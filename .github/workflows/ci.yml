@@ -34,6 +34,16 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-targets --locked
 
+  release-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Release tests
+        run: cargo test --workspace --all-targets --release --locked
+
   public-contract:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -56,8 +66,15 @@ jobs:
           test -s spec/protocol.md &&
           test -s spec/framing.md &&
           test -s spec/negotiation.md &&
-          test -s spec/errors.md
+          test -s spec/errors.md &&
+          test -s spec/identity-addressing.md
       - name: Public contract exists
-        run: test -s proto/ucr/v1/runtime.proto && test -s proto/ucr/v1/errors.proto
+        run: >-
+          test -s proto/ucr/v1/runtime.proto &&
+          test -s proto/ucr/v1/errors.proto &&
+          test -s proto/ucr/v1/identity.proto
       - name: ADR governance exists
-        run: test -s docs/adr/0000-template.md && test -s docs/adr/0002-phase-0-wire-framing.md
+        run: >-
+          test -s docs/adr/0000-template.md &&
+          test -s docs/adr/0002-phase-0-wire-framing.md &&
+          test -s docs/adr/0003-identity-address-endpoint-route-separation.md

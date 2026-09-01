@@ -188,3 +188,50 @@ fn canonical_capability_vocabulary_has_single_owner() {
         );
     }
 }
+
+#[test]
+fn identity_address_endpoint_and_route_remain_separate_layers() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs"))
+        .expect("read canonical model");
+    assert!(model.contains("pub struct EndpointAddress"));
+    assert!(model.contains("pub struct EndpointDescriptor"));
+    assert!(model.contains("pub struct ExternalIdentityBinding"));
+
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs"))
+        .expect("read core contract");
+    assert!(core.contains("pub endpoint_id: EndpointId"));
+    assert!(core.contains("pub address: EndpointAddress"));
+    assert!(
+        !core.contains("pub endpoint_address: Vec<u8>"),
+        "RouteCandidate must not collapse endpoint identity and address bytes"
+    );
+}
+
+#[test]
+fn public_identity_contract_exposes_generic_addressing_primitives() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/identity.proto"))
+        .expect("read identity proto");
+
+    for declaration in [
+        "enum EndpointKind",
+        "message EndpointAddress",
+        "message EndpointDescriptor",
+        "message ExternalIdentityBinding",
+    ] {
+        assert!(
+            proto.contains(declaration),
+            "public identity contract is missing `{declaration}`"
+        );
+    }
+    assert!(proto.contains("bytes external_entity_id = 4;"));
+    assert!(proto.contains("OpaqueId identity_id = 5;"));
+}

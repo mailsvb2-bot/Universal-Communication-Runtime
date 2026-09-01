@@ -1,12 +1,15 @@
 #![forbid(unsafe_code)]
 
-use ucr_model::{CapabilityDescriptor, CommunicationIntent, TenantScope};
+use ucr_model::{
+    CapabilityDescriptor, CommunicationIntent, EndpointAddress, EndpointId, TenantScope,
+};
 
 /// A route candidate is transient runtime state, never canonical identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteCandidate {
+    pub endpoint_id: EndpointId,
     pub transport_capability: String,
-    pub endpoint_address: Vec<u8>,
+    pub address: EndpointAddress,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,4 +83,27 @@ pub enum DurableStoreError {
     Unavailable,
     PermissionDenied,
     Internal,
+}
+
+#[cfg(test)]
+mod tests {
+    use ucr_model::{EndpointAddress, EndpointId, OpaqueId};
+
+    use super::RouteCandidate;
+
+    #[test]
+    fn route_debug_does_not_disclose_address_material() {
+        let route = RouteCandidate {
+            endpoint_id: EndpointId::from_opaque(OpaqueId::new("endpoint-a").expect("endpoint id")),
+            transport_capability: "ucr.transport.test".to_owned(),
+            address: EndpointAddress {
+                scheme: "ucr.address.test".to_owned(),
+                value: b"route-secret-address".to_vec(),
+            },
+        };
+
+        let debug = format!("{route:?}");
+        assert!(!debug.contains("route-secret-address"));
+        assert!(debug.contains("<opaque>"));
+    }
 }

@@ -2,6 +2,8 @@
 
 Status: **Experimental / Phase 0**
 
+Normative detail documents include `framing.md`, `negotiation.md`, `errors.md`, and `identity-addressing.md`.
+
 ## 1. Namespaces and versioning
 
 Stable canonical identifiers use `ucr.*`. Experimental extensions use `experimental.*`. Vendor and organization extensions use `vendor.<name>.*` and `organization.<id>.*`.
