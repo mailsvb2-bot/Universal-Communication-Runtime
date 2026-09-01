@@ -40,3 +40,9 @@ message EventEnvelope {
   bytes integrity_metadata = 8;
   repeated Extension extensions = 9;
 }
+
+message AcknowledgementEnvelope {
+  OpaqueId acknowledged_id = 1;
+  ProtocolVersion schema_version = 2;
+  repeated Extension extensions = 3;
+}

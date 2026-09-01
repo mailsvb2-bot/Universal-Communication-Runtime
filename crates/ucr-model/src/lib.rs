@@ -232,3 +232,10 @@ mod tests {
         assert!(!debug.contains(id.as_str()));
     }
 }
+
+/// Canonical capability descriptor shared by Core, Protocol, and SDK boundaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDescriptor {
+    pub id: String,
+    pub maturity: CapabilityMaturity,
+}

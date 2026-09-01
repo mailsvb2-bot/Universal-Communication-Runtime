@@ -1,0 +1,125 @@
+use crate::{CapabilityError, ExtensionError, FrameError, VersionNegotiationError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum CanonicalErrorCode {
+    InvalidArgument = 1,
+    MalformedFrame = 2,
+    UnsupportedProtocolVersion = 3,
+    DowngradeRejected = 4,
+    UnsupportedCriticalExtension = 5,
+    CapabilityMismatch = 6,
+    Unauthenticated = 7,
+    PermissionDenied = 8,
+    PolicyDenied = 9,
+    RateLimited = 10,
+    ResourceExhausted = 11,
+    DeadlineExceeded = 12,
+    Cancelled = 13,
+    TemporarilyUnavailable = 14,
+    IntegrityFailure = 15,
+    Conflict = 16,
+    NotFound = 17,
+    Internal = 18,
+}
+
+impl CanonicalErrorCode {
+    #[must_use]
+    pub const fn retryable_by_default(self) -> bool {
+        matches!(self, Self::RateLimited | Self::TemporarilyUnavailable)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalError {
+    pub code: CanonicalErrorCode,
+    pub retryable: bool,
+    pub retry_after_ms: Option<u64>,
+}
+
+impl CanonicalError {
+    #[must_use]
+    pub const fn new(code: CanonicalErrorCode) -> Self {
+        Self {
+            code,
+            retryable: code.retryable_by_default(),
+            retry_after_ms: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_retry_after(mut self, retry_after_ms: u64) -> Self {
+        self.retryable = true;
+        self.retry_after_ms = Some(retry_after_ms);
+        self
+    }
+}
+
+impl From<FrameError> for CanonicalError {
+    fn from(error: FrameError) -> Self {
+        let code = match error {
+            FrameError::UnsupportedFramingVersion => CanonicalErrorCode::UnsupportedProtocolVersion,
+            FrameError::PayloadTooLarge | FrameError::LengthOverflow => {
+                CanonicalErrorCode::ResourceExhausted
+            }
+            FrameError::TruncatedHeader
+            | FrameError::BadMagic
+            | FrameError::UnknownKind
+            | FrameError::UnsupportedFlags
+            | FrameError::TruncatedPayload => CanonicalErrorCode::MalformedFrame,
+        };
+        Self::new(code)
+    }
+}
+
+impl From<VersionNegotiationError> for CanonicalError {
+    fn from(error: VersionNegotiationError) -> Self {
+        let code = match error {
+            VersionNegotiationError::BelowLocalMinimum => CanonicalErrorCode::DowngradeRejected,
+            VersionNegotiationError::NoMutualVersion => {
+                CanonicalErrorCode::UnsupportedProtocolVersion
+            }
+            VersionNegotiationError::InvalidRange | VersionNegotiationError::EmptyAdvertisement => {
+                CanonicalErrorCode::InvalidArgument
+            }
+        };
+        Self::new(code)
+    }
+}
+
+impl From<ExtensionError> for CanonicalError {
+    fn from(error: ExtensionError) -> Self {
+        let code = match error {
+            ExtensionError::InvalidNamespace => CanonicalErrorCode::InvalidArgument,
+            ExtensionError::UnsupportedCritical => CanonicalErrorCode::UnsupportedCriticalExtension,
+        };
+        Self::new(code)
+    }
+}
+
+impl From<CapabilityError> for CanonicalError {
+    fn from(error: CapabilityError) -> Self {
+        let code = match error {
+            CapabilityError::InvalidIdentifier
+            | CapabilityError::DuplicateAdvertisement
+            | CapabilityError::InvalidRequirement => CanonicalErrorCode::InvalidArgument,
+            CapabilityError::MissingRequired | CapabilityError::RequiredBelowMaturity => {
+                CanonicalErrorCode::CapabilityMismatch
+            }
+        };
+        Self::new(code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CanonicalError, CanonicalErrorCode};
+
+    #[test]
+    fn retryability_is_explicit_and_conservative() {
+        assert!(CanonicalError::new(CanonicalErrorCode::RateLimited).retryable);
+        assert!(CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable).retryable);
+        assert!(!CanonicalError::new(CanonicalErrorCode::IntegrityFailure).retryable);
+        assert!(!CanonicalError::new(CanonicalErrorCode::PermissionDenied).retryable);
+    }
+}
