@@ -1,0 +1,13 @@
+[package]
+name = "ucr-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ucr-model = { path = "../ucr-model" }
+
+[lints]
+workspace = true

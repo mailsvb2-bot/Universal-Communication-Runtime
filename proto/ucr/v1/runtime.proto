@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/communication.proto";
+
+message NegotiationHello {
+  repeated VersionRange supported_versions = 1;
+  repeated Capability capabilities = 2;
+  repeated Extension extensions = 3;
+  bytes nonce = 4;
+}
+
+message NegotiationResult {
+  ProtocolVersion version = 1;
+  repeated Capability capabilities = 2;
+  repeated Extension extensions = 3;
+  bytes transcript_binding = 4;
+}
+
+message CommandEnvelope {
+  OpaqueId command_id = 1;
+  TenantScope scope = 2;
+  string command_type = 3;
+  bytes payload = 4;
+  Correlation correlation = 5;
+  ProtocolVersion schema_version = 6;
+  repeated Extension extensions = 7;
+}
+
+message EventEnvelope {
+  OpaqueId event_id = 1;
+  TenantScope scope = 2;
+  string event_type = 3;
+  bytes payload = 4;
+  uint64 logical_order = 5;
+  Correlation correlation = 6;
+  ProtocolVersion schema_version = 7;
+  bytes integrity_metadata = 8;
+  repeated Extension extensions = 9;
+}

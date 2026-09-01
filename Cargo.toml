@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ucr-model",
+    "crates/ucr-protocol",
+    "crates/ucr-core",
+    "crates/ucr-architecture-tests",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+license = "UNLICENSED"
+repository = "https://github.com/mailsvb2-bot/Universal-Communication-Runtime"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "deny"

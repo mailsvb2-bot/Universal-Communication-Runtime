@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+
+enum PrincipalKind {
+  PRINCIPAL_KIND_UNSPECIFIED = 0;
+  PRINCIPAL_KIND_PERSON = 1;
+  PRINCIPAL_KIND_DEVICE = 2;
+  PRINCIPAL_KIND_SERVICE_ACCOUNT = 3;
+  PRINCIPAL_KIND_AI_AGENT = 4;
+  PRINCIPAL_KIND_BOT = 5;
+  PRINCIPAL_KIND_ORGANIZATION = 6;
+  PRINCIPAL_KIND_AUTOMATION = 7;
+  PRINCIPAL_KIND_EXTERNAL_PLATFORM = 8;
+}
+
+enum ActorKind {
+  ACTOR_KIND_UNSPECIFIED = 0;
+  ACTOR_KIND_PERSON = 1;
+  ACTOR_KIND_AI_AGENT = 2;
+  ACTOR_KIND_BOT = 3;
+  ACTOR_KIND_ORGANIZATION = 4;
+  ACTOR_KIND_SYSTEM = 5;
+}
+
+message PrincipalRef {
+  OpaqueId principal_id = 1;
+  PrincipalKind kind = 2;
+}
+
+message ActorRef {
+  OpaqueId actor_id = 1;
+  ActorKind kind = 2;
+  optional OpaqueId on_behalf_of = 3;
+}
+
+message DeviceRef {
+  OpaqueId device_id = 1;
+  OpaqueId identity_id = 2;
+}
+
+message EndpointRef {
+  OpaqueId endpoint_id = 1;
+  optional OpaqueId identity_id = 2;
+  repeated Capability capabilities = 3;
+}

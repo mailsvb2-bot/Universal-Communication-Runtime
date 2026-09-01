@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+}
+
+message VersionRange {
+  ProtocolVersion min = 1;
+  ProtocolVersion max = 2;
+}
+
+message OpaqueId {
+  bytes value = 1;
+}
+
+message TenantScope {
+  OpaqueId tenant_id = 1;
+  optional OpaqueId namespace_id = 2;
+}
+
+message Extension {
+  string name = 1;
+  bool critical = 2;
+  bytes payload = 3;
+}
+
+message Correlation {
+  OpaqueId correlation_id = 1;
+  optional OpaqueId causation_id = 2;
+  optional string idempotency_key = 3;
+}
+
+enum CapabilityMaturity {
+  CAPABILITY_MATURITY_UNSPECIFIED = 0;
+  CAPABILITY_MATURITY_EXPERIMENTAL = 1;
+  CAPABILITY_MATURITY_PREPARED = 2;
+  CAPABILITY_MATURITY_BETA = 3;
+  CAPABILITY_MATURITY_PRODUCTION = 4;
+  CAPABILITY_MATURITY_DEPRECATED = 5;
+  CAPABILITY_MATURITY_DISABLED = 6;
+}
+
+message Capability {
+  string id = 1;
+  CapabilityMaturity maturity = 2;
+  repeated Extension extensions = 3;
+}

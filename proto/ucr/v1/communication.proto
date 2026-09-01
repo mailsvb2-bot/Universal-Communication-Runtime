@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/identity.proto";
+
+enum ConversationKind {
+  CONVERSATION_KIND_UNSPECIFIED = 0;
+  CONVERSATION_KIND_DIRECT = 1;
+  CONVERSATION_KIND_PRIVATE_GROUP = 2;
+  CONVERSATION_KIND_PUBLIC_GROUP = 3;
+  CONVERSATION_KIND_BROADCAST = 4;
+  CONVERSATION_KIND_COMMUNITY = 5;
+  CONVERSATION_KIND_ROOM = 6;
+  CONVERSATION_KIND_TOPIC = 7;
+  CONVERSATION_KIND_THREAD = 8;
+  CONVERSATION_KIND_SYSTEM = 9;
+}
+
+enum DeliveryPolicy {
+  DELIVERY_POLICY_UNSPECIFIED = 0;
+  DELIVERY_POLICY_BEST_EFFORT = 1;
+  DELIVERY_POLICY_DURABLE = 2;
+  DELIVERY_POLICY_URGENT = 3;
+  DELIVERY_POLICY_EXPIRING = 4;
+  DELIVERY_POLICY_LOCAL_ONLY = 5;
+  DELIVERY_POLICY_DIRECT_ONLY = 6;
+  DELIVERY_POLICY_NO_RELAY = 7;
+  DELIVERY_POLICY_NO_EXTERNAL_BRIDGE = 8;
+  DELIVERY_POLICY_PRIVATE_NETWORK_ONLY = 9;
+}
+
+message ConversationRef {
+  OpaqueId conversation_id = 1;
+  ConversationKind kind = 2;
+}
+
+message IntentConstraints {
+  repeated string allowed_transport_capabilities = 1;
+  repeated string forbidden_transport_capabilities = 2;
+  optional string privacy_profile = 3;
+  optional string region_constraint = 4;
+  optional uint64 max_cost_microunits = 5;
+  optional uint32 priority_class = 6;
+}
+
+message CommunicationIntent {
+  OpaqueId intent_id = 1;
+  TenantScope scope = 2;
+  OpaqueId target_identity_id = 3;
+  bytes payload = 4;
+  IntentConstraints constraints = 5;
+  Correlation correlation = 6;
+  repeated Extension extensions = 7;
+}
+
+message MessageEnvelope {
+  OpaqueId message_id = 1;
+  TenantScope scope = 2;
+  ConversationRef conversation = 3;
+  ActorRef author = 4;
+  optional DeviceRef author_device = 5;
+  uint64 logical_order = 6;
+  bytes content = 7;
+  DeliveryPolicy delivery_policy = 8;
+  Correlation correlation = 9;
+  repeated Extension extensions = 10;
+}
