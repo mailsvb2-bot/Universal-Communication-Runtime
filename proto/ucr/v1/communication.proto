@@ -36,6 +36,12 @@ message ConversationRef {
   ConversationKind kind = 2;
 }
 
+message OriginRef {
+  optional OpaqueId principal_id = 1;
+  optional OpaqueId endpoint_id = 2;
+  optional OpaqueId integration_id = 3;
+}
+
 message IntentConstraints {
   repeated string allowed_transport_capabilities = 1;
   repeated string forbidden_transport_capabilities = 2;
@@ -66,4 +72,5 @@ message MessageEnvelope {
   DeliveryPolicy delivery_policy = 8;
   Correlation correlation = 9;
   repeated Extension extensions = 10;
+  OriginRef origin = 11;
 }

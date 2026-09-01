@@ -6,6 +6,7 @@ mod error;
 mod extension;
 mod framing;
 mod handshake;
+mod provenance;
 mod version;
 
 pub use addressing::{
@@ -29,6 +30,7 @@ pub use framing::{
 pub use handshake::{
     HandshakeError, NegotiatedSession, NegotiationPolicy, PeerHello, negotiate_session,
 };
+pub use provenance::{ProvenanceError, validate_origin_ref};
 pub use version::{
     ProtocolVersion, VersionNegotiationError, VersionPolicy, VersionRange, negotiate_version,
     negotiate_version_sets,

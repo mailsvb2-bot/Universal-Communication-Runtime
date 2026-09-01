@@ -166,6 +166,22 @@ pub enum IdentityEvidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceLifecycleState {
+    Active,
+    Stale,
+    ReverificationRequired,
+    Expired,
+    Revoked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceDescriptor {
+    pub device_id: DeviceId,
+    pub identity_id: IdentityId,
+    pub state: DeviceLifecycleState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityMaturity {
     Experimental,
     Prepared,
@@ -207,6 +223,13 @@ pub struct ActorRef {
 pub struct DeviceRef {
     pub device_id: DeviceId,
     pub identity_id: IdentityId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginRef {
+    pub principal_id: Option<PrincipalId>,
+    pub endpoint_id: Option<EndpointId>,
+    pub integration_id: Option<IntegrationId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
