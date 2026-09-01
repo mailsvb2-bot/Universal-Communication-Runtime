@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod addressing;
 mod capability;
 mod error;
 mod extension;
@@ -7,6 +8,11 @@ mod framing;
 mod handshake;
 mod version;
 
+pub use addressing::{
+    AddressingError, MAX_ADDRESS_VALUE_LEN, MAX_ENDPOINT_ADDRESSES, MAX_ENDPOINT_CAPABILITIES,
+    MAX_EXTERNAL_ENTITY_ID_LEN, validate_endpoint_address, validate_endpoint_descriptor,
+    validate_external_identity_binding,
+};
 pub use capability::{
     CapabilityDescriptor, CapabilityError, CapabilityMaturity, CapabilityRequirement,
     negotiate_capabilities,

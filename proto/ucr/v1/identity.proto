@@ -24,6 +24,15 @@ enum ActorKind {
   ACTOR_KIND_ORGANIZATION = 4;
   ACTOR_KIND_SYSTEM = 5;
 }
+enum EndpointKind {
+  ENDPOINT_KIND_UNSPECIFIED = 0;
+  ENDPOINT_KIND_DEVICE = 1;
+  ENDPOINT_KIND_EXTERNAL_ACCOUNT = 2;
+  ENDPOINT_KIND_WEB_SESSION = 3;
+  ENDPOINT_KIND_PERSONAL_NODE = 4;
+  ENDPOINT_KIND_ORGANIZATION_NODE = 5;
+  ENDPOINT_KIND_TEMPORARY_PEER = 6;
+}
 
 message PrincipalRef {
   OpaqueId principal_id = 1;
@@ -40,9 +49,29 @@ message DeviceRef {
   OpaqueId device_id = 1;
   OpaqueId identity_id = 2;
 }
+message EndpointAddress {
+  string scheme = 1;
+  bytes value = 2;
+}
 
 message EndpointRef {
   OpaqueId endpoint_id = 1;
   optional OpaqueId identity_id = 2;
-  repeated Capability capabilities = 3;
+}
+
+message EndpointDescriptor {
+  OpaqueId endpoint_id = 1;
+  EndpointKind kind = 2;
+  optional OpaqueId identity_id = 3;
+  optional OpaqueId device_id = 4;
+  repeated Capability capabilities = 5;
+  repeated EndpointAddress addresses = 6;
+}
+
+message ExternalIdentityBinding {
+  TenantScope scope = 1;
+  OpaqueId integration_id = 2;
+  string external_namespace = 3;
+  bytes external_entity_id = 4;
+  OpaqueId identity_id = 5;
 }

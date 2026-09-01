@@ -1,4 +1,6 @@
-use crate::{CapabilityError, ExtensionError, FrameError, VersionNegotiationError};
+use crate::{
+    AddressingError, CapabilityError, ExtensionError, FrameError, VersionNegotiationError,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -111,9 +113,32 @@ impl From<CapabilityError> for CanonicalError {
     }
 }
 
+impl From<AddressingError> for CanonicalError {
+    fn from(error: AddressingError) -> Self {
+        let code = match error {
+            AddressingError::AddressValueTooLong
+            | AddressingError::TooManyAddresses
+            | AddressingError::TooManyCapabilities
+            | AddressingError::ExternalEntityIdTooLong => CanonicalErrorCode::ResourceExhausted,
+            AddressingError::InvalidScheme
+            | AddressingError::EmptyAddressValue
+            | AddressingError::DuplicateAddress
+            | AddressingError::DuplicateCapability
+            | AddressingError::InvalidCapability
+            | AddressingError::DeviceEndpointMissingDevice
+            | AddressingError::DeviceEndpointMissingIdentity
+            | AddressingError::DeviceBindingWithoutIdentity
+            | AddressingError::InvalidExternalNamespace
+            | AddressingError::EmptyExternalEntityId => CanonicalErrorCode::InvalidArgument,
+        };
+        Self::new(code)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CanonicalError, CanonicalErrorCode};
+    use crate::AddressingError;
 
     #[test]
     fn retryability_is_explicit_and_conservative() {
@@ -121,5 +146,17 @@ mod tests {
         assert!(CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable).retryable);
         assert!(!CanonicalError::new(CanonicalErrorCode::IntegrityFailure).retryable);
         assert!(!CanonicalError::new(CanonicalErrorCode::PermissionDenied).retryable);
+    }
+
+    #[test]
+    fn addressing_failures_map_to_stable_canonical_categories() {
+        assert_eq!(
+            CanonicalError::from(AddressingError::InvalidScheme).code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            CanonicalError::from(AddressingError::TooManyAddresses).code,
+            CanonicalErrorCode::ResourceExhausted
+        );
     }
 }

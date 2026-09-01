@@ -191,10 +191,22 @@ pub struct TenantScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrincipalRef {
+    pub principal_id: PrincipalId,
+    pub kind: PrincipalKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorRef {
     pub actor_id: ActorId,
     pub kind: ActorKind,
     pub on_behalf_of: Option<PrincipalId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceRef {
+    pub device_id: DeviceId,
+    pub identity_id: IdentityId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,4 +250,66 @@ mod tests {
 pub struct CapabilityDescriptor {
     pub id: String,
     pub maturity: CapabilityMaturity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointKind {
+    Device,
+    ExternalAccount,
+    WebSession,
+    PersonalNode,
+    OrganizationNode,
+    TemporaryPeer,
+}
+
+/// Address material belongs to an Endpoint and is never canonical Identity.
+#[derive(Clone, PartialEq, Eq)]
+pub struct EndpointAddress {
+    pub scheme: String,
+    pub value: Vec<u8>,
+}
+
+impl fmt::Debug for EndpointAddress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointAddress")
+            .field("scheme", &self.scheme)
+            .field("value", &"<opaque>")
+            .field("value_len", &self.value.len())
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointDescriptor {
+    pub endpoint_id: EndpointId,
+    pub kind: EndpointKind,
+    pub identity_id: Option<IdentityId>,
+    pub device_id: Option<DeviceId>,
+    pub capabilities: Vec<CapabilityDescriptor>,
+    pub addresses: Vec<EndpointAddress>,
+}
+
+/// Mapping owned by UCR between an external entity and canonical Identity.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ExternalIdentityBinding {
+    pub scope: TenantScope,
+    pub integration_id: IntegrationId,
+    pub external_namespace: String,
+    pub external_entity_id: Vec<u8>,
+    pub identity_id: IdentityId,
+}
+
+impl fmt::Debug for ExternalIdentityBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExternalIdentityBinding")
+            .field("scope", &self.scope)
+            .field("integration_id", &self.integration_id)
+            .field("external_namespace", &self.external_namespace)
+            .field("external_entity_id", &"<opaque>")
+            .field("external_entity_id_len", &self.external_entity_id.len())
+            .field("identity_id", &self.identity_id)
+            .finish()
+    }
 }
