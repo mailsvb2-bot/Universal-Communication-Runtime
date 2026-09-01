@@ -235,3 +235,54 @@ fn public_identity_contract_exposes_generic_addressing_primitives() {
     assert!(proto.contains("bytes external_entity_id = 4;"));
     assert!(proto.contains("OpaqueId identity_id = 5;"));
 }
+
+#[test]
+fn actor_provenance_is_explicit_and_not_person_only() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let identity = fs::read_to_string(workspace.join("proto/ucr/v1/identity.proto"))
+        .expect("read identity proto");
+    let communication = fs::read_to_string(workspace.join("proto/ucr/v1/communication.proto"))
+        .expect("read communication proto");
+
+    assert!(identity.contains("ACTOR_KIND_AI_AGENT"));
+    assert!(identity.contains("ACTOR_KIND_BOT"));
+    assert!(communication.contains("message OriginRef"));
+    assert!(communication.contains("ActorRef author = 4;"));
+    assert!(communication.contains("OriginRef origin = 11;"));
+    assert!(
+        !communication.contains("PersonId author"),
+        "canonical message author must remain Actor-based"
+    );
+}
+
+#[test]
+fn device_lifecycle_and_identity_evidence_match_canon_vocabulary() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/identity.proto"))
+        .expect("read identity proto");
+
+    for token in [
+        "IDENTITY_EVIDENCE_UNVERIFIED",
+        "IDENTITY_EVIDENCE_SELF_ASSERTED",
+        "IDENTITY_EVIDENCE_DEVICE_VERIFIED",
+        "IDENTITY_EVIDENCE_CONTACT_VERIFIED",
+        "IDENTITY_EVIDENCE_ORGANIZATION_VERIFIED",
+        "IDENTITY_EVIDENCE_EXTERNAL_PROVIDER_VERIFIED",
+        "DEVICE_LIFECYCLE_STATE_ACTIVE",
+        "DEVICE_LIFECYCLE_STATE_STALE",
+        "DEVICE_LIFECYCLE_STATE_REVERIFICATION_REQUIRED",
+        "DEVICE_LIFECYCLE_STATE_EXPIRED",
+        "DEVICE_LIFECYCLE_STATE_REVOKED",
+    ] {
+        assert!(
+            proto.contains(token),
+            "public identity contract is missing `{token}`"
+        );
+    }
+}

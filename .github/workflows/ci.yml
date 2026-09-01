@@ -67,7 +67,8 @@ jobs:
           test -s spec/framing.md &&
           test -s spec/negotiation.md &&
           test -s spec/errors.md &&
-          test -s spec/identity-addressing.md
+          test -s spec/identity-addressing.md &&
+          test -s spec/principal-actor-device.md
       - name: Public contract exists
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
@@ -77,4 +78,5 @@ jobs:
         run: >-
           test -s docs/adr/0000-template.md &&
           test -s docs/adr/0002-phase-0-wire-framing.md &&
-          test -s docs/adr/0003-identity-address-endpoint-route-separation.md
+          test -s docs/adr/0003-identity-address-endpoint-route-separation.md &&
+          test -s docs/adr/0004-actor-provenance-and-device-lifecycle.md

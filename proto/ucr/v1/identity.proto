@@ -24,6 +24,26 @@ enum ActorKind {
   ACTOR_KIND_ORGANIZATION = 4;
   ACTOR_KIND_SYSTEM = 5;
 }
+
+enum IdentityEvidence {
+  IDENTITY_EVIDENCE_UNSPECIFIED = 0;
+  IDENTITY_EVIDENCE_UNVERIFIED = 1;
+  IDENTITY_EVIDENCE_SELF_ASSERTED = 2;
+  IDENTITY_EVIDENCE_DEVICE_VERIFIED = 3;
+  IDENTITY_EVIDENCE_CONTACT_VERIFIED = 4;
+  IDENTITY_EVIDENCE_ORGANIZATION_VERIFIED = 5;
+  IDENTITY_EVIDENCE_EXTERNAL_PROVIDER_VERIFIED = 6;
+}
+
+enum DeviceLifecycleState {
+  DEVICE_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  DEVICE_LIFECYCLE_STATE_ACTIVE = 1;
+  DEVICE_LIFECYCLE_STATE_STALE = 2;
+  DEVICE_LIFECYCLE_STATE_REVERIFICATION_REQUIRED = 3;
+  DEVICE_LIFECYCLE_STATE_EXPIRED = 4;
+  DEVICE_LIFECYCLE_STATE_REVOKED = 5;
+}
+
 enum EndpointKind {
   ENDPOINT_KIND_UNSPECIFIED = 0;
   ENDPOINT_KIND_DEVICE = 1;
@@ -49,6 +69,13 @@ message DeviceRef {
   OpaqueId device_id = 1;
   OpaqueId identity_id = 2;
 }
+
+message DeviceDescriptor {
+  OpaqueId device_id = 1;
+  OpaqueId identity_id = 2;
+  DeviceLifecycleState state = 3;
+}
+
 message EndpointAddress {
   string scheme = 1;
   bytes value = 2;

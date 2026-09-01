@@ -1,5 +1,6 @@
 use crate::{
-    AddressingError, CapabilityError, ExtensionError, FrameError, VersionNegotiationError,
+    AddressingError, CapabilityError, ExtensionError, FrameError, ProvenanceError,
+    VersionNegotiationError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +100,12 @@ impl From<ExtensionError> for CanonicalError {
     }
 }
 
+impl From<ProvenanceError> for CanonicalError {
+    fn from(_error: ProvenanceError) -> Self {
+        Self::new(CanonicalErrorCode::InvalidArgument)
+    }
+}
+
 impl From<CapabilityError> for CanonicalError {
     fn from(error: CapabilityError) -> Self {
         let code = match error {
@@ -138,7 +145,7 @@ impl From<AddressingError> for CanonicalError {
 #[cfg(test)]
 mod tests {
     use super::{CanonicalError, CanonicalErrorCode};
-    use crate::AddressingError;
+    use crate::{AddressingError, ProvenanceError};
 
     #[test]
     fn retryability_is_explicit_and_conservative() {
@@ -157,6 +164,14 @@ mod tests {
         assert_eq!(
             CanonicalError::from(AddressingError::TooManyAddresses).code,
             CanonicalErrorCode::ResourceExhausted
+        );
+    }
+
+    #[test]
+    fn empty_provenance_is_invalid_argument() {
+        assert_eq!(
+            CanonicalError::from(ProvenanceError::EmptyOrigin).code,
+            CanonicalErrorCode::InvalidArgument
         );
     }
 }
