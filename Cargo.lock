@@ -5,6 +5,9 @@ version = 4
 [[package]]
 name = "ucr-architecture-tests"
 version = "0.0.1"
+dependencies = [
+ "ucr-protocol",
+]
 
 [[package]]
 name = "ucr-core"

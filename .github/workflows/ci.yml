@@ -15,9 +15,10 @@ concurrency:
 
 jobs:
   rust-quality:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Install pinned Rust toolchain
         run: rustup show
       - name: Format
@@ -26,18 +27,37 @@ jobs:
         run: cargo check --workspace --all-targets --locked
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
       - name: Tests
         run: cargo test --workspace --all-targets --locked
 
-  repository-guards:
-    runs-on: ubuntu-latest
+  public-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install protobuf compiler
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends protobuf-compiler
+      - name: Compile public protobuf contract
+        run: protoc --proto_path=proto --descriptor_set_out=/tmp/ucr-public.pb proto/ucr/v1/*.proto
+
+  repository-guards:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Canon provenance exists
         run: test -s docs/canon/SOURCE.md
       - name: Protocol specification exists
-        run: test -s spec/protocol.md
+        run: >-
+          test -s spec/protocol.md &&
+          test -s spec/framing.md &&
+          test -s spec/negotiation.md &&
+          test -s spec/errors.md
       - name: Public contract exists
-        run: test -s proto/ucr/v1/runtime.proto
+        run: test -s proto/ucr/v1/runtime.proto && test -s proto/ucr/v1/errors.proto
       - name: ADR governance exists
-        run: test -s docs/adr/0000-template.md
+        run: test -s docs/adr/0000-template.md && test -s docs/adr/0002-phase-0-wire-framing.md

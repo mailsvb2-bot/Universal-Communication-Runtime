@@ -1,13 +1,6 @@
 #![forbid(unsafe_code)]
 
-use ucr_model::{CommunicationIntent, TenantScope};
-
-/// Provider-independent runtime capability descriptor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapabilityDescriptor {
-    pub id: String,
-    pub maturity: ucr_model::CapabilityMaturity,
-}
+use ucr_model::{CapabilityDescriptor, CommunicationIntent, TenantScope};
 
 /// A route candidate is transient runtime state, never canonical identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
