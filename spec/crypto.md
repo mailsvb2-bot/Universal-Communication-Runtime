@@ -74,7 +74,7 @@ Reference tests include RFC 7748 X25519, RFC 8032 Ed25519, RFC 5869 HKDF-SHA-256
 
 ## Explicit nonclaims and blockers
 
-Phase 7 does not yet claim complete account/device recovery, historical-message key recovery, production OS keystore coverage on every target, formal verification, post-quantum security, or long-lived rekey policy. Recovery is Phase 8 and must not silently weaken E2EE.
+Phase 7 crypto plus the Phase-8 Recovery Model now provide an explicit encrypted recovery-package primitive and recovery policy binding. They still do not claim complete credential re-issuance, historical-message key archive design, production OS keystore coverage on every target, formal verification, post-quantum security, or long-lived rekey policy.
 
 A successful Phase-7 session authenticates the trusted device key supplied by the caller. How that device key became trusted, how it is linked/revoked, and recovery consequences remain governed by Identity/Device and Phase-8 recovery contracts.
 

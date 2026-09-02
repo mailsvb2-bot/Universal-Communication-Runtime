@@ -129,11 +129,11 @@ UCR cannot promise deletion of secrets or plaintext already extracted from a com
 Device lifecycle states remain distinct: Active, Stale, Reverification Required, Expired, and Revoked. Policy for stale/expired devices must be explicit rather than inferred from presence.
 ## 10. Recovery threats
 
-Account/key recovery is a security-boundary change, not merely an availability feature. Before recovery ships, UCR must define what is recovered, who authorizes recovery, which historical messages remain accessible, which guarantees change, and whether peer/device re-verification is required.
+Account/key recovery is a security-boundary change, not merely an availability feature. Phase 8 now requires every Recovery Plan to define what Identity/scope is recovered, typed recovery authorities, historical-message access, the post-recovery trust model, and mandatory device re-verification.
 
-Potential mechanisms may include recovery code/key, trusted device, hardware-backed recovery, encrypted backup, and organization-managed recovery. No mechanism may silently convert previously promised E2EE into infrastructure-readable history.
+Supported authority forms include recovery code/key, specifically named trusted or hardware-backed Devices, encrypted-backup recovery capability, and specifically named organization Principals. Organization-managed recovery must be explicit; no mechanism may silently convert previously promised E2EE into infrastructure-readable history.
 
-Recovery secrets are `SECRET`/`KEY_MATERIAL` and are excluded from telemetry and ordinary diagnostics.
+Recovery packages are versioned ciphertext cryptographically bound to the canonical plan. Recovery secrets are `SECRET`/`KEY_MATERIAL`, excluded from protobuf/general SQLite, telemetry, and ordinary diagnostics. A recovered Device remains `REVERIFICATION_REQUIRED`; decrypting a recovery package does not auto-trust it.
 ## 11. Metadata privacy and minimum disclosure
 
 Each infrastructure component must document which metadata it can observe. The design minimizes social-graph exposure, IP history, routing history, group membership leakage, presence leakage, and contact-discovery leakage.
@@ -180,7 +180,7 @@ The following are explicit blockers until implementation and evidence exist:
 - tenant-scoped authorization enforcement;
 - Service Principal authentication/least-privilege enforcement;
 - device revocation enforcement in credential/key delivery;
-- account/key recovery model and tests;
+- end-to-end recovery workflow: credential re-issuance, device revocation/key-delivery enforcement, backup restore conformance, and re-verification UX evidence;
 - metadata-visibility documentation for each infrastructure component;
 - required threat simulations;
 - required fuzz targets for implemented parsers/wrappers;
@@ -190,8 +190,8 @@ The following are explicit blockers until implementation and evidence exist:
 A blocker may be removed only with implementation, tests, and review evidence. Documentation alone does not close it.
 ## 16. Current verified foundation evidence
 
-Current repository evidence includes fail-closed framing, protocol/crypto downgrade policy, unsupported-critical-extension failure, capability negotiation, canonical error mapping, redaction, Identity/Endpoint/Route separation, signed transcript authentication, contributory X25519 agreement, directional HKDF keys, key confirmation, AEAD integrity, and durable replay protection.
+Current repository evidence includes fail-closed framing, protocol/crypto downgrade policy, unsupported-critical-extension failure, capability negotiation, canonical error mapping, redaction, Identity/Endpoint/Route separation, signed transcript authentication, contributory X25519 agreement, directional HKDF keys, key confirmation, AEAD integrity, durable replay protection, typed Recovery Plans, plan-bound encrypted recovery packages, and durable CAS recovery-plan rotation/revocation.
 
-These controls establish the Phase-7 crypto foundation but do not imply end-to-end trust provisioning, production keystore coverage, recovery, bridge, relay, SFU, or device-revocation enforcement is complete. Those absences remain visible in the blocker list above.
+These controls establish the Phase-8 recovery foundation but do not imply end-to-end trust provisioning, production keystore coverage, credential re-issuance, backup restore conformance, bridge, relay, SFU, or device-revocation/key-delivery enforcement is complete. Those absences remain visible in the blocker list above.
 
-Relevant normative material includes `spec/framing.md`, `spec/negotiation.md`, `spec/crypto.md`, `spec/errors.md`, `spec/identity-addressing.md`, `spec/principal-actor-device.md`, ADR-0002, ADR-0003, ADR-0004, and ADR-0011.
+Relevant normative material includes `spec/framing.md`, `spec/negotiation.md`, `spec/crypto.md`, `spec/recovery.md`, `spec/errors.md`, `spec/identity-addressing.md`, `spec/principal-actor-device.md`, ADR-0002, ADR-0003, ADR-0004, ADR-0011, and ADR-0012.

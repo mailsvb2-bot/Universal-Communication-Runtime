@@ -8,21 +8,25 @@ use std::{
 
 use ucr_core::{
     CommandAcceptanceStore, CommandOutcomeStore, DurableStoreError, EventAppendStatus,
-    EventJournalStore, StorageHealth, StorageProvider,
+    EventJournalStore, RecoveryPlanStore, StorageHealth, StorageProvider,
 };
 use ucr_crypto::{ReplayError, ReplayProtector, TranscriptBinding, VerifyingKeyBytes};
-use ucr_model::{CommandEnvelope, CommandId, EventEnvelope, EventId, TenantScope};
+use ucr_model::{
+    CommandEnvelope, CommandId, EventEnvelope, EventId, IdentityId, RecoveryPlan, RecoveryPlanId,
+    TenantScope,
+};
 use ucr_protocol::{
     CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
-    compare_command_idempotency, validate_command, validate_event,
+    canonical_recovery_plan, compare_command_idempotency, validate_command, validate_event,
 };
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 type ScopeKey = (String, Option<String>);
 type CommandKey = (ScopeKey, String);
 type CommandRefKey = (ScopeKey, String);
 type EventKey = (ScopeKey, String);
 type ReplayKey = ([u8; 32], [u8; 32]);
+type RecoveryIdentityKey = (ScopeKey, String);
 
 #[derive(Default)]
 struct MemoryState {
@@ -31,6 +35,8 @@ struct MemoryState {
     events: HashMap<EventKey, EventEnvelope>,
     terminal_events: HashMap<CommandRefKey, EventId>,
     seen_handshakes: HashSet<ReplayKey>,
+    recovery_plans: HashMap<String, RecoveryPlan>,
+    active_recovery_plans: HashMap<RecoveryIdentityKey, String>,
 }
 
 #[derive(Default)]
@@ -75,6 +81,124 @@ impl ReplayProtector for MemoryLocalStore {
         }
         Ok(())
     }
+}
+
+impl RecoveryPlanStore for MemoryLocalStore {
+    fn install_recovery_plan(&self, plan: &RecoveryPlan) -> Result<(), DurableStoreError> {
+        let plan = canonical_recovery_plan(plan).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let plan_id = plan.plan_id.as_opaque().as_str().to_owned();
+        let identity_key = recovery_identity_key(&plan.scope, &plan.identity_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.recovery_plans.get(&plan_id) {
+            return if existing == &plan
+                && state.active_recovery_plans.get(&identity_key) == Some(&plan_id)
+            {
+                Ok(())
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if state.active_recovery_plans.contains_key(&identity_key) {
+            return Err(DurableStoreError::Conflict);
+        }
+        state.recovery_plans.insert(plan_id.clone(), plan);
+        state.active_recovery_plans.insert(identity_key, plan_id);
+        Ok(())
+    }
+
+    fn rotate_recovery_plan(
+        &self,
+        expected_current: &RecoveryPlanId,
+        replacement: &RecoveryPlan,
+    ) -> Result<(), DurableStoreError> {
+        let replacement =
+            canonical_recovery_plan(replacement).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let expected_id = expected_current.as_opaque().as_str();
+        let replacement_id = replacement.plan_id.as_opaque().as_str().to_owned();
+        let identity_key = recovery_identity_key(&replacement.scope, &replacement.identity_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current = state
+            .recovery_plans
+            .get(expected_id)
+            .ok_or(DurableStoreError::Conflict)?;
+        if current.scope != replacement.scope || current.identity_id != replacement.identity_id {
+            return Err(DurableStoreError::Conflict);
+        }
+        if state
+            .active_recovery_plans
+            .get(&identity_key)
+            .map(String::as_str)
+            != Some(expected_id)
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+        if replacement_id == expected_id {
+            return if current == &replacement {
+                Ok(())
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if state.recovery_plans.contains_key(&replacement_id) {
+            return Err(DurableStoreError::Conflict);
+        }
+        state
+            .recovery_plans
+            .insert(replacement_id.clone(), replacement.clone());
+        state
+            .active_recovery_plans
+            .insert(identity_key, replacement_id);
+        Ok(())
+    }
+
+    fn revoke_recovery_plan(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        expected_current: &RecoveryPlanId,
+    ) -> Result<(), DurableStoreError> {
+        let expected_id = expected_current.as_opaque().as_str();
+        let identity_key = recovery_identity_key(scope, identity_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        match state.active_recovery_plans.get(&identity_key) {
+            Some(active) if active == expected_id => {
+                state.active_recovery_plans.remove(&identity_key);
+                Ok(())
+            }
+            Some(_) => Err(DurableStoreError::Conflict),
+            None => match state.recovery_plans.get(expected_id) {
+                Some(plan) if &plan.scope == scope && &plan.identity_id == identity_id => Ok(()),
+                _ => Err(DurableStoreError::Conflict),
+            },
+        }
+    }
+
+    fn active_recovery_plan(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+    ) -> Result<Option<RecoveryPlan>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let Some(plan_id) = state
+            .active_recovery_plans
+            .get(&recovery_identity_key(scope, identity_id))
+        else {
+            return Ok(None);
+        };
+        state
+            .recovery_plans
+            .get(plan_id)
+            .cloned()
+            .map(Some)
+            .ok_or(DurableStoreError::Corrupt)
+    }
+}
+
+fn recovery_identity_key(scope: &TenantScope, identity_id: &IdentityId) -> RecoveryIdentityKey {
+    (
+        scope_key(scope),
+        identity_id.as_opaque().as_str().to_owned(),
+    )
 }
 
 impl CommandAcceptanceStore for MemoryLocalStore {
@@ -300,7 +424,7 @@ mod tests {
     #[test]
     fn memory_store_is_healthy_and_versioned() {
         let store = MemoryLocalStore::default();
-        assert_eq!(store.schema_version(), Ok(3));
+        assert_eq!(store.schema_version(), Ok(4));
         assert_eq!(store.health(), Ok(ucr_core::StorageHealth::Healthy));
     }
 
@@ -414,6 +538,106 @@ mod replay_tests {
         assert_eq!(
             store.record_once(&peer, &binding),
             Err(ReplayError::Replayed)
+        );
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use ucr_core::{DurableStoreError, RecoveryPlanStore};
+    use ucr_model::{
+        DeviceId, DeviceLifecycleState, HistoricalMessageAccess, IdentityId, OpaqueId,
+        RecoveryAuthority, RecoveryPlan, RecoveryPlanId, RecoveryTrustModel, TenantId, TenantScope,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn id(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("test id")
+    }
+
+    fn plan(plan_id: &str, identity: &str) -> RecoveryPlan {
+        RecoveryPlan {
+            plan_id: RecoveryPlanId::from_opaque(id(plan_id)),
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(id("tenant-a")),
+                namespace_id: None,
+            },
+            identity_id: IdentityId::from_opaque(id(identity)),
+            authorities: vec![
+                RecoveryAuthority::RecoveryKey,
+                RecoveryAuthority::TrustedDevice(DeviceId::from_opaque(id("trusted-device"))),
+            ],
+            historical_message_access: HistoricalMessageAccess::ExplicitEncryptedRecovery,
+            trust_model: RecoveryTrustModel::UserControlled,
+            recovered_device_state: DeviceLifecycleState::ReverificationRequired,
+        }
+    }
+
+    #[test]
+    fn recovery_plan_install_rotate_and_revoke_are_fail_closed() {
+        let store = MemoryLocalStore::default();
+        let first = plan("plan-a", "identity-a");
+        store.install_recovery_plan(&first).expect("install first");
+        assert_eq!(
+            store
+                .active_recovery_plan(&first.scope, &first.identity_id)
+                .expect("lookup"),
+            Some(first.clone())
+        );
+
+        let replacement = plan("plan-b", "identity-a");
+        store
+            .rotate_recovery_plan(&first.plan_id, &replacement)
+            .expect("rotate");
+        assert_eq!(
+            store
+                .active_recovery_plan(&replacement.scope, &replacement.identity_id)
+                .expect("lookup replacement"),
+            Some(replacement.clone())
+        );
+
+        store
+            .revoke_recovery_plan(
+                &replacement.scope,
+                &replacement.identity_id,
+                &replacement.plan_id,
+            )
+            .expect("revoke");
+        assert_eq!(
+            store
+                .active_recovery_plan(&replacement.scope, &replacement.identity_id)
+                .expect("lookup revoked"),
+            None
+        );
+        store
+            .revoke_recovery_plan(
+                &replacement.scope,
+                &replacement.identity_id,
+                &replacement.plan_id,
+            )
+            .expect("idempotent revoke");
+        assert_eq!(
+            store.install_recovery_plan(&replacement),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn recovery_rotation_cannot_change_identity_or_skip_expected_plan() {
+        let store = MemoryLocalStore::default();
+        let first = plan("plan-a", "identity-a");
+        store.install_recovery_plan(&first).expect("install first");
+
+        let wrong_identity = plan("plan-b", "identity-b");
+        assert_eq!(
+            store.rotate_recovery_plan(&first.plan_id, &wrong_identity),
+            Err(DurableStoreError::Conflict)
+        );
+        let unknown = RecoveryPlanId::from_opaque(id("unknown-plan"));
+        assert_eq!(
+            store.rotate_recovery_plan(&unknown, &plan("plan-c", "identity-a")),
+            Err(DurableStoreError::Conflict)
         );
     }
 }

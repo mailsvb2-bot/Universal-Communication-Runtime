@@ -11,6 +11,7 @@ mod extension;
 mod framing;
 mod handshake;
 mod provenance;
+mod recovery;
 mod scope;
 mod version;
 
@@ -54,6 +55,10 @@ pub use handshake::{
     HandshakeError, NegotiatedSession, NegotiationPolicy, PeerHello, negotiate_session,
 };
 pub use provenance::{ProvenanceError, validate_origin_ref};
+pub use recovery::{
+    MAX_RECOVERY_AUTHORITIES, RecoveryError, canonical_recovery_plan, recovery_plan_aad,
+    validate_recovery_plan, validate_recovery_request,
+};
 pub use scope::{ScopeError, ScopeRelation, require_exact_scope, scope_relation};
 pub use version::{
     ProtocolVersion, VersionNegotiationError, VersionPolicy, VersionRange, negotiate_version,

@@ -37,9 +37,9 @@ Optional Infrastructure
 
 ## Current architectural layer
 
-**Phase 7 — Crypto Foundation (active implementation layer).**
+**Phase 8 — Recovery Model (active implementation layer).**
 
-Phases 0–6 now have canonical contracts and reference invariants. Phase 7 adds versioned crypto-suite negotiation, authenticated transcript/session primitives, key confirmation, durable replay protection, and non-exporting key-operation boundaries without making one OS keystore or cryptographic library the protocol source of truth.
+Phases 0–7 now have canonical contracts and reference invariants. Phase 8 adds typed recovery authorities, explicit trust transitions, encrypted plan-bound recovery packages, durable compare-and-swap plan rotation/revocation, and SQLite schema v4 without treating recovery as a password reset or silently weakening E2EE.
 
 This repository intentionally does not begin with chat UI, messenger adapters, WebRTC, mesh, or a cloud service. Those are consumers/providers of the canonical model and must not become alternative sources of truth.
 

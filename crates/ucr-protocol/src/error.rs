@@ -1,7 +1,7 @@
 use crate::{
     AddressingError, AuthorizationError, CapabilityError, CommandError, CryptoContractError,
     CryptoNegotiationError, EventError, ExtensionError, FrameError, HandshakeError,
-    ProvenanceError, ScopeError, VersionNegotiationError,
+    ProvenanceError, RecoveryError, ScopeError, VersionNegotiationError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +141,26 @@ impl From<ProvenanceError> for CanonicalError {
     }
 }
 
+impl From<RecoveryError> for CanonicalError {
+    fn from(error: RecoveryError) -> Self {
+        let code = match error {
+            RecoveryError::MethodNotAllowed
+            | RecoveryError::PlanMismatch
+            | RecoveryError::ScopeMismatch
+            | RecoveryError::IdentityMismatch => CanonicalErrorCode::PermissionDenied,
+            RecoveryError::EncodingTooLarge | RecoveryError::TooManyAuthorities => {
+                CanonicalErrorCode::ResourceExhausted
+            }
+            RecoveryError::NoAuthorities
+            | RecoveryError::DuplicateAuthority
+            | RecoveryError::UnsafeRecoveredDeviceState
+            | RecoveryError::HistoricalAccessNotExplicit
+            | RecoveryError::TrustModelAuthorityMismatch => CanonicalErrorCode::InvalidArgument,
+        };
+        Self::new(code)
+    }
+}
+
 impl From<ScopeError> for CanonicalError {
     fn from(_error: ScopeError) -> Self {
         // Scope mismatches are authorization failures. Do not expose whether a
@@ -229,7 +249,7 @@ mod tests {
     use super::{CanonicalError, CanonicalErrorCode};
     use crate::{
         AddressingError, AuthorizationError, CommandError, CryptoContractError, ProvenanceError,
-        ScopeError,
+        RecoveryError, ScopeError,
     };
 
     #[test]
@@ -289,6 +309,29 @@ mod tests {
         assert_eq!(
             CanonicalError::from(CryptoContractError::WrongKeyFormatVersion).code,
             CanonicalErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn recovery_denials_do_not_disclose_plan_or_scope_existence() {
+        for error in [
+            RecoveryError::MethodNotAllowed,
+            RecoveryError::PlanMismatch,
+            RecoveryError::ScopeMismatch,
+            RecoveryError::IdentityMismatch,
+        ] {
+            assert_eq!(
+                CanonicalError::from(error).code,
+                CanonicalErrorCode::PermissionDenied
+            );
+        }
+        assert_eq!(
+            CanonicalError::from(RecoveryError::UnsafeRecoveredDeviceState).code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            CanonicalError::from(RecoveryError::TooManyAuthorities).code,
+            CanonicalErrorCode::ResourceExhausted
         );
     }
 
