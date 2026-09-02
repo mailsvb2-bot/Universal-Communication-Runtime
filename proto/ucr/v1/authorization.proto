@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/identity.proto";
+
+message ExactPermissionScope {
+  TenantScope scope = 1;
+}
+
+message TenantWidePermissionScope {
+  OpaqueId tenant_id = 1;
+}
+
+message PermissionGrant {
+  ScopedPrincipal grantee = 1;
+  string permission = 2;
+  oneof scope {
+    ExactPermissionScope exact_scope = 3;
+    TenantWidePermissionScope tenant_wide_scope = 4;
+  }
+}
+
+message AuthorizationRequest {
+  ScopedPrincipal subject = 1;
+  string permission = 2;
+  TenantScope resource_scope = 3;
+}
+
+// Service principals use PrincipalKind.SERVICE_ACCOUNT together with
+// ScopedPrincipal. Authentication credentials are intentionally not defined
+// by this authorization contract.

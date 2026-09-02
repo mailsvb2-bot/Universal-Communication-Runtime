@@ -71,12 +71,14 @@ jobs:
           test -s spec/errors.md &&
           test -s spec/identity-addressing.md &&
           test -s spec/principal-actor-device.md &&
-          test -s spec/tenant-scope.md
+          test -s spec/tenant-scope.md &&
+          test -s spec/permissions.md
       - name: Public contract exists
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
           test -s proto/ucr/v1/errors.proto &&
-          test -s proto/ucr/v1/identity.proto
+          test -s proto/ucr/v1/identity.proto &&
+          test -s proto/ucr/v1/authorization.proto
       - name: ADR governance exists
         run: >-
           test -s docs/adr/0000-template.md &&
@@ -84,4 +86,5 @@ jobs:
           test -s docs/adr/0003-identity-address-endpoint-route-separation.md &&
           test -s docs/adr/0004-actor-provenance-and-device-lifecycle.md &&
           test -s docs/adr/0005-threat-model-as-release-gate.md &&
-          test -s docs/adr/0006-exact-tenant-namespace-scope-by-default.md
+          test -s docs/adr/0006-exact-tenant-namespace-scope-by-default.md &&
+          test -s docs/adr/0007-deny-by-default-explicit-permission-grants.md

@@ -220,6 +220,26 @@ pub struct ScopedPrincipal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionScope {
+    Exact(TenantScope),
+    TenantWide(TenantId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionGrant {
+    pub grantee: ScopedPrincipal,
+    pub permission: String,
+    pub scope: PermissionScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationRequest {
+    pub subject: ScopedPrincipal,
+    pub permission: String,
+    pub resource_scope: TenantScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorRef {
     pub actor_id: ActorId,
     pub kind: ActorKind,

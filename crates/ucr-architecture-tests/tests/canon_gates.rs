@@ -417,3 +417,58 @@ fn tenant_scope_remains_explicit_and_non_wildcard() {
     assert!(proto.contains("TenantScope scope = 1;"));
     assert!(proto.contains("PrincipalRef principal = 2;"));
 }
+
+#[test]
+fn authorization_contract_is_deny_by_default_and_explicitly_scoped() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let spec =
+        fs::read_to_string(workspace.join("spec/permissions.md")).expect("read permissions spec");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/authorization.proto"))
+        .expect("read authorization proto");
+
+    assert!(spec.contains("Authorization is deny-by-default"));
+    assert!(spec.contains("TenantWide"));
+    assert!(spec.contains("namespace-bound principal cannot receive tenant-wide authority"));
+    assert!(proto.contains("oneof scope"));
+    assert!(proto.contains("ExactPermissionScope exact_scope = 3;"));
+    assert!(proto.contains("TenantWidePermissionScope tenant_wide_scope = 4;"));
+}
+
+#[test]
+fn service_accounts_reuse_canonical_principal_model() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let identity = fs::read_to_string(workspace.join("proto/ucr/v1/identity.proto"))
+        .expect("read identity proto");
+    let authz = fs::read_to_string(workspace.join("proto/ucr/v1/authorization.proto"))
+        .expect("read authorization proto");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("read core");
+
+    assert!(identity.contains("PRINCIPAL_KIND_SERVICE_ACCOUNT"));
+    assert!(authz.contains("ScopedPrincipal subject = 1;"));
+    assert!(!authz.contains("message ServicePrincipal"));
+    assert!(core.contains("pub trait AuthorizationEvaluator"));
+    assert!(core.contains("pub trait PolicyEvaluator"));
+}
+
+#[test]
+fn authorization_contract_does_not_embed_credentials() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let authz = fs::read_to_string(workspace.join("proto/ucr/v1/authorization.proto"))
+        .expect("read authorization proto");
+
+    for forbidden in ["api_key =", "bearer_token =", "secret =", "credential ="] {
+        assert!(
+            !authz.contains(forbidden),
+            "authorization contract must not embed credential field `{forbidden}`"
+        );
+    }
+}
