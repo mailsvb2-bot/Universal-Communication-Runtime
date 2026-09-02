@@ -1,6 +1,6 @@
 use crate::{
-    AddressingError, CapabilityError, ExtensionError, FrameError, ProvenanceError, ScopeError,
-    VersionNegotiationError,
+    AddressingError, AuthorizationError, CapabilityError, ExtensionError, FrameError,
+    ProvenanceError, ScopeError, VersionNegotiationError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +114,17 @@ impl From<ScopeError> for CanonicalError {
     }
 }
 
+impl From<AuthorizationError> for CanonicalError {
+    fn from(error: AuthorizationError) -> Self {
+        let code = match error {
+            AuthorizationError::InvalidPermission => CanonicalErrorCode::InvalidArgument,
+            AuthorizationError::InvalidGrant => CanonicalErrorCode::Internal,
+            AuthorizationError::PermissionDenied => CanonicalErrorCode::PermissionDenied,
+        };
+        Self::new(code)
+    }
+}
+
 impl From<CapabilityError> for CanonicalError {
     fn from(error: CapabilityError) -> Self {
         let code = match error {
@@ -153,7 +164,7 @@ impl From<AddressingError> for CanonicalError {
 #[cfg(test)]
 mod tests {
     use super::{CanonicalError, CanonicalErrorCode};
-    use crate::{AddressingError, ProvenanceError, ScopeError};
+    use crate::{AddressingError, AuthorizationError, ProvenanceError, ScopeError};
 
     #[test]
     fn retryability_is_explicit_and_conservative() {
@@ -192,6 +203,18 @@ mod tests {
         assert_eq!(
             CanonicalError::from(ScopeError::NamespaceMismatch).code,
             CanonicalErrorCode::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn authorization_denial_and_corrupt_grant_have_distinct_categories() {
+        assert_eq!(
+            CanonicalError::from(AuthorizationError::PermissionDenied).code,
+            CanonicalErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            CanonicalError::from(AuthorizationError::InvalidGrant).code,
+            CanonicalErrorCode::Internal
         );
     }
 }

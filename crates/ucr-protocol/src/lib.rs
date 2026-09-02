@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod addressing;
+mod authorization;
 mod capability;
 mod error;
 mod extension;
@@ -14,6 +15,10 @@ pub use addressing::{
     AddressingError, MAX_ADDRESS_VALUE_LEN, MAX_ENDPOINT_ADDRESSES, MAX_ENDPOINT_CAPABILITIES,
     MAX_EXTERNAL_ENTITY_ID_LEN, validate_endpoint_address, validate_endpoint_descriptor,
     validate_external_identity_binding,
+};
+pub use authorization::{
+    AuthorizationError, GrantValidationError, authorize, is_service_principal,
+    validate_permission_grant,
 };
 pub use capability::{
     CapabilityDescriptor, CapabilityError, CapabilityMaturity, CapabilityRequirement,

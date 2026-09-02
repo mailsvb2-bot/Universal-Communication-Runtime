@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
 use ucr_model::{
-    CapabilityDescriptor, CommunicationIntent, EndpointAddress, EndpointId, TenantScope,
+    AuthorizationRequest, CapabilityDescriptor, CommunicationIntent, EndpointAddress, EndpointId,
+    TenantScope,
 };
+use ucr_protocol::CanonicalError;
 
 /// A route candidate is transient runtime state, never canonical identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +65,16 @@ pub enum PolicyDecision {
 /// changes.
 pub trait PolicyEvaluator: core::fmt::Debug + Send + Sync {
     fn evaluate_intent(&self, intent: &CommunicationIntent) -> PolicyDecision;
+}
+
+/// Authorization is a separate runtime boundary from communication policy.
+/// Implementations must preserve deny-by-default permission semantics.
+pub trait AuthorizationEvaluator: core::fmt::Debug + Send + Sync {
+    /// Evaluates one scoped permission request.
+    ///
+    /// # Errors
+    /// Returns a canonical error; lack of authority is `PermissionDenied`.
+    fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError>;
 }
 
 /// Durable persistence boundary. The concrete local/server stores arrive in a
