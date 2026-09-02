@@ -93,6 +93,7 @@ id_type!(CommandId);
 id_type!(EventId);
 id_type!(IntentId);
 id_type!(KeyId);
+id_type!(RecoveryPlanId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrincipalKind {
@@ -180,6 +181,100 @@ pub struct DeviceDescriptor {
     pub device_id: DeviceId,
     pub identity_id: IdentityId,
     pub state: DeviceLifecycleState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum RecoveryMethod {
+    RecoveryCode = 1,
+    RecoveryKey = 2,
+    TrustedDevice = 3,
+    HardwareBacked = 4,
+    EncryptedBackup = 5,
+    OrganizationManaged = 6,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RecoveryAuthority {
+    RecoveryCode,
+    RecoveryKey,
+    TrustedDevice(DeviceId),
+    HardwareBacked(DeviceId),
+    EncryptedBackup,
+    OrganizationManaged(PrincipalId),
+}
+
+impl RecoveryAuthority {
+    #[must_use]
+    pub const fn method(&self) -> RecoveryMethod {
+        match self {
+            Self::RecoveryCode => RecoveryMethod::RecoveryCode,
+            Self::RecoveryKey => RecoveryMethod::RecoveryKey,
+            Self::TrustedDevice(_) => RecoveryMethod::TrustedDevice,
+            Self::HardwareBacked(_) => RecoveryMethod::HardwareBacked,
+            Self::EncryptedBackup => RecoveryMethod::EncryptedBackup,
+            Self::OrganizationManaged(_) => RecoveryMethod::OrganizationManaged,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoricalMessageAccess {
+    None,
+    ExplicitEncryptedRecovery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryTrustModel {
+    UserControlled,
+    OrganizationManaged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum RecoveryPackageAlgorithm {
+    UcrV1 = 1,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct EncryptedRecoveryPackage {
+    pub algorithm: RecoveryPackageAlgorithm,
+    pub format_version: u32,
+    pub nonce: [u8; 24],
+    pub ciphertext: Vec<u8>,
+}
+
+impl fmt::Debug for EncryptedRecoveryPackage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncryptedRecoveryPackage")
+            .field("algorithm", &self.algorithm)
+            .field("format_version", &self.format_version)
+            .field("nonce", &"<nonce>")
+            .field("ciphertext", &"<encrypted>")
+            .field("ciphertext_len", &self.ciphertext.len())
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPlan {
+    pub plan_id: RecoveryPlanId,
+    pub scope: TenantScope,
+    pub identity_id: IdentityId,
+    pub authorities: Vec<RecoveryAuthority>,
+    pub historical_message_access: HistoricalMessageAccess,
+    pub trust_model: RecoveryTrustModel,
+    pub recovered_device_state: DeviceLifecycleState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryRequest {
+    pub plan_id: RecoveryPlanId,
+    pub scope: TenantScope,
+    pub identity_id: IdentityId,
+    pub authority: RecoveryAuthority,
+    pub target_device_id: DeviceId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

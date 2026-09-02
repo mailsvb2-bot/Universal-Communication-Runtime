@@ -360,7 +360,7 @@ fn threat_model_keeps_production_blockers_visible() {
         "tenant-scoped authorization enforcement",
         "Service Principal authentication/least-privilege enforcement",
         "device revocation enforcement",
-        "account/key recovery model and tests",
+        "end-to-end recovery workflow",
         "required threat simulations",
         "required fuzz targets",
         "secret/plaintext telemetry regression tests",
@@ -724,7 +724,7 @@ fn crypto_foundation_keeps_handshake_replay_and_nonclaims_explicit() {
         "Traffic APIs are exposed only after",
         "Replay security does not depend on wall-clock expiry",
         "Private key bytes are never part of the public UCR protocol",
-        "does not yet claim complete account/device recovery",
+        "still do not claim complete credential re-issuance",
     ] {
         assert!(
             spec.contains(invariant),
@@ -751,4 +751,62 @@ fn crypto_foundation_keeps_handshake_replay_and_nonclaims_explicit() {
         .expect("crypto session");
     assert!(session.contains("pub suite: CryptoSuite"));
     assert!(session.contains("PeerAgreementKeyMismatch"));
+}
+
+#[test]
+fn recovery_contract_keeps_explicit_authority_and_reverification_invariants() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let spec = fs::read_to_string(workspace.join("spec/recovery.md")).expect("recovery spec");
+    let proto =
+        fs::read_to_string(workspace.join("proto/ucr/v1/recovery.proto")).expect("recovery proto");
+
+    for invariant in [
+        "A method label alone does not authorize recovery",
+        "at most **64** authorities",
+        "used as the HKDF salt and as AEAD associated data",
+        "only accepted recovered-device state is `REVERIFICATION_REQUIRED`",
+        "Historical access defaults to `NONE`",
+        "organization recovery authority is valid only with the explicit organization-managed trust model",
+        "Recovery secret bytes are intentionally absent from protobuf",
+        "SYNC != BACKUP",
+    ] {
+        assert!(
+            spec.contains(invariant),
+            "recovery invariant missing: {invariant}"
+        );
+    }
+    assert!(proto.contains("message RecoveryAuthority"));
+    assert!(proto.contains("RecoveryTrustModel trust_model = 7;"));
+    assert!(proto.contains("message EncryptedRecoveryPackage"));
+    assert!(!proto.contains("recovery_secret"));
+    assert!(!proto.contains("private_key"));
+}
+
+#[test]
+fn recovery_storage_keeps_restart_rotation_and_migration_evidence() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let sqlite =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/recovery_plan.rs"))
+            .expect("recovery sqlite store");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+
+    for evidence in [
+        "recovery_plan_survives_restart_and_is_canonicalized",
+        "recovery_revoke_survives_restart",
+        "concurrent_recovery_rotation_has_single_winner",
+        "v3_store_migrates_to_v4_without_losing_existing_schema",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "recovery evidence missing: {evidence}"
+        );
+    }
+    assert!(core.contains("pub trait RecoveryPlanStore"));
+    assert!(!sqlite.contains("recovery_secret"));
 }

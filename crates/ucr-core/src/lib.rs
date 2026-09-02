@@ -2,7 +2,8 @@
 
 use ucr_model::{
     AuthorizationRequest, CapabilityDescriptor, CommandEnvelope, CommandId, CommunicationIntent,
-    EndpointAddress, EndpointId, EventEnvelope, EventId, TenantScope,
+    EndpointAddress, EndpointId, EventEnvelope, EventId, IdentityId, RecoveryPlan, RecoveryPlanId,
+    TenantScope,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -112,6 +113,46 @@ pub trait StorageProvider: core::fmt::Debug + Send + Sync {
     /// # Errors
     /// Returns an explicit storage failure if health cannot be established.
     fn health(&self) -> Result<StorageHealth, DurableStoreError>;
+}
+
+/// Durable recovery-plan capability. Recovery secrets are not part of this store.
+pub trait RecoveryPlanStore: StorageProvider {
+    /// Installs the first active plan for an identity.
+    ///
+    /// # Errors
+    /// Fails on invalid plan or when another active plan already exists.
+    fn install_recovery_plan(&self, plan: &RecoveryPlan) -> Result<(), DurableStoreError>;
+
+    /// Atomically replaces one expected active plan.
+    ///
+    /// # Errors
+    /// Fails if the expected plan is not active or scope/identity changes.
+    fn rotate_recovery_plan(
+        &self,
+        expected_current: &RecoveryPlanId,
+        replacement: &RecoveryPlan,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Revokes the expected active recovery plan. Repeating the same revocation is idempotent.
+    ///
+    /// # Errors
+    /// Fails when a different active plan exists or storage cannot commit safely.
+    fn revoke_recovery_plan(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        expected_current: &RecoveryPlanId,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Returns the currently active recovery plan for one scoped identity.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures; absence is not an error.
+    fn active_recovery_plan(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+    ) -> Result<Option<RecoveryPlan>, DurableStoreError>;
 }
 
 /// Durable command-acceptance capability.

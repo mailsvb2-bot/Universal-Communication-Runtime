@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod event_journal;
+mod recovery_plan;
 mod replay;
 
 use std::{fmt, path::Path, sync::Mutex, time::Duration};
@@ -14,7 +15,8 @@ use ucr_protocol::{CommandError, CommandReceipt, CommandReceiptStatus, validate_
 
 const SQLITE_SCHEMA_V1: u32 = 1;
 const SQLITE_SCHEMA_V2: u32 = 2;
-pub const SQLITE_SCHEMA_VERSION: u32 = 3;
+const SQLITE_SCHEMA_V3: u32 = 3;
+pub const SQLITE_SCHEMA_VERSION: u32 = 4;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -68,6 +70,46 @@ CREATE TABLE handshake_replay (
     peer_verifying_key BLOB NOT NULL CHECK(length(peer_verifying_key) = 32),
     transcript_binding BLOB NOT NULL CHECK(length(transcript_binding) = 32),
     PRIMARY KEY(peer_verifying_key, transcript_binding)
+ ) WITHOUT ROWID;";
+
+const V4_OBJECTS_SQL: &str = "
+CREATE TABLE recovery_plans (
+    plan_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+    namespace_id TEXT NOT NULL,
+    identity_id TEXT NOT NULL,
+    historical_access TEXT NOT NULL CHECK(historical_access IN ('none', 'explicit_encrypted_recovery')),
+    trust_model TEXT NOT NULL CHECK(trust_model IN ('user_controlled', 'organization_managed')),
+    recovered_device_state TEXT NOT NULL CHECK(recovered_device_state = 'reverification_required'),
+    UNIQUE(tenant_id, namespace_present, namespace_id, identity_id, plan_id),
+    CHECK((namespace_present = 0 AND namespace_id = '') OR
+          (namespace_present = 1 AND namespace_id <> ''))
+) WITHOUT ROWID;
+
+CREATE TABLE recovery_authorities (
+    plan_id TEXT NOT NULL,
+    method TEXT NOT NULL,
+    authority_id TEXT NOT NULL,
+    PRIMARY KEY(plan_id, method, authority_id),
+    FOREIGN KEY(plan_id) REFERENCES recovery_plans(plan_id) ON DELETE CASCADE,
+    CHECK(method IN ('recovery_code', 'recovery_key', 'trusted_device', 'hardware_backed', 'encrypted_backup', 'organization_managed')),
+    CHECK((method IN ('recovery_code', 'recovery_key', 'encrypted_backup') AND authority_id = '') OR
+          (method IN ('trusted_device', 'hardware_backed', 'organization_managed') AND authority_id <> ''))
+) WITHOUT ROWID;
+
+CREATE TABLE active_recovery_plans (
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+    namespace_id TEXT NOT NULL,
+    identity_id TEXT NOT NULL,
+    plan_id TEXT NOT NULL UNIQUE,
+    PRIMARY KEY(tenant_id, namespace_present, namespace_id, identity_id),
+    FOREIGN KEY(tenant_id, namespace_present, namespace_id, identity_id, plan_id)
+        REFERENCES recovery_plans(tenant_id, namespace_present, namespace_id, identity_id, plan_id)
+        ON DELETE CASCADE,
+    CHECK((namespace_present = 0 AND namespace_id = '') OR
+          (namespace_present = 1 AND namespace_id <> ''))
 ) WITHOUT ROWID;";
 
 pub struct SqliteLocalStore {
@@ -282,7 +324,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         if count_user_tables(connection)? != 0 {
             return Err(DurableStoreError::ForeignStore);
         }
-        return initialize_schema_v3(connection);
+        return initialize_schema_v4(connection);
     }
     if application_id != UCR_SQLITE_APPLICATION_ID {
         return Err(DurableStoreError::ForeignStore);
@@ -290,15 +332,20 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
     match version {
         SQLITE_SCHEMA_V1 => {
             migrate_v1_to_v2(connection)?;
-            migrate_v2_to_v3(connection)
+            migrate_v2_to_v3(connection)?;
+            migrate_v3_to_v4(connection)
         }
-        SQLITE_SCHEMA_V2 => migrate_v2_to_v3(connection),
-        SQLITE_SCHEMA_VERSION => verify_schema_v3(connection),
+        SQLITE_SCHEMA_V2 => {
+            migrate_v2_to_v3(connection)?;
+            migrate_v3_to_v4(connection)
+        }
+        SQLITE_SCHEMA_V3 => migrate_v3_to_v4(connection),
+        SQLITE_SCHEMA_VERSION => verify_schema_v4(connection),
         _ => Err(DurableStoreError::UnsupportedSchemaVersion),
     }
 }
 
-fn initialize_schema_v3(connection: &mut Connection) -> Result<(), DurableStoreError> {
+fn initialize_schema_v4(connection: &mut Connection) -> Result<(), DurableStoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -323,6 +370,9 @@ fn initialize_schema_v3(connection: &mut Connection) -> Result<(), DurableStoreE
         .map_err(|error| map_schema_change_error(&error))?;
     transaction
         .execute_batch(V3_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))?;
+    transaction
+        .execute_batch(V4_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
@@ -361,12 +411,29 @@ fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), DurableStoreError
         .execute_batch(V3_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V3)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v3(connection)
+}
+
+fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v3(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .execute_batch(V4_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v4(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -444,6 +511,57 @@ fn verify_schema_v3(connection: &Connection) -> Result<(), DurableStoreError> {
             ("transcript_binding", "BLOB", 1, 2),
         ],
     )
+}
+
+fn verify_schema_v4(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v3(connection)?;
+    verify_table_columns(
+        connection,
+        "recovery_plans",
+        &[
+            ("plan_id", "TEXT", 1, 1),
+            ("tenant_id", "TEXT", 1, 0),
+            ("namespace_present", "INTEGER", 1, 0),
+            ("namespace_id", "TEXT", 1, 0),
+            ("identity_id", "TEXT", 1, 0),
+            ("historical_access", "TEXT", 1, 0),
+            ("trust_model", "TEXT", 1, 0),
+            ("recovered_device_state", "TEXT", 1, 0),
+        ],
+    )?;
+    verify_table_columns(
+        connection,
+        "recovery_authorities",
+        &[
+            ("plan_id", "TEXT", 1, 1),
+            ("method", "TEXT", 1, 2),
+            ("authority_id", "TEXT", 1, 3),
+        ],
+    )?;
+    verify_table_columns(
+        connection,
+        "active_recovery_plans",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("identity_id", "TEXT", 1, 4),
+            ("plan_id", "TEXT", 1, 0),
+        ],
+    )?;
+    let mut foreign_key_check = connection
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(|error| map_sqlite_error(&error))?;
+    if foreign_key_check
+        .query([])
+        .map_err(|error| map_sqlite_error(&error))?
+        .next()
+        .map_err(|error| map_sqlite_error(&error))?
+        .is_some()
+    {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
 }
 
 fn verify_accepted_commands_schema(connection: &Connection) -> Result<(), DurableStoreError> {

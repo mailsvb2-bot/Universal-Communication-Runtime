@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/identity.proto";
+
+enum RecoveryMethod {
+  RECOVERY_METHOD_UNSPECIFIED = 0;
+  RECOVERY_METHOD_RECOVERY_CODE = 1;
+  RECOVERY_METHOD_RECOVERY_KEY = 2;
+  RECOVERY_METHOD_TRUSTED_DEVICE = 3;
+  RECOVERY_METHOD_HARDWARE_BACKED = 4;
+  RECOVERY_METHOD_ENCRYPTED_BACKUP = 5;
+  RECOVERY_METHOD_ORGANIZATION_MANAGED = 6;
+}
+
+enum HistoricalMessageAccess {
+  HISTORICAL_MESSAGE_ACCESS_UNSPECIFIED = 0;
+  HISTORICAL_MESSAGE_ACCESS_NONE = 1;
+  HISTORICAL_MESSAGE_ACCESS_EXPLICIT_ENCRYPTED_RECOVERY = 2;
+}
+
+enum RecoveryPackageAlgorithm {
+  RECOVERY_PACKAGE_ALGORITHM_UNSPECIFIED = 0;
+  RECOVERY_PACKAGE_ALGORITHM_UCR_V1 = 1;
+}
+enum RecoveryTrustModel {
+  RECOVERY_TRUST_MODEL_UNSPECIFIED = 0;
+  RECOVERY_TRUST_MODEL_USER_CONTROLLED = 1;
+  RECOVERY_TRUST_MODEL_ORGANIZATION_MANAGED = 2;
+}
+
+message RecoveryAuthority {
+  RecoveryMethod method = 1;
+  optional OpaqueId device_id = 2;
+  optional OpaqueId principal_id = 3;
+}
+
+// Semantic validation permits at most 64 authorities.
+message RecoveryPlan {
+  OpaqueId plan_id = 1;
+  TenantScope scope = 2;
+  OpaqueId identity_id = 3;
+  repeated RecoveryAuthority authorities = 4;
+  HistoricalMessageAccess historical_message_access = 5;
+  DeviceLifecycleState recovered_device_state = 6;
+  RecoveryTrustModel trust_model = 7;
+}
+
+message RecoveryRequest {
+  OpaqueId plan_id = 1;
+  TenantScope scope = 2;
+  OpaqueId identity_id = 3;
+  RecoveryAuthority authority = 4;
+  OpaqueId target_device_id = 5;
+}
+
+// Recovery secrets are intentionally absent. This envelope carries only
+// versioned ciphertext and public algorithm metadata.
+message EncryptedRecoveryPackage {
+  RecoveryPackageAlgorithm algorithm = 1;
+  uint32 format_version = 2;
+  bytes nonce = 3; // Exactly 24 bytes for RECOVERY_PACKAGE_ALGORITHM_UCR_V1.
+  bytes ciphertext = 4;
+}
