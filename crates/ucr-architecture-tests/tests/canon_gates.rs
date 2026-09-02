@@ -472,3 +472,44 @@ fn authorization_contract_does_not_embed_credentials() {
         );
     }
 }
+
+#[test]
+fn command_receipt_is_not_event_or_effect_proof() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let spec = fs::read_to_string(workspace.join("spec/commands-events.md"))
+        .expect("read command/event spec");
+    let runtime = fs::read_to_string(workspace.join("proto/ucr/v1/runtime.proto"))
+        .expect("read runtime proto");
+
+    assert!(spec.contains("An accepted command is not evidence"));
+    assert!(spec.contains("Neither receipt is an Event"));
+    assert!(runtime.contains("message CommandReceipt"));
+    assert!(runtime.contains("COMMAND_RECEIPT_STATUS_ACCEPTED"));
+    assert!(runtime.contains("COMMAND_RECEIPT_STATUS_DUPLICATE"));
+    assert!(runtime.contains("not evidence that the requested real-world effect occurred"));
+}
+
+#[test]
+fn command_idempotency_contract_keeps_restart_nonclaim_visible() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let spec = fs::read_to_string(workspace.join("spec/commands-events.md"))
+        .expect("read command/event spec");
+
+    for invariant in [
+        "Every accepted command requires a non-empty bounded idempotency key",
+        "different command type or payload is `CONFLICT`",
+        "does not claim restart-safe durable command processing",
+        "different tenant/namespace scope means a different command domain",
+    ] {
+        assert!(
+            spec.contains(invariant),
+            "command invariant missing: `{invariant}`"
+        );
+    }
+}

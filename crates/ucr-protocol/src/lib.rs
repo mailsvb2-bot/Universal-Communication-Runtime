@@ -3,6 +3,7 @@
 mod addressing;
 mod authorization;
 mod capability;
+mod commands;
 mod error;
 mod extension;
 mod framing;
@@ -23,6 +24,11 @@ pub use authorization::{
 pub use capability::{
     CapabilityDescriptor, CapabilityError, CapabilityMaturity, CapabilityRequirement,
     negotiate_capabilities,
+};
+pub use commands::{
+    CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
+    ReceiptError, compare_command_idempotency, validate_command, validate_command_receipt,
+    validate_event,
 };
 pub use error::{CanonicalError, CanonicalErrorCode};
 pub use extension::{

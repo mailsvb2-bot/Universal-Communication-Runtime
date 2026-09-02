@@ -41,6 +41,22 @@ message EventEnvelope {
   repeated Extension extensions = 9;
 }
 
+enum CommandReceiptStatus {
+  COMMAND_RECEIPT_STATUS_UNSPECIFIED = 0;
+  COMMAND_RECEIPT_STATUS_ACCEPTED = 1;
+  COMMAND_RECEIPT_STATUS_DUPLICATE = 2;
+}
+
+// A command receipt acknowledges acceptance/deduplication only. It is not an
+// Event and is not evidence that the requested real-world effect occurred.
+message CommandReceipt {
+  OpaqueId command_id = 1;
+  CommandReceiptStatus status = 2;
+  optional OpaqueId original_command_id = 3;
+  ProtocolVersion schema_version = 4;
+  repeated Extension extensions = 5;
+}
+
 message AcknowledgementEnvelope {
   OpaqueId acknowledged_id = 1;
   ProtocolVersion schema_version = 2;
