@@ -129,8 +129,13 @@ impl From<HandshakeError> for CanonicalError {
 impl From<ExtensionError> for CanonicalError {
     fn from(error: ExtensionError) -> Self {
         let code = match error {
-            ExtensionError::InvalidNamespace => CanonicalErrorCode::InvalidArgument,
+            ExtensionError::InvalidNamespace | ExtensionError::DuplicateExtension => {
+                CanonicalErrorCode::InvalidArgument
+            }
             ExtensionError::UnsupportedCritical => CanonicalErrorCode::UnsupportedCriticalExtension,
+            ExtensionError::TooManyExtensions | ExtensionError::PayloadTooLarge => {
+                CanonicalErrorCode::ResourceExhausted
+            }
         };
         Self::new(code)
     }
@@ -256,12 +261,14 @@ impl From<CommandError> for CanonicalError {
 impl From<EventError> for CanonicalError {
     fn from(error: EventError) -> Self {
         let code = match error {
-            EventError::InvalidEventType | EventError::InvalidSchemaVersion => {
-                CanonicalErrorCode::InvalidArgument
-            }
-            EventError::PayloadTooLarge | EventError::IntegrityMetadataTooLarge => {
-                CanonicalErrorCode::ResourceExhausted
-            }
+            EventError::InvalidEventType
+            | EventError::InvalidSchemaVersion
+            | EventError::InvalidExtension
+            | EventError::DuplicateExtension => CanonicalErrorCode::InvalidArgument,
+            EventError::PayloadTooLarge
+            | EventError::IntegrityMetadataTooLarge
+            | EventError::TooManyExtensions
+            | EventError::ExtensionPayloadTooLarge => CanonicalErrorCode::ResourceExhausted,
         };
         Self::new(code)
     }

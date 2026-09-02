@@ -551,6 +551,7 @@ version = "0.0.1"
 name = "ucr-protocol"
 version = "0.0.1"
 dependencies = [
+ "sha2",
  "ucr-model",
 ]
 

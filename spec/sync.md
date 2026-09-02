@@ -1,6 +1,6 @@
-# Sync Contract
+# Sync and Anti-Entropy Contract
 
-Status: Experimental / Phase 11 foundation.
+Status: Experimental / Phase 12 foundation.
 
 ## 1. Scope
 
@@ -26,7 +26,9 @@ The current bound is 256 Conversation IDs per partial SyncSession. This is a pro
 
 Selection does not import provider folders, CRM segments, or product-specific synchronization semantics into Core.
 
-## 4. Durable checkpoints
+Phase 12 Event-level reconciliation supports `FULL` selection. Conversation-selected Partial Sync fails closed for Event-level reconciliation because UCR does not yet define canonical Event-to-Conversation applicability. Implementations MUST NOT parse Event payloads or guess business meaning to synthesize that mapping.
+
+## 4. Durable Phase-11 checkpoints
 
 A `SyncCheckpoint` is bound to the exact session ID and Tenant/Namespace scope. `generation` starts at 1 and advances exactly by one. `applied_items` may stay equal or increase; regression is a conflict.
 
@@ -34,35 +36,83 @@ The resume token is opaque, bounded to 4096 bytes, and source-issued. UCR stores
 
 The token is not a global logical clock, not Identity evidence, not authorization, and not proof that the remote peer possesses any particular Event or Message.
 
-## 5. Durable storage boundary
+## 5. Canonical Event fingerprint
 
-`SyncStore` is a capability-specific Core interface. Memory and SQLite stores implement the same Protocol validation; neither owns a separate Sync model.
+Phase 12 defines `SHA256_V1`, a versioned canonical Event fingerprint. The hash uses explicit domain separation and a deterministic field encoding owned by `ucr-protocol`. It covers the complete canonical Event semantics, including exact Tenant/Namespace scope, Event type and payload, actor provenance, source device, wall/logical ordering metadata, correlation, schema version, integrity metadata, and canonical protocol extensions.
 
-SQLite schema v7 adds normalized `sync_sessions`, `sync_session_conversations`, and append-only `sync_checkpoints`. Migration from v6 is additive and preserves all earlier durable state.
+Extension order is not semantic. Extensions are validated, duplicate names are rejected, and canonical order is lexical by extension name before hashing or persistence. A golden vector is required so independent implementations can prove byte-for-byte parity.
 
-Session creation, state transitions, and checkpoint writes are explicit durable operations. Concurrent stale transitions or conflicting reuse of one checkpoint generation are `CONFLICT`; they never silently overwrite the winner.
+A fingerprint is an equality/integrity summary, not a digital signature, authorization decision, peer identity proof, or global clock.
 
-On reopen, malformed selections, invalid session states, checkpoint generation gaps, scope/session mismatches, or progress regression are corruption and fail closed.
+### SHA256_V1 canonical byte encoding
 
-## 6. Phase boundary and nonclaims
+Independent implementations MUST produce exactly the same bytes before SHA-256:
 
-Phase 11 does not perform Anti-Entropy. It does not claim summaries, missing-event detection, partial reconciliation, damaged-state repair, or duplicate-suppression proof across divergent replicas. Those belong to Phase 12.
+- prepend the ASCII domain bytes `ucr:event-fingerprint:sha256:v1\0`;
+- encode every byte string as unsigned 64-bit big-endian length followed by the raw bytes; strings are UTF-8 and use that byte-string encoding;
+- encode optional strings/IDs as one byte `0x00` for absent, or `0x01` followed by the encoded string for present;
+- encode booleans as one byte `0x00` or `0x01`;
+- encode `u32` and `u64` as fixed-width unsigned big-endian; encode `i64` as its fixed-width two's-complement big-endian representation;
+- encode scope as tenant ID string, then namespace-presence byte, then namespace ID string only when present;
+- encode `ActorKind` as one byte: Person=`1`, AiAgent=`2`, Bot=`3`, Organization=`4`, System=`5`; these codes are fingerprint-format constants and do not depend on language enum layout;
+- after canonical extension sorting, encode extension count as `u64` big-endian, then each extension as name string, critical byte, payload bytes.
 
-A resume token must never be promoted into an Anti-Entropy summary or remote-state proof. Network transport, routing, authentication of remote sync payloads, authorization policy integration, cancellation plumbing, and production timeout/deadline policy remain separate work.
+The field sequence after the domain is: `event_id`, scope, `event_type`, payload, actor ID, ActorKind code, actor `on_behalf_of`, source device ID, source identity ID, `wall_time_unix_ms`, `logical_order`, correlation ID, causation ID, idempotency key, schema major, schema minor, integrity metadata, extension count, extensions. No protobuf serialization bytes, local database row IDs, map iteration order, or language-native struct layout participate in the fingerprint.
+
+The Phase-12 golden vector in the reference implementation hashes the canonical test Event to `efc6bb9fdc495ccb4e812ab4d8cd68816271983f7aaf8b62a9c3d7359ea82e61`. Any implementation that produces another digest for that vector is non-conformant.
+
+## 6. Anti-Entropy classification and reconciliation
+
+For each scoped `EventId`, a target classifies a source summary as:
+
+- `MISSING`: no local Event exists with that scoped EventId;
+- `MATCHING`: the local Event has the same versioned canonical fingerprint;
+- `DAMAGED`: the scoped EventId exists locally but the canonical fingerprint differs.
+
+`MATCHING` is duplicate suppression. `MISSING` may be appended through the normal canonical Event validation/journal boundary. `DAMAGED` is fail-closed: the local Event MUST NOT be silently overwritten or repaired automatically. Recovery of damaged state requires a separate explicit policy/evidence path.
+
+Reusing one scoped `EventId` with different semantics remains a conflict. Anti-Entropy does not weaken Event immutability.
+
+## 7. Snapshot/resume semantics
+
+Anti-Entropy enumeration is snapshot-bound. The first page captures a source-local snapshot boundary. A cursor resumes only inside that immutable pass. Events appended after the snapshot boundary are intentionally excluded from the current pass and MUST appear in a later fresh reconciliation pass.
+
+EventId is never a canonical ordering key. Implementations MUST NOT resume by sorting opaque Event IDs. A reference store may use private append order such as SQLite `journal_seq`, but that ordering is implementation-private and MUST NOT appear in Core or the public protobuf contract.
+
+`AntiEntropyCursor` is opaque and bounded. Its binding covers the exact `SyncSession`, Tenant/Namespace scope, source endpoint, and target endpoint. A cursor from another session, scope, or direction is invalid. Cursor bytes are not remotely comparable and do not prove replica contents.
+
+## 8. Durable storage boundary and SQLite v8
+
+`SyncStore`, `EventJournalStore`, and `AntiEntropyStore` are capability-specific Core interfaces. Memory and SQLite stores implement the same Protocol validation; neither owns a second Sync/Event model.
+
+SQLite schema v7 adds normalized `sync_sessions`, `sync_session_conversations`, and append-only `sync_checkpoints`. SQLite schema v8 adds normalized `event_extensions` linked to the existing append-only Event journal. Migration from v7 to v8 is additive and transactional: every pre-v8 Event is preserved and canonically represents an empty extension list.
+
+SQLite may use its internal `journal_seq` to implement a stable snapshot cursor. `journal_seq` is not exported as canonical ordering and is not present in public UCR protobuf or Core model contracts.
+
+On reopen, malformed extension rows, invalid canonical extension ordering, foreign-key damage, malformed Sync selections/states, checkpoint gaps, or other semantic corruption fail closed.
+
+## 9. Phase boundary and nonclaims
+
+Phase 12 establishes local/reference Anti-Entropy summaries, missing/matching/damaged detection, duplicate suppression, snapshot-safe resume, and reconciliation behavior. It does not by itself authenticate or authorize arbitrary remote peers, define network framing for a concrete transport, select routes, provide production timeout/retry policy, or automatically repair damaged replicas.
+
+The Phase-11 `SyncCheckpoint.resume_token` and Phase-12 `AntiEntropyCursor` remain distinct concepts. Neither is a source-of-truth claim or global logical clock.
 
 Sync must not make cloud infrastructure mandatory and must not make a server the sole source of truth.
 
-## 7. Required reference evidence
+## 10. Required reference evidence
 
 Reference implementations must prove:
 
-- canonical Full/Partial selection validation and deduplication;
-- durable pause/resume and checkpoint recovery after restart;
-- stale state transitions fail closed;
-- checkpoint generation and applied-count monotonicity;
-- concurrent state/checkpoint races have one winner;
-- semantic corruption is rejected on reopen;
-- v6-to-v7 migration preserves pre-existing Message and earlier durable state;
-- no provider/product-specific Sync model exists in Core or public contract.
-
-The public protobuf contract mirrors the same provider-independent link, selection, state, session, and checkpoint model.
+- canonical Full/Partial Sync selection validation and durable pause/resume;
+- versioned Event fingerprint golden-vector parity;
+- protocol extensions survive Event persistence and affect fingerprints;
+- identical extension sets deduplicate regardless of input order;
+- missing, matching, and damaged Event states are distinguished;
+- incoming summary classification batches above the 256-item budget fail before allocation-heavy classification;
+- damaged Events are never silently overwritten;
+- a mid-pass append is excluded from the old snapshot and included in the next pass;
+- cursor reuse across another session/direction fails closed;
+- conversation-selected partial Event reconciliation fails closed;
+- SQLite v7-to-v8 migration preserves existing Events as empty-extension Events;
+- older SQLite migration chains still reach current schema without state loss;
+- no provider/product-specific Sync model or public `journal_seq` ordering exists.

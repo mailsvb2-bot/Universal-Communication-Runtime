@@ -37,9 +37,9 @@ Optional Infrastructure
 
 ## Current architectural layer
 
-**Phase 11 — Sync (active implementation layer).**
+**Phase 12 — Anti-Entropy (active implementation layer).**
 
-Phases 0–10 now have canonical contracts and reference invariants. Phase 11 adds provider-independent SyncSession/SyncCheckpoint semantics, durable pause/resume and partial selection, and SQLite schema v7 while keeping Anti-Entropy, network transports, routing, and reconciliation as separate later layers.
+Phases 0–11 now have canonical contracts and reference invariants. Phase 12 adds versioned canonical Event fingerprints, snapshot-safe Anti-Entropy enumeration, missing/matching/damaged reconciliation semantics, complete Event extension persistence parity, and SQLite schema v8. Network transports, remote peer authentication/authorization, routing, and automatic damaged-replica repair remain separate layers.
 
 This repository intentionally does not begin with chat UI, messenger adapters, WebRTC, mesh, or a cloud service. Those are consumers/providers of the canonical model and must not become alternative sources of truth.
 

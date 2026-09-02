@@ -602,7 +602,8 @@ mod tests {
         let connection = Connection::open(db.path()).expect("open raw store");
         connection
             .execute_batch(
-                "DROP TABLE sync_checkpoints;
+                "DROP TABLE event_extensions;
+                 DROP TABLE sync_checkpoints;
                  DROP TABLE sync_session_conversations;
                  DROP TABLE sync_sessions;
                  DROP TABLE delivery_evidence;

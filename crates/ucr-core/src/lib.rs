@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 
 use ucr_model::{
-    AuthorizationRequest, CapabilityDescriptor, CommandEnvelope, CommandId, CommunicationIntent,
-    ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
-    DeliveryState, EndpointAddress, EndpointId, EventEnvelope, EventId, IdentityId,
-    MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, SessionId, SyncCheckpoint,
-    SyncSession, SyncState, TenantScope,
+    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CapabilityDescriptor,
+    CommandEnvelope, CommandId, CommunicationIntent, ConversationId, ConversationRecord,
+    DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, EndpointAddress, EndpointId,
+    EventEnvelope, EventId, EventReconciliation, EventSummary, IdentityId, MessageEnvelope,
+    MessageId, RecoveryPlan, RecoveryPlanId, SessionId, SyncCheckpoint, SyncSession, SyncState,
+    TenantScope,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -336,6 +337,47 @@ pub trait EventJournalStore: StorageProvider {
     /// Returns explicit validation/conflict/storage failures. Reusing one
     /// scoped event ID with different semantics is a conflict.
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError>;
+}
+
+/// Event-level Anti-Entropy capability bound to durable Sync sessions.
+///
+/// Implementations may use private local ordering to resume snapshots, but no
+/// storage sequence is canonical or exposed through this interface.
+pub trait AntiEntropyStore: EventJournalStore + SyncStore {
+    /// Returns one snapshot-bound page of source Event summaries.
+    ///
+    /// # Errors
+    /// Fails closed for invalid session state/selection, cursor binding, or storage errors.
+    fn anti_entropy_summary_page(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+        cursor: Option<&AntiEntropyCursor>,
+        max_items: usize,
+    ) -> Result<AntiEntropyPage, DurableStoreError>;
+
+    /// Classifies remote Event summaries as missing, matching, or damaged locally.
+    ///
+    /// # Errors
+    /// Fails closed for invalid session binding or corrupt local Event state.
+    fn classify_event_summaries(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+        summaries: &[EventSummary],
+    ) -> Result<Vec<EventReconciliation>, DurableStoreError>;
+
+    /// Applies one missing Event, suppresses an exact duplicate, and refuses to
+    /// overwrite a damaged Event that reuses the same scoped `EventId`.
+    ///
+    /// # Errors
+    /// Returns conflict for damaged state and explicit validation/storage failures otherwise.
+    fn reconcile_event(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+        event: &EventEnvelope,
+    ) -> Result<EventAppendStatus, DurableStoreError>;
 }
 
 /// Durable terminal-outcome linkage for accepted commands.

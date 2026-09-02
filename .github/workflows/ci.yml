@@ -118,4 +118,5 @@ jobs:
           test -s docs/adr/0012-recovery-is-an-explicit-trust-transition.md &&
           test -s docs/adr/0013-provider-independent-conversation-and-durable-message.md &&
           test -s docs/adr/0014-delivery-attempts-and-evidence-are-separate-from-message-identity.md &&
-          test -s docs/adr/0015-sync-sessions-use-opaque-resume-checkpoints.md
+          test -s docs/adr/0015-sync-sessions-use-opaque-resume-checkpoints.md &&
+          test -s docs/adr/0016-event-anti-entropy-uses-versioned-fingerprints-and-snapshot-cursors.md

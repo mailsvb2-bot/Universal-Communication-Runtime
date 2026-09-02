@@ -51,3 +51,45 @@ message SyncCheckpoint {
   bytes resume_token = 4;
   uint64 applied_items = 5;
 }
+
+// Phase 12 Event-level Anti-Entropy. Fingerprints are versioned and compare
+// canonical Event semantics; they are not signatures or authorization proof.
+enum EventFingerprintAlgorithm {
+  EVENT_FINGERPRINT_ALGORITHM_UNSPECIFIED = 0;
+  EVENT_FINGERPRINT_ALGORITHM_SHA256_V1 = 1;
+}
+
+message EventFingerprint {
+  EventFingerprintAlgorithm algorithm = 1;
+  bytes digest = 2;
+}
+
+message EventSummary {
+  OpaqueId event_id = 1;
+  EventFingerprint fingerprint = 2;
+}
+
+// Store-private continuation state. Implementations may encode a local snapshot
+// boundary inside token, but callers MUST treat it as opaque and non-comparable.
+message AntiEntropyCursor {
+  bytes token = 1;
+}
+
+message AntiEntropyPage {
+  OpaqueId session_id = 1;
+  TenantScope scope = 2;
+  repeated EventSummary summaries = 3;
+  AntiEntropyCursor next_cursor = 4;
+}
+
+enum EventReplicaState {
+  EVENT_REPLICA_STATE_UNSPECIFIED = 0;
+  EVENT_REPLICA_STATE_MISSING = 1;
+  EVENT_REPLICA_STATE_MATCHING = 2;
+  EVENT_REPLICA_STATE_DAMAGED = 3;
+}
+
+message EventReconciliation {
+  OpaqueId event_id = 1;
+  EventReplicaState state = 2;
+}
