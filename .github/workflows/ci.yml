@@ -91,4 +91,5 @@ jobs:
           test -s docs/adr/0006-exact-tenant-namespace-scope-by-default.md &&
           test -s docs/adr/0007-deny-by-default-explicit-permission-grants.md &&
           test -s docs/adr/0008-command-event-idempotency-semantics.md &&
-          test -s docs/adr/0009-capability-specific-storage-and-sqlite-reference.md
+          test -s docs/adr/0009-capability-specific-storage-and-sqlite-reference.md &&
+          test -s docs/adr/0010-append-only-event-journal-and-terminal-command-outcomes.md
