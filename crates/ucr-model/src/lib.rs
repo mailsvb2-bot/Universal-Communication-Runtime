@@ -212,6 +212,13 @@ pub struct PrincipalRef {
     pub kind: PrincipalKind,
 }
 
+/// A principal bound to an explicit tenant/namespace security scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedPrincipal {
+    pub scope: TenantScope,
+    pub principal: PrincipalRef,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorRef {
     pub actor_id: ActorId,

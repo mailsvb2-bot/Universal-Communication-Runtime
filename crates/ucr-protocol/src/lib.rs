@@ -7,6 +7,7 @@ mod extension;
 mod framing;
 mod handshake;
 mod provenance;
+mod scope;
 mod version;
 
 pub use addressing::{
@@ -31,6 +32,7 @@ pub use handshake::{
     HandshakeError, NegotiatedSession, NegotiationPolicy, PeerHello, negotiate_session,
 };
 pub use provenance::{ProvenanceError, validate_origin_ref};
+pub use scope::{ScopeError, ScopeRelation, require_exact_scope, scope_relation};
 pub use version::{
     ProtocolVersion, VersionNegotiationError, VersionPolicy, VersionRange, negotiate_version,
     negotiate_version_sets,
