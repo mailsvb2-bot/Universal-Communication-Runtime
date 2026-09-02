@@ -1,0 +1,22 @@
+[package]
+name = "ucr-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chacha20poly1305 = { version = "=0.11.0", features = ["zeroize"] }
+ed25519-dalek = "=3.0.0"
+getrandom = "=0.4.3"
+hkdf = "=0.13.0"
+hmac = "=0.13.0"
+sha2 = "=0.11.0"
+x25519-dalek = { version = "=3.0.0", features = ["static_secrets"] }
+zeroize = { version = "=1.9.0", features = ["derive"] }
+ucr-model = { path = "../ucr-model" }
+ucr-protocol = { path = "../ucr-protocol" }
+
+[lints]
+workspace = true

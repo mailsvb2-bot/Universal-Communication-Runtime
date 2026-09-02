@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+
+// Versioned cryptographic suites. Zero is never a negotiated suite.
+enum CryptoSuite {
+  CRYPTO_SUITE_UNSPECIFIED = 0;
+  CRYPTO_SUITE_UCR_V1 = 1;
+}
+
+enum KeyPurpose {
+  KEY_PURPOSE_UNSPECIFIED = 0;
+  KEY_PURPOSE_SIGNING = 1;
+  KEY_PURPOSE_KEY_AGREEMENT = 2;
+}
+
+message PublicKeyDescriptor {
+  OpaqueId key_id = 1;
+  OpaqueId device_id = 2;
+  KeyPurpose purpose = 3;
+  string algorithm_id = 4;
+  uint32 algorithm_version = 5;
+  uint32 key_format_version = 6;
+  bytes public_key = 7;
+}
+message HandshakeKeyExchange {
+  bytes ephemeral_key = 1;
+}
+
+message HandshakeAuthentication {
+  bytes transcript_binding = 1;
+  PublicKeyDescriptor signing_key = 2;
+  bytes signature = 3;
+}
+
+message KeyConfirmation {
+  bytes transcript_binding = 1;
+  bytes tag = 2;
+}

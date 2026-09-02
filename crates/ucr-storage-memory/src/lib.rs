@@ -1,22 +1,28 @@
 #![forbid(unsafe_code)]
 
-use std::{collections::HashMap, fmt, sync::Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Mutex,
+};
 
 use ucr_core::{
     CommandAcceptanceStore, CommandOutcomeStore, DurableStoreError, EventAppendStatus,
     EventJournalStore, StorageHealth, StorageProvider,
 };
+use ucr_crypto::{ReplayError, ReplayProtector, TranscriptBinding, VerifyingKeyBytes};
 use ucr_model::{CommandEnvelope, CommandId, EventEnvelope, EventId, TenantScope};
 use ucr_protocol::{
     CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
     compare_command_idempotency, validate_command, validate_event,
 };
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 type ScopeKey = (String, Option<String>);
 type CommandKey = (ScopeKey, String);
 type CommandRefKey = (ScopeKey, String);
 type EventKey = (ScopeKey, String);
+type ReplayKey = ([u8; 32], [u8; 32]);
 
 #[derive(Default)]
 struct MemoryState {
@@ -24,6 +30,7 @@ struct MemoryState {
     accepted_by_id: HashMap<CommandRefKey, CommandEnvelope>,
     events: HashMap<EventKey, EventEnvelope>,
     terminal_events: HashMap<CommandRefKey, EventId>,
+    seen_handshakes: HashSet<ReplayKey>,
 }
 
 #[derive(Default)]
@@ -50,6 +57,23 @@ impl StorageProvider for MemoryLocalStore {
             .lock()
             .map(|_| StorageHealth::Healthy)
             .map_err(|_| DurableStoreError::Internal)
+    }
+}
+
+impl ReplayProtector for MemoryLocalStore {
+    fn record_once(
+        &self,
+        peer_verifying_key: &VerifyingKeyBytes,
+        binding: &TranscriptBinding,
+    ) -> Result<(), ReplayError> {
+        let mut state = self.state.lock().map_err(|_| ReplayError::Internal)?;
+        if !state
+            .seen_handshakes
+            .insert((peer_verifying_key.0, *binding.as_bytes()))
+        {
+            return Err(ReplayError::Replayed);
+        }
+        Ok(())
     }
 }
 
@@ -276,7 +300,7 @@ mod tests {
     #[test]
     fn memory_store_is_healthy_and_versioned() {
         let store = MemoryLocalStore::default();
-        assert_eq!(store.schema_version(), Ok(2));
+        assert_eq!(store.schema_version(), Ok(3));
         assert_eq!(store.health(), Ok(ucr_core::StorageHealth::Healthy));
     }
 
@@ -371,6 +395,25 @@ mod tests {
         assert_eq!(
             store.record_terminal_event(&accepted.scope, &accepted.command_id, &second),
             Err(DurableStoreError::Conflict)
+        );
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use ucr_crypto::{ReplayError, ReplayProtector, TranscriptBinding, VerifyingKeyBytes};
+
+    use super::MemoryLocalStore;
+
+    #[test]
+    fn memory_replay_guard_accepts_once() {
+        let store = MemoryLocalStore::default();
+        let peer = VerifyingKeyBytes([7_u8; 32]);
+        let binding = TranscriptBinding::from_bytes([9_u8; 32]);
+        assert_eq!(store.record_once(&peer, &binding), Ok(()));
+        assert_eq!(
+            store.record_once(&peer, &binding),
+            Err(ReplayError::Replayed)
         );
     }
 }

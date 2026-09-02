@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod event_journal;
+mod replay;
 
 use std::{fmt, path::Path, sync::Mutex, time::Duration};
 
@@ -11,7 +12,9 @@ use ucr_core::{CommandAcceptanceStore, DurableStoreError, StorageHealth, Storage
 use ucr_model::{CommandEnvelope, CommandId, OpaqueId, TenantScope};
 use ucr_protocol::{CommandError, CommandReceipt, CommandReceiptStatus, validate_command};
 
-pub const SQLITE_SCHEMA_VERSION: u32 = 2;
+const SQLITE_SCHEMA_V1: u32 = 1;
+const SQLITE_SCHEMA_V2: u32 = 2;
+pub const SQLITE_SCHEMA_VERSION: u32 = 3;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -59,6 +62,13 @@ CREATE TABLE command_terminal_events (
     CHECK((namespace_present = 0 AND namespace_id = '') OR
           (namespace_present = 1 AND namespace_id <> ''))
 );";
+
+const V3_OBJECTS_SQL: &str = "
+CREATE TABLE handshake_replay (
+    peer_verifying_key BLOB NOT NULL CHECK(length(peer_verifying_key) = 32),
+    transcript_binding BLOB NOT NULL CHECK(length(transcript_binding) = 32),
+    PRIMARY KEY(peer_verifying_key, transcript_binding)
+) WITHOUT ROWID;";
 
 pub struct SqliteLocalStore {
     connection: Mutex<Connection>,
@@ -272,19 +282,23 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         if count_user_tables(connection)? != 0 {
             return Err(DurableStoreError::ForeignStore);
         }
-        return initialize_schema_v2(connection);
+        return initialize_schema_v3(connection);
     }
     if application_id != UCR_SQLITE_APPLICATION_ID {
         return Err(DurableStoreError::ForeignStore);
     }
     match version {
-        1 => migrate_v1_to_v2(connection),
-        SQLITE_SCHEMA_VERSION => verify_schema_v2(connection),
+        SQLITE_SCHEMA_V1 => {
+            migrate_v1_to_v2(connection)?;
+            migrate_v2_to_v3(connection)
+        }
+        SQLITE_SCHEMA_V2 => migrate_v2_to_v3(connection),
+        SQLITE_SCHEMA_VERSION => verify_schema_v3(connection),
         _ => Err(DurableStoreError::UnsupportedSchemaVersion),
     }
 }
 
-fn initialize_schema_v2(connection: &mut Connection) -> Result<(), DurableStoreError> {
+fn initialize_schema_v3(connection: &mut Connection) -> Result<(), DurableStoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -308,6 +322,9 @@ fn initialize_schema_v2(connection: &mut Connection) -> Result<(), DurableStoreE
         .execute_batch(V2_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))?;
     transaction
+        .execute_batch(V3_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))?;
+    transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
@@ -327,12 +344,29 @@ fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), DurableStoreError
         .execute_batch(V2_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V2)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v2(connection)
+}
+
+fn migrate_v2_to_v3(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v2(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .execute_batch(V3_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v3(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -398,6 +432,18 @@ fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
         return Err(DurableStoreError::Corrupt);
     }
     Ok(())
+}
+
+fn verify_schema_v3(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v2(connection)?;
+    verify_table_columns(
+        connection,
+        "handshake_replay",
+        &[
+            ("peer_verifying_key", "BLOB", 1, 1),
+            ("transcript_binding", "BLOB", 1, 2),
+        ],
+    )
 }
 
 fn verify_accepted_commands_schema(connection: &Connection) -> Result<(), DurableStoreError> {

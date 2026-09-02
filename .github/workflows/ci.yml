@@ -44,6 +44,18 @@ jobs:
       - name: Release tests
         run: cargo test --workspace --all-targets --release --locked
 
+  security-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Install pinned cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit Cargo.lock
+        run: cargo audit --deny warnings
+
   public-contract:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -74,13 +86,15 @@ jobs:
           test -s spec/tenant-scope.md &&
           test -s spec/permissions.md &&
           test -s spec/commands-events.md &&
-          test -s spec/local-storage.md
+          test -s spec/local-storage.md &&
+          test -s spec/crypto.md
       - name: Public contract exists
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
           test -s proto/ucr/v1/errors.proto &&
           test -s proto/ucr/v1/identity.proto &&
-          test -s proto/ucr/v1/authorization.proto
+          test -s proto/ucr/v1/authorization.proto &&
+          test -s proto/ucr/v1/crypto.proto
       - name: ADR governance exists
         run: >-
           test -s docs/adr/0000-template.md &&
@@ -92,4 +106,5 @@ jobs:
           test -s docs/adr/0007-deny-by-default-explicit-permission-grants.md &&
           test -s docs/adr/0008-command-event-idempotency-semantics.md &&
           test -s docs/adr/0009-capability-specific-storage-and-sqlite-reference.md &&
-          test -s docs/adr/0010-append-only-event-journal-and-terminal-command-outcomes.md
+          test -s docs/adr/0010-append-only-event-journal-and-terminal-command-outcomes.md &&
+          test -s docs/adr/0011-versioned-crypto-suite-v1-and-non-exporting-key-operations.md

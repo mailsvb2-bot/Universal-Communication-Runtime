@@ -92,6 +92,7 @@ id_type!(IntegrationId);
 id_type!(CommandId);
 id_type!(EventId);
 id_type!(IntentId);
+id_type!(KeyId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrincipalKind {
@@ -189,6 +190,58 @@ pub enum CapabilityMaturity {
     Production,
     Deprecated,
     Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum CryptoSuite {
+    UcrV1 = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyPurpose {
+    Signing,
+    KeyAgreement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicKeyDescriptor {
+    pub key_id: KeyId,
+    pub device_id: DeviceId,
+    pub purpose: KeyPurpose,
+    pub algorithm_id: String,
+    pub algorithm_version: u32,
+    pub key_format_version: u32,
+    pub public_key: Vec<u8>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HandshakeNonce([u8; 32]);
+
+impl HandshakeNonce {
+    #[must_use]
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn is_all_zero(&self) -> bool {
+        self.0.iter().all(|byte| *byte == 0)
+    }
+}
+
+impl fmt::Debug for HandshakeNonce {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("HandshakeNonce")
+            .field(&"<nonce>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

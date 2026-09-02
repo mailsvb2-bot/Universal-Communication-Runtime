@@ -37,9 +37,9 @@ Optional Infrastructure
 
 ## Current architectural layer
 
-**Phase 6 — Local Storage (active implementation layer).**
+**Phase 7 — Crypto Foundation (active implementation layer).**
 
-Phases 0–5 have canonical contracts and reference invariants; Phase 6 now includes restart-safe command acceptance plus a canonical append-only Event/terminal-outcome journal, while the database remains an implementation behind storage capability contracts rather than a second protocol.
+Phases 0–6 now have canonical contracts and reference invariants. Phase 7 adds versioned crypto-suite negotiation, authenticated transcript/session primitives, key confirmation, durable replay protection, and non-exporting key-operation boundaries without making one OS keystore or cryptographic library the protocol source of truth.
 
 This repository intentionally does not begin with chat UI, messenger adapters, WebRTC, mesh, or a cloud service. Those are consumers/providers of the canonical model and must not become alternative sources of truth.
 
@@ -54,6 +54,7 @@ This repository intentionally does not begin with chat UI, messenger adapters, W
 - `crates/ucr-model/` — canonical Rust model vocabulary.
 - `crates/ucr-protocol/` — protocol/version negotiation reference logic.
 - `crates/ucr-core/` — runtime boundary contracts; no product-specific logic.
+- `crates/ucr-crypto/` — versioned cryptographic reference implementation and non-exporting key-operation boundaries.
 - `crates/ucr-storage-memory/` — storage contract test implementation.
 - `crates/ucr-storage-sqlite/` — local SQLite reference implementation.
 - `crates/ucr-architecture-tests/` — architectural regression gates.
@@ -67,6 +68,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo test --workspace --all-targets --locked
 cargo test --workspace --all-targets --release --locked
+cargo audit --deny warnings
 ```
 
 ## Non-goals
