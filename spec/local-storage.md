@@ -1,6 +1,6 @@
 # UCR local storage contract
 
-Status: **Experimental / Phase 6 foundation, extended through Phase 11**
+Status: **Experimental / Phase 6 foundation, extended through Phase 12**
 
 Local storage is a capability boundary, not a public database schema and not an alternate UCR protocol. External consumers never receive direct database access.
 
@@ -11,7 +11,7 @@ The storage abstraction must support at minimum:
 - server durable stores;
 - future embedded stores.
 
-The abstraction must not be reduced to the lowest common denominator. Domain capabilities use explicit storage interfaces such as `CommandAcceptanceStore`, `EventJournalStore`, `RecoveryPlanStore`, `ConversationStore`, and `MessageStore`; `DeliveryStore` and `SyncStore` are additional capability-specific contracts above `StorageProvider`; future identity and attachment stores add their own contracts without reducing the abstraction.
+The abstraction must not be reduced to the lowest common denominator. Domain capabilities use explicit storage interfaces such as `CommandAcceptanceStore`, `EventJournalStore`, `RecoveryPlanStore`, `ConversationStore`, and `MessageStore`; `DeliveryStore`, `SyncStore`, and `AntiEntropyStore` are additional capability-specific contracts above `StorageProvider`; future identity and attachment stores add their own contracts without reducing the abstraction.
 
 ## Command acceptance durability
 
@@ -50,7 +50,7 @@ The reference local store uses pinned bundled SQLite and must configure:
 
 A database carrying another application ID or unrelated user tables must not be silently adopted or mutated during rejection. A schema newer than the binary must be rejected; silent downgrade is forbidden. Schema shape and foreign-key consistency are validated when opening an existing store.
 
-Schema v2 migrates v1 transactionally: existing command acceptance/deduplication records are preserved, then scoped Command ID uniqueness and Event/outcome tables are added. If legacy rows contain duplicate scoped Command IDs, migration fails and the database remains at v1. Schema v3 migrates v2 transactionally by adding durable handshake replay state while preserving accepted commands and Events. Schema v4 migrates v3 transactionally by adding public Recovery Plan/authority/active-plan metadata while preserving command, Event, and replay state. Recovery secrets are not stored in these tables. Schema v5 migrates v4 transactionally by adding normalized Conversation/Message, ordered attachment/relation reference, and external-message-mapping tables while preserving all pre-existing durable state. Schema v6 migrates v5 transactionally by adding normalized DeliveryAttempt and append-only DeliveryEvidence tables while preserving all earlier durable state. Schema v7 migrates v6 transactionally by adding normalized SyncSession, partial Conversation selection, and append-only SyncCheckpoint tables while preserving all earlier durable state.
+Schema v2 migrates v1 transactionally: existing command acceptance/deduplication records are preserved, then scoped Command ID uniqueness and Event/outcome tables are added. If legacy rows contain duplicate scoped Command IDs, migration fails and the database remains at v1. Schema v3 migrates v2 transactionally by adding durable handshake replay state while preserving accepted commands and Events. Schema v4 migrates v3 transactionally by adding public Recovery Plan/authority/active-plan metadata while preserving command, Event, and replay state. Recovery secrets are not stored in these tables. Schema v5 migrates v4 transactionally by adding normalized Conversation/Message, ordered attachment/relation reference, and external-message-mapping tables while preserving all pre-existing durable state. Schema v6 migrates v5 transactionally by adding normalized DeliveryAttempt and append-only DeliveryEvidence tables while preserving all earlier durable state. Schema v7 migrates v6 transactionally by adding normalized SyncSession, partial Conversation selection, and append-only SyncCheckpoint tables while preserving all earlier durable state. Schema v8 migrates v7 transactionally by adding normalized canonical Event extension rows; pre-v8 Events are preserved exactly and represent an empty extension list.
 
 On Unix, the database file is created and hardened as owner-only (`0600`), and SQLite WAL/SHM sidecars must not widen group/other access. Other operating systems must rely on the platform's private application-data ACL/sandbox and must not expose the database as a user-shared document.
 ## Explicit failure semantics
@@ -71,6 +71,7 @@ Storage exhaustion, corruption, unavailability, permission failures, foreign-sto
 | Event provenance | canonical actor/source-device attribution | UCR Core | event retention policy | INTERNAL / identity metadata |
 | Event payload | immutable canonical fact payload | originating event | event retention policy | inherits payload classification |
 | integrity metadata | future cryptographic/integrity evidence | UCR Core | event retention policy | SECURITY METADATA |
+| Event extensions | canonical versioned extension semantics; payload remains non-loggable | UCR Protocol/Event | event retention policy | inherits extension payload classification |
 | terminal Command→Event link | durable processing outcome relation | UCR Core | command/event retention window | INTERNAL |
 | peer key + transcript binding | authenticated-handshake replay detection | UCR Crypto | replay retention policy | SECURITY METADATA / AUDIT |
 | recovery plan + authority identifiers | durable recovery policy and CAS rotation | UCR Recovery | recovery-policy retention | SECURITY METADATA / AUDIT |

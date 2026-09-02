@@ -243,7 +243,7 @@ fn load_selection(
     })
 }
 
-fn load_session_from(
+pub(super) fn load_session_from(
     connection: &Connection,
     scope: &TenantScope,
     session_id: &SessionId,
@@ -874,7 +874,8 @@ mod tests {
         let connection = Connection::open(db.path()).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE sync_checkpoints;
+                "DROP TABLE event_extensions;
+                 DROP TABLE sync_checkpoints;
                  DROP TABLE sync_session_conversations;
                  DROP TABLE sync_sessions;",
             )

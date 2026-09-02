@@ -4,10 +4,18 @@ pub struct ExtensionDescriptor {
     pub critical: bool,
 }
 
+use ucr_model::ProtocolExtension;
+
+pub const MAX_PROTOCOL_EXTENSIONS: usize = 64;
+pub const MAX_EXTENSION_PAYLOAD_LEN: usize = 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensionError {
     InvalidNamespace,
     UnsupportedCritical,
+    TooManyExtensions,
+    DuplicateExtension,
+    PayloadTooLarge,
 }
 
 /// Validates a namespaced UCR identifier.
@@ -39,6 +47,35 @@ const fn is_identifier_byte(byte: u8) -> bool {
 /// Returns [`ExtensionError::InvalidNamespace`] if the name is invalid.
 pub fn validate_extension_name(name: &str) -> Result<(), ExtensionError> {
     validate_namespaced_identifier(name)
+}
+
+/// Validates and canonically orders protocol extensions.
+///
+/// Extension order is not semantic. Duplicate names are rejected.
+///
+/// # Errors
+/// Returns an explicit namespace, count, duplicate, or payload budget error.
+pub fn canonical_protocol_extensions(
+    extensions: &[ProtocolExtension],
+) -> Result<Vec<ProtocolExtension>, ExtensionError> {
+    if extensions.len() > MAX_PROTOCOL_EXTENSIONS {
+        return Err(ExtensionError::TooManyExtensions);
+    }
+    let mut canonical = extensions.to_vec();
+    for extension in &canonical {
+        validate_extension_name(&extension.name)?;
+        if extension.payload.len() > MAX_EXTENSION_PAYLOAD_LEN {
+            return Err(ExtensionError::PayloadTooLarge);
+        }
+    }
+    canonical.sort_by(|left, right| left.name.cmp(&right.name));
+    if canonical
+        .windows(2)
+        .any(|pair| pair[0].name == pair[1].name)
+    {
+        return Err(ExtensionError::DuplicateExtension);
+    }
+    Ok(canonical)
 }
 
 /// Rejects unsupported critical extensions while tolerating unknown optional ones.

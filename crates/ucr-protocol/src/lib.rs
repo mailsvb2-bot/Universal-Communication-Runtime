@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod addressing;
+mod anti_entropy;
 mod authorization;
 mod capability;
 mod commands;
@@ -23,6 +24,12 @@ pub use addressing::{
     MAX_EXTERNAL_ENTITY_ID_LEN, validate_endpoint_address, validate_endpoint_descriptor,
     validate_external_identity_binding,
 };
+pub use anti_entropy::{
+    ANTI_ENTROPY_SESSION_BINDING_V1_DOMAIN, AntiEntropyError, EVENT_FINGERPRINT_SHA256_V1_DOMAIN,
+    MAX_ANTI_ENTROPY_CURSOR_LEN, MAX_ANTI_ENTROPY_PAGE_ITEMS, anti_entropy_session_binding,
+    event_fingerprint, validate_anti_entropy_cursor, validate_anti_entropy_page_size,
+    validate_anti_entropy_session, validate_anti_entropy_summary_count,
+};
 pub use authorization::{
     AuthorizationError, GrantValidationError, authorize, is_service_principal,
     validate_permission_grant,
@@ -33,8 +40,8 @@ pub use capability::{
 };
 pub use commands::{
     CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
-    ReceiptError, compare_command_idempotency, validate_command, validate_command_receipt,
-    validate_event,
+    ReceiptError, canonical_event, compare_command_idempotency, validate_command,
+    validate_command_receipt, validate_event,
 };
 pub use crypto_contract::{
     AEAD_ALGORITHM_ID, AGREEMENT_ALGORITHM_ID, ALGORITHM_VERSION, CRYPTO_SUITE_ID,
@@ -52,7 +59,8 @@ pub use delivery::{
 };
 pub use error::{CanonicalError, CanonicalErrorCode};
 pub use extension::{
-    ExtensionDescriptor, ExtensionError, require_supported_extensions, validate_extension_name,
+    ExtensionDescriptor, ExtensionError, MAX_EXTENSION_PAYLOAD_LEN, MAX_PROTOCOL_EXTENSIONS,
+    canonical_protocol_extensions, require_supported_extensions, validate_extension_name,
     validate_namespaced_identifier,
 };
 pub use framing::{

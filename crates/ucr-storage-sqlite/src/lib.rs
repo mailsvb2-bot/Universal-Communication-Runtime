@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod anti_entropy_store;
 mod delivery_store;
 mod event_journal;
 mod message_store;
@@ -22,7 +23,8 @@ const SQLITE_SCHEMA_V3: u32 = 3;
 const SQLITE_SCHEMA_V4: u32 = 4;
 const SQLITE_SCHEMA_V5: u32 = 5;
 const SQLITE_SCHEMA_V6: u32 = 6;
-pub const SQLITE_SCHEMA_VERSION: u32 = 7;
+const SQLITE_SCHEMA_V7: u32 = 7;
+pub const SQLITE_SCHEMA_VERSION: u32 = 8;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -330,7 +332,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         if count_user_tables(connection)? != 0 {
             return Err(DurableStoreError::ForeignStore);
         }
-        return initialize_schema_v7(connection);
+        return initialize_schema_v8(connection);
     }
     if application_id != UCR_SQLITE_APPLICATION_ID {
         return Err(DurableStoreError::ForeignStore);
@@ -342,37 +344,46 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
             migrate_v3_to_v4(connection)?;
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
-            migrate_v6_to_v7(connection)
+            migrate_v6_to_v7(connection)?;
+            migrate_v7_to_v8(connection)
         }
         SQLITE_SCHEMA_V2 => {
             migrate_v2_to_v3(connection)?;
             migrate_v3_to_v4(connection)?;
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
-            migrate_v6_to_v7(connection)
+            migrate_v6_to_v7(connection)?;
+            migrate_v7_to_v8(connection)
         }
         SQLITE_SCHEMA_V3 => {
             migrate_v3_to_v4(connection)?;
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
-            migrate_v6_to_v7(connection)
+            migrate_v6_to_v7(connection)?;
+            migrate_v7_to_v8(connection)
         }
         SQLITE_SCHEMA_V4 => {
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
-            migrate_v6_to_v7(connection)
+            migrate_v6_to_v7(connection)?;
+            migrate_v7_to_v8(connection)
         }
         SQLITE_SCHEMA_V5 => {
             migrate_v5_to_v6(connection)?;
-            migrate_v6_to_v7(connection)
+            migrate_v6_to_v7(connection)?;
+            migrate_v7_to_v8(connection)
         }
-        SQLITE_SCHEMA_V6 => migrate_v6_to_v7(connection),
-        SQLITE_SCHEMA_VERSION => sync_store::verify_schema_v7(connection),
+        SQLITE_SCHEMA_V6 => {
+            migrate_v6_to_v7(connection)?;
+            migrate_v7_to_v8(connection)
+        }
+        SQLITE_SCHEMA_V7 => migrate_v7_to_v8(connection),
+        SQLITE_SCHEMA_VERSION => event_journal::verify_schema_v8(connection),
         _ => Err(DurableStoreError::UnsupportedSchemaVersion),
     }
 }
 
-fn initialize_schema_v7(connection: &mut Connection) -> Result<(), DurableStoreError> {
+fn initialize_schema_v8(connection: &mut Connection) -> Result<(), DurableStoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -404,6 +415,7 @@ fn initialize_schema_v7(connection: &mut Connection) -> Result<(), DurableStoreE
     message_store::create_v5_objects(&transaction)?;
     delivery_store::create_v6_objects(&transaction)?;
     sync_store::create_v7_objects(&transaction)?;
+    event_journal::create_v8_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -503,12 +515,27 @@ fn migrate_v6_to_v7(connection: &mut Connection) -> Result<(), DurableStoreError
         .map_err(|error| map_sqlite_error(&error))?;
     sync_store::create_v7_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V7)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     sync_store::verify_schema_v7(connection)
+}
+
+fn migrate_v7_to_v8(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    sync_store::verify_schema_v7(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    event_journal::create_v8_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    event_journal::verify_schema_v8(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -893,6 +920,7 @@ mod tests {
             },
             schema_version: ProtocolVersion::new(1, 0),
             integrity_metadata: Vec::new(),
+            extensions: Vec::new(),
         }
     }
 
@@ -1076,6 +1104,32 @@ mod tests {
         assert_eq!(
             reopened.append_event(&changed),
             Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn terminal_link_creation_is_appended_even_when_event_already_exists() {
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open store");
+        let accepted = command(
+            "command-preexisting",
+            "retry-preexisting",
+            b"payload",
+            Some("namespace-a"),
+        );
+        let terminal = event("event-preexisting", "command-preexisting", b"done");
+        store.accept_command(&accepted).expect("accepted");
+        assert_eq!(
+            store.append_event(&terminal),
+            Ok(EventAppendStatus::Appended)
+        );
+        assert_eq!(
+            store.record_terminal_event(&accepted.scope, &accepted.command_id, &terminal),
+            Ok(EventAppendStatus::Appended)
+        );
+        assert_eq!(
+            store.terminal_event(&accepted.scope, &accepted.command_id),
+            Ok(Some(terminal.event_id.clone()))
         );
     }
 

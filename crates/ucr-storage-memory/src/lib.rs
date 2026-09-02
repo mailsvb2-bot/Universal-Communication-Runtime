@@ -7,28 +7,31 @@ use std::{
 };
 
 use ucr_core::{
-    CommandAcceptanceStore, CommandOutcomeStore, ConversationStore, DeliveryStore,
-    DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore, MessageStore,
-    RecoveryPlanStore, StorageHealth, StorageProvider, SyncStore,
+    AntiEntropyStore, CommandAcceptanceStore, CommandOutcomeStore, ConversationStore,
+    DeliveryStore, DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore,
+    MessageStore, RecoveryPlanStore, StorageHealth, StorageProvider, SyncStore,
 };
 use ucr_crypto::{ReplayError, ReplayProtector, TranscriptBinding, VerifyingKeyBytes};
 use ucr_model::{
-    CommandEnvelope, CommandId, ConversationId, ConversationRecord, DeliveryAttempt,
-    DeliveryEvidence, DeliveryId, DeliveryState, EventEnvelope, EventId, IdentityId,
+    AntiEntropyCursor, AntiEntropyPage, CommandEnvelope, CommandId, ConversationId,
+    ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState,
+    EventEnvelope, EventId, EventReconciliation, EventReplicaState, EventSummary, IdentityId,
     MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, SessionId, SyncCheckpoint,
     SyncSession, SyncState, TenantScope,
 };
 use ucr_protocol::{
-    CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
-    canonical_message, canonical_recovery_plan, canonical_sync_session,
-    compare_command_idempotency, validate_command, validate_conversation,
-    validate_conversation_parent_kind, validate_delivery_attempt, validate_delivery_evidence,
-    validate_delivery_evidence_binding, validate_delivery_evidence_order,
-    validate_delivery_transition, validate_event, validate_sync_checkpoint,
+    AntiEntropyError, CommandError, CommandReceipt, CommandReceiptStatus, EventError,
+    IdempotencyDecision, anti_entropy_session_binding, canonical_event, canonical_message,
+    canonical_recovery_plan, canonical_sync_session, compare_command_idempotency,
+    event_fingerprint, validate_anti_entropy_cursor, validate_anti_entropy_page_size,
+    validate_anti_entropy_session, validate_anti_entropy_summary_count, validate_command,
+    validate_conversation, validate_conversation_parent_kind, validate_delivery_attempt,
+    validate_delivery_evidence, validate_delivery_evidence_binding,
+    validate_delivery_evidence_order, validate_delivery_transition, validate_sync_checkpoint,
     validate_sync_transition,
 };
 
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 8;
 type ScopeKey = (String, Option<String>);
 type CommandKey = (ScopeKey, String);
 type CommandRefKey = (ScopeKey, String);
@@ -45,6 +48,7 @@ struct MemoryState {
     accepted: HashMap<CommandKey, CommandEnvelope>,
     accepted_by_id: HashMap<CommandRefKey, CommandEnvelope>,
     events: HashMap<EventKey, EventEnvelope>,
+    event_order: Vec<EventKey>,
     terminal_events: HashMap<CommandRefKey, EventId>,
     seen_handshakes: HashSet<ReplayKey>,
     recovery_plans: HashMap<String, RecoveryPlan>,
@@ -657,17 +661,193 @@ fn map_event_error(_error: EventError) -> DurableStoreError {
 
 impl EventJournalStore for MemoryLocalStore {
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError> {
-        validate_event(event).map_err(map_event_error)?;
-        let key = event_key(event);
+        let event = canonical_event(event).map_err(map_event_error)?;
+        let key = event_key(&event);
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         if let Some(original) = state.events.get(&key) {
-            return if original == event {
+            return if original == &event {
                 Ok(EventAppendStatus::Duplicate)
             } else {
                 Err(DurableStoreError::Conflict)
             };
         }
-        state.events.insert(key, event.clone());
+        state.events.insert(key.clone(), event);
+        state.event_order.push(key);
+        Ok(EventAppendStatus::Appended)
+    }
+}
+
+const MEMORY_CURSOR_VERSION: u8 = 1;
+const MEMORY_CURSOR_LEN: usize = 1 + 32 + 8 + 8;
+
+fn load_anti_entropy_session<'a>(
+    state: &'a MemoryState,
+    scope: &TenantScope,
+    session_id: &SessionId,
+) -> Result<&'a SyncSession, DurableStoreError> {
+    let session = state
+        .sync_sessions
+        .get(&sync_key(scope, session_id))
+        .ok_or(DurableStoreError::InvalidRecord)?;
+    validate_anti_entropy_session(session).map_err(map_anti_entropy_error)?;
+    Ok(session)
+}
+
+fn map_anti_entropy_error(_error: AntiEntropyError) -> DurableStoreError {
+    DurableStoreError::InvalidRecord
+}
+
+fn encode_memory_cursor(session: &SyncSession, snapshot: u64, position: u64) -> AntiEntropyCursor {
+    let mut token = Vec::with_capacity(MEMORY_CURSOR_LEN);
+    token.push(MEMORY_CURSOR_VERSION);
+    token.extend_from_slice(&anti_entropy_session_binding(session));
+    token.extend_from_slice(&snapshot.to_be_bytes());
+    token.extend_from_slice(&position.to_be_bytes());
+    AntiEntropyCursor { token }
+}
+
+fn decode_memory_cursor(
+    session: &SyncSession,
+    cursor: &AntiEntropyCursor,
+) -> Result<(u64, u64), DurableStoreError> {
+    validate_anti_entropy_cursor(&cursor.token).map_err(map_anti_entropy_error)?;
+    if cursor.token.len() != MEMORY_CURSOR_LEN || cursor.token[0] != MEMORY_CURSOR_VERSION {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    let binding = anti_entropy_session_binding(session);
+    if cursor.token[1..33] != binding {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    let snapshot = u64::from_be_bytes(
+        cursor.token[33..41]
+            .try_into()
+            .map_err(|_| DurableStoreError::InvalidRecord)?,
+    );
+    let position = u64::from_be_bytes(
+        cursor.token[41..49]
+            .try_into()
+            .map_err(|_| DurableStoreError::InvalidRecord)?,
+    );
+    if position > snapshot {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    Ok((snapshot, position))
+}
+
+impl AntiEntropyStore for MemoryLocalStore {
+    fn anti_entropy_summary_page(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+        cursor: Option<&AntiEntropyCursor>,
+        max_items: usize,
+    ) -> Result<AntiEntropyPage, DurableStoreError> {
+        validate_anti_entropy_page_size(max_items).map_err(map_anti_entropy_error)?;
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let session = load_anti_entropy_session(&state, scope, session_id)?;
+        let (snapshot, mut position) = match cursor {
+            Some(cursor) => decode_memory_cursor(session, cursor)?,
+            None => (
+                u64::try_from(state.event_order.len()).map_err(|_| DurableStoreError::Internal)?,
+                0,
+            ),
+        };
+        let available =
+            u64::try_from(state.event_order.len()).map_err(|_| DurableStoreError::Internal)?;
+        if snapshot > available {
+            return Err(DurableStoreError::Corrupt);
+        }
+        let wanted_scope = scope_key(scope);
+        let mut summaries = Vec::with_capacity(max_items);
+        while position < snapshot && summaries.len() < max_items {
+            let index = usize::try_from(position).map_err(|_| DurableStoreError::Corrupt)?;
+            let key = state
+                .event_order
+                .get(index)
+                .ok_or(DurableStoreError::Corrupt)?;
+            position = position.checked_add(1).ok_or(DurableStoreError::Corrupt)?;
+            if key.0 != wanted_scope {
+                continue;
+            }
+            let event = state.events.get(key).ok_or(DurableStoreError::Corrupt)?;
+            summaries.push(EventSummary {
+                event_id: event.event_id.clone(),
+                fingerprint: event_fingerprint(event).map_err(|_| DurableStoreError::Corrupt)?,
+            });
+        }
+        let next_cursor =
+            (position < snapshot).then(|| encode_memory_cursor(session, snapshot, position));
+        Ok(AntiEntropyPage {
+            session_id: session.session_id.clone(),
+            scope: session.scope.clone(),
+            summaries,
+            next_cursor,
+        })
+    }
+
+    fn classify_event_summaries(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+        summaries: &[EventSummary],
+    ) -> Result<Vec<EventReconciliation>, DurableStoreError> {
+        validate_anti_entropy_summary_count(summaries.len()).map_err(map_anti_entropy_error)?;
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let _session = load_anti_entropy_session(&state, scope, session_id)?;
+        let mut seen = HashSet::with_capacity(summaries.len());
+        let mut result = Vec::with_capacity(summaries.len());
+        for summary in summaries {
+            if !seen.insert(summary.event_id.clone()) {
+                return Err(DurableStoreError::InvalidRecord);
+            }
+            let key = (
+                scope_key(scope),
+                summary.event_id.as_opaque().as_str().to_owned(),
+            );
+            let state_kind = match state.events.get(&key) {
+                None => EventReplicaState::Missing,
+                Some(local) => {
+                    let local_fingerprint =
+                        event_fingerprint(local).map_err(|_| DurableStoreError::Corrupt)?;
+                    if local_fingerprint == summary.fingerprint {
+                        EventReplicaState::Matching
+                    } else {
+                        EventReplicaState::Damaged
+                    }
+                }
+            };
+            result.push(EventReconciliation {
+                event_id: summary.event_id.clone(),
+                state: state_kind,
+            });
+        }
+        Ok(result)
+    }
+
+    fn reconcile_event(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+        event: &EventEnvelope,
+    ) -> Result<EventAppendStatus, DurableStoreError> {
+        let event = canonical_event(event).map_err(map_event_error)?;
+        if &event.scope != scope {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let _session = load_anti_entropy_session(&state, scope, session_id)?;
+        let key = event_key(&event);
+        if let Some(local) = state.events.get(&key) {
+            return if event_fingerprint(local).map_err(|_| DurableStoreError::Corrupt)?
+                == event_fingerprint(&event).map_err(map_event_error)?
+            {
+                Ok(EventAppendStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.events.insert(key.clone(), event);
+        state.event_order.push(key);
         Ok(EventAppendStatus::Appended)
     }
 }
@@ -679,14 +859,14 @@ impl CommandOutcomeStore for MemoryLocalStore {
         command_id: &CommandId,
         event: &EventEnvelope,
     ) -> Result<EventAppendStatus, DurableStoreError> {
-        validate_event(event).map_err(map_event_error)?;
+        let event = canonical_event(event).map_err(map_event_error)?;
         if &event.scope != scope
             || event.correlation.causation_id.as_ref() != Some(command_id.as_opaque())
         {
             return Err(DurableStoreError::InvalidRecord);
         }
         let command_ref = command_ref_key(scope, command_id);
-        let event_key = event_key(event);
+        let event_key = event_key(&event);
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         if !state.accepted_by_id.contains_key(&command_ref) {
             return Err(DurableStoreError::InvalidRecord);
@@ -696,16 +876,17 @@ impl CommandOutcomeStore for MemoryLocalStore {
                 return Err(DurableStoreError::Conflict);
             }
             return match state.events.get(&event_key) {
-                Some(original) if original == event => Ok(EventAppendStatus::Duplicate),
+                Some(original) if original == &event => Ok(EventAppendStatus::Duplicate),
                 _ => Err(DurableStoreError::Conflict),
             };
         }
         if let Some(original) = state.events.get(&event_key) {
-            if original != event {
+            if original != &event {
                 return Err(DurableStoreError::Conflict);
             }
         } else {
-            state.events.insert(event_key, event.clone());
+            state.events.insert(event_key.clone(), event.clone());
+            state.event_order.push(event_key);
         }
         state
             .terminal_events
@@ -786,6 +967,7 @@ mod tests {
             },
             schema_version: ProtocolVersion::new(1, 0),
             integrity_metadata: Vec::new(),
+            extensions: Vec::new(),
         }
     }
 
@@ -845,6 +1027,26 @@ mod tests {
         assert_eq!(
             store.append_event(&changed),
             Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn terminal_link_creation_is_appended_even_when_event_already_exists() {
+        let store = MemoryLocalStore::default();
+        let accepted = command("command-preexisting", "retry-preexisting", b"payload");
+        let terminal = event("event-preexisting", "command-preexisting", b"done");
+        store.accept_command(&accepted).expect("accepted");
+        assert_eq!(
+            store.append_event(&terminal),
+            Ok(EventAppendStatus::Appended)
+        );
+        assert_eq!(
+            store.record_terminal_event(&accepted.scope, &accepted.command_id, &terminal),
+            Ok(EventAppendStatus::Appended)
+        );
+        assert_eq!(
+            store.terminal_event(&accepted.scope, &accepted.command_id),
+            Ok(Some(terminal.event_id.clone()))
         );
     }
 
@@ -1486,6 +1688,250 @@ mod sync_tests {
                 SyncState::Active,
             ),
             Err(DurableStoreError::Conflict)
+        );
+    }
+}
+
+#[cfg(test)]
+mod anti_entropy_tests {
+    use ucr_core::{
+        AntiEntropyStore, DurableStoreError, EventAppendStatus, EventJournalStore, SyncStore,
+    };
+    use ucr_model::{
+        ActorId, ActorKind, ActorRef, CorrelationContext, DeviceId, DeviceRef, EndpointId,
+        EventEnvelope, EventFingerprint, EventFingerprintAlgorithm, EventId, EventReplicaState,
+        EventSummary, IdentityId, OpaqueId, ProtocolExtension, ProtocolVersion, SessionId,
+        SyncLinkKind, SyncMode, SyncSelection, SyncSession, SyncState, TenantId, TenantScope,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-a")),
+            namespace_id: None,
+        }
+    }
+
+    fn session(id: &str, target: &str, mode: SyncMode) -> SyncSession {
+        SyncSession {
+            session_id: SessionId::from_opaque(oid(id)),
+            scope: scope(),
+            source_endpoint_id: EndpointId::from_opaque(oid("endpoint-source")),
+            target_endpoint_id: EndpointId::from_opaque(oid(target)),
+            link_kind: SyncLinkKind::DeviceDevice,
+            selection: SyncSelection {
+                mode,
+                conversation_ids: if mode == SyncMode::Partial {
+                    vec![ucr_model::ConversationId::from_opaque(oid(
+                        "conversation-a",
+                    ))]
+                } else {
+                    Vec::new()
+                },
+            },
+            state: SyncState::Prepared,
+        }
+    }
+
+    fn activate(store: &MemoryLocalStore, session: &SyncSession) {
+        store.create_sync_session(session).expect("create session");
+        store
+            .transition_sync(
+                &session.scope,
+                &session.session_id,
+                SyncState::Prepared,
+                SyncState::Active,
+            )
+            .expect("activate session");
+    }
+
+    fn event(id: &str, payload: &[u8]) -> EventEnvelope {
+        EventEnvelope {
+            event_id: EventId::from_opaque(oid(id)),
+            scope: scope(),
+            event_type: "ucr.test.event".to_owned(),
+            payload: payload.to_vec(),
+            actor: ActorRef {
+                actor_id: ActorId::from_opaque(oid("actor-a")),
+                kind: ActorKind::System,
+                on_behalf_of: None,
+            },
+            source_device: DeviceRef {
+                device_id: DeviceId::from_opaque(oid("device-a")),
+                identity_id: IdentityId::from_opaque(oid("identity-a")),
+            },
+            wall_time_unix_ms: 1,
+            logical_order: 1,
+            correlation: CorrelationContext {
+                correlation_id: oid("correlation-a"),
+                causation_id: None,
+                idempotency_key: None,
+            },
+            schema_version: ProtocolVersion::new(1, 0),
+            integrity_metadata: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn snapshot_resume_does_not_lose_events_added_during_pass() {
+        let store = MemoryLocalStore::default();
+        let sync = session("sync-a", "endpoint-target", SyncMode::Full);
+        activate(&store, &sync);
+        store
+            .append_event(&event("event-a", b"a"))
+            .expect("event a");
+        store
+            .append_event(&event("event-b", b"b"))
+            .expect("event b");
+
+        let first = store
+            .anti_entropy_summary_page(&sync.scope, &sync.session_id, None, 1)
+            .expect("first page");
+        assert_eq!(first.summaries.len(), 1);
+        assert_eq!(first.summaries[0].event_id.as_opaque().as_str(), "event-a");
+        let cursor = first.next_cursor.expect("resume cursor");
+
+        store
+            .append_event(&event("event-c", b"c"))
+            .expect("event c");
+        let resumed = store
+            .anti_entropy_summary_page(&sync.scope, &sync.session_id, Some(&cursor), 8)
+            .expect("resumed page");
+        assert_eq!(resumed.summaries.len(), 1);
+        assert_eq!(
+            resumed.summaries[0].event_id.as_opaque().as_str(),
+            "event-b"
+        );
+        assert!(resumed.next_cursor.is_none());
+
+        let next_pass = store
+            .anti_entropy_summary_page(&sync.scope, &sync.session_id, None, 8)
+            .expect("next pass");
+        assert_eq!(next_pass.summaries.len(), 3);
+        assert_eq!(
+            next_pass.summaries[2].event_id.as_opaque().as_str(),
+            "event-c"
+        );
+    }
+
+    #[test]
+    fn cursor_is_bound_to_exact_session_and_direction() {
+        let store = MemoryLocalStore::default();
+        let first = session("sync-a", "endpoint-target-a", SyncMode::Full);
+        let second = session("sync-b", "endpoint-target-b", SyncMode::Full);
+        activate(&store, &first);
+        activate(&store, &second);
+        store
+            .append_event(&event("event-a", b"a"))
+            .expect("event a");
+        store
+            .append_event(&event("event-b", b"b"))
+            .expect("event b");
+        let cursor = store
+            .anti_entropy_summary_page(&first.scope, &first.session_id, None, 1)
+            .expect("first page")
+            .next_cursor
+            .expect("cursor");
+        assert_eq!(
+            store.anti_entropy_summary_page(&second.scope, &second.session_id, Some(&cursor), 1),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        let oversized = vec![
+            EventSummary {
+                event_id: EventId::from_opaque(oid("event-summary")),
+                fingerprint: EventFingerprint {
+                    algorithm: EventFingerprintAlgorithm::Sha256V1,
+                    digest: [0; 32],
+                },
+            };
+            ucr_protocol::MAX_ANTI_ENTROPY_PAGE_ITEMS + 1
+        ];
+        assert_eq!(
+            store.classify_event_summaries(&first.scope, &first.session_id, &oversized),
+            Err(DurableStoreError::InvalidRecord)
+        );
+    }
+
+    #[test]
+    fn reconciliation_distinguishes_missing_matching_and_damaged_without_overwrite() {
+        let source = MemoryLocalStore::default();
+        let target = MemoryLocalStore::default();
+        let sync = session("sync-a", "endpoint-target", SyncMode::Full);
+        activate(&source, &sync);
+        activate(&target, &sync);
+        let matching = event("event-a", b"same");
+        let damaged_source = event("event-b", b"source");
+        let missing = event("event-c", b"missing");
+        for value in [&matching, &damaged_source, &missing] {
+            source.append_event(value).expect("source event");
+        }
+        target.append_event(&matching).expect("matching local");
+        target
+            .append_event(&event("event-b", b"different-local"))
+            .expect("damaged local");
+
+        let page = source
+            .anti_entropy_summary_page(&sync.scope, &sync.session_id, None, 8)
+            .expect("source summaries");
+        let states = target
+            .classify_event_summaries(&sync.scope, &sync.session_id, &page.summaries)
+            .expect("classification");
+        assert_eq!(states[0].state, EventReplicaState::Matching);
+        assert_eq!(states[1].state, EventReplicaState::Damaged);
+        assert_eq!(states[2].state, EventReplicaState::Missing);
+        assert_eq!(
+            target.reconcile_event(&sync.scope, &sync.session_id, &matching),
+            Ok(EventAppendStatus::Duplicate)
+        );
+        assert_eq!(
+            target.reconcile_event(&sync.scope, &sync.session_id, &damaged_source),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            target.reconcile_event(&sync.scope, &sync.session_id, &missing),
+            Ok(EventAppendStatus::Appended)
+        );
+    }
+
+    #[test]
+    fn partial_event_reconciliation_and_extension_order_fail_or_deduplicate_canonically() {
+        let partial_store = MemoryLocalStore::default();
+        let partial = session("sync-partial", "endpoint-target", SyncMode::Partial);
+        activate(&partial_store, &partial);
+        assert_eq!(
+            partial_store.anti_entropy_summary_page(&partial.scope, &partial.session_id, None, 1),
+            Err(DurableStoreError::InvalidRecord)
+        );
+
+        let store = MemoryLocalStore::default();
+        let mut original = event("event-ext", b"payload");
+        original.extensions = vec![
+            ProtocolExtension {
+                name: "vendor.example.z".to_owned(),
+                critical: false,
+                payload: b"z".to_vec(),
+            },
+            ProtocolExtension {
+                name: "ucr.example.a".to_owned(),
+                critical: true,
+                payload: b"a".to_vec(),
+            },
+        ];
+        let mut reordered = original.clone();
+        reordered.extensions.reverse();
+        assert_eq!(
+            store.append_event(&original),
+            Ok(EventAppendStatus::Appended)
+        );
+        assert_eq!(
+            store.append_event(&reordered),
+            Ok(EventAppendStatus::Duplicate)
         );
     }
 }

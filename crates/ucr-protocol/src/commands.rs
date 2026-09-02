@@ -1,6 +1,9 @@
 use ucr_model::{CommandEnvelope, CommandId, EventEnvelope};
 
-use crate::{DEFAULT_MAX_PAYLOAD_LEN, validate_namespaced_identifier};
+use crate::{
+    DEFAULT_MAX_PAYLOAD_LEN, ExtensionError, canonical_protocol_extensions,
+    validate_namespaced_identifier,
+};
 
 pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 256;
 pub const MAX_COMMAND_PAYLOAD_LEN: usize = DEFAULT_MAX_PAYLOAD_LEN as usize;
@@ -23,6 +26,10 @@ pub enum EventError {
     PayloadTooLarge,
     IntegrityMetadataTooLarge,
     InvalidSchemaVersion,
+    InvalidExtension,
+    DuplicateExtension,
+    TooManyExtensions,
+    ExtensionPayloadTooLarge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +112,31 @@ pub fn validate_event(event: &EventEnvelope) -> Result<(), EventError> {
     if event.schema_version.major == 0 {
         return Err(EventError::InvalidSchemaVersion);
     }
+    canonical_protocol_extensions(&event.extensions).map_err(map_extension_error)?;
     Ok(())
+}
+
+/// Validates and canonically orders one Event before hashing, persistence, or wire use.
+///
+/// # Errors
+/// Returns the same fail-closed validation errors as [`validate_event`].
+pub fn canonical_event(event: &EventEnvelope) -> Result<EventEnvelope, EventError> {
+    validate_event(event)?;
+    let mut canonical = event.clone();
+    canonical.extensions =
+        canonical_protocol_extensions(&event.extensions).map_err(map_extension_error)?;
+    Ok(canonical)
+}
+
+const fn map_extension_error(error: ExtensionError) -> EventError {
+    match error {
+        ExtensionError::InvalidNamespace | ExtensionError::UnsupportedCritical => {
+            EventError::InvalidExtension
+        }
+        ExtensionError::TooManyExtensions => EventError::TooManyExtensions,
+        ExtensionError::DuplicateExtension => EventError::DuplicateExtension,
+        ExtensionError::PayloadTooLarge => EventError::ExtensionPayloadTooLarge,
+    }
 }
 
 /// Classifies an incoming command against a previously accepted command.
@@ -197,6 +228,7 @@ mod tests {
             },
             schema_version: ProtocolVersion::new(1, 0),
             integrity_metadata: b"integrity".to_vec(),
+            extensions: Vec::new(),
         }
     }
 

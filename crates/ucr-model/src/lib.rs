@@ -509,6 +509,25 @@ pub struct CommandEnvelope {
     pub correlation: CorrelationContext,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProtocolExtension {
+    pub name: String,
+    pub critical: bool,
+    pub payload: Vec<u8>,
+}
+
+impl fmt::Debug for ProtocolExtension {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProtocolExtension")
+            .field("name", &self.name)
+            .field("critical", &self.critical)
+            .field("payload", &"<redacted>")
+            .field("payload_len", &self.payload.len())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventEnvelope {
     pub event_id: EventId,
@@ -522,6 +541,61 @@ pub struct EventEnvelope {
     pub correlation: CorrelationContext,
     pub schema_version: ProtocolVersion,
     pub integrity_metadata: Vec<u8>,
+    pub extensions: Vec<ProtocolExtension>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum EventFingerprintAlgorithm {
+    Sha256V1 = 1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventFingerprint {
+    pub algorithm: EventFingerprintAlgorithm,
+    pub digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventSummary {
+    pub event_id: EventId,
+    pub fingerprint: EventFingerprint,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct AntiEntropyCursor {
+    pub token: Vec<u8>,
+}
+
+impl fmt::Debug for AntiEntropyCursor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AntiEntropyCursor")
+            .field("token", &"<opaque>")
+            .field("token_len", &self.token.len())
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AntiEntropyPage {
+    pub session_id: SessionId,
+    pub scope: TenantScope,
+    pub summaries: Vec<EventSummary>,
+    pub next_cursor: Option<AntiEntropyCursor>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventReplicaState {
+    Missing,
+    Matching,
+    Damaged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventReconciliation {
+    pub event_id: EventId,
+    pub state: EventReplicaState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -650,6 +724,24 @@ mod tests {
         let id = OpaqueId::new("provider-or-secret-looking-value").expect("valid id");
         let debug = format!("{id:?}");
         assert!(!debug.contains(id.as_str()));
+    }
+
+    #[test]
+    fn protocol_extension_and_anti_entropy_cursor_debug_redact_payloads() {
+        let extension = super::ProtocolExtension {
+            name: "ucr.test.secret".to_owned(),
+            critical: false,
+            payload: b"extension-secret".to_vec(),
+        };
+        let cursor = super::AntiEntropyCursor {
+            token: b"cursor-secret".to_vec(),
+        };
+        let extension_debug = format!("{extension:?}");
+        let cursor_debug = format!("{cursor:?}");
+        assert!(!extension_debug.contains("extension-secret"));
+        assert!(!cursor_debug.contains("cursor-secret"));
+        assert!(extension_debug.contains("<redacted>"));
+        assert!(cursor_debug.contains("<opaque>"));
     }
 }
 

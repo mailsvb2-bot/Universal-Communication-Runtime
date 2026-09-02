@@ -983,7 +983,9 @@ fn sync_contract_keeps_scope_resume_and_phase_boundaries() {
         "Bidirectional synchronization uses two independent sessions/checkpoint streams",
         "The resume token is opaque",
         "not proof that the remote peer possesses any particular Event or Message",
-        "Phase 11 does not perform Anti-Entropy",
+        "EventId is never a canonical ordering key",
+        "Conversation-selected Partial Sync fails closed for Event-level reconciliation",
+        "DAMAGED` is fail-closed",
     ] {
         assert!(
             spec.contains(invariant),
@@ -996,6 +998,13 @@ fn sync_contract_keeps_scope_resume_and_phase_boundaries() {
         "enum SyncState",
         "message SyncSession",
         "message SyncCheckpoint",
+        "enum EventFingerprintAlgorithm",
+        "message EventFingerprint",
+        "message EventSummary",
+        "message AntiEntropyCursor",
+        "message AntiEntropyPage",
+        "enum EventReplicaState",
+        "message EventReconciliation",
     ] {
         assert!(
             proto.contains(declaration),
@@ -1031,4 +1040,60 @@ fn sync_storage_keeps_restart_migration_and_conflict_evidence() {
     assert!(!sqlite.contains("telegram_sync"));
     assert!(!sqlite.contains("vk_sync"));
     assert!(!sqlite.contains("max_sync"));
+}
+
+#[test]
+fn anti_entropy_keeps_fingerprint_snapshot_damage_and_storage_boundaries() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+    let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/anti_entropy.rs"))
+        .expect("anti entropy protocol");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+    let sqlite =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/anti_entropy_store.rs"))
+            .expect("sqlite anti entropy store");
+    let sqlite_root = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let runtime_proto =
+        fs::read_to_string(workspace.join("proto/ucr/v1/runtime.proto")).expect("runtime proto");
+    let sync_proto =
+        fs::read_to_string(workspace.join("proto/ucr/v1/sync.proto")).expect("sync proto");
+
+    assert!(core.contains("pub trait AntiEntropyStore"));
+    assert!(protocol.contains("EVENT_FINGERPRINT_SHA256_V1_DOMAIN"));
+    assert!(protocol.contains("event_fingerprint_sha256_v1_matches_golden_vector"));
+    assert!(runtime_proto.contains("repeated Extension extensions = 9;"));
+    assert!(sync_proto.contains("EVENT_FINGERPRINT_ALGORITHM_SHA256_V1"));
+    assert!(!core.contains("journal_seq"));
+    assert!(!sync_proto.contains("journal_seq"));
+
+    for evidence in [
+        "snapshot_resume_does_not_lose_events_added_during_pass",
+        "cursor_is_bound_to_exact_session_and_direction",
+        "reconciliation_distinguishes_missing_matching_and_damaged_without_overwrite",
+        "partial_event_reconciliation_and_extension_order_fail_or_deduplicate_canonically",
+    ] {
+        assert!(
+            memory.contains(evidence),
+            "memory evidence missing: {evidence}"
+        );
+    }
+    for evidence in [
+        "sqlite_snapshot_resume_excludes_mid_pass_event_until_next_pass",
+        "sqlite_reconciliation_classifies_and_never_overwrites_damaged_event",
+        "sqlite_cursor_binding_partial_fail_closed_and_extensions_round_trip",
+        "v7_to_v8_migration_preserves_existing_events_as_empty_extensions",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "sqlite evidence missing: {evidence}"
+        );
+    }
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 8;"));
+    assert!(memory.contains("validate_anti_entropy_summary_count(summaries.len())"));
+    assert!(sqlite.contains("validate_anti_entropy_summary_count(summaries.len())"));
 }
