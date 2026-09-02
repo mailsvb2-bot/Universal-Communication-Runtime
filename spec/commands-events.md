@@ -28,4 +28,4 @@ Logical ordering is explicit runtime metadata; it must not be substituted with p
 
 ## Persistence boundary
 
-Durable idempotency requires persistent acceptance/deduplication state and restart-safe semantics. The current Phase-5 reference logic defines comparison/validation semantics only; it does not claim restart-safe durable command processing until the Local Storage phase implements and tests that state.
+Phase-6 local storage now provides restart-safe command acceptance/deduplication for the SQLite reference store. This proves durable acceptance state, not restart-safe handler execution or durable outcome/event recovery; those require additional storage contracts and evidence.

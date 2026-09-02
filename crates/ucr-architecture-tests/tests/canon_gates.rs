@@ -504,12 +504,85 @@ fn command_idempotency_contract_keeps_restart_nonclaim_visible() {
     for invariant in [
         "Every accepted command requires a non-empty bounded idempotency key",
         "different command type or payload is `CONFLICT`",
-        "does not claim restart-safe durable command processing",
+        "restart-safe command acceptance/deduplication",
+        "not restart-safe handler execution",
         "different tenant/namespace scope means a different command domain",
     ] {
         assert!(
             spec.contains(invariant),
             "command invariant missing: `{invariant}`"
+        );
+    }
+}
+
+#[test]
+fn local_storage_keeps_sqlite_out_of_canonical_core() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    for relative in [
+        "crates/ucr-model/src/lib.rs",
+        "crates/ucr-protocol/src/lib.rs",
+        "crates/ucr-core/src/lib.rs",
+    ] {
+        let content = fs::read_to_string(workspace.join(relative)).expect("read canonical crate");
+        assert!(
+            !content.contains("rusqlite"),
+            "SQLite leaked into {relative}"
+        );
+        assert!(
+            !content.contains("accepted_commands"),
+            "SQL schema leaked into {relative}"
+        );
+    }
+
+    let root = fs::read_to_string(workspace.join("Cargo.toml")).expect("read workspace manifest");
+    let sqlite_manifest =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/Cargo.toml"))
+            .expect("read sqlite manifest");
+    assert!(root.contains("crates/ucr-storage-memory"));
+    assert!(root.contains("crates/ucr-storage-sqlite"));
+    assert!(sqlite_manifest.contains("version = \"=0.40.2\""));
+    assert!(sqlite_manifest.contains("features = [\"bundled\"]"));
+}
+
+#[test]
+fn local_storage_contract_keeps_restart_and_failure_invariants() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let spec = fs::read_to_string(workspace.join("spec/local-storage.md"))
+        .expect("read local storage spec");
+    let sqlite = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("read sqlite store");
+
+    for invariant in [
+        "only then return Accepted",
+        "process restart must preserve committed deduplication state",
+        "silent downgrade is forbidden",
+        "Storage exhaustion, corruption, unavailability",
+        "preserve unsynced/durable state",
+        "External consumers never receive direct database access",
+    ] {
+        assert!(
+            spec.contains(invariant),
+            "storage invariant missing: `{invariant}`"
+        );
+    }
+    for evidence in [
+        "accepted_command_is_deduplicated_after_restart",
+        "concurrent_acceptance_has_single_winner",
+        "uncommitted_acceptance_does_not_survive_reopen",
+        "foreign_sqlite_database_is_not_adopted",
+        "newer_schema_is_rejected_without_downgrade",
+        "schema_shape_drift_is_rejected_even_at_known_version",
+        "sqlite_sidecar_files_are_owner_only",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "storage evidence test missing: `{evidence}`"
         );
     }
 }

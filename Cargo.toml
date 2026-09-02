@@ -4,6 +4,8 @@ members = [
     "crates/ucr-model",
     "crates/ucr-protocol",
     "crates/ucr-core",
+    "crates/ucr-storage-memory",
+    "crates/ucr-storage-sqlite",
     "crates/ucr-architecture-tests",
 ]
 
