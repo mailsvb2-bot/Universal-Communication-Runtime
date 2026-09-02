@@ -1,8 +1,9 @@
 use ucr_model::{CommandEnvelope, CommandId, EventEnvelope};
 
-use crate::validate_namespaced_identifier;
+use crate::{DEFAULT_MAX_PAYLOAD_LEN, validate_namespaced_identifier};
 
 pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 256;
+pub const MAX_COMMAND_PAYLOAD_LEN: usize = DEFAULT_MAX_PAYLOAD_LEN as usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandError {
@@ -10,6 +11,7 @@ pub enum CommandError {
     MissingIdempotencyKey,
     EmptyIdempotencyKey,
     IdempotencyKeyTooLong,
+    PayloadTooLarge,
     IdempotencyConflict,
 }
 
@@ -73,6 +75,9 @@ pub fn validate_command(command: &CommandEnvelope) -> Result<(), CommandError> {
     }
     if key.len() > MAX_IDEMPOTENCY_KEY_LEN {
         return Err(CommandError::IdempotencyKeyTooLong);
+    }
+    if command.payload.len() > MAX_COMMAND_PAYLOAD_LEN {
+        return Err(CommandError::PayloadTooLarge);
     }
     Ok(())
 }
@@ -266,6 +271,15 @@ mod tests {
         assert_eq!(
             validate_command_receipt(&invalid),
             Err(ReceiptError::AcceptedHasOriginal)
+        );
+    }
+
+    #[test]
+    fn command_payload_budget_fails_closed_before_storage() {
+        let oversized = vec![0_u8; super::MAX_COMMAND_PAYLOAD_LEN + 1];
+        assert_eq!(
+            validate_command(&command("command-a", Some("retry-key"), &oversized)),
+            Err(CommandError::PayloadTooLarge)
         );
     }
 }

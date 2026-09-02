@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
 use ucr_model::{
-    AuthorizationRequest, CapabilityDescriptor, CommunicationIntent, EndpointAddress, EndpointId,
-    TenantScope,
+    AuthorizationRequest, CapabilityDescriptor, CommandEnvelope, CommunicationIntent,
+    EndpointAddress, EndpointId, TenantScope,
 };
-use ucr_protocol::CanonicalError;
+use ucr_protocol::{CanonicalError, CommandReceipt};
 
 /// A route candidate is transient runtime state, never canonical identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,24 +77,57 @@ pub trait AuthorizationEvaluator: core::fmt::Debug + Send + Sync {
     fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError>;
 }
 
-/// Durable persistence boundary. The concrete local/server stores arrive in a
-/// later roadmap phase; the canonical runtime must depend on this boundary,
-/// not on direct external-consumer database access.
-pub trait DurableStore: core::fmt::Debug + Send + Sync {
-    /// Persists an opaque canonical record before a transport attempt.
-    ///
-    /// # Errors
-    /// Must return an explicit failure; silent message loss is forbidden.
-    fn persist(&self, scope: &TenantScope, record: &[u8]) -> Result<(), DurableStoreError>;
+/// Storage health is explicit and never inferred from successful construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageHealth {
+    Healthy,
+    ReadOnly,
+    Unavailable,
+    Corrupt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurableStoreError {
+    InvalidRecord,
+    Conflict,
     Full,
     Corrupt,
     Unavailable,
     PermissionDenied,
+    UnsupportedSchemaVersion,
+    ForeignStore,
     Internal,
+}
+
+/// Base boundary shared by local, memory-test, server, and future embedded stores.
+pub trait StorageProvider: core::fmt::Debug + Send + Sync {
+    /// Returns the schema generation understood by this store.
+    ///
+    /// # Errors
+    /// Returns an explicit storage failure when metadata cannot be read safely.
+    fn schema_version(&self) -> Result<u32, DurableStoreError>;
+
+    /// Performs a non-mutating health check.
+    ///
+    /// # Errors
+    /// Returns an explicit storage failure if health cannot be established.
+    fn health(&self) -> Result<StorageHealth, DurableStoreError>;
+}
+
+/// Durable command-acceptance capability.
+///
+/// The implementation must atomically persist acceptance before returning an
+/// Accepted receipt and must preserve deduplication across restart.
+pub trait CommandAcceptanceStore: StorageProvider {
+    /// Atomically accepts or deduplicates one command.
+    ///
+    /// # Errors
+    /// Returns explicit invalid/conflict/storage failures; failures never mean
+    /// that a new command was accepted.
+    fn accept_command(
+        &self,
+        command: &CommandEnvelope,
+    ) -> Result<CommandReceipt, DurableStoreError>;
 }
 
 #[cfg(test)]

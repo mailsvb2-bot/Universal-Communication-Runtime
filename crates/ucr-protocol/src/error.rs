@@ -133,6 +133,7 @@ impl From<CommandError> for CanonicalError {
             | CommandError::MissingIdempotencyKey
             | CommandError::EmptyIdempotencyKey
             | CommandError::IdempotencyKeyTooLong => CanonicalErrorCode::InvalidArgument,
+            CommandError::PayloadTooLarge => CanonicalErrorCode::ResourceExhausted,
         };
         Self::new(code)
     }

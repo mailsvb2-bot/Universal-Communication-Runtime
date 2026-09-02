@@ -37,7 +37,9 @@ Optional Infrastructure
 
 ## Current architectural layer
 
-**Phase 0 — Canonical Architecture and Protocol Specification.**
+**Phase 6 — Local Storage (active implementation layer).**
+
+Phases 0–5 now have canonical contracts and reference invariants in `main`; Phase 6 is adding restart-safe local persistence without treating the database as a second protocol.
 
 This repository intentionally does not begin with chat UI, messenger adapters, WebRTC, mesh, or a cloud service. Those are consumers/providers of the canonical model and must not become alternative sources of truth.
 
@@ -52,15 +54,19 @@ This repository intentionally does not begin with chat UI, messenger adapters, W
 - `crates/ucr-model/` — canonical Rust model vocabulary.
 - `crates/ucr-protocol/` — protocol/version negotiation reference logic.
 - `crates/ucr-core/` — runtime boundary contracts; no product-specific logic.
+- `crates/ucr-storage-memory/` — storage contract test implementation.
+- `crates/ucr-storage-sqlite/` — local SQLite reference implementation.
 - `crates/ucr-architecture-tests/` — architectural regression gates.
 
 ## Quality gate
 
 ```bash
 cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo test --workspace --all-targets --locked
+cargo test --workspace --all-targets --release --locked
 ```
 
 ## Non-goals

@@ -2,7 +2,7 @@
 
 Status: **Experimental / Phase 0**
 
-Normative detail documents include `framing.md`, `negotiation.md`, `errors.md`, `identity-addressing.md`, `principal-actor-device.md`, `tenant-scope.md`, `permissions.md`, and `commands-events.md`.
+Normative detail documents include `framing.md`, `negotiation.md`, `errors.md`, `identity-addressing.md`, `principal-actor-device.md`, `tenant-scope.md`, `permissions.md`, `commands-events.md`, and `local-storage.md`.
 
 ## 1. Namespaces and versioning
 
@@ -41,3 +41,7 @@ Canonical machine-readable errors are specified in [errors.md](errors.md) and `p
 ## 8. Compatibility
 
 Stable public fields are not removed or repurposed without versioning. Critical unsupported extensions fail explicitly. The public contract is protobuf under versioned package `ucr.v1`; Rust structs are the reference implementation, not the source of protocol truth.
+
+## 9. Local storage
+
+Local persistence follows [local-storage.md](local-storage.md). Storage is capability-specific, local-first, explicit on failure, and not a public database API. Durable command acceptance returns Accepted only after commit.
