@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_store_migrates_to_v4_without_losing_existing_schema() {
+    fn v3_store_migrates_through_v4_to_current_without_losing_existing_schema() {
         let db = TestDb::new();
         {
             let store = SqliteLocalStore::open(db.path()).expect("initialize v4");
@@ -602,7 +602,12 @@ mod tests {
         let connection = Connection::open(db.path()).expect("open raw store");
         connection
             .execute_batch(
-                "DROP TABLE active_recovery_plans;
+                "DROP TABLE message_external_mappings;
+                 DROP TABLE message_relations;
+                 DROP TABLE message_attachments;
+                 DROP TABLE messages;
+                 DROP TABLE conversations;
+                 DROP TABLE active_recovery_plans;
                  DROP TABLE recovery_authorities;
                  DROP TABLE recovery_plans;",
             )

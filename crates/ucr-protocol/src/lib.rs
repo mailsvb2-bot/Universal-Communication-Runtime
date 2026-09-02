@@ -10,6 +10,7 @@ mod error;
 mod extension;
 mod framing;
 mod handshake;
+mod message;
 mod provenance;
 mod recovery;
 mod scope;
@@ -53,6 +54,11 @@ pub use framing::{
 };
 pub use handshake::{
     HandshakeError, NegotiatedSession, NegotiationPolicy, PeerHello, negotiate_session,
+};
+pub use message::{
+    ConversationError, EXTERNAL_MESSAGE_ID_LIMIT, EXTERNAL_MESSAGE_MAPPING_LIMIT,
+    MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_RELATION_LIMIT, MessageError,
+    canonical_message, validate_conversation, validate_conversation_parent_kind, validate_message,
 };
 pub use provenance::{ProvenanceError, validate_origin_ref};
 pub use recovery::{

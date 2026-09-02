@@ -181,6 +181,8 @@ The following are explicit blockers until implementation and evidence exist:
 - Service Principal authentication/least-privilege enforcement;
 - device revocation enforcement in credential/key delivery;
 - end-to-end recovery workflow: credential re-issuance, device revocation/key-delivery enforcement, backup restore conformance, and re-verification UX evidence;
+- cryptographic Message-signature verification over canonical signing bytes;
+- message-content encryption-at-rest policy for local durable stores where required;
 - metadata-visibility documentation for each infrastructure component;
 - required threat simulations;
 - required fuzz targets for implemented parsers/wrappers;
@@ -190,8 +192,8 @@ The following are explicit blockers until implementation and evidence exist:
 A blocker may be removed only with implementation, tests, and review evidence. Documentation alone does not close it.
 ## 16. Current verified foundation evidence
 
-Current repository evidence includes fail-closed framing, protocol/crypto downgrade policy, unsupported-critical-extension failure, capability negotiation, canonical error mapping, redaction, Identity/Endpoint/Route separation, signed transcript authentication, contributory X25519 agreement, directional HKDF keys, key confirmation, AEAD integrity, durable replay protection, typed Recovery Plans, plan-bound encrypted recovery packages, and durable CAS recovery-plan rotation/revocation.
+Current repository evidence includes fail-closed framing, protocol/crypto downgrade policy, unsupported-critical-extension failure, capability negotiation, canonical error mapping, redaction, Identity/Endpoint/Route separation, signed transcript authentication, contributory X25519 agreement, directional HKDF keys, key confirmation, AEAD integrity, durable replay protection, typed Recovery Plans, plan-bound encrypted recovery packages, durable CAS recovery-plan rotation/revocation, provider-independent Conversation/Message entities, validated Topic/Thread hierarchy, and restart-safe canonical Message persistence.
 
-These controls establish the Phase-8 recovery foundation but do not imply end-to-end trust provisioning, production keystore coverage, credential re-issuance, backup restore conformance, bridge, relay, SFU, or device-revocation/key-delivery enforcement is complete. Those absences remain visible in the blocker list above.
+These controls establish the Phase-9 Conversation/Message foundation but do not imply Message signatures are cryptographically verified, SQLite Message content is encrypted at rest, Delivery/Sync/Attachment/Group-MLS behavior is complete, or the remaining trust/recovery/infrastructure blockers are closed. Those absences remain visible in the blocker list above.
 
-Relevant normative material includes `spec/framing.md`, `spec/negotiation.md`, `spec/crypto.md`, `spec/recovery.md`, `spec/errors.md`, `spec/identity-addressing.md`, `spec/principal-actor-device.md`, ADR-0002, ADR-0003, ADR-0004, ADR-0011, and ADR-0012.
+Relevant normative material includes `spec/framing.md`, `spec/negotiation.md`, `spec/crypto.md`, `spec/recovery.md`, `spec/errors.md`, `spec/identity-addressing.md`, `spec/principal-actor-device.md`, `spec/conversation-message.md`, ADR-0002, ADR-0003, ADR-0004, ADR-0011, ADR-0012, and ADR-0013.

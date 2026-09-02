@@ -2,8 +2,8 @@
 
 use ucr_model::{
     AuthorizationRequest, CapabilityDescriptor, CommandEnvelope, CommandId, CommunicationIntent,
-    EndpointAddress, EndpointId, EventEnvelope, EventId, IdentityId, RecoveryPlan, RecoveryPlanId,
-    TenantScope,
+    ConversationId, ConversationRecord, EndpointAddress, EndpointId, EventEnvelope, EventId,
+    IdentityId, MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, TenantScope,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -169,6 +169,57 @@ pub trait CommandAcceptanceStore: StorageProvider {
         &self,
         command: &CommandEnvelope,
     ) -> Result<CommandReceipt, DurableStoreError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableRecordStatus {
+    Persisted,
+    Duplicate,
+}
+
+/// Durable provider-independent Conversation capability.
+pub trait ConversationStore: StorageProvider {
+    /// Persists or deduplicates one canonical Conversation.
+    ///
+    /// # Errors
+    /// Returns explicit validation, conflict, or storage failures.
+    fn persist_conversation(
+        &self,
+        conversation: &ConversationRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one scoped Conversation when present.
+    ///
+    /// # Errors
+    /// Returns explicit storage or corrupt-state failures.
+    fn conversation(
+        &self,
+        scope: &TenantScope,
+        conversation_id: &ConversationId,
+    ) -> Result<Option<ConversationRecord>, DurableStoreError>;
+}
+
+/// Durable canonical Message capability. Delivery transitions after Persisted
+/// belong to the Delivery Engine, not this storage boundary.
+pub trait MessageStore: ConversationStore {
+    /// Persists or deduplicates one canonical Message as local durable state.
+    ///
+    /// # Errors
+    /// Returns explicit validation, conflict, or storage failures.
+    fn persist_message(
+        &self,
+        message: &MessageEnvelope,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one scoped Message when present.
+    ///
+    /// # Errors
+    /// Returns explicit storage or corrupt-state failures.
+    fn message(
+        &self,
+        scope: &TenantScope,
+        message_id: &MessageId,
+    ) -> Result<Option<MessageEnvelope>, DurableStoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

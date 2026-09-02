@@ -452,6 +452,79 @@ pub struct OriginRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationRef {
+    pub conversation_id: ConversationId,
+    pub kind: ConversationKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationRecord {
+    pub scope: TenantScope,
+    pub conversation: ConversationRef,
+    pub parent_conversation_id: Option<ConversationId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageRelationKind {
+    Reply,
+    Quote,
+    Edit,
+    Reaction,
+    ThreadParent,
+    Forward,
+    Reference,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageRelation {
+    pub kind: MessageRelationKind,
+    pub target_message_id: MessageId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalMessageMapping {
+    pub integration_id: IntegrationId,
+    pub external_message_id: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageCryptoMetadata {
+    pub suite: CryptoSuite,
+    pub key_id: Option<KeyId>,
+    pub opaque_metadata: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageSignature {
+    pub key_id: KeyId,
+    pub algorithm_id: String,
+    pub algorithm_version: u32,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageEnvelope {
+    pub message_id: MessageId,
+    pub scope: TenantScope,
+    pub conversation: ConversationRef,
+    pub author: ActorRef,
+    pub author_device: DeviceRef,
+    pub created_at_unix_ms: i64,
+    pub logical_order: u64,
+    pub content: Vec<u8>,
+    pub attachment_ids: Vec<AttachmentId>,
+    pub reply_to: Option<MessageId>,
+    pub relations: Vec<MessageRelation>,
+    pub crypto_metadata: Option<MessageCryptoMetadata>,
+    pub delivery_policy: DeliveryPolicy,
+    pub delivery_state: DeliveryState,
+    pub origin: OriginRef,
+    pub correlation: CorrelationContext,
+    pub external_mappings: Vec<ExternalMessageMapping>,
+    pub signature: Option<MessageSignature>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntentConstraints {
     pub allowed_transport_capabilities: Vec<String>,
     pub forbidden_transport_capabilities: Vec<String>,
