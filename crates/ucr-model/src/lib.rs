@@ -240,6 +240,32 @@ pub struct AuthorizationRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrelationContext {
+    pub correlation_id: OpaqueId,
+    pub causation_id: Option<OpaqueId>,
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandEnvelope {
+    pub command_id: CommandId,
+    pub scope: TenantScope,
+    pub command_type: String,
+    pub payload: Vec<u8>,
+    pub correlation: CorrelationContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventEnvelope {
+    pub event_id: EventId,
+    pub scope: TenantScope,
+    pub event_type: String,
+    pub payload: Vec<u8>,
+    pub logical_order: u64,
+    pub correlation: CorrelationContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorRef {
     pub actor_id: ActorId,
     pub kind: ActorKind,

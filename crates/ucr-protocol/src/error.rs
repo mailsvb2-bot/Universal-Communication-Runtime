@@ -1,6 +1,6 @@
 use crate::{
-    AddressingError, AuthorizationError, CapabilityError, ExtensionError, FrameError,
-    ProvenanceError, ScopeError, VersionNegotiationError,
+    AddressingError, AuthorizationError, CapabilityError, CommandError, EventError, ExtensionError,
+    FrameError, ProvenanceError, ScopeError, VersionNegotiationError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +125,25 @@ impl From<AuthorizationError> for CanonicalError {
     }
 }
 
+impl From<CommandError> for CanonicalError {
+    fn from(error: CommandError) -> Self {
+        let code = match error {
+            CommandError::IdempotencyConflict => CanonicalErrorCode::Conflict,
+            CommandError::InvalidCommandType
+            | CommandError::MissingIdempotencyKey
+            | CommandError::EmptyIdempotencyKey
+            | CommandError::IdempotencyKeyTooLong => CanonicalErrorCode::InvalidArgument,
+        };
+        Self::new(code)
+    }
+}
+
+impl From<EventError> for CanonicalError {
+    fn from(_error: EventError) -> Self {
+        Self::new(CanonicalErrorCode::InvalidArgument)
+    }
+}
+
 impl From<CapabilityError> for CanonicalError {
     fn from(error: CapabilityError) -> Self {
         let code = match error {
@@ -164,7 +183,7 @@ impl From<AddressingError> for CanonicalError {
 #[cfg(test)]
 mod tests {
     use super::{CanonicalError, CanonicalErrorCode};
-    use crate::{AddressingError, AuthorizationError, ProvenanceError, ScopeError};
+    use crate::{AddressingError, AuthorizationError, CommandError, ProvenanceError, ScopeError};
 
     #[test]
     fn retryability_is_explicit_and_conservative() {
@@ -215,6 +234,14 @@ mod tests {
         assert_eq!(
             CanonicalError::from(AuthorizationError::InvalidGrant).code,
             CanonicalErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn idempotency_conflict_maps_to_canonical_conflict() {
+        assert_eq!(
+            CanonicalError::from(CommandError::IdempotencyConflict).code,
+            CanonicalErrorCode::Conflict
         );
     }
 }
