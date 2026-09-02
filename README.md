@@ -37,9 +37,9 @@ Optional Infrastructure
 
 ## Current architectural layer
 
-**Phase 9 — Conversation / Message (active implementation layer).**
+**Phase 10 — Delivery State / Evidence (active implementation layer).**
 
-Phases 0–8 now have canonical contracts and reference invariants. Phase 9 adds provider-independent Conversation/Message entities, canonical relationship/provenance metadata, restart-safe local Message persistence, Conversation hierarchy enforcement, and SQLite schema v5 while keeping Delivery, Group/MLS, Attachment transfer, Sync, and signature verification as separate layers.
+Phases 0–9 now have canonical contracts and reference invariants. Phase 10 adds provider-independent DeliveryAttempt/DeliveryEvidence semantics, monotonic evidence-gated transitions, restart-safe delivery persistence, and SQLite schema v6 while keeping routing, real transports, retry scheduling, receive-side deduplication, Sync, and remote receipt authentication as separate layers.
 
 This repository intentionally does not begin with chat UI, messenger adapters, WebRTC, mesh, or a cloud service. Those are consumers/providers of the canonical model and must not become alternative sources of truth.
 

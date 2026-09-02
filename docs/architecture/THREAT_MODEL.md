@@ -183,6 +183,7 @@ The following are explicit blockers until implementation and evidence exist:
 - end-to-end recovery workflow: credential re-issuance, device revocation/key-delivery enforcement, backup restore conformance, and re-verification UX evidence;
 - cryptographic Message-signature verification over canonical signing bytes;
 - message-content encryption-at-rest policy for local durable stores where required;
+- cryptographic authentication and anti-replay for remote delivery receipts;
 - metadata-visibility documentation for each infrastructure component;
 - required threat simulations;
 - required fuzz targets for implemented parsers/wrappers;
@@ -192,8 +193,8 @@ The following are explicit blockers until implementation and evidence exist:
 A blocker may be removed only with implementation, tests, and review evidence. Documentation alone does not close it.
 ## 16. Current verified foundation evidence
 
-Current repository evidence includes fail-closed framing, protocol/crypto downgrade policy, unsupported-critical-extension failure, capability negotiation, canonical error mapping, redaction, Identity/Endpoint/Route separation, signed transcript authentication, contributory X25519 agreement, directional HKDF keys, key confirmation, AEAD integrity, durable replay protection, typed Recovery Plans, plan-bound encrypted recovery packages, durable CAS recovery-plan rotation/revocation, provider-independent Conversation/Message entities, validated Topic/Thread hierarchy, and restart-safe canonical Message persistence.
+Current repository evidence includes fail-closed framing, protocol/crypto downgrade policy, unsupported-critical-extension failure, capability negotiation, canonical error mapping, redaction, Identity/Endpoint/Route separation, signed transcript authentication, contributory X25519 agreement, directional HKDF keys, key confirmation, AEAD integrity, durable replay protection, typed Recovery Plans, plan-bound encrypted recovery packages, durable CAS recovery-plan rotation/revocation, provider-independent Conversation/Message entities, validated Topic/Thread hierarchy, restart-safe canonical Message persistence, and evidence-gated restart-safe DeliveryAttempt state with relay/transport/user evidence separation.
 
-These controls establish the Phase-9 Conversation/Message foundation but do not imply Message signatures are cryptographically verified, SQLite Message content is encrypted at rest, Delivery/Sync/Attachment/Group-MLS behavior is complete, or the remaining trust/recovery/infrastructure blockers are closed. Those absences remain visible in the blocker list above.
+These controls establish the Phase-10 Delivery state/evidence foundation but do not imply Message signatures are cryptographically verified, SQLite Message content is encrypted at rest, real routing/transports/retry/receive-side deduplication/Sync/Attachment/Group-MLS behavior is complete, or remote delivery receipts are cryptographically authenticated. Those absences remain visible in the blocker list above.
 
-Relevant normative material includes `spec/framing.md`, `spec/negotiation.md`, `spec/crypto.md`, `spec/recovery.md`, `spec/errors.md`, `spec/identity-addressing.md`, `spec/principal-actor-device.md`, `spec/conversation-message.md`, ADR-0002, ADR-0003, ADR-0004, ADR-0011, ADR-0012, and ADR-0013.
+Relevant normative material includes `spec/framing.md`, `spec/negotiation.md`, `spec/crypto.md`, `spec/recovery.md`, `spec/errors.md`, `spec/identity-addressing.md`, `spec/principal-actor-device.md`, `spec/conversation-message.md`, `spec/delivery.md`, ADR-0002, ADR-0003, ADR-0004, ADR-0011, ADR-0012, ADR-0013, and ADR-0014.

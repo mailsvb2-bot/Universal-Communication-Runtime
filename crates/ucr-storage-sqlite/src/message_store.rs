@@ -1053,7 +1053,7 @@ fn load_external_mappings(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         fs,
         path::PathBuf,
@@ -1076,10 +1076,10 @@ mod tests {
     use crate::{SQLITE_SCHEMA_VERSION, UCR_SQLITE_APPLICATION_ID};
 
     static DB_SEQUENCE: AtomicU64 = AtomicU64::new(40_000);
-    struct TestDb(PathBuf);
+    pub(crate) struct TestDb(PathBuf);
 
     impl TestDb {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let sequence = DB_SEQUENCE.fetch_add(1, Ordering::Relaxed);
             Self(std::env::temp_dir().join(format!(
                 "ucr-message-{}-{sequence}.sqlite3",
@@ -1087,7 +1087,7 @@ mod tests {
             )))
         }
 
-        fn path(&self) -> &std::path::Path {
+        pub(crate) fn path(&self) -> &std::path::Path {
             &self.0
         }
     }
@@ -1103,14 +1103,14 @@ mod tests {
     fn oid(value: &str) -> OpaqueId {
         OpaqueId::new(value).expect("test id")
     }
-    fn scope() -> TenantScope {
+    pub(crate) fn scope() -> TenantScope {
         TenantScope {
             tenant_id: TenantId::from_opaque(oid("tenant-a")),
             namespace_id: Some(NamespaceId::from_opaque(oid("namespace-a"))),
         }
     }
 
-    fn conversation() -> ConversationRecord {
+    pub(crate) fn conversation() -> ConversationRecord {
         ConversationRecord {
             scope: scope(),
             conversation: ConversationRef {
@@ -1121,7 +1121,7 @@ mod tests {
         }
     }
 
-    fn message(content: &[u8]) -> MessageEnvelope {
+    pub(crate) fn message(content: &[u8]) -> MessageEnvelope {
         let reply = MessageId::from_opaque(oid("message-parent"));
         MessageEnvelope {
             message_id: MessageId::from_opaque(oid("message-a")),
@@ -1375,7 +1375,9 @@ mod tests {
         let connection = Connection::open(db.path()).expect("open raw store");
         connection
             .execute_batch(
-                "DROP TABLE message_external_mappings;
+                "DROP TABLE delivery_evidence;
+                 DROP TABLE delivery_attempts;
+                 DROP TABLE message_external_mappings;
                  DROP TABLE message_relations;
                  DROP TABLE message_attachments;
                  DROP TABLE messages;

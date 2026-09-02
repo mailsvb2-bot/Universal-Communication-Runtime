@@ -6,6 +6,7 @@ mod capability;
 mod commands;
 mod crypto_contract;
 mod crypto_negotiation;
+mod delivery;
 mod error;
 mod extension;
 mod framing;
@@ -42,6 +43,11 @@ pub use crypto_contract::{
 };
 pub use crypto_negotiation::{
     CryptoNegotiationError, CryptoPolicy, CryptoSuite, negotiate_crypto_suite,
+};
+pub use delivery::{
+    DeliveryError, can_transition_delivery, evidence_supports_state, is_terminal_delivery_state,
+    validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
+    validate_delivery_evidence_order, validate_delivery_transition,
 };
 pub use error::{CanonicalError, CanonicalErrorCode};
 pub use extension::{

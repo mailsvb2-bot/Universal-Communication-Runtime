@@ -2,8 +2,9 @@
 
 use ucr_model::{
     AuthorizationRequest, CapabilityDescriptor, CommandEnvelope, CommandId, CommunicationIntent,
-    ConversationId, ConversationRecord, EndpointAddress, EndpointId, EventEnvelope, EventId,
-    IdentityId, MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, TenantScope,
+    ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
+    DeliveryState, EndpointAddress, EndpointId, EventEnvelope, EventId, IdentityId,
+    MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, TenantScope,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -220,6 +221,51 @@ pub trait MessageStore: ConversationStore {
         scope: &TenantScope,
         message_id: &MessageId,
     ) -> Result<Option<MessageEnvelope>, DurableStoreError>;
+}
+
+/// Durable Delivery Engine state/evidence capability.
+pub trait DeliveryStore: MessageStore {
+    /// Creates one `DeliveryAttempt` from already-persisted Message state.
+    ///
+    /// # Errors
+    /// Returns validation, conflict, or storage failures.
+    fn create_delivery_attempt(
+        &self,
+        attempt: &DeliveryAttempt,
+        persisted_evidence: &DeliveryEvidence,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Atomically validates and advances one attempt.
+    ///
+    /// # Errors
+    /// Returns conflict for stale expected state and explicit validation/storage failures otherwise.
+    fn transition_delivery(
+        &self,
+        scope: &TenantScope,
+        delivery_id: &DeliveryId,
+        expected_state: DeliveryState,
+        next_state: DeliveryState,
+        evidence: Option<&DeliveryEvidence>,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Appends delivery evidence without changing state.
+    ///
+    /// # Errors
+    /// Returns conflict for reused logical order with different evidence and explicit storage failures.
+    fn record_delivery_evidence(
+        &self,
+        evidence: &DeliveryEvidence,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one scoped `DeliveryAttempt` when present.
+    ///
+    /// # Errors
+    /// Returns explicit storage or corrupt-state failures.
+    fn delivery_attempt(
+        &self,
+        scope: &TenantScope,
+        delivery_id: &DeliveryId,
+    ) -> Result<Option<DeliveryAttempt>, DurableStoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
