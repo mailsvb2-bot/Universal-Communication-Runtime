@@ -800,7 +800,7 @@ fn recovery_storage_keeps_restart_rotation_and_migration_evidence() {
         "recovery_plan_survives_restart_and_is_canonicalized",
         "recovery_revoke_survives_restart",
         "concurrent_recovery_rotation_has_single_winner",
-        "v3_store_migrates_to_v4_without_losing_existing_schema",
+        "v3_store_migrates_through_v4_to_current_without_losing_existing_schema",
     ] {
         assert!(
             sqlite.contains(evidence),
@@ -809,4 +809,92 @@ fn recovery_storage_keeps_restart_rotation_and_migration_evidence() {
     }
     assert!(core.contains("pub trait RecoveryPlanStore"));
     assert!(!sqlite.contains("recovery_secret"));
+}
+
+#[test]
+fn conversation_message_contract_keeps_canon_and_wire_compatibility() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let spec = fs::read_to_string(workspace.join("spec/conversation-message.md"))
+        .expect("conversation message spec");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/communication.proto"))
+        .expect("communication proto");
+
+    for invariant in [
+        "A Conversation is a canonical UCR entity and outlives any provider",
+        "A `TOPIC` requires one existing parent root Conversation",
+        "A `THREAD` requires one existing `TOPIC` parent",
+        "Relation order and external-mapping order are not semantic",
+        "reuse of one scoped Message ID with different semantics is a conflict",
+    ] {
+        assert!(
+            spec.contains(invariant),
+            "message invariant missing: {invariant}"
+        );
+    }
+    for field in [
+        "OpaqueId message_id = 1;",
+        "TenantScope scope = 2;",
+        "ConversationRef conversation = 3;",
+        "ActorRef author = 4;",
+        "optional DeviceRef author_device = 5;",
+        "uint64 logical_order = 6;",
+        "bytes content = 7;",
+        "DeliveryPolicy delivery_policy = 8;",
+        "Correlation correlation = 9;",
+        "repeated Extension extensions = 10;",
+        "OriginRef origin = 11;",
+        "int64 created_at_unix_ms = 12;",
+        "optional OpaqueId reply_to = 19;",
+    ] {
+        assert!(
+            proto.contains(field),
+            "wire field changed or missing: {field}"
+        );
+    }
+    assert!(proto.contains("message ConversationRecord"));
+    assert!(proto.contains("message MessageRelation"));
+}
+
+#[test]
+fn message_storage_keeps_restart_migration_and_security_nonclaims() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let sqlite =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/message_store.rs"))
+            .expect("message sqlite store");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+    let spec = fs::read_to_string(workspace.join("spec/conversation-message.md"))
+        .expect("conversation message spec");
+
+    for evidence in [
+        "message_round_trip_survives_restart_with_all_canonical_fields",
+        "concurrent_conflicting_messages_have_single_winner",
+        "v4_store_migrates_to_v5_without_losing_existing_durable_state",
+        "conversation_hierarchy_requires_existing_parent_with_valid_kind",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "message evidence missing: {evidence}"
+        );
+    }
+    assert!(core.contains("pub trait ConversationStore"));
+    assert!(core.contains("pub trait MessageStore"));
+    for nonclaim in [
+        "The Phase-9 boundary intentionally stops at `PERSISTED`",
+        "does **not** claim that merely storing a signature proves Message authenticity",
+        "does not claim message-content encryption at rest",
+    ] {
+        assert!(
+            spec.contains(nonclaim),
+            "message nonclaim missing: {nonclaim}"
+        );
+    }
+    assert!(!sqlite.contains("telegram_message"));
+    assert!(!sqlite.contains("vk_message"));
+    assert!(!sqlite.contains("max_message"));
 }

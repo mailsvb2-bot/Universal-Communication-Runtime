@@ -7,26 +7,30 @@ use std::{
 };
 
 use ucr_core::{
-    CommandAcceptanceStore, CommandOutcomeStore, DurableStoreError, EventAppendStatus,
-    EventJournalStore, RecoveryPlanStore, StorageHealth, StorageProvider,
+    CommandAcceptanceStore, CommandOutcomeStore, ConversationStore, DurableRecordStatus,
+    DurableStoreError, EventAppendStatus, EventJournalStore, MessageStore, RecoveryPlanStore,
+    StorageHealth, StorageProvider,
 };
 use ucr_crypto::{ReplayError, ReplayProtector, TranscriptBinding, VerifyingKeyBytes};
 use ucr_model::{
-    CommandEnvelope, CommandId, EventEnvelope, EventId, IdentityId, RecoveryPlan, RecoveryPlanId,
-    TenantScope,
+    CommandEnvelope, CommandId, ConversationId, ConversationRecord, DeliveryState, EventEnvelope,
+    EventId, IdentityId, MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, TenantScope,
 };
 use ucr_protocol::{
     CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
-    canonical_recovery_plan, compare_command_idempotency, validate_command, validate_event,
+    canonical_message, canonical_recovery_plan, compare_command_idempotency, validate_command,
+    validate_conversation, validate_conversation_parent_kind, validate_event,
 };
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 type ScopeKey = (String, Option<String>);
 type CommandKey = (ScopeKey, String);
 type CommandRefKey = (ScopeKey, String);
 type EventKey = (ScopeKey, String);
 type ReplayKey = ([u8; 32], [u8; 32]);
 type RecoveryIdentityKey = (ScopeKey, String);
+type ConversationKey = (ScopeKey, String);
+type MessageKey = (ScopeKey, String);
 
 #[derive(Default)]
 struct MemoryState {
@@ -37,6 +41,8 @@ struct MemoryState {
     seen_handshakes: HashSet<ReplayKey>,
     recovery_plans: HashMap<String, RecoveryPlan>,
     active_recovery_plans: HashMap<RecoveryIdentityKey, String>,
+    conversations: HashMap<ConversationKey, ConversationRecord>,
+    messages: HashMap<MessageKey, MessageEnvelope>,
 }
 
 #[derive(Default)]
@@ -199,6 +205,109 @@ fn recovery_identity_key(scope: &TenantScope, identity_id: &IdentityId) -> Recov
         scope_key(scope),
         identity_id.as_opaque().as_str().to_owned(),
     )
+}
+
+fn conversation_key(scope: &TenantScope, conversation_id: &ConversationId) -> ConversationKey {
+    (
+        scope_key(scope),
+        conversation_id.as_opaque().as_str().to_owned(),
+    )
+}
+
+fn message_key(scope: &TenantScope, message_id: &MessageId) -> MessageKey {
+    (scope_key(scope), message_id.as_opaque().as_str().to_owned())
+}
+
+impl ConversationStore for MemoryLocalStore {
+    fn persist_conversation(
+        &self,
+        conversation: &ConversationRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_conversation(conversation).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = conversation_key(
+            &conversation.scope,
+            &conversation.conversation.conversation_id,
+        );
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(parent_id) = &conversation.parent_conversation_id {
+            let parent = state
+                .conversations
+                .get(&conversation_key(&conversation.scope, parent_id))
+                .ok_or(DurableStoreError::InvalidRecord)?;
+            validate_conversation_parent_kind(
+                conversation.conversation.kind,
+                parent.conversation.kind,
+            )
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        }
+        if let Some(existing) = state.conversations.get(&key) {
+            return if existing == conversation {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.conversations.insert(key, conversation.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn conversation(
+        &self,
+        scope: &TenantScope,
+        conversation_id: &ConversationId,
+    ) -> Result<Option<ConversationRecord>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .conversations
+            .get(&conversation_key(scope, conversation_id))
+            .cloned())
+    }
+}
+
+impl MessageStore for MemoryLocalStore {
+    fn persist_message(
+        &self,
+        message: &MessageEnvelope,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let mut persisted =
+            canonical_message(message).map_err(|_| DurableStoreError::InvalidRecord)?;
+        if !matches!(
+            message.delivery_state,
+            DeliveryState::Created | DeliveryState::Persisted
+        ) {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let conversation_key =
+            conversation_key(&message.scope, &message.conversation.conversation_id);
+        let conversation = state
+            .conversations
+            .get(&conversation_key)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if conversation.conversation != message.conversation {
+            return Err(DurableStoreError::Conflict);
+        }
+        let key = message_key(&message.scope, &message.message_id);
+        persisted.delivery_state = DeliveryState::Persisted;
+        if let Some(existing) = state.messages.get(&key) {
+            return if existing == &persisted {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.messages.insert(key, persisted);
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn message(
+        &self,
+        scope: &TenantScope,
+        message_id: &MessageId,
+    ) -> Result<Option<MessageEnvelope>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state.messages.get(&message_key(scope, message_id)).cloned())
+    }
 }
 
 impl CommandAcceptanceStore for MemoryLocalStore {
@@ -424,7 +533,7 @@ mod tests {
     #[test]
     fn memory_store_is_healthy_and_versioned() {
         let store = MemoryLocalStore::default();
-        assert_eq!(store.schema_version(), Ok(4));
+        assert_eq!(store.schema_version(), Ok(5));
         assert_eq!(store.health(), Ok(ucr_core::StorageHealth::Healthy));
     }
 
@@ -637,6 +746,169 @@ mod recovery_tests {
         let unknown = RecoveryPlanId::from_opaque(id("unknown-plan"));
         assert_eq!(
             store.rotate_recovery_plan(&unknown, &plan("plan-c", "identity-a")),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+}
+
+#[cfg(test)]
+mod message_tests {
+    use ucr_core::{ConversationStore, DurableRecordStatus, DurableStoreError, MessageStore};
+    use ucr_model::{
+        ActorId, ActorKind, ActorRef, ConversationId, ConversationKind, ConversationRecord,
+        ConversationRef, CorrelationContext, DeliveryPolicy, DeliveryState, DeviceId, DeviceRef,
+        IdentityId, MessageEnvelope, MessageId, OpaqueId, OriginRef, PrincipalId, TenantId,
+        TenantScope,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn id(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(id("tenant-message")),
+            namespace_id: None,
+        }
+    }
+    fn conversation() -> ConversationRecord {
+        ConversationRecord {
+            scope: scope(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(id("conversation-message")),
+                kind: ConversationKind::Direct,
+            },
+            parent_conversation_id: None,
+        }
+    }
+
+    fn message() -> MessageEnvelope {
+        MessageEnvelope {
+            message_id: MessageId::from_opaque(id("message-memory")),
+            scope: scope(),
+            conversation: conversation().conversation,
+            author: ActorRef {
+                actor_id: ActorId::from_opaque(id("actor-message")),
+                kind: ActorKind::Person,
+                on_behalf_of: None,
+            },
+            author_device: DeviceRef {
+                device_id: DeviceId::from_opaque(id("device-message")),
+                identity_id: IdentityId::from_opaque(id("identity-message")),
+            },
+            created_at_unix_ms: 1,
+            logical_order: 1,
+            content: b"hello".to_vec(),
+            attachment_ids: Vec::new(),
+            reply_to: None,
+            relations: Vec::new(),
+            crypto_metadata: None,
+            delivery_policy: DeliveryPolicy::Durable,
+            delivery_state: DeliveryState::Created,
+            origin: OriginRef {
+                principal_id: Some(PrincipalId::from_opaque(id("principal-message"))),
+                endpoint_id: None,
+                integration_id: None,
+            },
+            correlation: CorrelationContext {
+                correlation_id: id("correlation-message"),
+                causation_id: None,
+                idempotency_key: Some("message-memory-key".into()),
+            },
+            external_mappings: Vec::new(),
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn conversation_and_message_persist_and_deduplicate() {
+        let store = MemoryLocalStore::default();
+        assert_eq!(
+            store.persist_conversation(&conversation()),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.persist_conversation(&conversation()),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        assert_eq!(
+            store.persist_message(&message()),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.persist_message(&message()),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        let loaded = store
+            .message(&scope(), &message().message_id)
+            .expect("load message")
+            .expect("message exists");
+        assert_eq!(loaded.delivery_state, DeliveryState::Persisted);
+    }
+
+    #[test]
+    fn conversation_hierarchy_requires_existing_parent_with_valid_kind() {
+        let store = MemoryLocalStore::default();
+        let root = conversation();
+        store.persist_conversation(&root).expect("persist root");
+
+        let topic = ConversationRecord {
+            scope: scope(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(id("topic-memory")),
+                kind: ConversationKind::Topic,
+            },
+            parent_conversation_id: Some(root.conversation.conversation_id.clone()),
+        };
+        assert_eq!(
+            store.persist_conversation(&topic),
+            Ok(DurableRecordStatus::Persisted)
+        );
+
+        let thread = ConversationRecord {
+            scope: scope(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(id("thread-memory")),
+                kind: ConversationKind::Thread,
+            },
+            parent_conversation_id: Some(topic.conversation.conversation_id.clone()),
+        };
+        assert_eq!(
+            store.persist_conversation(&thread),
+            Ok(DurableRecordStatus::Persisted)
+        );
+
+        let invalid_thread = ConversationRecord {
+            scope: scope(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(id("thread-invalid")),
+                kind: ConversationKind::Thread,
+            },
+            parent_conversation_id: Some(root.conversation.conversation_id.clone()),
+        };
+        assert_eq!(
+            store.persist_conversation(&invalid_thread),
+            Err(DurableStoreError::InvalidRecord)
+        );
+    }
+
+    #[test]
+    fn message_requires_matching_persisted_conversation() {
+        let store = MemoryLocalStore::default();
+        assert_eq!(
+            store.persist_message(&message()),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        store
+            .persist_conversation(&conversation())
+            .expect("persist conversation");
+        let mut conflicting = message();
+        conflicting.content = b"changed".to_vec();
+        store.persist_message(&message()).expect("persist message");
+        assert_eq!(
+            store.persist_message(&conflicting),
             Err(DurableStoreError::Conflict)
         );
     }

@@ -37,9 +37,9 @@ Optional Infrastructure
 
 ## Current architectural layer
 
-**Phase 8 — Recovery Model (active implementation layer).**
+**Phase 9 — Conversation / Message (active implementation layer).**
 
-Phases 0–7 now have canonical contracts and reference invariants. Phase 8 adds typed recovery authorities, explicit trust transitions, encrypted plan-bound recovery packages, durable compare-and-swap plan rotation/revocation, and SQLite schema v4 without treating recovery as a password reset or silently weakening E2EE.
+Phases 0–8 now have canonical contracts and reference invariants. Phase 9 adds provider-independent Conversation/Message entities, canonical relationship/provenance metadata, restart-safe local Message persistence, Conversation hierarchy enforcement, and SQLite schema v5 while keeping Delivery, Group/MLS, Attachment transfer, Sync, and signature verification as separate layers.
 
 This repository intentionally does not begin with chat UI, messenger adapters, WebRTC, mesh, or a cloud service. Those are consumers/providers of the canonical model and must not become alternative sources of truth.
 

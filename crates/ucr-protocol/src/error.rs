@@ -1,7 +1,8 @@
 use crate::{
-    AddressingError, AuthorizationError, CapabilityError, CommandError, CryptoContractError,
-    CryptoNegotiationError, EventError, ExtensionError, FrameError, HandshakeError,
-    ProvenanceError, RecoveryError, ScopeError, VersionNegotiationError,
+    AddressingError, AuthorizationError, CapabilityError, CommandError, ConversationError,
+    CryptoContractError, CryptoNegotiationError, EventError, ExtensionError, FrameError,
+    HandshakeError, MessageError, ProvenanceError, RecoveryError, ScopeError,
+    VersionNegotiationError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +136,27 @@ impl From<ExtensionError> for CanonicalError {
     }
 }
 
+impl From<ConversationError> for CanonicalError {
+    fn from(_error: ConversationError) -> Self {
+        Self::new(CanonicalErrorCode::InvalidArgument)
+    }
+}
+
+impl From<MessageError> for CanonicalError {
+    fn from(error: MessageError) -> Self {
+        let code = match error {
+            MessageError::ContentTooLarge
+            | MessageError::TooManyAttachments
+            | MessageError::TooManyRelations
+            | MessageError::CryptoMetadataTooLarge
+            | MessageError::TooManyExternalMappings
+            | MessageError::ExternalMessageIdTooLarge => CanonicalErrorCode::ResourceExhausted,
+            _ => CanonicalErrorCode::InvalidArgument,
+        };
+        Self::new(code)
+    }
+}
+
 impl From<ProvenanceError> for CanonicalError {
     fn from(_error: ProvenanceError) -> Self {
         Self::new(CanonicalErrorCode::InvalidArgument)
@@ -248,8 +270,8 @@ impl From<AddressingError> for CanonicalError {
 mod tests {
     use super::{CanonicalError, CanonicalErrorCode};
     use crate::{
-        AddressingError, AuthorizationError, CommandError, CryptoContractError, ProvenanceError,
-        RecoveryError, ScopeError,
+        AddressingError, AuthorizationError, CommandError, ConversationError, CryptoContractError,
+        MessageError, ProvenanceError, RecoveryError, ScopeError,
     };
 
     #[test]
@@ -331,6 +353,26 @@ mod tests {
         );
         assert_eq!(
             CanonicalError::from(RecoveryError::TooManyAuthorities).code,
+            CanonicalErrorCode::ResourceExhausted
+        );
+    }
+
+    #[test]
+    fn conversation_and_message_failures_have_stable_canonical_categories() {
+        assert_eq!(
+            CanonicalError::from(ConversationError::InvalidParentKind).code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            CanonicalError::from(MessageError::SelfRelation).code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            CanonicalError::from(MessageError::ContentTooLarge).code,
+            CanonicalErrorCode::ResourceExhausted
+        );
+        assert_eq!(
+            CanonicalError::from(MessageError::ExternalMessageIdTooLarge).code,
             CanonicalErrorCode::ResourceExhausted
         );
     }

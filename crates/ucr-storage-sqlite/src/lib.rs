@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod event_journal;
+mod message_store;
 mod recovery_plan;
 mod replay;
 
@@ -16,7 +17,8 @@ use ucr_protocol::{CommandError, CommandReceipt, CommandReceiptStatus, validate_
 const SQLITE_SCHEMA_V1: u32 = 1;
 const SQLITE_SCHEMA_V2: u32 = 2;
 const SQLITE_SCHEMA_V3: u32 = 3;
-pub const SQLITE_SCHEMA_VERSION: u32 = 4;
+const SQLITE_SCHEMA_V4: u32 = 4;
+pub const SQLITE_SCHEMA_VERSION: u32 = 5;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -324,7 +326,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         if count_user_tables(connection)? != 0 {
             return Err(DurableStoreError::ForeignStore);
         }
-        return initialize_schema_v4(connection);
+        return initialize_schema_v5(connection);
     }
     if application_id != UCR_SQLITE_APPLICATION_ID {
         return Err(DurableStoreError::ForeignStore);
@@ -333,19 +335,25 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         SQLITE_SCHEMA_V1 => {
             migrate_v1_to_v2(connection)?;
             migrate_v2_to_v3(connection)?;
-            migrate_v3_to_v4(connection)
+            migrate_v3_to_v4(connection)?;
+            migrate_v4_to_v5(connection)
         }
         SQLITE_SCHEMA_V2 => {
             migrate_v2_to_v3(connection)?;
-            migrate_v3_to_v4(connection)
+            migrate_v3_to_v4(connection)?;
+            migrate_v4_to_v5(connection)
         }
-        SQLITE_SCHEMA_V3 => migrate_v3_to_v4(connection),
-        SQLITE_SCHEMA_VERSION => verify_schema_v4(connection),
+        SQLITE_SCHEMA_V3 => {
+            migrate_v3_to_v4(connection)?;
+            migrate_v4_to_v5(connection)
+        }
+        SQLITE_SCHEMA_V4 => migrate_v4_to_v5(connection),
+        SQLITE_SCHEMA_VERSION => message_store::verify_schema_v5(connection),
         _ => Err(DurableStoreError::UnsupportedSchemaVersion),
     }
 }
 
-fn initialize_schema_v4(connection: &mut Connection) -> Result<(), DurableStoreError> {
+fn initialize_schema_v5(connection: &mut Connection) -> Result<(), DurableStoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -374,6 +382,7 @@ fn initialize_schema_v4(connection: &mut Connection) -> Result<(), DurableStoreE
     transaction
         .execute_batch(V4_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))?;
+    message_store::create_v5_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -428,12 +437,27 @@ fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), DurableStoreError
         .execute_batch(V4_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V4)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v4(connection)
+}
+
+fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v4(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    message_store::create_v5_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    message_store::verify_schema_v5(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {

@@ -3,6 +3,7 @@ syntax = "proto3";
 package ucr.v1;
 
 import "ucr/v1/common.proto";
+import "ucr/v1/crypto.proto";
 import "ucr/v1/identity.proto";
 
 enum ConversationKind {
@@ -31,9 +32,64 @@ enum DeliveryPolicy {
   DELIVERY_POLICY_PRIVATE_NETWORK_ONLY = 9;
 }
 
+enum DeliveryState {
+  DELIVERY_STATE_UNSPECIFIED = 0;
+  DELIVERY_STATE_CREATED = 1;
+  DELIVERY_STATE_PERSISTED = 2;
+  DELIVERY_STATE_ENCRYPTED = 3;
+  DELIVERY_STATE_QUEUED = 4;
+  DELIVERY_STATE_ROUTE_PLANNED = 5;
+  DELIVERY_STATE_IN_FLIGHT = 6;
+  DELIVERY_STATE_ACKNOWLEDGED = 7;
+  DELIVERY_STATE_DELIVERED = 8;
+  DELIVERY_STATE_READ = 9;
+  DELIVERY_STATE_FAILED = 10;
+  DELIVERY_STATE_EXPIRED = 11;
+}
+
+enum MessageRelationKind {
+  MESSAGE_RELATION_KIND_UNSPECIFIED = 0;
+  MESSAGE_RELATION_KIND_REPLY = 1;
+  MESSAGE_RELATION_KIND_QUOTE = 2;
+  MESSAGE_RELATION_KIND_EDIT = 3;
+  MESSAGE_RELATION_KIND_REACTION = 4;
+  MESSAGE_RELATION_KIND_THREAD_PARENT = 5;
+  MESSAGE_RELATION_KIND_FORWARD = 6;
+  MESSAGE_RELATION_KIND_REFERENCE = 7;
+}
+
 message ConversationRef {
   OpaqueId conversation_id = 1;
   ConversationKind kind = 2;
+}
+
+message ConversationRecord {
+  TenantScope scope = 1;
+  ConversationRef conversation = 2;
+  optional OpaqueId parent_conversation_id = 3;
+}
+
+message MessageRelation {
+  MessageRelationKind kind = 1;
+  OpaqueId target_message_id = 2;
+}
+
+message ExternalMessageMapping {
+  OpaqueId integration_id = 1;
+  bytes external_message_id = 2;
+}
+
+message MessageCryptoMetadata {
+  CryptoSuite suite = 1;
+  optional OpaqueId key_id = 2;
+  bytes opaque_metadata = 3;
+}
+
+message MessageSignature {
+  OpaqueId key_id = 1;
+  string algorithm_id = 2;
+  uint32 algorithm_version = 3;
+  bytes signature = 4;
 }
 
 message OriginRef {
@@ -73,4 +129,12 @@ message MessageEnvelope {
   Correlation correlation = 9;
   repeated Extension extensions = 10;
   OriginRef origin = 11;
+  int64 created_at_unix_ms = 12;
+  repeated OpaqueId attachment_ids = 13;
+  repeated MessageRelation relations = 14;
+  optional MessageCryptoMetadata crypto_metadata = 15;
+  DeliveryState delivery_state = 16;
+  repeated ExternalMessageMapping external_mappings = 17;
+  optional MessageSignature signature = 18;
+  optional OpaqueId reply_to = 19;
 }
