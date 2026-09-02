@@ -70,7 +70,8 @@ jobs:
           test -s spec/negotiation.md &&
           test -s spec/errors.md &&
           test -s spec/identity-addressing.md &&
-          test -s spec/principal-actor-device.md
+          test -s spec/principal-actor-device.md &&
+          test -s spec/tenant-scope.md
       - name: Public contract exists
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
@@ -82,4 +83,5 @@ jobs:
           test -s docs/adr/0002-phase-0-wire-framing.md &&
           test -s docs/adr/0003-identity-address-endpoint-route-separation.md &&
           test -s docs/adr/0004-actor-provenance-and-device-lifecycle.md &&
-          test -s docs/adr/0005-threat-model-as-release-gate.md
+          test -s docs/adr/0005-threat-model-as-release-gate.md &&
+          test -s docs/adr/0006-exact-tenant-namespace-scope-by-default.md

@@ -398,3 +398,22 @@ fn threat_model_keeps_minimum_disclosure_and_security_nonclaims() {
         );
     }
 }
+
+#[test]
+fn tenant_scope_remains_explicit_and_non_wildcard() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let spec =
+        fs::read_to_string(workspace.join("spec/tenant-scope.md")).expect("read tenant scope spec");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/identity.proto"))
+        .expect("read identity proto");
+
+    assert!(spec.contains("does **not** mean \"all namespaces\""));
+    assert!(spec.contains("exact scope equality"));
+    assert!(spec.contains("PERMISSION_DENIED"));
+    assert!(proto.contains("message ScopedPrincipal"));
+    assert!(proto.contains("TenantScope scope = 1;"));
+    assert!(proto.contains("PrincipalRef principal = 2;"));
+}

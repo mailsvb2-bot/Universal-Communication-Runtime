@@ -59,6 +59,11 @@ message PrincipalRef {
   PrincipalKind kind = 2;
 }
 
+message ScopedPrincipal {
+  TenantScope scope = 1;
+  PrincipalRef principal = 2;
+}
+
 message ActorRef {
   OpaqueId actor_id = 1;
   ActorKind kind = 2;

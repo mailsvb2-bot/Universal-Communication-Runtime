@@ -1,5 +1,5 @@
 use crate::{
-    AddressingError, CapabilityError, ExtensionError, FrameError, ProvenanceError,
+    AddressingError, CapabilityError, ExtensionError, FrameError, ProvenanceError, ScopeError,
     VersionNegotiationError,
 };
 
@@ -106,6 +106,14 @@ impl From<ProvenanceError> for CanonicalError {
     }
 }
 
+impl From<ScopeError> for CanonicalError {
+    fn from(_error: ScopeError) -> Self {
+        // Scope mismatches are authorization failures. Do not expose whether a
+        // cross-tenant/cross-namespace resource actually exists.
+        Self::new(CanonicalErrorCode::PermissionDenied)
+    }
+}
+
 impl From<CapabilityError> for CanonicalError {
     fn from(error: CapabilityError) -> Self {
         let code = match error {
@@ -145,7 +153,7 @@ impl From<AddressingError> for CanonicalError {
 #[cfg(test)]
 mod tests {
     use super::{CanonicalError, CanonicalErrorCode};
-    use crate::{AddressingError, ProvenanceError};
+    use crate::{AddressingError, ProvenanceError, ScopeError};
 
     #[test]
     fn retryability_is_explicit_and_conservative() {
@@ -172,6 +180,18 @@ mod tests {
         assert_eq!(
             CanonicalError::from(ProvenanceError::EmptyOrigin).code,
             CanonicalErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn scope_mismatch_is_permission_denied_without_resource_disclosure() {
+        assert_eq!(
+            CanonicalError::from(ScopeError::CrossTenant).code,
+            CanonicalErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            CanonicalError::from(ScopeError::NamespaceMismatch).code,
+            CanonicalErrorCode::PermissionDenied
         );
     }
 }
