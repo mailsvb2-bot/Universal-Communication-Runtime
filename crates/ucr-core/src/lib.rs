@@ -4,7 +4,8 @@ use ucr_model::{
     AuthorizationRequest, CapabilityDescriptor, CommandEnvelope, CommandId, CommunicationIntent,
     ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
     DeliveryState, EndpointAddress, EndpointId, EventEnvelope, EventId, IdentityId,
-    MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, TenantScope,
+    MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, SessionId, SyncCheckpoint,
+    SyncSession, SyncState, TenantScope,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -266,6 +267,59 @@ pub trait DeliveryStore: MessageStore {
         scope: &TenantScope,
         delivery_id: &DeliveryId,
     ) -> Result<Option<DeliveryAttempt>, DurableStoreError>;
+}
+
+/// Durable provider-independent Sync session/checkpoint capability.
+pub trait SyncStore: StorageProvider {
+    /// Persists or deduplicates one canonical sync session in Prepared state.
+    ///
+    /// # Errors
+    /// Returns explicit validation, conflict, or storage failures.
+    fn create_sync_session(
+        &self,
+        session: &SyncSession,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Atomically advances one sync session by expected-state compare-and-swap.
+    ///
+    /// # Errors
+    /// Returns conflict for stale expected state and explicit storage failures.
+    fn transition_sync(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+        expected_state: SyncState,
+        next_state: SyncState,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Appends one monotonic durable resume checkpoint.
+    ///
+    /// # Errors
+    /// Returns conflict for stale/reused generation or explicit storage failures.
+    fn record_sync_checkpoint(
+        &self,
+        checkpoint: &SyncCheckpoint,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one scoped sync session when present.
+    ///
+    /// # Errors
+    /// Returns explicit storage or corrupt-state failures.
+    fn sync_session(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<Option<SyncSession>, DurableStoreError>;
+
+    /// Loads the latest checkpoint for one scoped sync session.
+    ///
+    /// # Errors
+    /// Returns explicit storage or corrupt-state failures.
+    fn latest_sync_checkpoint(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<Option<SyncCheckpoint>, DurableStoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

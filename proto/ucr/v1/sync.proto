@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+
+enum SyncLinkKind {
+  SYNC_LINK_KIND_UNSPECIFIED = 0;
+  SYNC_LINK_KIND_DEVICE_DEVICE = 1;
+  SYNC_LINK_KIND_DEVICE_NODE = 2;
+  SYNC_LINK_KIND_PEER_PEER = 3;
+  SYNC_LINK_KIND_DEVICE_CLOUD = 4;
+}
+
+enum SyncMode {
+  SYNC_MODE_UNSPECIFIED = 0;
+  SYNC_MODE_FULL = 1;
+  SYNC_MODE_PARTIAL = 2;
+}
+
+enum SyncState {
+  SYNC_STATE_UNSPECIFIED = 0;
+  SYNC_STATE_PREPARED = 1;
+  SYNC_STATE_ACTIVE = 2;
+  SYNC_STATE_PAUSED = 3;
+  SYNC_STATE_COMPLETED = 4;
+  SYNC_STATE_CANCELLED = 5;
+  SYNC_STATE_FAILED = 6;
+}
+message SyncSelection {
+  SyncMode mode = 1;
+  repeated OpaqueId conversation_ids = 2;
+}
+
+message SyncSession {
+  OpaqueId session_id = 1;
+  TenantScope scope = 2;
+  OpaqueId source_endpoint_id = 3;
+  OpaqueId target_endpoint_id = 4;
+  SyncLinkKind link_kind = 5;
+  SyncSelection selection = 6;
+  SyncState state = 7;
+}
+
+// Opaque resume_token is source-issued resume state. It is not a security
+// authority, is not globally comparable, and does not perform anti-entropy.
+message SyncCheckpoint {
+  OpaqueId session_id = 1;
+  TenantScope scope = 2;
+  uint64 generation = 3;
+  bytes resume_token = 4;
+  uint64 applied_items = 5;
+}

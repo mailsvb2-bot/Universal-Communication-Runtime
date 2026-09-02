@@ -37,9 +37,9 @@ Optional Infrastructure
 
 ## Current architectural layer
 
-**Phase 10 — Delivery State / Evidence (active implementation layer).**
+**Phase 11 — Sync (active implementation layer).**
 
-Phases 0–9 now have canonical contracts and reference invariants. Phase 10 adds provider-independent DeliveryAttempt/DeliveryEvidence semantics, monotonic evidence-gated transitions, restart-safe delivery persistence, and SQLite schema v6 while keeping routing, real transports, retry scheduling, receive-side deduplication, Sync, and remote receipt authentication as separate layers.
+Phases 0–10 now have canonical contracts and reference invariants. Phase 11 adds provider-independent SyncSession/SyncCheckpoint semantics, durable pause/resume and partial selection, and SQLite schema v7 while keeping Anti-Entropy, network transports, routing, and reconciliation as separate later layers.
 
 This repository intentionally does not begin with chat UI, messenger adapters, WebRTC, mesh, or a cloud service. Those are consumers/providers of the canonical model and must not become alternative sources of truth.
 

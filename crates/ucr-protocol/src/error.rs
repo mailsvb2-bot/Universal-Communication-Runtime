@@ -2,7 +2,7 @@ use crate::{
     AddressingError, AuthorizationError, CapabilityError, CommandError, ConversationError,
     CryptoContractError, CryptoNegotiationError, DeliveryError, EventError, ExtensionError,
     FrameError, HandshakeError, MessageError, ProvenanceError, RecoveryError, ScopeError,
-    VersionNegotiationError,
+    SyncError, VersionNegotiationError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +172,28 @@ impl From<DeliveryError> for CanonicalError {
     }
 }
 
+impl From<SyncError> for CanonicalError {
+    fn from(error: SyncError) -> Self {
+        let code = match error {
+            SyncError::CheckpointBindingMismatch => CanonicalErrorCode::PermissionDenied,
+            SyncError::TooManyConversations | SyncError::ResumeTokenTooLarge => {
+                CanonicalErrorCode::ResourceExhausted
+            }
+            SyncError::IllegalTransition
+            | SyncError::InvalidCheckpointGeneration
+            | SyncError::AppliedItemsRegression => CanonicalErrorCode::Conflict,
+            SyncError::SameEndpoint
+            | SyncError::InvalidInitialState
+            | SyncError::FullSelectionHasConversations
+            | SyncError::PartialSelectionEmpty
+            | SyncError::DuplicateConversation
+            | SyncError::CheckpointRequiresActiveSession
+            | SyncError::EmptyResumeToken => CanonicalErrorCode::InvalidArgument,
+        };
+        Self::new(code)
+    }
+}
+
 impl From<ProvenanceError> for CanonicalError {
     fn from(_error: ProvenanceError) -> Self {
         Self::new(CanonicalErrorCode::InvalidArgument)
@@ -286,7 +308,7 @@ mod tests {
     use super::{CanonicalError, CanonicalErrorCode};
     use crate::{
         AddressingError, AuthorizationError, CommandError, ConversationError, CryptoContractError,
-        DeliveryError, MessageError, ProvenanceError, RecoveryError, ScopeError,
+        DeliveryError, MessageError, ProvenanceError, RecoveryError, ScopeError, SyncError,
     };
 
     #[test]
@@ -405,6 +427,22 @@ mod tests {
         assert_eq!(
             CanonicalError::from(DeliveryError::EvidenceRegression).code,
             CanonicalErrorCode::Conflict
+        );
+    }
+
+    #[test]
+    fn sync_failures_keep_conflict_scope_and_budget_categories_stable() {
+        assert_eq!(
+            CanonicalError::from(SyncError::IllegalTransition).code,
+            CanonicalErrorCode::Conflict
+        );
+        assert_eq!(
+            CanonicalError::from(SyncError::CheckpointBindingMismatch).code,
+            CanonicalErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            CanonicalError::from(SyncError::ResumeTokenTooLarge).code,
+            CanonicalErrorCode::ResourceExhausted
         );
     }
 

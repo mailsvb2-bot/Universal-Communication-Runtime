@@ -15,6 +15,7 @@ mod message;
 mod provenance;
 mod recovery;
 mod scope;
+mod sync;
 mod version;
 
 pub use addressing::{
@@ -72,6 +73,11 @@ pub use recovery::{
     validate_recovery_plan, validate_recovery_request,
 };
 pub use scope::{ScopeError, ScopeRelation, require_exact_scope, scope_relation};
+pub use sync::{
+    MAX_PARTIAL_SYNC_CONVERSATIONS, MAX_SYNC_RESUME_TOKEN_LEN, SyncError, can_transition_sync,
+    canonical_sync_session, is_terminal_sync_state, validate_sync_checkpoint,
+    validate_sync_transition,
+};
 pub use version::{
     ProtocolVersion, VersionNegotiationError, VersionPolicy, VersionRange, negotiate_version,
     negotiate_version_sets,
