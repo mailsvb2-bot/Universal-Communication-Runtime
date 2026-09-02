@@ -1,6 +1,7 @@
 use crate::{
-    AddressingError, AuthorizationError, CapabilityError, CommandError, EventError, ExtensionError,
-    FrameError, ProvenanceError, ScopeError, VersionNegotiationError,
+    AddressingError, AuthorizationError, CapabilityError, CommandError, CryptoContractError,
+    CryptoNegotiationError, EventError, ExtensionError, FrameError, HandshakeError,
+    ProvenanceError, ScopeError, VersionNegotiationError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +88,40 @@ impl From<VersionNegotiationError> for CanonicalError {
             }
         };
         Self::new(code)
+    }
+}
+
+impl From<CryptoContractError> for CanonicalError {
+    fn from(_error: CryptoContractError) -> Self {
+        Self::new(CanonicalErrorCode::InvalidArgument)
+    }
+}
+
+impl From<CryptoNegotiationError> for CanonicalError {
+    fn from(error: CryptoNegotiationError) -> Self {
+        let code = match error {
+            CryptoNegotiationError::PolicyRejectedMutualSuite => {
+                CanonicalErrorCode::DowngradeRejected
+            }
+            CryptoNegotiationError::NoMutualSuite => CanonicalErrorCode::CapabilityMismatch,
+            CryptoNegotiationError::EmptyAdvertisement
+            | CryptoNegotiationError::DuplicateAdvertisement
+            | CryptoNegotiationError::DuplicatePolicySuite => CanonicalErrorCode::InvalidArgument,
+        };
+        Self::new(code)
+    }
+}
+
+impl From<HandshakeError> for CanonicalError {
+    fn from(error: HandshakeError) -> Self {
+        match error {
+            HandshakeError::Version(inner) => Self::from(inner),
+            HandshakeError::Crypto(inner) => Self::from(inner),
+            HandshakeError::Capability(inner) => Self::from(inner),
+            HandshakeError::Extension(inner) => Self::from(inner),
+            HandshakeError::InvalidNonce => Self::new(CanonicalErrorCode::InvalidArgument),
+            HandshakeError::NonceCollision => Self::new(CanonicalErrorCode::IntegrityFailure),
+        }
     }
 }
 
@@ -192,7 +227,10 @@ impl From<AddressingError> for CanonicalError {
 #[cfg(test)]
 mod tests {
     use super::{CanonicalError, CanonicalErrorCode};
-    use crate::{AddressingError, AuthorizationError, CommandError, ProvenanceError, ScopeError};
+    use crate::{
+        AddressingError, AuthorizationError, CommandError, CryptoContractError, ProvenanceError,
+        ScopeError,
+    };
 
     #[test]
     fn retryability_is_explicit_and_conservative() {
@@ -243,6 +281,14 @@ mod tests {
         assert_eq!(
             CanonicalError::from(AuthorizationError::InvalidGrant).code,
             CanonicalErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn malformed_crypto_descriptor_maps_to_invalid_argument() {
+        assert_eq!(
+            CanonicalError::from(CryptoContractError::WrongKeyFormatVersion).code,
+            CanonicalErrorCode::InvalidArgument
         );
     }
 

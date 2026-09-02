@@ -355,9 +355,8 @@ fn threat_model_keeps_production_blockers_visible() {
         .expect("read threat model");
 
     for blocker in [
-        "authenticated handshake and key confirmation",
-        "replay protection state",
-        "cryptographic transcript/downgrade binding",
+        "trusted peer signing-key provisioning and lifecycle integration",
+        "production OS/hardware-backed key providers for supported targets",
         "tenant-scoped authorization enforcement",
         "Service Principal authentication/least-privilege enforcement",
         "device revocation enforcement",
@@ -671,4 +670,85 @@ fn event_journal_keeps_append_only_and_exactly_once_nonclaim() {
     }
     assert!(core.contains("pub trait EventJournalStore"));
     assert!(core.contains("pub trait CommandOutcomeStore"));
+}
+
+#[test]
+fn crypto_suite_has_one_protocol_owner_and_non_exporting_key_boundary() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/crypto_contract.rs"))
+        .expect("crypto contract");
+    let crypto = fs::read_to_string(workspace.join("crates/ucr-crypto/src/lib.rs"))
+        .expect("crypto implementation");
+    let provider = fs::read_to_string(workspace.join("crates/ucr-crypto/src/key_provider.rs"))
+        .expect("key provider");
+
+    for identifier in ["ed25519", "x25519", "hkdf-sha256", "xchacha20-poly1305"] {
+        assert!(protocol.contains(identifier));
+    }
+    assert!(crypto.contains("pub use ucr_protocol"));
+    assert!(!crypto.contains("pub const SIGNATURE_ALGORITHM_ID"));
+    assert!(provider.contains("pub trait SigningKeyHandle"));
+    let agreement = fs::read_to_string(workspace.join("crates/ucr-crypto/src/agreement.rs"))
+        .expect("agreement implementation");
+    assert!(agreement.contains("pub fn agree(self, peer: AgreementPublicKey)"));
+    assert!(!provider.contains("private_key"));
+
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let negotiation =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/crypto_negotiation.rs"))
+            .expect("crypto negotiation");
+    assert!(!model.contains("PartialOrd, Ord, Hash)]\n#[repr(u32)]\npub enum CryptoSuite"));
+    assert!(negotiation.contains("pub preferred_suites: Vec<CryptoSuite>"));
+    assert!(!negotiation.contains(".max()"));
+    assert!(!negotiation.contains("minimum: CryptoSuite"));
+}
+
+#[test]
+fn crypto_foundation_keeps_handshake_replay_and_nonclaims_explicit() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let spec = fs::read_to_string(workspace.join("spec/crypto.md")).expect("crypto spec");
+    let sqlite = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/replay.rs"))
+        .expect("replay store");
+    let proto =
+        fs::read_to_string(workspace.join("proto/ucr/v1/crypto.proto")).expect("crypto proto");
+
+    for invariant in [
+        "insecure fallback is forbidden",
+        "A session is `Pending`",
+        "Traffic APIs are exposed only after",
+        "Replay security does not depend on wall-clock expiry",
+        "Private key bytes are never part of the public UCR protocol",
+        "does not yet claim complete account/device recovery",
+    ] {
+        assert!(
+            spec.contains(invariant),
+            "crypto invariant missing: {invariant}"
+        );
+    }
+    for evidence in [
+        "replay_record_survives_restart",
+        "concurrent_replay_record_has_single_winner",
+        "v2_store_migrates_to_v3_without_losing_accepted_commands",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "replay evidence missing: {evidence}"
+        );
+    }
+    assert!(proto.contains("message HandshakeKeyExchange"));
+    assert!(proto.contains("bytes ephemeral_key = 1;"));
+    let runtime =
+        fs::read_to_string(workspace.join("proto/ucr/v1/runtime.proto")).expect("runtime proto");
+    assert!(runtime.contains("bytes transcript_binding = 4 [deprecated = true];"));
+    assert!(spec.contains("MUST be empty"));
+    let session = fs::read_to_string(workspace.join("crates/ucr-crypto/src/session.rs"))
+        .expect("crypto session");
+    assert!(session.contains("pub suite: CryptoSuite"));
+    assert!(session.contains("PeerAgreementKeyMismatch"));
 }

@@ -1,8 +1,8 @@
 # UCR negotiation and handshake contract
 
-Status: **Experimental / Phase 0**
+Status: **Experimental / Phase 7**
 
-A peer advertises one or more supported protocol ranges, actual capabilities, extensions, and a fresh nonce. Empty version advertisements are invalid. Each VersionRange is confined to one major protocol version; support across multiple majors is advertised as multiple ranges.
+A peer advertises one or more supported protocol ranges, supported crypto suites, actual capabilities, extensions, and a fresh 32-byte nonce. Empty version advertisements are invalid. Each VersionRange is confined to one major protocol version; support across multiple majors is advertised as multiple ranges.
 
 Version selection chooses the highest mutual version satisfying local minimum policy. A mutual version below the configured minimum is an explicit downgrade rejection, not a fallback opportunity.
 
@@ -12,6 +12,11 @@ Required capabilities may specify a minimum maturity. Missing or insufficient re
 
 Unknown optional extensions may be tolerated. Unknown critical extensions fail negotiation.
 
-The Phase-0 reference negotiation logic deliberately performs **no cryptography**. A production authenticated handshake must integrity-bind both peer hellos, both nonces, and the selected result.
+Crypto-suite negotiation is intersection-based and policy-gated. Empty or duplicate suite advertisements fail closed. All-zero or reflected/equal peer nonces fail before authentication.
 
-Until that crypto layer exists, a successful parameter negotiation is not evidence of authenticated peer identity and must not be represented as an established secure session.
+Parameter negotiation still performs no secret-key operation itself. Phase 7 cryptographically binds the exact hello/result frame bytes, both nonces through those frames, and both ephemeral agreement keys into the authenticated transcript. A successful parameter negotiation alone remains insufficient to represent an established secure session; peer signature, replay protection, contributory agreement, derivation, and key confirmation must also succeed.
+
+
+Crypto suite identifiers do not encode security strength or preference. Crypto policy supplies an explicit ordered allowlist; an empty allowlist intentionally disables all suites. Negotiation selects the first policy-preferred suite advertised by both peers. A mutually advertised suite disabled by policy is an explicit downgrade rejection, not a fallback opportunity.
+
+The legacy `NegotiationResult.transcript_binding` field is deprecated and MUST remain empty. Transcript binding cannot be embedded in the exact result bytes from which that binding is computed; the authenticated binding is carried by the subsequent handshake-authentication message.

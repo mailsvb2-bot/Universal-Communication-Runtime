@@ -4,6 +4,7 @@ package ucr.v1;
 
 import "ucr/v1/common.proto";
 import "ucr/v1/communication.proto";
+import "ucr/v1/crypto.proto";
 import "ucr/v1/identity.proto";
 
 message NegotiationHello {
@@ -11,13 +12,17 @@ message NegotiationHello {
   repeated Capability capabilities = 2;
   repeated Extension extensions = 3;
   bytes nonce = 4;
+  repeated CryptoSuite supported_crypto_suites = 5;
 }
 
 message NegotiationResult {
   ProtocolVersion version = 1;
   repeated Capability capabilities = 2;
   repeated Extension extensions = 3;
-  bytes transcript_binding = 4;
+  // Legacy Phase-0 placeholder. MUST be empty in canonical negotiation results;
+  // authenticated transcript binding is carried by HandshakeAuthentication.
+  bytes transcript_binding = 4 [deprecated = true];
+  CryptoSuite crypto_suite = 5;
 }
 
 message CommandEnvelope {

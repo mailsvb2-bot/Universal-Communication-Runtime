@@ -4,6 +4,8 @@ mod addressing;
 mod authorization;
 mod capability;
 mod commands;
+mod crypto_contract;
+mod crypto_negotiation;
 mod error;
 mod extension;
 mod framing;
@@ -29,6 +31,15 @@ pub use commands::{
     CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
     ReceiptError, compare_command_idempotency, validate_command, validate_command_receipt,
     validate_event,
+};
+pub use crypto_contract::{
+    AEAD_ALGORITHM_ID, AGREEMENT_ALGORITHM_ID, ALGORITHM_VERSION, CRYPTO_SUITE_ID,
+    CryptoContractError, ED25519_PUBLIC_KEY_LEN, HANDSHAKE_NONCE_LEN, KDF_ALGORITHM_ID,
+    KEY_CONFIRMATION_TAG_LEN, KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN,
+    TRANSCRIPT_BINDING_LEN, X25519_PUBLIC_KEY_LEN, validate_public_key_descriptor,
+};
+pub use crypto_negotiation::{
+    CryptoNegotiationError, CryptoPolicy, CryptoSuite, negotiate_crypto_suite,
 };
 pub use error::{CanonicalError, CanonicalErrorCode};
 pub use extension::{

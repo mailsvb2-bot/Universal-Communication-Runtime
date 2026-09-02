@@ -90,9 +90,9 @@ The model explicitly covers:
 
 | Threat | Primary boundary | Required control | Current evidence |
 |---|---|---|---|
-| MITM / forged peer | Device/Core/transport | authenticated handshake, key confirmation, peer identity binding | protocol requirement; crypto implementation pending |
-| Replay | protocol/session | nonces, replay window/state, idempotency | requirement specified; replay engine pending |
-| Downgrade | handshake | integrity-bound negotiation transcript, minimum security policy | version policy implemented; authenticated binding pending |
+| MITM / forged peer | Device/Core/transport | authenticated handshake, key confirmation, peer identity binding | signed transcript + key confirmation implemented; trust provisioning/revocation integration pending |
+| Replay | protocol/session | nonces, durable replay state, idempotency | memory/SQLite replay guards pass restart and concurrency tests |
+| Downgrade | handshake | integrity-bound negotiation transcript, explicit allowed-suite security policy | protocol + explicit crypto-suite allowlist policy and authenticated transcript binding implemented |
 | Malformed packets | network/Core | deterministic parser, size limits, unknown-kind rejection | framing parser tests present |
 | Flooding / spam | API/network | quotas, rate limits, backpressure, block/abuse policy | policy work pending |
 | Malicious tenant | API/Core/storage | tenant-scoped authz, resource visibility, policies and storage | canonical scope exists; enforcement phase pending |
@@ -117,7 +117,7 @@ Production protocol paths require all of the following where applicable:
 - deadline/timeout limits;
 - explicit unsupported-critical-extension failure.
 
-Successful version/capability negotiation alone is not proof of an authenticated secure session. The negotiated transcript must eventually be cryptographically bound before security-sensitive session establishment is considered complete.
+Successful version/capability negotiation alone is not proof of an authenticated secure session. The negotiated transcript is cryptographically bound in Phase 7; peer signature, durable replay protection, contributory agreement, derivation, and key confirmation must all succeed before security-sensitive session establishment is complete.
 ## 9. Device compromise, theft, and revocation
 
 A stolen or compromised device is not made trustworthy by server ownership or account login.
@@ -175,9 +175,8 @@ No transport/capability is promoted to Production maturity without the relevant 
 
 The following are explicit blockers until implementation and evidence exist:
 
-- authenticated handshake and key confirmation;
-- replay protection state;
-- cryptographic transcript/downgrade binding;
+- trusted peer signing-key provisioning and lifecycle integration;
+- production OS/hardware-backed key providers for supported targets;
 - tenant-scoped authorization enforcement;
 - Service Principal authentication/least-privilege enforcement;
 - device revocation enforcement in credential/key delivery;
@@ -191,8 +190,8 @@ The following are explicit blockers until implementation and evidence exist:
 A blocker may be removed only with implementation, tests, and review evidence. Documentation alone does not close it.
 ## 16. Current verified foundation evidence
 
-Current repository evidence includes fail-closed framing bounds/unknown-kind rejection, explicit protocol-version minimum policy, unsupported-critical-extension failure, capability maturity negotiation, canonical error mapping, redaction of opaque IDs/address values, and architectural separation of Identity/Endpoint/Route and Actor/Origin.
+Current repository evidence includes fail-closed framing, protocol/crypto downgrade policy, unsupported-critical-extension failure, capability negotiation, canonical error mapping, redaction, Identity/Endpoint/Route separation, signed transcript authentication, contributory X25519 agreement, directional HKDF keys, key confirmation, AEAD integrity, and durable replay protection.
 
-These controls reduce attack surface but do not imply crypto, authorization, recovery, bridge, relay, SFU, or device-revocation implementation exists. Their absence remains visible in the blocker list above.
+These controls establish the Phase-7 crypto foundation but do not imply end-to-end trust provisioning, production keystore coverage, recovery, bridge, relay, SFU, or device-revocation enforcement is complete. Those absences remain visible in the blocker list above.
 
-Relevant normative material: `spec/framing.md`, `spec/negotiation.md`, `spec/errors.md`, `spec/identity-addressing.md`, `spec/principal-actor-device.md`, ADR-0002, ADR-0003, and ADR-0004.
+Relevant normative material includes `spec/framing.md`, `spec/negotiation.md`, `spec/crypto.md`, `spec/errors.md`, `spec/identity-addressing.md`, `spec/principal-actor-device.md`, ADR-0002, ADR-0003, ADR-0004, and ADR-0011.
