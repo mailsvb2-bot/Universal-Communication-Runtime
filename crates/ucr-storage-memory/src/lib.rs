@@ -9,23 +9,26 @@ use std::{
 use ucr_core::{
     CommandAcceptanceStore, CommandOutcomeStore, ConversationStore, DeliveryStore,
     DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore, MessageStore,
-    RecoveryPlanStore, StorageHealth, StorageProvider,
+    RecoveryPlanStore, StorageHealth, StorageProvider, SyncStore,
 };
 use ucr_crypto::{ReplayError, ReplayProtector, TranscriptBinding, VerifyingKeyBytes};
 use ucr_model::{
     CommandEnvelope, CommandId, ConversationId, ConversationRecord, DeliveryAttempt,
     DeliveryEvidence, DeliveryId, DeliveryState, EventEnvelope, EventId, IdentityId,
-    MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, TenantScope,
+    MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, SessionId, SyncCheckpoint,
+    SyncSession, SyncState, TenantScope,
 };
 use ucr_protocol::{
     CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
-    canonical_message, canonical_recovery_plan, compare_command_idempotency, validate_command,
-    validate_conversation, validate_conversation_parent_kind, validate_delivery_attempt,
-    validate_delivery_evidence, validate_delivery_evidence_binding,
-    validate_delivery_evidence_order, validate_delivery_transition, validate_event,
+    canonical_message, canonical_recovery_plan, canonical_sync_session,
+    compare_command_idempotency, validate_command, validate_conversation,
+    validate_conversation_parent_kind, validate_delivery_attempt, validate_delivery_evidence,
+    validate_delivery_evidence_binding, validate_delivery_evidence_order,
+    validate_delivery_transition, validate_event, validate_sync_checkpoint,
+    validate_sync_transition,
 };
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 type ScopeKey = (String, Option<String>);
 type CommandKey = (ScopeKey, String);
 type CommandRefKey = (ScopeKey, String);
@@ -35,6 +38,7 @@ type RecoveryIdentityKey = (ScopeKey, String);
 type ConversationKey = (ScopeKey, String);
 type MessageKey = (ScopeKey, String);
 type DeliveryKey = (ScopeKey, String);
+type SyncKey = (ScopeKey, String);
 
 #[derive(Default)]
 struct MemoryState {
@@ -49,6 +53,8 @@ struct MemoryState {
     messages: HashMap<MessageKey, MessageEnvelope>,
     deliveries: HashMap<DeliveryKey, DeliveryAttempt>,
     delivery_evidence: HashMap<DeliveryKey, Vec<DeliveryEvidence>>,
+    sync_sessions: HashMap<SyncKey, SyncSession>,
+    sync_checkpoints: HashMap<SyncKey, Vec<SyncCheckpoint>>,
 }
 
 #[derive(Default)]
@@ -229,6 +235,10 @@ fn delivery_key(scope: &TenantScope, delivery_id: &DeliveryId) -> DeliveryKey {
         scope_key(scope),
         delivery_id.as_opaque().as_str().to_owned(),
     )
+}
+
+fn sync_key(scope: &TenantScope, session_id: &SessionId) -> SyncKey {
+    (scope_key(scope), session_id.as_opaque().as_str().to_owned())
 }
 
 impl ConversationStore for MemoryLocalStore {
@@ -456,6 +466,109 @@ fn append_delivery_evidence(
     Ok(DurableRecordStatus::Persisted)
 }
 
+impl SyncStore for MemoryLocalStore {
+    fn create_sync_session(
+        &self,
+        session: &SyncSession,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let canonical = canonical_sync_session(session.clone())
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = sync_key(&canonical.scope, &canonical.session_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.sync_sessions.get(&key) {
+            return if existing == &canonical {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.sync_sessions.insert(key, canonical);
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn transition_sync(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+        expected_state: SyncState,
+        next_state: SyncState,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let key = sync_key(scope, session_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let session = state
+            .sync_sessions
+            .get_mut(&key)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if session.state != expected_state {
+            return Err(DurableStoreError::Conflict);
+        }
+        if expected_state == next_state {
+            return Ok(DurableRecordStatus::Duplicate);
+        }
+        validate_sync_transition(expected_state, next_state)
+            .map_err(|_| DurableStoreError::Conflict)?;
+        session.state = next_state;
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn record_sync_checkpoint(
+        &self,
+        checkpoint: &SyncCheckpoint,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let key = sync_key(&checkpoint.scope, &checkpoint.session_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let session = state
+            .sync_sessions
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        let journal = state.sync_checkpoints.entry(key).or_default();
+        if let Some(existing) = journal
+            .iter()
+            .find(|item| item.generation == checkpoint.generation)
+        {
+            return if existing == checkpoint {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        validate_sync_checkpoint(&session, journal.last(), checkpoint).map_err(
+            |error| match error {
+                ucr_protocol::SyncError::InvalidCheckpointGeneration
+                | ucr_protocol::SyncError::AppliedItemsRegression => DurableStoreError::Conflict,
+                _ => DurableStoreError::InvalidRecord,
+            },
+        )?;
+        journal.push(checkpoint.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn sync_session(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<Option<SyncSession>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .sync_sessions
+            .get(&sync_key(scope, session_id))
+            .cloned())
+    }
+
+    fn latest_sync_checkpoint(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<Option<SyncCheckpoint>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .sync_checkpoints
+            .get(&sync_key(scope, session_id))
+            .and_then(|journal| journal.last().cloned()))
+    }
+}
+
 impl CommandAcceptanceStore for MemoryLocalStore {
     fn accept_command(
         &self,
@@ -679,7 +792,7 @@ mod tests {
     #[test]
     fn memory_store_is_healthy_and_versioned() {
         let store = MemoryLocalStore::default();
-        assert_eq!(store.schema_version(), Ok(5));
+        assert_eq!(store.schema_version(), Ok(crate::SCHEMA_VERSION));
         assert_eq!(store.health(), Ok(ucr_core::StorageHealth::Healthy));
     }
 
@@ -1206,6 +1319,173 @@ mod delivery_tests {
         assert_eq!(
             store.record_delivery_evidence(&relay),
             Ok(DurableRecordStatus::Duplicate)
+        );
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use ucr_core::{DurableRecordStatus, DurableStoreError, SyncStore};
+    use ucr_model::{
+        ConversationId, EndpointId, OpaqueId, SessionId, SyncCheckpoint, SyncLinkKind, SyncMode,
+        SyncSelection, SyncSession, SyncState, TenantId, TenantScope,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn session() -> SyncSession {
+        SyncSession {
+            session_id: SessionId::from_opaque(oid("sync-memory")),
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(oid("tenant-sync")),
+                namespace_id: None,
+            },
+            source_endpoint_id: EndpointId::from_opaque(oid("endpoint-local")),
+            target_endpoint_id: EndpointId::from_opaque(oid("endpoint-remote")),
+            link_kind: SyncLinkKind::DeviceDevice,
+            selection: SyncSelection {
+                mode: SyncMode::Partial,
+                conversation_ids: vec![
+                    ConversationId::from_opaque(oid("conversation-b")),
+                    ConversationId::from_opaque(oid("conversation-a")),
+                ],
+            },
+            state: SyncState::Prepared,
+        }
+    }
+
+    fn checkpoint(session: &SyncSession, generation: u64, applied_items: u64) -> SyncCheckpoint {
+        SyncCheckpoint {
+            session_id: session.session_id.clone(),
+            scope: session.scope.clone(),
+            generation,
+            resume_token: format!("resume-{generation}").into_bytes(),
+            applied_items,
+        }
+    }
+
+    #[test]
+    fn sync_session_is_canonical_and_idempotent() {
+        let store = MemoryLocalStore::default();
+        let session = session();
+        assert_eq!(
+            store.create_sync_session(&session),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.create_sync_session(&session),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        let loaded = store
+            .sync_session(&session.scope, &session.session_id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(
+            loaded.selection.conversation_ids[0].as_opaque().as_str(),
+            "conversation-a"
+        );
+    }
+
+    #[test]
+    fn sync_checkpoint_and_pause_resume_are_durable_semantics() {
+        let store = MemoryLocalStore::default();
+        let session = session();
+        store.create_sync_session(&session).expect("create session");
+        store
+            .transition_sync(
+                &session.scope,
+                &session.session_id,
+                SyncState::Prepared,
+                SyncState::Active,
+            )
+            .expect("activate");
+        let mut active = store
+            .sync_session(&session.scope, &session.session_id)
+            .expect("load")
+            .expect("exists");
+        let first = checkpoint(&active, 1, 3);
+        assert_eq!(
+            store.record_sync_checkpoint(&first),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.record_sync_checkpoint(&first),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        store
+            .transition_sync(
+                &session.scope,
+                &session.session_id,
+                SyncState::Active,
+                SyncState::Paused,
+            )
+            .expect("pause");
+        active.state = SyncState::Paused;
+        let second = checkpoint(&active, 2, 7);
+        assert_eq!(
+            store.record_sync_checkpoint(&second),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.latest_sync_checkpoint(&session.scope, &session.session_id),
+            Ok(Some(second))
+        );
+        assert_eq!(
+            store.transition_sync(
+                &session.scope,
+                &session.session_id,
+                SyncState::Paused,
+                SyncState::Active,
+            ),
+            Ok(DurableRecordStatus::Persisted)
+        );
+    }
+
+    #[test]
+    fn stale_checkpoint_and_terminal_reopen_fail_closed() {
+        let store = MemoryLocalStore::default();
+        let session = session();
+        store.create_sync_session(&session).expect("create session");
+        store
+            .transition_sync(
+                &session.scope,
+                &session.session_id,
+                SyncState::Prepared,
+                SyncState::Active,
+            )
+            .expect("activate");
+        let mut active = store
+            .sync_session(&session.scope, &session.session_id)
+            .expect("load")
+            .expect("exists");
+        let first = checkpoint(&active, 1, 5);
+        store.record_sync_checkpoint(&first).expect("checkpoint");
+        let stale = checkpoint(&active, 3, 6);
+        assert_eq!(
+            store.record_sync_checkpoint(&stale),
+            Err(DurableStoreError::Conflict)
+        );
+        store
+            .transition_sync(
+                &session.scope,
+                &session.session_id,
+                SyncState::Active,
+                SyncState::Completed,
+            )
+            .expect("complete");
+        active.state = SyncState::Completed;
+        assert_eq!(
+            store.transition_sync(
+                &session.scope,
+                &session.session_id,
+                SyncState::Completed,
+                SyncState::Active,
+            ),
+            Err(DurableStoreError::Conflict)
         );
     }
 }

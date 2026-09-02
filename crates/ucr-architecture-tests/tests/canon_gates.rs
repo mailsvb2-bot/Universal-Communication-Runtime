@@ -966,3 +966,69 @@ fn delivery_storage_keeps_restart_migration_and_nonclaims() {
     assert!(!sqlite.contains("vk_delivery"));
     assert!(!sqlite.contains("max_delivery"));
 }
+
+#[test]
+fn sync_contract_keeps_scope_resume_and_phase_boundaries() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let spec = fs::read_to_string(workspace.join("spec/sync.md")).expect("sync spec");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/sync.proto")).expect("sync proto");
+
+    for invariant in [
+        "SYNC != BACKUP",
+        "A server, cloud, relay, provider, or external consumer is never the canonical source of truth",
+        "`PAUSED` is durable state",
+        "Bidirectional synchronization uses two independent sessions/checkpoint streams",
+        "The resume token is opaque",
+        "not proof that the remote peer possesses any particular Event or Message",
+        "Phase 11 does not perform Anti-Entropy",
+    ] {
+        assert!(
+            spec.contains(invariant),
+            "sync invariant missing: {invariant}"
+        );
+    }
+    for declaration in [
+        "enum SyncLinkKind",
+        "enum SyncMode",
+        "enum SyncState",
+        "message SyncSession",
+        "message SyncCheckpoint",
+    ] {
+        assert!(
+            proto.contains(declaration),
+            "sync wire declaration missing: {declaration}"
+        );
+    }
+}
+
+#[test]
+fn sync_storage_keeps_restart_migration_and_conflict_evidence() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let sqlite = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/sync_store.rs"))
+        .expect("sync sqlite store");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+
+    for evidence in [
+        "sync_session_checkpoint_pause_and_resume_survive_restart",
+        "concurrent_sync_activation_has_single_winner",
+        "concurrent_checkpoint_generation_has_single_winner",
+        "checkpoint_generation_gap_is_rejected_on_reopen",
+        "corrupt_partial_sync_selection_is_rejected_on_reopen",
+        "v6_store_migrates_to_v7_without_losing_message_state",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "sync evidence missing: {evidence}"
+        );
+    }
+    assert!(core.contains("pub trait SyncStore"));
+    assert!(!sqlite.contains("telegram_sync"));
+    assert!(!sqlite.contains("vk_sync"));
+    assert!(!sqlite.contains("max_sync"));
+}

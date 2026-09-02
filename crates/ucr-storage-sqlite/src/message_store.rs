@@ -1375,7 +1375,10 @@ pub(crate) mod tests {
         let connection = Connection::open(db.path()).expect("open raw store");
         connection
             .execute_batch(
-                "DROP TABLE delivery_evidence;
+                "DROP TABLE sync_checkpoints;
+                 DROP TABLE sync_session_conversations;
+                 DROP TABLE sync_sessions;
+                 DROP TABLE delivery_evidence;
                  DROP TABLE delivery_attempts;
                  DROP TABLE message_external_mappings;
                  DROP TABLE message_relations;

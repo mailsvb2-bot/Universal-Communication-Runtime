@@ -187,6 +187,70 @@ pub struct DeliveryEvidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncLinkKind {
+    DeviceDevice,
+    DeviceNode,
+    PeerPeer,
+    DeviceCloud,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    Full,
+    Partial,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncState {
+    Prepared,
+    Active,
+    Paused,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncSelection {
+    pub mode: SyncMode,
+    pub conversation_ids: Vec<ConversationId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncSession {
+    pub session_id: SessionId,
+    pub scope: TenantScope,
+    pub source_endpoint_id: EndpointId,
+    pub target_endpoint_id: EndpointId,
+    pub link_kind: SyncLinkKind,
+    pub selection: SyncSelection,
+    pub state: SyncState,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct SyncCheckpoint {
+    pub session_id: SessionId,
+    pub scope: TenantScope,
+    pub generation: u64,
+    pub resume_token: Vec<u8>,
+    pub applied_items: u64,
+}
+
+impl fmt::Debug for SyncCheckpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SyncCheckpoint")
+            .field("session_id", &self.session_id)
+            .field("scope", &self.scope)
+            .field("generation", &self.generation)
+            .field("resume_token", &"<opaque>")
+            .field("resume_token_len", &self.resume_token.len())
+            .field("applied_items", &self.applied_items)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityEvidence {
     Unverified,
     SelfAsserted,
