@@ -1,17 +1,6 @@
 use core::cmp::{max, min};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ProtocolVersion {
-    pub major: u32,
-    pub minor: u32,
-}
-
-impl ProtocolVersion {
-    #[must_use]
-    pub const fn new(major: u32, minor: u32) -> Self {
-        Self { major, minor }
-    }
-}
+pub use ucr_model::ProtocolVersion;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VersionRange {

@@ -505,7 +505,7 @@ fn command_idempotency_contract_keeps_restart_nonclaim_visible() {
         "Every accepted command requires a non-empty bounded idempotency key",
         "different command type or payload is `CONFLICT`",
         "restart-safe command acceptance/deduplication",
-        "not restart-safe handler execution",
+        "does not prove an arbitrary external side effect happened exactly once",
         "different tenant/namespace scope means a different command domain",
     ] {
         assert!(
@@ -579,10 +579,96 @@ fn local_storage_contract_keeps_restart_and_failure_invariants() {
         "newer_schema_is_rejected_without_downgrade",
         "schema_shape_drift_is_rejected_even_at_known_version",
         "sqlite_sidecar_files_are_owner_only",
+        "v1_store_migrates_and_preserves_command_deduplication",
+        "v1_duplicate_scoped_command_ids_block_migration_without_version_bump",
+        "event_append_survives_restart_and_is_idempotent",
+        "terminal_event_survives_restart_and_retry",
+        "concurrent_terminal_events_have_single_winner",
+        "foreign_key_violation_is_rejected_on_reopen",
     ] {
         assert!(
             sqlite.contains(evidence),
             "storage evidence test missing: `{evidence}`"
         );
     }
+}
+
+#[test]
+fn protocol_version_value_type_has_one_rust_owner() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let version = fs::read_to_string(workspace.join("crates/ucr-protocol/src/version.rs"))
+        .expect("version module");
+
+    assert!(model.contains("pub struct ProtocolVersion"));
+    assert!(version.contains("pub use ucr_model::ProtocolVersion;"));
+    assert!(!version.contains("pub struct ProtocolVersion"));
+}
+
+#[test]
+fn canonical_event_contract_keeps_provenance_and_wire_compatibility() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let runtime =
+        fs::read_to_string(workspace.join("proto/ucr/v1/runtime.proto")).expect("runtime");
+
+    for field in [
+        "pub actor: ActorRef",
+        "pub source_device: DeviceRef",
+        "pub wall_time_unix_ms: i64",
+        "pub logical_order: u64",
+        "pub schema_version: ProtocolVersion",
+        "pub integrity_metadata: Vec<u8>",
+    ] {
+        assert!(
+            model.contains(field),
+            "missing canonical Event field: {field}"
+        );
+    }
+    for wire in [
+        "uint64 logical_order = 5;",
+        "Correlation correlation = 6;",
+        "ProtocolVersion schema_version = 7;",
+        "bytes integrity_metadata = 8;",
+        "repeated Extension extensions = 9;",
+        "ActorRef actor = 10;",
+        "DeviceRef source_device = 11;",
+        "int64 wall_time_unix_ms = 12;",
+    ] {
+        assert!(
+            runtime.contains(wire),
+            "Event wire invariant missing: {wire}"
+        );
+    }
+}
+
+#[test]
+fn event_journal_keeps_append_only_and_exactly_once_nonclaim() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let spec = fs::read_to_string(workspace.join("spec/local-storage.md")).expect("storage spec");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+
+    for invariant in [
+        "Canonical Events are append-only",
+        "same scoped Event ID with identical semantics is a Duplicate",
+        "second different terminal Event for the same Command is a Conflict",
+        "not universal exactly-once evidence for an external side effect",
+        "migration fails and the database remains at v1",
+    ] {
+        assert!(
+            spec.contains(invariant),
+            "event journal invariant missing: {invariant}"
+        );
+    }
+    assert!(core.contains("pub trait EventJournalStore"));
+    assert!(core.contains("pub trait CommandOutcomeStore"));
 }

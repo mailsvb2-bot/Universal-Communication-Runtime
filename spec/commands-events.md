@@ -22,10 +22,14 @@ Idempotency provides an effectively-once user experience under defined retry con
 Neither receipt is an Event. Neither proves message delivery, external side effect, user observation, payment, provider acceptance, or any other real-world outcome.
 ## Events and causation
 
+A canonical Event carries event ID, explicit tenant/namespace scope, actor, source device, wall-clock timestamp, logical ordering, correlation/causation, schema version, integrity metadata, event type, and payload. Actor and source device are provenance, not display strings.
+
 Events carry correlation metadata and may identify a causation ID when a command or prior event caused the fact. Not every event is command-caused, so causation remains optional.
 
-Logical ordering is explicit runtime metadata; it must not be substituted with provider timestamps as the sole canonical ordering rule.
+`wall_time_unix_ms` exists for audit/display context and interoperability. It is not the sole ordering rule and must not be trusted as authorization, freshness, replay, or identity evidence. Logical ordering remains explicit canonical runtime metadata. Provider timestamps do not replace either field.
 
 ## Persistence boundary
 
-Phase-6 local storage now provides restart-safe command acceptance/deduplication for the SQLite reference store. This proves durable acceptance state, not restart-safe handler execution or durable outcome/event recovery; those require additional storage contracts and evidence.
+Phase-6 local storage provides restart-safe command acceptance/deduplication and an append-only canonical Event journal. A terminal Event may be atomically linked to a previously accepted Command when its scope matches and its causation ID references that Command.
+
+This terminal link records UCR processing state. It does not prove an arbitrary external side effect happened exactly once. Crash-safe handler claiming/recovery and downstream/external idempotency remain separate responsibilities and must not be inferred from a terminal Event.

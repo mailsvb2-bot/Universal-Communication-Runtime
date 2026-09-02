@@ -1,17 +1,64 @@
 #![forbid(unsafe_code)]
 
+mod event_journal;
+
 use std::{fmt, path::Path, sync::Mutex, time::Duration};
 
 use rusqlite::{
     Connection, Error as SqliteError, ErrorCode, OptionalExtension, TransactionBehavior, params,
 };
 use ucr_core::{CommandAcceptanceStore, DurableStoreError, StorageHealth, StorageProvider};
-use ucr_model::{CommandEnvelope, CommandId, OpaqueId};
+use ucr_model::{CommandEnvelope, CommandId, OpaqueId, TenantScope};
 use ucr_protocol::{CommandError, CommandReceipt, CommandReceiptStatus, validate_command};
 
-pub const SQLITE_SCHEMA_VERSION: u32 = 1;
+pub const SQLITE_SCHEMA_VERSION: u32 = 2;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const V2_OBJECTS_SQL: &str = "
+CREATE UNIQUE INDEX accepted_commands_scope_command_id
+ON accepted_commands(tenant_id, namespace_present, namespace_id, command_id);
+
+CREATE TABLE events (
+    journal_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+    namespace_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload BLOB NOT NULL,
+    actor_id TEXT NOT NULL,
+    actor_kind TEXT NOT NULL,
+    on_behalf_of TEXT,
+    source_device_id TEXT NOT NULL,
+    source_identity_id TEXT NOT NULL,
+    wall_time_unix_ms INTEGER NOT NULL,
+    logical_order BLOB NOT NULL CHECK(length(logical_order) = 8),
+    correlation_id TEXT NOT NULL,
+    causation_id TEXT,
+    idempotency_key TEXT,
+    schema_major INTEGER NOT NULL,
+    schema_minor INTEGER NOT NULL,
+    integrity_metadata BLOB NOT NULL,
+    UNIQUE(tenant_id, namespace_present, namespace_id, event_id),
+    CHECK((namespace_present = 0 AND namespace_id = '') OR
+          (namespace_present = 1 AND namespace_id <> ''))
+);
+
+CREATE TABLE command_terminal_events (
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+    namespace_id TEXT NOT NULL,
+    command_id TEXT NOT NULL,
+    terminal_event_id TEXT NOT NULL,
+    PRIMARY KEY(tenant_id, namespace_present, namespace_id, command_id),
+    UNIQUE(tenant_id, namespace_present, namespace_id, terminal_event_id),
+    FOREIGN KEY(tenant_id, namespace_present, namespace_id, command_id)
+        REFERENCES accepted_commands(tenant_id, namespace_present, namespace_id, command_id),
+    FOREIGN KEY(tenant_id, namespace_present, namespace_id, terminal_event_id)
+        REFERENCES events(tenant_id, namespace_present, namespace_id, event_id),
+    CHECK((namespace_present = 0 AND namespace_id = '') OR
+          (namespace_present = 1 AND namespace_id <> ''))
+);";
 
 pub struct SqliteLocalStore {
     connection: Mutex<Connection>,
@@ -82,7 +129,7 @@ impl CommandAcceptanceStore for SqliteLocalStore {
             .idempotency_key
             .as_deref()
             .ok_or(DurableStoreError::InvalidRecord)?;
-        let namespace = namespace_storage_key(command);
+        let namespace = namespace_storage_key(&command.scope);
         let tenant = command.scope.tenant_id.as_opaque().as_str();
         let mut connection = self.lock_connection()?;
         let transaction = connection
@@ -111,6 +158,24 @@ impl CommandAcceptanceStore for SqliteLocalStore {
                 .commit()
                 .map_err(|error| map_sqlite_error(&error))?;
             return Ok(receipt);
+        }
+
+        let command_id_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM accepted_commands \
+                 WHERE tenant_id = ?1 AND namespace_present = ?2 \
+                 AND namespace_id = ?3 AND command_id = ?4)",
+                params![
+                    tenant,
+                    namespace.present,
+                    namespace.value,
+                    command.command_id.as_opaque().as_str()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        if command_id_exists {
+            return Err(DurableStoreError::Conflict);
         }
 
         transaction
@@ -147,8 +212,8 @@ struct NamespaceStorageKey<'a> {
     value: &'a str,
 }
 
-fn namespace_storage_key(command: &CommandEnvelope) -> NamespaceStorageKey<'_> {
-    match command.scope.namespace_id.as_ref() {
+fn namespace_storage_key(scope: &TenantScope) -> NamespaceStorageKey<'_> {
+    match scope.namespace_id.as_ref() {
         Some(namespace_id) => NamespaceStorageKey {
             present: 1,
             value: namespace_id.as_opaque().as_str(),
@@ -207,18 +272,19 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         if count_user_tables(connection)? != 0 {
             return Err(DurableStoreError::ForeignStore);
         }
-        return initialize_schema_v1(connection);
+        return initialize_schema_v2(connection);
     }
     if application_id != UCR_SQLITE_APPLICATION_ID {
         return Err(DurableStoreError::ForeignStore);
     }
     match version {
-        SQLITE_SCHEMA_VERSION => verify_schema_v1(connection),
+        1 => migrate_v1_to_v2(connection),
+        SQLITE_SCHEMA_VERSION => verify_schema_v2(connection),
         _ => Err(DurableStoreError::UnsupportedSchemaVersion),
     }
 }
 
-fn initialize_schema_v1(connection: &mut Connection) -> Result<(), DurableStoreError> {
+fn initialize_schema_v2(connection: &mut Connection) -> Result<(), DurableStoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -239,6 +305,9 @@ fn initialize_schema_v1(connection: &mut Connection) -> Result<(), DurableStoreE
         )
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
+        .execute_batch(V2_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))?;
+    transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
@@ -249,9 +318,112 @@ fn initialize_schema_v1(connection: &mut Connection) -> Result<(), DurableStoreE
         .map_err(|error| map_sqlite_error(&error))
 }
 
-fn verify_schema_v1(connection: &Connection) -> Result<(), DurableStoreError> {
+fn migrate_v1_to_v2(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_accepted_commands_schema(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .execute_batch(V2_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v2(connection)
+}
+
+fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_accepted_commands_schema(connection)?;
+    verify_table_columns(
+        connection,
+        "events",
+        &[
+            ("journal_seq", "INTEGER", 0, 1),
+            ("tenant_id", "TEXT", 1, 0),
+            ("namespace_present", "INTEGER", 1, 0),
+            ("namespace_id", "TEXT", 1, 0),
+            ("event_id", "TEXT", 1, 0),
+            ("event_type", "TEXT", 1, 0),
+            ("payload", "BLOB", 1, 0),
+            ("actor_id", "TEXT", 1, 0),
+            ("actor_kind", "TEXT", 1, 0),
+            ("on_behalf_of", "TEXT", 0, 0),
+            ("source_device_id", "TEXT", 1, 0),
+            ("source_identity_id", "TEXT", 1, 0),
+            ("wall_time_unix_ms", "INTEGER", 1, 0),
+            ("logical_order", "BLOB", 1, 0),
+            ("correlation_id", "TEXT", 1, 0),
+            ("causation_id", "TEXT", 0, 0),
+            ("idempotency_key", "TEXT", 0, 0),
+            ("schema_major", "INTEGER", 1, 0),
+            ("schema_minor", "INTEGER", 1, 0),
+            ("integrity_metadata", "BLOB", 1, 0),
+        ],
+    )?;
+    verify_table_columns(
+        connection,
+        "command_terminal_events",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("command_id", "TEXT", 1, 4),
+            ("terminal_event_id", "TEXT", 1, 0),
+        ],
+    )?;
+    let index_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = ?1)",
+            ["accepted_commands_scope_command_id"],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if !index_exists {
+        return Err(DurableStoreError::Corrupt);
+    }
+    let mut foreign_key_check = connection
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut violations = foreign_key_check
+        .query([])
+        .map_err(|error| map_sqlite_error(&error))?;
+    if violations
+        .next()
+        .map_err(|error| map_sqlite_error(&error))?
+        .is_some()
+    {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
+}
+
+fn verify_accepted_commands_schema(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_table_columns(
+        connection,
+        "accepted_commands",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("idempotency_key", "TEXT", 1, 4),
+            ("command_id", "TEXT", 1, 0),
+            ("command_type", "TEXT", 1, 0),
+            ("payload", "BLOB", 1, 0),
+        ],
+    )
+}
+
+fn verify_table_columns(
+    connection: &Connection,
+    table: &str,
+    expected: &[(&str, &str, i64, i64)],
+) -> Result<(), DurableStoreError> {
+    let sql = format!("PRAGMA table_info('{table}')");
     let mut statement = connection
-        .prepare("PRAGMA table_info('accepted_commands')")
+        .prepare(&sql)
         .map_err(|error| map_sqlite_error(&error))?;
     let actual = statement
         .query_map([], |row| {
@@ -265,15 +437,6 @@ fn verify_schema_v1(connection: &Connection) -> Result<(), DurableStoreError> {
         .map_err(|error| map_sqlite_error(&error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| map_sqlite_error(&error))?;
-    let expected = [
-        ("tenant_id", "TEXT", 1, 1),
-        ("namespace_present", "INTEGER", 1, 2),
-        ("namespace_id", "TEXT", 1, 3),
-        ("idempotency_key", "TEXT", 1, 4),
-        ("command_id", "TEXT", 1, 0),
-        ("command_type", "TEXT", 1, 0),
-        ("payload", "BLOB", 1, 0),
-    ];
     if actual.len() != expected.len()
         || actual.iter().zip(expected).any(|(actual, expected)| {
             actual.0 != expected.0
@@ -318,6 +481,17 @@ fn map_command_error(error: CommandError) -> DurableStoreError {
         | CommandError::EmptyIdempotencyKey
         | CommandError::IdempotencyKeyTooLong
         | CommandError::PayloadTooLarge => DurableStoreError::InvalidRecord,
+    }
+}
+
+fn map_schema_change_error(error: &SqliteError) -> DurableStoreError {
+    match error {
+        SqliteError::SqliteFailure(details, _)
+            if details.code == ErrorCode::ConstraintViolation =>
+        {
+            DurableStoreError::Corrupt
+        }
+        _ => map_sqlite_error(error),
     }
 }
 
@@ -396,10 +570,14 @@ mod tests {
         thread,
     };
 
-    use ucr_core::{CommandAcceptanceStore, DurableStoreError, StorageHealth, StorageProvider};
+    use ucr_core::{
+        CommandAcceptanceStore, CommandOutcomeStore, DurableStoreError, EventAppendStatus,
+        EventJournalStore, StorageHealth, StorageProvider,
+    };
     use ucr_model::{
-        CommandEnvelope, CommandId, CorrelationContext, NamespaceId, OpaqueId, TenantId,
-        TenantScope,
+        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext, DeviceId,
+        DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, ProtocolVersion,
+        TenantId, TenantScope,
     };
     use ucr_protocol::CommandReceiptStatus;
 
@@ -450,6 +628,60 @@ mod tests {
                 idempotency_key: Some(key.to_owned()),
             },
         }
+    }
+
+    fn event(id: &str, causation: &str, payload: &[u8]) -> EventEnvelope {
+        EventEnvelope {
+            event_id: EventId::from_opaque(opaque(id)),
+            scope: command("scope-source", "scope-key", b"", Some("namespace-a")).scope,
+            event_type: "ucr.command.completed".to_owned(),
+            payload: payload.to_vec(),
+            actor: ActorRef {
+                actor_id: ActorId::from_opaque(opaque("actor-a")),
+                kind: ActorKind::System,
+                on_behalf_of: None,
+            },
+            source_device: DeviceRef {
+                device_id: DeviceId::from_opaque(opaque("device-a")),
+                identity_id: IdentityId::from_opaque(opaque("identity-a")),
+            },
+            wall_time_unix_ms: 1_788_330_000_000,
+            logical_order: 1,
+            correlation: CorrelationContext {
+                correlation_id: opaque("correlation-a"),
+                causation_id: Some(opaque(causation)),
+                idempotency_key: None,
+            },
+            schema_version: ProtocolVersion::new(1, 0),
+            integrity_metadata: Vec::new(),
+        }
+    }
+
+    fn create_v1_store(path: &std::path::Path) -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open(path).expect("open v1 fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE accepted_commands (
+                    tenant_id TEXT NOT NULL,
+                    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+                    namespace_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    command_id TEXT NOT NULL,
+                    command_type TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    PRIMARY KEY (tenant_id, namespace_present, namespace_id, idempotency_key),
+                    CHECK((namespace_present = 0 AND namespace_id = '') OR
+                          (namespace_present = 1 AND namespace_id <> ''))
+                ) WITHOUT ROWID;",
+            )
+            .expect("create v1 schema");
+        connection
+            .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
+            .expect("set application id");
+        connection
+            .pragma_update(None, "user_version", 1_u32)
+            .expect("set v1 version");
+        connection
     }
     #[test]
     fn sqlite_store_initializes_schema_and_is_healthy() {
@@ -524,6 +756,179 @@ mod tests {
     }
 
     #[test]
+    fn v1_store_migrates_and_preserves_command_deduplication() {
+        let db = TestDbPath::new();
+        let connection = create_v1_store(db.path());
+        connection
+            .execute(
+                "INSERT INTO accepted_commands VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    "tenant-a",
+                    1_i64,
+                    "namespace-a",
+                    "retry-a",
+                    "command-a",
+                    "ucr.message.send",
+                    b"payload".as_slice()
+                ],
+            )
+            .expect("insert v1 acceptance");
+        drop(connection);
+
+        let store = SqliteLocalStore::open(db.path()).expect("migrate v1");
+        assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        let retry = command("command-b", "retry-a", b"payload", Some("namespace-a"));
+        let receipt = store
+            .accept_command(&retry)
+            .expect("deduplicate migrated command");
+        assert_eq!(receipt.status, CommandReceiptStatus::Duplicate);
+        assert_eq!(
+            receipt.original_command_id,
+            Some(CommandId::from_opaque(opaque("command-a")))
+        );
+    }
+
+    #[test]
+    fn v1_duplicate_scoped_command_ids_block_migration_without_version_bump() {
+        let db = TestDbPath::new();
+        let connection = create_v1_store(db.path());
+        for key in ["retry-a", "retry-b"] {
+            connection
+                .execute(
+                    "INSERT INTO accepted_commands VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![
+                        "tenant-a",
+                        1_i64,
+                        "namespace-a",
+                        key,
+                        "command-a",
+                        "ucr.message.send",
+                        b"payload".as_slice()
+                    ],
+                )
+                .expect("insert duplicate command id fixture");
+        }
+        drop(connection);
+        assert_eq!(
+            SqliteLocalStore::open(db.path()).err(),
+            Some(DurableStoreError::Corrupt)
+        );
+        let reopened = rusqlite::Connection::open(db.path()).expect("reopen v1 fixture");
+        let version: u32 = reopened
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read user version");
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn event_append_survives_restart_and_is_idempotent() {
+        let db = TestDbPath::new();
+        let first = event("event-a", "command-a", b"done");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            assert_eq!(store.append_event(&first), Ok(EventAppendStatus::Appended));
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen store");
+        assert_eq!(
+            reopened.append_event(&first),
+            Ok(EventAppendStatus::Duplicate)
+        );
+        let changed = event("event-a", "command-a", b"changed");
+        assert_eq!(
+            reopened.append_event(&changed),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn terminal_event_survives_restart_and_retry() {
+        let db = TestDbPath::new();
+        let accepted = command("command-a", "retry-a", b"payload", Some("namespace-a"));
+        let terminal = event("event-a", "command-a", b"done");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            store.accept_command(&accepted).expect("accept command");
+            assert_eq!(
+                store.record_terminal_event(&accepted.scope, &accepted.command_id, &terminal),
+                Ok(EventAppendStatus::Appended)
+            );
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen store");
+        assert_eq!(
+            reopened.terminal_event(&accepted.scope, &accepted.command_id),
+            Ok(Some(terminal.event_id.clone()))
+        );
+        assert_eq!(
+            reopened.record_terminal_event(&accepted.scope, &accepted.command_id, &terminal),
+            Ok(EventAppendStatus::Duplicate)
+        );
+    }
+
+    #[test]
+    fn terminal_event_requires_accepted_command_and_matching_causation() {
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open store");
+        let accepted = command("command-a", "retry-a", b"payload", Some("namespace-a"));
+        let terminal = event("event-a", "command-a", b"done");
+        assert_eq!(
+            store.record_terminal_event(&accepted.scope, &accepted.command_id, &terminal),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        store.accept_command(&accepted).expect("accept command");
+        let wrong = event("event-b", "command-b", b"done");
+        assert_eq!(
+            store.record_terminal_event(&accepted.scope, &accepted.command_id, &wrong),
+            Err(DurableStoreError::InvalidRecord)
+        );
+    }
+
+    #[test]
+    fn second_terminal_event_for_same_command_conflicts() {
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open store");
+        let accepted = command("command-a", "retry-a", b"payload", Some("namespace-a"));
+        store.accept_command(&accepted).expect("accept command");
+        store
+            .record_terminal_event(
+                &accepted.scope,
+                &accepted.command_id,
+                &event("event-a", "command-a", b"done"),
+            )
+            .expect("record terminal");
+        assert_eq!(
+            store.record_terminal_event(
+                &accepted.scope,
+                &accepted.command_id,
+                &event("event-b", "command-a", b"done-again"),
+            ),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn scoped_command_id_reuse_conflicts_even_with_new_idempotency_key() {
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open store");
+        store
+            .accept_command(&command(
+                "command-a",
+                "retry-a",
+                b"payload",
+                Some("namespace-a"),
+            ))
+            .expect("accept command");
+        assert_eq!(
+            store.accept_command(&command(
+                "command-a",
+                "retry-b",
+                b"payload",
+                Some("namespace-a"),
+            )),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
     fn newer_schema_is_rejected_without_downgrade() {
         let db = TestDbPath::new();
         let connection = rusqlite::Connection::open(db.path()).expect("open raw sqlite");
@@ -544,6 +949,30 @@ mod tests {
     fn corrupt_database_fails_explicitly() {
         let db = TestDbPath::new();
         fs::write(db.path(), b"not-a-sqlite-database").expect("write corrupt db");
+        assert_eq!(
+            SqliteLocalStore::open(db.path()).err(),
+            Some(DurableStoreError::Corrupt)
+        );
+    }
+
+    #[test]
+    fn foreign_key_violation_is_rejected_on_reopen() {
+        let db = TestDbPath::new();
+        let accepted = command("command-a", "retry-a", b"payload", Some("namespace-a"));
+        let terminal = event("event-a", "command-a", b"done");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            store.accept_command(&accepted).expect("accept command");
+            store
+                .record_terminal_event(&accepted.scope, &accepted.command_id, &terminal)
+                .expect("record terminal");
+        }
+        let raw = rusqlite::Connection::open(db.path()).expect("open raw sqlite");
+        raw.pragma_update(None, "foreign_keys", "OFF")
+            .expect("disable foreign keys for corruption fixture");
+        raw.execute("DELETE FROM events WHERE event_id = ?1", ["event-a"])
+            .expect("create dangling terminal link");
+        drop(raw);
         assert_eq!(
             SqliteLocalStore::open(db.path()).err(),
             Some(DurableStoreError::Corrupt)
@@ -632,6 +1061,53 @@ mod tests {
             1
         );
     }
+    #[test]
+    fn concurrent_terminal_events_have_single_winner() {
+        let db = TestDbPath::new();
+        let accepted = command("command-a", "retry-a", b"payload", Some("namespace-a"));
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            store.accept_command(&accepted).expect("accept command");
+        }
+        let barrier = Arc::new(Barrier::new(3));
+        let run = |event_id: &'static str| {
+            let path = db.path().to_owned();
+            let scope = accepted.scope.clone();
+            let command_id = accepted.command_id.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                let store = SqliteLocalStore::open(path).expect("open concurrent store");
+                barrier.wait();
+                store.record_terminal_event(
+                    &scope,
+                    &command_id,
+                    &event(event_id, "command-a", event_id.as_bytes()),
+                )
+            })
+        };
+        let first = run("event-a");
+        let second = run("event-b");
+        barrier.wait();
+        let results = [
+            first.join().expect("first terminal thread"),
+            second.join().expect("second terminal thread"),
+        ];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Ok(EventAppendStatus::Appended)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(DurableStoreError::Conflict)))
+                .count(),
+            1
+        );
+    }
+
     #[test]
     fn sqlite_connection_uses_required_durability_pragmas() {
         let db = TestDbPath::new();

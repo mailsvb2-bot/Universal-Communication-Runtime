@@ -4,6 +4,7 @@ package ucr.v1;
 
 import "ucr/v1/common.proto";
 import "ucr/v1/communication.proto";
+import "ucr/v1/identity.proto";
 
 message NegotiationHello {
   repeated VersionRange supported_versions = 1;
@@ -39,6 +40,9 @@ message EventEnvelope {
   ProtocolVersion schema_version = 7;
   bytes integrity_metadata = 8;
   repeated Extension extensions = 9;
+  ActorRef actor = 10;
+  DeviceRef source_device = 11;
+  int64 wall_time_unix_ms = 12;
 }
 
 enum CommandReceiptStatus {

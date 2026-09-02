@@ -140,8 +140,16 @@ impl From<CommandError> for CanonicalError {
 }
 
 impl From<EventError> for CanonicalError {
-    fn from(_error: EventError) -> Self {
-        Self::new(CanonicalErrorCode::InvalidArgument)
+    fn from(error: EventError) -> Self {
+        let code = match error {
+            EventError::InvalidEventType | EventError::InvalidSchemaVersion => {
+                CanonicalErrorCode::InvalidArgument
+            }
+            EventError::PayloadTooLarge | EventError::IntegrityMetadataTooLarge => {
+                CanonicalErrorCode::ResourceExhausted
+            }
+        };
+        Self::new(code)
     }
 }
 

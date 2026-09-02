@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use ucr_model::{
-    AuthorizationRequest, CapabilityDescriptor, CommandEnvelope, CommunicationIntent,
-    EndpointAddress, EndpointId, TenantScope,
+    AuthorizationRequest, CapabilityDescriptor, CommandEnvelope, CommandId, CommunicationIntent,
+    EndpointAddress, EndpointId, EventEnvelope, EventId, TenantScope,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -128,6 +128,49 @@ pub trait CommandAcceptanceStore: StorageProvider {
         &self,
         command: &CommandEnvelope,
     ) -> Result<CommandReceipt, DurableStoreError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventAppendStatus {
+    Appended,
+    Duplicate,
+}
+
+/// Durable canonical event journal capability.
+pub trait EventJournalStore: StorageProvider {
+    /// Appends or deduplicates a canonical event.
+    ///
+    /// # Errors
+    /// Returns explicit validation/conflict/storage failures. Reusing one
+    /// scoped event ID with different semantics is a conflict.
+    fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError>;
+}
+
+/// Durable terminal-outcome linkage for accepted commands.
+pub trait CommandOutcomeStore: EventJournalStore {
+    /// Atomically appends/deduplicates a terminal Event and links it to one
+    /// previously accepted Command. This records UCR processing state only; it
+    /// does not prove an arbitrary external side effect happened exactly once.
+    ///
+    /// # Errors
+    /// Fails if the command was not accepted in the same scope, causation does
+    /// not reference that command, or a different terminal event already won.
+    fn record_terminal_event(
+        &self,
+        scope: &TenantScope,
+        command_id: &CommandId,
+        event: &EventEnvelope,
+    ) -> Result<EventAppendStatus, DurableStoreError>;
+
+    /// Returns the terminal event linked to a command, if any.
+    ///
+    /// # Errors
+    /// Returns explicit storage failures; absence is not an error.
+    fn terminal_event(
+        &self,
+        scope: &TenantScope,
+        command_id: &CommandId,
+    ) -> Result<Option<EventId>, DurableStoreError>;
 }
 
 #[cfg(test)]

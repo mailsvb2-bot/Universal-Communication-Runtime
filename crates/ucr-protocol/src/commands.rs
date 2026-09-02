@@ -4,6 +4,8 @@ use crate::{DEFAULT_MAX_PAYLOAD_LEN, validate_namespaced_identifier};
 
 pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 256;
 pub const MAX_COMMAND_PAYLOAD_LEN: usize = DEFAULT_MAX_PAYLOAD_LEN as usize;
+pub const MAX_EVENT_PAYLOAD_LEN: usize = DEFAULT_MAX_PAYLOAD_LEN as usize;
+pub const MAX_EVENT_INTEGRITY_METADATA_LEN: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandError {
@@ -18,6 +20,9 @@ pub enum CommandError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventError {
     InvalidEventType,
+    PayloadTooLarge,
+    IntegrityMetadataTooLarge,
+    InvalidSchemaVersion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +95,17 @@ pub fn validate_command(command: &CommandEnvelope) -> Result<(), CommandError> {
 /// # Errors
 /// Rejects malformed event type identifiers.
 pub fn validate_event(event: &EventEnvelope) -> Result<(), EventError> {
-    validate_namespaced_identifier(&event.event_type).map_err(|_| EventError::InvalidEventType)
+    validate_namespaced_identifier(&event.event_type).map_err(|_| EventError::InvalidEventType)?;
+    if event.payload.len() > MAX_EVENT_PAYLOAD_LEN {
+        return Err(EventError::PayloadTooLarge);
+    }
+    if event.integrity_metadata.len() > MAX_EVENT_INTEGRITY_METADATA_LEN {
+        return Err(EventError::IntegrityMetadataTooLarge);
+    }
+    if event.schema_version.major == 0 {
+        return Err(EventError::InvalidSchemaVersion);
+    }
+    Ok(())
 }
 
 /// Classifies an incoming command against a previously accepted command.
@@ -122,8 +137,9 @@ pub fn compare_command_idempotency(
 #[cfg(test)]
 mod tests {
     use ucr_model::{
-        CommandEnvelope, CommandId, CorrelationContext, EventEnvelope, EventId, NamespaceId,
-        OpaqueId, TenantId, TenantScope,
+        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext, DeviceId,
+        DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, ProtocolVersion,
+        TenantId, TenantScope,
     };
 
     use super::{
@@ -163,12 +179,24 @@ mod tests {
             scope: scope("tenant-a", "namespace-a"),
             event_type: event_type.to_owned(),
             payload: b"fact".to_vec(),
+            actor: ActorRef {
+                actor_id: ActorId::from_opaque(opaque("actor-a")),
+                kind: ActorKind::System,
+                on_behalf_of: None,
+            },
+            source_device: DeviceRef {
+                device_id: DeviceId::from_opaque(opaque("device-a")),
+                identity_id: IdentityId::from_opaque(opaque("identity-a")),
+            },
+            wall_time_unix_ms: 1_700_000_000_000,
             logical_order: 1,
             correlation: CorrelationContext {
                 correlation_id: opaque("correlation-a"),
                 causation_id: Some(opaque("command-a")),
                 idempotency_key: None,
             },
+            schema_version: ProtocolVersion::new(1, 0),
+            integrity_metadata: b"integrity".to_vec(),
         }
     }
 
@@ -280,6 +308,32 @@ mod tests {
         assert_eq!(
             validate_command(&command("command-a", Some("retry-key"), &oversized)),
             Err(CommandError::PayloadTooLarge)
+        );
+    }
+    #[test]
+    fn event_payload_budget_fails_closed_before_storage() {
+        let mut oversized = event("ucr.message.created");
+        oversized.payload = vec![0_u8; super::MAX_EVENT_PAYLOAD_LEN + 1];
+        assert_eq!(validate_event(&oversized), Err(EventError::PayloadTooLarge));
+    }
+
+    #[test]
+    fn event_integrity_metadata_budget_fails_closed_before_storage() {
+        let mut oversized = event("ucr.message.created");
+        oversized.integrity_metadata = vec![0_u8; super::MAX_EVENT_INTEGRITY_METADATA_LEN + 1];
+        assert_eq!(
+            validate_event(&oversized),
+            Err(EventError::IntegrityMetadataTooLarge)
+        );
+    }
+
+    #[test]
+    fn event_schema_version_must_be_explicit() {
+        let mut invalid = event("ucr.message.created");
+        invalid.schema_version = ProtocolVersion::new(0, 0);
+        assert_eq!(
+            validate_event(&invalid),
+            Err(EventError::InvalidSchemaVersion)
         );
     }
 }

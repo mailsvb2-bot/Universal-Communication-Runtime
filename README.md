@@ -39,7 +39,7 @@ Optional Infrastructure
 
 **Phase 6 — Local Storage (active implementation layer).**
 
-Phases 0–5 now have canonical contracts and reference invariants in `main`; Phase 6 is adding restart-safe local persistence without treating the database as a second protocol.
+Phases 0–5 have canonical contracts and reference invariants; Phase 6 now includes restart-safe command acceptance plus a canonical append-only Event/terminal-outcome journal, while the database remains an implementation behind storage capability contracts rather than a second protocol.
 
 This repository intentionally does not begin with chat UI, messenger adapters, WebRTC, mesh, or a cloud service. Those are consumers/providers of the canonical model and must not become alternative sources of truth.
 

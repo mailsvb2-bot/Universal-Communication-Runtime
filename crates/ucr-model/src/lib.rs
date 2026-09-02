@@ -239,6 +239,19 @@ pub struct AuthorizationRequest {
     pub resource_scope: TenantScope,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProtocolVersion {
+    pub major: u32,
+    pub minor: u32,
+}
+
+impl ProtocolVersion {
+    #[must_use]
+    pub const fn new(major: u32, minor: u32) -> Self {
+        Self { major, minor }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorrelationContext {
     pub correlation_id: OpaqueId,
@@ -261,8 +274,13 @@ pub struct EventEnvelope {
     pub scope: TenantScope,
     pub event_type: String,
     pub payload: Vec<u8>,
+    pub actor: ActorRef,
+    pub source_device: DeviceRef,
+    pub wall_time_unix_ms: i64,
     pub logical_order: u64,
     pub correlation: CorrelationContext,
+    pub schema_version: ProtocolVersion,
+    pub integrity_metadata: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
