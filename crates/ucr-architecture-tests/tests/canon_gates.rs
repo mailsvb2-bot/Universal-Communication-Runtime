@@ -898,3 +898,71 @@ fn message_storage_keeps_restart_migration_and_security_nonclaims() {
     assert!(!sqlite.contains("vk_message"));
     assert!(!sqlite.contains("max_message"));
 }
+
+#[test]
+fn delivery_contract_keeps_evidence_semantics_and_wire_shape() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let spec = fs::read_to_string(workspace.join("spec/delivery.md")).expect("delivery spec");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/communication.proto"))
+        .expect("communication proto");
+
+    for invariant in [
+        "A canonical Message outlives any route",
+        "Retry and multi-path delivery create a new `DeliveryId`",
+        "`REPLICATED_TO_RELAY` never proves `DELIVERED`",
+        "`READ` requires `READ_BY_USER` evidence",
+        "The Message row is not a second mutable delivery state machine",
+    ] {
+        assert!(
+            spec.contains(invariant),
+            "delivery invariant missing: {invariant}"
+        );
+    }
+    assert!(proto.contains("enum DeliveryEvidenceKind"));
+    assert!(proto.contains("message DeliveryAttempt"));
+    assert!(proto.contains("message DeliveryEvidence"));
+    assert!(proto.contains("DELIVERY_EVIDENCE_KIND_REPLICATED_TO_RELAY = 4;"));
+    assert!(proto.contains("uint64 logical_order = 5;"));
+}
+
+#[test]
+fn delivery_storage_keeps_restart_migration_and_nonclaims() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let sqlite =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/delivery_store.rs"))
+            .expect("delivery sqlite store");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+    let spec = fs::read_to_string(workspace.join("spec/delivery.md")).expect("delivery spec");
+
+    for evidence in [
+        "delivery_transition_chain_survives_restart_with_evidence",
+        "concurrent_ack_transition_has_single_winner",
+        "v5_store_migrates_to_v6_without_losing_message_state",
+        "corrupt_delivery_evidence_binding_is_rejected_on_reopen",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "delivery evidence missing: {evidence}"
+        );
+    }
+    assert!(core.contains("pub trait DeliveryStore"));
+    for nonclaim in [
+        "does not claim network exactly-once delivery",
+        "does not yet provide real transport adapters",
+        "remote receipt authentication",
+    ] {
+        assert!(
+            spec.contains(nonclaim),
+            "delivery nonclaim missing: {nonclaim}"
+        );
+    }
+    assert!(!sqlite.contains("telegram_delivery"));
+    assert!(!sqlite.contains("vk_delivery"));
+    assert!(!sqlite.contains("max_delivery"));
+}

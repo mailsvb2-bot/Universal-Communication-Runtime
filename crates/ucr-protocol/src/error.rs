@@ -1,7 +1,7 @@
 use crate::{
     AddressingError, AuthorizationError, CapabilityError, CommandError, ConversationError,
-    CryptoContractError, CryptoNegotiationError, EventError, ExtensionError, FrameError,
-    HandshakeError, MessageError, ProvenanceError, RecoveryError, ScopeError,
+    CryptoContractError, CryptoNegotiationError, DeliveryError, EventError, ExtensionError,
+    FrameError, HandshakeError, MessageError, ProvenanceError, RecoveryError, ScopeError,
     VersionNegotiationError,
 };
 
@@ -157,6 +157,21 @@ impl From<MessageError> for CanonicalError {
     }
 }
 
+impl From<DeliveryError> for CanonicalError {
+    fn from(error: DeliveryError) -> Self {
+        let code = match error {
+            DeliveryError::EvidenceRegression => CanonicalErrorCode::Conflict,
+            DeliveryError::InvalidInitialState
+            | DeliveryError::IllegalTransition
+            | DeliveryError::ScopeMismatch
+            | DeliveryError::MessageMismatch
+            | DeliveryError::DeliveryMismatch
+            | DeliveryError::EvidenceDoesNotProveState => CanonicalErrorCode::InvalidArgument,
+        };
+        Self::new(code)
+    }
+}
+
 impl From<ProvenanceError> for CanonicalError {
     fn from(_error: ProvenanceError) -> Self {
         Self::new(CanonicalErrorCode::InvalidArgument)
@@ -271,7 +286,7 @@ mod tests {
     use super::{CanonicalError, CanonicalErrorCode};
     use crate::{
         AddressingError, AuthorizationError, CommandError, ConversationError, CryptoContractError,
-        MessageError, ProvenanceError, RecoveryError, ScopeError,
+        DeliveryError, MessageError, ProvenanceError, RecoveryError, ScopeError,
     };
 
     #[test]
@@ -374,6 +389,22 @@ mod tests {
         assert_eq!(
             CanonicalError::from(MessageError::ExternalMessageIdTooLarge).code,
             CanonicalErrorCode::ResourceExhausted
+        );
+    }
+
+    #[test]
+    fn delivery_failures_have_stable_canonical_categories() {
+        assert_eq!(
+            CanonicalError::from(DeliveryError::IllegalTransition).code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            CanonicalError::from(DeliveryError::EvidenceDoesNotProveState).code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            CanonicalError::from(DeliveryError::EvidenceRegression).code,
+            CanonicalErrorCode::Conflict
         );
     }
 

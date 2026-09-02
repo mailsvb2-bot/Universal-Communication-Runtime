@@ -7,19 +7,22 @@ use std::{
 };
 
 use ucr_core::{
-    CommandAcceptanceStore, CommandOutcomeStore, ConversationStore, DurableRecordStatus,
-    DurableStoreError, EventAppendStatus, EventJournalStore, MessageStore, RecoveryPlanStore,
-    StorageHealth, StorageProvider,
+    CommandAcceptanceStore, CommandOutcomeStore, ConversationStore, DeliveryStore,
+    DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore, MessageStore,
+    RecoveryPlanStore, StorageHealth, StorageProvider,
 };
 use ucr_crypto::{ReplayError, ReplayProtector, TranscriptBinding, VerifyingKeyBytes};
 use ucr_model::{
-    CommandEnvelope, CommandId, ConversationId, ConversationRecord, DeliveryState, EventEnvelope,
-    EventId, IdentityId, MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, TenantScope,
+    CommandEnvelope, CommandId, ConversationId, ConversationRecord, DeliveryAttempt,
+    DeliveryEvidence, DeliveryId, DeliveryState, EventEnvelope, EventId, IdentityId,
+    MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, TenantScope,
 };
 use ucr_protocol::{
     CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
     canonical_message, canonical_recovery_plan, compare_command_idempotency, validate_command,
-    validate_conversation, validate_conversation_parent_kind, validate_event,
+    validate_conversation, validate_conversation_parent_kind, validate_delivery_attempt,
+    validate_delivery_evidence, validate_delivery_evidence_binding,
+    validate_delivery_evidence_order, validate_delivery_transition, validate_event,
 };
 
 const SCHEMA_VERSION: u32 = 5;
@@ -31,6 +34,7 @@ type ReplayKey = ([u8; 32], [u8; 32]);
 type RecoveryIdentityKey = (ScopeKey, String);
 type ConversationKey = (ScopeKey, String);
 type MessageKey = (ScopeKey, String);
+type DeliveryKey = (ScopeKey, String);
 
 #[derive(Default)]
 struct MemoryState {
@@ -43,6 +47,8 @@ struct MemoryState {
     active_recovery_plans: HashMap<RecoveryIdentityKey, String>,
     conversations: HashMap<ConversationKey, ConversationRecord>,
     messages: HashMap<MessageKey, MessageEnvelope>,
+    deliveries: HashMap<DeliveryKey, DeliveryAttempt>,
+    delivery_evidence: HashMap<DeliveryKey, Vec<DeliveryEvidence>>,
 }
 
 #[derive(Default)]
@@ -218,6 +224,13 @@ fn message_key(scope: &TenantScope, message_id: &MessageId) -> MessageKey {
     (scope_key(scope), message_id.as_opaque().as_str().to_owned())
 }
 
+fn delivery_key(scope: &TenantScope, delivery_id: &DeliveryId) -> DeliveryKey {
+    (
+        scope_key(scope),
+        delivery_id.as_opaque().as_str().to_owned(),
+    )
+}
+
 impl ConversationStore for MemoryLocalStore {
     fn persist_conversation(
         &self,
@@ -308,6 +321,139 @@ impl MessageStore for MemoryLocalStore {
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         Ok(state.messages.get(&message_key(scope, message_id)).cloned())
     }
+}
+
+impl DeliveryStore for MemoryLocalStore {
+    fn create_delivery_attempt(
+        &self,
+        attempt: &DeliveryAttempt,
+        persisted_evidence: &DeliveryEvidence,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_delivery_attempt(attempt).map_err(|_| DurableStoreError::InvalidRecord)?;
+        validate_delivery_evidence(attempt, persisted_evidence, DeliveryState::Persisted)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = delivery_key(&attempt.scope, &attempt.delivery_id);
+        let message_key = message_key(&attempt.scope, &attempt.message_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let message = state
+            .messages
+            .get(&message_key)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if message.delivery_state != DeliveryState::Persisted {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        if let Some(existing) = state.deliveries.get(&key) {
+            if existing != attempt {
+                return Err(DurableStoreError::Conflict);
+            }
+            let evidence = state
+                .delivery_evidence
+                .get(&key)
+                .ok_or(DurableStoreError::Corrupt)?;
+            return if evidence.first() == Some(persisted_evidence) {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.deliveries.insert(key.clone(), attempt.clone());
+        state
+            .delivery_evidence
+            .insert(key, vec![persisted_evidence.clone()]);
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn transition_delivery(
+        &self,
+        scope: &TenantScope,
+        delivery_id: &DeliveryId,
+        expected_state: DeliveryState,
+        next_state: DeliveryState,
+        evidence: Option<&DeliveryEvidence>,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let key = delivery_key(scope, delivery_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current = state
+            .deliveries
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if current.state != expected_state {
+            return Err(DurableStoreError::Conflict);
+        }
+        validate_delivery_transition(&current, next_state)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let proof_required = matches!(
+            next_state,
+            DeliveryState::Acknowledged | DeliveryState::Delivered | DeliveryState::Read
+        );
+        if proof_required && evidence.is_none() {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        if let Some(evidence) = evidence {
+            validate_delivery_evidence(&current, evidence, next_state)
+                .map_err(|_| DurableStoreError::InvalidRecord)?;
+            append_delivery_evidence(&mut state, &key, evidence)?;
+        }
+        let attempt = state
+            .deliveries
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Corrupt)?;
+        attempt.state = next_state;
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn record_delivery_evidence(
+        &self,
+        evidence: &DeliveryEvidence,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let key = delivery_key(&evidence.scope, &evidence.delivery_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current = state
+            .deliveries
+            .get(&key)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        validate_delivery_evidence_binding(current, evidence)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        append_delivery_evidence(&mut state, &key, evidence)
+    }
+
+    fn delivery_attempt(
+        &self,
+        scope: &TenantScope,
+        delivery_id: &DeliveryId,
+    ) -> Result<Option<DeliveryAttempt>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .deliveries
+            .get(&delivery_key(scope, delivery_id))
+            .cloned())
+    }
+}
+
+fn append_delivery_evidence(
+    state: &mut MemoryState,
+    key: &DeliveryKey,
+    evidence: &DeliveryEvidence,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+    let journal = state.delivery_evidence.entry(key.clone()).or_default();
+    if let Some(existing) = journal
+        .iter()
+        .find(|item| item.logical_order == evidence.logical_order)
+    {
+        return if existing == evidence {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    validate_delivery_evidence_order(
+        journal.last().map(|last| last.logical_order),
+        evidence.logical_order,
+    )
+    .map_err(|_| DurableStoreError::Conflict)?;
+    journal.push(evidence.clone());
+    Ok(DurableRecordStatus::Persisted)
 }
 
 impl CommandAcceptanceStore for MemoryLocalStore {
@@ -767,13 +913,13 @@ mod message_tests {
         OpaqueId::new(value).expect("valid id")
     }
 
-    fn scope() -> TenantScope {
+    pub(super) fn scope() -> TenantScope {
         TenantScope {
             tenant_id: TenantId::from_opaque(id("tenant-message")),
             namespace_id: None,
         }
     }
-    fn conversation() -> ConversationRecord {
+    pub(super) fn conversation() -> ConversationRecord {
         ConversationRecord {
             scope: scope(),
             conversation: ConversationRef {
@@ -784,7 +930,7 @@ mod message_tests {
         }
     }
 
-    fn message() -> MessageEnvelope {
+    pub(super) fn message() -> MessageEnvelope {
         MessageEnvelope {
             message_id: MessageId::from_opaque(id("message-memory")),
             scope: scope(),
@@ -910,6 +1056,156 @@ mod message_tests {
         assert_eq!(
             store.persist_message(&conflicting),
             Err(DurableStoreError::Conflict)
+        );
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use ucr_core::{
+        ConversationStore, DeliveryStore, DurableRecordStatus, DurableStoreError, MessageStore,
+    };
+    use ucr_model::{
+        DeliveryAttempt, DeliveryEvidence, DeliveryEvidenceKind, DeliveryId, DeliveryState,
+        OpaqueId,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+    fn attempt(id: &str) -> DeliveryAttempt {
+        let message = super::message_tests::message();
+        DeliveryAttempt {
+            delivery_id: DeliveryId::from_opaque(oid(id)),
+            scope: message.scope,
+            message_id: message.message_id,
+            state: DeliveryState::Persisted,
+        }
+    }
+    fn evidence(
+        attempt: &DeliveryAttempt,
+        kind: DeliveryEvidenceKind,
+        order: u64,
+    ) -> DeliveryEvidence {
+        DeliveryEvidence {
+            delivery_id: attempt.delivery_id.clone(),
+            scope: attempt.scope.clone(),
+            message_id: attempt.message_id.clone(),
+            kind,
+            logical_order: order,
+        }
+    }
+    fn seeded_store() -> MemoryLocalStore {
+        let store = MemoryLocalStore::default();
+        store
+            .persist_conversation(&super::message_tests::conversation())
+            .expect("persist conversation");
+        store
+            .persist_message(&super::message_tests::message())
+            .expect("persist message");
+        store
+    }
+
+    #[test]
+    fn delivery_attempt_starts_with_persisted_local_evidence() {
+        let store = seeded_store();
+        let attempt = attempt("delivery-a");
+        let evidence = evidence(&attempt, DeliveryEvidenceKind::PersistedLocal, 1);
+        assert_eq!(
+            store.create_delivery_attempt(&attempt, &evidence),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.create_delivery_attempt(&attempt, &evidence),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+    }
+
+    #[test]
+    fn relay_evidence_does_not_inflate_delivery_state() {
+        let store = seeded_store();
+        let attempt = attempt("delivery-relay");
+        store
+            .create_delivery_attempt(
+                &attempt,
+                &evidence(&attempt, DeliveryEvidenceKind::PersistedLocal, 1),
+            )
+            .expect("create attempt");
+        assert_eq!(
+            store.record_delivery_evidence(&evidence(
+                &attempt,
+                DeliveryEvidenceKind::ReplicatedToRelay,
+                2,
+            )),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        let loaded = store
+            .delivery_attempt(&attempt.scope, &attempt.delivery_id)
+            .expect("load attempt")
+            .expect("attempt exists");
+        assert_eq!(loaded.state, DeliveryState::Persisted);
+    }
+
+    #[test]
+    fn proof_required_transitions_fail_closed_without_matching_evidence() {
+        let store = seeded_store();
+        let attempt = attempt("delivery-proof");
+        store
+            .create_delivery_attempt(
+                &attempt,
+                &evidence(&attempt, DeliveryEvidenceKind::PersistedLocal, 1),
+            )
+            .expect("create attempt");
+        for (expected, next) in [
+            (DeliveryState::Persisted, DeliveryState::Encrypted),
+            (DeliveryState::Encrypted, DeliveryState::Queued),
+            (DeliveryState::Queued, DeliveryState::RoutePlanned),
+            (DeliveryState::RoutePlanned, DeliveryState::InFlight),
+        ] {
+            store
+                .transition_delivery(&attempt.scope, &attempt.delivery_id, expected, next, None)
+                .expect("advance local state");
+        }
+        assert_eq!(
+            store.transition_delivery(
+                &attempt.scope,
+                &attempt.delivery_id,
+                DeliveryState::InFlight,
+                DeliveryState::Acknowledged,
+                None,
+            ),
+            Err(DurableStoreError::InvalidRecord)
+        );
+    }
+
+    #[test]
+    fn evidence_order_is_monotonic_and_conflicting_order_fails() {
+        let store = seeded_store();
+        let attempt = attempt("delivery-order");
+        store
+            .create_delivery_attempt(
+                &attempt,
+                &evidence(&attempt, DeliveryEvidenceKind::PersistedLocal, 10),
+            )
+            .expect("create attempt");
+        assert_eq!(
+            store.record_delivery_evidence(&evidence(
+                &attempt,
+                DeliveryEvidenceKind::ReplicatedToRelay,
+                9,
+            )),
+            Err(DurableStoreError::Conflict)
+        );
+        let relay = evidence(&attempt, DeliveryEvidenceKind::ReplicatedToRelay, 11);
+        assert_eq!(
+            store.record_delivery_evidence(&relay),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.record_delivery_evidence(&relay),
+            Ok(DurableRecordStatus::Duplicate)
         );
     }
 }

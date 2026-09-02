@@ -1,6 +1,6 @@
 # UCR local storage contract
 
-Status: **Experimental / Phase 6 foundation, extended through Phase 9**
+Status: **Experimental / Phase 6 foundation, extended through Phase 10**
 
 Local storage is a capability boundary, not a public database schema and not an alternate UCR protocol. External consumers never receive direct database access.
 
@@ -50,7 +50,7 @@ The reference local store uses pinned bundled SQLite and must configure:
 
 A database carrying another application ID or unrelated user tables must not be silently adopted or mutated during rejection. A schema newer than the binary must be rejected; silent downgrade is forbidden. Schema shape and foreign-key consistency are validated when opening an existing store.
 
-Schema v2 migrates v1 transactionally: existing command acceptance/deduplication records are preserved, then scoped Command ID uniqueness and Event/outcome tables are added. If legacy rows contain duplicate scoped Command IDs, migration fails and the database remains at v1. Schema v3 migrates v2 transactionally by adding durable handshake replay state while preserving accepted commands and Events. Schema v4 migrates v3 transactionally by adding public Recovery Plan/authority/active-plan metadata while preserving command, Event, and replay state. Recovery secrets are not stored in these tables. Schema v5 migrates v4 transactionally by adding normalized Conversation/Message, ordered attachment/relation reference, and external-message-mapping tables while preserving all pre-existing durable state.
+Schema v2 migrates v1 transactionally: existing command acceptance/deduplication records are preserved, then scoped Command ID uniqueness and Event/outcome tables are added. If legacy rows contain duplicate scoped Command IDs, migration fails and the database remains at v1. Schema v3 migrates v2 transactionally by adding durable handshake replay state while preserving accepted commands and Events. Schema v4 migrates v3 transactionally by adding public Recovery Plan/authority/active-plan metadata while preserving command, Event, and replay state. Recovery secrets are not stored in these tables. Schema v5 migrates v4 transactionally by adding normalized Conversation/Message, ordered attachment/relation reference, and external-message-mapping tables while preserving all pre-existing durable state. Schema v6 migrates v5 transactionally by adding normalized DeliveryAttempt and append-only DeliveryEvidence tables while preserving all earlier durable state.
 
 On Unix, the database file is created and hardened as owner-only (`0600`), and SQLite WAL/SHM sidecars must not widen group/other access. Other operating systems must rely on the platform's private application-data ACL/sandbox and must not expose the database as a user-shared document.
 ## Explicit failure semantics
@@ -78,6 +78,8 @@ Storage exhaustion, corruption, unavailability, permission failures, foreign-sto
 | Message content + provenance + relations | durable canonical user communication | UCR Message | message retention policy | PRIVATE or originating classification |
 | Message crypto/signature metadata | future verification/decryption context | UCR Message/Crypto | message retention policy | SECURITY METADATA |
 | external Message mappings | provider Integration reconciliation only | UCR Integration | mapping retention policy | INTERNAL / provider metadata |
+| DeliveryAttempt state | monotonic per-attempt delivery state | UCR Delivery | delivery retention policy | INTERNAL / AUDIT |
+| DeliveryEvidence | typed proof for persisted/transport/relay/device/user stages | UCR Delivery | delivery evidence retention | AUDIT / SECURITY METADATA |
 
 Idempotency keys must not be used to carry secrets. Payload persistence is not telemetry and does not imply permission to export it. Private signing/agreement keys are never stored in this general SQLite schema; Phase-7 uses a separate non-exporting key-operation boundary. Payload-at-rest encryption remains a separate explicit decision and is not implied by transport/session crypto.
 

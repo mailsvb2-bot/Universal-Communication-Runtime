@@ -47,6 +47,33 @@ enum DeliveryState {
   DELIVERY_STATE_EXPIRED = 11;
 }
 
+enum DeliveryEvidenceKind {
+  DELIVERY_EVIDENCE_KIND_UNSPECIFIED = 0;
+  DELIVERY_EVIDENCE_KIND_CREATED_LOCAL = 1;
+  DELIVERY_EVIDENCE_KIND_PERSISTED_LOCAL = 2;
+  DELIVERY_EVIDENCE_KIND_ACCEPTED_BY_TRANSPORT = 3;
+  DELIVERY_EVIDENCE_KIND_REPLICATED_TO_RELAY = 4;
+  DELIVERY_EVIDENCE_KIND_RECEIVED_BY_DEVICE = 5;
+  DELIVERY_EVIDENCE_KIND_DECRYPTED_BY_DEVICE = 6;
+  DELIVERY_EVIDENCE_KIND_PRESENTED_TO_USER = 7;
+  DELIVERY_EVIDENCE_KIND_READ_BY_USER = 8;
+}
+
+message DeliveryAttempt {
+  OpaqueId delivery_id = 1;
+  TenantScope scope = 2;
+  OpaqueId message_id = 3;
+  DeliveryState state = 4;
+}
+
+message DeliveryEvidence {
+  OpaqueId delivery_id = 1;
+  TenantScope scope = 2;
+  OpaqueId message_id = 3;
+  DeliveryEvidenceKind kind = 4;
+  uint64 logical_order = 5;
+}
+
 enum MessageRelationKind {
   MESSAGE_RELATION_KIND_UNSPECIFIED = 0;
   MESSAGE_RELATION_KIND_REPLY = 1;

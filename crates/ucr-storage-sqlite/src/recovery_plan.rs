@@ -602,7 +602,9 @@ mod tests {
         let connection = Connection::open(db.path()).expect("open raw store");
         connection
             .execute_batch(
-                "DROP TABLE message_external_mappings;
+                "DROP TABLE delivery_evidence;
+                 DROP TABLE delivery_attempts;
+                 DROP TABLE message_external_mappings;
                  DROP TABLE message_relations;
                  DROP TABLE message_attachments;
                  DROP TABLE messages;

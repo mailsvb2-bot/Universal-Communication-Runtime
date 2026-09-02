@@ -157,6 +157,35 @@ pub enum DeliveryState {
     Expired,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeliveryEvidenceKind {
+    CreatedLocal,
+    PersistedLocal,
+    AcceptedByTransport,
+    ReplicatedToRelay,
+    ReceivedByDevice,
+    DecryptedByDevice,
+    PresentedToUser,
+    ReadByUser,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryAttempt {
+    pub delivery_id: DeliveryId,
+    pub scope: TenantScope,
+    pub message_id: MessageId,
+    pub state: DeliveryState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryEvidence {
+    pub delivery_id: DeliveryId,
+    pub scope: TenantScope,
+    pub message_id: MessageId,
+    pub kind: DeliveryEvidenceKind,
+    pub logical_order: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityEvidence {
     Unverified,

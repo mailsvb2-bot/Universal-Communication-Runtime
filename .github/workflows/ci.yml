@@ -89,7 +89,8 @@ jobs:
           test -s spec/local-storage.md &&
           test -s spec/crypto.md &&
           test -s spec/recovery.md &&
-          test -s spec/conversation-message.md
+          test -s spec/conversation-message.md &&
+          test -s spec/delivery.md
       - name: Public contract exists
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
@@ -113,4 +114,5 @@ jobs:
           test -s docs/adr/0010-append-only-event-journal-and-terminal-command-outcomes.md &&
           test -s docs/adr/0011-versioned-crypto-suite-v1-and-non-exporting-key-operations.md &&
           test -s docs/adr/0012-recovery-is-an-explicit-trust-transition.md &&
-          test -s docs/adr/0013-provider-independent-conversation-and-durable-message.md
+          test -s docs/adr/0013-provider-independent-conversation-and-durable-message.md &&
+          test -s docs/adr/0014-delivery-attempts-and-evidence-are-separate-from-message-identity.md
