@@ -286,3 +286,115 @@ fn device_lifecycle_and_identity_evidence_match_canon_vocabulary() {
         );
     }
 }
+
+#[test]
+fn threat_model_keeps_all_canon_trust_boundaries() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let threat_model = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("read threat model");
+
+    for boundary in [
+        "User Device",
+        "External App",
+        "SDK",
+        "UCR Core",
+        "Relay",
+        "Bridge",
+        "SFU",
+        "Personal Node",
+        "Organization Node",
+        "Cloud Infrastructure",
+    ] {
+        assert!(
+            threat_model.contains(boundary),
+            "threat model is missing `{boundary}`"
+        );
+    }
+}
+#[test]
+fn threat_model_keeps_required_canon_threat_classes() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let threat_model = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("read threat model");
+
+    for threat in [
+        "malicious peer",
+        "compromised device",
+        "stolen device",
+        "malicious bridge",
+        "compromised relay",
+        "compromised SFU",
+        "malicious tenant",
+        "malicious service account",
+        "MITM",
+        "replay",
+        "downgrade",
+        "impersonation",
+        "attachment bombs",
+        "Sybil-like abuse",
+    ] {
+        assert!(
+            threat_model.contains(threat),
+            "threat model is missing `{threat}`"
+        );
+    }
+}
+#[test]
+fn threat_model_keeps_production_blockers_visible() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let threat_model = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("read threat model");
+
+    for blocker in [
+        "authenticated handshake and key confirmation",
+        "replay protection state",
+        "cryptographic transcript/downgrade binding",
+        "tenant-scoped authorization enforcement",
+        "Service Principal authentication/least-privilege enforcement",
+        "device revocation enforcement",
+        "account/key recovery model and tests",
+        "required threat simulations",
+        "required fuzz targets",
+        "secret/plaintext telemetry regression tests",
+    ] {
+        assert!(
+            threat_model.contains(blocker),
+            "production blocker disappeared without evidence: `{blocker}`"
+        );
+    }
+
+    assert!(threat_model.contains("Documentation alone does not close it"));
+}
+#[test]
+fn threat_model_keeps_minimum_disclosure_and_security_nonclaims() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let threat_model = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("read threat model");
+
+    for invariant in [
+        "minimum disclosure of metadata",
+        "Relay receives only relay-required routing material",
+        "Bridge receives only provider context required",
+        "SFU receives only media-routing context required",
+        "Successful version/capability negotiation alone is not proof",
+        "cannot promise deletion of secrets or plaintext already extracted",
+        "must not require central telemetry upload to function",
+    ] {
+        assert!(
+            threat_model.contains(invariant),
+            "security/privacy invariant is missing: `{invariant}`"
+        );
+    }
+}
