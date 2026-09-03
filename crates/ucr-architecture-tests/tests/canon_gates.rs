@@ -1419,3 +1419,53 @@ fn sensitive_model_debug_surfaces_redact_private_material_without_closing_teleme
         "do **not** close the broader `secret/plaintext telemetry regression tests` blocker"
     ));
 }
+
+#[test]
+fn opaque_id_bytes_have_one_explicit_utf8_semantic_owner() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let proto =
+        fs::read_to_string(workspace.join("proto/ucr/v1/common.proto")).expect("common proto");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let protocol = fs::read_to_string(workspace.join("spec/protocol.md")).expect("protocol spec");
+    let sync = fs::read_to_string(workspace.join("spec/sync.md")).expect("sync spec");
+    let anti_entropy =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/anti_entropy.rs"))
+            .expect("anti entropy protocol");
+    let sqlite = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite store");
+    let local_storage =
+        fs::read_to_string(workspace.join("spec/local-storage.md")).expect("local storage spec");
+
+    assert!(proto.contains("message OpaqueId"));
+    assert!(proto.contains("bytes value = 1;"));
+    assert!(proto.contains("exact, non-empty UTF-8 token of at most 128 bytes"));
+    assert!(model.contains("pub struct OpaqueId(String);"));
+    assert!(model.contains("pub const MAX_LEN: usize = 128;"));
+    assert!(model.contains("InvalidUtf8"));
+    assert!(model.contains("pub fn from_wire_bytes(value: &[u8])"));
+    assert!(model.contains("pub fn as_wire_bytes(&self) -> &[u8]"));
+    assert!(model.contains("opaque_id_wire_bytes_have_explicit_utf8_and_byte_budget_semantics"));
+    assert!(model.contains("opaque_id_does_not_normalize_distinct_utf8_tokens"));
+
+    for invariant in [
+        "an exact, non-empty UTF-8 token whose encoded length is at most 128 bytes",
+        "MUST NOT normalize Unicode, case-fold, trim, transliterate, or otherwise rewrite an ID",
+        "protobuf syntactic ability to carry arbitrary bytes is not by itself canonical validity",
+    ] {
+        assert!(
+            protocol.contains(invariant),
+            "OpaqueId invariant missing: {invariant}"
+        );
+    }
+    assert!(sync.contains("canonical IDs as their exact `OpaqueId.value` semantic UTF-8 bytes"));
+    assert!(anti_entropy.contains("value.as_wire_bytes()"));
+    assert!(anti_entropy.contains("event_fingerprint_sha256_v1_matches_golden_vector"));
+    assert!(sync.contains("The Phase-12 golden vector in the reference implementation hashes"));
+    assert!(sqlite.contains("utf8_opaque_ids_survive_restart_without_normalization"));
+    assert!(
+        local_storage.contains("This OpaqueId clarification requires no SQLite schema migration.")
+    );
+}

@@ -12,7 +12,11 @@ Every protocol envelope carries an explicit schema/protocol version. Runtime res
 
 ## 2. Canonical IDs and scope
 
-IDs are opaque protocol values. Their meaning must not be inferred from phone numbers, emails, IP addresses, hostnames, provider IDs, or server database sequences.
+IDs are opaque protocol values. Their meaning must not be inferred from phone numbers, emails, IP addresses, hostnames, provider IDs, or server database sequences. Canonical IDs are generated offline; the concrete generation algorithm remains a separate ADR decision.
+
+The public `ucr.v1.OpaqueId.value` field remains protobuf `bytes` in v1, but its semantic domain is explicit: an ID is an exact, non-empty UTF-8 token whose encoded length is at most 128 bytes. Semantic decoding rejects invalid UTF-8 and over-budget values. Implementations MUST preserve the exact UTF-8 bytes and MUST NOT normalize Unicode, case-fold, trim, transliterate, or otherwise rewrite an ID. Distinct byte sequences remain distinct opaque IDs even when they could render similarly.
+
+The Rust reference `OpaqueId` is the single representation owner and exposes semantic wire-byte decode/encode without creating a second binary-ID model. A future decision to admit arbitrary non-UTF-8 IDs requires an explicit versioned compatibility/storage/fingerprint ADR; protobuf syntactic ability to carry arbitrary bytes is not by itself canonical validity.
 
 Security-sensitive envelopes carry `tenant_id`; namespace is explicit where additional separation is required. Tenant scope is never inferred from transport metadata.
 

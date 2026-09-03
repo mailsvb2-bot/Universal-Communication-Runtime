@@ -50,10 +50,11 @@ Independent implementations MUST produce exactly the same bytes before SHA-256:
 
 - prepend the ASCII domain bytes `ucr:event-fingerprint:sha256:v1\0`;
 - encode every byte string as unsigned 64-bit big-endian length followed by the raw bytes; strings are UTF-8 and use that byte-string encoding;
-- encode optional strings/IDs as one byte `0x00` for absent, or `0x01` followed by the encoded string for present;
+- encode canonical IDs as their exact `OpaqueId.value` semantic UTF-8 bytes using the byte-string length prefix above; do not normalize or reconstruct them through another textual representation;
+- encode optional strings as one byte `0x00` for absent, or `0x01` followed by the encoded UTF-8 string for present; encode optional IDs with the same presence byte followed by the encoded canonical ID bytes;
 - encode booleans as one byte `0x00` or `0x01`;
 - encode `u32` and `u64` as fixed-width unsigned big-endian; encode `i64` as its fixed-width two's-complement big-endian representation;
-- encode scope as tenant ID string, then namespace-presence byte, then namespace ID string only when present;
+- encode scope as tenant canonical ID bytes, then namespace-presence byte, then namespace canonical ID bytes only when present;
 - encode `ActorKind` as one byte: Person=`1`, AiAgent=`2`, Bot=`3`, Organization=`4`, System=`5`; these codes are fingerprint-format constants and do not depend on language enum layout;
 - after canonical extension sorting, encode extension count as `u64` big-endian, then each extension as name string, critical byte, payload bytes.
 

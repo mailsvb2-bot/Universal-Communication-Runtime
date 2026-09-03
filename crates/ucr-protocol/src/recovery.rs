@@ -122,22 +122,19 @@ pub fn recovery_plan_aad(plan: &RecoveryPlan) -> Result<Vec<u8>, RecoveryError> 
     let plan = canonical_recovery_plan(plan)?;
     let mut output = Vec::new();
     output.extend_from_slice(b"UCR-RECOVERY-PLAN-AAD-V1\0");
-    push_field(&mut output, plan.plan_id.as_opaque().as_str().as_bytes())?;
+    push_field(&mut output, plan.plan_id.as_opaque().as_wire_bytes())?;
     push_field(
         &mut output,
-        plan.scope.tenant_id.as_opaque().as_str().as_bytes(),
+        plan.scope.tenant_id.as_opaque().as_wire_bytes(),
     )?;
     match &plan.scope.namespace_id {
         Some(namespace) => {
             output.push(1);
-            push_field(&mut output, namespace.as_opaque().as_str().as_bytes())?;
+            push_field(&mut output, namespace.as_opaque().as_wire_bytes())?;
         }
         None => output.push(0),
     }
-    push_field(
-        &mut output,
-        plan.identity_id.as_opaque().as_str().as_bytes(),
-    )?;
+    push_field(&mut output, plan.identity_id.as_opaque().as_wire_bytes())?;
     let mut authorities = plan
         .authorities
         .iter()
@@ -166,10 +163,10 @@ fn encode_authority(authority: &RecoveryAuthority) -> Result<Vec<u8>, RecoveryEr
     let mut output = vec![authority.method() as u8];
     match authority {
         RecoveryAuthority::TrustedDevice(device) | RecoveryAuthority::HardwareBacked(device) => {
-            push_field(&mut output, device.as_opaque().as_str().as_bytes())?;
+            push_field(&mut output, device.as_opaque().as_wire_bytes())?;
         }
         RecoveryAuthority::OrganizationManaged(principal) => {
-            push_field(&mut output, principal.as_opaque().as_str().as_bytes())?;
+            push_field(&mut output, principal.as_opaque().as_wire_bytes())?;
         }
         RecoveryAuthority::RecoveryCode
         | RecoveryAuthority::RecoveryKey
