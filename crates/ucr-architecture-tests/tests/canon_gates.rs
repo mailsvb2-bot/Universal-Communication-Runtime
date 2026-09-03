@@ -1469,3 +1469,62 @@ fn opaque_id_bytes_have_one_explicit_utf8_semantic_owner() {
         local_storage.contains("This OpaqueId clarification requires no SQLite schema migration.")
     );
 }
+
+#[test]
+fn native_opaque_id_generation_is_offline_csprng_owned_and_non_authoritative() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let protocol_id = fs::read_to_string(workspace.join("crates/ucr-protocol/src/id.rs"))
+        .expect("id generation protocol");
+    let core_id = fs::read_to_string(workspace.join("crates/ucr-core/src/id.rs"))
+        .expect("id generation runtime");
+    let protocol = fs::read_to_string(workspace.join("spec/protocol.md")).expect("protocol spec");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let protocol_cargo = fs::read_to_string(workspace.join("crates/ucr-protocol/Cargo.toml"))
+        .expect("protocol cargo manifest");
+    let core_cargo = fs::read_to_string(workspace.join("crates/ucr-core/Cargo.toml"))
+        .expect("core cargo manifest");
+
+    assert!(protocol_id.contains("ucr.id.random_hex.v1"));
+    assert!(protocol_id.contains("CANONICAL_ID_RANDOM_BYTES: usize = 16"));
+    assert!(protocol_id.contains("generation_contract_has_stable_algorithm_and_golden_encoding"));
+    assert!(protocol_id.contains("pub fn encode_native_opaque_id"));
+    assert!(!protocol_id.contains("getrandom::"));
+    assert!(!protocol_cargo.contains("getrandom"));
+
+    assert!(core_id.contains("pub fn generate_opaque_id"));
+    assert!(core_id.contains("getrandom::fill(bytes)"));
+    assert!(core_id.contains("generator_fails_closed_when_os_randomness_is_unavailable"));
+    assert!(core_id.contains("production_generator_emits_semantically_valid_lower_hex_tokens"));
+    assert!(core_cargo.contains("getrandom = \"=0.4.3\""));
+
+    for forbidden in [
+        "std::time",
+        "SystemTime",
+        "Uuid",
+        "Ulid",
+        "rand::",
+        "thread_rng",
+    ] {
+        assert!(
+            !core_id.contains(forbidden),
+            "native ID runtime must not depend on alternate/time-based source: {forbidden}"
+        );
+    }
+    for invariant in [
+        "exactly 16 bytes (128 bits) from the operating-system CSPRNG",
+        "no clock, host, provider, server, database-sequence, or business-data input",
+        "not a credential, authority proof, chronology value, or a narrower validation rule",
+        "`ucr-protocol::encode_native_opaque_id` is the single deterministic algorithm/encoding owner",
+        "`ucr-core::generate_opaque_id` is the Rust runtime owner",
+    ] {
+        assert!(
+            protocol.contains(invariant),
+            "native ID generation invariant missing: {invariant}"
+        );
+    }
+    assert!(threat.contains("`ucr.id.random_hex.v1` uses 128 bits from the OS CSPRNG"));
+}

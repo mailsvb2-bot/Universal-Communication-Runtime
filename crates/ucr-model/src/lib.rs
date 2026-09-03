@@ -4,9 +4,9 @@ use core::fmt;
 
 /// Opaque canonical identifier value.
 ///
-/// The concrete offline generation algorithm is intentionally not selected in
-/// Phase 0; callers must not infer provider, network, tenant or business
-/// semantics from this value.
+/// Native offline generation is specified by UCR Protocol ADR-0023; this model
+/// remains the representation/validation owner. Callers must not infer provider,
+/// network, tenant, business, authority, or chronology semantics from this value.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpaqueId(String);
 

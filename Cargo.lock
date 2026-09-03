@@ -523,6 +523,7 @@ dependencies = [
 name = "ucr-core"
 version = "0.0.1"
 dependencies = [
+ "getrandom",
  "ucr-model",
  "ucr-protocol",
 ]

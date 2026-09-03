@@ -12,11 +12,11 @@ Every protocol envelope carries an explicit schema/protocol version. Runtime res
 
 ## 2. Canonical IDs and scope
 
-IDs are opaque protocol values. Their meaning must not be inferred from phone numbers, emails, IP addresses, hostnames, provider IDs, or server database sequences. Canonical IDs are generated offline; the concrete generation algorithm remains a separate ADR decision.
+IDs are opaque protocol values. Their meaning must not be inferred from phone numbers, emails, IP addresses, hostnames, provider IDs, or server database sequences. Canonical IDs are generated offline. Native UCR generation uses `ucr.id.random_hex.v1`: exactly 16 bytes (128 bits) from the operating-system CSPRNG encoded as exactly 32 lowercase hexadecimal ASCII characters. Generation has no clock, host, provider, server, database-sequence, or business-data input; OS-random failure is explicit and has no predictable fallback.
 
 The public `ucr.v1.OpaqueId.value` field remains protobuf `bytes` in v1, but its semantic domain is explicit: an ID is an exact, non-empty UTF-8 token whose encoded length is at most 128 bytes. Semantic decoding rejects invalid UTF-8 and over-budget values. Implementations MUST preserve the exact UTF-8 bytes and MUST NOT normalize Unicode, case-fold, trim, transliterate, or otherwise rewrite an ID. Distinct byte sequences remain distinct opaque IDs even when they could render similarly.
 
-The Rust reference `OpaqueId` is the single representation owner and exposes semantic wire-byte decode/encode without creating a second binary-ID model. A future decision to admit arbitrary non-UTF-8 IDs requires an explicit versioned compatibility/storage/fingerprint ADR; protobuf syntactic ability to carry arbitrary bytes is not by itself canonical validity.
+The Rust reference `OpaqueId` is the single representation owner and exposes semantic wire-byte decode/encode without creating a second binary-ID model. `ucr-protocol::encode_native_opaque_id` is the single deterministic algorithm/encoding owner, while `ucr-core::generate_opaque_id` is the Rust runtime owner that acquires OS CSPRNG entropy and delegates to that protocol encoding. Native random-hex output is not a credential, authority proof, chronology value, or a narrower validation rule for imported/existing IDs. A future decision to admit arbitrary non-UTF-8 IDs requires an explicit versioned compatibility/storage/fingerprint ADR; protobuf syntactic ability to carry arbitrary bytes is not by itself canonical validity.
 
 Security-sensitive envelopes carry `tenant_id`; namespace is explicit where additional separation is required. Tenant scope is never inferred from transport metadata.
 

@@ -13,6 +13,7 @@ mod error;
 mod extension;
 mod framing;
 mod handshake;
+mod id;
 mod intent;
 mod message;
 mod provenance;
@@ -81,6 +82,10 @@ pub use handshake::{
     HandshakeError, NegotiatedSession, NegotiationPolicy, NegotiationResultEnvelope,
     NegotiationResultError, PeerHello, canonical_negotiation_result, negotiate_session,
     negotiation_result_for_session, validate_negotiation_result,
+};
+pub use id::{
+    CANONICAL_ID_GENERATION_ALGORITHM_ID, CANONICAL_ID_RANDOM_BYTES, CANONICAL_ID_TEXT_LEN,
+    NativeIdEncodingError, encode_native_opaque_id,
 };
 pub use intent::{
     IntentError, MAX_INTENT_TRANSPORT_CONSTRAINTS, canonical_communication_intent,

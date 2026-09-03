@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod id;
+
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CapabilityDescriptor,
     CommandEnvelope, CommandId, CommunicationIntent, ConversationId, ConversationRecord,
@@ -9,6 +11,8 @@ use ucr_model::{
     TenantScope,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
+
+pub use id::{IdGenerationError, generate_opaque_id};
 
 /// A route candidate is transient runtime state, never canonical identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
