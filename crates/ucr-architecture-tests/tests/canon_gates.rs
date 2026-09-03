@@ -356,7 +356,6 @@ fn threat_model_keeps_production_blockers_visible() {
 
     for blocker in [
         "production OS/hardware-backed key providers for supported targets",
-        "tenant-scoped authorization enforcement",
         "Service Principal authentication/least-privilege enforcement",
         "device revocation enforcement",
         "end-to-end recovery workflow",
@@ -1656,7 +1655,6 @@ fn trusted_signing_key_lifecycle_is_scoped_restart_safe_and_runtime_integrated()
     assert!(!threat.contains("- trusted peer signing-key provisioning and lifecycle integration;"));
     for remaining in [
         "production OS/hardware-backed key providers for supported targets",
-        "tenant-scoped authorization enforcement",
         "device revocation enforcement in credential/key delivery",
     ] {
         assert!(
@@ -1759,6 +1757,8 @@ fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overc
     let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
     let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/authorization.rs"))
         .expect("authorization protocol");
+    let runtime = fs::read_to_string(workspace.join("crates/ucr-core/src/authorized_runtime.rs"))
+        .expect("authorized runtime");
     let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
         .expect("memory store");
     let sqlite =
@@ -1776,9 +1776,9 @@ fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overc
 
     assert!(core.contains("pub trait PermissionGrantStore"));
     assert!(core.contains("pub struct AuthorizedTrustedSigningKeyMutations"));
-    assert!(core.contains("TRUSTED_SIGNING_KEY_PROVISION_PERMISSION"));
-    assert!(core.contains("TRUSTED_SIGNING_KEY_ROTATE_PERMISSION"));
-    assert!(core.contains("TRUSTED_SIGNING_KEY_REVOKE_PERMISSION"));
+    assert!(runtime.contains("TRUSTED_SIGNING_KEY_PROVISION_PERMISSION"));
+    assert!(runtime.contains("TRUSTED_SIGNING_KEY_ROTATE_PERMISSION"));
+    assert!(runtime.contains("TRUSTED_SIGNING_KEY_REVOKE_PERMISSION"));
     assert!(protocol.contains("ucr.crypto.trusted_signing_key.provision"));
     assert!(protocol.contains("ucr.crypto.trusted_signing_key.rotate"));
     assert!(protocol.contains("ucr.crypto.trusted_signing_key.revoke"));
@@ -1799,7 +1799,140 @@ fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overc
     assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 12;"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(spec.contains("SQLite schema v12"));
-    assert!(spec.contains("broader production blocker remains"));
     assert!(adr.contains("does not claim every Command/Message/Sync/Delivery/runtime operation"));
-    assert!(threat.contains("- tenant-scoped authorization enforcement;"));
+    assert!(threat.contains("SQLite v12 state"));
+}
+
+const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
+    "grant_permission",
+    "revoke_permission",
+    "permission_grants_for",
+    "provision_trusted_signing_key",
+    "rotate_trusted_signing_key",
+    "revoke_trusted_signing_key",
+    "trusted_signing_key",
+    "active_trusted_signing_key",
+    "install_recovery_plan",
+    "rotate_recovery_plan",
+    "revoke_recovery_plan",
+    "active_recovery_plan",
+    "accept_command",
+    "persist_conversation",
+    "conversation",
+    "persist_message",
+    "message",
+    "create_delivery_attempt",
+    "transition_delivery",
+    "record_delivery_evidence",
+    "delivery_attempt",
+    "create_sync_session",
+    "transition_sync",
+    "record_sync_checkpoint",
+    "sync_session",
+    "latest_sync_checkpoint",
+    "append_event",
+    "anti_entropy_summary_page",
+    "classify_event_summaries",
+    "reconcile_event",
+    "record_terminal_event",
+    "terminal_event",
+];
+
+const AUTHORIZED_RUNTIME_PERMISSIONS: &[&str] = &[
+    "PERMISSION_GRANT_READ_PERMISSION",
+    "PERMISSION_GRANT_CREATE_PERMISSION",
+    "PERMISSION_GRANT_REVOKE_PERMISSION",
+    "TRUSTED_SIGNING_KEY_READ_PERMISSION",
+    "TRUSTED_SIGNING_KEY_PROVISION_PERMISSION",
+    "TRUSTED_SIGNING_KEY_ROTATE_PERMISSION",
+    "TRUSTED_SIGNING_KEY_REVOKE_PERMISSION",
+    "RECOVERY_PLAN_READ_PERMISSION",
+    "RECOVERY_PLAN_INSTALL_PERMISSION",
+    "RECOVERY_PLAN_ROTATE_PERMISSION",
+    "RECOVERY_PLAN_REVOKE_PERMISSION",
+    "COMMAND_ACCEPT_PERMISSION",
+    "COMMAND_OUTCOME_READ_PERMISSION",
+    "COMMAND_OUTCOME_WRITE_PERMISSION",
+    "CONVERSATION_READ_PERMISSION",
+    "CONVERSATION_WRITE_PERMISSION",
+    "MESSAGE_READ_PERMISSION",
+    "MESSAGE_WRITE_PERMISSION",
+    "DELIVERY_READ_PERMISSION",
+    "DELIVERY_WRITE_PERMISSION",
+    "SYNC_READ_PERMISSION",
+    "SYNC_WRITE_PERMISSION",
+    "ANTI_ENTROPY_READ_PERMISSION",
+    "ANTI_ENTROPY_RECONCILE_PERMISSION",
+    "EVENT_APPEND_PERMISSION",
+];
+
+#[test]
+fn tenant_scoped_durable_runtime_authorization_covers_every_current_method() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+    let runtime = fs::read_to_string(workspace.join("crates/ucr-core/src/authorized_runtime.rs"))
+        .expect("authorized runtime");
+    let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/authorization.rs"))
+        .expect("authorization protocol");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+    let spec = fs::read_to_string(workspace.join("spec/permissions.md")).expect("permissions spec");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0028-tenant-scoped-durable-runtime-operations-require-explicit-permissions.md",
+    ))
+    .expect("adr 0028");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    for method in AUTHORIZED_DURABLE_METHODS {
+        assert!(
+            runtime.contains(&format!("pub fn {method}(")),
+            "authorized runtime method missing: {method}"
+        );
+    }
+    assert_eq!(
+        runtime.matches("pub fn ").count(),
+        AUTHORIZED_DURABLE_METHODS.len()
+    );
+    assert_eq!(
+        runtime.matches("self.require(").count(),
+        AUTHORIZED_DURABLE_METHODS.len()
+    );
+
+    for permission in AUTHORIZED_RUNTIME_PERMISSIONS {
+        assert!(
+            protocol.contains(permission),
+            "permission owner missing: {permission}"
+        );
+        assert!(
+            runtime.contains(permission),
+            "runtime permission mapping missing: {permission}"
+        );
+    }
+    assert!(protocol.contains("pub const RUNTIME_PERMISSION_IDS"));
+    assert!(protocol.contains("runtime_permission_vocabulary_is_namespaced_and_unique"));
+    assert!(
+        memory
+            .contains("runtime_permission_administration_cannot_self_bootstrap_and_is_scope_bound")
+    );
+    assert!(
+        memory
+            .contains("unified_runtime_enforces_independent_conversation_and_message_permissions")
+    );
+    assert!(core.contains("AuthorizedDurableRuntime::new(self.authorization, self.store)"));
+    assert!(spec.contains("every currently implemented tenant-scoped durable capability"));
+    assert!(adr.contains("mirrors all 32 methods"));
+    assert!(adr.contains("cannot grant itself grant-management authority"));
+    assert!(ci.contains(
+        "docs/adr/0028-tenant-scoped-durable-runtime-operations-require-explicit-permissions.md"
+    ));
+    assert!(
+        !threat.contains("- tenant-scoped authorization enforcement;"),
+        "authorization blocker may be removed only with complete runtime evidence"
+    );
+    assert!(threat.contains("- Service Principal authentication/least-privilege enforcement;"));
 }
