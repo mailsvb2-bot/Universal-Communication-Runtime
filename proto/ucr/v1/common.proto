@@ -13,6 +13,9 @@ message VersionRange {
 }
 
 message OpaqueId {
+  // v1 keeps a bytes field for public-contract compatibility. Semantic decoding
+  // requires an exact, non-empty UTF-8 token of at most 128 bytes. Implementations
+  // must not normalize, case-fold, trim, or otherwise rewrite the token.
   bytes value = 1;
 }
 

@@ -13,33 +13,62 @@ pub struct OpaqueId(String);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpaqueIdError {
     Empty,
+    InvalidUtf8,
     TooLong,
 }
 
 impl OpaqueId {
     pub const MAX_LEN: usize = 128;
 
-    /// Creates an opaque ID after applying only representation-safety checks.
+    /// Creates an opaque ID from its canonical UTF-8 token representation.
+    ///
+    /// The representation is byte-preserving: no Unicode normalization,
+    /// case-folding, trimming, or provider-specific interpretation is applied.
     ///
     /// # Errors
     /// Returns [`OpaqueIdError::Empty`] for an empty value and
-    /// [`OpaqueIdError::TooLong`] when the representation exceeds the Phase-0
-    /// protocol budget.
+    /// [`OpaqueIdError::TooLong`] when its UTF-8 encoding exceeds the canonical
+    /// 128-byte protocol budget.
     pub fn new(value: impl Into<String>) -> Result<Self, OpaqueIdError> {
         let value = value.into();
-        if value.is_empty() {
-            return Err(OpaqueIdError::Empty);
-        }
-        if value.len() > Self::MAX_LEN {
-            return Err(OpaqueIdError::TooLong);
-        }
+        validate_opaque_id_bytes(value.as_bytes())?;
         Ok(Self(value))
+    }
+
+    /// Semantically decodes the public `ucr.v1.OpaqueId.value` byte field.
+    ///
+    /// # Errors
+    /// Returns [`OpaqueIdError::Empty`] for an empty value,
+    /// [`OpaqueIdError::InvalidUtf8`] for a non-UTF-8 byte sequence, and
+    /// [`OpaqueIdError::TooLong`] when the exact wire representation exceeds
+    /// the canonical 128-byte budget.
+    pub fn from_wire_bytes(value: &[u8]) -> Result<Self, OpaqueIdError> {
+        validate_opaque_id_bytes(value)?;
+        let value = core::str::from_utf8(value).map_err(|_| OpaqueIdError::InvalidUtf8)?;
+        Ok(Self(value.to_owned()))
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Returns the exact canonical bytes carried by public `OpaqueId.value`.
+    #[must_use]
+    pub fn as_wire_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+fn validate_opaque_id_bytes(value: &[u8]) -> Result<(), OpaqueIdError> {
+    if value.is_empty() {
+        return Err(OpaqueIdError::Empty);
+    }
+    if value.len() > OpaqueId::MAX_LEN {
+        return Err(OpaqueIdError::TooLong);
+    }
+    core::str::from_utf8(value).map_err(|_| OpaqueIdError::InvalidUtf8)?;
+    Ok(())
 }
 
 impl fmt::Debug for OpaqueId {
@@ -889,6 +918,34 @@ mod tests {
     #[test]
     fn opaque_id_rejects_empty_values() {
         assert_eq!(OpaqueId::new(""), Err(OpaqueIdError::Empty));
+    }
+
+    #[test]
+    fn opaque_id_wire_bytes_have_explicit_utf8_and_byte_budget_semantics() {
+        let exact = "идентификатор-é".as_bytes();
+        let decoded = OpaqueId::from_wire_bytes(exact).expect("decode wire ID");
+        assert_eq!(decoded.as_wire_bytes(), exact);
+        assert_eq!(decoded.as_str().as_bytes(), exact);
+        assert_eq!(
+            OpaqueId::from_wire_bytes(&[0xff, 0xfe]),
+            Err(OpaqueIdError::InvalidUtf8)
+        );
+        assert_eq!(
+            OpaqueId::from_wire_bytes(&[b'a'; OpaqueId::MAX_LEN + 1]),
+            Err(OpaqueIdError::TooLong)
+        );
+        assert!(OpaqueId::new("é".repeat(64)).is_ok());
+        assert_eq!(OpaqueId::new("é".repeat(65)), Err(OpaqueIdError::TooLong));
+    }
+
+    #[test]
+    fn opaque_id_does_not_normalize_distinct_utf8_tokens() {
+        let composed = OpaqueId::from_wire_bytes("é".as_bytes()).expect("composed ID");
+        let decomposed_text = format!("e{}", '\u{301}');
+        let decomposed =
+            OpaqueId::from_wire_bytes(decomposed_text.as_bytes()).expect("decomposed ID");
+        assert_ne!(composed, decomposed);
+        assert_ne!(composed.as_wire_bytes(), decomposed.as_wire_bytes());
     }
 
     #[test]

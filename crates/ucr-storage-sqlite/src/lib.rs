@@ -1062,6 +1062,68 @@ mod tests {
     }
 
     #[test]
+    fn utf8_opaque_ids_survive_restart_without_normalization() {
+        let db = TestDbPath::new();
+        let mut composed = command(
+            "команда-é",
+            "retry-unicode",
+            b"payload",
+            Some("пространство-é"),
+        );
+        composed.scope.tenant_id = TenantId::from_opaque(opaque("арендатор-é"));
+        composed.correlation.correlation_id = opaque("корреляция-é");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            assert_eq!(
+                store
+                    .accept_command(&composed)
+                    .expect("accept unicode command")
+                    .status,
+                CommandReceiptStatus::Accepted
+            );
+        }
+        let retry = {
+            let mut value = command(
+                "команда-повтор-é",
+                "retry-unicode",
+                b"payload",
+                Some("пространство-é"),
+            );
+            value.scope.tenant_id = TenantId::from_opaque(opaque("арендатор-é"));
+            value.correlation.correlation_id = opaque("другая-корреляция-é");
+            value
+        };
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen unicode store");
+        let duplicate = reopened
+            .accept_command(&retry)
+            .expect("deduplicate unicode retry");
+        assert_eq!(duplicate.status, CommandReceiptStatus::Duplicate);
+        assert_eq!(
+            duplicate.original_command_id,
+            Some(composed.command_id.clone())
+        );
+        assert_eq!(
+            duplicate
+                .original_command_id
+                .expect("original")
+                .as_opaque()
+                .as_wire_bytes(),
+            "команда-é".as_bytes()
+        );
+
+        let mut decomposed_scope = command("command-decomposed", "retry-unicode", b"payload", None);
+        let decomposed_tenant = format!("арендатор-e{}", '\u{301}');
+        decomposed_scope.scope.tenant_id = TenantId::from_opaque(opaque(&decomposed_tenant));
+        assert_eq!(
+            reopened
+                .accept_command(&decomposed_scope)
+                .expect("distinct decomposed tenant")
+                .status,
+            CommandReceiptStatus::Accepted
+        );
+    }
+
+    #[test]
     fn command_protocol_semantics_survive_restart_and_extension_order_is_canonical() {
         let db = TestDbPath::new();
         let mut first = command(

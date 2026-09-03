@@ -1,4 +1,4 @@
-use ucr_model::ProtocolExtension;
+use ucr_model::{OpaqueIdError, ProtocolExtension};
 
 use crate::{
     AcknowledgementError, AddressingError, AuthorizationError, CapabilityError, CommandError,
@@ -133,6 +133,18 @@ pub fn error_envelope_from_canonical(
         retry_after_ms: error.retry_after_ms,
         diagnostic_domain: diagnostic_domain.into(),
         extensions: Vec::new(),
+    }
+}
+
+impl From<OpaqueIdError> for CanonicalError {
+    fn from(error: OpaqueIdError) -> Self {
+        let code = match error {
+            OpaqueIdError::TooLong => CanonicalErrorCode::ResourceExhausted,
+            OpaqueIdError::Empty | OpaqueIdError::InvalidUtf8 => {
+                CanonicalErrorCode::InvalidArgument
+            }
+        };
+        Self::new(code)
     }
 }
 
@@ -486,6 +498,24 @@ mod tests {
         NegotiationResultError, ProvenanceError, ReceiptError, RecoveryError, ScopeError,
         SyncError,
     };
+
+    #[test]
+    fn opaque_id_wire_decode_failures_keep_validation_and_budget_categories_stable() {
+        use ucr_model::OpaqueIdError;
+
+        assert_eq!(
+            CanonicalError::from(OpaqueIdError::Empty).code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            CanonicalError::from(OpaqueIdError::InvalidUtf8).code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            CanonicalError::from(OpaqueIdError::TooLong).code,
+            CanonicalErrorCode::ResourceExhausted
+        );
+    }
 
     #[test]
     fn retryability_is_explicit_and_conservative() {

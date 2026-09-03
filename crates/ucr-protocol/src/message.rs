@@ -110,7 +110,7 @@ pub fn validate_message(message: &MessageEnvelope) -> Result<(), MessageError> {
     }
     let mut attachments = BTreeSet::new();
     for attachment in &message.attachment_ids {
-        if !attachments.insert(attachment.as_opaque().as_str()) {
+        if !attachments.insert(attachment.as_opaque().as_wire_bytes()) {
             return Err(MessageError::DuplicateAttachment);
         }
     }
@@ -125,7 +125,7 @@ pub fn validate_message(message: &MessageEnvelope) -> Result<(), MessageError> {
         }
         let key = (
             relation.kind as u8,
-            relation.target_message_id.as_opaque().as_str(),
+            relation.target_message_id.as_opaque().as_wire_bytes(),
         );
         if !relations.insert(key) {
             return Err(MessageError::DuplicateRelation);
@@ -181,15 +181,15 @@ pub fn canonical_message(message: &MessageEnvelope) -> Result<MessageEnvelope, M
             .then_with(|| {
                 left.target_message_id
                     .as_opaque()
-                    .as_str()
-                    .cmp(right.target_message_id.as_opaque().as_str())
+                    .as_wire_bytes()
+                    .cmp(right.target_message_id.as_opaque().as_wire_bytes())
             })
     });
     canonical.external_mappings.sort_by(|left, right| {
         left.integration_id
             .as_opaque()
-            .as_str()
-            .cmp(right.integration_id.as_opaque().as_str())
+            .as_wire_bytes()
+            .cmp(right.integration_id.as_opaque().as_wire_bytes())
     });
     canonical.extensions =
         canonical_protocol_extensions(&message.extensions).map_err(map_extension_error)?;
@@ -228,7 +228,7 @@ fn validate_external_mappings(mappings: &[ExternalMessageMapping]) -> Result<(),
         if mapping.external_message_id.len() > EXTERNAL_MESSAGE_ID_LIMIT {
             return Err(MessageError::ExternalMessageIdTooLarge);
         }
-        if !integrations.insert(mapping.integration_id.as_opaque().as_str()) {
+        if !integrations.insert(mapping.integration_id.as_opaque().as_wire_bytes()) {
             return Err(MessageError::DuplicateExternalMapping);
         }
     }

@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use ucr_model::{
-    ActorKind, EventEnvelope, EventFingerprint, EventFingerprintAlgorithm, SyncMode, SyncSession,
-    SyncState,
+    ActorKind, EventEnvelope, EventFingerprint, EventFingerprintAlgorithm, OpaqueId, SyncMode,
+    SyncSession, SyncState,
 };
 
 use crate::{EventError, canonical_event};
@@ -92,11 +92,11 @@ pub fn event_fingerprint(event: &EventEnvelope) -> Result<EventFingerprint, Even
     let event = canonical_event(event)?;
     let mut hash = Sha256::new();
     hash.update(EVENT_FINGERPRINT_SHA256_V1_DOMAIN);
-    hash_string(&mut hash, event.event_id.as_opaque().as_str());
+    hash_id(&mut hash, event.event_id.as_opaque());
     hash_scope(&mut hash, &event.scope);
     hash_string(&mut hash, &event.event_type);
     hash_bytes(&mut hash, &event.payload);
-    hash_string(&mut hash, event.actor.actor_id.as_opaque().as_str());
+    hash_id(&mut hash, event.actor.actor_id.as_opaque());
     hash.update([actor_kind_code(event.actor.kind)]);
     hash_optional_id(
         &mut hash,
@@ -104,27 +104,14 @@ pub fn event_fingerprint(event: &EventEnvelope) -> Result<EventFingerprint, Even
             .actor
             .on_behalf_of
             .as_ref()
-            .map(|id| id.as_opaque().as_str()),
+            .map(ucr_model::PrincipalId::as_opaque),
     );
-    hash_string(
-        &mut hash,
-        event.source_device.device_id.as_opaque().as_str(),
-    );
-    hash_string(
-        &mut hash,
-        event.source_device.identity_id.as_opaque().as_str(),
-    );
+    hash_id(&mut hash, event.source_device.device_id.as_opaque());
+    hash_id(&mut hash, event.source_device.identity_id.as_opaque());
     hash.update(event.wall_time_unix_ms.to_be_bytes());
     hash.update(event.logical_order.to_be_bytes());
-    hash_string(&mut hash, event.correlation.correlation_id.as_str());
-    hash_optional_id(
-        &mut hash,
-        event
-            .correlation
-            .causation_id
-            .as_ref()
-            .map(ucr_model::OpaqueId::as_str),
-    );
+    hash_id(&mut hash, &event.correlation.correlation_id);
+    hash_optional_id(&mut hash, event.correlation.causation_id.as_ref());
     hash_optional_string(&mut hash, event.correlation.idempotency_key.as_deref());
     hash.update(event.schema_version.major.to_be_bytes());
     hash.update(event.schema_version.minor.to_be_bytes());
@@ -148,26 +135,32 @@ pub fn event_fingerprint(event: &EventEnvelope) -> Result<EventFingerprint, Even
 pub fn anti_entropy_session_binding(session: &SyncSession) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(ANTI_ENTROPY_SESSION_BINDING_V1_DOMAIN);
-    hash_string(&mut hash, session.session_id.as_opaque().as_str());
+    hash_id(&mut hash, session.session_id.as_opaque());
     hash_scope(&mut hash, &session.scope);
-    hash_string(&mut hash, session.source_endpoint_id.as_opaque().as_str());
-    hash_string(&mut hash, session.target_endpoint_id.as_opaque().as_str());
+    hash_id(&mut hash, session.source_endpoint_id.as_opaque());
+    hash_id(&mut hash, session.target_endpoint_id.as_opaque());
     hash.finalize().into()
 }
 
 fn hash_scope(hash: &mut Sha256, scope: &ucr_model::TenantScope) {
-    hash_string(hash, scope.tenant_id.as_opaque().as_str());
+    hash_id(hash, scope.tenant_id.as_opaque());
     match &scope.namespace_id {
         Some(namespace) => {
             hash.update([1]);
-            hash_string(hash, namespace.as_opaque().as_str());
+            hash_id(hash, namespace.as_opaque());
         }
         None => hash.update([0]),
     }
 }
 
-fn hash_optional_id(hash: &mut Sha256, value: Option<&str>) {
-    hash_optional_string(hash, value);
+fn hash_optional_id(hash: &mut Sha256, value: Option<&OpaqueId>) {
+    match value {
+        Some(value) => {
+            hash.update([1]);
+            hash_id(hash, value);
+        }
+        None => hash.update([0]),
+    }
 }
 
 fn hash_optional_string(hash: &mut Sha256, value: Option<&str>) {
@@ -178,6 +171,10 @@ fn hash_optional_string(hash: &mut Sha256, value: Option<&str>) {
         }
         None => hash.update([0]),
     }
+}
+
+fn hash_id(hash: &mut Sha256, value: &OpaqueId) {
+    hash_bytes(hash, value.as_wire_bytes());
 }
 
 fn hash_string(hash: &mut Sha256, value: &str) {
