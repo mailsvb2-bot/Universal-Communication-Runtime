@@ -156,4 +156,5 @@ jobs:
           test -s docs/adr/0022-opaque-id-bytes-have-exact-utf8-semantic-contract.md &&
           test -s docs/adr/0023-native-opaque-ids-use-os-csprng-random-hex-v1.md &&
           test -s docs/adr/0024-message-signatures-bind-canonical-authored-message.md &&
-          test -s docs/adr/0025-bounded-fuzzing-is-required-for-implemented-untrusted-boundaries.md
+          test -s docs/adr/0025-bounded-fuzzing-is-required-for-implemented-untrusted-boundaries.md &&
+          test -s docs/adr/0026-trusted-signing-keys-use-scoped-nonreactivating-lifecycle.md

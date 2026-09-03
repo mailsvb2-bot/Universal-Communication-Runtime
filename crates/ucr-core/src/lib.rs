@@ -5,10 +5,10 @@ mod id;
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CapabilityDescriptor,
     CommandEnvelope, CommandId, CommunicationIntent, ConversationId, ConversationRecord,
-    DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, EndpointAddress, EndpointId,
-    EventEnvelope, EventId, EventReconciliation, EventSummary, IdentityId, MessageEnvelope,
-    MessageId, RecoveryPlan, RecoveryPlanId, SessionId, SyncCheckpoint, SyncSession, SyncState,
-    TenantScope,
+    DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceId, EndpointAddress,
+    EndpointId, EventEnvelope, EventId, EventReconciliation, EventSummary, IdentityId, KeyId,
+    MessageEnvelope, MessageId, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, SessionId,
+    SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -108,6 +108,69 @@ pub enum DurableStoreError {
 }
 
 /// Base boundary shared by local, memory-test, server, and future embedded stores.
+/// Durable trust/lifecycle owner for public Ed25519 device signing keys.
+///
+/// This store owns key trust state only. Device lifecycle remains a separate
+/// canonical owner and must not be duplicated here.
+pub trait TrustedSigningKeyStore: StorageProvider {
+    /// Provisions the first active trusted signing key for one exact scope/device.
+    /// Repeating the identical active record is idempotent; a conflicting or
+    /// previously revoked key cannot be silently adopted or reactivated.
+    ///
+    /// # Errors
+    /// Returns validation, conflict, or storage failures.
+    fn provision_trusted_signing_key(
+        &self,
+        scope: &TenantScope,
+        descriptor: &PublicKeyDescriptor,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Atomically revokes the expected active key and installs its replacement
+    /// for the same exact scope/device.
+    ///
+    /// # Errors
+    /// Returns conflict for stale expected state, scope/device/key reuse, or storage failures.
+    fn rotate_trusted_signing_key(
+        &self,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_current: &KeyId,
+        replacement: &PublicKeyDescriptor,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Revokes the expected active key. Repeating the same revocation is idempotent.
+    /// Revocation never reactivates an earlier key.
+    ///
+    /// # Errors
+    /// Returns conflict for a different active key or explicit storage failures.
+    fn revoke_trusted_signing_key(
+        &self,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_current: &KeyId,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Loads one trusted key record, including revoked historical records.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures; absence is not an error.
+    fn trusted_signing_key(
+        &self,
+        scope: &TenantScope,
+        key_id: &KeyId,
+    ) -> Result<Option<TrustedSigningKeyRecord>, DurableStoreError>;
+
+    /// Loads the currently active trusted signing key for one exact scope/device.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures; absence is not an error.
+    fn active_trusted_signing_key(
+        &self,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+    ) -> Result<Option<PublicKeyDescriptor>, DurableStoreError>;
+}
+
 pub trait StorageProvider: core::fmt::Debug + Send + Sync {
     /// Returns the schema generation understood by this store.
     ///

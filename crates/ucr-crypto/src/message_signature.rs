@@ -4,7 +4,10 @@ use ucr_protocol::{
     validate_public_key_descriptor,
 };
 
-use crate::{SignatureBytes, SignatureError, VerifyingKeyBytes, verify_message_binding_signature};
+use crate::{
+    SignatureBytes, SignatureError, TrustedKeyResolutionError, TrustedSigningKeyResolver,
+    VerifyingKeyBytes, verify_message_binding_signature,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageSignatureVerificationError {
@@ -16,6 +19,12 @@ pub enum MessageSignatureVerificationError {
     AuthorDeviceMismatch,
     InvalidPublicKey,
     InvalidSignature,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustedMessageSignatureError {
+    Trust(TrustedKeyResolutionError),
+    Verification(MessageSignatureVerificationError),
 }
 
 impl From<MessageSignatureVerificationError> for CanonicalError {
@@ -85,6 +94,34 @@ pub fn verify_message_signature(
         SignatureBytes(signature_bytes),
     )
     .map_err(map_signature_error)
+}
+
+/// Resolves the Message author's active trusted signing key and verifies the signature.
+///
+/// The Message-provided key ID is only a lookup claim. The resolver must independently
+/// establish active trust for the exact scope/device/key tuple.
+///
+/// # Errors
+/// Returns a non-disclosing trust failure or the underlying fail-closed signature error.
+pub fn verify_message_signature_with_trust<R: TrustedSigningKeyResolver>(
+    message: &MessageEnvelope,
+    resolver: &R,
+) -> Result<(), TrustedMessageSignatureError> {
+    let signature =
+        message
+            .signature
+            .as_ref()
+            .ok_or(TrustedMessageSignatureError::Verification(
+                MessageSignatureVerificationError::MissingSignature,
+            ))?;
+    let trusted = resolver
+        .resolve_active_signing_key(
+            &message.scope,
+            &message.author_device.device_id,
+            &signature.key_id,
+        )
+        .map_err(TrustedMessageSignatureError::Trust)?;
+    verify_message_signature(message, &trusted).map_err(TrustedMessageSignatureError::Verification)
 }
 
 const fn map_signature_error(error: SignatureError) -> MessageSignatureVerificationError {
