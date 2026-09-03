@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod authorized_runtime;
 mod id;
 
 use ucr_model::{
@@ -11,11 +12,9 @@ use ucr_model::{
     ScopedPrincipal, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
     TrustedSigningKeyRecord,
 };
-use ucr_protocol::{
-    CanonicalError, CommandReceipt, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
-    TRUSTED_SIGNING_KEY_REVOKE_PERMISSION, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
-};
+use ucr_protocol::{CanonicalError, CommandReceipt};
 
+pub use authorized_runtime::AuthorizedDurableRuntime;
 pub use id::{IdGenerationError, generate_opaque_id};
 
 /// A route candidate is transient runtime state, never canonical identity.
@@ -233,10 +232,8 @@ where
         scope: &TenantScope,
         descriptor: &PublicKeyDescriptor,
     ) -> Result<(), AuthorizedMutationError> {
-        self.require(subject, scope, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION)?;
-        self.store
-            .provision_trusted_signing_key(scope, descriptor)
-            .map_err(AuthorizedMutationError::Store)
+        AuthorizedDurableRuntime::new(self.authorization, self.store)
+            .provision_trusted_signing_key(subject, scope, descriptor)
     }
 
     /// Authorizes and atomically rotates the expected trusted signing key.
@@ -251,10 +248,13 @@ where
         expected_current: &KeyId,
         replacement: &PublicKeyDescriptor,
     ) -> Result<(), AuthorizedMutationError> {
-        self.require(subject, scope, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION)?;
-        self.store
-            .rotate_trusted_signing_key(scope, device_id, expected_current, replacement)
-            .map_err(AuthorizedMutationError::Store)
+        AuthorizedDurableRuntime::new(self.authorization, self.store).rotate_trusted_signing_key(
+            subject,
+            scope,
+            device_id,
+            expected_current,
+            replacement,
+        )
     }
 
     /// Authorizes and revokes the expected trusted signing key.
@@ -268,25 +268,12 @@ where
         device_id: &DeviceId,
         expected_current: &KeyId,
     ) -> Result<(), AuthorizedMutationError> {
-        self.require(subject, scope, TRUSTED_SIGNING_KEY_REVOKE_PERMISSION)?;
-        self.store
-            .revoke_trusted_signing_key(scope, device_id, expected_current)
-            .map_err(AuthorizedMutationError::Store)
-    }
-
-    fn require(
-        &self,
-        subject: &ScopedPrincipal,
-        scope: &TenantScope,
-        permission: &str,
-    ) -> Result<(), AuthorizedMutationError> {
-        self.authorization
-            .authorize(&AuthorizationRequest {
-                subject: subject.clone(),
-                permission: permission.to_owned(),
-                resource_scope: scope.clone(),
-            })
-            .map_err(AuthorizedMutationError::Authorization)
+        AuthorizedDurableRuntime::new(self.authorization, self.store).revoke_trusted_signing_key(
+            subject,
+            scope,
+            device_id,
+            expected_current,
+        )
     }
 }
 

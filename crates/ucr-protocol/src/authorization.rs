@@ -8,6 +8,56 @@ pub const TRUSTED_SIGNING_KEY_PROVISION_PERMISSION: &str =
     "ucr.crypto.trusted_signing_key.provision";
 pub const TRUSTED_SIGNING_KEY_ROTATE_PERMISSION: &str = "ucr.crypto.trusted_signing_key.rotate";
 pub const TRUSTED_SIGNING_KEY_REVOKE_PERMISSION: &str = "ucr.crypto.trusted_signing_key.revoke";
+pub const TRUSTED_SIGNING_KEY_READ_PERMISSION: &str = "ucr.crypto.trusted_signing_key.read";
+pub const PERMISSION_GRANT_READ_PERMISSION: &str = "ucr.authorization.grant.read";
+pub const PERMISSION_GRANT_CREATE_PERMISSION: &str = "ucr.authorization.grant.create";
+pub const PERMISSION_GRANT_REVOKE_PERMISSION: &str = "ucr.authorization.grant.revoke";
+pub const RECOVERY_PLAN_READ_PERMISSION: &str = "ucr.recovery.plan.read";
+pub const RECOVERY_PLAN_INSTALL_PERMISSION: &str = "ucr.recovery.plan.install";
+pub const RECOVERY_PLAN_ROTATE_PERMISSION: &str = "ucr.recovery.plan.rotate";
+pub const RECOVERY_PLAN_REVOKE_PERMISSION: &str = "ucr.recovery.plan.revoke";
+pub const COMMAND_ACCEPT_PERMISSION: &str = "ucr.command.accept";
+pub const COMMAND_OUTCOME_READ_PERMISSION: &str = "ucr.command.outcome.read";
+pub const COMMAND_OUTCOME_WRITE_PERMISSION: &str = "ucr.command.outcome.write";
+pub const CONVERSATION_READ_PERMISSION: &str = "ucr.conversation.read";
+pub const CONVERSATION_WRITE_PERMISSION: &str = "ucr.conversation.write";
+pub const MESSAGE_READ_PERMISSION: &str = "ucr.message.read";
+pub const MESSAGE_WRITE_PERMISSION: &str = "ucr.message.write";
+pub const DELIVERY_READ_PERMISSION: &str = "ucr.delivery.read";
+pub const DELIVERY_WRITE_PERMISSION: &str = "ucr.delivery.write";
+pub const SYNC_READ_PERMISSION: &str = "ucr.sync.read";
+pub const SYNC_WRITE_PERMISSION: &str = "ucr.sync.write";
+pub const ANTI_ENTROPY_READ_PERMISSION: &str = "ucr.sync.anti_entropy.read";
+pub const ANTI_ENTROPY_RECONCILE_PERMISSION: &str = "ucr.sync.anti_entropy.reconcile";
+pub const EVENT_APPEND_PERMISSION: &str = "ucr.event.append";
+
+pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
+    PERMISSION_GRANT_READ_PERMISSION,
+    PERMISSION_GRANT_CREATE_PERMISSION,
+    PERMISSION_GRANT_REVOKE_PERMISSION,
+    TRUSTED_SIGNING_KEY_READ_PERMISSION,
+    TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
+    TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
+    TRUSTED_SIGNING_KEY_REVOKE_PERMISSION,
+    RECOVERY_PLAN_READ_PERMISSION,
+    RECOVERY_PLAN_INSTALL_PERMISSION,
+    RECOVERY_PLAN_ROTATE_PERMISSION,
+    RECOVERY_PLAN_REVOKE_PERMISSION,
+    COMMAND_ACCEPT_PERMISSION,
+    COMMAND_OUTCOME_READ_PERMISSION,
+    COMMAND_OUTCOME_WRITE_PERMISSION,
+    CONVERSATION_READ_PERMISSION,
+    CONVERSATION_WRITE_PERMISSION,
+    MESSAGE_READ_PERMISSION,
+    MESSAGE_WRITE_PERMISSION,
+    DELIVERY_READ_PERMISSION,
+    DELIVERY_WRITE_PERMISSION,
+    SYNC_READ_PERMISSION,
+    SYNC_WRITE_PERMISSION,
+    ANTI_ENTROPY_READ_PERMISSION,
+    ANTI_ENTROPY_RECONCILE_PERMISSION,
+    EVENT_APPEND_PERMISSION,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantValidationError {
@@ -107,8 +157,8 @@ mod tests {
     };
 
     use super::{
-        AuthorizationError, GrantValidationError, authorize, is_service_principal,
-        validate_permission_grant,
+        AuthorizationError, GrantValidationError, RUNTIME_PERMISSION_IDS, authorize,
+        is_service_principal, validate_namespaced_identifier, validate_permission_grant,
     };
 
     fn opaque(value: &str) -> OpaqueId {
@@ -281,5 +331,21 @@ mod tests {
             authorize(&request, &[]),
             Err(AuthorizationError::InvalidPermission)
         );
+    }
+
+    #[test]
+    fn runtime_permission_vocabulary_is_namespaced_and_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for permission in RUNTIME_PERMISSION_IDS {
+            assert!(
+                validate_namespaced_identifier(permission).is_ok(),
+                "invalid runtime permission id: {permission}"
+            );
+            assert!(
+                seen.insert(*permission),
+                "duplicate runtime permission id: {permission}"
+            );
+        }
+        assert_eq!(seen.len(), RUNTIME_PERMISSION_IDS.len());
     }
 }

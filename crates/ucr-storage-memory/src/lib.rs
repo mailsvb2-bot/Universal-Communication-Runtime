@@ -2677,8 +2677,8 @@ mod trusted_signing_key_tests {
 #[cfg(test)]
 mod permission_enforcement_tests {
     use ucr_core::{
-        AuthorizedMutationError, AuthorizedTrustedSigningKeyMutations, PermissionGrantStore,
-        TrustedSigningKeyStore,
+        AuthorizedDurableRuntime, AuthorizedMutationError, AuthorizedTrustedSigningKeyMutations,
+        ConversationStore, MessageStore, PermissionGrantStore, TrustedSigningKeyStore,
     };
     use ucr_model::{
         DeviceId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PermissionGrant, PermissionScope,
@@ -2686,7 +2686,10 @@ mod permission_enforcement_tests {
         TenantScope,
     };
     use ucr_protocol::{
-        ALGORITHM_VERSION, CanonicalError, CanonicalErrorCode, KEY_FORMAT_VERSION,
+        ALGORITHM_VERSION, CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION,
+        CanonicalError, CanonicalErrorCode, KEY_FORMAT_VERSION, MESSAGE_READ_PERMISSION,
+        MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION,
+        PERMISSION_GRANT_READ_PERMISSION, PERMISSION_GRANT_REVOKE_PERMISSION,
         SIGNATURE_ALGORITHM_ID, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
         TRUSTED_SIGNING_KEY_REVOKE_PERMISSION, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
     };
@@ -2874,6 +2877,178 @@ mod permission_enforcement_tests {
         assert_eq!(
             authorized.provision(&subject, &other_tenant, &descriptor("key-c", "device-c", 7),),
             Err(denied())
+        );
+    }
+
+    #[test]
+    fn runtime_permission_administration_cannot_self_bootstrap_and_is_scope_bound() {
+        let store = MemoryLocalStore::default();
+        let admin = subject("tenant-a", Some("namespace-a"));
+        let resource = scope("tenant-a", Some("namespace-a"));
+        let mut target = subject("tenant-a", Some("namespace-a"));
+        target.principal.principal_id = PrincipalId::from_opaque(oid("service-target"));
+        let target_grant = exact_grant(&target, MESSAGE_WRITE_PERMISSION, &resource);
+        let runtime = AuthorizedDurableRuntime::new(&store, &store);
+
+        assert_eq!(
+            runtime.grant_permission(&admin, &target_grant),
+            Err(denied())
+        );
+        assert!(
+            store
+                .permission_grants_for(&target)
+                .expect("target grants")
+                .is_empty()
+        );
+
+        let create_admin = exact_grant(&admin, PERMISSION_GRANT_CREATE_PERMISSION, &resource);
+        assert_eq!(
+            runtime.grant_permission(&admin, &create_admin),
+            Err(denied())
+        );
+        store
+            .grant_permission(&create_admin)
+            .expect("out-of-band bootstrap create authority");
+        runtime
+            .grant_permission(&admin, &target_grant)
+            .expect("authorized grant creation");
+
+        assert_eq!(
+            runtime.permission_grants_for(&admin, &target),
+            Err(denied())
+        );
+        store
+            .grant_permission(&exact_grant(
+                &admin,
+                PERMISSION_GRANT_READ_PERMISSION,
+                &resource,
+            ))
+            .expect("bootstrap grant read authority");
+        assert_eq!(
+            runtime.permission_grants_for(&admin, &target),
+            Ok(vec![target_grant.clone()])
+        );
+
+        assert_eq!(
+            runtime.revoke_permission(&admin, &target_grant),
+            Err(denied())
+        );
+        store
+            .grant_permission(&exact_grant(
+                &admin,
+                PERMISSION_GRANT_REVOKE_PERMISSION,
+                &resource,
+            ))
+            .expect("bootstrap revoke authority");
+        runtime
+            .revoke_permission(&admin, &target_grant)
+            .expect("authorized grant revocation");
+        assert!(
+            runtime
+                .permission_grants_for(&admin, &target)
+                .expect("grants after revoke")
+                .is_empty()
+        );
+
+        let other_resource = scope("tenant-b", Some("namespace-a"));
+        let other_target = subject("tenant-b", Some("namespace-a"));
+        let cross_tenant_grant =
+            exact_grant(&other_target, MESSAGE_WRITE_PERMISSION, &other_resource);
+        assert_eq!(
+            runtime.grant_permission(&admin, &cross_tenant_grant),
+            Err(denied())
+        );
+        assert!(
+            store
+                .permission_grants_for(&other_target)
+                .expect("other tenant grants")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn unified_runtime_enforces_independent_conversation_and_message_permissions() {
+        let store = MemoryLocalStore::default();
+        let subject = subject("tenant-message", None);
+        let resource = super::message_tests::scope();
+        let conversation = super::message_tests::conversation();
+        let message = super::message_tests::message();
+        let runtime = AuthorizedDurableRuntime::new(&store, &store);
+
+        assert_eq!(
+            runtime.persist_conversation(&subject, &conversation),
+            Err(denied())
+        );
+        assert_eq!(
+            store
+                .conversation(&resource, &conversation.conversation.conversation_id)
+                .expect("raw conversation lookup"),
+            None
+        );
+
+        store
+            .grant_permission(&exact_grant(
+                &subject,
+                CONVERSATION_WRITE_PERMISSION,
+                &resource,
+            ))
+            .expect("bootstrap conversation write");
+        runtime
+            .persist_conversation(&subject, &conversation)
+            .expect("authorized conversation persist");
+        assert_eq!(
+            runtime.conversation(
+                &subject,
+                &resource,
+                &conversation.conversation.conversation_id
+            ),
+            Err(denied())
+        );
+        store
+            .grant_permission(&exact_grant(
+                &subject,
+                CONVERSATION_READ_PERMISSION,
+                &resource,
+            ))
+            .expect("bootstrap conversation read");
+        assert_eq!(
+            runtime
+                .conversation(
+                    &subject,
+                    &resource,
+                    &conversation.conversation.conversation_id
+                )
+                .expect("authorized conversation read"),
+            Some(conversation)
+        );
+
+        assert_eq!(runtime.persist_message(&subject, &message), Err(denied()));
+        assert_eq!(
+            store
+                .message(&resource, &message.message_id)
+                .expect("raw message lookup"),
+            None
+        );
+        store
+            .grant_permission(&exact_grant(&subject, MESSAGE_WRITE_PERMISSION, &resource))
+            .expect("bootstrap message write");
+        runtime
+            .persist_message(&subject, &message)
+            .expect("authorized message persist");
+        assert_eq!(
+            runtime.message(&subject, &resource, &message.message_id),
+            Err(denied())
+        );
+        store
+            .grant_permission(&exact_grant(&subject, MESSAGE_READ_PERMISSION, &resource))
+            .expect("bootstrap message read");
+        let mut persisted_message = message;
+        persisted_message.delivery_state = ucr_model::DeliveryState::Persisted;
+        assert_eq!(
+            runtime
+                .message(&subject, &resource, &persisted_message.message_id)
+                .expect("authorized message read"),
+            Some(persisted_message)
         );
     }
 }

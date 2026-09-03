@@ -1,0 +1,705 @@
+use ucr_model::{
+    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
+    ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
+    DeliveryState, DeviceId, EventEnvelope, EventId, EventReconciliation, EventSummary, IdentityId,
+    KeyId, MessageEnvelope, MessageId, PermissionGrant, PermissionScope, PublicKeyDescriptor,
+    RecoveryPlan, RecoveryPlanId, ScopedPrincipal, SessionId, SyncCheckpoint, SyncSession,
+    SyncState, TenantScope, TrustedSigningKeyRecord,
+};
+use ucr_protocol::{
+    ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, COMMAND_ACCEPT_PERMISSION,
+    COMMAND_OUTCOME_READ_PERMISSION, COMMAND_OUTCOME_WRITE_PERMISSION,
+    CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION, DELIVERY_READ_PERMISSION,
+    DELIVERY_WRITE_PERMISSION, EVENT_APPEND_PERMISSION, MESSAGE_READ_PERMISSION,
+    MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
+    PERMISSION_GRANT_REVOKE_PERMISSION, RECOVERY_PLAN_INSTALL_PERMISSION,
+    RECOVERY_PLAN_READ_PERMISSION, RECOVERY_PLAN_REVOKE_PERMISSION,
+    RECOVERY_PLAN_ROTATE_PERMISSION, SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION,
+    TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_READ_PERMISSION,
+    TRUSTED_SIGNING_KEY_REVOKE_PERMISSION, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
+};
+
+use crate::{
+    AntiEntropyStore, AuthorizationEvaluator, AuthorizedMutationError, CommandAcceptanceStore,
+    CommandOutcomeStore, ConversationStore, DeliveryStore, DurableRecordStatus, DurableStoreError,
+    EventAppendStatus, EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore,
+    SyncStore, TrustedSigningKeyStore,
+};
+
+/// Authorization-enforcing runtime boundary over tenant-scoped durable capabilities.
+///
+/// The caller supplies an already authenticated [`ScopedPrincipal`]. Raw stores remain
+/// persistence capabilities and are not an external authorization bypass.
+#[derive(Debug)]
+pub struct AuthorizedDurableRuntime<'a, A, S> {
+    authorization: &'a A,
+    store: &'a S,
+}
+
+impl<'a, A, S> AuthorizedDurableRuntime<'a, A, S>
+where
+    A: AuthorizationEvaluator,
+{
+    #[must_use]
+    pub const fn new(authorization: &'a A, store: &'a S) -> Self {
+        Self {
+            authorization,
+            store,
+        }
+    }
+
+    fn require(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        permission: &str,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.authorization
+            .authorize(&AuthorizationRequest {
+                subject: subject.clone(),
+                permission: permission.to_owned(),
+                resource_scope: scope.clone(),
+            })
+            .map_err(AuthorizedMutationError::Authorization)
+    }
+}
+
+fn permission_grant_resource_scope(grant: &PermissionGrant) -> TenantScope {
+    match &grant.scope {
+        PermissionScope::Exact(scope) => scope.clone(),
+        PermissionScope::TenantWide(tenant_id) => TenantScope {
+            tenant_id: tenant_id.clone(),
+            namespace_id: None,
+        },
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: PermissionGrantStore,
+{
+    /// Lists grants for one scoped principal only after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn permission_grants_for(
+        &self,
+        subject: &ScopedPrincipal,
+        target: &ScopedPrincipal,
+    ) -> Result<Vec<PermissionGrant>, AuthorizedMutationError> {
+        self.require(subject, &target.scope, PERMISSION_GRANT_READ_PERMISSION)?;
+        self.store
+            .permission_grants_for(target)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Adds one grant through the runtime administration boundary.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures. Runtime callers cannot
+    /// bootstrap this permission through the same path.
+    pub fn grant_permission(
+        &self,
+        subject: &ScopedPrincipal,
+        grant: &PermissionGrant,
+    ) -> Result<(), AuthorizedMutationError> {
+        let resource_scope = permission_grant_resource_scope(grant);
+        self.require(subject, &resource_scope, PERMISSION_GRANT_CREATE_PERMISSION)?;
+        self.store
+            .grant_permission(grant)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Removes one exact grant through the runtime administration boundary.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn revoke_permission(
+        &self,
+        subject: &ScopedPrincipal,
+        grant: &PermissionGrant,
+    ) -> Result<(), AuthorizedMutationError> {
+        let resource_scope = permission_grant_resource_scope(grant);
+        self.require(subject, &resource_scope, PERMISSION_GRANT_REVOKE_PERMISSION)?;
+        self.store
+            .revoke_permission(grant)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: TrustedSigningKeyStore,
+{
+    /// Provisions a trusted signing key only after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn provision_trusted_signing_key(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        descriptor: &PublicKeyDescriptor,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, scope, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION)?;
+        self.store
+            .provision_trusted_signing_key(scope, descriptor)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Rotates the expected trusted signing key only after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn rotate_trusted_signing_key(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_current: &KeyId,
+        replacement: &PublicKeyDescriptor,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, scope, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION)?;
+        self.store
+            .rotate_trusted_signing_key(scope, device_id, expected_current, replacement)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Revokes the expected trusted signing key only after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn revoke_trusted_signing_key(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_current: &KeyId,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, scope, TRUSTED_SIGNING_KEY_REVOKE_PERMISSION)?;
+        self.store
+            .revoke_trusted_signing_key(scope, device_id, expected_current)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn trusted_signing_key(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        key_id: &KeyId,
+    ) -> Result<Option<TrustedSigningKeyRecord>, AuthorizedMutationError> {
+        self.require(subject, scope, TRUSTED_SIGNING_KEY_READ_PERMISSION)?;
+        self.store
+            .trusted_signing_key(scope, key_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn active_trusted_signing_key(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+    ) -> Result<Option<PublicKeyDescriptor>, AuthorizedMutationError> {
+        self.require(subject, scope, TRUSTED_SIGNING_KEY_READ_PERMISSION)?;
+        self.store
+            .active_trusted_signing_key(scope, device_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: RecoveryPlanStore,
+{
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn install_recovery_plan(
+        &self,
+        subject: &ScopedPrincipal,
+        plan: &RecoveryPlan,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, &plan.scope, RECOVERY_PLAN_INSTALL_PERMISSION)?;
+        self.store
+            .install_recovery_plan(plan)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn rotate_recovery_plan(
+        &self,
+        subject: &ScopedPrincipal,
+        expected_current: &RecoveryPlanId,
+        replacement: &RecoveryPlan,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, &replacement.scope, RECOVERY_PLAN_ROTATE_PERMISSION)?;
+        self.store
+            .rotate_recovery_plan(expected_current, replacement)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn revoke_recovery_plan(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        expected_current: &RecoveryPlanId,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, scope, RECOVERY_PLAN_REVOKE_PERMISSION)?;
+        self.store
+            .revoke_recovery_plan(scope, identity_id, expected_current)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn active_recovery_plan(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+    ) -> Result<Option<RecoveryPlan>, AuthorizedMutationError> {
+        self.require(subject, scope, RECOVERY_PLAN_READ_PERMISSION)?;
+        self.store
+            .active_recovery_plan(scope, identity_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: CommandAcceptanceStore,
+{
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn accept_command(
+        &self,
+        subject: &ScopedPrincipal,
+        command: &CommandEnvelope,
+    ) -> Result<ucr_protocol::CommandReceipt, AuthorizedMutationError> {
+        self.require(subject, &command.scope, COMMAND_ACCEPT_PERMISSION)?;
+        self.store
+            .accept_command(command)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: ConversationStore,
+{
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn persist_conversation(
+        &self,
+        subject: &ScopedPrincipal,
+        conversation: &ConversationRecord,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &conversation.scope, CONVERSATION_WRITE_PERMISSION)?;
+        self.store
+            .persist_conversation(conversation)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn conversation(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        conversation_id: &ConversationId,
+    ) -> Result<Option<ConversationRecord>, AuthorizedMutationError> {
+        self.require(subject, scope, CONVERSATION_READ_PERMISSION)?;
+        self.store
+            .conversation(scope, conversation_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: MessageStore,
+{
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn persist_message(
+        &self,
+        subject: &ScopedPrincipal,
+        message: &MessageEnvelope,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &message.scope, MESSAGE_WRITE_PERMISSION)?;
+        self.store
+            .persist_message(message)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn message(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        message_id: &MessageId,
+    ) -> Result<Option<MessageEnvelope>, AuthorizedMutationError> {
+        self.require(subject, scope, MESSAGE_READ_PERMISSION)?;
+        self.store
+            .message(scope, message_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: DeliveryStore,
+{
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn create_delivery_attempt(
+        &self,
+        subject: &ScopedPrincipal,
+        attempt: &DeliveryAttempt,
+        persisted_evidence: &DeliveryEvidence,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        if attempt.scope != persisted_evidence.scope {
+            return Err(AuthorizedMutationError::Store(
+                DurableStoreError::InvalidRecord,
+            ));
+        }
+        self.require(subject, &attempt.scope, DELIVERY_WRITE_PERMISSION)?;
+        self.store
+            .create_delivery_attempt(attempt, persisted_evidence)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn transition_delivery(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        delivery_id: &DeliveryId,
+        expected_state: DeliveryState,
+        next_state: DeliveryState,
+        evidence: Option<&DeliveryEvidence>,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        if evidence.is_some_and(|value| &value.scope != scope) {
+            return Err(AuthorizedMutationError::Store(
+                DurableStoreError::InvalidRecord,
+            ));
+        }
+        self.require(subject, scope, DELIVERY_WRITE_PERMISSION)?;
+        self.store
+            .transition_delivery(scope, delivery_id, expected_state, next_state, evidence)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn record_delivery_evidence(
+        &self,
+        subject: &ScopedPrincipal,
+        evidence: &DeliveryEvidence,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &evidence.scope, DELIVERY_WRITE_PERMISSION)?;
+        self.store
+            .record_delivery_evidence(evidence)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn delivery_attempt(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        delivery_id: &DeliveryId,
+    ) -> Result<Option<DeliveryAttempt>, AuthorizedMutationError> {
+        self.require(subject, scope, DELIVERY_READ_PERMISSION)?;
+        self.store
+            .delivery_attempt(scope, delivery_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: SyncStore,
+{
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn create_sync_session(
+        &self,
+        subject: &ScopedPrincipal,
+        session: &SyncSession,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &session.scope, SYNC_WRITE_PERMISSION)?;
+        self.store
+            .create_sync_session(session)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn transition_sync(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        session_id: &SessionId,
+        expected_state: SyncState,
+        next_state: SyncState,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, scope, SYNC_WRITE_PERMISSION)?;
+        self.store
+            .transition_sync(scope, session_id, expected_state, next_state)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn record_sync_checkpoint(
+        &self,
+        subject: &ScopedPrincipal,
+        checkpoint: &SyncCheckpoint,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &checkpoint.scope, SYNC_WRITE_PERMISSION)?;
+        self.store
+            .record_sync_checkpoint(checkpoint)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn sync_session(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<Option<SyncSession>, AuthorizedMutationError> {
+        self.require(subject, scope, SYNC_READ_PERMISSION)?;
+        self.store
+            .sync_session(scope, session_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn latest_sync_checkpoint(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<Option<SyncCheckpoint>, AuthorizedMutationError> {
+        self.require(subject, scope, SYNC_READ_PERMISSION)?;
+        self.store
+            .latest_sync_checkpoint(scope, session_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: EventJournalStore,
+{
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn append_event(
+        &self,
+        subject: &ScopedPrincipal,
+        event: &EventEnvelope,
+    ) -> Result<EventAppendStatus, AuthorizedMutationError> {
+        self.require(subject, &event.scope, EVENT_APPEND_PERMISSION)?;
+        self.store
+            .append_event(event)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: AntiEntropyStore,
+{
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn anti_entropy_summary_page(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        session_id: &SessionId,
+        cursor: Option<&AntiEntropyCursor>,
+        max_items: usize,
+    ) -> Result<AntiEntropyPage, AuthorizedMutationError> {
+        self.require(subject, scope, ANTI_ENTROPY_READ_PERMISSION)?;
+        self.store
+            .anti_entropy_summary_page(scope, session_id, cursor, max_items)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn classify_event_summaries(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        session_id: &SessionId,
+        summaries: &[EventSummary],
+    ) -> Result<Vec<EventReconciliation>, AuthorizedMutationError> {
+        self.require(subject, scope, ANTI_ENTROPY_READ_PERMISSION)?;
+        self.store
+            .classify_event_summaries(scope, session_id, summaries)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn reconcile_event(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        session_id: &SessionId,
+        event: &EventEnvelope,
+    ) -> Result<EventAppendStatus, AuthorizedMutationError> {
+        if &event.scope != scope {
+            return Err(AuthorizedMutationError::Store(
+                DurableStoreError::InvalidRecord,
+            ));
+        }
+        self.require(subject, scope, ANTI_ENTROPY_RECONCILE_PERMISSION)?;
+        self.store
+            .reconcile_event(scope, session_id, event)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: CommandOutcomeStore,
+{
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn record_terminal_event(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        command_id: &CommandId,
+        event: &EventEnvelope,
+    ) -> Result<EventAppendStatus, AuthorizedMutationError> {
+        if &event.scope != scope {
+            return Err(AuthorizedMutationError::Store(
+                DurableStoreError::InvalidRecord,
+            ));
+        }
+        self.require(subject, scope, COMMAND_OUTCOME_WRITE_PERMISSION)?;
+        self.store
+            .record_terminal_event(scope, command_id, event)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Executes this tenant-scoped durable operation only after authorization.
+    ///
+    /// # Errors
+    /// Returns an authorization failure before storage access, an invalid-record failure
+    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    pub fn terminal_event(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        command_id: &CommandId,
+    ) -> Result<Option<EventId>, AuthorizedMutationError> {
+        self.require(subject, scope, COMMAND_OUTCOME_READ_PERMISSION)?;
+        self.store
+            .terminal_event(scope, command_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
