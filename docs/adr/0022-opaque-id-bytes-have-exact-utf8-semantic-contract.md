@@ -1,6 +1,6 @@
 # ADR-0022: OpaqueId bytes have an exact UTF-8 semantic contract
 
-Status: Accepted
+Status: Accepted (native generation decision superseded by ADR-0023)
 
 Date: 2026-09-03
 
@@ -24,7 +24,7 @@ Canonical Event fingerprints and Anti-Entropy session bindings consume `OpaqueId
 
 The SQLite reference store keeps canonical IDs in TEXT columns. This is lossless for the defined semantic domain, so no schema migration or base64/hex adaptation layer is added. A restart regression test covers non-ASCII canonical IDs.
 
-The concrete offline ID generation algorithm remains undecided. This ADR defines representation and decode validity, not UUID/ULID/key-derived/random generation.
+This ADR defines representation and decode validity only. Its deliberate non-decision on native offline generation is superseded by ADR-0023; the wire semantic domain defined here remains unchanged.
 
 ## Error semantics
 
