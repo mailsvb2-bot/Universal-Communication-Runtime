@@ -1,8 +1,11 @@
+use ucr_model::ProtocolExtension;
+
 use crate::{
     AcknowledgementError, AddressingError, AuthorizationError, CapabilityError, CommandError,
     ConversationError, CryptoContractError, CryptoNegotiationError, DeliveryError, EventError,
-    ExtensionError, FrameError, HandshakeError, MessageError, NegotiationResultError,
+    ExtensionError, FrameError, HandshakeError, IntentError, MessageError, NegotiationResultError,
     ProvenanceError, ReceiptError, RecoveryError, ScopeError, SyncError, VersionNegotiationError,
+    canonical_protocol_extensions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +38,62 @@ impl CanonicalErrorCode {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorEnvelope {
+    /// Raw protobuf enum value. Unknown future non-zero values remain failures.
+    pub code: i32,
+    pub retryable: bool,
+    pub retry_after_ms: Option<u64>,
+    pub diagnostic_domain: String,
+    pub extensions: Vec<ProtocolExtension>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorEnvelopeError {
+    UnspecifiedCode,
+    InvalidExtension,
+    DuplicateExtension,
+    TooManyExtensions,
+    ExtensionPayloadTooLarge,
+}
+
+/// Validates the public error envelope without collapsing unknown future codes.
+///
+/// # Errors
+/// Rejects the protobuf UNSPECIFIED value and malformed/over-budget extensions.
+pub fn validate_error_envelope(envelope: &ErrorEnvelope) -> Result<(), ErrorEnvelopeError> {
+    if envelope.code == 0 {
+        return Err(ErrorEnvelopeError::UnspecifiedCode);
+    }
+    canonical_protocol_extensions(&envelope.extensions).map_err(map_error_envelope_extension)?;
+    Ok(())
+}
+
+/// Returns a deterministic wire representation while preserving the raw error code.
+///
+/// # Errors
+/// Returns the same fail-closed errors as [`validate_error_envelope`].
+pub fn canonical_error_envelope(
+    envelope: &ErrorEnvelope,
+) -> Result<ErrorEnvelope, ErrorEnvelopeError> {
+    validate_error_envelope(envelope)?;
+    let mut canonical = envelope.clone();
+    canonical.extensions = canonical_protocol_extensions(&envelope.extensions)
+        .map_err(map_error_envelope_extension)?;
+    Ok(canonical)
+}
+
+const fn map_error_envelope_extension(error: ExtensionError) -> ErrorEnvelopeError {
+    match error {
+        ExtensionError::InvalidNamespace | ExtensionError::UnsupportedCritical => {
+            ErrorEnvelopeError::InvalidExtension
+        }
+        ExtensionError::DuplicateExtension => ErrorEnvelopeError::DuplicateExtension,
+        ExtensionError::TooManyExtensions => ErrorEnvelopeError::TooManyExtensions,
+        ExtensionError::PayloadTooLarge => ErrorEnvelopeError::ExtensionPayloadTooLarge,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalError {
     pub code: CanonicalErrorCode,
@@ -57,6 +116,53 @@ impl CanonicalError {
         self.retryable = true;
         self.retry_after_ms = Some(retry_after_ms);
         self
+    }
+}
+
+/// Builds a public base error envelope from one known canonical error.
+///
+/// Response extensions are not inferred automatically.
+#[must_use]
+pub fn error_envelope_from_canonical(
+    error: CanonicalError,
+    diagnostic_domain: impl Into<String>,
+) -> ErrorEnvelope {
+    ErrorEnvelope {
+        code: i32::from(error.code as u16),
+        retryable: error.retryable,
+        retry_after_ms: error.retry_after_ms,
+        diagnostic_domain: diagnostic_domain.into(),
+        extensions: Vec::new(),
+    }
+}
+
+impl From<ErrorEnvelopeError> for CanonicalError {
+    fn from(error: ErrorEnvelopeError) -> Self {
+        let code = match error {
+            ErrorEnvelopeError::TooManyExtensions
+            | ErrorEnvelopeError::ExtensionPayloadTooLarge => CanonicalErrorCode::ResourceExhausted,
+            ErrorEnvelopeError::UnspecifiedCode
+            | ErrorEnvelopeError::InvalidExtension
+            | ErrorEnvelopeError::DuplicateExtension => CanonicalErrorCode::InvalidArgument,
+        };
+        Self::new(code)
+    }
+}
+
+impl From<IntentError> for CanonicalError {
+    fn from(error: IntentError) -> Self {
+        let code = match error {
+            IntentError::PayloadTooLarge
+            | IntentError::TooManyTransportConstraints
+            | IntentError::TooManyExtensions
+            | IntentError::ExtensionPayloadTooLarge => CanonicalErrorCode::ResourceExhausted,
+            IntentError::InvalidTransportCapability
+            | IntentError::DuplicateTransportCapability
+            | IntentError::ConflictingTransportCapability
+            | IntentError::InvalidExtension
+            | IntentError::DuplicateExtension => CanonicalErrorCode::InvalidArgument,
+        };
+        Self::new(code)
     }
 }
 
@@ -168,7 +274,9 @@ impl From<MessageError> for CanonicalError {
             | MessageError::TooManyRelations
             | MessageError::CryptoMetadataTooLarge
             | MessageError::TooManyExternalMappings
-            | MessageError::ExternalMessageIdTooLarge => CanonicalErrorCode::ResourceExhausted,
+            | MessageError::ExternalMessageIdTooLarge
+            | MessageError::TooManyExtensions
+            | MessageError::ExtensionPayloadTooLarge => CanonicalErrorCode::ResourceExhausted,
             _ => CanonicalErrorCode::InvalidArgument,
         };
         Self::new(code)
@@ -563,6 +671,63 @@ mod tests {
         );
         assert_eq!(
             CanonicalError::from(CommandError::TooManyExtensions).code,
+            CanonicalErrorCode::ResourceExhausted
+        );
+    }
+
+    #[test]
+    fn error_envelope_preserves_unknown_failure_codes_and_canonicalizes_extensions() {
+        let mut envelope = super::ErrorEnvelope {
+            code: 31_337,
+            retryable: false,
+            retry_after_ms: None,
+            diagnostic_domain: "vendor.example.transport".to_owned(),
+            extensions: vec![
+                ucr_model::ProtocolExtension {
+                    name: "vendor.example.z".to_owned(),
+                    critical: false,
+                    payload: b"z".to_vec(),
+                },
+                ucr_model::ProtocolExtension {
+                    name: "ucr.example.a".to_owned(),
+                    critical: false,
+                    payload: b"a".to_vec(),
+                },
+            ],
+        };
+        let canonical = super::canonical_error_envelope(&envelope).expect("canonical envelope");
+        assert_eq!(canonical.code, 31_337);
+        assert_eq!(canonical.extensions[0].name, "ucr.example.a");
+
+        envelope.code = 0;
+        assert_eq!(
+            super::validate_error_envelope(&envelope),
+            Err(super::ErrorEnvelopeError::UnspecifiedCode)
+        );
+    }
+
+    #[test]
+    fn canonical_error_to_wire_envelope_keeps_retry_semantics_without_copying_extensions() {
+        let error = CanonicalError::new(CanonicalErrorCode::RateLimited).with_retry_after(500);
+        let envelope = super::error_envelope_from_canonical(error, "ucr.runtime");
+        assert_eq!(envelope.code, CanonicalErrorCode::RateLimited as i32);
+        assert!(envelope.retryable);
+        assert_eq!(envelope.retry_after_ms, Some(500));
+        assert!(envelope.extensions.is_empty());
+    }
+
+    #[test]
+    fn intent_and_error_envelope_validation_map_to_stable_categories() {
+        assert_eq!(
+            CanonicalError::from(super::ErrorEnvelopeError::TooManyExtensions).code,
+            CanonicalErrorCode::ResourceExhausted
+        );
+        assert_eq!(
+            CanonicalError::from(crate::IntentError::ConflictingTransportCapability).code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            CanonicalError::from(crate::IntentError::TooManyTransportConstraints).code,
             CanonicalErrorCode::ResourceExhausted
         );
     }

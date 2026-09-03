@@ -24,7 +24,7 @@ Commands and events carry correlation/idempotency data for effectively-once user
 
 ## 4. Communication Intent
 
-Communication Intent is a first-class primitive. External consumers express target, payload, and policy constraints; they do not control the internal routing graph.
+Communication Intent is a first-class primitive. External consumers express target, payload, policy constraints, correlation, and protocol extensions; they do not control the internal routing graph. The optional `privacy_profile` is preserved as an opaque string at the public boundary so unknown future profiles are not silently discarded. Transport capability allow/forbid constraints are namespaced, bounded, duplicate-free, and contradictory declarations fail closed.
 
 ## 5. Framing
 

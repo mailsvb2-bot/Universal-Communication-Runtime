@@ -3,7 +3,7 @@ use ucr_core::DurableStoreError;
 use ucr_model::{
     CommandEnvelope, CommandId, OpaqueId, ProtocolExtension, ProtocolVersion, TenantId, TenantScope,
 };
-use ucr_protocol::canonical_protocol_extensions;
+use ucr_protocol::{MAX_PROTOCOL_EXTENSIONS, canonical_protocol_extensions};
 
 use super::{
     map_schema_change_error, map_sqlite_error, namespace_storage_key, verify_table_columns,
@@ -170,6 +170,9 @@ pub(super) fn load_protocol_metadata(
         .map_err(|error| map_sqlite_error(&error))?;
     let mut extensions = Vec::new();
     for (expected_position, row) in rows.enumerate() {
+        if expected_position >= MAX_PROTOCOL_EXTENSIONS {
+            return Err(DurableStoreError::Corrupt);
+        }
         let (position, name, critical, payload) = row.map_err(|error| map_sqlite_error(&error))?;
         if position != i64::try_from(expected_position).map_err(|_| DurableStoreError::Corrupt)? {
             return Err(DurableStoreError::Corrupt);

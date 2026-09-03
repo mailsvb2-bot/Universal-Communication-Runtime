@@ -5,7 +5,7 @@ use ucr_model::{
     EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, PrincipalId, ProtocolExtension,
     ProtocolVersion, TenantId, TenantScope,
 };
-use ucr_protocol::{EventError, canonical_event};
+use ucr_protocol::{EventError, MAX_PROTOCOL_EXTENSIONS, canonical_event};
 
 use super::{
     SqliteLocalStore, map_schema_change_error, map_sqlite_error, namespace_storage_key,
@@ -186,6 +186,9 @@ fn load_extensions(
         .map_err(|error| map_sqlite_error(&error))?;
     let mut extensions = Vec::new();
     for (expected_position, row) in rows.enumerate() {
+        if expected_position >= MAX_PROTOCOL_EXTENSIONS {
+            return Err(DurableStoreError::Corrupt);
+        }
         let (position, name, critical, payload) = row.map_err(|error| map_sqlite_error(&error))?;
         if position != i64::try_from(expected_position).map_err(|_| DurableStoreError::Corrupt)? {
             return Err(DurableStoreError::Corrupt);

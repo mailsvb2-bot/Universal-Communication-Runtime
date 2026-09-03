@@ -664,7 +664,8 @@ fn command_envelope_keeps_wire_model_idempotency_and_storage_parity() {
     assert!(
         memory.contains("command_extensions_and_schema_are_semantic_but_extension_order_is_not")
     );
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 9;"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V9: u32 = 9;"));
+    assert!(sqlite_root.contains("fn migrate_v8_to_v9"));
     assert!(sqlite_root.contains("v8_to_v9_migration_backfills_legacy_command_protocol_semantics"));
     assert!(sqlite_root.contains("missing_command_protocol_metadata_is_rejected_on_reopen"));
     assert!(sqlite_command.contains("CREATE TABLE command_protocol_metadata"));
@@ -986,7 +987,7 @@ fn conversation_message_contract_keeps_canon_and_wire_compatibility() {
         "A Conversation is a canonical UCR entity and outlives any provider",
         "A `TOPIC` requires one existing parent root Conversation",
         "A `THREAD` requires one existing `TOPIC` parent",
-        "Relation order and external-mapping order are not semantic",
+        "Relation order, external-mapping order, and protocol-extension order are not semantic",
         "reuse of one scoped Message ID with different semantics is a conflict",
     ] {
         assert!(
@@ -1057,6 +1058,106 @@ fn message_storage_keeps_restart_migration_and_security_nonclaims() {
     assert!(!sqlite.contains("telegram_message"));
     assert!(!sqlite.contains("vk_message"));
     assert!(!sqlite.contains("max_message"));
+}
+
+#[test]
+fn message_intent_and_error_wire_parity_survives_v10_storage() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let message_protocol =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/message.rs")).expect("message");
+    let intent_protocol =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/intent.rs")).expect("intent");
+    let error_protocol =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/error.rs")).expect("error");
+    let sqlite_root =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs")).expect("sqlite");
+    let sqlite_message =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/message_store.rs"))
+            .expect("message sqlite");
+    let communication =
+        fs::read_to_string(workspace.join("proto/ucr/v1/communication.proto")).expect("proto");
+    let errors = fs::read_to_string(workspace.join("proto/ucr/v1/errors.proto")).expect("errors");
+    let message_spec =
+        fs::read_to_string(workspace.join("spec/conversation-message.md")).expect("message spec");
+    let error_spec = fs::read_to_string(workspace.join("spec/errors.md")).expect("error spec");
+    let architecture = fs::read_to_string(workspace.join("docs/architecture/ARCHITECTURE.md"))
+        .expect("architecture");
+
+    let message_model = model
+        .split("pub struct MessageEnvelope")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct IntentConstraints").next())
+        .expect("MessageEnvelope block");
+    assert!(message_model.contains("pub author_device: DeviceRef"));
+    assert!(!message_model.contains("pub author_device: Option<DeviceRef>"));
+    assert!(message_model.contains("pub extensions: Vec<ProtocolExtension>"));
+    assert!(message_protocol.contains("canonical_protocol_extensions(&message.extensions)"));
+
+    let intent_constraints = model
+        .split("pub struct IntentConstraints")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct CommunicationIntent").next())
+        .expect("IntentConstraints block");
+    assert!(intent_constraints.contains("pub privacy_profile: Option<String>"));
+    assert!(intent_constraints.contains("pub priority_class: Option<u32>"));
+    let intent_model = model
+        .split("pub struct CommunicationIntent")
+        .nth(1)
+        .and_then(|tail| tail.split("#[cfg(test)]").next())
+        .expect("CommunicationIntent block");
+    assert!(intent_model.contains("pub correlation: CorrelationContext"));
+    assert!(intent_model.contains("pub extensions: Vec<ProtocolExtension>"));
+    assert!(intent_protocol.contains("pub fn canonical_communication_intent"));
+    assert!(intent_protocol.contains("ConflictingTransportCapability"));
+
+    assert!(communication.contains("optional string privacy_profile = 3;"));
+    assert!(communication.contains("optional uint32 priority_class = 6;"));
+    assert!(communication.contains("Correlation correlation = 6;"));
+    assert!(communication.contains("repeated Extension extensions = 7;"));
+    assert!(communication.contains("optional DeviceRef author_device = 5;"));
+    assert!(communication.contains("repeated Extension extensions = 10;"));
+    assert!(message_spec.contains("Canonical Message semantic decoding requires an author Device"));
+
+    assert!(errors.contains("message ErrorEnvelope"));
+    assert!(errors.contains("repeated Extension extensions = 5;"));
+    assert!(error_protocol.contains("pub struct ErrorEnvelope"));
+    assert!(error_protocol.contains("pub code: i32"));
+    assert!(error_protocol.contains("pub extensions: Vec<ProtocolExtension>"));
+    assert!(error_protocol.contains("pub fn canonical_error_envelope"));
+    assert!(error_spec.contains("Unknown future non-zero numeric codes remain failures"));
+
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 10;"));
+    assert!(sqlite_root.contains("fn migrate_v9_to_v10"));
+    assert!(sqlite_message.contains("CREATE TABLE message_extensions"));
+    let sqlite_command =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/command_store.rs"))
+            .expect("command sqlite");
+    let sqlite_event =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/event_journal.rs"))
+            .expect("event sqlite");
+    for loader in [&sqlite_command, &sqlite_event, &sqlite_message] {
+        assert!(loader.contains("expected_position >= MAX_PROTOCOL_EXTENSIONS"));
+    }
+    for evidence in [
+        "message_extensions_survive_restart_and_are_part_of_conflict_semantics",
+        "v9_to_v10_migration_preserves_existing_messages_as_empty_extensions",
+        "corrupt_message_extension_rows_are_rejected_on_reopen",
+        "oversized_persisted_message_extension_set_is_rejected_on_reopen",
+    ] {
+        assert!(
+            sqlite_message.contains(evidence),
+            "missing v10 evidence: {evidence}"
+        );
+    }
+    assert!(
+        sqlite_root.contains("oversized_persisted_command_extension_set_is_rejected_on_reopen")
+    );
+    assert!(sqlite_root.contains("oversized_persisted_event_extension_set_is_rejected_on_reopen"));
+    assert!(architecture.contains("durable Intent storage is not yet implemented"));
 }
 
 #[test]

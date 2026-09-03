@@ -13,6 +13,7 @@ mod error;
 mod extension;
 mod framing;
 mod handshake;
+mod intent;
 mod message;
 mod provenance;
 mod recovery;
@@ -63,7 +64,10 @@ pub use delivery::{
     validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
     validate_delivery_evidence_order, validate_delivery_transition,
 };
-pub use error::{CanonicalError, CanonicalErrorCode};
+pub use error::{
+    CanonicalError, CanonicalErrorCode, ErrorEnvelope, ErrorEnvelopeError,
+    canonical_error_envelope, error_envelope_from_canonical, validate_error_envelope,
+};
 pub use extension::{
     ExtensionError, MAX_EXTENSION_PAYLOAD_LEN, MAX_PROTOCOL_EXTENSIONS,
     canonical_protocol_extensions, require_supported_extensions, validate_extension_name,
@@ -77,6 +81,10 @@ pub use handshake::{
     HandshakeError, NegotiatedSession, NegotiationPolicy, NegotiationResultEnvelope,
     NegotiationResultError, PeerHello, canonical_negotiation_result, negotiate_session,
     negotiation_result_for_session, validate_negotiation_result,
+};
+pub use intent::{
+    IntentError, MAX_INTENT_TRANSPORT_CONSTRAINTS, canonical_communication_intent,
+    validate_communication_intent,
 };
 pub use message::{
     ConversationError, EXTERNAL_MESSAGE_ID_LIMIT, EXTERNAL_MESSAGE_MAPPING_LIMIT,

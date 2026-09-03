@@ -1333,6 +1333,7 @@ mod message_tests {
                 causation_id: None,
                 idempotency_key: Some("message-memory-key".into()),
             },
+            extensions: Vec::new(),
             external_mappings: Vec::new(),
             signature: None,
         }
@@ -1362,6 +1363,45 @@ mod message_tests {
             .expect("load message")
             .expect("message exists");
         assert_eq!(loaded.delivery_state, DeliveryState::Persisted);
+    }
+
+    #[test]
+    fn message_extensions_are_semantic_but_extension_order_is_not() {
+        let store = MemoryLocalStore::default();
+        store
+            .persist_conversation(&conversation())
+            .expect("persist conversation");
+        let mut first = message();
+        first.extensions = vec![
+            ucr_model::ProtocolExtension {
+                name: "vendor.example.z".to_owned(),
+                critical: false,
+                payload: b"z".to_vec(),
+            },
+            ucr_model::ProtocolExtension {
+                name: "ucr.example.a".to_owned(),
+                critical: false,
+                payload: b"a".to_vec(),
+            },
+        ];
+        assert_eq!(
+            store.persist_message(&first),
+            Ok(DurableRecordStatus::Persisted)
+        );
+
+        let mut reordered = first.clone();
+        reordered.extensions.reverse();
+        assert_eq!(
+            store.persist_message(&reordered),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+
+        let mut changed = reordered;
+        changed.extensions[0].payload.push(b'!');
+        assert_eq!(
+            store.persist_message(&changed),
+            Err(DurableStoreError::Conflict)
+        );
     }
 
     #[test]
