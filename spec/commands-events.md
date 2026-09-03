@@ -34,6 +34,8 @@ Events carry correlation metadata and may identify a causation ID when a command
 
 `wall_time_unix_ms` exists for audit/display context and interoperability. It is not the sole ordering rule and must not be trusted as authorization, freshness, replay, or identity evidence. Logical ordering remains explicit canonical runtime metadata. Provider timestamps do not replace either field.
 
+Ordinary Rust `Debug` output is not an authorized payload-inspection path. The reference model redacts Event payload bytes, integrity metadata, correlation idempotency keys, extension payloads, and payload-derived Event fingerprint digests while retaining safe structural metadata and lengths for diagnostics.
+
 ## Persistence boundary
 
 Phase-6 local storage provides restart-safe command acceptance/deduplication and an append-only canonical Event journal. Post-Phase-12 Command parity hardening makes Command schema version and canonical extension semantics durable as part of restart-safe idempotency comparison; a restart must not collapse semantically different Commands into one duplicate. A terminal Event may be atomically linked to a previously accepted Command when its scope matches and its causation ID references that Command.

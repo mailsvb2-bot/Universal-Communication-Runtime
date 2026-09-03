@@ -26,6 +26,8 @@ Commands and events carry correlation/idempotency data for effectively-once user
 
 Communication Intent is a first-class primitive. External consumers express target, payload, policy constraints, correlation, and protocol extensions; they do not control the internal routing graph. The optional `privacy_profile` is preserved as an opaque string at the public boundary so unknown future profiles are not silently discarded. Transport capability allow/forbid constraints are namespaced, bounded, duplicate-free, and contradictory declarations fail closed.
 
+Ordinary Rust `Debug` output for a Communication Intent redacts its payload, idempotency key, extension payloads, transport capability values, privacy/region values, and cost/priority values. Diagnostics retain only non-sensitive structure such as counts, presence flags, and payload length.
+
 ## 5. Framing
 
 The canonical byte-stream frame is specified in [framing.md](framing.md). Framing is versioned independently from message schema and fails closed on unsupported reserved flags or unsafe lengths.

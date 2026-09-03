@@ -493,11 +493,23 @@ impl ProtocolVersion {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CorrelationContext {
     pub correlation_id: OpaqueId,
     pub causation_id: Option<OpaqueId>,
     pub idempotency_key: Option<String>,
+}
+
+impl fmt::Debug for CorrelationContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CorrelationContext")
+            .field("correlation_id", &self.correlation_id)
+            .field("causation_id", &self.causation_id)
+            .field("idempotency_key", &"<redacted>")
+            .field("has_idempotency_key", &self.idempotency_key.is_some())
+            .finish()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -550,7 +562,7 @@ impl fmt::Debug for ProtocolExtension {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EventEnvelope {
     pub event_id: EventId,
     pub scope: TenantScope,
@@ -566,16 +578,49 @@ pub struct EventEnvelope {
     pub extensions: Vec<ProtocolExtension>,
 }
 
+impl fmt::Debug for EventEnvelope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EventEnvelope")
+            .field("event_id", &self.event_id)
+            .field("scope", &self.scope)
+            .field("event_type", &self.event_type)
+            .field("payload", &"<redacted>")
+            .field("payload_len", &self.payload.len())
+            .field("actor", &self.actor)
+            .field("source_device", &self.source_device)
+            .field("wall_time_unix_ms", &self.wall_time_unix_ms)
+            .field("logical_order", &self.logical_order)
+            .field("correlation", &self.correlation)
+            .field("schema_version", &self.schema_version)
+            .field("integrity_metadata", &"<opaque>")
+            .field("integrity_metadata_len", &self.integrity_metadata.len())
+            .field("extensions", &self.extensions)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum EventFingerprintAlgorithm {
     Sha256V1 = 1,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EventFingerprint {
     pub algorithm: EventFingerprintAlgorithm,
     pub digest: [u8; 32],
+}
+
+impl fmt::Debug for EventFingerprint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EventFingerprint")
+            .field("algorithm", &self.algorithm)
+            .field("digest", &"<opaque>")
+            .field("digest_len", &self.digest.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -670,20 +715,43 @@ pub struct MessageRelation {
     pub target_message_id: MessageId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ExternalMessageMapping {
     pub integration_id: IntegrationId,
     pub external_message_id: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for ExternalMessageMapping {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExternalMessageMapping")
+            .field("integration_id", &self.integration_id)
+            .field("external_message_id", &"<opaque>")
+            .field("external_message_id_len", &self.external_message_id.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct MessageCryptoMetadata {
     pub suite: CryptoSuite,
     pub key_id: Option<KeyId>,
     pub opaque_metadata: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for MessageCryptoMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessageCryptoMetadata")
+            .field("suite", &self.suite)
+            .field("key_id", &self.key_id)
+            .field("opaque_metadata", &"<opaque>")
+            .field("opaque_metadata_len", &self.opaque_metadata.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct MessageSignature {
     pub key_id: KeyId,
     pub algorithm_id: String,
@@ -691,7 +759,20 @@ pub struct MessageSignature {
     pub signature: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for MessageSignature {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessageSignature")
+            .field("key_id", &self.key_id)
+            .field("algorithm_id", &self.algorithm_id)
+            .field("algorithm_version", &self.algorithm_version)
+            .field("signature", &"<opaque>")
+            .field("signature_len", &self.signature.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct MessageEnvelope {
     pub message_id: MessageId,
     pub scope: TenantScope,
@@ -714,7 +795,35 @@ pub struct MessageEnvelope {
     pub signature: Option<MessageSignature>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for MessageEnvelope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessageEnvelope")
+            .field("message_id", &self.message_id)
+            .field("scope", &self.scope)
+            .field("conversation", &self.conversation)
+            .field("author", &self.author)
+            .field("author_device", &self.author_device)
+            .field("created_at_unix_ms", &self.created_at_unix_ms)
+            .field("logical_order", &self.logical_order)
+            .field("content", &"<redacted>")
+            .field("content_len", &self.content.len())
+            .field("attachment_ids", &self.attachment_ids)
+            .field("reply_to", &self.reply_to)
+            .field("relations", &self.relations)
+            .field("crypto_metadata", &self.crypto_metadata)
+            .field("delivery_policy", &self.delivery_policy)
+            .field("delivery_state", &self.delivery_state)
+            .field("origin", &self.origin)
+            .field("correlation", &self.correlation)
+            .field("extensions", &self.extensions)
+            .field("external_mappings", &self.external_mappings)
+            .field("signature", &self.signature)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct IntentConstraints {
     pub allowed_transport_capabilities: Vec<String>,
     pub forbidden_transport_capabilities: Vec<String>,
@@ -724,7 +833,29 @@ pub struct IntentConstraints {
     pub priority_class: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for IntentConstraints {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IntentConstraints")
+            .field(
+                "allowed_transport_capability_count",
+                &self.allowed_transport_capabilities.len(),
+            )
+            .field(
+                "forbidden_transport_capability_count",
+                &self.forbidden_transport_capabilities.len(),
+            )
+            .field("privacy_profile", &"<redacted>")
+            .field("has_privacy_profile", &self.privacy_profile.is_some())
+            .field("region_constraint", &"<redacted>")
+            .field("has_region_constraint", &self.region_constraint.is_some())
+            .field("has_max_cost", &self.max_cost_microunits.is_some())
+            .field("has_priority_class", &self.priority_class.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct CommunicationIntent {
     pub intent_id: IntentId,
     pub scope: TenantScope,
@@ -733,6 +864,22 @@ pub struct CommunicationIntent {
     pub constraints: IntentConstraints,
     pub correlation: CorrelationContext,
     pub extensions: Vec<ProtocolExtension>,
+}
+
+impl fmt::Debug for CommunicationIntent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommunicationIntent")
+            .field("intent_id", &self.intent_id)
+            .field("scope", &self.scope)
+            .field("target_identity_id", &self.target_identity_id)
+            .field("payload", &"<redacted>")
+            .field("payload_len", &self.payload.len())
+            .field("constraints", &self.constraints)
+            .field("correlation", &self.correlation)
+            .field("extensions", &self.extensions)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -802,6 +949,270 @@ mod tests {
         assert!(!cursor_debug.contains("cursor-secret"));
         assert!(extension_debug.contains("<redacted>"));
         assert!(cursor_debug.contains("<opaque>"));
+    }
+
+    #[test]
+    fn correlation_and_event_debug_do_not_disclose_sensitive_material() {
+        let correlation = super::CorrelationContext {
+            correlation_id: super::OpaqueId::new("correlation-sensitive-marker")
+                .expect("correlation id"),
+            causation_id: Some(
+                super::OpaqueId::new("causation-sensitive-marker").expect("causation id"),
+            ),
+            idempotency_key: Some("idempotency-sensitive-marker".to_owned()),
+        };
+        let event = super::EventEnvelope {
+            event_id: super::EventId::from_opaque(
+                super::OpaqueId::new("event-sensitive-marker").expect("event id"),
+            ),
+            scope: super::TenantScope {
+                tenant_id: super::TenantId::from_opaque(
+                    super::OpaqueId::new("tenant-sensitive-marker").expect("tenant id"),
+                ),
+                namespace_id: None,
+            },
+            event_type: "ucr.test.event".to_owned(),
+            payload: b"event-plaintext-sensitive-marker".to_vec(),
+            actor: super::ActorRef {
+                actor_id: super::ActorId::from_opaque(
+                    super::OpaqueId::new("actor-sensitive-marker").expect("actor id"),
+                ),
+                kind: super::ActorKind::System,
+                on_behalf_of: None,
+            },
+            source_device: super::DeviceRef {
+                device_id: super::DeviceId::from_opaque(
+                    super::OpaqueId::new("device-sensitive-marker").expect("device id"),
+                ),
+                identity_id: super::IdentityId::from_opaque(
+                    super::OpaqueId::new("identity-sensitive-marker").expect("identity id"),
+                ),
+            },
+            wall_time_unix_ms: 1,
+            logical_order: 2,
+            correlation: correlation.clone(),
+            schema_version: super::ProtocolVersion::new(1, 0),
+            integrity_metadata: b"integrity-sensitive-marker".to_vec(),
+            extensions: vec![super::ProtocolExtension {
+                name: "ucr.test.extension".to_owned(),
+                critical: false,
+                payload: b"event-extension-sensitive-marker".to_vec(),
+            }],
+        };
+        let fingerprint = super::EventFingerprint {
+            algorithm: super::EventFingerprintAlgorithm::Sha256V1,
+            digest: [0xaa; 32],
+        };
+        let correlation_debug = format!("{correlation:?}");
+        let event_debug = format!("{event:?}");
+        let fingerprint_debug = format!("{fingerprint:?}");
+        for secret in [
+            "correlation-sensitive-marker",
+            "causation-sensitive-marker",
+            "idempotency-sensitive-marker",
+        ] {
+            assert!(!correlation_debug.contains(secret));
+            assert!(!event_debug.contains(secret));
+        }
+        for secret in [
+            "event-plaintext-sensitive-marker",
+            "integrity-sensitive-marker",
+            "event-extension-sensitive-marker",
+        ] {
+            assert!(!event_debug.contains(secret));
+        }
+        assert!(!fingerprint_debug.contains("170, 170"));
+        assert!(event_debug.contains("payload_len"));
+        assert!(event_debug.contains("integrity_metadata_len"));
+        assert!(fingerprint_debug.contains("<opaque>"));
+    }
+
+    fn sensitive_message_parts() -> (
+        super::ExternalMessageMapping,
+        super::MessageCryptoMetadata,
+        super::MessageSignature,
+    ) {
+        let external_mapping = super::ExternalMessageMapping {
+            integration_id: super::IntegrationId::from_opaque(
+                super::OpaqueId::new("integration-sensitive-marker").expect("integration id"),
+            ),
+            external_message_id: b"external-message-sensitive-marker".to_vec(),
+        };
+        let crypto_metadata = super::MessageCryptoMetadata {
+            suite: super::CryptoSuite::UcrV1,
+            key_id: Some(super::KeyId::from_opaque(
+                super::OpaqueId::new("key-sensitive-marker").expect("key id"),
+            )),
+            opaque_metadata: b"crypto-metadata-sensitive-marker".to_vec(),
+        };
+        let signature = super::MessageSignature {
+            key_id: super::KeyId::from_opaque(
+                super::OpaqueId::new("signature-key-sensitive-marker").expect("key id"),
+            ),
+            algorithm_id: "ucr.signature.test".to_owned(),
+            algorithm_version: 1,
+            signature: b"signature-sensitive-marker".to_vec(),
+        };
+        (external_mapping, crypto_metadata, signature)
+    }
+
+    fn sensitive_message() -> super::MessageEnvelope {
+        let (external_mapping, crypto_metadata, signature) = sensitive_message_parts();
+        super::MessageEnvelope {
+            message_id: super::MessageId::from_opaque(
+                super::OpaqueId::new("message-sensitive-marker").expect("message id"),
+            ),
+            scope: super::TenantScope {
+                tenant_id: super::TenantId::from_opaque(
+                    super::OpaqueId::new("message-tenant-sensitive-marker").expect("tenant id"),
+                ),
+                namespace_id: None,
+            },
+            conversation: super::ConversationRef {
+                conversation_id: super::ConversationId::from_opaque(
+                    super::OpaqueId::new("conversation-sensitive-marker").expect("conversation id"),
+                ),
+                kind: super::ConversationKind::Direct,
+            },
+            author: super::ActorRef {
+                actor_id: super::ActorId::from_opaque(
+                    super::OpaqueId::new("message-actor-sensitive-marker").expect("actor id"),
+                ),
+                kind: super::ActorKind::Person,
+                on_behalf_of: None,
+            },
+            author_device: super::DeviceRef {
+                device_id: super::DeviceId::from_opaque(
+                    super::OpaqueId::new("message-device-sensitive-marker").expect("device id"),
+                ),
+                identity_id: super::IdentityId::from_opaque(
+                    super::OpaqueId::new("message-identity-sensitive-marker").expect("identity id"),
+                ),
+            },
+            created_at_unix_ms: 1,
+            logical_order: 1,
+            content: b"message-plaintext-sensitive-marker".to_vec(),
+            attachment_ids: Vec::new(),
+            reply_to: None,
+            relations: Vec::new(),
+            crypto_metadata: Some(crypto_metadata),
+            delivery_policy: super::DeliveryPolicy::Durable,
+            delivery_state: super::DeliveryState::Persisted,
+            origin: super::OriginRef {
+                principal_id: None,
+                endpoint_id: None,
+                integration_id: None,
+            },
+            correlation: super::CorrelationContext {
+                correlation_id: super::OpaqueId::new("message-correlation-sensitive-marker")
+                    .expect("correlation id"),
+                causation_id: None,
+                idempotency_key: Some("message-idempotency-sensitive-marker".to_owned()),
+            },
+            extensions: vec![super::ProtocolExtension {
+                name: "ucr.test.message-extension".to_owned(),
+                critical: false,
+                payload: b"message-extension-sensitive-marker".to_vec(),
+            }],
+            external_mappings: vec![external_mapping],
+            signature: Some(signature),
+        }
+    }
+
+    #[test]
+    fn message_nested_debug_does_not_disclose_sensitive_material() {
+        let (external_mapping, crypto_metadata, signature) = sensitive_message_parts();
+        let mapping_debug = format!("{external_mapping:?}");
+        let metadata_debug = format!("{crypto_metadata:?}");
+        let signature_debug = format!("{signature:?}");
+        assert!(!mapping_debug.contains("external-message-sensitive-marker"));
+        assert!(!metadata_debug.contains("crypto-metadata-sensitive-marker"));
+        assert!(!signature_debug.contains("signature-sensitive-marker"));
+        assert!(mapping_debug.contains("external_message_id_len"));
+        assert!(metadata_debug.contains("opaque_metadata_len"));
+        assert!(signature_debug.contains("signature_len"));
+    }
+
+    #[test]
+    fn message_envelope_debug_does_not_disclose_sensitive_material() {
+        let debug = format!("{:?}", sensitive_message());
+        for secret in [
+            "message-plaintext-sensitive-marker",
+            "message-idempotency-sensitive-marker",
+            "message-extension-sensitive-marker",
+            "external-message-sensitive-marker",
+            "crypto-metadata-sensitive-marker",
+            "signature-sensitive-marker",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+        assert!(debug.contains("content_len"));
+    }
+
+    #[test]
+    fn communication_intent_and_constraints_debug_redact_private_policy_and_payload() {
+        let constraints = super::IntentConstraints {
+            allowed_transport_capabilities: vec![
+                "ucr.transport.allowed-sensitive-marker".to_owned(),
+            ],
+            forbidden_transport_capabilities: vec![
+                "ucr.transport.forbidden-sensitive-marker".to_owned(),
+            ],
+            privacy_profile: Some("privacy-sensitive-marker".to_owned()),
+            region_constraint: Some("region-sensitive-marker".to_owned()),
+            max_cost_microunits: Some(987_654_321),
+            priority_class: Some(777),
+        };
+        let intent = super::CommunicationIntent {
+            intent_id: super::IntentId::from_opaque(
+                super::OpaqueId::new("intent-sensitive-marker").expect("intent id"),
+            ),
+            scope: super::TenantScope {
+                tenant_id: super::TenantId::from_opaque(
+                    super::OpaqueId::new("intent-tenant-sensitive-marker").expect("tenant id"),
+                ),
+                namespace_id: None,
+            },
+            target_identity_id: super::IdentityId::from_opaque(
+                super::OpaqueId::new("target-sensitive-marker").expect("identity id"),
+            ),
+            payload: b"intent-plaintext-sensitive-marker".to_vec(),
+            constraints: constraints.clone(),
+            correlation: super::CorrelationContext {
+                correlation_id: super::OpaqueId::new("intent-correlation-sensitive-marker")
+                    .expect("correlation id"),
+                causation_id: None,
+                idempotency_key: Some("intent-idempotency-sensitive-marker".to_owned()),
+            },
+            extensions: vec![super::ProtocolExtension {
+                name: "ucr.test.intent-extension".to_owned(),
+                critical: false,
+                payload: b"intent-extension-sensitive-marker".to_vec(),
+            }],
+        };
+        let constraints_debug = format!("{constraints:?}");
+        let intent_debug = format!("{intent:?}");
+        for secret in [
+            "ucr.transport.allowed-sensitive-marker",
+            "ucr.transport.forbidden-sensitive-marker",
+            "privacy-sensitive-marker",
+            "region-sensitive-marker",
+            "987654321",
+            "777",
+        ] {
+            assert!(!constraints_debug.contains(secret));
+            assert!(!intent_debug.contains(secret));
+        }
+        for secret in [
+            "intent-plaintext-sensitive-marker",
+            "intent-idempotency-sensitive-marker",
+            "intent-extension-sensitive-marker",
+        ] {
+            assert!(!intent_debug.contains(secret));
+        }
+        assert!(intent_debug.contains("payload_len"));
+        assert!(constraints_debug.contains("allowed_transport_capability_count"));
+        assert!(constraints_debug.contains("has_privacy_profile"));
     }
 }
 

@@ -58,6 +58,8 @@ Phase 9 may persist Message content locally before transport encryption, matchin
 
 External message IDs remain scoped Integration mappings. They never become canonical Message IDs and cannot create provider-specific message brains.
 
+Ordinary Rust `Debug` output redacts Message plaintext, correlation idempotency keys, external provider message IDs, crypto metadata bytes, signature bytes, and extension payloads. The same nested metadata types redact themselves when formatted directly; safe structure, presence, algorithms, and byte lengths may remain visible. This is model-level diagnostic hardening, not a claim that all telemetry/crash-report pipelines have end-to-end plaintext-leak coverage.
+
 Edit and reaction relations establish canonical relationship vocabulary, but Phase 9 does not yet claim a complete edit-history projection, reaction engine, group membership/MLS state, Attachment engine, Sync/Anti-Entropy, or Delivery Engine.
 
 ## 7. Required evidence
