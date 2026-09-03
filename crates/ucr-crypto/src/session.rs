@@ -200,7 +200,7 @@ where
 {
     let claim = &input.peer_signing_descriptor;
     let trusted = trust
-        .resolve_active_signing_key(&input.scope, &claim.device_id, &claim.key_id)
+        .resolve_active_signing_key(&input.scope, &claim.device_id, None, &claim.key_id)
         .map_err(TrustedSessionError::Trust)?;
     if trusted != *claim {
         return Err(TrustedSessionError::Trust(

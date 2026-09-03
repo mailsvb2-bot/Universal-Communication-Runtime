@@ -8,12 +8,12 @@ mod service_request;
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CapabilityDescriptor,
     CommandEnvelope, CommandId, CommunicationIntent, ConversationId, ConversationRecord,
-    DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceId, EndpointAddress,
-    EndpointId, EventEnvelope, EventId, EventReconciliation, EventSummary, IdentityId, KeyId,
-    MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
-    ScopedPrincipal, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
-    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord,
+    DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
+    EndpointAddress, EndpointId, EventEnvelope, EventId, EventReconciliation, EventSummary,
+    IdentityId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor,
+    RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditRecord, ServiceCredentialId,
+    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
+    TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -224,6 +224,48 @@ pub trait ServiceAuditStore: StorageProvider {
         scope: &TenantScope,
         max_items: usize,
     ) -> Result<Vec<ServiceAuditRecord>, DurableStoreError>;
+}
+
+/// Durable exact-scope owner for canonical Device lifecycle.
+///
+/// Device state is not copied into key or credential records. Revocation through
+/// this owner is irreversible and must invalidate currently active device-bound
+/// key material owned by the same durable runtime atomically.
+pub trait DeviceLifecycleStore: StorageProvider {
+    /// Registers one canonical Device descriptor for an exact scope. Identical
+    /// retries are idempotent; an existing Device ID cannot be rebound to another
+    /// Identity or lifecycle state through registration.
+    ///
+    /// # Errors
+    /// Returns conflict for rebinding/state replacement and explicit storage failures.
+    fn register_device(
+        &self,
+        scope: &TenantScope,
+        descriptor: &DeviceDescriptor,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Irreversibly revokes one exact Device and invalidates currently active
+    /// device-bound trusted signing material in the same atomic durable action.
+    ///
+    /// # Errors
+    /// Returns conflict for an unknown Device or Identity mismatch and explicit
+    /// storage failures. Retrying the same completed revocation is idempotent.
+    fn revoke_device(
+        &self,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_identity_id: &IdentityId,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Resolves one exact scoped Device descriptor; absence is not an error.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn device(
+        &self,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+    ) -> Result<Option<DeviceDescriptor>, DurableStoreError>;
 }
 
 /// Storage health is explicit and never inferred from successful construction.

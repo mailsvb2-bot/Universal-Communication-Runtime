@@ -356,7 +356,7 @@ fn threat_model_keeps_production_blockers_visible() {
 
     for blocker in [
         "production OS/hardware-backed key providers for supported targets",
-        "device revocation enforcement",
+        "device-bound credential/content delivery",
         "end-to-end recovery workflow",
         "required threat simulations",
         "secret/plaintext telemetry regression tests",
@@ -1130,7 +1130,7 @@ fn message_intent_and_error_wire_parity_survives_v10_storage() {
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 14;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 15;"));
     assert!(sqlite_root.contains("fn migrate_v9_to_v10"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
@@ -1641,11 +1641,13 @@ fn trusted_signing_key_lifecycle_is_scoped_restart_safe_and_runtime_integrated()
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 14"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 15"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
+    assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
 
     for evidence in [
         "trusted_signing_key_lifecycle_is_atomic_idempotent_and_irreversible",
@@ -1662,7 +1664,7 @@ fn trusted_signing_key_lifecycle_is_scoped_restart_safe_and_runtime_integrated()
     assert!(!threat.contains("- trusted peer signing-key provisioning and lifecycle integration;"));
     for remaining in [
         "production OS/hardware-backed key providers for supported targets",
-        "device revocation enforcement in credential/key delivery",
+        "device-bound credential/content delivery enforcement beyond implemented trusted-key/authentication paths",
     ] {
         assert!(
             threat.contains(remaining),
@@ -1805,10 +1807,12 @@ fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overc
     );
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 14;"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 15;"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
+    assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
     assert!(spec.contains("SQLite schema v12"));
     assert!(adr.contains("does not claim every Command/Message/Sync/Delivery/runtime operation"));
     assert!(threat.contains("SQLite v12 state"));
@@ -1820,6 +1824,9 @@ const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
     "service_quota_policy",
     "set_service_quota_policy",
     "service_audit_records",
+    "register_device",
+    "revoke_device",
+    "device",
     "grant_permission",
     "revoke_permission",
     "permission_grants_for",
@@ -1860,6 +1867,9 @@ const AUTHORIZED_RUNTIME_PERMISSIONS: &[&str] = &[
     "SERVICE_QUOTA_READ_PERMISSION",
     "SERVICE_QUOTA_WRITE_PERMISSION",
     "SERVICE_AUDIT_READ_PERMISSION",
+    "DEVICE_READ_PERMISSION",
+    "DEVICE_REGISTER_PERMISSION",
+    "DEVICE_REVOKE_PERMISSION",
     "PERMISSION_GRANT_READ_PERMISSION",
     "PERMISSION_GRANT_CREATE_PERMISSION",
     "PERMISSION_GRANT_REVOKE_PERMISSION",
@@ -1960,6 +1970,108 @@ fn tenant_scoped_durable_runtime_authorization_covers_every_current_method() {
 }
 
 #[test]
+fn device_lifecycle_is_durable_and_gates_protected_key_access() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+    let runtime = fs::read_to_string(workspace.join("crates/ucr-core/src/authorized_runtime.rs"))
+        .expect("authorized runtime");
+    let protocol =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/device_lifecycle.rs"))
+            .expect("device protocol");
+    let authorization =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/authorization.rs"))
+            .expect("authorization protocol");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+    let sqlite_root = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let sqlite_device =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/device_store.rs"))
+            .expect("sqlite device store");
+    let sqlite_keys =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/trusted_key_store.rs"))
+            .expect("sqlite key store");
+    let memory_keys = &memory;
+    let resolver = fs::read_to_string(workspace.join("crates/ucr-crypto/src/trusted_key.rs"))
+        .expect("trusted key resolver");
+    let message_signature =
+        fs::read_to_string(workspace.join("crates/ucr-crypto/src/message_signature.rs"))
+            .expect("message signature");
+    let spec =
+        fs::read_to_string(workspace.join("spec/principal-actor-device.md")).expect("device spec");
+    let storage_spec =
+        fs::read_to_string(workspace.join("spec/local-storage.md")).expect("storage spec");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let adr = fs::read_to_string(
+        workspace
+            .join("docs/adr/0032-device-lifecycle-is-durable-and-gates-protected-key-access.md"),
+    )
+    .expect("adr 0032");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(core.contains("pub trait DeviceLifecycleStore: StorageProvider"));
+    for method in ["register_device", "revoke_device", "device"] {
+        assert!(runtime.contains(&format!("pub fn {method}(")));
+    }
+    for permission in [
+        "DEVICE_READ_PERMISSION",
+        "DEVICE_REGISTER_PERMISSION",
+        "DEVICE_REVOKE_PERMISSION",
+    ] {
+        assert!(authorization.contains(permission));
+        assert!(runtime.contains(permission));
+    }
+    assert!(protocol.contains("only `Active`"));
+    assert!(protocol.contains("DeviceLifecycleState::Active"));
+    assert!(resolver.contains("identity_id: Option<&IdentityId>"));
+    assert!(message_signature.contains("Some(&message.author_device.identity_id)"));
+    assert!(sqlite_keys.contains("protected_device_allows"));
+    assert!(memory_keys.contains("device_allows_protected_access"));
+
+    for evidence in [
+        "device_revocation_atomically_revokes_key_and_cannot_be_reactivated",
+        "protected_key_access_requires_active_device_and_exact_identity_binding",
+        "device_lifecycle_administration_uses_independent_permissions_and_cannot_reactivate",
+    ] {
+        assert!(
+            memory.contains(evidence),
+            "memory Device evidence missing: {evidence}"
+        );
+    }
+    for evidence in [
+        "device_revocation_and_key_invalidation_survive_restart",
+        "concurrent_device_revoke_and_key_rotation_never_leave_active_key",
+        "v14_to_v15_migration_preserves_key_but_does_not_invent_device_identity",
+        "corrupt_device_state_is_rejected_on_reopen",
+    ] {
+        assert!(
+            sqlite_device.contains(evidence),
+            "sqlite Device evidence missing: {evidence}"
+        );
+    }
+    assert!(sqlite_device.contains("CREATE TABLE devices"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 15;"));
+    assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
+    assert!(storage_spec.contains("migration does not invent an Identity binding"));
+    assert!(spec.contains("one exact-scope durable `DeviceLifecycleStore`"));
+    assert!(adr.contains("creates no Device rows"));
+    assert!(adr.contains("does not claim a device-bound credential/content-delivery API"));
+    assert!(
+        ci.contains("docs/adr/0032-device-lifecycle-is-durable-and-gates-protected-key-access.md")
+    );
+    assert!(!threat.contains("- device revocation enforcement in credential/key delivery;"));
+    assert!(threat.contains(
+        "- device-bound credential/content delivery enforcement beyond implemented trusted-key/authentication paths;"
+    ));
+    assert!(threat.contains("- end-to-end recovery workflow:"));
+}
+
+#[test]
 fn service_principal_authentication_resolves_canonical_identity_before_least_privilege() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -2008,9 +2120,10 @@ fn service_principal_authentication_resolves_canonical_identity_before_least_pri
         "credential_authentication_is_non_disclosing_revocable_and_raw_runtime_cannot_bypass_gate"
     ));
     assert!(sqlite.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 14"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 15"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V12 => migrate_v12_to_v13(connection)?"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V13 => migrate_v13_to_v14(connection)?"));
+    assert!(sqlite.contains("SQLITE_SCHEMA_V14 => migrate_v14_to_v15(connection)?"));
     assert!(
         sqlite_credentials.contains("credential_survives_restart_and_revocation_remains_effective")
     );
@@ -2023,7 +2136,9 @@ fn service_principal_authentication_resolves_canonical_identity_before_least_pri
             "Successful authentication returns the persisted canonical `ScopedPrincipal`"
         )
     );
-    assert!(permissions.contains("Service Principal credential authentication now feeds"));
+    assert!(permissions.contains(
+        "Service Principal credential authentication feeds an authenticated `ScopedPrincipal`"
+    ));
     assert!(adr.contains("credential-enumeration oracle"));
     assert!(ci.contains(
         "docs/adr/0030-service-principal-credentials-authenticate-canonical-scoped-principals.md"
@@ -2160,8 +2275,10 @@ fn service_principal_audit_storage_and_governance_close_only_the_evidenced_block
     assert!(sqlite.contains("CREATE TRIGGER service_audit_no_delete"));
     assert!(sqlite.contains("verify_audit_chain"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 14;"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 15;"));
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
+    assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
     assert!(spec.contains("single-use"));
     assert!(spec.contains("not a distributed global rate limiter"));
     assert!(spec.contains("not a claim that an attacker with privileged filesystem control"));
@@ -2178,7 +2295,7 @@ fn service_principal_audit_storage_and_governance_close_only_the_evidenced_block
     assert!(
         threat.contains("- production OS/hardware-backed key providers for supported targets;")
     );
-    assert!(threat.contains("- device revocation enforcement in credential/key delivery;"));
+    assert!(threat.contains("- device-bound credential/content delivery enforcement beyond implemented trusted-key/authentication paths;"));
 }
 
 fn canonical_threat_boundaries(threat: &str) -> std::collections::BTreeSet<String> {

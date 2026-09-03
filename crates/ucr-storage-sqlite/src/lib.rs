@@ -3,6 +3,7 @@
 mod anti_entropy_store;
 mod command_store;
 mod delivery_store;
+mod device_store;
 mod event_journal;
 mod message_store;
 mod permission_store;
@@ -38,7 +39,8 @@ const SQLITE_SCHEMA_V10: u32 = 10;
 const SQLITE_SCHEMA_V11: u32 = 11;
 const SQLITE_SCHEMA_V12: u32 = 12;
 const SQLITE_SCHEMA_V13: u32 = 13;
-pub const SQLITE_SCHEMA_VERSION: u32 = 14;
+const SQLITE_SCHEMA_V14: u32 = 14;
+pub const SQLITE_SCHEMA_VERSION: u32 = 15;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -361,7 +363,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         if count_user_tables(connection)? != 0 {
             return Err(DurableStoreError::ForeignStore);
         }
-        return initialize_schema_v14(connection);
+        return initialize_schema_v15(connection);
     }
     if application_id != UCR_SQLITE_APPLICATION_ID {
         return Err(DurableStoreError::ForeignStore);
@@ -370,7 +372,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return service_control_store::verify_schema_v14(connection);
+        return device_store::verify_schema_v15(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -394,14 +396,15 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V11 => migrate_v11_to_v12(connection)?,
             SQLITE_SCHEMA_V12 => migrate_v12_to_v13(connection)?,
             SQLITE_SCHEMA_V13 => migrate_v13_to_v14(connection)?,
+            SQLITE_SCHEMA_V14 => migrate_v14_to_v15(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    service_control_store::verify_schema_v14(connection)
+    device_store::verify_schema_v15(connection)
 }
 
-fn initialize_schema_v14(connection: &mut Connection) -> Result<(), DurableStoreError> {
+fn initialize_schema_v15(connection: &mut Connection) -> Result<(), DurableStoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -440,6 +443,7 @@ fn initialize_schema_v14(connection: &mut Connection) -> Result<(), DurableStore
     permission_store::create_v12_objects(&transaction)?;
     service_credential_store::create_v13_objects(&transaction)?;
     service_control_store::create_v14_objects(&transaction)?;
+    device_store::create_v15_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -645,12 +649,27 @@ fn migrate_v13_to_v14(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     service_control_store::create_v14_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V14)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     service_control_store::verify_schema_v14(connection)
+}
+
+fn migrate_v14_to_v15(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    service_control_store::verify_schema_v14(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    device_store::create_v15_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    device_store::verify_schema_v15(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1263,7 +1282,7 @@ mod tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF;
-                     DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;
+                     DROP TABLE devices; DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;
                      DROP TABLE message_extensions;
                      DROP TABLE command_extensions;
                      DROP TABLE command_protocol_metadata;

@@ -1,17 +1,18 @@
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
     ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
-    DeliveryState, DeviceId, EventEnvelope, EventId, EventReconciliation, EventSummary, IdentityId,
-    KeyId, MessageEnvelope, MessageId, PermissionGrant, PermissionScope, PrincipalKind,
-    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditRecord,
-    ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint,
-    SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    DeliveryState, DeviceDescriptor, DeviceId, EventEnvelope, EventId, EventReconciliation,
+    EventSummary, IdentityId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PermissionScope,
+    PrincipalKind, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
+    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy,
+    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{
     ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, COMMAND_ACCEPT_PERMISSION,
     COMMAND_OUTCOME_READ_PERMISSION, COMMAND_OUTCOME_WRITE_PERMISSION,
     CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION, DELIVERY_READ_PERMISSION,
-    DELIVERY_WRITE_PERMISSION, EVENT_APPEND_PERMISSION, MESSAGE_READ_PERMISSION,
+    DELIVERY_WRITE_PERMISSION, DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION,
+    DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION, MESSAGE_READ_PERMISSION,
     MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
     PERMISSION_GRANT_REVOKE_PERMISSION, RECOVERY_PLAN_INSTALL_PERMISSION,
     RECOVERY_PLAN_READ_PERMISSION, RECOVERY_PLAN_REVOKE_PERMISSION,
@@ -25,10 +26,10 @@ use ucr_protocol::{
 
 use crate::{
     AntiEntropyStore, AuthorizationEvaluator, AuthorizedMutationError, CommandAcceptanceStore,
-    CommandOutcomeStore, ConversationStore, DeliveryStore, DurableRecordStatus, DurableStoreError,
-    EventAppendStatus, EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore,
-    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaStore, SyncStore,
-    TrustedSigningKeyStore,
+    CommandOutcomeStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
+    DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore, MessageStore,
+    PermissionGrantStore, RecoveryPlanStore, ServiceAuditStore, ServiceCredentialStore,
+    ServiceQuotaStore, SyncStore, TrustedSigningKeyStore,
 };
 
 /// Authorization-enforcing runtime boundary over tenant-scoped durable capabilities.
@@ -245,6 +246,62 @@ where
         self.require(subject, scope, SERVICE_AUDIT_READ_PERMISSION)?;
         self.store
             .service_audit_records(scope, max_items)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: DeviceLifecycleStore,
+{
+    /// Registers one exact-scoped canonical Device only after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn register_device(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        descriptor: &DeviceDescriptor,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, scope, DEVICE_REGISTER_PERMISSION)?;
+        self.store
+            .register_device(scope, descriptor)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Irreversibly revokes one exact-scoped Device and its current device-bound
+    /// trusted signing material only after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn revoke_device(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_identity_id: &IdentityId,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, scope, DEVICE_REVOKE_PERMISSION)?;
+        self.store
+            .revoke_device(scope, device_id, expected_identity_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Reads one exact-scoped canonical Device only after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn device(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+    ) -> Result<Option<DeviceDescriptor>, AuthorizedMutationError> {
+        self.require(subject, scope, DEVICE_READ_PERMISSION)?;
+        self.store
+            .device(scope, device_id)
             .map_err(AuthorizedMutationError::Store)
     }
 }

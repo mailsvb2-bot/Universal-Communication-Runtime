@@ -1,4 +1,4 @@
-use ucr_model::{DeviceId, KeyId, PublicKeyDescriptor, TenantScope};
+use ucr_model::{DeviceId, IdentityId, KeyId, PublicKeyDescriptor, TenantScope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustedKeyResolutionError {
@@ -24,6 +24,7 @@ pub trait TrustedSigningKeyResolver: core::fmt::Debug + Send + Sync {
         &self,
         scope: &TenantScope,
         device_id: &DeviceId,
+        identity_id: Option<&IdentityId>,
         key_id: &KeyId,
     ) -> Result<PublicKeyDescriptor, TrustedKeyResolutionError>;
 }

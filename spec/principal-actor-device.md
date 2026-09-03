@@ -28,8 +28,11 @@ Canonical device lifecycle states are Active, Stale, Reverification Required, Ex
 
 `DEVICE_LIFECYCLE_STATE_UNSPECIFIED` is a protobuf wire default only and is invalid after semantic decoding.
 
-Revocation is security-significant: a revoked device must not receive new protected content or new credentials. Exact behavior for Stale, Reverification Required, and Expired is policy/recovery work and must not be guessed by transports.
-Trusted signing-key lifecycle is deliberately narrower than Device lifecycle. Revoking a trusted signing key prevents that key from authenticating new UCR Message/handshake operations through the trust resolver, but it does not mutate or duplicate the canonical Device state. Conversely, complete Device revocation must eventually revoke/deny all relevant credential and key-delivery paths, not merely one signing key.
+Revocation is security-significant: a revoked device must not receive new protected content or new credentials. Exact behavior for Stale, Reverification Required, and Expired remains policy/recovery work and must not be guessed by transports.
+
+The reference runtime now has one exact-scope durable `DeviceLifecycleStore` for this canonical state. Registration cannot rebind an existing Device ID to another Identity or replace its lifecycle state. Revocation is irreversible through registration, is idempotent for the same Device/Identity, and atomically revokes the currently active trusted signing key for that Device. New trusted-key provision/rotation and resolver-backed authentication require a registered `Active` Device; all non-Active states fail closed. Message-signature trust additionally requires the persisted Device → Identity binding to match `author_device.identity_id`.
+
+Trusted signing-key lifecycle remains deliberately narrower than Device lifecycle: key rows do not copy Device state. Device lifecycle is the owner consulted by protected-key paths. Device-bound credential/content delivery that does not yet exist in the reference runtime remains separate work rather than an inferred implementation.
 
 ## 5. Multi-device invariant
 
