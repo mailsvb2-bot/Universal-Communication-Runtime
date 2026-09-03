@@ -159,4 +159,5 @@ jobs:
           test -s docs/adr/0025-bounded-fuzzing-is-required-for-implemented-untrusted-boundaries.md &&
           test -s docs/adr/0026-trusted-signing-keys-use-scoped-nonreactivating-lifecycle.md &&
           test -s docs/adr/0027-permission-grants-are-durable-and-runtime-enforced.md &&
-          test -s docs/adr/0028-tenant-scoped-durable-runtime-operations-require-explicit-permissions.md
+          test -s docs/adr/0028-tenant-scoped-durable-runtime-operations-require-explicit-permissions.md &&
+          test -s docs/adr/0029-infrastructure-metadata-visibility-is-explicit-and-machine-checked.md
