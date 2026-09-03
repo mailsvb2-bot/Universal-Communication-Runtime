@@ -1,9 +1,3 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtensionDescriptor {
-    pub name: String,
-    pub critical: bool,
-}
-
 use ucr_model::ProtocolExtension;
 
 pub const MAX_PROTOCOL_EXTENSIONS: usize = 64;
@@ -83,7 +77,7 @@ pub fn canonical_protocol_extensions(
 /// # Errors
 /// Returns [`ExtensionError::UnsupportedCritical`] for an unsupported critical extension.
 pub fn require_supported_extensions<'a>(
-    advertised: impl IntoIterator<Item = &'a ExtensionDescriptor>,
+    advertised: impl IntoIterator<Item = &'a ProtocolExtension>,
     supported: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), ExtensionError> {
     let supported: Vec<&str> = supported.into_iter().collect();
@@ -98,9 +92,7 @@ pub fn require_supported_extensions<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ExtensionDescriptor, ExtensionError, require_supported_extensions, validate_extension_name,
-    };
+    use super::{ExtensionError, require_supported_extensions, validate_extension_name};
 
     #[test]
     fn namespace_is_explicit() {
@@ -118,18 +110,20 @@ mod tests {
 
     #[test]
     fn optional_extension_is_tolerated() {
-        let advertised = [ExtensionDescriptor {
+        let advertised = [ucr_model::ProtocolExtension {
             name: "vendor.example.future".to_owned(),
             critical: false,
+            payload: Vec::new(),
         }];
         assert!(require_supported_extensions(&advertised, []).is_ok());
     }
 
     #[test]
     fn critical_extension_fails_explicitly() {
-        let advertised = [ExtensionDescriptor {
+        let advertised = [ucr_model::ProtocolExtension {
             name: "vendor.example.required".to_owned(),
             critical: true,
+            payload: Vec::new(),
         }];
         assert_eq!(
             require_supported_extensions(&advertised, []),

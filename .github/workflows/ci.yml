@@ -120,4 +120,6 @@ jobs:
           test -s docs/adr/0014-delivery-attempts-and-evidence-are-separate-from-message-identity.md &&
           test -s docs/adr/0015-sync-sessions-use-opaque-resume-checkpoints.md &&
           test -s docs/adr/0016-event-anti-entropy-uses-versioned-fingerprints-and-snapshot-cursors.md &&
-          test -s docs/adr/0017-command-envelope-version-and-extensions-are-durable-idempotency-semantics.md
+          test -s docs/adr/0017-command-envelope-version-and-extensions-are-durable-idempotency-semantics.md &&
+          test -s docs/adr/0018-runtime-receipts-and-generic-acknowledgements-preserve-wire-semantics.md &&
+          test -s docs/adr/0019-negotiation-and-capabilities-use-one-payload-bearing-extension-model.md

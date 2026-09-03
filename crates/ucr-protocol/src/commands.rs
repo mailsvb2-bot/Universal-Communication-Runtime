@@ -1,8 +1,8 @@
-use ucr_model::{CommandEnvelope, CommandId, EventEnvelope};
+use ucr_model::{CommandEnvelope, CommandId, EventEnvelope, ProtocolExtension, ProtocolVersion};
 
 use crate::{
-    DEFAULT_MAX_PAYLOAD_LEN, ExtensionError, canonical_protocol_extensions,
-    validate_namespaced_identifier,
+    DEFAULT_MAX_PAYLOAD_LEN, ExtensionError, RUNTIME_ENVELOPE_SCHEMA_V1,
+    canonical_protocol_extensions, validate_namespaced_identifier,
 };
 
 pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 256;
@@ -53,6 +53,11 @@ pub enum CommandReceiptStatus {
 pub enum ReceiptError {
     AcceptedHasOriginal,
     DuplicateMissingOriginal,
+    InvalidSchemaVersion,
+    InvalidExtension,
+    DuplicateExtension,
+    TooManyExtensions,
+    ExtensionPayloadTooLarge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,18 +65,78 @@ pub struct CommandReceipt {
     pub command_id: CommandId,
     pub status: CommandReceiptStatus,
     pub original_command_id: Option<CommandId>,
+    pub schema_version: ProtocolVersion,
+    pub extensions: Vec<ProtocolExtension>,
 }
 
-/// Validates receipt shape. A receipt records command acceptance/deduplication,
-/// not completion of the requested real-world effect.
+/// Validates receipt shape and protocol metadata. A receipt records command
+/// acceptance/deduplication, not completion of the requested real-world effect.
 ///
 /// # Errors
-/// Rejects inconsistent accepted/duplicate receipt fields.
-pub const fn validate_command_receipt(receipt: &CommandReceipt) -> Result<(), ReceiptError> {
+/// Rejects inconsistent accepted/duplicate fields, zero-major schema versions,
+/// and malformed or over-budget protocol extensions.
+pub fn validate_command_receipt(receipt: &CommandReceipt) -> Result<(), ReceiptError> {
     match (receipt.status, receipt.original_command_id.is_some()) {
-        (CommandReceiptStatus::Accepted, true) => Err(ReceiptError::AcceptedHasOriginal),
-        (CommandReceiptStatus::Duplicate, false) => Err(ReceiptError::DuplicateMissingOriginal),
-        _ => Ok(()),
+        (CommandReceiptStatus::Accepted, true) => return Err(ReceiptError::AcceptedHasOriginal),
+        (CommandReceiptStatus::Duplicate, false) => {
+            return Err(ReceiptError::DuplicateMissingOriginal);
+        }
+        _ => {}
+    }
+    if receipt.schema_version.major == 0 {
+        return Err(ReceiptError::InvalidSchemaVersion);
+    }
+    canonical_protocol_extensions(&receipt.extensions).map_err(map_receipt_extension_error)?;
+    Ok(())
+}
+
+/// Validates and canonically orders one command receipt for wire use.
+///
+/// # Errors
+/// Returns the same fail-closed validation errors as [`validate_command_receipt`].
+pub fn canonical_command_receipt(receipt: &CommandReceipt) -> Result<CommandReceipt, ReceiptError> {
+    validate_command_receipt(receipt)?;
+    let mut canonical = receipt.clone();
+    canonical.extensions =
+        canonical_protocol_extensions(&receipt.extensions).map_err(map_receipt_extension_error)?;
+    Ok(canonical)
+}
+
+/// Creates the base v1 Accepted receipt emitted only after durable acceptance.
+#[must_use]
+pub fn accepted_command_receipt(command_id: CommandId) -> CommandReceipt {
+    CommandReceipt {
+        command_id,
+        status: CommandReceiptStatus::Accepted,
+        original_command_id: None,
+        schema_version: RUNTIME_ENVELOPE_SCHEMA_V1,
+        extensions: Vec::new(),
+    }
+}
+
+/// Creates the base v1 Duplicate receipt for one incoming command.
+#[must_use]
+pub fn duplicate_command_receipt(
+    command_id: CommandId,
+    original_command_id: CommandId,
+) -> CommandReceipt {
+    CommandReceipt {
+        command_id,
+        status: CommandReceiptStatus::Duplicate,
+        original_command_id: Some(original_command_id),
+        schema_version: RUNTIME_ENVELOPE_SCHEMA_V1,
+        extensions: Vec::new(),
+    }
+}
+
+const fn map_receipt_extension_error(error: ExtensionError) -> ReceiptError {
+    match error {
+        ExtensionError::InvalidNamespace | ExtensionError::UnsupportedCritical => {
+            ReceiptError::InvalidExtension
+        }
+        ExtensionError::TooManyExtensions => ReceiptError::TooManyExtensions,
+        ExtensionError::DuplicateExtension => ReceiptError::DuplicateExtension,
+        ExtensionError::PayloadTooLarge => ReceiptError::ExtensionPayloadTooLarge,
     }
 }
 
@@ -398,11 +463,42 @@ mod tests {
     }
 
     #[test]
+    fn receipt_version_and_extensions_are_canonical_wire_semantics() {
+        let base = super::accepted_command_receipt(CommandId::from_opaque(opaque("command-a")));
+        assert_eq!(base.schema_version, ProtocolVersion::new(1, 0));
+        assert!(base.extensions.is_empty());
+
+        let mut extended = base.clone();
+        extended.extensions = vec![
+            ucr_model::ProtocolExtension {
+                name: "vendor.example.z".to_owned(),
+                critical: false,
+                payload: b"z".to_vec(),
+            },
+            ucr_model::ProtocolExtension {
+                name: "ucr.example.a".to_owned(),
+                critical: true,
+                payload: b"a".to_vec(),
+            },
+        ];
+        let canonical = super::canonical_command_receipt(&extended).expect("canonical receipt");
+        assert_eq!(canonical.extensions[0].name, "ucr.example.a");
+
+        extended.schema_version = ProtocolVersion::new(0, 0);
+        assert_eq!(
+            validate_command_receipt(&extended),
+            Err(ReceiptError::InvalidSchemaVersion)
+        );
+    }
+
+    #[test]
     fn receipt_shape_cannot_confuse_acceptance_and_duplicate() {
         let accepted = CommandReceipt {
             command_id: CommandId::from_opaque(opaque("command-a")),
             status: CommandReceiptStatus::Accepted,
             original_command_id: None,
+            schema_version: ProtocolVersion::new(1, 0),
+            extensions: Vec::new(),
         };
         assert_eq!(validate_command_receipt(&accepted), Ok(()));
 
@@ -410,6 +506,8 @@ mod tests {
             command_id: CommandId::from_opaque(opaque("command-b")),
             status: CommandReceiptStatus::Duplicate,
             original_command_id: None,
+            schema_version: ProtocolVersion::new(1, 0),
+            extensions: Vec::new(),
         };
         assert_eq!(
             validate_command_receipt(&invalid_duplicate),
@@ -436,6 +534,8 @@ mod tests {
             command_id: CommandId::from_opaque(opaque("command-b")),
             status: CommandReceiptStatus::Accepted,
             original_command_id: Some(CommandId::from_opaque(opaque("command-a"))),
+            schema_version: ProtocolVersion::new(1, 0),
+            extensions: Vec::new(),
         };
         assert_eq!(
             validate_command_receipt(&invalid),

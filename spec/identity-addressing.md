@@ -24,7 +24,7 @@ An endpoint has a canonical endpoint ID, an endpoint kind, optional Identity/Dev
 
 A Device endpoint requires both its Device ID and owning Identity ID. Other endpoint kinds may be temporarily unbound while discovery or linking is incomplete.
 
-Endpoint capability IDs and address schemes are namespaced protocol identifiers. Duplicate declarations are invalid.
+Endpoint capability IDs and address schemes are namespaced protocol identifiers. A public Capability also preserves canonical protocol extensions; nested extension namespace, duplicate-name, count, and payload budgets are validated at the Endpoint boundary. Duplicate capability declarations are invalid.
 
 `ENDPOINT_KIND_UNSPECIFIED` is a protobuf wire default only. It is not a valid canonical Endpoint kind after semantic decoding.
 ## 4. Address

@@ -20,11 +20,11 @@ use ucr_model::{
     SyncSession, SyncState, TenantScope,
 };
 use ucr_protocol::{
-    AntiEntropyError, CommandError, CommandReceipt, CommandReceiptStatus, EventError,
-    IdempotencyDecision, anti_entropy_session_binding, canonical_command, canonical_event,
+    AntiEntropyError, CommandError, CommandReceipt, EventError, IdempotencyDecision,
+    accepted_command_receipt, anti_entropy_session_binding, canonical_command, canonical_event,
     canonical_message, canonical_recovery_plan, canonical_sync_session,
-    compare_command_idempotency, event_fingerprint, validate_anti_entropy_cursor,
-    validate_anti_entropy_page_size, validate_anti_entropy_session,
+    compare_command_idempotency, duplicate_command_receipt, event_fingerprint,
+    validate_anti_entropy_cursor, validate_anti_entropy_page_size, validate_anti_entropy_session,
     validate_anti_entropy_summary_count, validate_conversation, validate_conversation_parent_kind,
     validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
     validate_delivery_evidence_order, validate_delivery_transition, validate_sync_checkpoint,
@@ -592,11 +592,7 @@ impl CommandAcceptanceStore for MemoryLocalStore {
 
         state.accepted.insert(key, command.clone());
         state.accepted_by_id.insert(command_ref, command.clone());
-        Ok(CommandReceipt {
-            command_id: command.command_id.clone(),
-            status: CommandReceiptStatus::Accepted,
-            original_command_id: None,
-        })
+        Ok(accepted_command_receipt(command.command_id.clone()))
     }
 }
 
@@ -651,11 +647,10 @@ fn receipt_for_existing(
     incoming: &CommandEnvelope,
 ) -> Result<CommandReceipt, DurableStoreError> {
     match compare_command_idempotency(original, incoming).map_err(map_command_error)? {
-        IdempotencyDecision::DuplicateOf(original_command_id) => Ok(CommandReceipt {
-            command_id: incoming.command_id.clone(),
-            status: CommandReceiptStatus::Duplicate,
-            original_command_id: Some(original_command_id),
-        }),
+        IdempotencyDecision::DuplicateOf(original_command_id) => Ok(duplicate_command_receipt(
+            incoming.command_id.clone(),
+            original_command_id,
+        )),
         IdempotencyDecision::New => Err(DurableStoreError::Internal),
     }
 }
@@ -994,10 +989,14 @@ mod tests {
         let accepted = store.accept_command(&first).expect("accepted");
         assert_eq!(accepted.status, CommandReceiptStatus::Accepted);
         assert!(accepted.original_command_id.is_none());
+        assert_eq!(accepted.schema_version, ProtocolVersion::new(1, 0));
+        assert!(accepted.extensions.is_empty());
 
         let duplicate = store.accept_command(&retry).expect("duplicate");
         assert_eq!(duplicate.status, CommandReceiptStatus::Duplicate);
         assert_eq!(duplicate.original_command_id, Some(first.command_id));
+        assert_eq!(duplicate.schema_version, ProtocolVersion::new(1, 0));
+        assert!(duplicate.extensions.is_empty());
     }
 
     #[test]

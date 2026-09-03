@@ -807,6 +807,7 @@ mod tests {
 pub struct CapabilityDescriptor {
     pub id: String,
     pub maturity: CapabilityMaturity,
+    pub extensions: Vec<ProtocolExtension>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
