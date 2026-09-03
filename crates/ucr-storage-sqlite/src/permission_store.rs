@@ -464,7 +464,8 @@ mod tests {
     #[test]
     fn exact_grant_authorization_and_revocation_survive_restart() {
         let db = TestDb::new();
-        let subject = subject("tenant-a", Some("namespace-a"));
+        let mut subject = subject("tenant-a", Some("namespace-a"));
+        subject.principal.kind = PrincipalKind::Person;
         let resource = scope("tenant-a", Some("namespace-a"));
         let grant = exact_grant(&subject, &resource);
         {
@@ -519,7 +520,8 @@ mod tests {
     #[test]
     fn authorized_trusted_key_mutation_uses_persisted_grant_after_restart() {
         let db = TestDb::new();
-        let subject = subject("tenant-a", Some("namespace-a"));
+        let mut subject = subject("tenant-a", Some("namespace-a"));
+        subject.principal.kind = PrincipalKind::Person;
         let resource = scope("tenant-a", Some("namespace-a"));
         let grant = exact_grant(&subject, &resource);
         {
@@ -578,7 +580,7 @@ mod tests {
         }
         let connection = Connection::open(db.path()).expect("raw connection");
         connection
-            .execute_batch("DROP TABLE service_credentials; DROP TABLE permission_grants;")
+            .execute_batch("DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants;")
             .expect("remove v12 objects");
         connection
             .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)

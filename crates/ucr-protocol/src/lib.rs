@@ -20,6 +20,7 @@ mod message_signature;
 mod provenance;
 mod recovery;
 mod scope;
+mod service_control;
 mod sync;
 mod trusted_key;
 mod version;
@@ -48,11 +49,12 @@ pub use authorization::{
     PERMISSION_GRANT_READ_PERMISSION, PERMISSION_GRANT_REVOKE_PERMISSION,
     RECOVERY_PLAN_INSTALL_PERMISSION, RECOVERY_PLAN_READ_PERMISSION,
     RECOVERY_PLAN_REVOKE_PERMISSION, RECOVERY_PLAN_ROTATE_PERMISSION, RUNTIME_PERMISSION_IDS,
-    SERVICE_CREDENTIAL_PROVISION_PERMISSION, SERVICE_CREDENTIAL_REVOKE_PERMISSION,
-    SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
-    TRUSTED_SIGNING_KEY_READ_PERMISSION, TRUSTED_SIGNING_KEY_REVOKE_PERMISSION,
-    TRUSTED_SIGNING_KEY_ROTATE_PERMISSION, authorize, is_service_principal,
-    validate_permission_grant,
+    SERVICE_AUDIT_READ_PERMISSION, SERVICE_CREDENTIAL_PROVISION_PERMISSION,
+    SERVICE_CREDENTIAL_REVOKE_PERMISSION, SERVICE_QUOTA_READ_PERMISSION,
+    SERVICE_QUOTA_WRITE_PERMISSION, SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION,
+    TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_READ_PERMISSION,
+    TRUSTED_SIGNING_KEY_REVOKE_PERMISSION, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION, authorize,
+    is_service_principal, validate_permission_grant,
 };
 pub use capability::{
     CapabilityDescriptor, CapabilityError, CapabilityMaturity, CapabilityRequirement,
@@ -118,6 +120,11 @@ pub use recovery::{
     validate_recovery_plan, validate_recovery_request,
 };
 pub use scope::{ScopeError, ScopeRelation, require_exact_scope, scope_relation};
+pub use service_control::{
+    MAX_SERVICE_AUDIT_READ_ITEMS, MAX_SERVICE_REQUEST_PERMISSION_LEN, SERVICE_AUDIT_HASH_LEN,
+    SERVICE_AUDIT_HASH_V1_DOMAIN, ServiceControlValidationError, service_audit_hash,
+    validate_service_audit_record, validate_service_quota_policy,
+};
 pub use sync::{
     MAX_PARTIAL_SYNC_CONVERSATIONS, MAX_SYNC_RESUME_TOKEN_LEN, SyncError, can_transition_sync,
     canonical_sync_session, is_terminal_sync_state, validate_sync_checkpoint,

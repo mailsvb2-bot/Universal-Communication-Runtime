@@ -8,6 +8,9 @@ pub const SERVICE_CREDENTIAL_PROVISION_PERMISSION: &str =
     "ucr.authentication.service_credential.provision";
 pub const SERVICE_CREDENTIAL_REVOKE_PERMISSION: &str =
     "ucr.authentication.service_credential.revoke";
+pub const SERVICE_QUOTA_READ_PERMISSION: &str = "ucr.authorization.service_quota.read";
+pub const SERVICE_QUOTA_WRITE_PERMISSION: &str = "ucr.authorization.service_quota.write";
+pub const SERVICE_AUDIT_READ_PERMISSION: &str = "ucr.audit.service_principal.read";
 pub const TRUSTED_SIGNING_KEY_PROVISION_PERMISSION: &str =
     "ucr.crypto.trusted_signing_key.provision";
 pub const TRUSTED_SIGNING_KEY_ROTATE_PERMISSION: &str = "ucr.crypto.trusted_signing_key.rotate";
@@ -38,6 +41,9 @@ pub const EVENT_APPEND_PERMISSION: &str = "ucr.event.append";
 pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     SERVICE_CREDENTIAL_PROVISION_PERMISSION,
     SERVICE_CREDENTIAL_REVOKE_PERMISSION,
+    SERVICE_QUOTA_READ_PERMISSION,
+    SERVICE_QUOTA_WRITE_PERMISSION,
+    SERVICE_AUDIT_READ_PERMISSION,
     PERMISSION_GRANT_READ_PERMISSION,
     PERMISSION_GRANT_CREATE_PERMISSION,
     PERMISSION_GRANT_REVOKE_PERMISSION,

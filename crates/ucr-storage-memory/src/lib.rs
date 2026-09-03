@@ -9,8 +9,9 @@ use std::{
 use ucr_core::{
     AntiEntropyStore, AuthorizationEvaluator, CommandAcceptanceStore, CommandOutcomeStore,
     ConversationStore, DeliveryStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore,
-    ServiceCredentialStore, StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore,
+    EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore, ServiceAuditStore,
+    ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth,
+    StorageProvider, SyncStore, TrustedSigningKeyStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -21,20 +22,23 @@ use ucr_model::{
     ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
     DeliveryState, DeviceId, EventEnvelope, EventId, EventReconciliation, EventReplicaState,
     EventSummary, IdentityId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
-    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceCredentialId,
-    ServiceCredentialRecord, ServiceCredentialState, SessionId, SyncCheckpoint, SyncSession,
-    SyncState, TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
+    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditRecord,
+    ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy,
+    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
-    IdempotencyDecision, accepted_command_receipt, anti_entropy_session_binding, canonical_command,
-    canonical_event, canonical_message, canonical_recovery_plan, canonical_sync_session,
-    compare_command_idempotency, duplicate_command_receipt, event_fingerprint,
-    validate_anti_entropy_cursor, validate_anti_entropy_page_size, validate_anti_entropy_session,
+    IdempotencyDecision, MAX_SERVICE_AUDIT_READ_ITEMS, accepted_command_receipt,
+    anti_entropy_session_binding, canonical_command, canonical_event, canonical_message,
+    canonical_recovery_plan, canonical_sync_session, compare_command_idempotency,
+    duplicate_command_receipt, event_fingerprint, service_audit_hash, validate_anti_entropy_cursor,
+    validate_anti_entropy_page_size, validate_anti_entropy_session,
     validate_anti_entropy_summary_count, validate_conversation, validate_conversation_parent_kind,
     validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
     validate_delivery_evidence_order, validate_delivery_transition, validate_permission_grant,
-    validate_sync_checkpoint, validate_sync_transition, validate_trusted_signing_key_descriptor,
+    validate_service_audit_record, validate_service_quota_policy, validate_sync_checkpoint,
+    validate_sync_transition, validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 9;
@@ -51,6 +55,14 @@ type SyncKey = (ScopeKey, String);
 type TrustedSigningKeyRef = (ScopeKey, String);
 type TrustedSigningDeviceRef = (ScopeKey, String);
 type ServiceCredentialRef = (ScopeKey, String);
+type ServicePrincipalKey = (ScopeKey, String);
+
+#[derive(Debug, Clone, Copy)]
+struct MemoryQuotaUsage {
+    window_start_unix_ms: i64,
+    used_requests: u64,
+    last_observed_unix_ms: i64,
+}
 
 #[derive(Default)]
 struct MemoryState {
@@ -72,6 +84,9 @@ struct MemoryState {
     active_trusted_signing_keys: HashMap<TrustedSigningDeviceRef, String>,
     permission_grants: Vec<PermissionGrant>,
     service_credentials: HashMap<ServiceCredentialRef, ServiceCredentialRecord>,
+    service_quota_policies: HashMap<ServicePrincipalKey, ServiceQuotaPolicy>,
+    service_quota_usage: HashMap<ServicePrincipalKey, MemoryQuotaUsage>,
+    service_audit_records: Vec<(ServiceAuditRecord, [u8; 32])>,
 }
 
 #[derive(Default)]
@@ -181,6 +196,135 @@ impl ServiceCredentialStore for MemoryLocalStore {
         let key = service_credential_ref(scope, credential_id);
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         Ok(state.service_credentials.get(&key).cloned())
+    }
+}
+
+impl ServiceQuotaStore for MemoryLocalStore {
+    fn set_service_quota_policy(
+        &self,
+        policy: &ServiceQuotaPolicy,
+    ) -> Result<(), DurableStoreError> {
+        validate_service_quota_policy(policy).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = service_principal_key(&policy.subject);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if state.service_quota_policies.get(&key) == Some(policy) {
+            return Ok(());
+        }
+        state
+            .service_quota_policies
+            .insert(key.clone(), policy.clone());
+        state.service_quota_usage.remove(&key);
+        Ok(())
+    }
+
+    fn service_quota_policy(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<Option<ServiceQuotaPolicy>, DurableStoreError> {
+        validate_service_subject(subject)?;
+        let key = service_principal_key(subject);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state.service_quota_policies.get(&key).cloned())
+    }
+
+    fn consume_service_request(
+        &self,
+        subject: &ScopedPrincipal,
+        now_unix_ms: i64,
+    ) -> Result<(), ServiceQuotaConsumeError> {
+        validate_service_subject(subject).map_err(ServiceQuotaConsumeError::Store)?;
+        if now_unix_ms < 0 {
+            return Err(ServiceQuotaConsumeError::ClockRollback);
+        }
+        let key = service_principal_key(subject);
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ServiceQuotaConsumeError::Store(DurableStoreError::Internal))?;
+        let policy = state
+            .service_quota_policies
+            .get(&key)
+            .cloned()
+            .ok_or(ServiceQuotaConsumeError::NotConfigured)?;
+        let window_ms = i64::try_from(policy.window_ms)
+            .map_err(|_| ServiceQuotaConsumeError::Store(DurableStoreError::Corrupt))?;
+        let window_start_unix_ms = now_unix_ms - now_unix_ms.rem_euclid(window_ms);
+        let usage = state
+            .service_quota_usage
+            .entry(key)
+            .or_insert(MemoryQuotaUsage {
+                window_start_unix_ms,
+                used_requests: 0,
+                last_observed_unix_ms: now_unix_ms,
+            });
+        if now_unix_ms < usage.last_observed_unix_ms
+            || window_start_unix_ms < usage.window_start_unix_ms
+        {
+            return Err(ServiceQuotaConsumeError::ClockRollback);
+        }
+        if window_start_unix_ms > usage.window_start_unix_ms {
+            usage.window_start_unix_ms = window_start_unix_ms;
+            usage.used_requests = 0;
+        }
+        usage.last_observed_unix_ms = now_unix_ms;
+        if usage.used_requests >= policy.max_requests {
+            let window_end = window_start_unix_ms
+                .checked_add(window_ms)
+                .ok_or(ServiceQuotaConsumeError::Store(DurableStoreError::Corrupt))?;
+            let retry_after_ms = u64::try_from(window_end.saturating_sub(now_unix_ms))
+                .map_err(|_| ServiceQuotaConsumeError::Store(DurableStoreError::Corrupt))?;
+            return Err(ServiceQuotaConsumeError::RateLimited { retry_after_ms });
+        }
+        usage.used_requests += 1;
+        Ok(())
+    }
+}
+
+impl ServiceAuditStore for MemoryLocalStore {
+    fn append_service_audit(&self, record: &ServiceAuditRecord) -> Result<(), DurableStoreError> {
+        validate_service_audit_record(record).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some((existing, _)) = state
+            .service_audit_records
+            .iter()
+            .find(|(existing, _)| existing.audit_id == record.audit_id)
+        {
+            return if existing == record {
+                Ok(())
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        let previous_hash = state
+            .service_audit_records
+            .last()
+            .map_or([0_u8; 32], |(_, hash)| *hash);
+        let record_hash = service_audit_hash(previous_hash, record);
+        state
+            .service_audit_records
+            .push((record.clone(), record_hash));
+        Ok(())
+    }
+
+    fn service_audit_records(
+        &self,
+        scope: &TenantScope,
+        max_items: usize,
+    ) -> Result<Vec<ServiceAuditRecord>, DurableStoreError> {
+        if max_items == 0 || max_items > MAX_SERVICE_AUDIT_READ_ITEMS {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut records = state
+            .service_audit_records
+            .iter()
+            .rev()
+            .filter(|(record, _)| record.presented_scope == *scope)
+            .take(max_items)
+            .map(|(record, _)| record.clone())
+            .collect::<Vec<_>>();
+        records.reverse();
+        Ok(records)
     }
 }
 
@@ -942,6 +1086,25 @@ fn trusted_key_ref(scope: &TenantScope, key_id: &KeyId) -> TrustedSigningKeyRef 
 
 fn trusted_device_ref(scope: &TenantScope, device_id: &DeviceId) -> TrustedSigningDeviceRef {
     (scope_key(scope), device_id.as_opaque().as_str().to_owned())
+}
+
+fn validate_service_subject(subject: &ScopedPrincipal) -> Result<(), DurableStoreError> {
+    if subject.principal.kind != ucr_model::PrincipalKind::ServiceAccount {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    Ok(())
+}
+
+fn service_principal_key(subject: &ScopedPrincipal) -> ServicePrincipalKey {
+    (
+        scope_key(&subject.scope),
+        subject
+            .principal
+            .principal_id
+            .as_opaque()
+            .as_str()
+            .to_owned(),
+    )
 }
 
 fn service_credential_ref(
@@ -2778,8 +2941,8 @@ mod permission_enforcement_tests {
         ScopedPrincipal {
             scope: scope(tenant, namespace),
             principal: PrincipalRef {
-                principal_id: PrincipalId::from_opaque(oid("service-a")),
-                kind: PrincipalKind::ServiceAccount,
+                principal_id: PrincipalId::from_opaque(oid("principal-a")),
+                kind: PrincipalKind::Person,
             },
         }
     }
@@ -3179,9 +3342,10 @@ mod service_principal_authentication_tests {
     }
 
     #[test]
-    fn credential_authentication_is_non_disclosing_revocable_and_feeds_least_privilege_runtime() {
+    fn credential_authentication_is_non_disclosing_revocable_and_raw_runtime_cannot_bypass_gate() {
         let store = MemoryLocalStore::default();
-        let admin = service_subject("admin-a", "tenant-a", Some("namespace-a"));
+        let mut admin = service_subject("admin-a", "tenant-a", Some("namespace-a"));
+        admin.principal.kind = PrincipalKind::Person;
         let service = service_subject("service-a", "tenant-a", Some("namespace-a"));
         let resource = service.scope.clone();
         let (record, secret) = issue_service_credential(&service).expect("issue credential");
@@ -3236,7 +3400,7 @@ mod service_principal_authentication_tests {
             .expect("grant minimum read authority");
         assert_eq!(
             runtime.conversation(&authenticated, &resource, &conversation_id),
-            Ok(None)
+            Err(denied())
         );
 
         assert_eq!(
@@ -3265,6 +3429,307 @@ mod service_principal_authentication_tests {
                 resource_scope: resource,
             }),
             Ok(())
+        );
+    }
+}
+
+#[cfg(test)]
+mod service_principal_quota_audit_tests {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    use ucr_core::{
+        AuthorizedDurableRuntime, AuthorizedMutationError, PermissionGrantStore, ServiceAuditStore,
+        ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
+        ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore, issue_service_credential,
+    };
+    use ucr_model::{
+        ConversationId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
+        PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuditOutcome, ServiceQuotaPolicy,
+        TenantId, TenantScope,
+    };
+    use ucr_protocol::{
+        CONVERSATION_READ_PERMISSION, CanonicalError, CanonicalErrorCode,
+        SERVICE_AUDIT_READ_PERMISSION, SERVICE_QUOTA_READ_PERMISSION,
+        SERVICE_QUOTA_WRITE_PERMISSION,
+    };
+
+    use super::MemoryLocalStore;
+
+    #[derive(Debug)]
+    struct TestClock(AtomicI64);
+
+    impl TestClock {
+        fn new(now: i64) -> Self {
+            Self(AtomicI64::new(now))
+        }
+
+        fn set(&self, now: i64) {
+            self.0.store(now, Ordering::Release);
+        }
+    }
+
+    impl ServiceQuotaClock for TestClock {
+        fn now_unix_ms(&self) -> Result<i64, ServiceQuotaClockError> {
+            Ok(self.0.load(Ordering::Acquire))
+        }
+    }
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-quota")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("namespace-quota"))),
+        }
+    }
+
+    fn service(id: &str) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid(id)),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
+    fn grant(subject: &ScopedPrincipal, permission: &str) -> PermissionGrant {
+        PermissionGrant {
+            grantee: subject.clone(),
+            permission: permission.to_owned(),
+            scope: PermissionScope::Exact(scope()),
+        }
+    }
+
+    fn denied() -> AuthorizedMutationError {
+        AuthorizedMutationError::Authorization(CanonicalError::new(
+            CanonicalErrorCode::PermissionDenied,
+        ))
+    }
+
+    #[test]
+    fn service_request_gate_enforces_fixed_window_quota_and_audits_decisions() {
+        let store = MemoryLocalStore::default();
+        let service = service("service-quota");
+        let resource = scope();
+        let (credential, secret) = issue_service_credential(&service).expect("issue");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        store
+            .grant_permission(&grant(&service, CONVERSATION_READ_PERMISSION))
+            .expect("bootstrap least privilege");
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: service,
+                max_requests: 2,
+                window_ms: 1_000,
+            })
+            .expect("bootstrap quota");
+        let clock = TestClock::new(10_000);
+        let conversation_id = ConversationId::from_opaque(oid("missing-conversation"));
+
+        for _ in 0..2 {
+            let gate = ServicePrincipalRequestGate::new(&clock, &store, &store);
+            let request = gate
+                .authenticate_request(
+                    &resource,
+                    &credential.credential_id,
+                    &secret,
+                    CONVERSATION_READ_PERMISSION,
+                    &resource,
+                )
+                .expect("authenticate request");
+            let runtime = AuthorizedDurableRuntime::new(&request, &store);
+            assert_eq!(
+                runtime.conversation(request.subject(), &resource, &conversation_id),
+                Ok(None)
+            );
+        }
+
+        let gate = ServicePrincipalRequestGate::new(&clock, &store, &store);
+        let limited = gate
+            .authenticate_request(
+                &resource,
+                &credential.credential_id,
+                &secret,
+                CONVERSATION_READ_PERMISSION,
+                &resource,
+            )
+            .expect("authentication still succeeds before quota");
+        let runtime = AuthorizedDurableRuntime::new(&limited, &store);
+        assert_eq!(
+            runtime.conversation(limited.subject(), &resource, &conversation_id),
+            Err(AuthorizedMutationError::Authorization(
+                CanonicalError::new(CanonicalErrorCode::RateLimited).with_retry_after(1_000)
+            ))
+        );
+
+        let audit = store
+            .service_audit_records(&resource, 8)
+            .expect("read raw audit fixture");
+        assert_eq!(
+            audit
+                .iter()
+                .map(|record| record.outcome)
+                .collect::<Vec<_>>(),
+            vec![
+                ServiceAuditOutcome::Authorized,
+                ServiceAuditOutcome::Authorized,
+                ServiceAuditOutcome::RateLimited,
+            ]
+        );
+    }
+
+    #[test]
+    fn service_request_gate_audits_bad_secret_clock_rollback_and_context_reuse() {
+        let store = MemoryLocalStore::default();
+        let service = service("service-guard");
+        let resource = scope();
+        let (credential, secret) = issue_service_credential(&service).expect("issue");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        store
+            .grant_permission(&grant(&service, CONVERSATION_READ_PERMISSION))
+            .expect("bootstrap least privilege");
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: service,
+                max_requests: 5,
+                window_ms: 1_000,
+            })
+            .expect("bootstrap quota");
+        let clock = TestClock::new(10_000);
+        let conversation_id = ConversationId::from_opaque(oid("missing-guard-conversation"));
+
+        let gate = ServicePrincipalRequestGate::new(&clock, &store, &store);
+        let valid = gate
+            .authenticate_request(
+                &resource,
+                &credential.credential_id,
+                &secret,
+                CONVERSATION_READ_PERMISSION,
+                &resource,
+            )
+            .expect("authenticate first request");
+        let runtime = AuthorizedDurableRuntime::new(&valid, &store);
+        assert_eq!(
+            runtime.conversation(valid.subject(), &resource, &conversation_id),
+            Ok(None)
+        );
+
+        let wrong = ServiceCredentialSecret::from_bytes([0xA5; 32]);
+        let gate = ServicePrincipalRequestGate::new(&clock, &store, &store);
+        assert!(matches!(
+            gate.authenticate_request(
+                &resource,
+                &credential.credential_id,
+                &wrong,
+                CONVERSATION_READ_PERMISSION,
+                &resource,
+            ),
+            Err(CanonicalError {
+                code: CanonicalErrorCode::Unauthenticated,
+                ..
+            })
+        ));
+
+        clock.set(9_999);
+        let gate = ServicePrincipalRequestGate::new(&clock, &store, &store);
+        let rollback = gate
+            .authenticate_request(
+                &resource,
+                &credential.credential_id,
+                &secret,
+                CONVERSATION_READ_PERMISSION,
+                &resource,
+            )
+            .expect("authenticate before rollback check");
+        let runtime = AuthorizedDurableRuntime::new(&rollback, &store);
+        assert_eq!(
+            runtime.conversation(rollback.subject(), &resource, &conversation_id),
+            Err(AuthorizedMutationError::Authorization(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable,
+            )))
+        );
+
+        clock.set(11_000);
+        let gate = ServicePrincipalRequestGate::new(&clock, &store, &store);
+        let one_shot = gate
+            .authenticate_request(
+                &resource,
+                &credential.credential_id,
+                &secret,
+                CONVERSATION_READ_PERMISSION,
+                &resource,
+            )
+            .expect("new window request");
+        let runtime = AuthorizedDurableRuntime::new(&one_shot, &store);
+        assert_eq!(
+            runtime.conversation(one_shot.subject(), &resource, &conversation_id),
+            Ok(None)
+        );
+        assert_eq!(
+            runtime.conversation(one_shot.subject(), &resource, &conversation_id),
+            Err(denied())
+        );
+
+        let audit = store.service_audit_records(&resource, 8).expect("audit");
+        assert_eq!(audit.len(), 5);
+        assert_eq!(audit[0].outcome, ServiceAuditOutcome::Authorized);
+        assert_eq!(audit[1].outcome, ServiceAuditOutcome::AuthenticationFailed);
+        assert!(audit[1].subject.is_none());
+        assert_eq!(audit[2].outcome, ServiceAuditOutcome::QuotaUnavailable);
+        assert_eq!(audit[3].outcome, ServiceAuditOutcome::Authorized);
+        assert_eq!(audit[4].outcome, ServiceAuditOutcome::PermissionDenied);
+    }
+
+    #[test]
+    fn quota_policy_and_audit_read_use_independent_admin_permissions() {
+        let store = MemoryLocalStore::default();
+        let mut admin = service("admin-quota");
+        admin.principal.kind = PrincipalKind::Person;
+        let target = service("target-quota");
+        let policy = ServiceQuotaPolicy {
+            subject: target.clone(),
+            max_requests: 10,
+            window_ms: 60_000,
+        };
+        let runtime = AuthorizedDurableRuntime::new(&store, &store);
+
+        assert_eq!(
+            runtime.set_service_quota_policy(&admin, &policy),
+            Err(denied())
+        );
+        store
+            .grant_permission(&grant(&admin, SERVICE_QUOTA_WRITE_PERMISSION))
+            .expect("bootstrap quota write");
+        runtime
+            .set_service_quota_policy(&admin, &policy)
+            .expect("authorized quota write");
+
+        assert_eq!(runtime.service_quota_policy(&admin, &target), Err(denied()));
+        store
+            .grant_permission(&grant(&admin, SERVICE_QUOTA_READ_PERMISSION))
+            .expect("bootstrap quota read");
+        assert_eq!(
+            runtime.service_quota_policy(&admin, &target),
+            Ok(Some(policy))
+        );
+
+        assert_eq!(
+            runtime.service_audit_records(&admin, &scope(), 10),
+            Err(denied())
+        );
+        store
+            .grant_permission(&grant(&admin, SERVICE_AUDIT_READ_PERMISSION))
+            .expect("bootstrap audit read");
+        assert_eq!(
+            runtime.service_audit_records(&admin, &scope(), 10),
+            Ok(Vec::new())
         );
     }
 }

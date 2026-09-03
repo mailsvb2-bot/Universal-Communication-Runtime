@@ -3,6 +3,7 @@
 mod authorized_runtime;
 mod id;
 mod service_auth;
+mod service_request;
 
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CapabilityDescriptor,
@@ -10,8 +11,9 @@ use ucr_model::{
     DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceId, EndpointAddress,
     EndpointId, EventEnvelope, EventId, EventReconciliation, EventSummary, IdentityId, KeyId,
     MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
-    ScopedPrincipal, ServiceCredentialId, ServiceCredentialRecord, SessionId, SyncCheckpoint,
-    SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    ScopedPrincipal, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
+    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -20,6 +22,11 @@ pub use id::{IdGenerationError, generate_opaque_id};
 pub use service_auth::{
     ServiceAuthenticationError, ServiceCredentialIssueError, ServiceCredentialSecret,
     authenticate_service_principal, issue_service_credential,
+};
+pub use service_request::{
+    ServicePrincipalAdmissionProof, ServicePrincipalRequestAuthorization,
+    ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaClockError,
+    SystemServiceQuotaClock,
 };
 
 /// A route candidate is transient runtime state, never canonical identity.
@@ -91,6 +98,13 @@ pub trait AuthorizationEvaluator: core::fmt::Debug + Send + Sync {
     /// # Errors
     /// Returns a canonical error; lack of authority is `PermissionDenied`.
     fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError>;
+
+    /// Returns the unforgeable Core-owned admission proof required when the subject is a
+    /// Service Account. Ordinary authorization evaluators deliberately return `None`.
+    #[must_use]
+    fn service_principal_admission_proof(&self) -> Option<&ServicePrincipalAdmissionProof> {
+        None
+    }
 }
 
 /// Durable owner for explicit permission grants. Authentication credentials and
@@ -152,6 +166,64 @@ pub trait ServiceCredentialStore: StorageProvider {
         scope: &TenantScope,
         credential_id: &ServiceCredentialId,
     ) -> Result<Option<ServiceCredentialRecord>, DurableStoreError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceQuotaConsumeError {
+    NotConfigured,
+    RateLimited { retry_after_ms: u64 },
+    ClockRollback,
+    Store(DurableStoreError),
+}
+
+/// Durable fixed-window quota policy and accounting for canonical Service Accounts.
+pub trait ServiceQuotaStore: StorageProvider {
+    /// Installs or replaces one explicit quota policy. Identical updates must not reset usage.
+    ///
+    /// # Errors
+    /// Rejects malformed policy and explicit storage failures.
+    fn set_service_quota_policy(
+        &self,
+        policy: &ServiceQuotaPolicy,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Loads one exact Service Principal quota policy.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures; absence is not an error.
+    fn service_quota_policy(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<Option<ServiceQuotaPolicy>, DurableStoreError>;
+
+    /// Atomically consumes one request from the current fixed window.
+    ///
+    /// # Errors
+    /// Fails closed for missing policy, exhaustion, clock rollback, or storage failure.
+    fn consume_service_request(
+        &self,
+        subject: &ScopedPrincipal,
+        now_unix_ms: i64,
+    ) -> Result<(), ServiceQuotaConsumeError>;
+}
+
+/// Append-only metadata-only audit owner for Service Principal request admission.
+pub trait ServiceAuditStore: StorageProvider {
+    /// Appends one audit decision. The implementation must preserve append-only integrity.
+    ///
+    /// # Errors
+    /// Rejects malformed records, conflicting IDs, or storage/integrity failures.
+    fn append_service_audit(&self, record: &ServiceAuditRecord) -> Result<(), DurableStoreError>;
+
+    /// Returns the newest bounded audit records for one presented scope.
+    ///
+    /// # Errors
+    /// Rejects invalid limits or corrupt/inaccessible durable state.
+    fn service_audit_records(
+        &self,
+        scope: &TenantScope,
+        max_items: usize,
+    ) -> Result<Vec<ServiceAuditRecord>, DurableStoreError>;
 }
 
 /// Storage health is explicit and never inferred from successful construction.
