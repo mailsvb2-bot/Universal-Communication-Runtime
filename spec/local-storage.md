@@ -1,6 +1,6 @@
 # UCR local storage contract
 
-Status: **Experimental / Phase 6 foundation, extended through Phase 12**
+Status: **Experimental / Phase 6 foundation, extended through Phase 12 and post-Phase-12 Command parity hardening**
 
 Local storage is a capability boundary, not a public database schema and not an alternate UCR protocol. External consumers never receive direct database access.
 
@@ -19,8 +19,8 @@ A command is validated before storage. New acceptance is one atomic transaction:
 
 1. acquire a write transaction;
 2. inspect the scoped idempotency key;
-3. return Duplicate for identical previously accepted semantics;
-4. return Conflict for key reuse with different semantics;
+3. return Duplicate only for identical previously accepted Command type, payload, schema version, and canonical extension semantics;
+4. return Conflict for scoped key reuse with any difference in those semantics;
 5. insert a new acceptance record;
 6. commit;
 7. only then return Accepted.
@@ -50,7 +50,7 @@ The reference local store uses pinned bundled SQLite and must configure:
 
 A database carrying another application ID or unrelated user tables must not be silently adopted or mutated during rejection. A schema newer than the binary must be rejected; silent downgrade is forbidden. Schema shape and foreign-key consistency are validated when opening an existing store.
 
-Schema v2 migrates v1 transactionally: existing command acceptance/deduplication records are preserved, then scoped Command ID uniqueness and Event/outcome tables are added. If legacy rows contain duplicate scoped Command IDs, migration fails and the database remains at v1. Schema v3 migrates v2 transactionally by adding durable handshake replay state while preserving accepted commands and Events. Schema v4 migrates v3 transactionally by adding public Recovery Plan/authority/active-plan metadata while preserving command, Event, and replay state. Recovery secrets are not stored in these tables. Schema v5 migrates v4 transactionally by adding normalized Conversation/Message, ordered attachment/relation reference, and external-message-mapping tables while preserving all pre-existing durable state. Schema v6 migrates v5 transactionally by adding normalized DeliveryAttempt and append-only DeliveryEvidence tables while preserving all earlier durable state. Schema v7 migrates v6 transactionally by adding normalized SyncSession, partial Conversation selection, and append-only SyncCheckpoint tables while preserving all earlier durable state. Schema v8 migrates v7 transactionally by adding normalized canonical Event extension rows; pre-v8 Events are preserved exactly and represent an empty extension list.
+Schema v2 migrates v1 transactionally: existing command acceptance/deduplication records are preserved, then scoped Command ID uniqueness and Event/outcome tables are added. If legacy rows contain duplicate scoped Command IDs, migration fails and the database remains at v1. Schema v3 migrates v2 transactionally by adding durable handshake replay state while preserving accepted commands and Events. Schema v4 migrates v3 transactionally by adding public Recovery Plan/authority/active-plan metadata while preserving command, Event, and replay state. Recovery secrets are not stored in these tables. Schema v5 migrates v4 transactionally by adding normalized Conversation/Message, ordered attachment/relation reference, and external-message-mapping tables while preserving all pre-existing durable state. Schema v6 migrates v5 transactionally by adding normalized DeliveryAttempt and append-only DeliveryEvidence tables while preserving all earlier durable state. Schema v7 migrates v6 transactionally by adding normalized SyncSession, partial Conversation selection, and append-only SyncCheckpoint tables while preserving all earlier durable state. Schema v8 migrates v7 transactionally by adding normalized canonical Event extension rows; pre-v8 Events are preserved exactly and represent an empty extension list. Schema v9 migrates v8 transactionally by adding normalized Command protocol-version metadata and canonical Command extension rows while leaving the historical `accepted_commands` layout unchanged. Every pre-v9 accepted Command is backfilled as schema version `1.0` with an empty extension list, matching the only Command semantics representable by the pre-v9 Rust reference model.
 
 On Unix, the database file is created and hardened as owner-only (`0600`), and SQLite WAL/SHM sidecars must not widen group/other access. Other operating systems must rely on the platform's private application-data ACL/sandbox and must not expose the database as a user-shared document.
 ## Explicit failure semantics
@@ -68,6 +68,8 @@ Storage exhaustion, corruption, unavailability, permission failures, foreign-sto
 | command ID | duplicate provenance | UCR Core | acceptance retention window | INTERNAL |
 | command type | semantic conflict detection / recovery | UCR Core | acceptance retention window | INTERNAL |
 | command payload | semantic conflict detection / future recovery | originating command | acceptance retention window | inherits payload classification |
+| Command schema version | versioned semantic conflict detection | UCR Protocol/Command | acceptance retention window | INTERNAL |
+| Command extensions | canonical versioned extension semantics; payload remains non-loggable | UCR Protocol/Command | acceptance retention window | inherits extension payload classification |
 | Event provenance | canonical actor/source-device attribution | UCR Core | event retention policy | INTERNAL / identity metadata |
 | Event payload | immutable canonical fact payload | originating event | event retention policy | inherits payload classification |
 | integrity metadata | future cryptographic/integrity evidence | UCR Core | event retention policy | SECURITY METADATA |

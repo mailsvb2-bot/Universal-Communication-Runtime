@@ -502,7 +502,7 @@ fn command_idempotency_contract_keeps_restart_nonclaim_visible() {
 
     for invariant in [
         "Every accepted command requires a non-empty bounded idempotency key",
-        "different command type or payload is `CONFLICT`",
+        "different type, payload, schema version, or canonical extension semantics is `CONFLICT`",
         "restart-safe command acceptance/deduplication",
         "does not prove an arbitrary external side effect happened exactly once",
         "different tenant/namespace scope means a different command domain",
@@ -512,6 +512,47 @@ fn command_idempotency_contract_keeps_restart_nonclaim_visible() {
             "command invariant missing: `{invariant}`"
         );
     }
+}
+
+#[test]
+fn command_envelope_keeps_wire_model_idempotency_and_storage_parity() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/commands.rs"))
+        .expect("command protocol");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+    let sqlite_root = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let sqlite_command =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/command_store.rs"))
+            .expect("sqlite command store");
+    let runtime =
+        fs::read_to_string(workspace.join("proto/ucr/v1/runtime.proto")).expect("runtime proto");
+
+    let command_model = model
+        .split("pub struct CommandEnvelope")
+        .nth(1)
+        .and_then(|tail| tail.split("impl fmt::Debug for CommandEnvelope").next())
+        .expect("CommandEnvelope model block");
+    assert!(command_model.contains("pub schema_version: ProtocolVersion"));
+    assert!(command_model.contains("pub extensions: Vec<ProtocolExtension>"));
+    assert!(runtime.contains("ProtocolVersion schema_version = 6;"));
+    assert!(runtime.contains("repeated Extension extensions = 7;"));
+    assert!(protocol.contains("pub fn canonical_command"));
+    assert!(protocol.contains("original.schema_version == incoming.schema_version"));
+    assert!(protocol.contains("original.extensions == incoming.extensions"));
+    assert!(
+        memory.contains("command_extensions_and_schema_are_semantic_but_extension_order_is_not")
+    );
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 9;"));
+    assert!(sqlite_root.contains("v8_to_v9_migration_backfills_legacy_command_protocol_semantics"));
+    assert!(sqlite_root.contains("missing_command_protocol_metadata_is_rejected_on_reopen"));
+    assert!(sqlite_command.contains("CREATE TABLE command_protocol_metadata"));
+    assert!(sqlite_command.contains("CREATE TABLE command_extensions"));
 }
 
 #[test]
@@ -584,6 +625,9 @@ fn local_storage_contract_keeps_restart_and_failure_invariants() {
         "terminal_event_survives_restart_and_retry",
         "concurrent_terminal_events_have_single_winner",
         "foreign_key_violation_is_rejected_on_reopen",
+        "command_protocol_semantics_survive_restart_and_extension_order_is_canonical",
+        "v8_to_v9_migration_backfills_legacy_command_protocol_semantics",
+        "missing_command_protocol_metadata_is_rejected_on_reopen",
     ] {
         assert!(
             sqlite.contains(evidence),
@@ -1093,7 +1137,7 @@ fn anti_entropy_keeps_fingerprint_snapshot_damage_and_storage_boundaries() {
             "sqlite evidence missing: {evidence}"
         );
     }
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 8;"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V8: u32 = 8;"));
     assert!(memory.contains("validate_anti_entropy_summary_count(summaries.len())"));
     assert!(sqlite.contains("validate_anti_entropy_summary_count(summaries.len())"));
 }

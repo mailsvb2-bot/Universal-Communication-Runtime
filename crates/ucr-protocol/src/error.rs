@@ -251,8 +251,13 @@ impl From<CommandError> for CanonicalError {
             CommandError::InvalidCommandType
             | CommandError::MissingIdempotencyKey
             | CommandError::EmptyIdempotencyKey
-            | CommandError::IdempotencyKeyTooLong => CanonicalErrorCode::InvalidArgument,
-            CommandError::PayloadTooLarge => CanonicalErrorCode::ResourceExhausted,
+            | CommandError::IdempotencyKeyTooLong
+            | CommandError::InvalidSchemaVersion
+            | CommandError::InvalidExtension
+            | CommandError::DuplicateExtension => CanonicalErrorCode::InvalidArgument,
+            CommandError::PayloadTooLarge
+            | CommandError::TooManyExtensions
+            | CommandError::ExtensionPayloadTooLarge => CanonicalErrorCode::ResourceExhausted,
         };
         Self::new(code)
     }
@@ -454,10 +459,18 @@ mod tests {
     }
 
     #[test]
-    fn idempotency_conflict_maps_to_canonical_conflict() {
+    fn command_failures_keep_conflict_validation_and_budget_categories_stable() {
         assert_eq!(
             CanonicalError::from(CommandError::IdempotencyConflict).code,
             CanonicalErrorCode::Conflict
+        );
+        assert_eq!(
+            CanonicalError::from(CommandError::InvalidSchemaVersion).code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            CanonicalError::from(CommandError::TooManyExtensions).code,
+            CanonicalErrorCode::ResourceExhausted
         );
     }
 }

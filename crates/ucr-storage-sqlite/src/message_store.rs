@@ -1201,6 +1201,8 @@ pub(crate) mod tests {
                 causation_id: None,
                 idempotency_key: Some("idempotency-v4".to_owned()),
             },
+            schema_version: ProtocolVersion::new(1, 0),
+            extensions: Vec::new(),
         }
     }
     #[test]
@@ -1375,7 +1377,9 @@ pub(crate) mod tests {
         let connection = Connection::open(db.path()).expect("open raw store");
         connection
             .execute_batch(
-                "DROP TABLE event_extensions;
+                "DROP TABLE command_extensions;
+                 DROP TABLE command_protocol_metadata;
+                 DROP TABLE event_extensions;
                  DROP TABLE sync_checkpoints;
                  DROP TABLE sync_session_conversations;
                  DROP TABLE sync_sessions;

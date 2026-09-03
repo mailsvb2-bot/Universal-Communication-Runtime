@@ -21,17 +21,17 @@ use ucr_model::{
 };
 use ucr_protocol::{
     AntiEntropyError, CommandError, CommandReceipt, CommandReceiptStatus, EventError,
-    IdempotencyDecision, anti_entropy_session_binding, canonical_event, canonical_message,
-    canonical_recovery_plan, canonical_sync_session, compare_command_idempotency,
-    event_fingerprint, validate_anti_entropy_cursor, validate_anti_entropy_page_size,
-    validate_anti_entropy_session, validate_anti_entropy_summary_count, validate_command,
-    validate_conversation, validate_conversation_parent_kind, validate_delivery_attempt,
-    validate_delivery_evidence, validate_delivery_evidence_binding,
+    IdempotencyDecision, anti_entropy_session_binding, canonical_command, canonical_event,
+    canonical_message, canonical_recovery_plan, canonical_sync_session,
+    compare_command_idempotency, event_fingerprint, validate_anti_entropy_cursor,
+    validate_anti_entropy_page_size, validate_anti_entropy_session,
+    validate_anti_entropy_summary_count, validate_conversation, validate_conversation_parent_kind,
+    validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
     validate_delivery_evidence_order, validate_delivery_transition, validate_sync_checkpoint,
     validate_sync_transition,
 };
 
-const SCHEMA_VERSION: u32 = 8;
+const SCHEMA_VERSION: u32 = 9;
 type ScopeKey = (String, Option<String>);
 type CommandKey = (ScopeKey, String);
 type CommandRefKey = (ScopeKey, String);
@@ -578,13 +578,13 @@ impl CommandAcceptanceStore for MemoryLocalStore {
         &self,
         command: &CommandEnvelope,
     ) -> Result<CommandReceipt, DurableStoreError> {
-        validate_command(command).map_err(map_command_error)?;
-        let key = command_key(command)?;
+        let command = canonical_command(command).map_err(map_command_error)?;
+        let key = command_key(&command)?;
         let command_ref = command_ref_key(&command.scope, &command.command_id);
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
 
         if let Some(original) = state.accepted.get(&key) {
-            return receipt_for_existing(original, command);
+            return receipt_for_existing(original, &command);
         }
         if state.accepted_by_id.contains_key(&command_ref) {
             return Err(DurableStoreError::Conflict);
@@ -607,7 +607,12 @@ fn map_command_error(error: CommandError) -> DurableStoreError {
         | CommandError::MissingIdempotencyKey
         | CommandError::EmptyIdempotencyKey
         | CommandError::IdempotencyKeyTooLong
-        | CommandError::PayloadTooLarge => DurableStoreError::InvalidRecord,
+        | CommandError::PayloadTooLarge
+        | CommandError::InvalidSchemaVersion
+        | CommandError::InvalidExtension
+        | CommandError::DuplicateExtension
+        | CommandError::TooManyExtensions
+        | CommandError::ExtensionPayloadTooLarge => DurableStoreError::InvalidRecord,
     }
 }
 
@@ -915,8 +920,8 @@ mod tests {
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext, DeviceId,
-        DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, ProtocolVersion,
-        TenantId, TenantScope,
+        DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, ProtocolExtension,
+        ProtocolVersion, TenantId, TenantScope,
     };
     use ucr_protocol::CommandReceiptStatus;
 
@@ -940,6 +945,8 @@ mod tests {
                 causation_id: None,
                 idempotency_key: Some(key.to_owned()),
             },
+            schema_version: ProtocolVersion::new(1, 0),
+            extensions: Vec::new(),
         }
     }
 
@@ -991,6 +998,55 @@ mod tests {
         let duplicate = store.accept_command(&retry).expect("duplicate");
         assert_eq!(duplicate.status, CommandReceiptStatus::Duplicate);
         assert_eq!(duplicate.original_command_id, Some(first.command_id));
+    }
+
+    #[test]
+    fn command_extensions_and_schema_are_semantic_but_extension_order_is_not() {
+        let store = MemoryLocalStore::default();
+        let mut first = command("command-ext-a", "retry-ext", b"payload");
+        first.extensions = vec![
+            ProtocolExtension {
+                name: "vendor.example.z".to_owned(),
+                critical: false,
+                payload: b"z".to_vec(),
+            },
+            ProtocolExtension {
+                name: "ucr.example.a".to_owned(),
+                critical: true,
+                payload: b"a".to_vec(),
+            },
+        ];
+        assert_eq!(
+            store.accept_command(&first).expect("accept").status,
+            CommandReceiptStatus::Accepted
+        );
+
+        let mut reordered = command("command-ext-b", "retry-ext", b"payload");
+        reordered.extensions = first.extensions.clone();
+        reordered.extensions.reverse();
+        assert_eq!(
+            store
+                .accept_command(&reordered)
+                .expect("deduplicate")
+                .status,
+            CommandReceiptStatus::Duplicate
+        );
+
+        let mut changed_extension = reordered.clone();
+        changed_extension.command_id = CommandId::from_opaque(opaque("command-ext-c"));
+        changed_extension.extensions[0].payload.push(b'!');
+        assert_eq!(
+            store.accept_command(&changed_extension),
+            Err(DurableStoreError::Conflict)
+        );
+
+        let mut changed_schema = reordered;
+        changed_schema.command_id = CommandId::from_opaque(opaque("command-ext-d"));
+        changed_schema.schema_version = ProtocolVersion::new(1, 1);
+        assert_eq!(
+            store.accept_command(&changed_schema),
+            Err(DurableStoreError::Conflict)
+        );
     }
 
     #[test]
