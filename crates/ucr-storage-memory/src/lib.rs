@@ -7,33 +7,33 @@ use std::{
 };
 
 use ucr_core::{
-    AntiEntropyStore, CommandAcceptanceStore, CommandOutcomeStore, ConversationStore,
-    DeliveryStore, DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore,
-    MessageStore, RecoveryPlanStore, StorageHealth, StorageProvider, SyncStore,
-    TrustedSigningKeyStore,
+    AntiEntropyStore, AuthorizationEvaluator, CommandAcceptanceStore, CommandOutcomeStore,
+    ConversationStore, DeliveryStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
+    EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore, StorageHealth,
+    StorageProvider, SyncStore, TrustedSigningKeyStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
     TrustedSigningKeyResolver, VerifyingKeyBytes,
 };
 use ucr_model::{
-    AntiEntropyCursor, AntiEntropyPage, CommandEnvelope, CommandId, ConversationId,
-    ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceId,
-    EventEnvelope, EventId, EventReconciliation, EventReplicaState, EventSummary, IdentityId,
-    KeyId, MessageEnvelope, MessageId, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
-    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
-    TrustedSigningKeyState,
+    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
+    ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
+    DeliveryState, DeviceId, EventEnvelope, EventId, EventReconciliation, EventReplicaState,
+    EventSummary, IdentityId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
+    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, SessionId, SyncCheckpoint,
+    SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
 };
 use ucr_protocol::{
-    AntiEntropyError, CommandError, CommandReceipt, EventError, IdempotencyDecision,
-    accepted_command_receipt, anti_entropy_session_binding, canonical_command, canonical_event,
-    canonical_message, canonical_recovery_plan, canonical_sync_session,
+    AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
+    IdempotencyDecision, accepted_command_receipt, anti_entropy_session_binding, canonical_command,
+    canonical_event, canonical_message, canonical_recovery_plan, canonical_sync_session,
     compare_command_idempotency, duplicate_command_receipt, event_fingerprint,
     validate_anti_entropy_cursor, validate_anti_entropy_page_size, validate_anti_entropy_session,
     validate_anti_entropy_summary_count, validate_conversation, validate_conversation_parent_kind,
     validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
-    validate_delivery_evidence_order, validate_delivery_transition, validate_sync_checkpoint,
-    validate_sync_transition, validate_trusted_signing_key_descriptor,
+    validate_delivery_evidence_order, validate_delivery_transition, validate_permission_grant,
+    validate_sync_checkpoint, validate_sync_transition, validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 9;
@@ -68,6 +68,7 @@ struct MemoryState {
     sync_checkpoints: HashMap<SyncKey, Vec<SyncCheckpoint>>,
     trusted_signing_keys: HashMap<TrustedSigningKeyRef, TrustedSigningKeyRecord>,
     active_trusted_signing_keys: HashMap<TrustedSigningDeviceRef, String>,
+    permission_grants: Vec<PermissionGrant>,
 }
 
 #[derive(Default)]
@@ -94,6 +95,46 @@ impl StorageProvider for MemoryLocalStore {
             .lock()
             .map(|_| StorageHealth::Healthy)
             .map_err(|_| DurableStoreError::Internal)
+    }
+}
+
+impl PermissionGrantStore for MemoryLocalStore {
+    fn grant_permission(&self, grant: &PermissionGrant) -> Result<(), DurableStoreError> {
+        validate_permission_grant(grant).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if !state.permission_grants.contains(grant) {
+            state.permission_grants.push(grant.clone());
+        }
+        Ok(())
+    }
+
+    fn revoke_permission(&self, grant: &PermissionGrant) -> Result<(), DurableStoreError> {
+        validate_permission_grant(grant).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        state.permission_grants.retain(|existing| existing != grant);
+        Ok(())
+    }
+
+    fn permission_grants_for(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<Vec<PermissionGrant>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .permission_grants
+            .iter()
+            .filter(|grant| grant.grantee == *subject)
+            .cloned()
+            .collect())
+    }
+}
+
+impl AuthorizationEvaluator for MemoryLocalStore {
+    fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError> {
+        let grants = self
+            .permission_grants_for(&request.subject)
+            .map_err(map_authorization_store_error)?;
+        ucr_protocol::authorize(request, &grants).map_err(CanonicalError::from)
     }
 }
 
@@ -832,6 +873,21 @@ fn map_command_error(error: CommandError) -> DurableStoreError {
         | CommandError::TooManyExtensions
         | CommandError::ExtensionPayloadTooLarge => DurableStoreError::InvalidRecord,
     }
+}
+
+const fn map_authorization_store_error(error: DurableStoreError) -> CanonicalError {
+    let code = match error {
+        DurableStoreError::Full => CanonicalErrorCode::ResourceExhausted,
+        DurableStoreError::Unavailable => CanonicalErrorCode::TemporarilyUnavailable,
+        DurableStoreError::PermissionDenied => CanonicalErrorCode::PermissionDenied,
+        DurableStoreError::InvalidRecord
+        | DurableStoreError::Conflict
+        | DurableStoreError::Corrupt
+        | DurableStoreError::UnsupportedSchemaVersion
+        | DurableStoreError::ForeignStore
+        | DurableStoreError::Internal => CanonicalErrorCode::Internal,
+    };
+    CanonicalError::new(code)
 }
 
 fn trusted_key_ref(scope: &TenantScope, key_id: &KeyId) -> TrustedSigningKeyRef {
@@ -2614,6 +2670,210 @@ mod trusted_signing_key_tests {
         assert_eq!(
             store.provision_trusted_signing_key(&scope, &malformed),
             Err(DurableStoreError::InvalidRecord)
+        );
+    }
+}
+
+#[cfg(test)]
+mod permission_enforcement_tests {
+    use ucr_core::{
+        AuthorizedMutationError, AuthorizedTrustedSigningKeyMutations, PermissionGrantStore,
+        TrustedSigningKeyStore,
+    };
+    use ucr_model::{
+        DeviceId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PermissionGrant, PermissionScope,
+        PrincipalId, PrincipalKind, PrincipalRef, PublicKeyDescriptor, ScopedPrincipal, TenantId,
+        TenantScope,
+    };
+    use ucr_protocol::{
+        ALGORITHM_VERSION, CanonicalError, CanonicalErrorCode, KEY_FORMAT_VERSION,
+        SIGNATURE_ALGORITHM_ID, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
+        TRUSTED_SIGNING_KEY_REVOKE_PERMISSION, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope(tenant: &str, namespace: Option<&str>) -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid(tenant)),
+            namespace_id: namespace.map(|value| NamespaceId::from_opaque(oid(value))),
+        }
+    }
+
+    fn subject(tenant: &str, namespace: Option<&str>) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(tenant, namespace),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("service-a")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
+    fn descriptor(key: &str, device: &str, byte: u8) -> PublicKeyDescriptor {
+        PublicKeyDescriptor {
+            key_id: KeyId::from_opaque(oid(key)),
+            device_id: DeviceId::from_opaque(oid(device)),
+            purpose: KeyPurpose::Signing,
+            algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ALGORITHM_VERSION,
+            key_format_version: KEY_FORMAT_VERSION,
+            public_key: vec![byte; 32],
+        }
+    }
+
+    fn exact_grant(
+        grantee: &ScopedPrincipal,
+        permission: &str,
+        resource: &TenantScope,
+    ) -> PermissionGrant {
+        PermissionGrant {
+            grantee: grantee.clone(),
+            permission: permission.to_owned(),
+            scope: PermissionScope::Exact(resource.clone()),
+        }
+    }
+
+    fn denied() -> AuthorizedMutationError {
+        AuthorizedMutationError::Authorization(CanonicalError::new(
+            CanonicalErrorCode::PermissionDenied,
+        ))
+    }
+
+    #[test]
+    fn persisted_permission_is_deny_by_default_revocable_and_storage_is_not_reached_on_denial() {
+        let store = MemoryLocalStore::default();
+        let subject = subject("tenant-a", Some("namespace-a"));
+        let resource = scope("tenant-a", Some("namespace-a"));
+        let first = descriptor("key-a", "device-a", 1);
+        let second = descriptor("key-b", "device-b", 2);
+        let authorized = AuthorizedTrustedSigningKeyMutations::new(&store, &store);
+
+        assert_eq!(
+            authorized.provision(&subject, &resource, &first),
+            Err(denied())
+        );
+        assert_eq!(
+            store.active_trusted_signing_key(&resource, &first.device_id),
+            Ok(None)
+        );
+
+        let grant = exact_grant(
+            &subject,
+            TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
+            &resource,
+        );
+        store.grant_permission(&grant).expect("grant provision");
+        store.grant_permission(&grant).expect("idempotent grant");
+        assert_eq!(authorized.provision(&subject, &resource, &first), Ok(()));
+
+        store.revoke_permission(&grant).expect("revoke provision");
+        store
+            .revoke_permission(&grant)
+            .expect("idempotent grant revocation");
+        assert_eq!(
+            authorized.provision(&subject, &resource, &second),
+            Err(denied())
+        );
+        assert_eq!(
+            store.active_trusted_signing_key(&resource, &second.device_id),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn provision_rotate_and_revoke_permissions_are_not_interchangeable() {
+        let store = MemoryLocalStore::default();
+        let subject = subject("tenant-a", Some("namespace-a"));
+        let resource = scope("tenant-a", Some("namespace-a"));
+        let first = descriptor("key-a", "device-a", 3);
+        let second = descriptor("key-b", "device-a", 4);
+        let authorized = AuthorizedTrustedSigningKeyMutations::new(&store, &store);
+
+        store
+            .grant_permission(&exact_grant(
+                &subject,
+                TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
+                &resource,
+            ))
+            .expect("grant provision");
+        authorized
+            .provision(&subject, &resource, &first)
+            .expect("authorized provision");
+        assert_eq!(
+            authorized.rotate(
+                &subject,
+                &resource,
+                &first.device_id,
+                &first.key_id,
+                &second,
+            ),
+            Err(denied())
+        );
+
+        store
+            .grant_permission(&exact_grant(
+                &subject,
+                TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
+                &resource,
+            ))
+            .expect("grant rotate");
+        authorized
+            .rotate(
+                &subject,
+                &resource,
+                &first.device_id,
+                &first.key_id,
+                &second,
+            )
+            .expect("authorized rotate");
+        assert_eq!(
+            authorized.revoke(&subject, &resource, &second.device_id, &second.key_id),
+            Err(denied())
+        );
+
+        store
+            .grant_permission(&exact_grant(
+                &subject,
+                TRUSTED_SIGNING_KEY_REVOKE_PERMISSION,
+                &resource,
+            ))
+            .expect("grant revoke");
+        authorized
+            .revoke(&subject, &resource, &second.device_id, &second.key_id)
+            .expect("authorized revoke");
+    }
+
+    #[test]
+    fn explicit_tenant_wide_grant_authorizes_only_same_tenant_namespaces() {
+        let store = MemoryLocalStore::default();
+        let subject = subject("tenant-a", None);
+        let grant = PermissionGrant {
+            grantee: subject.clone(),
+            permission: TRUSTED_SIGNING_KEY_PROVISION_PERMISSION.to_owned(),
+            scope: PermissionScope::TenantWide(TenantId::from_opaque(oid("tenant-a"))),
+        };
+        store.grant_permission(&grant).expect("grant tenant wide");
+        let authorized = AuthorizedTrustedSigningKeyMutations::new(&store, &store);
+        let namespace_a = scope("tenant-a", Some("namespace-a"));
+        let namespace_b = scope("tenant-a", Some("namespace-b"));
+        let other_tenant = scope("tenant-b", Some("namespace-a"));
+
+        assert_eq!(
+            authorized.provision(&subject, &namespace_a, &descriptor("key-a", "device-a", 5),),
+            Ok(())
+        );
+        assert_eq!(
+            authorized.provision(&subject, &namespace_b, &descriptor("key-b", "device-b", 6),),
+            Ok(())
+        );
+        assert_eq!(
+            authorized.provision(&subject, &other_tenant, &descriptor("key-c", "device-c", 7),),
+            Err(denied())
         );
     }
 }

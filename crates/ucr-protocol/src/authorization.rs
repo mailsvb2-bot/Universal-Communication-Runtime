@@ -4,6 +4,11 @@ use ucr_model::{
 
 use crate::{require_exact_scope, validate_namespaced_identifier};
 
+pub const TRUSTED_SIGNING_KEY_PROVISION_PERMISSION: &str =
+    "ucr.crypto.trusted_signing_key.provision";
+pub const TRUSTED_SIGNING_KEY_ROTATE_PERMISSION: &str = "ucr.crypto.trusted_signing_key.rotate";
+pub const TRUSTED_SIGNING_KEY_REVOKE_PERMISSION: &str = "ucr.crypto.trusted_signing_key.revoke";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantValidationError {
     InvalidPermission,

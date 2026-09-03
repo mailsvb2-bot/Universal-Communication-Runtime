@@ -40,8 +40,9 @@ pub use anti_entropy::{
     validate_anti_entropy_session, validate_anti_entropy_summary_count,
 };
 pub use authorization::{
-    AuthorizationError, GrantValidationError, authorize, is_service_principal,
-    validate_permission_grant,
+    AuthorizationError, GrantValidationError, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
+    TRUSTED_SIGNING_KEY_REVOKE_PERMISSION, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION, authorize,
+    is_service_principal, validate_permission_grant,
 };
 pub use capability::{
     CapabilityDescriptor, CapabilityError, CapabilityMaturity, CapabilityRequirement,

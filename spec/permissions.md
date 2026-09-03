@@ -29,3 +29,12 @@ A malformed permission identifier is invalid input. Corrupted/malformed persiste
 Actor identity, message authorship, `on_behalf_of`, Identity membership, Endpoint, external provider binding, route selection, network origin, and process identity are not permission grants by themselves.
 
 Authentication, credential issuance/rotation, quotas, audit persistence, and revocation enforcement remain separate layers and must not be claimed complete merely because authorization semantics exist.
+## Durable reference authorization state
+
+The Rust reference runtime persists the current explicit grant set through `PermissionGrantStore`. Identical grant insertion and exact grant removal are idempotent set operations. SQLite schema v12 is the restart-safe reference representation; migration from v11 starts with no grants because earlier storage contained no authorization evidence that could be safely inferred.
+
+`AuthorizationEvaluator` implementations load grants for the exact authenticated `ScopedPrincipal` and delegate semantic evaluation to the canonical `authorize` function. Malformed persisted grant state fails closed as an internal authorization failure; implementations must not skip corrupt grants in order to find an allowing grant.
+
+Trusted signing-key provision, rotation, and revocation are the first runtime mutations with an authorization-enforcing façade. They use separate namespaced permission identifiers: `ucr.crypto.trusted_signing_key.provision`, `ucr.crypto.trusted_signing_key.rotate`, and `ucr.crypto.trusted_signing_key.revoke`. Raw persistence APIs are not external authorization bypasses.
+
+This evidence does not yet establish tenant-scoped enforcement for every Command, Message, Sync, Delivery, recovery, or future external API operation. The broader production blocker remains until every applicable runtime boundary has an explicit permission owner and enforcement test.

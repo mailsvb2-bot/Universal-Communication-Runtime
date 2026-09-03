@@ -1129,8 +1129,11 @@ fn message_intent_and_error_wire_parity_survives_v10_storage() {
     assert!(error_spec.contains("Unknown future non-zero numeric codes remain failures"));
 
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V10: u32 = 10;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 11;"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 12;"));
     assert!(sqlite_root.contains("fn migrate_v9_to_v10"));
+    assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
+    assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_message.contains("CREATE TABLE message_extensions"));
     let sqlite_command =
         fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/command_store.rs"))
@@ -1633,8 +1636,10 @@ fn trusted_signing_key_lifecycle_is_scoped_restart_safe_and_runtime_integrated()
     assert!(sqlite.contains("trusted_signing_keys_one_active_per_device"));
     assert!(sqlite.contains("WHERE state = 'active'"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V10: u32 = 10"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 11"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 12"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
+    assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
 
     for evidence in [
         "trusted_signing_key_lifecycle_is_atomic_idempotent_and_irreversible",
@@ -1743,4 +1748,58 @@ fn implemented_untrusted_boundaries_have_bounded_required_fuzzing() {
         !threat.contains("- required fuzz targets for implemented parsers/wrappers;"),
         "fuzz blocker must only be removed with the positive executable evidence above"
     );
+}
+
+#[test]
+fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overclaiming() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+    let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/authorization.rs"))
+        .expect("authorization protocol");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+    let sqlite =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/permission_store.rs"))
+            .expect("permission sqlite store");
+    let sqlite_root = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let spec = fs::read_to_string(workspace.join("spec/permissions.md")).expect("permissions spec");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let adr = fs::read_to_string(
+        workspace.join("docs/adr/0027-permission-grants-are-durable-and-runtime-enforced.md"),
+    )
+    .expect("adr 0027");
+
+    assert!(core.contains("pub trait PermissionGrantStore"));
+    assert!(core.contains("pub struct AuthorizedTrustedSigningKeyMutations"));
+    assert!(core.contains("TRUSTED_SIGNING_KEY_PROVISION_PERMISSION"));
+    assert!(core.contains("TRUSTED_SIGNING_KEY_ROTATE_PERMISSION"));
+    assert!(core.contains("TRUSTED_SIGNING_KEY_REVOKE_PERMISSION"));
+    assert!(protocol.contains("ucr.crypto.trusted_signing_key.provision"));
+    assert!(protocol.contains("ucr.crypto.trusted_signing_key.rotate"));
+    assert!(protocol.contains("ucr.crypto.trusted_signing_key.revoke"));
+    assert!(memory.contains("impl PermissionGrantStore for MemoryLocalStore"));
+    assert!(memory.contains("impl AuthorizationEvaluator for MemoryLocalStore"));
+    assert!(memory.contains(
+        "persisted_permission_is_deny_by_default_revocable_and_storage_is_not_reached_on_denial"
+    ));
+    assert!(sqlite.contains("CREATE TABLE permission_grants"));
+    assert!(sqlite.contains("impl PermissionGrantStore for SqliteLocalStore"));
+    assert!(sqlite.contains("impl AuthorizationEvaluator for SqliteLocalStore"));
+    assert!(sqlite.contains("malformed_persisted_permission_is_rejected_on_reopen"));
+    assert!(sqlite.contains("authorized_trusted_key_mutation_uses_persisted_grant_after_restart"));
+    assert!(
+        sqlite
+            .contains("v11_to_v12_migration_preserves_trusted_key_state_and_starts_without_grants")
+    );
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 12;"));
+    assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
+    assert!(spec.contains("SQLite schema v12"));
+    assert!(spec.contains("broader production blocker remains"));
+    assert!(adr.contains("does not claim every Command/Message/Sync/Delivery/runtime operation"));
+    assert!(threat.contains("- tenant-scoped authorization enforcement;"));
 }
