@@ -123,6 +123,7 @@ id_type!(EventId);
 id_type!(IntentId);
 id_type!(KeyId);
 id_type!(RecoveryPlanId);
+id_type!(ServiceCredentialId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrincipalKind {
@@ -513,6 +514,32 @@ pub struct PermissionGrant {
     pub grantee: ScopedPrincipal,
     pub permission: String,
     pub scope: PermissionScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceCredentialState {
+    Active,
+    Revoked,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ServiceCredentialRecord {
+    pub credential_id: ServiceCredentialId,
+    pub subject: ScopedPrincipal,
+    pub secret_digest: [u8; 32],
+    pub state: ServiceCredentialState,
+}
+
+impl fmt::Debug for ServiceCredentialRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServiceCredentialRecord")
+            .field("credential_id", &self.credential_id)
+            .field("subject", &self.subject)
+            .field("secret_digest", &"<redacted>")
+            .field("state", &self.state)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -524,8 +524,11 @@ name = "ucr-core"
 version = "0.0.1"
 dependencies = [
  "getrandom",
+ "sha2",
+ "subtle",
  "ucr-model",
  "ucr-protocol",
+ "zeroize",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@
 
 mod authorized_runtime;
 mod id;
+mod service_auth;
 
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CapabilityDescriptor,
@@ -9,13 +10,17 @@ use ucr_model::{
     DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceId, EndpointAddress,
     EndpointId, EventEnvelope, EventId, EventReconciliation, EventSummary, IdentityId, KeyId,
     MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
-    ScopedPrincipal, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord,
+    ScopedPrincipal, ServiceCredentialId, ServiceCredentialRecord, SessionId, SyncCheckpoint,
+    SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
 pub use authorized_runtime::AuthorizedDurableRuntime;
 pub use id::{IdGenerationError, generate_opaque_id};
+pub use service_auth::{
+    ServiceAuthenticationError, ServiceCredentialIssueError, ServiceCredentialSecret,
+    authenticate_service_principal, issue_service_credential,
+};
 
 /// A route candidate is transient runtime state, never canonical identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +116,42 @@ pub trait PermissionGrantStore: StorageProvider {
         &self,
         subject: &ScopedPrincipal,
     ) -> Result<Vec<PermissionGrant>, DurableStoreError>;
+}
+
+/// Durable authentication-credential lifecycle for canonical Service Account principals.
+///
+/// This capability stores only credential metadata and a one-way digest. Plaintext
+/// authentication secrets are never persisted here and permission grants remain a
+/// separate authorization capability.
+pub trait ServiceCredentialStore: StorageProvider {
+    /// Persists the first active credential record. Identical retries are idempotent.
+    ///
+    /// # Errors
+    /// Rejects malformed records, ID reuse, or storage failures.
+    fn provision_service_credential(
+        &self,
+        record: &ServiceCredentialRecord,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Irreversibly revokes one expected credential. Repeating revocation is idempotent.
+    ///
+    /// # Errors
+    /// Rejects scope mismatches or explicit storage failures.
+    fn revoke_service_credential(
+        &self,
+        scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Resolves credential metadata for one exact scope. Absence is not an error.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn service_credential(
+        &self,
+        scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+    ) -> Result<Option<ServiceCredentialRecord>, DurableStoreError>;
 }
 
 /// Storage health is explicit and never inferred from successful construction.

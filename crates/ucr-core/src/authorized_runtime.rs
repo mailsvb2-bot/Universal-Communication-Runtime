@@ -3,8 +3,8 @@ use ucr_model::{
     ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
     DeliveryState, DeviceId, EventEnvelope, EventId, EventReconciliation, EventSummary, IdentityId,
     KeyId, MessageEnvelope, MessageId, PermissionGrant, PermissionScope, PublicKeyDescriptor,
-    RecoveryPlan, RecoveryPlanId, ScopedPrincipal, SessionId, SyncCheckpoint, SyncSession,
-    SyncState, TenantScope, TrustedSigningKeyRecord,
+    RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceCredentialId, ServiceCredentialRecord,
+    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{
     ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, COMMAND_ACCEPT_PERMISSION,
@@ -14,7 +14,8 @@ use ucr_protocol::{
     MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
     PERMISSION_GRANT_REVOKE_PERMISSION, RECOVERY_PLAN_INSTALL_PERMISSION,
     RECOVERY_PLAN_READ_PERMISSION, RECOVERY_PLAN_REVOKE_PERMISSION,
-    RECOVERY_PLAN_ROTATE_PERMISSION, SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION,
+    RECOVERY_PLAN_ROTATE_PERMISSION, SERVICE_CREDENTIAL_PROVISION_PERMISSION,
+    SERVICE_CREDENTIAL_REVOKE_PERMISSION, SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION,
     TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_READ_PERMISSION,
     TRUSTED_SIGNING_KEY_REVOKE_PERMISSION, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
 };
@@ -23,7 +24,7 @@ use crate::{
     AntiEntropyStore, AuthorizationEvaluator, AuthorizedMutationError, CommandAcceptanceStore,
     CommandOutcomeStore, ConversationStore, DeliveryStore, DurableRecordStatus, DurableStoreError,
     EventAppendStatus, EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore,
-    SyncStore, TrustedSigningKeyStore,
+    ServiceCredentialStore, SyncStore, TrustedSigningKeyStore,
 };
 
 /// Authorization-enforcing runtime boundary over tenant-scoped durable capabilities.
@@ -124,6 +125,47 @@ where
         self.require(subject, &resource_scope, PERMISSION_GRANT_REVOKE_PERMISSION)?;
         self.store
             .revoke_permission(grant)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore,
+{
+    /// Provisions one Service Principal credential only after administrator authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures. Credential plaintext is never persisted.
+    pub fn provision_service_credential(
+        &self,
+        subject: &ScopedPrincipal,
+        record: &ServiceCredentialRecord,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(
+            subject,
+            &record.subject.scope,
+            SERVICE_CREDENTIAL_PROVISION_PERMISSION,
+        )?;
+        self.store
+            .provision_service_credential(record)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Revokes one Service Principal credential only after administrator authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures. Revocation is irreversible.
+    pub fn revoke_service_credential(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, scope, SERVICE_CREDENTIAL_REVOKE_PERMISSION)?;
+        self.store
+            .revoke_service_credential(scope, credential_id)
             .map_err(AuthorizedMutationError::Store)
     }
 }
