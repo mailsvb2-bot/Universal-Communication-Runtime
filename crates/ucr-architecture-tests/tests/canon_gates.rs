@@ -1358,3 +1358,64 @@ fn anti_entropy_keeps_fingerprint_snapshot_damage_and_storage_boundaries() {
     assert!(memory.contains("validate_anti_entropy_summary_count(summaries.len())"));
     assert!(sqlite.contains("validate_anti_entropy_summary_count(summaries.len())"));
 }
+
+#[test]
+fn sensitive_model_debug_surfaces_redact_private_material_without_closing_telemetry_blocker() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let commands = fs::read_to_string(workspace.join("spec/commands-events.md"))
+        .expect("commands/events spec");
+    let message =
+        fs::read_to_string(workspace.join("spec/conversation-message.md")).expect("message spec");
+    let protocol = fs::read_to_string(workspace.join("spec/protocol.md")).expect("protocol spec");
+
+    for owner in [
+        "CorrelationContext",
+        "EventEnvelope",
+        "EventFingerprint",
+        "ExternalMessageMapping",
+        "MessageCryptoMetadata",
+        "MessageSignature",
+        "MessageEnvelope",
+        "IntentConstraints",
+        "CommunicationIntent",
+    ] {
+        assert!(
+            model.contains(&format!("impl fmt::Debug for {owner}")),
+            "sensitive Debug owner missing for {owner}"
+        );
+        assert!(
+            !model.contains(&format!(
+                "#[derive(Debug, Clone, PartialEq, Eq)]\npub struct {owner}"
+            )),
+            "derived Debug reintroduced for sensitive owner {owner}"
+        );
+    }
+
+    for evidence in [
+        "correlation_and_event_debug_do_not_disclose_sensitive_material",
+        "message_nested_debug_does_not_disclose_sensitive_material",
+        "message_envelope_debug_does_not_disclose_sensitive_material",
+        "communication_intent_and_constraints_debug_redact_private_policy_and_payload",
+    ] {
+        assert!(
+            model.contains(evidence),
+            "redaction evidence missing: {evidence}"
+        );
+    }
+    assert!(
+        commands
+            .contains("Ordinary Rust `Debug` output is not an authorized payload-inspection path")
+    );
+    assert!(message.contains("Ordinary Rust `Debug` output redacts Message plaintext"));
+    assert!(protocol.contains("Ordinary Rust `Debug` output for a Communication Intent redacts"));
+    assert!(threat.contains("- secret/plaintext telemetry regression tests."));
+    assert!(threat.contains(
+        "do **not** close the broader `secret/plaintext telemetry regression tests` blocker"
+    ));
+}
