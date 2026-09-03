@@ -67,7 +67,7 @@ impl DeviceLifecycleStore for SqliteLocalStore {
             };
         }
         insert_device(&transaction, scope, descriptor)?;
-        if descriptor.state == DeviceLifecycleState::Revoked {
+        if !device_allows_protected_access(descriptor) {
             revoke_active_device_key(&transaction, scope, &descriptor.device_id)?;
         }
         transaction
@@ -145,7 +145,7 @@ pub(super) fn protected_device_allows(
         && identity_id.is_none_or(|expected| device.identity_id == *expected))
 }
 
-fn insert_device(
+pub(super) fn insert_device(
     transaction: &Transaction<'_>,
     scope: &TenantScope,
     descriptor: &DeviceDescriptor,
@@ -169,7 +169,7 @@ fn insert_device(
     Ok(())
 }
 
-fn load_device(
+pub(super) fn load_device(
     connection: &Connection,
     scope: &TenantScope,
     device_id: &DeviceId,
@@ -230,10 +230,10 @@ fn verify_rows(connection: &Connection) -> Result<(), DurableStoreError> {
         decode_id(&identity)?;
         decode_state(&state)?;
     }
-    verify_revoked_devices_have_no_active_keys(connection)
+    verify_non_active_devices_have_no_active_keys(connection)
 }
 
-fn verify_revoked_devices_have_no_active_keys(
+fn verify_non_active_devices_have_no_active_keys(
     connection: &Connection,
 ) -> Result<(), DurableStoreError> {
     let count: i64 = connection
@@ -244,7 +244,7 @@ fn verify_revoked_devices_have_no_active_keys(
               AND k.namespace_present=d.namespace_present
               AND k.namespace_id=d.namespace_id
               AND k.device_id=d.device_id
-             WHERE d.state='revoked' AND k.state='active'",
+             WHERE d.state<>'active' AND k.state='active'",
             [],
             |row| row.get(0),
         )
@@ -278,7 +278,7 @@ fn active_device_key_count(
         .map_err(|error| map_sqlite_error(&error))
 }
 
-fn revoke_active_device_key(
+pub(super) fn revoke_active_device_key(
     transaction: &Transaction<'_>,
     scope: &TenantScope,
     device_id: &DeviceId,
@@ -652,5 +652,73 @@ mod tests {
             SqliteLocalStore::open(db.path()),
             Err(DurableStoreError::Corrupt)
         ));
+    }
+    #[test]
+    fn registering_non_active_device_after_v14_migration_revokes_residual_key() {
+        let db = TestDb::new();
+        let scope = scope();
+        let active = device(DeviceLifecycleState::Active);
+        let legacy_key = key("legacy-reverify-key", 31);
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("initialize current");
+            store.register_device(&scope, &active).expect("register");
+            store
+                .provision_trusted_signing_key(&scope, &legacy_key)
+                .expect("provision key");
+        }
+        let connection = Connection::open(db.path()).expect("raw sqlite");
+        connection
+            .execute_batch("DROP TABLE devices;")
+            .expect("drop devices");
+        connection
+            .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
+            .expect("application id");
+        connection
+            .pragma_update(None, "user_version", SQLITE_SCHEMA_V14)
+            .expect("set v14");
+        drop(connection);
+
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate");
+        let mut recovered = active.clone();
+        recovered.state = DeviceLifecycleState::ReverificationRequired;
+        migrated
+            .register_device(&scope, &recovered)
+            .expect("register recovered device");
+        assert_eq!(
+            migrated
+                .trusted_signing_key(&scope, &legacy_key.key_id)
+                .expect("key lookup")
+                .expect("key retained")
+                .state,
+            TrustedSigningKeyState::Revoked
+        );
+        assert_eq!(
+            migrated.active_trusted_signing_key(&scope, &active.device_id),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn non_active_device_with_active_key_is_rejected_on_reopen() {
+        let db = TestDb::new();
+        let scope = scope();
+        let active = device(DeviceLifecycleState::Active);
+        let active_key = key("tamper-key", 32);
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open");
+            store.register_device(&scope, &active).expect("register");
+            store
+                .provision_trusted_signing_key(&scope, &active_key)
+                .expect("provision key");
+        }
+        let connection = Connection::open(db.path()).expect("raw sqlite");
+        connection
+            .execute("UPDATE devices SET state='reverification_required'", [])
+            .expect("tamper state");
+        drop(connection);
+        assert_eq!(
+            SqliteLocalStore::open(db.path()).expect_err("inconsistent state must fail"),
+            DurableStoreError::Corrupt
+        );
     }
 }

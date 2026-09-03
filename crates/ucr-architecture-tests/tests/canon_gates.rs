@@ -1955,7 +1955,9 @@ fn tenant_scoped_durable_runtime_authorization_covers_every_current_method() {
             .contains("unified_runtime_enforces_independent_conversation_and_message_permissions")
     );
     assert!(core.contains("AuthorizedDurableRuntime::new(self.authorization, self.store)"));
-    assert!(spec.contains("every currently implemented tenant-scoped durable capability"));
+    assert!(spec.contains(
+        "every currently implemented **permission-authorized** tenant-scoped durable capability"
+    ));
     assert!(adr.contains("mirrors all 32 methods"));
     assert!(adr.contains("cannot grant itself grant-management authority"));
     assert!(ci.contains(
@@ -2046,6 +2048,8 @@ fn device_lifecycle_is_durable_and_gates_protected_key_access() {
         "device_revocation_and_key_invalidation_survive_restart",
         "concurrent_device_revoke_and_key_rotation_never_leave_active_key",
         "v14_to_v15_migration_preserves_key_but_does_not_invent_device_identity",
+        "registering_non_active_device_after_v14_migration_revokes_residual_key",
+        "non_active_device_with_active_key_is_rejected_on_reopen",
         "corrupt_device_state_is_rejected_on_reopen",
     ] {
         assert!(
@@ -2069,6 +2073,94 @@ fn device_lifecycle_is_durable_and_gates_protected_key_access() {
         "- device-bound credential/content delivery enforcement beyond implemented trusted-key/authentication paths;"
     ));
     assert!(threat.contains("- end-to-end recovery workflow:"));
+}
+
+#[test]
+fn recovery_execution_requires_verified_authority_and_atomic_device_staging() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let workflow = fs::read_to_string(workspace.join("crates/ucr-core/src/recovery_workflow.rs"))
+        .expect("recovery workflow");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+    let sqlite_recovery =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/recovery_plan.rs"))
+            .expect("sqlite recovery");
+    let sqlite_device =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/device_store.rs"))
+            .expect("sqlite device");
+    let spec = fs::read_to_string(workspace.join("spec/recovery.md")).expect("recovery spec");
+    let permissions =
+        fs::read_to_string(workspace.join("spec/permissions.md")).expect("permissions spec");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0033-recovery-device-staging-requires-verified-authority-and-active-plan.md",
+    ))
+    .expect("adr 0033");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(workflow.contains("pub trait RecoveryAuthorityVerifier"));
+    assert!(workflow.contains("pub struct RecoveryAdmissionProof"));
+    assert!(workflow.contains("plan_id: RecoveryPlanId"));
+    assert!(!workflow.contains("pub plan_id: RecoveryPlanId"));
+    assert!(workflow.contains("pub trait RecoveryDeviceStagingStore"));
+    assert!(workflow.contains("proof: &RecoveryAdmissionProof"));
+    let validate = workflow
+        .find("validate_recovery_request(&plan, request)")
+        .expect("validation");
+    let verify = workflow
+        .find(".verify_authority(&plan, request)")
+        .expect("authority verifier");
+    assert!(
+        validate < verify,
+        "authority verifier must run after canonical request binding"
+    );
+    assert!(workflow.contains("RecoveryError::PlanMismatch"));
+    assert!(workflow.contains("CanonicalErrorCode::PermissionDenied"));
+
+    for evidence in [
+        "recovery_staging_requires_verified_authority_and_never_auto_trusts_device",
+        "recovery_proof_is_invalidated_by_plan_revoke_and_cannot_overwrite_existing_device",
+    ] {
+        assert!(
+            memory.contains(evidence),
+            "memory recovery evidence missing: {evidence}"
+        );
+    }
+    for evidence in [
+        "verified_recovery_device_staging_survives_restart_and_stays_reverification_required",
+        "revoked_plan_invalidates_previously_issued_recovery_proof",
+        "concurrent_plan_revoke_and_device_stage_never_stage_after_revocation",
+        "missing_or_mismatched_recovery_plan_is_non_disclosing",
+    ] {
+        assert!(
+            sqlite_recovery.contains(evidence),
+            "sqlite recovery evidence missing: {evidence}"
+        );
+    }
+    assert!(sqlite_recovery.contains("TransactionBehavior::Immediate"));
+    assert!(sqlite_recovery.contains("active_plan_id(&transaction, &identity)?"));
+    assert!(sqlite_recovery.contains("revoke_active_device_key"));
+    assert!(sqlite_device.contains("WHERE d.state<>'active' AND k.state='active'"));
+    assert!(spec.contains("validate_recovery_request` proves only"));
+    assert!(spec.contains("atomically re-check that the same plan is still active"));
+    assert!(
+        permissions
+            .contains("Recovery execution is deliberately not another PermissionGrant operation")
+    );
+    assert!(adr.contains("rejected because revoke/rotation creates a TOCTOU race"));
+    assert!(ci.contains(
+        "docs/adr/0033-recovery-device-staging-requires-verified-authority-and-active-plan.md"
+    ));
+    assert!(threat.contains(
+        "- end-to-end recovery workflow: concrete authority-verifier providers, credential re-issuance"
+    ));
+    assert!(threat.contains(
+        "- device-bound credential/content delivery enforcement beyond implemented trusted-key/authentication paths;"
+    ));
 }
 
 #[test]

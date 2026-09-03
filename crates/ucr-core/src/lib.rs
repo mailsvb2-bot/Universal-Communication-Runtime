@@ -2,6 +2,7 @@
 
 mod authorized_runtime;
 mod id;
+mod recovery_workflow;
 mod service_auth;
 mod service_request;
 
@@ -19,6 +20,10 @@ use ucr_protocol::{CanonicalError, CommandReceipt};
 
 pub use authorized_runtime::AuthorizedDurableRuntime;
 pub use id::{IdGenerationError, generate_opaque_id};
+pub use recovery_workflow::{
+    RecoveryAdmissionProof, RecoveryAuthorityVerificationError, RecoveryAuthorityVerifier,
+    RecoveryDeviceStagingStore, RecoveryRequestGate, authorize_and_stage_recovered_device,
+};
 pub use service_auth::{
     ServiceAuthenticationError, ServiceCredentialIssueError, ServiceCredentialSecret,
     authenticate_service_principal, issue_service_credential,
