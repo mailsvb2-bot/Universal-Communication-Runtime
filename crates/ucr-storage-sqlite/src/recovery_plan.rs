@@ -1,5 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use ucr_core::{DurableStoreError, RecoveryPlanStore};
+use ucr_core::{
+    DurableStoreError, RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
+};
 use ucr_model::{
     DeviceId, DeviceLifecycleState, HistoricalMessageAccess, IdentityId, NamespaceId, OpaqueId,
     PrincipalId, RecoveryAuthority, RecoveryPlan, RecoveryPlanId, RecoveryTrustModel, TenantId,
@@ -153,6 +155,48 @@ impl RecoveryPlanStore for SqliteLocalStore {
         load_plan(&connection, &plan_id)?
             .ok_or(DurableStoreError::Corrupt)
             .map(Some)
+    }
+}
+
+impl RecoveryDeviceStagingStore for SqliteLocalStore {
+    fn stage_recovered_device(
+        &self,
+        proof: &RecoveryAdmissionProof,
+    ) -> Result<(), DurableStoreError> {
+        if proof.recovered_device_state() != DeviceLifecycleState::ReverificationRequired {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let identity = identity_key(proof.scope(), proof.identity_id());
+        if active_plan_id(&transaction, &identity)?.as_deref()
+            != Some(proof.plan_id().as_opaque().as_str())
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let descriptor = proof.recovered_device();
+        if let Some(existing) =
+            super::device_store::load_device(&transaction, proof.scope(), proof.target_device_id())?
+        {
+            return if existing == descriptor {
+                transaction
+                    .commit()
+                    .map_err(|error| map_sqlite_error(&error))
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        super::device_store::revoke_active_device_key(
+            &transaction,
+            proof.scope(),
+            proof.target_device_id(),
+        )?;
+        super::device_store::insert_device(&transaction, proof.scope(), &descriptor)?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))
     }
 }
 
@@ -434,11 +478,17 @@ mod tests {
     };
 
     use rusqlite::Connection;
-    use ucr_core::{DurableStoreError, RecoveryPlanStore, StorageProvider};
+    use ucr_core::{
+        DeviceLifecycleStore, DurableStoreError, RecoveryAuthorityVerificationError,
+        RecoveryAuthorityVerifier, RecoveryDeviceStagingStore, RecoveryPlanStore,
+        RecoveryRequestGate, StorageProvider, authorize_and_stage_recovered_device,
+    };
     use ucr_model::{
         DeviceId, DeviceLifecycleState, HistoricalMessageAccess, IdentityId, NamespaceId, OpaqueId,
-        RecoveryAuthority, RecoveryPlan, RecoveryPlanId, RecoveryTrustModel, TenantId, TenantScope,
+        RecoveryAuthority, RecoveryPlan, RecoveryPlanId, RecoveryRequest, RecoveryTrustModel,
+        TenantId, TenantScope,
     };
+    use ucr_protocol::CanonicalErrorCode;
 
     use super::SqliteLocalStore;
     use crate::{SQLITE_SCHEMA_VERSION, UCR_SQLITE_APPLICATION_ID};
@@ -492,6 +542,29 @@ mod tests {
             historical_message_access: HistoricalMessageAccess::ExplicitEncryptedRecovery,
             trust_model: RecoveryTrustModel::UserControlled,
             recovered_device_state: DeviceLifecycleState::ReverificationRequired,
+        }
+    }
+
+    #[derive(Debug)]
+    struct AllowVerifier;
+
+    impl RecoveryAuthorityVerifier for AllowVerifier {
+        fn verify_authority(
+            &self,
+            _plan: &RecoveryPlan,
+            _request: &RecoveryRequest,
+        ) -> Result<(), RecoveryAuthorityVerificationError> {
+            Ok(())
+        }
+    }
+
+    fn request(plan: &RecoveryPlan, target: &str) -> RecoveryRequest {
+        RecoveryRequest {
+            plan_id: plan.plan_id.clone(),
+            scope: plan.scope.clone(),
+            identity_id: plan.identity_id.clone(),
+            authority: RecoveryAuthority::RecoveryKey,
+            target_device_id: DeviceId::from_opaque(opaque(target)),
         }
     }
 
@@ -644,5 +717,123 @@ mod tests {
                 .plan_id,
             original.plan_id
         );
+    }
+    #[test]
+    fn verified_recovery_device_staging_survives_restart_and_stays_reverification_required() {
+        let db = TestDb::new();
+        let active = plan("plan-stage");
+        let request = request(&active, "device-recovered");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            store.install_recovery_plan(&active).expect("install plan");
+            let staged = authorize_and_stage_recovered_device(&AllowVerifier, &store, &request)
+                .expect("verified recovery stages device");
+            assert_eq!(staged.state, DeviceLifecycleState::ReverificationRequired);
+            assert_eq!(
+                store.device(&active.scope, &request.target_device_id),
+                Ok(Some(staged))
+            );
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen store");
+        assert_eq!(
+            reopened
+                .device(&active.scope, &request.target_device_id)
+                .expect("device lookup")
+                .expect("staged device")
+                .state,
+            DeviceLifecycleState::ReverificationRequired
+        );
+    }
+
+    #[test]
+    fn revoked_plan_invalidates_previously_issued_recovery_proof() {
+        let db = TestDb::new();
+        let active = plan("plan-proof");
+        let request = request(&active, "device-proof");
+        let store = SqliteLocalStore::open(db.path()).expect("open store");
+        store.install_recovery_plan(&active).expect("install plan");
+        let proof = RecoveryRequestGate::new(&AllowVerifier, &store)
+            .authorize_recovery(&request)
+            .expect("verified proof");
+        store
+            .revoke_recovery_plan(&active.scope, &active.identity_id, &active.plan_id)
+            .expect("revoke plan");
+        assert_eq!(
+            store.stage_recovered_device(&proof),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        assert_eq!(
+            store.device(&active.scope, &request.target_device_id),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn concurrent_plan_revoke_and_device_stage_never_stage_after_revocation() {
+        let db = TestDb::new();
+        let active = plan("plan-race");
+        let request = request(&active, "device-race");
+        let proof = {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            store.install_recovery_plan(&active).expect("install plan");
+            RecoveryRequestGate::new(&AllowVerifier, &store)
+                .authorize_recovery(&request)
+                .expect("verified proof")
+        };
+        let barrier = Arc::new(Barrier::new(3));
+        let stage_path = db.path().to_owned();
+        let stage_barrier = Arc::clone(&barrier);
+        let stage = thread::spawn(move || {
+            let store = SqliteLocalStore::open(stage_path).expect("stage store");
+            stage_barrier.wait();
+            store.stage_recovered_device(&proof)
+        });
+        let revoke_path = db.path().to_owned();
+        let revoke_barrier = Arc::clone(&barrier);
+        let scope = active.scope.clone();
+        let identity = active.identity_id.clone();
+        let plan_id = active.plan_id.clone();
+        let revoke = thread::spawn(move || {
+            let store = SqliteLocalStore::open(revoke_path).expect("revoke store");
+            revoke_barrier.wait();
+            store.revoke_recovery_plan(&scope, &identity, &plan_id)
+        });
+        barrier.wait();
+        let stage_result = stage.join().expect("stage thread");
+        assert_eq!(revoke.join().expect("revoke thread"), Ok(()));
+        assert!(matches!(
+            stage_result,
+            Ok(()) | Err(DurableStoreError::PermissionDenied)
+        ));
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen store");
+        assert_eq!(
+            reopened
+                .active_recovery_plan(&active.scope, &active.identity_id)
+                .expect("active plan lookup"),
+            None
+        );
+        let staged = reopened
+            .device(&active.scope, &request.target_device_id)
+            .expect("device lookup");
+        if stage_result.is_ok() {
+            assert_eq!(
+                staged.expect("stage committed before revoke").state,
+                DeviceLifecycleState::ReverificationRequired
+            );
+        } else {
+            assert_eq!(staged, None);
+        }
+    }
+
+    #[test]
+    fn missing_or_mismatched_recovery_plan_is_non_disclosing() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open store");
+        let active = plan("plan-nondisclosure");
+        let request = request(&active, "device-nondisclosure");
+        let error = authorize_and_stage_recovered_device(&AllowVerifier, &store, &request)
+            .expect_err("missing plan denied");
+        assert_eq!(error.code, CanonicalErrorCode::PermissionDenied);
     }
 }

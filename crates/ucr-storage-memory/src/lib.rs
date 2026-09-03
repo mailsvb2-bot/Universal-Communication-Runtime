@@ -9,9 +9,10 @@ use std::{
 use ucr_core::{
     AntiEntropyStore, AuthorizationEvaluator, CommandAcceptanceStore, CommandOutcomeStore,
     ConversationStore, DeliveryStore, DeviceLifecycleStore, DurableRecordStatus, DurableStoreError,
-    EventAppendStatus, EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore,
-    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
-    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore,
+    EventAppendStatus, EventJournalStore, MessageStore, PermissionGrantStore,
+    RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore, ServiceAuditStore,
+    ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth,
+    StorageProvider, SyncStore, TrustedSigningKeyStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -345,6 +346,25 @@ impl DeviceLifecycleStore for MemoryLocalStore {
             } else {
                 Err(DurableStoreError::Conflict)
             };
+        }
+        if !device_allows_protected_access(descriptor) {
+            let trusted_ref = trusted_device_ref(scope, &descriptor.device_id);
+            if let Some(active_key_id) =
+                state.active_trusted_signing_keys.get(&trusted_ref).cloned()
+            {
+                let active_key_ref = (trusted_ref.0.clone(), active_key_id);
+                let record = state
+                    .trusted_signing_keys
+                    .get_mut(&active_key_ref)
+                    .ok_or(DurableStoreError::Corrupt)?;
+                if record.state != TrustedSigningKeyState::Active
+                    || record.descriptor.device_id != descriptor.device_id
+                {
+                    return Err(DurableStoreError::Corrupt);
+                }
+                record.state = TrustedSigningKeyState::Revoked;
+                state.active_trusted_signing_keys.remove(&trusted_ref);
+            }
         }
         state.devices.insert(key, descriptor.clone());
         Ok(())
@@ -757,6 +777,54 @@ impl RecoveryPlanStore for MemoryLocalStore {
             .cloned()
             .map(Some)
             .ok_or(DurableStoreError::Corrupt)
+    }
+}
+
+impl RecoveryDeviceStagingStore for MemoryLocalStore {
+    fn stage_recovered_device(
+        &self,
+        proof: &RecoveryAdmissionProof,
+    ) -> Result<(), DurableStoreError> {
+        if proof.recovered_device_state() != DeviceLifecycleState::ReverificationRequired {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let identity_key = recovery_identity_key(proof.scope(), proof.identity_id());
+        let expected_plan = proof.plan_id().as_opaque().as_str();
+        let device_key = device_key(proof.scope(), proof.target_device_id());
+        let descriptor = proof.recovered_device();
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if state
+            .active_recovery_plans
+            .get(&identity_key)
+            .map(String::as_str)
+            != Some(expected_plan)
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        if let Some(existing) = state.devices.get(&device_key) {
+            return if existing == &descriptor {
+                Ok(())
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        let trusted_ref = trusted_device_ref(proof.scope(), proof.target_device_id());
+        if let Some(active_key_id) = state.active_trusted_signing_keys.get(&trusted_ref).cloned() {
+            let active_key_ref = (trusted_ref.0.clone(), active_key_id);
+            let record = state
+                .trusted_signing_keys
+                .get_mut(&active_key_ref)
+                .ok_or(DurableStoreError::Corrupt)?;
+            if record.state != TrustedSigningKeyState::Active
+                || record.descriptor.device_id != *proof.target_device_id()
+            {
+                return Err(DurableStoreError::Corrupt);
+            }
+            record.state = TrustedSigningKeyState::Revoked;
+            state.active_trusted_signing_keys.remove(&trusted_ref);
+        }
+        state.devices.insert(device_key, descriptor);
+        Ok(())
     }
 }
 
@@ -1795,10 +1863,20 @@ mod replay_tests {
 
 #[cfg(test)]
 mod recovery_tests {
-    use ucr_core::{DurableStoreError, RecoveryPlanStore};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ucr_core::{
+        DeviceLifecycleStore, DurableStoreError, RecoveryAuthorityVerificationError,
+        RecoveryAuthorityVerifier, RecoveryDeviceStagingStore, RecoveryPlanStore,
+        RecoveryRequestGate, TrustedSigningKeyStore, authorize_and_stage_recovered_device,
+    };
     use ucr_model::{
-        DeviceId, DeviceLifecycleState, HistoricalMessageAccess, IdentityId, OpaqueId,
-        RecoveryAuthority, RecoveryPlan, RecoveryPlanId, RecoveryTrustModel, TenantId, TenantScope,
+        DeviceId, DeviceLifecycleState, HistoricalMessageAccess, IdentityId, KeyId, KeyPurpose,
+        OpaqueId, PublicKeyDescriptor, RecoveryAuthority, RecoveryPlan, RecoveryPlanId,
+        RecoveryRequest, RecoveryTrustModel, TenantId, TenantScope,
+    };
+    use ucr_protocol::{
+        ALGORITHM_VERSION, CanonicalErrorCode, KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID,
     };
 
     use super::MemoryLocalStore;
@@ -1822,6 +1900,65 @@ mod recovery_tests {
             historical_message_access: HistoricalMessageAccess::ExplicitEncryptedRecovery,
             trust_model: RecoveryTrustModel::UserControlled,
             recovered_device_state: DeviceLifecycleState::ReverificationRequired,
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestVerifier {
+        outcome: Result<(), RecoveryAuthorityVerificationError>,
+        calls: AtomicUsize,
+    }
+
+    impl TestVerifier {
+        fn allow() -> Self {
+            Self {
+                outcome: Ok(()),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn deny() -> Self {
+            Self {
+                outcome: Err(RecoveryAuthorityVerificationError::Denied),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl RecoveryAuthorityVerifier for TestVerifier {
+        fn verify_authority(
+            &self,
+            _plan: &RecoveryPlan,
+            _request: &RecoveryRequest,
+        ) -> Result<(), RecoveryAuthorityVerificationError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.outcome
+        }
+    }
+
+    fn request(plan: &RecoveryPlan, target: &str, authority: RecoveryAuthority) -> RecoveryRequest {
+        RecoveryRequest {
+            plan_id: plan.plan_id.clone(),
+            scope: plan.scope.clone(),
+            identity_id: plan.identity_id.clone(),
+            authority,
+            target_device_id: DeviceId::from_opaque(id(target)),
+        }
+    }
+
+    fn signing_key(device_id: &DeviceId) -> PublicKeyDescriptor {
+        PublicKeyDescriptor {
+            key_id: KeyId::from_opaque(id("recovered-key")),
+            device_id: device_id.clone(),
+            purpose: KeyPurpose::Signing,
+            algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ALGORITHM_VERSION,
+            key_format_version: KEY_FORMAT_VERSION,
+            public_key: vec![9_u8; 32],
         }
     }
 
@@ -1890,6 +2027,96 @@ mod recovery_tests {
             store.rotate_recovery_plan(&unknown, &plan("plan-c", "identity-a")),
             Err(DurableStoreError::Conflict)
         );
+    }
+    #[test]
+    fn recovery_staging_requires_verified_authority_and_never_auto_trusts_device() {
+        let store = MemoryLocalStore::default();
+        let active = plan("plan-stage", "identity-stage");
+        store.install_recovery_plan(&active).expect("install plan");
+        let exact = request(&active, "device-recovered", RecoveryAuthority::RecoveryKey);
+
+        let denied = TestVerifier::deny();
+        let error = authorize_and_stage_recovered_device(&denied, &store, &exact)
+            .expect_err("denied proof must fail");
+        assert_eq!(error.code, CanonicalErrorCode::PermissionDenied);
+        assert_eq!(denied.calls(), 1);
+        assert_eq!(
+            store.device(&active.scope, &exact.target_device_id),
+            Ok(None)
+        );
+
+        let allowed = TestVerifier::allow();
+        let wrong_method = request(
+            &active,
+            "device-wrong-method",
+            RecoveryAuthority::RecoveryCode,
+        );
+        let before = allowed.calls();
+        let error = authorize_and_stage_recovered_device(&allowed, &store, &wrong_method)
+            .expect_err("method outside plan must fail before provider");
+        assert_eq!(error.code, CanonicalErrorCode::PermissionDenied);
+        assert_eq!(allowed.calls(), before);
+
+        let staged = authorize_and_stage_recovered_device(&allowed, &store, &exact)
+            .expect("verified recovery stages device");
+        assert_eq!(staged.state, DeviceLifecycleState::ReverificationRequired);
+        assert_eq!(
+            store.device(&active.scope, &exact.target_device_id),
+            Ok(Some(staged.clone()))
+        );
+        assert_eq!(
+            store.provision_trusted_signing_key(
+                &active.scope,
+                &signing_key(&exact.target_device_id)
+            ),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        assert_eq!(
+            authorize_and_stage_recovered_device(&allowed, &store, &exact),
+            Ok(staged)
+        );
+    }
+
+    #[test]
+    fn recovery_proof_is_invalidated_by_plan_revoke_and_cannot_overwrite_existing_device() {
+        let store = MemoryLocalStore::default();
+        let active = plan("plan-proof", "identity-proof");
+        store.install_recovery_plan(&active).expect("install plan");
+        let verifier = TestVerifier::allow();
+        let exact = request(&active, "device-proof", RecoveryAuthority::RecoveryKey);
+        let proof = RecoveryRequestGate::new(&verifier, &store)
+            .authorize_recovery(&exact)
+            .expect("issue proof");
+        store
+            .revoke_recovery_plan(&active.scope, &active.identity_id, &active.plan_id)
+            .expect("revoke plan");
+        assert_eq!(
+            store.stage_recovered_device(&proof),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        assert_eq!(
+            store.device(&active.scope, &exact.target_device_id),
+            Ok(None)
+        );
+
+        let second = plan("plan-second", "identity-proof");
+        store
+            .install_recovery_plan(&second)
+            .expect("install replacement lifecycle");
+        let target = request(&second, "device-existing", RecoveryAuthority::RecoveryKey);
+        store
+            .register_device(
+                &second.scope,
+                &ucr_model::DeviceDescriptor {
+                    device_id: target.target_device_id.clone(),
+                    identity_id: second.identity_id.clone(),
+                    state: DeviceLifecycleState::Active,
+                },
+            )
+            .expect("register existing active device");
+        let error = authorize_and_stage_recovered_device(&verifier, &store, &target)
+            .expect_err("recovery cannot downgrade existing active device");
+        assert_eq!(error.code, CanonicalErrorCode::Conflict);
     }
 }
 

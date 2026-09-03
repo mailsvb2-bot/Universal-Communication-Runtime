@@ -63,6 +63,16 @@ Rotation requires the caller's expected current plan ID. Exactly one concurrent 
 
 The SQLite reference store persists only public recovery-plan metadata and typed authority identifiers. Schema v4 migrates v3 transactionally by adding recovery plan/authority/active-plan tables while preserving commands, Events, and replay state.
 
+## Verified recovery execution and Device staging
+
+`validate_recovery_request` proves only that a request is structurally covered by the active plan. It is never authority proof by itself. The reference Core therefore resolves the active plan through `RecoveryRequestGate` and then requires a trusted `RecoveryAuthorityVerifier` to prove the concrete selected authority. The verifier is a trusted provider boundary configured by the embedding runtime; untrusted request data must never choose an always-allow verifier.
+
+Only after both checks succeed does Core mint a `RecoveryAdmissionProof`. Its binding fields are private, so callers cannot fabricate a staging capability. `RecoveryDeviceStagingStore` accepts that proof and must atomically re-check that the same plan is still active for the exact scope + Identity while staging the target Device. A plan revoke or rotation that wins first therefore makes an already-issued proof unusable; an identical completed staging retry is idempotent.
+
+The staged Device is always the plan-required `REVERIFICATION_REQUIRED` descriptor. Recovery staging never creates `ACTIVE`, never overwrites a differently bound/existing Device, and does not define how re-verification later succeeds. Any residual Active trusted signing key for a Device being registered/staged as non-Active is revoked in the same durable action; reopening SQLite rejects a non-Active Device row paired with an Active trusted key. This is especially important for v14→v15 databases whose historical trusted-key rows were intentionally preserved without inventing Device identity.
+
+This proof-gated recovery staging path is separate from `AuthorizedDurableRuntime`: recovery authority is defined by the active Recovery Plan, not by an ordinary PermissionGrant. The normal permission boundary still governs Recovery Plan administration itself.
+
 ## Backup is not sync
 
 `SYNC != BACKUP`. Sync distributes current state; backup exists for recovery. A future complete backup provider must define encryption, integrity, versioning, restore tests, and documented key ownership before Production maturity.
@@ -77,6 +87,6 @@ UCR cannot guarantee deletion of plaintext or secrets already extracted from an 
 
 ## Explicit nonclaims
 
-Phase 8 establishes the canonical recovery policy, cryptographic recovery-package primitive, and durable plan lifecycle. The current reference runtime additionally enforces durable Device revocation on trusted-key/authentication paths, but it does not yet claim complete credential re-issuance, device-bound credential/content delivery across recovery, historical message-key archive design, end-user recovery UX, or full backup/restore conformance.
+Phase 8 establishes the canonical recovery policy, cryptographic recovery-package primitive, durable plan lifecycle, and proof-gated atomic staging of a verified recovered Device into `REVERIFICATION_REQUIRED`. The current reference runtime additionally enforces durable Device revocation on trusted-key/authentication paths, but it does not yet claim concrete production authority-verifier coverage for every RecoveryMethod, credential re-issuance, device-bound credential/content delivery across recovery, the transition from re-verification to Active, historical message-key archive design, end-user recovery UX, or full backup/restore conformance.
 
 Those capabilities remain separate release blockers and must not be inferred from a valid `RecoveryPlan` or decryptable recovery package.
