@@ -16,6 +16,7 @@ mod handshake;
 mod id;
 mod intent;
 mod message;
+mod message_signature;
 mod provenance;
 mod recovery;
 mod scope;
@@ -95,6 +96,9 @@ pub use message::{
     ConversationError, EXTERNAL_MESSAGE_ID_LIMIT, EXTERNAL_MESSAGE_MAPPING_LIMIT,
     MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_RELATION_LIMIT, MessageError,
     canonical_message, validate_conversation, validate_conversation_parent_kind, validate_message,
+};
+pub use message_signature::{
+    MESSAGE_SIGNING_BINDING_V1_DOMAIN, MessageSigningBinding, message_signing_binding,
 };
 pub use provenance::{ProvenanceError, validate_origin_ref};
 pub use recovery::{

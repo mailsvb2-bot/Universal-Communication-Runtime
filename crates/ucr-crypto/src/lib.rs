@@ -5,6 +5,7 @@ mod agreement;
 mod confirmation;
 mod kdf;
 mod key_provider;
+mod message_signature;
 mod recovery;
 mod rng;
 mod session;
@@ -16,6 +17,7 @@ pub use agreement::{AgreementError, AgreementKeyPair, AgreementPublicKey};
 pub use confirmation::{ConfirmationError, ConfirmationKey, ConfirmationTag};
 pub use kdf::DerivationError;
 pub use key_provider::SigningKeyHandle;
+pub use message_signature::{MessageSignatureVerificationError, verify_message_signature};
 pub use recovery::{
     MAX_RECOVERY_MATERIAL_LEN, RECOVERY_NONCE_LEN, RECOVERY_PACKAGE_FORMAT_VERSION,
     RECOVERY_SECRET_LEN, RecoveryPackageError, RecoverySecret, open_recovery_material,
@@ -27,8 +29,8 @@ pub use session::{
     SessionHandshakeInput, SessionRole, begin_session,
 };
 pub use signing::{
-    SignatureBytes, SignatureError, SigningKeyMaterial, VerifyingKeyBytes,
-    verify_transcript_signature,
+    MESSAGE_SIGNATURE_V1_DOMAIN, SignatureBytes, SignatureError, SigningKeyMaterial,
+    VerifyingKeyBytes, verify_message_binding_signature, verify_transcript_signature,
 };
 pub use transcript::{TranscriptBinding, TranscriptError, bind_handshake_transcript};
 

@@ -2,8 +2,10 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use zeroize::Zeroizing;
 
 use crate::{SigningKeyHandle, TranscriptBinding};
+use ucr_protocol::MessageSigningBinding;
 
 const SIGNATURE_DOMAIN: &[u8] = b"UCR-HANDSHAKE-SIGNATURE-V1\0";
+pub const MESSAGE_SIGNATURE_V1_DOMAIN: &[u8] = b"UCR-MESSAGE-SIGNATURE-V1\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureError {
@@ -51,6 +53,14 @@ impl SigningKeyMaterial {
         message.extend_from_slice(binding.as_bytes());
         SignatureBytes(self.0.sign(&message).to_bytes())
     }
+
+    #[must_use]
+    pub fn sign_message_binding(&self, binding: &MessageSigningBinding) -> SignatureBytes {
+        let mut message = Vec::with_capacity(MESSAGE_SIGNATURE_V1_DOMAIN.len() + 32);
+        message.extend_from_slice(MESSAGE_SIGNATURE_V1_DOMAIN);
+        message.extend_from_slice(binding.as_bytes());
+        SignatureBytes(self.0.sign(&message).to_bytes())
+    }
 }
 
 /// Verifies a transcript signature against a public Ed25519 key.
@@ -73,6 +83,26 @@ pub fn verify_transcript_signature(
         .map_err(|_| SignatureError::InvalidSignature)
 }
 
+/// Verifies an authored-Message binding signature against a public Ed25519 key.
+///
+/// # Errors
+/// Returns explicit invalid-key or invalid-signature failures.
+pub fn verify_message_binding_signature(
+    public_key: VerifyingKeyBytes,
+    binding: &MessageSigningBinding,
+    signature: SignatureBytes,
+) -> Result<(), SignatureError> {
+    let verifying_key =
+        VerifyingKey::from_bytes(&public_key.0).map_err(|_| SignatureError::InvalidPublicKey)?;
+    let signature = Signature::from_bytes(&signature.0);
+    let mut message = Vec::with_capacity(MESSAGE_SIGNATURE_V1_DOMAIN.len() + 32);
+    message.extend_from_slice(MESSAGE_SIGNATURE_V1_DOMAIN);
+    message.extend_from_slice(binding.as_bytes());
+    verifying_key
+        .verify(&message, &signature)
+        .map_err(|_| SignatureError::InvalidSignature)
+}
+
 impl SigningKeyHandle for SigningKeyMaterial {
     fn verifying_key(&self) -> VerifyingKeyBytes {
         SigningKeyMaterial::verifying_key(self)
@@ -83,5 +113,12 @@ impl SigningKeyHandle for SigningKeyMaterial {
         binding: &TranscriptBinding,
     ) -> Result<SignatureBytes, SignatureError> {
         Ok(SigningKeyMaterial::sign_transcript(self, binding))
+    }
+
+    fn sign_message_binding(
+        &self,
+        binding: &MessageSigningBinding,
+    ) -> Result<SignatureBytes, SignatureError> {
+        Ok(SigningKeyMaterial::sign_message_binding(self, binding))
     }
 }

@@ -61,7 +61,7 @@ Random nonce use does not authorize callers to reuse a `TrafficKey` indefinitely
 
 ## Key material boundary
 
-Private key bytes are never part of the public UCR protocol or storage schema. `SigningKeyHandle` exposes long-lived signing operations without private-key export. Handshake X25519 uses a single-use in-memory `AgreementKeyPair`; its private scalar is never exported and is consumed by one agreement.
+Private key bytes are never part of the public UCR protocol or storage schema. `SigningKeyHandle` exposes domain-separated handshake-transcript and canonical Message-binding signing operations without private-key export. Message signatures use `UCR-MESSAGE-SIGNATURE-V1\0` plus the 32-byte canonical authored-Message binding; the Message verifier still requires an already trusted signing-key descriptor. Handshake X25519 uses a single-use in-memory `AgreementKeyPair`; its private scalar is never exported and is consumed by one agreement.
 
 The in-memory key implementations are reference/test implementations. Production device integrations should use OS/hardware-backed key storage where available. Lack of such a backend must not silently cause private keys to be written into the general SQLite store.
 
@@ -70,7 +70,7 @@ Temporary in-memory seed buffers are zeroized. Secret traffic/confirmation/share
 
 Public signing/agreement descriptors are validated against the negotiated suite: purpose, algorithm identifier, algorithm version, key-format version, and exact public-key length must agree.
 
-Reference tests include RFC 7748 X25519, RFC 8032 Ed25519, RFC 5869 HKDF-SHA-256, AEAD tamper/AAD tests, transcript boundary/order tests, key confirmation, replay, restart, concurrency, and migration evidence.
+Reference tests include RFC 7748 X25519, RFC 8032 Ed25519, RFC 5869 HKDF-SHA-256, AEAD tamper/AAD tests, transcript boundary/order tests, canonical Message-signing golden/order tests, Message content/key/device tamper rejection, key confirmation, replay, restart, concurrency, and migration evidence.
 
 ## Explicit nonclaims and blockers
 

@@ -40,7 +40,19 @@ Relation order, external-mapping order, and protocol-extension order are not sem
 
 An empty Message with no content, attachments, or relations is invalid. Origin must contain at least one canonical Principal, Endpoint, or Integration reference.
 
-Optional signature metadata is validated for the configured suite-v1 algorithm/version/length. Phase 9 does **not** claim that merely storing a signature proves Message authenticity; cryptographic Message-signature verification and canonical signing bytes remain separate security work.
+Optional signature metadata is validated for the configured suite-v1 algorithm/version/length. Merely storing signature metadata is not authenticity proof. Authorship verification is an explicit cryptographic operation against an already trusted signing-key descriptor.
+
+### Canonical Message signing binding v1
+
+`MessageSigningBinding` v1 is SHA-256 over the ASCII domain `UCR-MESSAGE-SIGNING-BINDING-V1\0` followed by deterministic authored-Message encoding. Byte strings use unsigned 64-bit big-endian length followed by exact bytes. Optional values use one byte `0x00` for absent or `0x01` followed by the encoded value. Integers use big-endian representation. Protobuf serialization and language-native struct layout are never signing inputs.
+
+The exact field sequence is: `message_id`; scope tenant ID and optional namespace ID; Conversation ID and ConversationKind code; author Actor ID, ActorKind code, and optional `on_behalf_of`; author Device ID and Identity ID; `created_at_unix_ms`; `logical_order`; content; attachment count and attachment IDs in authored order; optional `reply_to`; canonical relation count and each relation kind/target; optional crypto metadata containing suite code, optional key ID, and opaque metadata; DeliveryPolicy code; optional origin Principal/Endpoint/Integration IDs; correlation ID, optional causation ID, optional idempotency key; canonical extension count and each extension name, critical byte, and payload.
+
+Stable v1 codes are: Actor `PERSON=1, AI_AGENT=2, BOT=3, ORGANIZATION=4, SYSTEM=5`; Conversation `DIRECT=1, PRIVATE_GROUP=2, PUBLIC_GROUP=3, BROADCAST=4, COMMUNITY=5, ROOM=6, TOPIC=7, THREAD=8, SYSTEM=9`; Relation `REPLY=1, QUOTE=2, EDIT=3, REACTION=4, THREAD_PARENT=5, FORWARD=6, REFERENCE=7`; DeliveryPolicy `BEST_EFFORT=1, DURABLE=2, URGENT=3, EXPIRING=4, LOCAL_ONLY=5, DIRECT_ONLY=6, NO_RELAY=7, NO_EXTERNAL_BRIDGE=8, PRIVATE_NETWORK_ONLY=9`. Crypto Suite UCR v1 keeps its public numeric suite code `1`.
+
+`delivery_state`, `external_mappings`, and `signature` are excluded from the authored binding. Delivery progression belongs to `DeliveryAttempt`; provider mappings are integration results; signature metadata is the verification result itself. Relation and extension input ordering is first canonicalized using the normal Message rules; attachment ordering remains authored semantics.
+
+Ed25519 signs the ASCII domain `UCR-MESSAGE-SIGNATURE-V1\0` followed by the 32-byte signing binding. Verification requires an already trusted suite-v1 Signing `PublicKeyDescriptor`, exact signature `key_id` match, exact descriptor Device ID / Message author Device ID match, and valid Ed25519 verification. `key_id` inside a Message never establishes trust by itself. The reference golden binding is `d71367107172322ca408610f8a1de9b00fff44383f33ee56e4316fd5043d09d2`.
 ## 5. Persistence boundary
 
 `ConversationStore` and `MessageStore` are capability-specific Core interfaces. Core does not depend on SQLite.
@@ -64,6 +76,6 @@ Edit and reaction relations establish canonical relationship vocabulary, but Pha
 
 ## 7. Required evidence
 
-Reference implementations must prove restart-safe Message round-trip, exact duplicate/conflict behavior including extension semantics, valid Conversation hierarchy, concurrent conflicting Message single-winner behavior, v4-to-v5 migration without loss of pre-existing durable state, and v9-to-v10 migration preserving legacy Messages as empty-extension Messages.
+Reference implementations must prove restart-safe Message round-trip, exact duplicate/conflict behavior including extension semantics, valid Conversation hierarchy, concurrent conflicting Message single-winner behavior, v4-to-v5 migration without loss of pre-existing durable state, v9-to-v10 migration preserving legacy Messages as empty-extension Messages, canonical Message-signing golden vectors/order invariants, and adversarial signature verification against trusted author-device signing descriptors.
 
 Protobuf compatibility is additive: the original `MessageEnvelope` fields 1-11 remain unchanged; Phase-9 fields use numbers 12-19.

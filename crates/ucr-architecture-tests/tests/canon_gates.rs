@@ -1047,7 +1047,7 @@ fn message_storage_keeps_restart_migration_and_security_nonclaims() {
     assert!(core.contains("pub trait MessageStore"));
     for nonclaim in [
         "The Phase-9 boundary intentionally stops at `PERSISTED`",
-        "does **not** claim that merely storing a signature proves Message authenticity",
+        "Merely storing signature metadata is not authenticity proof.",
         "does not claim message-content encryption at rest",
     ] {
         assert!(
@@ -1527,4 +1527,49 @@ fn native_opaque_id_generation_is_offline_csprng_owned_and_non_authoritative() {
         );
     }
     assert!(threat.contains("`ucr.id.random_hex.v1` uses 128 bits from the OS CSPRNG"));
+}
+
+#[test]
+fn message_signature_verification_binds_authored_semantics_without_claiming_key_trust() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let binding =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/message_signature.rs"))
+            .expect("message signing binding");
+    let signing = fs::read_to_string(workspace.join("crates/ucr-crypto/src/signing.rs"))
+        .expect("crypto signing");
+    let verifier = fs::read_to_string(workspace.join("crates/ucr-crypto/src/message_signature.rs"))
+        .expect("message signature verifier");
+    let key_provider = fs::read_to_string(workspace.join("crates/ucr-crypto/src/key_provider.rs"))
+        .expect("key provider");
+    let spec =
+        fs::read_to_string(workspace.join("spec/conversation-message.md")).expect("message spec");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+
+    assert!(binding.contains("UCR-MESSAGE-SIGNING-BINDING-V1\\0"));
+    assert!(binding.contains("signing_binding_has_stable_golden_vector"));
+    assert!(binding.contains("authored_fields_change_binding_but_runtime_provider_fields_do_not"));
+    assert!(!binding.contains("canonical.delivery_state"));
+    assert!(!binding.contains("canonical.external_mappings"));
+    assert!(signing.contains("UCR-MESSAGE-SIGNATURE-V1\\0"));
+    assert!(signing.contains("sign_message_binding"));
+    assert!(signing.contains("verify_message_binding_signature"));
+    assert!(key_provider.contains("fn sign_message_binding"));
+    assert!(verifier.contains("verify_message_signature"));
+    assert!(verifier.contains("KeyIdMismatch"));
+    assert!(verifier.contains("AuthorDeviceMismatch"));
+    assert!(verifier.contains("InvalidTrustedKeyDescriptor"));
+    assert!(verifier.contains("authored_tampering_and_wrong_crypto_key_fail_closed"));
+    assert!(spec.contains("d71367107172322ca408610f8a1de9b00fff44383f33ee56e4316fd5043d09d2"));
+    assert!(spec.contains("`delivery_state`, `external_mappings`, and `signature` are excluded"));
+    assert!(spec.contains("`key_id` inside a Message never establishes trust by itself"));
+    assert!(threat.contains("trusted peer signing-key provisioning and lifecycle integration"));
+    assert!(
+        !threat.contains(
+            "- cryptographic Message-signature verification over canonical signing bytes;"
+        )
+    );
 }
