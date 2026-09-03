@@ -17,6 +17,11 @@ pub enum CommandError {
     EmptyIdempotencyKey,
     IdempotencyKeyTooLong,
     PayloadTooLarge,
+    InvalidSchemaVersion,
+    InvalidExtension,
+    DuplicateExtension,
+    TooManyExtensions,
+    ExtensionPayloadTooLarge,
     IdempotencyConflict,
 }
 
@@ -91,7 +96,34 @@ pub fn validate_command(command: &CommandEnvelope) -> Result<(), CommandError> {
     if command.payload.len() > MAX_COMMAND_PAYLOAD_LEN {
         return Err(CommandError::PayloadTooLarge);
     }
+    if command.schema_version.major == 0 {
+        return Err(CommandError::InvalidSchemaVersion);
+    }
+    canonical_protocol_extensions(&command.extensions).map_err(map_command_extension_error)?;
     Ok(())
+}
+
+/// Validates and canonically orders one Command before persistence or wire use.
+///
+/// # Errors
+/// Returns the same fail-closed validation errors as [`validate_command`].
+pub fn canonical_command(command: &CommandEnvelope) -> Result<CommandEnvelope, CommandError> {
+    validate_command(command)?;
+    let mut canonical = command.clone();
+    canonical.extensions =
+        canonical_protocol_extensions(&command.extensions).map_err(map_command_extension_error)?;
+    Ok(canonical)
+}
+
+const fn map_command_extension_error(error: ExtensionError) -> CommandError {
+    match error {
+        ExtensionError::InvalidNamespace | ExtensionError::UnsupportedCritical => {
+            CommandError::InvalidExtension
+        }
+        ExtensionError::TooManyExtensions => CommandError::TooManyExtensions,
+        ExtensionError::DuplicateExtension => CommandError::DuplicateExtension,
+        ExtensionError::PayloadTooLarge => CommandError::ExtensionPayloadTooLarge,
+    }
 }
 
 /// Validates canonical event type syntax.
@@ -150,14 +182,18 @@ pub fn compare_command_idempotency(
     original: &CommandEnvelope,
     incoming: &CommandEnvelope,
 ) -> Result<IdempotencyDecision, CommandError> {
-    validate_command(original)?;
-    validate_command(incoming)?;
+    let original = canonical_command(original)?;
+    let incoming = canonical_command(incoming)?;
     if original.scope != incoming.scope
         || original.correlation.idempotency_key != incoming.correlation.idempotency_key
     {
         return Ok(IdempotencyDecision::New);
     }
-    if original.command_type == incoming.command_type && original.payload == incoming.payload {
+    if original.command_type == incoming.command_type
+        && original.payload == incoming.payload
+        && original.schema_version == incoming.schema_version
+        && original.extensions == incoming.extensions
+    {
         return Ok(IdempotencyDecision::DuplicateOf(
             original.command_id.clone(),
         ));
@@ -175,8 +211,8 @@ mod tests {
 
     use super::{
         CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
-        ReceiptError, compare_command_idempotency, validate_command, validate_command_receipt,
-        validate_event,
+        ReceiptError, canonical_command, compare_command_idempotency, validate_command,
+        validate_command_receipt, validate_event,
     };
 
     fn opaque(value: &str) -> OpaqueId {
@@ -201,6 +237,8 @@ mod tests {
                 causation_id: None,
                 idempotency_key: key.map(str::to_owned),
             },
+            schema_version: ProtocolVersion::new(1, 0),
+            extensions: Vec::new(),
         }
     }
 
@@ -230,6 +268,77 @@ mod tests {
             integrity_metadata: b"integrity".to_vec(),
             extensions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn command_schema_and_extensions_are_canonical_semantics() {
+        let mut original = command("command-a", Some("retry-key"), b"payload");
+        original.extensions = vec![
+            ucr_model::ProtocolExtension {
+                name: "vendor.example.z".to_owned(),
+                critical: false,
+                payload: b"z".to_vec(),
+            },
+            ucr_model::ProtocolExtension {
+                name: "ucr.example.a".to_owned(),
+                critical: true,
+                payload: b"a".to_vec(),
+            },
+        ];
+        let mut reordered = original.clone();
+        reordered.command_id = CommandId::from_opaque(opaque("command-b"));
+        reordered.extensions.reverse();
+        assert_eq!(
+            compare_command_idempotency(&original, &reordered),
+            Ok(IdempotencyDecision::DuplicateOf(
+                original.command_id.clone()
+            ))
+        );
+
+        let canonical = canonical_command(&reordered).expect("canonical command");
+        assert_eq!(canonical.extensions[0].name, "ucr.example.a");
+
+        let mut changed_extension = reordered.clone();
+        changed_extension.extensions[0].payload.push(b'!');
+        assert_eq!(
+            compare_command_idempotency(&original, &changed_extension),
+            Err(CommandError::IdempotencyConflict)
+        );
+
+        let mut changed_schema = reordered;
+        changed_schema.schema_version = ProtocolVersion::new(1, 1);
+        assert_eq!(
+            compare_command_idempotency(&original, &changed_schema),
+            Err(CommandError::IdempotencyConflict)
+        );
+    }
+
+    #[test]
+    fn command_schema_version_and_extension_shape_fail_closed() {
+        let mut invalid = command("command-a", Some("retry-key"), b"payload");
+        invalid.schema_version = ProtocolVersion::new(0, 0);
+        assert_eq!(
+            validate_command(&invalid),
+            Err(CommandError::InvalidSchemaVersion)
+        );
+
+        let mut duplicate = command("command-b", Some("retry-key-2"), b"payload");
+        duplicate.extensions = vec![
+            ucr_model::ProtocolExtension {
+                name: "ucr.example.same".to_owned(),
+                critical: false,
+                payload: Vec::new(),
+            },
+            ucr_model::ProtocolExtension {
+                name: "ucr.example.same".to_owned(),
+                critical: true,
+                payload: Vec::new(),
+            },
+        ];
+        assert_eq!(
+            validate_command(&duplicate),
+            Err(CommandError::DuplicateExtension)
+        );
     }
 
     #[test]

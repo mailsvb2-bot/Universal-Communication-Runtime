@@ -40,8 +40,8 @@ pub use capability::{
 };
 pub use commands::{
     CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
-    ReceiptError, canonical_event, compare_command_idempotency, validate_command,
-    validate_command_receipt, validate_event,
+    ReceiptError, canonical_command, canonical_event, compare_command_idempotency,
+    validate_command, validate_command_receipt, validate_event,
 };
 pub use crypto_contract::{
     AEAD_ALGORITHM_ID, AGREEMENT_ALGORITHM_ID, ALGORITHM_VERSION, CRYPTO_SUITE_ID,

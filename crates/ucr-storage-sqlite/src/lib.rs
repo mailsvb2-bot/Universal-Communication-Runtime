@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod anti_entropy_store;
+mod command_store;
 mod delivery_store;
 mod event_journal;
 mod message_store;
@@ -15,7 +16,7 @@ use rusqlite::{
 };
 use ucr_core::{CommandAcceptanceStore, DurableStoreError, StorageHealth, StorageProvider};
 use ucr_model::{CommandEnvelope, CommandId, OpaqueId, TenantScope};
-use ucr_protocol::{CommandError, CommandReceipt, CommandReceiptStatus, validate_command};
+use ucr_protocol::{CommandError, CommandReceipt, CommandReceiptStatus, canonical_command};
 
 const SQLITE_SCHEMA_V1: u32 = 1;
 const SQLITE_SCHEMA_V2: u32 = 2;
@@ -24,7 +25,8 @@ const SQLITE_SCHEMA_V4: u32 = 4;
 const SQLITE_SCHEMA_V5: u32 = 5;
 const SQLITE_SCHEMA_V6: u32 = 6;
 const SQLITE_SCHEMA_V7: u32 = 7;
-pub const SQLITE_SCHEMA_VERSION: u32 = 8;
+const SQLITE_SCHEMA_V8: u32 = 8;
+pub const SQLITE_SCHEMA_VERSION: u32 = 9;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -183,7 +185,7 @@ impl CommandAcceptanceStore for SqliteLocalStore {
         &self,
         command: &CommandEnvelope,
     ) -> Result<CommandReceipt, DurableStoreError> {
-        validate_command(command).map_err(map_command_error)?;
+        let command = canonical_command(command).map_err(map_command_error)?;
         let idempotency_key = command
             .correlation
             .idempotency_key
@@ -213,7 +215,22 @@ impl CommandAcceptanceStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
 
         if let Some((original_id, command_type, payload)) = existing {
-            let receipt = duplicate_receipt(command, original_id, &command_type, &payload)?;
+            let original_command_id = CommandId::from_opaque(
+                OpaqueId::new(original_id).map_err(|_| DurableStoreError::Corrupt)?,
+            );
+            let protocol = command_store::load_protocol_metadata(
+                &transaction,
+                &command.scope,
+                &original_command_id,
+            )?
+            .ok_or(DurableStoreError::Corrupt)?;
+            let receipt = duplicate_receipt(
+                &command,
+                original_command_id,
+                &command_type,
+                &payload,
+                &protocol,
+            )?;
             transaction
                 .commit()
                 .map_err(|error| map_sqlite_error(&error))?;
@@ -250,11 +267,12 @@ impl CommandAcceptanceStore for SqliteLocalStore {
                     namespace.value,
                     idempotency_key,
                     command.command_id.as_opaque().as_str(),
-                    command.command_type,
-                    command.payload,
+                    command.command_type.as_str(),
+                    command.payload.as_slice(),
                 ],
             )
             .map_err(|error| map_sqlite_error(&error))?;
+        command_store::insert_protocol_metadata(&transaction, &command)?;
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
@@ -287,18 +305,22 @@ fn namespace_storage_key(scope: &TenantScope) -> NamespaceStorageKey<'_> {
 
 fn duplicate_receipt(
     incoming: &CommandEnvelope,
-    original_id: String,
+    original_id: CommandId,
     original_type: &str,
     original_payload: &[u8],
+    original_protocol: &command_store::StoredCommandProtocol,
 ) -> Result<CommandReceipt, DurableStoreError> {
-    if original_type != incoming.command_type || original_payload != incoming.payload {
+    if original_type != incoming.command_type
+        || original_payload != incoming.payload
+        || original_protocol.schema_version != incoming.schema_version
+        || original_protocol.extensions != incoming.extensions
+    {
         return Err(DurableStoreError::Conflict);
     }
-    let original_id = OpaqueId::new(original_id).map_err(|_| DurableStoreError::Corrupt)?;
     Ok(CommandReceipt {
         command_id: incoming.command_id.clone(),
         status: CommandReceiptStatus::Duplicate,
-        original_command_id: Some(CommandId::from_opaque(original_id)),
+        original_command_id: Some(original_id),
     })
 }
 
@@ -332,7 +354,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         if count_user_tables(connection)? != 0 {
             return Err(DurableStoreError::ForeignStore);
         }
-        return initialize_schema_v8(connection);
+        return initialize_schema_v9(connection);
     }
     if application_id != UCR_SQLITE_APPLICATION_ID {
         return Err(DurableStoreError::ForeignStore);
@@ -345,7 +367,8 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
-            migrate_v7_to_v8(connection)
+            migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)
         }
         SQLITE_SCHEMA_V2 => {
             migrate_v2_to_v3(connection)?;
@@ -353,37 +376,46 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
-            migrate_v7_to_v8(connection)
+            migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)
         }
         SQLITE_SCHEMA_V3 => {
             migrate_v3_to_v4(connection)?;
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
-            migrate_v7_to_v8(connection)
+            migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)
         }
         SQLITE_SCHEMA_V4 => {
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
-            migrate_v7_to_v8(connection)
+            migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)
         }
         SQLITE_SCHEMA_V5 => {
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
-            migrate_v7_to_v8(connection)
+            migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)
         }
         SQLITE_SCHEMA_V6 => {
             migrate_v6_to_v7(connection)?;
-            migrate_v7_to_v8(connection)
+            migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)
         }
-        SQLITE_SCHEMA_V7 => migrate_v7_to_v8(connection),
-        SQLITE_SCHEMA_VERSION => event_journal::verify_schema_v8(connection),
+        SQLITE_SCHEMA_V7 => {
+            migrate_v7_to_v8(connection)?;
+            migrate_v8_to_v9(connection)
+        }
+        SQLITE_SCHEMA_V8 => migrate_v8_to_v9(connection),
+        SQLITE_SCHEMA_VERSION => command_store::verify_schema_v9(connection),
         _ => Err(DurableStoreError::UnsupportedSchemaVersion),
     }
 }
 
-fn initialize_schema_v8(connection: &mut Connection) -> Result<(), DurableStoreError> {
+fn initialize_schema_v9(connection: &mut Connection) -> Result<(), DurableStoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -416,6 +448,7 @@ fn initialize_schema_v8(connection: &mut Connection) -> Result<(), DurableStoreE
     delivery_store::create_v6_objects(&transaction)?;
     sync_store::create_v7_objects(&transaction)?;
     event_journal::create_v8_objects(&transaction)?;
+    command_store::create_v9_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -530,12 +563,28 @@ fn migrate_v7_to_v8(connection: &mut Connection) -> Result<(), DurableStoreError
         .map_err(|error| map_sqlite_error(&error))?;
     event_journal::create_v8_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V8)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     event_journal::verify_schema_v8(connection)
+}
+
+fn migrate_v8_to_v9(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    event_journal::verify_schema_v8(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    command_store::create_v9_objects(&transaction)?;
+    command_store::backfill_legacy_v8_commands(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    command_store::verify_schema_v9(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -746,7 +795,12 @@ fn map_command_error(error: CommandError) -> DurableStoreError {
         | CommandError::MissingIdempotencyKey
         | CommandError::EmptyIdempotencyKey
         | CommandError::IdempotencyKeyTooLong
-        | CommandError::PayloadTooLarge => DurableStoreError::InvalidRecord,
+        | CommandError::PayloadTooLarge
+        | CommandError::InvalidSchemaVersion
+        | CommandError::InvalidExtension
+        | CommandError::DuplicateExtension
+        | CommandError::TooManyExtensions
+        | CommandError::ExtensionPayloadTooLarge => DurableStoreError::InvalidRecord,
     }
 }
 
@@ -842,8 +896,8 @@ mod tests {
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext, DeviceId,
-        DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, ProtocolVersion,
-        TenantId, TenantScope,
+        DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, ProtocolExtension,
+        ProtocolVersion, TenantId, TenantScope,
     };
     use ucr_protocol::CommandReceiptStatus;
 
@@ -893,6 +947,8 @@ mod tests {
                 causation_id: None,
                 idempotency_key: Some(key.to_owned()),
             },
+            schema_version: ProtocolVersion::new(1, 0),
+            extensions: Vec::new(),
         }
     }
 
@@ -973,6 +1029,187 @@ mod tests {
         let duplicate = reopened.accept_command(&retry).expect("deduplicate retry");
         assert_eq!(duplicate.status, CommandReceiptStatus::Duplicate);
         assert_eq!(duplicate.original_command_id, Some(first.command_id));
+    }
+
+    #[test]
+    fn command_protocol_semantics_survive_restart_and_extension_order_is_canonical() {
+        let db = TestDbPath::new();
+        let mut first = command(
+            "command-ext-a",
+            "retry-ext",
+            b"payload",
+            Some("namespace-a"),
+        );
+        first.extensions = vec![
+            ProtocolExtension {
+                name: "vendor.example.z".to_owned(),
+                critical: false,
+                payload: b"z".to_vec(),
+            },
+            ProtocolExtension {
+                name: "ucr.example.a".to_owned(),
+                critical: true,
+                payload: b"a".to_vec(),
+            },
+        ];
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            assert_eq!(
+                store.accept_command(&first).expect("accept").status,
+                CommandReceiptStatus::Accepted
+            );
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen store");
+        let mut reordered = command(
+            "command-ext-b",
+            "retry-ext",
+            b"payload",
+            Some("namespace-a"),
+        );
+        reordered.extensions = first.extensions.clone();
+        reordered.extensions.reverse();
+        assert_eq!(
+            reopened
+                .accept_command(&reordered)
+                .expect("deduplicate")
+                .status,
+            CommandReceiptStatus::Duplicate
+        );
+
+        let mut changed_extension = reordered.clone();
+        changed_extension.command_id = CommandId::from_opaque(opaque("command-ext-c"));
+        changed_extension.extensions[0].payload.push(b'!');
+        assert_eq!(
+            reopened.accept_command(&changed_extension),
+            Err(DurableStoreError::Conflict)
+        );
+
+        let mut changed_schema = reordered;
+        changed_schema.command_id = CommandId::from_opaque(opaque("command-ext-d"));
+        changed_schema.schema_version = ProtocolVersion::new(1, 1);
+        assert_eq!(
+            reopened.accept_command(&changed_schema),
+            Err(DurableStoreError::Conflict)
+        );
+        drop(reopened);
+
+        let connection = rusqlite::Connection::open(db.path()).expect("inspect command extensions");
+        let names: Vec<String> = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT name FROM command_extensions
+                     WHERE command_id='command-ext-a' ORDER BY position",
+                )
+                .expect("prepare");
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("rows")
+        };
+        assert_eq!(names, vec!["ucr.example.a", "vendor.example.z"]);
+    }
+
+    #[test]
+    fn v8_to_v9_migration_backfills_legacy_command_protocol_semantics() {
+        let db = TestDbPath::new();
+        let legacy = command(
+            "command-pre-v9",
+            "retry-pre-v9",
+            b"legacy",
+            Some("namespace-a"),
+        );
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create current store");
+            store
+                .accept_command(&legacy)
+                .expect("accept legacy command");
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open raw sqlite");
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys=OFF;
+                     DROP TABLE command_extensions;
+                     DROP TABLE command_protocol_metadata;
+                     PRAGMA user_version=8;",
+                )
+                .expect("simulate exact v8 command shape");
+        }
+
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v8 to v9");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        let retry = command(
+            "command-pre-v9-retry",
+            "retry-pre-v9",
+            b"legacy",
+            Some("namespace-a"),
+        );
+        assert_eq!(
+            migrated
+                .accept_command(&retry)
+                .expect("legacy duplicate")
+                .status,
+            CommandReceiptStatus::Duplicate
+        );
+        let mut changed_schema = retry;
+        changed_schema.command_id = CommandId::from_opaque(opaque("command-pre-v9-changed"));
+        changed_schema.schema_version = ProtocolVersion::new(1, 1);
+        assert_eq!(
+            migrated.accept_command(&changed_schema),
+            Err(DurableStoreError::Conflict)
+        );
+        drop(migrated);
+
+        let connection = rusqlite::Connection::open(db.path()).expect("inspect migrated metadata");
+        let version: (i64, i64) = connection
+            .query_row(
+                "SELECT schema_major, schema_minor FROM command_protocol_metadata
+                 WHERE command_id='command-pre-v9'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("backfilled version");
+        assert_eq!(version, (1, 0));
+        let extensions: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM command_extensions WHERE command_id='command-pre-v9'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("extension count");
+        assert_eq!(extensions, 0);
+    }
+
+    #[test]
+    fn missing_command_protocol_metadata_is_rejected_on_reopen() {
+        let db = TestDbPath::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            store
+                .accept_command(&command(
+                    "command-corrupt-protocol",
+                    "retry-corrupt-protocol",
+                    b"payload",
+                    Some("namespace-a"),
+                ))
+                .expect("accept command");
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open raw sqlite");
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys=OFF;
+                     DELETE FROM command_protocol_metadata
+                     WHERE command_id='command-corrupt-protocol';",
+                )
+                .expect("remove protocol metadata");
+        }
+        assert_eq!(
+            SqliteLocalStore::open(db.path()).err(),
+            Some(DurableStoreError::Corrupt)
+        );
     }
 
     #[test]

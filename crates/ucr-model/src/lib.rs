@@ -500,13 +500,35 @@ pub struct CorrelationContext {
     pub idempotency_key: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CommandEnvelope {
     pub command_id: CommandId,
     pub scope: TenantScope,
     pub command_type: String,
     pub payload: Vec<u8>,
     pub correlation: CorrelationContext,
+    pub schema_version: ProtocolVersion,
+    pub extensions: Vec<ProtocolExtension>,
+}
+
+impl fmt::Debug for CommandEnvelope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandEnvelope")
+            .field("command_id", &self.command_id)
+            .field("scope", &self.scope)
+            .field("command_type", &self.command_type)
+            .field("payload", &"<redacted>")
+            .field("payload_len", &self.payload.len())
+            .field("correlation", &"<redacted>")
+            .field(
+                "has_idempotency_key",
+                &self.correlation.idempotency_key.is_some(),
+            )
+            .field("schema_version", &self.schema_version)
+            .field("extensions", &self.extensions)
+            .finish()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -724,6 +746,41 @@ mod tests {
         let id = OpaqueId::new("provider-or-secret-looking-value").expect("valid id");
         let debug = format!("{id:?}");
         assert!(!debug.contains(id.as_str()));
+    }
+
+    #[test]
+    fn command_debug_redacts_nested_extension_payload() {
+        let command = super::CommandEnvelope {
+            command_id: super::CommandId::from_opaque(
+                super::OpaqueId::new("command-redaction").expect("command id"),
+            ),
+            scope: super::TenantScope {
+                tenant_id: super::TenantId::from_opaque(
+                    super::OpaqueId::new("tenant-redaction").expect("tenant id"),
+                ),
+                namespace_id: None,
+            },
+            command_type: "ucr.test.command".to_owned(),
+            payload: b"ordinary-command-payload".to_vec(),
+            correlation: super::CorrelationContext {
+                correlation_id: super::OpaqueId::new("correlation-redaction")
+                    .expect("correlation id"),
+                causation_id: None,
+                idempotency_key: Some("redaction-retry".to_owned()),
+            },
+            schema_version: super::ProtocolVersion::new(1, 0),
+            extensions: vec![super::ProtocolExtension {
+                name: "ucr.test.secret".to_owned(),
+                critical: false,
+                payload: b"command-extension-secret".to_vec(),
+            }],
+        };
+        let debug = format!("{command:?}");
+        assert!(!debug.contains("command-extension-secret"));
+        assert!(!debug.contains("ordinary-command-payload"));
+        assert!(!debug.contains("redaction-retry"));
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("payload_len"));
     }
 
     #[test]

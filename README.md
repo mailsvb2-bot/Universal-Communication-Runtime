@@ -37,9 +37,9 @@ Optional Infrastructure
 
 ## Current architectural layer
 
-**Phase 12 — Anti-Entropy (active implementation layer).**
+**Phase 12 — Anti-Entropy (completed local/reference foundation; parity hardening continues without inventing a new phase).**
 
-Phases 0–11 now have canonical contracts and reference invariants. Phase 12 adds versioned canonical Event fingerprints, snapshot-safe Anti-Entropy enumeration, missing/matching/damaged reconciliation semantics, complete Event extension persistence parity, and SQLite schema v8. Network transports, remote peer authentication/authorization, routing, and automatic damaged-replica repair remain separate layers.
+Phases 0–12 now have canonical/local-reference contracts and regression invariants. Phase 12 established versioned canonical Event fingerprints, snapshot-safe Anti-Entropy enumeration, missing/matching/damaged reconciliation semantics, and complete Event extension persistence parity. Post-Phase-12 hardening now restores `CommandEnvelope` schema-version/extension parity across protobuf, Rust, memory, and SQLite schema v9. Network transports, remote peer authentication/authorization, routing, and automatic damaged-replica repair remain separate layers.
 
 This repository intentionally does not begin with chat UI, messenger adapters, WebRTC, mesh, or a cloud service. Those are consumers/providers of the canonical model and must not become alternative sources of truth.
 
