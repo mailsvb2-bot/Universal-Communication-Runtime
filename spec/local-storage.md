@@ -92,6 +92,8 @@ Storage exhaustion, corruption, unavailability, permission failures, foreign-sto
 
 Idempotency keys must not be used to carry secrets. Payload persistence is not telemetry and does not imply permission to export it. Private signing/agreement keys are never stored in this general SQLite schema; Phase-7 uses a separate non-exporting key-operation boundary. Payload-at-rest encryption remains a separate explicit decision and is not implied by transport/session crypto.
 
+SQLite schema v12 additionally persists normalized canonical permission grants. Grant rows contain authorization metadata only; authentication credentials, private keys, bearer tokens, and audit history are not stored in the permission table. v11-to-v12 migration starts with an empty grant set rather than inferring authority from existing identities, keys, messages, or tenant-root scope.
+
 ## Migration and rollback
 
 Every future migration must be deterministic, versioned, preserve unsynced/durable state, and document rollback compatibility. Migration failure must leave the prior committed database valid or fail explicitly; destructive best-effort migration is forbidden.

@@ -602,7 +602,7 @@ mod tests {
         let connection = Connection::open(db.path()).expect("open raw store");
         connection
             .execute_batch(
-                "DROP TABLE trusted_signing_keys;
+                "DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;
                  DROP TABLE message_extensions;
                  DROP TABLE command_extensions;
                  DROP TABLE command_protocol_metadata;

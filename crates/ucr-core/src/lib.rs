@@ -7,10 +7,14 @@ use ucr_model::{
     CommandEnvelope, CommandId, CommunicationIntent, ConversationId, ConversationRecord,
     DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceId, EndpointAddress,
     EndpointId, EventEnvelope, EventId, EventReconciliation, EventSummary, IdentityId, KeyId,
-    MessageEnvelope, MessageId, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, SessionId,
-    SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
+    ScopedPrincipal, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord,
 };
-use ucr_protocol::{CanonicalError, CommandReceipt};
+use ucr_protocol::{
+    CanonicalError, CommandReceipt, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
+    TRUSTED_SIGNING_KEY_REVOKE_PERMISSION, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
+};
 
 pub use id::{IdGenerationError, generate_opaque_id};
 
@@ -83,6 +87,31 @@ pub trait AuthorizationEvaluator: core::fmt::Debug + Send + Sync {
     /// # Errors
     /// Returns a canonical error; lack of authority is `PermissionDenied`.
     fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError>;
+}
+
+/// Durable owner for explicit permission grants. Authentication credentials and
+/// audit history deliberately remain separate capabilities.
+pub trait PermissionGrantStore: StorageProvider {
+    /// Adds one canonical grant. Repeating the identical grant is idempotent.
+    ///
+    /// # Errors
+    /// Rejects malformed grants and explicit storage failures.
+    fn grant_permission(&self, grant: &PermissionGrant) -> Result<(), DurableStoreError>;
+
+    /// Removes one exact canonical grant. Repeating removal is idempotent.
+    ///
+    /// # Errors
+    /// Rejects malformed grants and explicit storage failures.
+    fn revoke_permission(&self, grant: &PermissionGrant) -> Result<(), DurableStoreError>;
+
+    /// Returns all persisted grants for one exact scoped principal.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn permission_grants_for(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<Vec<PermissionGrant>, DurableStoreError>;
 }
 
 /// Storage health is explicit and never inferred from successful construction.
@@ -169,6 +198,102 @@ pub trait TrustedSigningKeyStore: StorageProvider {
         scope: &TenantScope,
         device_id: &DeviceId,
     ) -> Result<Option<PublicKeyDescriptor>, DurableStoreError>;
+}
+
+/// Authorization-enforcing façade for trusted signing-key mutations.
+///
+/// Raw key storage remains an internal persistence capability. External/runtime
+/// callers use this boundary with an already authenticated [`ScopedPrincipal`].
+#[derive(Debug)]
+pub struct AuthorizedTrustedSigningKeyMutations<'a, A, S> {
+    authorization: &'a A,
+    store: &'a S,
+}
+
+impl<'a, A, S> AuthorizedTrustedSigningKeyMutations<'a, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: TrustedSigningKeyStore,
+{
+    #[must_use]
+    pub const fn new(authorization: &'a A, store: &'a S) -> Self {
+        Self {
+            authorization,
+            store,
+        }
+    }
+
+    /// Authorizes and provisions the first trusted signing key for the scope.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures; denied calls never reach storage.
+    pub fn provision(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        descriptor: &PublicKeyDescriptor,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, scope, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION)?;
+        self.store
+            .provision_trusted_signing_key(scope, descriptor)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Authorizes and atomically rotates the expected trusted signing key.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures; denied calls never reach storage.
+    pub fn rotate(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_current: &KeyId,
+        replacement: &PublicKeyDescriptor,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, scope, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION)?;
+        self.store
+            .rotate_trusted_signing_key(scope, device_id, expected_current, replacement)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Authorizes and revokes the expected trusted signing key.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures; denied calls never reach storage.
+    pub fn revoke(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_current: &KeyId,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, scope, TRUSTED_SIGNING_KEY_REVOKE_PERMISSION)?;
+        self.store
+            .revoke_trusted_signing_key(scope, device_id, expected_current)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    fn require(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        permission: &str,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.authorization
+            .authorize(&AuthorizationRequest {
+                subject: subject.clone(),
+                permission: permission.to_owned(),
+                resource_scope: scope.clone(),
+            })
+            .map_err(AuthorizedMutationError::Authorization)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorizedMutationError {
+    Authorization(CanonicalError),
+    Store(DurableStoreError),
 }
 
 pub trait StorageProvider: core::fmt::Debug + Send + Sync {
