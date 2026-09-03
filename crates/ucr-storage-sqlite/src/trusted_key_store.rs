@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use ucr_core::{DurableStoreError, TrustedSigningKeyStore};
 use ucr_crypto::{TrustedKeyResolutionError, TrustedSigningKeyResolver};
 use ucr_model::{
-    DeviceId, KeyId, KeyPurpose, OpaqueId, PublicKeyDescriptor, TenantScope,
+    DeviceId, IdentityId, KeyId, KeyPurpose, OpaqueId, PublicKeyDescriptor, TenantScope,
     TrustedSigningKeyRecord, TrustedSigningKeyState,
 };
 use ucr_protocol::validate_trusted_signing_key_descriptor;
@@ -74,6 +74,14 @@ impl TrustedSigningKeyStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
+        if !super::device_store::protected_device_allows(
+            &transaction,
+            scope,
+            &descriptor.device_id,
+            None,
+        )? {
+            return Err(DurableStoreError::PermissionDenied);
+        }
 
         if let Some(existing) = load_key_record(&transaction, scope, &descriptor.key_id)? {
             return if existing.state == TrustedSigningKeyState::Active
@@ -111,6 +119,9 @@ impl TrustedSigningKeyStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
+        if !super::device_store::protected_device_allows(&transaction, scope, device_id, None)? {
+            return Err(DurableStoreError::PermissionDenied);
+        }
         let active = active_key_id(&transaction, scope, device_id)?;
 
         if active.as_ref() == Some(&replacement.key_id) {
@@ -207,6 +218,9 @@ impl TrustedSigningKeyStore for SqliteLocalStore {
         device_id: &DeviceId,
     ) -> Result<Option<PublicKeyDescriptor>, DurableStoreError> {
         let connection = self.lock_connection()?;
+        if !super::device_store::protected_device_allows(&connection, scope, device_id, None)? {
+            return Ok(None);
+        }
         let Some(key_id) = active_key_id(&connection, scope, device_id)? else {
             return Ok(None);
         };
@@ -226,9 +240,15 @@ impl TrustedSigningKeyResolver for SqliteLocalStore {
         &self,
         scope: &TenantScope,
         device_id: &DeviceId,
+        identity_id: Option<&IdentityId>,
         key_id: &KeyId,
     ) -> Result<PublicKeyDescriptor, TrustedKeyResolutionError> {
         let connection = self.lock_connection().map_err(map_resolution_store_error)?;
+        if !super::device_store::protected_device_allows(&connection, scope, device_id, identity_id)
+            .map_err(map_resolution_store_error)?
+        {
+            return Err(TrustedKeyResolutionError::NotTrusted);
+        }
         let namespace = namespace_storage_key(scope);
         let row = connection
             .query_row(
@@ -566,11 +586,13 @@ mod tests {
     };
 
     use rusqlite::{Connection, params};
-    use ucr_core::{DurableStoreError, StorageProvider, TrustedSigningKeyStore};
+    use ucr_core::{
+        DeviceLifecycleStore, DurableStoreError, StorageProvider, TrustedSigningKeyStore,
+    };
     use ucr_crypto::{TrustedKeyResolutionError, TrustedSigningKeyResolver};
     use ucr_model::{
-        DeviceId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PublicKeyDescriptor, TenantId,
-        TenantScope, TrustedSigningKeyState,
+        DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, KeyId, KeyPurpose,
+        NamespaceId, OpaqueId, PublicKeyDescriptor, TenantId, TenantScope, TrustedSigningKeyState,
     };
     use ucr_protocol::{ALGORITHM_VERSION, KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID};
 
@@ -626,6 +648,21 @@ mod tests {
         }
     }
 
+    fn register_active_device(store: &SqliteLocalStore, scope: &TenantScope) -> IdentityId {
+        let identity_id = IdentityId::from_opaque(oid("identity-trust"));
+        store
+            .register_device(
+                scope,
+                &DeviceDescriptor {
+                    device_id: DeviceId::from_opaque(oid("device-trust")),
+                    identity_id: identity_id.clone(),
+                    state: DeviceLifecycleState::Active,
+                },
+            )
+            .expect("register active device fixture");
+        identity_id
+    }
+
     #[test]
     fn trusted_key_rotation_revocation_and_resolver_survive_restart() {
         let db = TestDb::new();
@@ -634,11 +671,12 @@ mod tests {
         let second = descriptor("key-second", 2);
         {
             let store = SqliteLocalStore::open(db.path()).expect("open store");
+            register_active_device(&store, &scope);
             store
                 .provision_trusted_signing_key(&scope, &first)
                 .expect("provision first");
             assert_eq!(
-                store.resolve_active_signing_key(&scope, &first.device_id, &first.key_id),
+                store.resolve_active_signing_key(&scope, &first.device_id, None, &first.key_id),
                 Ok(first.clone())
             );
         }
@@ -661,11 +699,11 @@ mod tests {
                 TrustedSigningKeyState::Revoked
             );
             assert_eq!(
-                store.resolve_active_signing_key(&scope, &first.device_id, &first.key_id),
+                store.resolve_active_signing_key(&scope, &first.device_id, None, &first.key_id),
                 Err(TrustedKeyResolutionError::NotTrusted)
             );
             assert_eq!(
-                store.resolve_active_signing_key(&scope, &second.device_id, &second.key_id),
+                store.resolve_active_signing_key(&scope, &second.device_id, None, &second.key_id),
                 Ok(second.clone())
             );
             store
@@ -674,7 +712,7 @@ mod tests {
         }
         let reopened = SqliteLocalStore::open(db.path()).expect("reopen revoked store");
         assert_eq!(
-            reopened.resolve_active_signing_key(&scope, &second.device_id, &second.key_id),
+            reopened.resolve_active_signing_key(&scope, &second.device_id, None, &second.key_id),
             Err(TrustedKeyResolutionError::NotTrusted)
         );
         assert_eq!(
@@ -694,9 +732,9 @@ mod tests {
         let first = descriptor("key-base", 3);
         let left = descriptor("key-left", 4);
         let right = descriptor("key-right", 5);
-        SqliteLocalStore::open(db.path())
-            .expect("open seed")
-            .provision_trusted_signing_key(&scope, &first)
+        let seed = SqliteLocalStore::open(db.path()).expect("open seed");
+        register_active_device(&seed, &scope);
+        seed.provision_trusted_signing_key(&scope, &first)
             .expect("seed key");
 
         let barrier = Arc::new(Barrier::new(3));
@@ -753,7 +791,7 @@ mod tests {
             )
             .expect("seed v10 security state");
         connection
-            .execute_batch("DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;")
+            .execute_batch("DROP TABLE devices; DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;")
             .expect("remove v11 objects");
         connection
             .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
@@ -784,8 +822,9 @@ mod tests {
         let db = TestDb::new();
         let scope = scope();
         let key = descriptor("key-corrupt", 6);
-        SqliteLocalStore::open(db.path())
-            .expect("open store")
+        let store = SqliteLocalStore::open(db.path()).expect("open store");
+        register_active_device(&store, &scope);
+        store
             .provision_trusted_signing_key(&scope, &key)
             .expect("provision key");
         let connection = Connection::open(db.path()).expect("raw sqlite");

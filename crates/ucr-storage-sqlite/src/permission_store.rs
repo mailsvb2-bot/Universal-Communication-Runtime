@@ -371,12 +371,12 @@ mod tests {
     use rusqlite::{Connection, params};
     use ucr_core::{
         AuthorizationEvaluator, AuthorizedMutationError, AuthorizedTrustedSigningKeyMutations,
-        PermissionGrantStore, StorageProvider, TrustedSigningKeyStore,
+        DeviceLifecycleStore, PermissionGrantStore, StorageProvider, TrustedSigningKeyStore,
     };
     use ucr_model::{
-        AuthorizationRequest, DeviceId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PermissionGrant,
-        PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, PublicKeyDescriptor,
-        ScopedPrincipal, TenantId, TenantScope,
+        AuthorizationRequest, DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, KeyId,
+        KeyPurpose, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
+        PrincipalKind, PrincipalRef, PublicKeyDescriptor, ScopedPrincipal, TenantId, TenantScope,
     };
     use ucr_protocol::{
         ALGORITHM_VERSION, CanonicalError, CanonicalErrorCode, KEY_FORMAT_VERSION,
@@ -431,6 +431,25 @@ mod tests {
                 kind: PrincipalKind::ServiceAccount,
             },
         }
+    }
+
+    fn register_active_device(
+        store: &SqliteLocalStore,
+        resource: &TenantScope,
+        device_id: &DeviceId,
+    ) -> IdentityId {
+        let identity_id = IdentityId::from_opaque(oid("identity-device"));
+        store
+            .register_device(
+                resource,
+                &DeviceDescriptor {
+                    device_id: device_id.clone(),
+                    identity_id: identity_id.clone(),
+                    state: DeviceLifecycleState::Active,
+                },
+            )
+            .expect("register active device fixture");
+        identity_id
     }
 
     fn exact_grant(subject: &ScopedPrincipal, resource: &TenantScope) -> PermissionGrant {
@@ -531,6 +550,7 @@ mod tests {
         let store = SqliteLocalStore::open(db.path()).expect("reopen");
         let facade = AuthorizedTrustedSigningKeyMutations::new(&store, &store);
         let key = descriptor("key-a", "device-a", 9);
+        register_active_device(&store, &resource, &key.device_id);
         assert_eq!(facade.provision(&subject, &resource, &key), Ok(()));
         store.revoke_permission(&grant).expect("remove grant");
         assert_eq!(
@@ -574,13 +594,14 @@ mod tests {
         let key = descriptor("key-a", "device-a", 11);
         {
             let store = SqliteLocalStore::open(db.path()).expect("initialize current");
+            register_active_device(&store, &resource, &key.device_id);
             store
                 .provision_trusted_signing_key(&resource, &key)
                 .expect("seed v11 security state");
         }
         let connection = Connection::open(db.path()).expect("raw connection");
         connection
-            .execute_batch("DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants;")
+            .execute_batch("DROP TABLE devices; DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants;")
             .expect("remove v12 objects");
         connection
             .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
@@ -592,6 +613,20 @@ mod tests {
 
         let migrated = SqliteLocalStore::open(db.path()).expect("migrate v11 to v12");
         assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        assert_eq!(
+            migrated.active_trusted_signing_key(&resource, &key.device_id),
+            Ok(None),
+            "historical migration must not invent Device→Identity binding"
+        );
+        assert_eq!(
+            migrated
+                .trusted_signing_key(&resource, &key.key_id)
+                .expect("historical key lookup")
+                .expect("historical key retained")
+                .state,
+            ucr_model::TrustedSigningKeyState::Active
+        );
+        register_active_device(&migrated, &resource, &key.device_id);
         assert_eq!(
             migrated.active_trusted_signing_key(&resource, &key.device_id),
             Ok(Some(key))

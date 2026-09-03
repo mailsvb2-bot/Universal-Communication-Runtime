@@ -9,6 +9,7 @@ mod commands;
 mod crypto_contract;
 mod crypto_negotiation;
 mod delivery;
+mod device_lifecycle;
 mod error;
 mod extension;
 mod framing;
@@ -44,7 +45,8 @@ pub use authorization::{
     ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, AuthorizationError,
     COMMAND_ACCEPT_PERMISSION, COMMAND_OUTCOME_READ_PERMISSION, COMMAND_OUTCOME_WRITE_PERMISSION,
     CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION, DELIVERY_READ_PERMISSION,
-    DELIVERY_WRITE_PERMISSION, EVENT_APPEND_PERMISSION, GrantValidationError,
+    DELIVERY_WRITE_PERMISSION, DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION,
+    DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION, GrantValidationError,
     MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION,
     PERMISSION_GRANT_READ_PERMISSION, PERMISSION_GRANT_REVOKE_PERMISSION,
     RECOVERY_PLAN_INSTALL_PERMISSION, RECOVERY_PLAN_READ_PERMISSION,
@@ -80,6 +82,7 @@ pub use delivery::{
     validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
     validate_delivery_evidence_order, validate_delivery_transition,
 };
+pub use device_lifecycle::device_allows_protected_access;
 pub use error::{
     CanonicalError, CanonicalErrorCode, ErrorEnvelope, ErrorEnvelopeError,
     canonical_error_envelope, error_envelope_from_canonical, validate_error_envelope,

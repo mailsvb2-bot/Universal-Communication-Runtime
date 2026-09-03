@@ -8,10 +8,10 @@ use std::{
 
 use ucr_core::{
     AntiEntropyStore, AuthorizationEvaluator, CommandAcceptanceStore, CommandOutcomeStore,
-    ConversationStore, DeliveryStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore, ServiceAuditStore,
-    ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth,
-    StorageProvider, SyncStore, TrustedSigningKeyStore,
+    ConversationStore, DeliveryStore, DeviceLifecycleStore, DurableRecordStatus, DurableStoreError,
+    EventAppendStatus, EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore,
+    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
+    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -20,25 +20,26 @@ use ucr_crypto::{
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
     ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
-    DeliveryState, DeviceId, EventEnvelope, EventId, EventReconciliation, EventReplicaState,
-    EventSummary, IdentityId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
-    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditRecord,
-    ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy,
-    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
-    TrustedSigningKeyState,
+    DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventEnvelope, EventId,
+    EventReconciliation, EventReplicaState, EventSummary, IdentityId, KeyId, MessageEnvelope,
+    MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
+    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
+    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord, TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
     IdempotencyDecision, MAX_SERVICE_AUDIT_READ_ITEMS, accepted_command_receipt,
     anti_entropy_session_binding, canonical_command, canonical_event, canonical_message,
     canonical_recovery_plan, canonical_sync_session, compare_command_idempotency,
-    duplicate_command_receipt, event_fingerprint, service_audit_hash, validate_anti_entropy_cursor,
-    validate_anti_entropy_page_size, validate_anti_entropy_session,
-    validate_anti_entropy_summary_count, validate_conversation, validate_conversation_parent_kind,
-    validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
-    validate_delivery_evidence_order, validate_delivery_transition, validate_permission_grant,
-    validate_service_audit_record, validate_service_quota_policy, validate_sync_checkpoint,
-    validate_sync_transition, validate_trusted_signing_key_descriptor,
+    device_allows_protected_access, duplicate_command_receipt, event_fingerprint,
+    service_audit_hash, validate_anti_entropy_cursor, validate_anti_entropy_page_size,
+    validate_anti_entropy_session, validate_anti_entropy_summary_count, validate_conversation,
+    validate_conversation_parent_kind, validate_delivery_attempt, validate_delivery_evidence,
+    validate_delivery_evidence_binding, validate_delivery_evidence_order,
+    validate_delivery_transition, validate_permission_grant, validate_service_audit_record,
+    validate_service_quota_policy, validate_sync_checkpoint, validate_sync_transition,
+    validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 9;
@@ -54,6 +55,7 @@ type DeliveryKey = (ScopeKey, String);
 type SyncKey = (ScopeKey, String);
 type TrustedSigningKeyRef = (ScopeKey, String);
 type TrustedSigningDeviceRef = (ScopeKey, String);
+type DeviceKey = (ScopeKey, String);
 type ServiceCredentialRef = (ScopeKey, String);
 type ServicePrincipalKey = (ScopeKey, String);
 
@@ -82,6 +84,7 @@ struct MemoryState {
     sync_checkpoints: HashMap<SyncKey, Vec<SyncCheckpoint>>,
     trusted_signing_keys: HashMap<TrustedSigningKeyRef, TrustedSigningKeyRecord>,
     active_trusted_signing_keys: HashMap<TrustedSigningDeviceRef, String>,
+    devices: HashMap<DeviceKey, DeviceDescriptor>,
     permission_grants: Vec<PermissionGrant>,
     service_credentials: HashMap<ServiceCredentialRef, ServiceCredentialRecord>,
     service_quota_policies: HashMap<ServicePrincipalKey, ServiceQuotaPolicy>,
@@ -328,6 +331,81 @@ impl ServiceAuditStore for MemoryLocalStore {
     }
 }
 
+impl DeviceLifecycleStore for MemoryLocalStore {
+    fn register_device(
+        &self,
+        scope: &TenantScope,
+        descriptor: &DeviceDescriptor,
+    ) -> Result<(), DurableStoreError> {
+        let key = device_key(scope, &descriptor.device_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.devices.get(&key) {
+            return if existing == descriptor {
+                Ok(())
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.devices.insert(key, descriptor.clone());
+        Ok(())
+    }
+
+    fn revoke_device(
+        &self,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_identity_id: &IdentityId,
+    ) -> Result<(), DurableStoreError> {
+        let key = device_key(scope, device_id);
+        let trusted_ref = trusted_device_ref(scope, device_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let device = state.devices.get(&key).ok_or(DurableStoreError::Conflict)?;
+        if device.identity_id != *expected_identity_id {
+            return Err(DurableStoreError::Conflict);
+        }
+        if device.state == DeviceLifecycleState::Revoked {
+            return if state.active_trusted_signing_keys.contains_key(&trusted_ref) {
+                Err(DurableStoreError::Corrupt)
+            } else {
+                Ok(())
+            };
+        }
+        if let Some(active_key_id) = state.active_trusted_signing_keys.get(&trusted_ref).cloned() {
+            let active_key_ref = (trusted_ref.0.clone(), active_key_id);
+            let key_record = state
+                .trusted_signing_keys
+                .get(&active_key_ref)
+                .ok_or(DurableStoreError::Corrupt)?;
+            if key_record.state != TrustedSigningKeyState::Active
+                || key_record.descriptor.device_id != *device_id
+            {
+                return Err(DurableStoreError::Corrupt);
+            }
+            state
+                .trusted_signing_keys
+                .get_mut(&active_key_ref)
+                .ok_or(DurableStoreError::Corrupt)?
+                .state = TrustedSigningKeyState::Revoked;
+            state.active_trusted_signing_keys.remove(&trusted_ref);
+        }
+        state
+            .devices
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Corrupt)?
+            .state = DeviceLifecycleState::Revoked;
+        Ok(())
+    }
+
+    fn device(
+        &self,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+    ) -> Result<Option<DeviceDescriptor>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state.devices.get(&device_key(scope, device_id)).cloned())
+    }
+}
+
 impl TrustedSigningKeyStore for MemoryLocalStore {
     fn provision_trusted_signing_key(
         &self,
@@ -339,6 +417,9 @@ impl TrustedSigningKeyStore for MemoryLocalStore {
         let key_ref = trusted_key_ref(scope, &descriptor.key_id);
         let device_ref = trusted_device_ref(scope, &descriptor.device_id);
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if !memory_device_allows_protected_access(&state, scope, &descriptor.device_id, None) {
+            return Err(DurableStoreError::PermissionDenied);
+        }
 
         if let Some(existing) = state.trusted_signing_keys.get(&key_ref) {
             return if existing.state == TrustedSigningKeyState::Active
@@ -388,6 +469,9 @@ impl TrustedSigningKeyStore for MemoryLocalStore {
         let expected_id = expected_current.as_opaque().as_str();
         let replacement_id = replacement.key_id.as_opaque().as_str();
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if !memory_device_allows_protected_access(&state, scope, device_id, None) {
+            return Err(DurableStoreError::PermissionDenied);
+        }
 
         match state.active_trusted_signing_keys.get(&device_ref) {
             Some(active) if active == replacement_id => {
@@ -491,6 +575,9 @@ impl TrustedSigningKeyStore for MemoryLocalStore {
         device_id: &DeviceId,
     ) -> Result<Option<PublicKeyDescriptor>, DurableStoreError> {
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if !memory_device_allows_protected_access(&state, scope, device_id, None) {
+            return Ok(None);
+        }
         let device_ref = trusted_device_ref(scope, device_id);
         let Some(key_id) = state.active_trusted_signing_keys.get(&device_ref) else {
             return Ok(None);
@@ -514,12 +601,16 @@ impl TrustedSigningKeyResolver for MemoryLocalStore {
         &self,
         scope: &TenantScope,
         device_id: &DeviceId,
+        identity_id: Option<&IdentityId>,
         key_id: &KeyId,
     ) -> Result<PublicKeyDescriptor, TrustedKeyResolutionError> {
         let state = self
             .state
             .lock()
             .map_err(|_| TrustedKeyResolutionError::Internal)?;
+        if !memory_device_allows_protected_access(&state, scope, device_id, identity_id) {
+            return Err(TrustedKeyResolutionError::NotTrusted);
+        }
         let device_ref = trusted_device_ref(scope, device_id);
         if state.active_trusted_signing_keys.get(&device_ref)
             != Some(&key_id.as_opaque().as_str().to_owned())
@@ -1078,6 +1169,25 @@ const fn map_authorization_store_error(error: DurableStoreError) -> CanonicalErr
         | DurableStoreError::Internal => CanonicalErrorCode::Internal,
     };
     CanonicalError::new(code)
+}
+
+fn device_key(scope: &TenantScope, device_id: &DeviceId) -> DeviceKey {
+    (scope_key(scope), device_id.as_opaque().as_str().to_owned())
+}
+
+fn memory_device_allows_protected_access(
+    state: &MemoryState,
+    scope: &TenantScope,
+    device_id: &DeviceId,
+    identity_id: Option<&IdentityId>,
+) -> bool {
+    state
+        .devices
+        .get(&device_key(scope, device_id))
+        .is_some_and(|device| {
+            device_allows_protected_access(device)
+                && identity_id.is_none_or(|expected| device.identity_id == *expected)
+        })
 }
 
 fn trusted_key_ref(scope: &TenantScope, key_id: &KeyId) -> TrustedSigningKeyRef {
@@ -2548,8 +2658,168 @@ mod anti_entropy_tests {
 }
 
 #[cfg(test)]
+mod device_lifecycle_tests {
+    use ucr_core::{DeviceLifecycleStore, DurableStoreError, TrustedSigningKeyStore};
+    use ucr_crypto::{TrustedKeyResolutionError, TrustedSigningKeyResolver};
+    use ucr_model::{
+        DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, KeyId, KeyPurpose,
+        NamespaceId, OpaqueId, PublicKeyDescriptor, TenantId, TenantScope, TrustedSigningKeyState,
+    };
+    use ucr_protocol::{ALGORITHM_VERSION, KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID};
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-device")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("namespace-device"))),
+        }
+    }
+
+    fn device(state: DeviceLifecycleState) -> DeviceDescriptor {
+        DeviceDescriptor {
+            device_id: DeviceId::from_opaque(oid("device-a")),
+            identity_id: IdentityId::from_opaque(oid("identity-a")),
+            state,
+        }
+    }
+
+    fn key(id: &str, byte: u8) -> PublicKeyDescriptor {
+        PublicKeyDescriptor {
+            key_id: KeyId::from_opaque(oid(id)),
+            device_id: DeviceId::from_opaque(oid("device-a")),
+            purpose: KeyPurpose::Signing,
+            algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ALGORITHM_VERSION,
+            key_format_version: KEY_FORMAT_VERSION,
+            public_key: vec![byte; 32],
+        }
+    }
+
+    #[test]
+    fn device_revocation_atomically_revokes_key_and_cannot_be_reactivated() {
+        let store = MemoryLocalStore::default();
+        let scope = scope();
+        let active = device(DeviceLifecycleState::Active);
+        let first = key("key-a", 9);
+        store.register_device(&scope, &active).expect("register");
+        store
+            .provision_trusted_signing_key(&scope, &first)
+            .expect("provision key");
+        assert_eq!(
+            store.resolve_active_signing_key(
+                &scope,
+                &active.device_id,
+                Some(&active.identity_id),
+                &first.key_id,
+            ),
+            Ok(first.clone())
+        );
+
+        let wrong_identity = IdentityId::from_opaque(oid("identity-other"));
+        assert_eq!(
+            store.revoke_device(&scope, &active.device_id, &wrong_identity),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            store.revoke_device(&scope, &active.device_id, &active.identity_id),
+            Ok(())
+        );
+        assert_eq!(
+            store.revoke_device(&scope, &active.device_id, &active.identity_id),
+            Ok(())
+        );
+        let revoked = store
+            .device(&scope, &active.device_id)
+            .expect("device lookup")
+            .expect("device exists");
+        assert_eq!(revoked.state, DeviceLifecycleState::Revoked);
+        assert_eq!(
+            store.active_trusted_signing_key(&scope, &active.device_id),
+            Ok(None)
+        );
+        assert_eq!(
+            store
+                .trusted_signing_key(&scope, &first.key_id)
+                .expect("key lookup")
+                .expect("key exists")
+                .state,
+            TrustedSigningKeyState::Revoked
+        );
+        assert_eq!(
+            store.resolve_active_signing_key(
+                &scope,
+                &active.device_id,
+                Some(&active.identity_id),
+                &first.key_id,
+            ),
+            Err(TrustedKeyResolutionError::NotTrusted)
+        );
+        assert_eq!(
+            store.provision_trusted_signing_key(&scope, &key("key-b", 10)),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        assert_eq!(
+            store.register_device(&scope, &active),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn protected_key_access_requires_active_device_and_exact_identity_binding() {
+        let store = MemoryLocalStore::default();
+        let scope = scope();
+        let recovering = device(DeviceLifecycleState::ReverificationRequired);
+        let first = key("key-recovering", 11);
+        store
+            .register_device(&scope, &recovering)
+            .expect("register recovering device");
+        assert_eq!(
+            store.provision_trusted_signing_key(&scope, &first),
+            Err(DurableStoreError::PermissionDenied)
+        );
+
+        let other_scope = TenantScope {
+            tenant_id: scope.tenant_id.clone(),
+            namespace_id: Some(NamespaceId::from_opaque(oid("namespace-active"))),
+        };
+        let active = device(DeviceLifecycleState::Active);
+        store
+            .register_device(&other_scope, &active)
+            .expect("register active device");
+        let active_key = key("key-active", 12);
+        store
+            .provision_trusted_signing_key(&other_scope, &active_key)
+            .expect("active device gets key");
+        let wrong_identity = IdentityId::from_opaque(oid("identity-wrong"));
+        assert_eq!(
+            store.resolve_active_signing_key(
+                &other_scope,
+                &active.device_id,
+                Some(&wrong_identity),
+                &active_key.key_id,
+            ),
+            Err(TrustedKeyResolutionError::NotTrusted)
+        );
+        assert_eq!(
+            store.resolve_active_signing_key(
+                &other_scope,
+                &active.device_id,
+                Some(&active.identity_id),
+                &active_key.key_id,
+            ),
+            Ok(active_key)
+        );
+    }
+}
+
+#[cfg(test)]
 mod trusted_signing_key_tests {
-    use ucr_core::{DurableStoreError, TrustedSigningKeyStore};
+    use ucr_core::{DeviceLifecycleStore, DurableStoreError, TrustedSigningKeyStore};
     use ucr_crypto::{
         AgreementKeyPair, MessageSignatureVerificationError, SessionRole, SigningKeyMaterial,
         TranscriptBinding, TrustedKeyResolutionError, TrustedMessageSignatureError,
@@ -2558,10 +2828,10 @@ mod trusted_signing_key_tests {
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, ConversationId, ConversationKind, ConversationRef,
-        CorrelationContext, CryptoSuite, DeliveryPolicy, DeliveryState, DeviceId, DeviceRef,
-        IdentityId, KeyId, KeyPurpose, MessageEnvelope, MessageId, MessageSignature, NamespaceId,
-        OpaqueId, OriginRef, PrincipalId, PublicKeyDescriptor, TenantId, TenantScope,
-        TrustedSigningKeyState,
+        CorrelationContext, CryptoSuite, DeliveryPolicy, DeliveryState, DeviceDescriptor, DeviceId,
+        DeviceLifecycleState, DeviceRef, IdentityId, KeyId, KeyPurpose, MessageEnvelope, MessageId,
+        MessageSignature, NamespaceId, OpaqueId, OriginRef, PrincipalId, PublicKeyDescriptor,
+        TenantId, TenantScope, TrustedSigningKeyState,
     };
     use ucr_protocol::{
         ALGORITHM_VERSION, KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID, message_signing_binding,
@@ -2592,12 +2862,31 @@ mod trusted_signing_key_tests {
         }
     }
 
+    fn register_active_device(
+        store: &MemoryLocalStore,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        identity: &str,
+    ) {
+        store
+            .register_device(
+                scope,
+                &DeviceDescriptor {
+                    device_id: device_id.clone(),
+                    identity_id: IdentityId::from_opaque(oid(identity)),
+                    state: DeviceLifecycleState::Active,
+                },
+            )
+            .expect("register active device");
+    }
+
     #[test]
     fn trusted_signing_key_lifecycle_is_atomic_idempotent_and_irreversible() {
         let store = MemoryLocalStore::default();
         let scope = scope("tenant-a", Some("namespace-a"));
         let first = descriptor("key-a", "device-a", 1);
         let second = descriptor("key-b", "device-a", 2);
+        register_active_device(&store, &scope, &first.device_id, "identity-a");
 
         assert_eq!(store.provision_trusted_signing_key(&scope, &first), Ok(()));
         assert_eq!(store.provision_trusted_signing_key(&scope, &first), Ok(()));
@@ -2643,11 +2932,11 @@ mod trusted_signing_key_tests {
             TrustedSigningKeyState::Revoked
         );
         assert_eq!(
-            store.resolve_active_signing_key(&scope, &first.device_id, &first.key_id),
+            store.resolve_active_signing_key(&scope, &first.device_id, None, &first.key_id),
             Err(TrustedKeyResolutionError::NotTrusted)
         );
         assert_eq!(
-            store.resolve_active_signing_key(&scope, &second.device_id, &second.key_id),
+            store.resolve_active_signing_key(&scope, &second.device_id, None, &second.key_id),
             Ok(second.clone())
         );
 
@@ -2660,7 +2949,7 @@ mod trusted_signing_key_tests {
             Ok(())
         );
         assert_eq!(
-            store.resolve_active_signing_key(&scope, &second.device_id, &second.key_id),
+            store.resolve_active_signing_key(&scope, &second.device_id, None, &second.key_id),
             Err(TrustedKeyResolutionError::NotTrusted)
         );
         assert_eq!(
@@ -2676,12 +2965,14 @@ mod trusted_signing_key_tests {
         let scope_b = scope("tenant-b", Some("namespace-a"));
         let key_a = descriptor("shared-key-id", "device-a", 3);
         let key_b = descriptor("shared-key-id", "device-a", 4);
+        register_active_device(&store, &scope_a, &key_a.device_id, "identity-a");
+        register_active_device(&store, &scope_b, &key_b.device_id, "identity-b");
 
         store
             .provision_trusted_signing_key(&scope_a, &key_a)
             .expect("scope a provision");
         assert_eq!(
-            store.resolve_active_signing_key(&scope_b, &key_a.device_id, &key_a.key_id),
+            store.resolve_active_signing_key(&scope_b, &key_a.device_id, None, &key_a.key_id),
             Err(TrustedKeyResolutionError::NotTrusted)
         );
         assert_eq!(
@@ -2693,13 +2984,14 @@ mod trusted_signing_key_tests {
             Ok(())
         );
         assert_eq!(
-            store.resolve_active_signing_key(&scope_b, &key_b.device_id, &key_b.key_id),
+            store.resolve_active_signing_key(&scope_b, &key_b.device_id, None, &key_b.key_id),
             Ok(key_b)
         );
         assert_eq!(
             store.resolve_active_signing_key(
                 &scope_a,
                 &DeviceId::from_opaque(oid("device-other")),
+                None,
                 &key_a.key_id,
             ),
             Err(TrustedKeyResolutionError::NotTrusted)
@@ -2775,6 +3067,7 @@ mod trusted_signing_key_tests {
             key_format_version: KEY_FORMAT_VERSION,
             public_key: signer.verifying_key().0.to_vec(),
         };
+        register_active_device(&store, &scope, &descriptor.device_id, "identity-trusted");
         store
             .provision_trusted_signing_key(&scope, &descriptor)
             .expect("provision trust");
@@ -2782,6 +3075,21 @@ mod trusted_signing_key_tests {
         assert_eq!(
             verify_message_signature_with_trust(&message, &store),
             Ok(())
+        );
+
+        let mut rebound_identity = message.clone();
+        rebound_identity.author_device.identity_id = IdentityId::from_opaque(oid("identity-other"));
+        let rebound_binding = message_signing_binding(&rebound_identity).expect("rebound binding");
+        rebound_identity
+            .signature
+            .as_mut()
+            .expect("signature")
+            .signature = signer.sign_message_binding(&rebound_binding).0.to_vec();
+        assert_eq!(
+            verify_message_signature_with_trust(&rebound_identity, &store),
+            Err(TrustedMessageSignatureError::Trust(
+                TrustedKeyResolutionError::NotTrusted
+            ))
         );
 
         let mut tampered = message.clone();
@@ -2818,6 +3126,7 @@ mod trusted_signing_key_tests {
             key_format_version: KEY_FORMAT_VERSION,
             public_key: signer.verifying_key().0.to_vec(),
         };
+        register_active_device(&store, &scope, &descriptor.device_id, "identity-handshake");
         store
             .provision_trusted_signing_key(&scope, &descriptor)
             .expect("provision trust");
@@ -2908,16 +3217,18 @@ mod trusted_signing_key_tests {
 mod permission_enforcement_tests {
     use ucr_core::{
         AuthorizedDurableRuntime, AuthorizedMutationError, AuthorizedTrustedSigningKeyMutations,
-        ConversationStore, MessageStore, PermissionGrantStore, TrustedSigningKeyStore,
+        ConversationStore, DeviceLifecycleStore, DurableStoreError, MessageStore,
+        PermissionGrantStore, TrustedSigningKeyStore,
     };
     use ucr_model::{
-        DeviceId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PermissionGrant, PermissionScope,
-        PrincipalId, PrincipalKind, PrincipalRef, PublicKeyDescriptor, ScopedPrincipal, TenantId,
-        TenantScope,
+        DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, KeyId, KeyPurpose,
+        NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId, PrincipalKind,
+        PrincipalRef, PublicKeyDescriptor, ScopedPrincipal, TenantId, TenantScope,
     };
     use ucr_protocol::{
         ALGORITHM_VERSION, CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION,
-        CanonicalError, CanonicalErrorCode, KEY_FORMAT_VERSION, MESSAGE_READ_PERMISSION,
+        CanonicalError, CanonicalErrorCode, DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION,
+        DEVICE_REVOKE_PERMISSION, KEY_FORMAT_VERSION, MESSAGE_READ_PERMISSION,
         MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION,
         PERMISSION_GRANT_READ_PERMISSION, PERMISSION_GRANT_REVOKE_PERMISSION,
         SIGNATURE_ALGORITHM_ID, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
@@ -2959,6 +3270,24 @@ mod permission_enforcement_tests {
         }
     }
 
+    fn register_active_device(
+        store: &MemoryLocalStore,
+        resource: &TenantScope,
+        device_id: &DeviceId,
+        identity: &str,
+    ) {
+        store
+            .register_device(
+                resource,
+                &DeviceDescriptor {
+                    device_id: device_id.clone(),
+                    identity_id: IdentityId::from_opaque(oid(identity)),
+                    state: DeviceLifecycleState::Active,
+                },
+            )
+            .expect("register active device fixture");
+    }
+
     fn exact_grant(
         grantee: &ScopedPrincipal,
         permission: &str,
@@ -2984,6 +3313,8 @@ mod permission_enforcement_tests {
         let resource = scope("tenant-a", Some("namespace-a"));
         let first = descriptor("key-a", "device-a", 1);
         let second = descriptor("key-b", "device-b", 2);
+        register_active_device(&store, &resource, &first.device_id, "identity-a");
+        register_active_device(&store, &resource, &second.device_id, "identity-b");
         let authorized = AuthorizedTrustedSigningKeyMutations::new(&store, &store);
 
         assert_eq!(
@@ -3025,6 +3356,7 @@ mod permission_enforcement_tests {
         let resource = scope("tenant-a", Some("namespace-a"));
         let first = descriptor("key-a", "device-a", 3);
         let second = descriptor("key-b", "device-a", 4);
+        register_active_device(&store, &resource, &first.device_id, "identity-a");
         let authorized = AuthorizedTrustedSigningKeyMutations::new(&store, &store);
 
         store
@@ -3095,18 +3427,75 @@ mod permission_enforcement_tests {
         let namespace_a = scope("tenant-a", Some("namespace-a"));
         let namespace_b = scope("tenant-a", Some("namespace-b"));
         let other_tenant = scope("tenant-b", Some("namespace-a"));
+        let key_a = descriptor("key-a", "device-a", 5);
+        let key_b = descriptor("key-b", "device-b", 6);
+        let key_c = descriptor("key-c", "device-c", 7);
+        register_active_device(&store, &namespace_a, &key_a.device_id, "identity-a");
+        register_active_device(&store, &namespace_b, &key_b.device_id, "identity-b");
+        register_active_device(&store, &other_tenant, &key_c.device_id, "identity-c");
+
+        assert_eq!(authorized.provision(&subject, &namespace_a, &key_a), Ok(()));
+        assert_eq!(authorized.provision(&subject, &namespace_b, &key_b), Ok(()));
+        assert_eq!(
+            authorized.provision(&subject, &other_tenant, &key_c),
+            Err(denied())
+        );
+    }
+
+    #[test]
+    fn device_lifecycle_administration_uses_independent_permissions_and_cannot_reactivate() {
+        let store = MemoryLocalStore::default();
+        let admin = subject("tenant-device-admin", Some("namespace-a"));
+        let resource = scope("tenant-device-admin", Some("namespace-a"));
+        let device = DeviceDescriptor {
+            device_id: DeviceId::from_opaque(oid("device-admin")),
+            identity_id: IdentityId::from_opaque(oid("identity-admin")),
+            state: DeviceLifecycleState::Active,
+        };
+        let runtime = AuthorizedDurableRuntime::new(&store, &store);
 
         assert_eq!(
-            authorized.provision(&subject, &namespace_a, &descriptor("key-a", "device-a", 5),),
-            Ok(())
-        );
-        assert_eq!(
-            authorized.provision(&subject, &namespace_b, &descriptor("key-b", "device-b", 6),),
-            Ok(())
-        );
-        assert_eq!(
-            authorized.provision(&subject, &other_tenant, &descriptor("key-c", "device-c", 7),),
+            runtime.register_device(&admin, &resource, &device),
             Err(denied())
+        );
+        store
+            .grant_permission(&exact_grant(&admin, DEVICE_REGISTER_PERMISSION, &resource))
+            .expect("bootstrap device register authority");
+        runtime
+            .register_device(&admin, &resource, &device)
+            .expect("authorized device registration");
+
+        assert_eq!(
+            runtime.device(&admin, &resource, &device.device_id),
+            Err(denied())
+        );
+        store
+            .grant_permission(&exact_grant(&admin, DEVICE_READ_PERMISSION, &resource))
+            .expect("bootstrap device read authority");
+        assert_eq!(
+            runtime.device(&admin, &resource, &device.device_id),
+            Ok(Some(device.clone()))
+        );
+
+        assert_eq!(
+            runtime.revoke_device(&admin, &resource, &device.device_id, &device.identity_id),
+            Err(denied())
+        );
+        store
+            .grant_permission(&exact_grant(&admin, DEVICE_REVOKE_PERMISSION, &resource))
+            .expect("bootstrap device revoke authority");
+        runtime
+            .revoke_device(&admin, &resource, &device.device_id, &device.identity_id)
+            .expect("authorized device revoke");
+        let mut revoked = device.clone();
+        revoked.state = DeviceLifecycleState::Revoked;
+        assert_eq!(
+            runtime.device(&admin, &resource, &device.device_id),
+            Ok(Some(revoked))
+        );
+        assert_eq!(
+            runtime.register_device(&admin, &resource, &device),
+            Err(AuthorizedMutationError::Store(DurableStoreError::Conflict))
         );
     }
 

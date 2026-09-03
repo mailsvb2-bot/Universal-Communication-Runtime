@@ -77,6 +77,6 @@ UCR cannot guarantee deletion of plaintext or secrets already extracted from an 
 
 ## Explicit nonclaims
 
-Phase 8 establishes the canonical recovery policy, cryptographic recovery-package primitive, and durable plan lifecycle. It does not yet claim complete credential re-issuance, device-revocation enforcement across delivery, historical message-key archive design, end-user recovery UX, or full backup/restore conformance.
+Phase 8 establishes the canonical recovery policy, cryptographic recovery-package primitive, and durable plan lifecycle. The current reference runtime additionally enforces durable Device revocation on trusted-key/authentication paths, but it does not yet claim complete credential re-issuance, device-bound credential/content delivery across recovery, historical message-key archive design, end-user recovery UX, or full backup/restore conformance.
 
 Those capabilities remain separate release blockers and must not be inferred from a valid `RecoveryPlan` or decryptable recovery package.

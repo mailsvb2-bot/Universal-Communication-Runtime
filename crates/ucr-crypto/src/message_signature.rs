@@ -118,6 +118,7 @@ pub fn verify_message_signature_with_trust<R: TrustedSigningKeyResolver>(
         .resolve_active_signing_key(
             &message.scope,
             &message.author_device.device_id,
+            Some(&message.author_device.identity_id),
             &signature.key_id,
         )
         .map_err(TrustedMessageSignatureError::Trust)?;
