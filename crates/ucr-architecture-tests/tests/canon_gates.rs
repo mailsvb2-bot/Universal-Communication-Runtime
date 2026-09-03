@@ -356,7 +356,7 @@ fn threat_model_keeps_production_blockers_visible() {
 
     for blocker in [
         "production OS/hardware-backed key providers for supported targets",
-        "Service Principal authentication/least-privilege enforcement",
+        "Service Principal quota and audit enforcement",
         "device revocation enforcement",
         "end-to-end recovery workflow",
         "required threat simulations",
@@ -1129,10 +1129,12 @@ fn message_intent_and_error_wire_parity_survives_v10_storage() {
 
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V10: u32 = 10;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 12;"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 13;"));
     assert!(sqlite_root.contains("fn migrate_v9_to_v10"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
+    assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
     assert!(sqlite_message.contains("CREATE TABLE message_extensions"));
     let sqlite_command =
         fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/command_store.rs"))
@@ -1636,9 +1638,11 @@ fn trusted_signing_key_lifecycle_is_scoped_restart_safe_and_runtime_integrated()
     assert!(sqlite.contains("WHERE state = 'active'"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V10: u32 = 10"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 12"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 13"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
+    assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
 
     for evidence in [
         "trusted_signing_key_lifecycle_is_atomic_idempotent_and_irreversible",
@@ -1796,14 +1800,18 @@ fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overc
         sqlite
             .contains("v11_to_v12_migration_preserves_trusted_key_state_and_starts_without_grants")
     );
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 12;"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 13;"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
+    assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
     assert!(spec.contains("SQLite schema v12"));
     assert!(adr.contains("does not claim every Command/Message/Sync/Delivery/runtime operation"));
     assert!(threat.contains("SQLite v12 state"));
 }
 
 const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
+    "provision_service_credential",
+    "revoke_service_credential",
     "grant_permission",
     "revoke_permission",
     "permission_grants_for",
@@ -1839,6 +1847,8 @@ const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
 ];
 
 const AUTHORIZED_RUNTIME_PERMISSIONS: &[&str] = &[
+    "SERVICE_CREDENTIAL_PROVISION_PERMISSION",
+    "SERVICE_CREDENTIAL_REVOKE_PERMISSION",
     "PERMISSION_GRANT_READ_PERMISSION",
     "PERMISSION_GRANT_CREATE_PERMISSION",
     "PERMISSION_GRANT_REVOKE_PERMISSION",
@@ -1934,7 +1944,85 @@ fn tenant_scoped_durable_runtime_authorization_covers_every_current_method() {
         !threat.contains("- tenant-scoped authorization enforcement;"),
         "authorization blocker may be removed only with complete runtime evidence"
     );
-    assert!(threat.contains("- Service Principal authentication/least-privilege enforcement;"));
+    assert!(!threat.contains("- Service Principal authentication/least-privilege enforcement;"));
+    assert!(threat.contains("- Service Principal quota and audit enforcement;"));
+}
+
+#[test]
+fn service_principal_authentication_resolves_canonical_identity_before_least_privilege() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/service_auth.rs"))
+        .expect("service auth");
+    let runtime = fs::read_to_string(workspace.join("crates/ucr-core/src/authorized_runtime.rs"))
+        .expect("authorized runtime");
+    let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/authorization.rs"))
+        .expect("authorization protocol");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+    let sqlite = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite store");
+    let sqlite_credentials = fs::read_to_string(
+        workspace.join("crates/ucr-storage-sqlite/src/service_credential_store.rs"),
+    )
+    .expect("sqlite credential store");
+    let spec = fs::read_to_string(workspace.join("spec/service-principal-authentication.md"))
+        .expect("service auth spec");
+    let permissions =
+        fs::read_to_string(workspace.join("spec/permissions.md")).expect("permissions spec");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0030-service-principal-credentials-authenticate-canonical-scoped-principals.md",
+    ))
+    .expect("adr 0030");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(model.contains("pub struct ServiceCredentialRecord"));
+    assert!(model.contains(".field(\"secret_digest\", &\"<redacted>\")"));
+    assert!(core.contains("UCR-SERVICE-CREDENTIAL-DIGEST-V1\\0"));
+    assert!(core.contains("getrandom::fill"));
+    assert!(core.contains("self.0.zeroize()"));
+    assert!(core.contains("expected.ct_eq(&record.secret_digest)"));
+    assert!(core.contains("CanonicalErrorCode::Unauthenticated"));
+    assert!(core.contains("record.subject.principal.kind != PrincipalKind::ServiceAccount"));
+    assert!(runtime.contains("SERVICE_CREDENTIAL_PROVISION_PERMISSION"));
+    assert!(runtime.contains("SERVICE_CREDENTIAL_REVOKE_PERMISSION"));
+    assert!(protocol.contains("ucr.authentication.service_credential.provision"));
+    assert!(protocol.contains("ucr.authentication.service_credential.revoke"));
+    assert!(memory.contains(
+        "credential_authentication_is_non_disclosing_revocable_and_feeds_least_privilege_runtime"
+    ));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 13"));
+    assert!(sqlite.contains("SQLITE_SCHEMA_V12 => migrate_v12_to_v13(connection)?"));
+    assert!(
+        sqlite_credentials.contains("credential_survives_restart_and_revocation_remains_effective")
+    );
+    assert!(
+        sqlite_credentials
+            .contains("v12_to_v13_migration_preserves_permissions_and_starts_without_credentials")
+    );
+    assert!(
+        spec.contains(
+            "Successful authentication returns the persisted canonical `ScopedPrincipal`"
+        )
+    );
+    assert!(permissions.contains("Service Principal credential authentication now feeds"));
+    assert!(adr.contains("credential-enumeration oracle"));
+    assert!(ci.contains(
+        "docs/adr/0030-service-principal-credentials-authenticate-canonical-scoped-principals.md"
+    ));
+    assert!(
+        !threat.contains("- Service Principal authentication/least-privilege enforcement;"),
+        "authentication/least-privilege blocker may disappear only with this executable evidence"
+    );
+    assert!(
+        threat.contains("- Service Principal quota and audit enforcement;"),
+        "remaining production Service Principal requirements must stay visible"
+    );
 }
 
 fn canonical_threat_boundaries(threat: &str) -> std::collections::BTreeSet<String> {

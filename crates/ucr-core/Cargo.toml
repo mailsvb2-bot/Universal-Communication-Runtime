@@ -8,6 +8,9 @@ repository.workspace = true
 
 [dependencies]
 getrandom = "=0.4.3"
+sha2 = "=0.11.0"
+subtle = "=2.6.1"
+zeroize = "=1.9.0"
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
 

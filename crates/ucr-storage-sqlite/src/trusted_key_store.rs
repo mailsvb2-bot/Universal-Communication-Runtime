@@ -753,7 +753,7 @@ mod tests {
             )
             .expect("seed v10 security state");
         connection
-            .execute_batch("DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;")
+            .execute_batch("DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;")
             .expect("remove v11 objects");
         connection
             .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)

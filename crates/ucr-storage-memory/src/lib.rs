@@ -9,8 +9,8 @@ use std::{
 use ucr_core::{
     AntiEntropyStore, AuthorizationEvaluator, CommandAcceptanceStore, CommandOutcomeStore,
     ConversationStore, DeliveryStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore, StorageHealth,
-    StorageProvider, SyncStore, TrustedSigningKeyStore,
+    EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore,
+    ServiceCredentialStore, StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -21,8 +21,9 @@ use ucr_model::{
     ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
     DeliveryState, DeviceId, EventEnvelope, EventId, EventReconciliation, EventReplicaState,
     EventSummary, IdentityId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
-    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, SessionId, SyncCheckpoint,
-    SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
+    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceCredentialId,
+    ServiceCredentialRecord, ServiceCredentialState, SessionId, SyncCheckpoint, SyncSession,
+    SyncState, TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -49,6 +50,7 @@ type DeliveryKey = (ScopeKey, String);
 type SyncKey = (ScopeKey, String);
 type TrustedSigningKeyRef = (ScopeKey, String);
 type TrustedSigningDeviceRef = (ScopeKey, String);
+type ServiceCredentialRef = (ScopeKey, String);
 
 #[derive(Default)]
 struct MemoryState {
@@ -69,6 +71,7 @@ struct MemoryState {
     trusted_signing_keys: HashMap<TrustedSigningKeyRef, TrustedSigningKeyRecord>,
     active_trusted_signing_keys: HashMap<TrustedSigningDeviceRef, String>,
     permission_grants: Vec<PermissionGrant>,
+    service_credentials: HashMap<ServiceCredentialRef, ServiceCredentialRecord>,
 }
 
 #[derive(Default)]
@@ -135,6 +138,49 @@ impl AuthorizationEvaluator for MemoryLocalStore {
             .permission_grants_for(&request.subject)
             .map_err(map_authorization_store_error)?;
         ucr_protocol::authorize(request, &grants).map_err(CanonicalError::from)
+    }
+}
+
+impl ServiceCredentialStore for MemoryLocalStore {
+    fn provision_service_credential(
+        &self,
+        record: &ServiceCredentialRecord,
+    ) -> Result<(), DurableStoreError> {
+        validate_service_credential_record(record)?;
+        let key = service_credential_ref(&record.subject.scope, &record.credential_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.service_credentials.get(&key) {
+            return if existing == record {
+                Ok(())
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.service_credentials.insert(key, record.clone());
+        Ok(())
+    }
+
+    fn revoke_service_credential(
+        &self,
+        scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+    ) -> Result<(), DurableStoreError> {
+        let key = service_credential_ref(scope, credential_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(record) = state.service_credentials.get_mut(&key) {
+            record.state = ServiceCredentialState::Revoked;
+        }
+        Ok(())
+    }
+
+    fn service_credential(
+        &self,
+        scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+    ) -> Result<Option<ServiceCredentialRecord>, DurableStoreError> {
+        let key = service_credential_ref(scope, credential_id);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state.service_credentials.get(&key).cloned())
     }
 }
 
@@ -896,6 +942,27 @@ fn trusted_key_ref(scope: &TenantScope, key_id: &KeyId) -> TrustedSigningKeyRef 
 
 fn trusted_device_ref(scope: &TenantScope, device_id: &DeviceId) -> TrustedSigningDeviceRef {
     (scope_key(scope), device_id.as_opaque().as_str().to_owned())
+}
+
+fn service_credential_ref(
+    scope: &TenantScope,
+    credential_id: &ServiceCredentialId,
+) -> ServiceCredentialRef {
+    (
+        scope_key(scope),
+        credential_id.as_opaque().as_str().to_owned(),
+    )
+}
+
+fn validate_service_credential_record(
+    record: &ServiceCredentialRecord,
+) -> Result<(), DurableStoreError> {
+    if record.subject.principal.kind != ucr_model::PrincipalKind::ServiceAccount
+        || record.state != ServiceCredentialState::Active
+    {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    Ok(())
 }
 
 fn scope_key(scope: &TenantScope) -> ScopeKey {
@@ -3049,6 +3116,155 @@ mod permission_enforcement_tests {
                 .message(&subject, &resource, &persisted_message.message_id)
                 .expect("authorized message read"),
             Some(persisted_message)
+        );
+    }
+}
+
+#[cfg(test)]
+mod service_principal_authentication_tests {
+    use ucr_core::{
+        AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError,
+        PermissionGrantStore, ServiceAuthenticationError, ServiceCredentialSecret,
+        ServiceCredentialStore, authenticate_service_principal, issue_service_credential,
+    };
+    use ucr_model::{
+        AuthorizationRequest, ConversationId, NamespaceId, OpaqueId, PermissionGrant,
+        PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantId,
+        TenantScope,
+    };
+    use ucr_protocol::{
+        CONVERSATION_READ_PERMISSION, CanonicalError, CanonicalErrorCode,
+        SERVICE_CREDENTIAL_PROVISION_PERMISSION, SERVICE_CREDENTIAL_REVOKE_PERMISSION,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope(tenant: &str, namespace: Option<&str>) -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid(tenant)),
+            namespace_id: namespace.map(|value| NamespaceId::from_opaque(oid(value))),
+        }
+    }
+
+    fn service_subject(id: &str, tenant: &str, namespace: Option<&str>) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(tenant, namespace),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid(id)),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
+    fn exact_grant(
+        grantee: &ScopedPrincipal,
+        permission: &str,
+        resource: &TenantScope,
+    ) -> PermissionGrant {
+        PermissionGrant {
+            grantee: grantee.clone(),
+            permission: permission.to_owned(),
+            scope: PermissionScope::Exact(resource.clone()),
+        }
+    }
+
+    fn denied() -> AuthorizedMutationError {
+        AuthorizedMutationError::Authorization(CanonicalError::new(
+            CanonicalErrorCode::PermissionDenied,
+        ))
+    }
+
+    #[test]
+    fn credential_authentication_is_non_disclosing_revocable_and_feeds_least_privilege_runtime() {
+        let store = MemoryLocalStore::default();
+        let admin = service_subject("admin-a", "tenant-a", Some("namespace-a"));
+        let service = service_subject("service-a", "tenant-a", Some("namespace-a"));
+        let resource = service.scope.clone();
+        let (record, secret) = issue_service_credential(&service).expect("issue credential");
+        let runtime = AuthorizedDurableRuntime::new(&store, &store);
+
+        assert_eq!(
+            runtime.provision_service_credential(&admin, &record),
+            Err(denied())
+        );
+        assert_eq!(
+            store.service_credential(&resource, &record.credential_id),
+            Ok(None)
+        );
+
+        store
+            .grant_permission(&exact_grant(
+                &admin,
+                SERVICE_CREDENTIAL_PROVISION_PERMISSION,
+                &resource,
+            ))
+            .expect("bootstrap credential provision authority");
+        runtime
+            .provision_service_credential(&admin, &record)
+            .expect("authorized credential provision");
+
+        let wrong_secret = ServiceCredentialSecret::from_bytes([0xA5; 32]);
+        assert_eq!(
+            authenticate_service_principal(&store, &resource, &record.credential_id, &wrong_secret),
+            Err(ServiceAuthenticationError::AuthenticationFailed)
+        );
+        let wrong_scope = scope("tenant-a", Some("namespace-b"));
+        assert_eq!(
+            authenticate_service_principal(&store, &wrong_scope, &record.credential_id, &secret),
+            Err(ServiceAuthenticationError::AuthenticationFailed)
+        );
+        let authenticated =
+            authenticate_service_principal(&store, &resource, &record.credential_id, &secret)
+                .expect("valid credential authenticates");
+        assert_eq!(authenticated, service);
+
+        let conversation_id = ConversationId::from_opaque(oid("missing-conversation"));
+        assert_eq!(
+            runtime.conversation(&authenticated, &resource, &conversation_id),
+            Err(denied())
+        );
+        store
+            .grant_permission(&exact_grant(
+                &authenticated,
+                CONVERSATION_READ_PERMISSION,
+                &resource,
+            ))
+            .expect("grant minimum read authority");
+        assert_eq!(
+            runtime.conversation(&authenticated, &resource, &conversation_id),
+            Ok(None)
+        );
+
+        assert_eq!(
+            runtime.revoke_service_credential(&admin, &resource, &record.credential_id),
+            Err(denied())
+        );
+        store
+            .grant_permission(&exact_grant(
+                &admin,
+                SERVICE_CREDENTIAL_REVOKE_PERMISSION,
+                &resource,
+            ))
+            .expect("bootstrap credential revoke authority");
+        runtime
+            .revoke_service_credential(&admin, &resource, &record.credential_id)
+            .expect("authorized revoke");
+        assert_eq!(
+            authenticate_service_principal(&store, &resource, &record.credential_id, &secret),
+            Err(ServiceAuthenticationError::AuthenticationFailed)
+        );
+
+        assert_eq!(
+            store.authorize(&AuthorizationRequest {
+                subject: authenticated,
+                permission: CONVERSATION_READ_PERMISSION.to_owned(),
+                resource_scope: resource,
+            }),
+            Ok(())
         );
     }
 }

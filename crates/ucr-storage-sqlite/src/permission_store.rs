@@ -578,7 +578,7 @@ mod tests {
         }
         let connection = Connection::open(db.path()).expect("raw connection");
         connection
-            .execute_batch("DROP TABLE permission_grants;")
+            .execute_batch("DROP TABLE service_credentials; DROP TABLE permission_grants;")
             .expect("remove v12 objects");
         connection
             .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)

@@ -84,6 +84,7 @@ Storage exhaustion, corruption, unavailability, permission failures, foreign-sto
 | Message content + provenance + relations | durable canonical user communication | UCR Message | message retention policy | PRIVATE or originating classification |
 | Message crypto/signature metadata | future verification/decryption context | UCR Message/Crypto | message retention policy | SECURITY METADATA |
 | Trusted public signing key + key trust state | scoped author/peer authentication trust lifecycle | UCR Crypto/Core trust owner | security trust/audit retention | SECURITY METADATA / AUDIT |
+| Service Principal credential ID + digest + lifecycle | exact-scope Service Account authentication; no plaintext secret | UCR Core authentication owner | credential lifecycle retention | SECURITY METADATA / AUTHENTICATION |
 | external Message mappings | provider Integration reconciliation only | UCR Integration | mapping retention policy | INTERNAL / provider metadata |
 | DeliveryAttempt state | monotonic per-attempt delivery state | UCR Delivery | delivery retention policy | INTERNAL / AUDIT |
 | DeliveryEvidence | typed proof for persisted/transport/relay/device/user stages | UCR Delivery | delivery evidence retention | AUDIT / SECURITY METADATA |
@@ -92,7 +93,7 @@ Storage exhaustion, corruption, unavailability, permission failures, foreign-sto
 
 Idempotency keys must not be used to carry secrets. Payload persistence is not telemetry and does not imply permission to export it. Private signing/agreement keys are never stored in this general SQLite schema; Phase-7 uses a separate non-exporting key-operation boundary. Payload-at-rest encryption remains a separate explicit decision and is not implied by transport/session crypto.
 
-SQLite schema v12 additionally persists normalized canonical permission grants. Grant rows contain authorization metadata only; authentication credentials, private keys, bearer tokens, and audit history are not stored in the permission table. v11-to-v12 migration starts with an empty grant set rather than inferring authority from existing identities, keys, messages, or tenant-root scope.
+SQLite schema v12 additionally persists normalized canonical permission grants. Grant rows contain authorization metadata only; authentication credentials, private keys, bearer tokens, and audit history are not stored in the permission table. v11-to-v12 migration starts with an empty grant set rather than inferring authority from existing identities, keys, messages, or tenant-root scope. SQLite schema v13 adds Service Principal credential metadata and one-way digests; plaintext credential secrets are never stored. v12-to-v13 migration is additive and starts with no credentials rather than inferring authentication from grants or signing keys.
 
 ## Migration and rollback
 

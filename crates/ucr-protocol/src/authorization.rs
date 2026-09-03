@@ -4,6 +4,10 @@ use ucr_model::{
 
 use crate::{require_exact_scope, validate_namespaced_identifier};
 
+pub const SERVICE_CREDENTIAL_PROVISION_PERMISSION: &str =
+    "ucr.authentication.service_credential.provision";
+pub const SERVICE_CREDENTIAL_REVOKE_PERMISSION: &str =
+    "ucr.authentication.service_credential.revoke";
 pub const TRUSTED_SIGNING_KEY_PROVISION_PERMISSION: &str =
     "ucr.crypto.trusted_signing_key.provision";
 pub const TRUSTED_SIGNING_KEY_ROTATE_PERMISSION: &str = "ucr.crypto.trusted_signing_key.rotate";
@@ -32,6 +36,8 @@ pub const ANTI_ENTROPY_RECONCILE_PERMISSION: &str = "ucr.sync.anti_entropy.recon
 pub const EVENT_APPEND_PERMISSION: &str = "ucr.event.append";
 
 pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
+    SERVICE_CREDENTIAL_PROVISION_PERMISSION,
+    SERVICE_CREDENTIAL_REVOKE_PERMISSION,
     PERMISSION_GRANT_READ_PERMISSION,
     PERMISSION_GRANT_CREATE_PERMISSION,
     PERMISSION_GRANT_REVOKE_PERMISSION,

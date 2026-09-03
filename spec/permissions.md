@@ -10,7 +10,7 @@ Permissions use namespaced identifiers such as `ucr.message.send`. Product/provi
 
 A Service Principal uses the existing canonical `PrincipalKind::ServiceAccount` / `PRINCIPAL_KIND_SERVICE_ACCOUNT` vocabulary together with `ScopedPrincipal`. UCR does not create a second service-account identity model.
 
-Authentication credentials are intentionally outside this authorization contract. A permission grant is not a credential, bearer token, API key, session, or proof of authentication.
+Authentication credentials remain outside the authorization contract. A permission grant is not a credential, bearer token, API key, session, or proof of authentication. The reference Service Principal credential lifecycle is defined separately in `service-principal-authentication.md` and resolves back into this same canonical `ScopedPrincipal`.
 ## Grant scope
 
 `Exact` grants apply only to one exact `TenantScope`.
@@ -28,7 +28,7 @@ A malformed permission identifier is invalid input. Corrupted/malformed persiste
 
 Actor identity, message authorship, `on_behalf_of`, Identity membership, Endpoint, external provider binding, route selection, network origin, and process identity are not permission grants by themselves.
 
-Authentication, credential issuance/rotation, quotas, audit persistence, and revocation enforcement remain separate layers and must not be claimed complete merely because authorization semantics exist.
+Authentication, quotas, audit persistence, Device revocation, and remote-peer authentication remain separate layers from permission semantics. Service Principal credential authentication is now implemented as a distinct owner; it must not be folded into grants.
 ## Durable reference authorization state
 
 The Rust reference runtime persists the current explicit grant set through `PermissionGrantStore`. Identical grant insertion and exact grant removal are idempotent set operations. SQLite schema v12 is the restart-safe reference representation; migration from v11 starts with no grants because earlier storage contained no authorization evidence that could be safely inferred.
@@ -37,8 +37,8 @@ The Rust reference runtime persists the current explicit grant set through `Perm
 
 `AuthorizedDurableRuntime` is the authorization-enforcing runtime boundary for every currently implemented tenant-scoped durable capability. Raw persistence traits remain internal storage/bootstrap capabilities and are not external authorization APIs. The runtime façade covers all current methods for permission grants, trusted signing keys, recovery plans, command acceptance/outcomes, conversations, messages, delivery, sync, events, and Anti-Entropy.
 
-The protocol-owned `RUNTIME_PERMISSION_IDS` registry is the canonical current runtime vocabulary. It includes independent read/write or lifecycle permissions as applicable: `ucr.authorization.grant.read`, `ucr.authorization.grant.create`, `ucr.authorization.grant.revoke`; trusted signing-key read/provision/rotate/revoke; recovery-plan read/install/rotate/revoke; command accept and outcome read/write; conversation read/write; message read/write; delivery read/write; sync read/write; Anti-Entropy read/reconcile; and event append. Every identifier is namespaced and duplicate-free.
+The protocol-owned `RUNTIME_PERMISSION_IDS` registry is the canonical current runtime vocabulary. It includes Service Principal credential provision/revoke plus independent read/write or lifecycle permissions as applicable: `ucr.authorization.grant.read`, `ucr.authorization.grant.create`, `ucr.authorization.grant.revoke`; trusted signing-key read/provision/rotate/revoke; recovery-plan read/install/rotate/revoke; command accept and outcome read/write; conversation read/write; message read/write; delivery read/write; sync read/write; Anti-Entropy read/reconcile; and event append. Every identifier is namespaced and duplicate-free.
 
 Permission administration is not a bypass. Runtime grant listing, creation, and revocation require their own explicit permissions, evaluated against the grant's resource scope. A runtime caller with no grant-management authority cannot bootstrap that authority by granting it to itself. The first authorization trust-root grant is seeded only by trusted local deployment/bootstrap code through the raw grant store; remote/runtime code never receives that escape hatch.
 
-Every new tenant-scoped durable runtime method must add an explicit protocol-owned permission and authorization-enforcing façade method in the same change. Current architecture tests require complete method-for-method coverage. This closes tenant-scoped authorization enforcement for the implemented durable runtime surface, but authentication credentials, Service Principal authentication, quotas, audit persistence, Device revocation, and remote-peer/transport authentication remain separate layers.
+Every new tenant-scoped durable runtime method must add an explicit protocol-owned permission and authorization-enforcing façade method in the same change. Current architecture tests require complete method-for-method coverage. This closes tenant-scoped authorization enforcement for the implemented durable runtime surface. Service Principal credential authentication now feeds an authenticated `ScopedPrincipal` into this same boundary; quotas, audit persistence, Device revocation, and remote-peer/transport authentication remain separate layers.
