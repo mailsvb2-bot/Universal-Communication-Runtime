@@ -21,6 +21,7 @@ mod provenance;
 mod recovery;
 mod scope;
 mod sync;
+mod trusted_key;
 mod version;
 
 pub use acknowledgement::{
@@ -111,6 +112,7 @@ pub use sync::{
     canonical_sync_session, is_terminal_sync_state, validate_sync_checkpoint,
     validate_sync_transition,
 };
+pub use trusted_key::{TrustedSigningKeyError, validate_trusted_signing_key_descriptor};
 pub use version::{
     ProtocolVersion, RUNTIME_ENVELOPE_SCHEMA_V1, VersionNegotiationError, VersionPolicy,
     VersionRange, negotiate_version, negotiate_version_sets,

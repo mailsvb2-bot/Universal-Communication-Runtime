@@ -8,6 +8,7 @@ mod message_store;
 mod recovery_plan;
 mod replay;
 mod sync_store;
+mod trusted_key_store;
 
 use std::{fmt, path::Path, sync::Mutex, time::Duration};
 
@@ -30,7 +31,8 @@ const SQLITE_SCHEMA_V6: u32 = 6;
 const SQLITE_SCHEMA_V7: u32 = 7;
 const SQLITE_SCHEMA_V8: u32 = 8;
 const SQLITE_SCHEMA_V9: u32 = 9;
-pub const SQLITE_SCHEMA_VERSION: u32 = 10;
+const SQLITE_SCHEMA_V10: u32 = 10;
+pub const SQLITE_SCHEMA_VERSION: u32 = 11;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -353,7 +355,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         if count_user_tables(connection)? != 0 {
             return Err(DurableStoreError::ForeignStore);
         }
-        return initialize_schema_v10(connection);
+        return initialize_schema_v11(connection);
     }
     if application_id != UCR_SQLITE_APPLICATION_ID {
         return Err(DurableStoreError::ForeignStore);
@@ -368,7 +370,8 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
-            migrate_v9_to_v10(connection)
+            migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)
         }
         SQLITE_SCHEMA_V2 => {
             migrate_v2_to_v3(connection)?;
@@ -378,7 +381,8 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
-            migrate_v9_to_v10(connection)
+            migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)
         }
         SQLITE_SCHEMA_V3 => {
             migrate_v3_to_v4(connection)?;
@@ -387,7 +391,8 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
-            migrate_v9_to_v10(connection)
+            migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)
         }
         SQLITE_SCHEMA_V4 => {
             migrate_v4_to_v5(connection)?;
@@ -395,37 +400,46 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
-            migrate_v9_to_v10(connection)
+            migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)
         }
         SQLITE_SCHEMA_V5 => {
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
-            migrate_v9_to_v10(connection)
+            migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)
         }
         SQLITE_SCHEMA_V6 => {
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
-            migrate_v9_to_v10(connection)
+            migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)
         }
         SQLITE_SCHEMA_V7 => {
             migrate_v7_to_v8(connection)?;
             migrate_v8_to_v9(connection)?;
-            migrate_v9_to_v10(connection)
+            migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)
         }
         SQLITE_SCHEMA_V8 => {
             migrate_v8_to_v9(connection)?;
-            migrate_v9_to_v10(connection)
+            migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)
         }
-        SQLITE_SCHEMA_V9 => migrate_v9_to_v10(connection),
-        SQLITE_SCHEMA_VERSION => message_store::verify_schema_v10(connection),
+        SQLITE_SCHEMA_V9 => {
+            migrate_v9_to_v10(connection)?;
+            migrate_v10_to_v11(connection)
+        }
+        SQLITE_SCHEMA_V10 => migrate_v10_to_v11(connection),
+        SQLITE_SCHEMA_VERSION => trusted_key_store::verify_schema_v11(connection),
         _ => Err(DurableStoreError::UnsupportedSchemaVersion),
     }
 }
 
-fn initialize_schema_v10(connection: &mut Connection) -> Result<(), DurableStoreError> {
+fn initialize_schema_v11(connection: &mut Connection) -> Result<(), DurableStoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -460,6 +474,7 @@ fn initialize_schema_v10(connection: &mut Connection) -> Result<(), DurableStore
     event_journal::create_v8_objects(&transaction)?;
     command_store::create_v9_objects(&transaction)?;
     message_store::create_v10_objects(&transaction)?;
+    trusted_key_store::create_v11_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -605,12 +620,27 @@ fn migrate_v9_to_v10(connection: &mut Connection) -> Result<(), DurableStoreErro
         .map_err(|error| map_sqlite_error(&error))?;
     message_store::create_v10_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V10)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     message_store::verify_schema_v10(connection)
+}
+
+fn migrate_v10_to_v11(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    message_store::verify_schema_v10(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    trusted_key_store::create_v11_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    trusted_key_store::verify_schema_v11(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1223,8 +1253,9 @@ mod tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF;
+                     DROP TABLE trusted_signing_keys;
                      DROP TABLE message_extensions;
-                 DROP TABLE command_extensions;
+                     DROP TABLE command_extensions;
                      DROP TABLE command_protocol_metadata;
                      PRAGMA user_version=8;",
                 )

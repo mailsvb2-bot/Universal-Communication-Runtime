@@ -10,14 +10,19 @@ use ucr_core::{
     AntiEntropyStore, CommandAcceptanceStore, CommandOutcomeStore, ConversationStore,
     DeliveryStore, DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore,
     MessageStore, RecoveryPlanStore, StorageHealth, StorageProvider, SyncStore,
+    TrustedSigningKeyStore,
 };
-use ucr_crypto::{ReplayError, ReplayProtector, TranscriptBinding, VerifyingKeyBytes};
+use ucr_crypto::{
+    ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
+    TrustedSigningKeyResolver, VerifyingKeyBytes,
+};
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, CommandEnvelope, CommandId, ConversationId,
-    ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState,
+    ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceId,
     EventEnvelope, EventId, EventReconciliation, EventReplicaState, EventSummary, IdentityId,
-    MessageEnvelope, MessageId, RecoveryPlan, RecoveryPlanId, SessionId, SyncCheckpoint,
-    SyncSession, SyncState, TenantScope,
+    KeyId, MessageEnvelope, MessageId, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
+    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CommandError, CommandReceipt, EventError, IdempotencyDecision,
@@ -28,7 +33,7 @@ use ucr_protocol::{
     validate_anti_entropy_summary_count, validate_conversation, validate_conversation_parent_kind,
     validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
     validate_delivery_evidence_order, validate_delivery_transition, validate_sync_checkpoint,
-    validate_sync_transition,
+    validate_sync_transition, validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 9;
@@ -42,6 +47,8 @@ type ConversationKey = (ScopeKey, String);
 type MessageKey = (ScopeKey, String);
 type DeliveryKey = (ScopeKey, String);
 type SyncKey = (ScopeKey, String);
+type TrustedSigningKeyRef = (ScopeKey, String);
+type TrustedSigningDeviceRef = (ScopeKey, String);
 
 #[derive(Default)]
 struct MemoryState {
@@ -59,6 +66,8 @@ struct MemoryState {
     delivery_evidence: HashMap<DeliveryKey, Vec<DeliveryEvidence>>,
     sync_sessions: HashMap<SyncKey, SyncSession>,
     sync_checkpoints: HashMap<SyncKey, Vec<SyncCheckpoint>>,
+    trusted_signing_keys: HashMap<TrustedSigningKeyRef, TrustedSigningKeyRecord>,
+    active_trusted_signing_keys: HashMap<TrustedSigningDeviceRef, String>,
 }
 
 #[derive(Default)]
@@ -85,6 +94,219 @@ impl StorageProvider for MemoryLocalStore {
             .lock()
             .map(|_| StorageHealth::Healthy)
             .map_err(|_| DurableStoreError::Internal)
+    }
+}
+
+impl TrustedSigningKeyStore for MemoryLocalStore {
+    fn provision_trusted_signing_key(
+        &self,
+        scope: &TenantScope,
+        descriptor: &PublicKeyDescriptor,
+    ) -> Result<(), DurableStoreError> {
+        validate_trusted_signing_key_descriptor(descriptor)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key_ref = trusted_key_ref(scope, &descriptor.key_id);
+        let device_ref = trusted_device_ref(scope, &descriptor.device_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+
+        if let Some(existing) = state.trusted_signing_keys.get(&key_ref) {
+            return if existing.state == TrustedSigningKeyState::Active
+                && existing.descriptor == *descriptor
+                && state.active_trusted_signing_keys.get(&device_ref)
+                    == Some(&descriptor.key_id.as_opaque().as_str().to_owned())
+            {
+                Ok(())
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if state.active_trusted_signing_keys.contains_key(&device_ref) {
+            return Err(DurableStoreError::Conflict);
+        }
+
+        state.trusted_signing_keys.insert(
+            key_ref,
+            TrustedSigningKeyRecord {
+                scope: scope.clone(),
+                descriptor: descriptor.clone(),
+                state: TrustedSigningKeyState::Active,
+            },
+        );
+        state.active_trusted_signing_keys.insert(
+            device_ref,
+            descriptor.key_id.as_opaque().as_str().to_owned(),
+        );
+        Ok(())
+    }
+
+    fn rotate_trusted_signing_key(
+        &self,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_current: &KeyId,
+        replacement: &PublicKeyDescriptor,
+    ) -> Result<(), DurableStoreError> {
+        validate_trusted_signing_key_descriptor(replacement)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        if replacement.device_id != *device_id || replacement.key_id == *expected_current {
+            return Err(DurableStoreError::Conflict);
+        }
+        let device_ref = trusted_device_ref(scope, device_id);
+        let expected_ref = trusted_key_ref(scope, expected_current);
+        let replacement_ref = trusted_key_ref(scope, &replacement.key_id);
+        let expected_id = expected_current.as_opaque().as_str();
+        let replacement_id = replacement.key_id.as_opaque().as_str();
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+
+        match state.active_trusted_signing_keys.get(&device_ref) {
+            Some(active) if active == replacement_id => {
+                let old = state.trusted_signing_keys.get(&expected_ref);
+                let new = state.trusted_signing_keys.get(&replacement_ref);
+                return if old.is_some_and(|record| {
+                    record.state == TrustedSigningKeyState::Revoked
+                        && record.descriptor.device_id == *device_id
+                }) && new.is_some_and(|record| {
+                    record.state == TrustedSigningKeyState::Active
+                        && record.descriptor == *replacement
+                }) {
+                    Ok(())
+                } else {
+                    Err(DurableStoreError::Conflict)
+                };
+            }
+            Some(active) if active == expected_id => {}
+            _ => return Err(DurableStoreError::Conflict),
+        }
+        if state.trusted_signing_keys.contains_key(&replacement_ref) {
+            return Err(DurableStoreError::Conflict);
+        }
+        let current = state
+            .trusted_signing_keys
+            .get_mut(&expected_ref)
+            .ok_or(DurableStoreError::Corrupt)?;
+        if current.state != TrustedSigningKeyState::Active
+            || current.descriptor.device_id != *device_id
+        {
+            return Err(DurableStoreError::Corrupt);
+        }
+        current.state = TrustedSigningKeyState::Revoked;
+        state.trusted_signing_keys.insert(
+            replacement_ref,
+            TrustedSigningKeyRecord {
+                scope: scope.clone(),
+                descriptor: replacement.clone(),
+                state: TrustedSigningKeyState::Active,
+            },
+        );
+        state
+            .active_trusted_signing_keys
+            .insert(device_ref, replacement_id.to_owned());
+        Ok(())
+    }
+
+    fn revoke_trusted_signing_key(
+        &self,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_current: &KeyId,
+    ) -> Result<(), DurableStoreError> {
+        let device_ref = trusted_device_ref(scope, device_id);
+        let key_ref = trusted_key_ref(scope, expected_current);
+        let expected_id = expected_current.as_opaque().as_str();
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        match state.active_trusted_signing_keys.get(&device_ref) {
+            Some(active) if active == expected_id => {
+                let current = state
+                    .trusted_signing_keys
+                    .get_mut(&key_ref)
+                    .ok_or(DurableStoreError::Corrupt)?;
+                if current.state != TrustedSigningKeyState::Active
+                    || current.descriptor.device_id != *device_id
+                {
+                    return Err(DurableStoreError::Corrupt);
+                }
+                current.state = TrustedSigningKeyState::Revoked;
+                state.active_trusted_signing_keys.remove(&device_ref);
+                Ok(())
+            }
+            Some(_) => Err(DurableStoreError::Conflict),
+            None => match state.trusted_signing_keys.get(&key_ref) {
+                Some(record)
+                    if record.state == TrustedSigningKeyState::Revoked
+                        && record.descriptor.device_id == *device_id =>
+                {
+                    Ok(())
+                }
+                _ => Err(DurableStoreError::Conflict),
+            },
+        }
+    }
+
+    fn trusted_signing_key(
+        &self,
+        scope: &TenantScope,
+        key_id: &KeyId,
+    ) -> Result<Option<TrustedSigningKeyRecord>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .trusted_signing_keys
+            .get(&trusted_key_ref(scope, key_id))
+            .cloned())
+    }
+
+    fn active_trusted_signing_key(
+        &self,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+    ) -> Result<Option<PublicKeyDescriptor>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let device_ref = trusted_device_ref(scope, device_id);
+        let Some(key_id) = state.active_trusted_signing_keys.get(&device_ref) else {
+            return Ok(None);
+        };
+        let key_ref = (device_ref.0.clone(), key_id.clone());
+        let record = state
+            .trusted_signing_keys
+            .get(&key_ref)
+            .ok_or(DurableStoreError::Corrupt)?;
+        if record.state != TrustedSigningKeyState::Active
+            || record.descriptor.device_id != *device_id
+        {
+            return Err(DurableStoreError::Corrupt);
+        }
+        Ok(Some(record.descriptor.clone()))
+    }
+}
+
+impl TrustedSigningKeyResolver for MemoryLocalStore {
+    fn resolve_active_signing_key(
+        &self,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        key_id: &KeyId,
+    ) -> Result<PublicKeyDescriptor, TrustedKeyResolutionError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| TrustedKeyResolutionError::Internal)?;
+        let device_ref = trusted_device_ref(scope, device_id);
+        if state.active_trusted_signing_keys.get(&device_ref)
+            != Some(&key_id.as_opaque().as_str().to_owned())
+        {
+            return Err(TrustedKeyResolutionError::NotTrusted);
+        }
+        let record = state
+            .trusted_signing_keys
+            .get(&trusted_key_ref(scope, key_id))
+            .ok_or(TrustedKeyResolutionError::Corrupt)?;
+        if record.state != TrustedSigningKeyState::Active
+            || record.descriptor.device_id != *device_id
+        {
+            return Err(TrustedKeyResolutionError::Corrupt);
+        }
+        validate_trusted_signing_key_descriptor(&record.descriptor)
+            .map_err(|_| TrustedKeyResolutionError::Corrupt)?;
+        Ok(record.descriptor.clone())
     }
 }
 
@@ -610,6 +832,14 @@ fn map_command_error(error: CommandError) -> DurableStoreError {
         | CommandError::TooManyExtensions
         | CommandError::ExtensionPayloadTooLarge => DurableStoreError::InvalidRecord,
     }
+}
+
+fn trusted_key_ref(scope: &TenantScope, key_id: &KeyId) -> TrustedSigningKeyRef {
+    (scope_key(scope), key_id.as_opaque().as_str().to_owned())
+}
+
+fn trusted_device_ref(scope: &TenantScope, device_id: &DeviceId) -> TrustedSigningDeviceRef {
+    (scope_key(scope), device_id.as_opaque().as_str().to_owned())
 }
 
 fn scope_key(scope: &TenantScope) -> ScopeKey {
@@ -2027,6 +2257,363 @@ mod anti_entropy_tests {
         assert_eq!(
             store.append_event(&reordered),
             Ok(EventAppendStatus::Duplicate)
+        );
+    }
+}
+
+#[cfg(test)]
+mod trusted_signing_key_tests {
+    use ucr_core::{DurableStoreError, TrustedSigningKeyStore};
+    use ucr_crypto::{
+        AgreementKeyPair, MessageSignatureVerificationError, SessionRole, SigningKeyMaterial,
+        TranscriptBinding, TrustedKeyResolutionError, TrustedMessageSignatureError,
+        TrustedSessionError, TrustedSessionHandshakeInput, TrustedSigningKeyResolver,
+        begin_session_with_trusted_peer, verify_message_signature_with_trust,
+    };
+    use ucr_model::{
+        ActorId, ActorKind, ActorRef, ConversationId, ConversationKind, ConversationRef,
+        CorrelationContext, CryptoSuite, DeliveryPolicy, DeliveryState, DeviceId, DeviceRef,
+        IdentityId, KeyId, KeyPurpose, MessageEnvelope, MessageId, MessageSignature, NamespaceId,
+        OpaqueId, OriginRef, PrincipalId, PublicKeyDescriptor, TenantId, TenantScope,
+        TrustedSigningKeyState,
+    };
+    use ucr_protocol::{
+        ALGORITHM_VERSION, KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID, message_signing_binding,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope(tenant: &str, namespace: Option<&str>) -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid(tenant)),
+            namespace_id: namespace.map(|value| NamespaceId::from_opaque(oid(value))),
+        }
+    }
+
+    fn descriptor(key: &str, device: &str, byte: u8) -> PublicKeyDescriptor {
+        PublicKeyDescriptor {
+            key_id: KeyId::from_opaque(oid(key)),
+            device_id: DeviceId::from_opaque(oid(device)),
+            purpose: KeyPurpose::Signing,
+            algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ALGORITHM_VERSION,
+            key_format_version: KEY_FORMAT_VERSION,
+            public_key: vec![byte; 32],
+        }
+    }
+
+    #[test]
+    fn trusted_signing_key_lifecycle_is_atomic_idempotent_and_irreversible() {
+        let store = MemoryLocalStore::default();
+        let scope = scope("tenant-a", Some("namespace-a"));
+        let first = descriptor("key-a", "device-a", 1);
+        let second = descriptor("key-b", "device-a", 2);
+
+        assert_eq!(store.provision_trusted_signing_key(&scope, &first), Ok(()));
+        assert_eq!(store.provision_trusted_signing_key(&scope, &first), Ok(()));
+        assert_eq!(
+            store.active_trusted_signing_key(&scope, &first.device_id),
+            Ok(Some(first.clone()))
+        );
+
+        let mut conflicting = first.clone();
+        conflicting.public_key[0] ^= 1;
+        assert_eq!(
+            store.provision_trusted_signing_key(&scope, &conflicting),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            store.provision_trusted_signing_key(&scope, &second),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            store.rotate_trusted_signing_key(
+                &scope,
+                &first.device_id,
+                &KeyId::from_opaque(oid("wrong-current")),
+                &second,
+            ),
+            Err(DurableStoreError::Conflict)
+        );
+
+        assert_eq!(
+            store.rotate_trusted_signing_key(&scope, &first.device_id, &first.key_id, &second),
+            Ok(())
+        );
+        assert_eq!(
+            store.rotate_trusted_signing_key(&scope, &first.device_id, &first.key_id, &second),
+            Ok(())
+        );
+        assert_eq!(
+            store
+                .trusted_signing_key(&scope, &first.key_id)
+                .expect("old record")
+                .expect("old key")
+                .state,
+            TrustedSigningKeyState::Revoked
+        );
+        assert_eq!(
+            store.resolve_active_signing_key(&scope, &first.device_id, &first.key_id),
+            Err(TrustedKeyResolutionError::NotTrusted)
+        );
+        assert_eq!(
+            store.resolve_active_signing_key(&scope, &second.device_id, &second.key_id),
+            Ok(second.clone())
+        );
+
+        assert_eq!(
+            store.revoke_trusted_signing_key(&scope, &second.device_id, &second.key_id),
+            Ok(())
+        );
+        assert_eq!(
+            store.revoke_trusted_signing_key(&scope, &second.device_id, &second.key_id),
+            Ok(())
+        );
+        assert_eq!(
+            store.resolve_active_signing_key(&scope, &second.device_id, &second.key_id),
+            Err(TrustedKeyResolutionError::NotTrusted)
+        );
+        assert_eq!(
+            store.provision_trusted_signing_key(&scope, &first),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn trusted_signing_keys_are_exact_scope_and_device_bound() {
+        let store = MemoryLocalStore::default();
+        let scope_a = scope("tenant-a", Some("namespace-a"));
+        let scope_b = scope("tenant-b", Some("namespace-a"));
+        let key_a = descriptor("shared-key-id", "device-a", 3);
+        let key_b = descriptor("shared-key-id", "device-a", 4);
+
+        store
+            .provision_trusted_signing_key(&scope_a, &key_a)
+            .expect("scope a provision");
+        assert_eq!(
+            store.resolve_active_signing_key(&scope_b, &key_a.device_id, &key_a.key_id),
+            Err(TrustedKeyResolutionError::NotTrusted)
+        );
+        assert_eq!(
+            store.active_trusted_signing_key(&scope_b, &key_a.device_id),
+            Ok(None)
+        );
+        assert_eq!(
+            store.provision_trusted_signing_key(&scope_b, &key_b),
+            Ok(())
+        );
+        assert_eq!(
+            store.resolve_active_signing_key(&scope_b, &key_b.device_id, &key_b.key_id),
+            Ok(key_b)
+        );
+        assert_eq!(
+            store.resolve_active_signing_key(
+                &scope_a,
+                &DeviceId::from_opaque(oid("device-other")),
+                &key_a.key_id,
+            ),
+            Err(TrustedKeyResolutionError::NotTrusted)
+        );
+    }
+
+    fn signed_message(
+        signer: &SigningKeyMaterial,
+        descriptor: &PublicKeyDescriptor,
+        scope: &TenantScope,
+    ) -> MessageEnvelope {
+        let mut message = MessageEnvelope {
+            message_id: MessageId::from_opaque(oid("message-trusted")),
+            scope: scope.clone(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(oid("conversation-trusted")),
+                kind: ConversationKind::Direct,
+            },
+            author: ActorRef {
+                actor_id: ActorId::from_opaque(oid("actor-trusted")),
+                kind: ActorKind::Person,
+                on_behalf_of: None,
+            },
+            author_device: DeviceRef {
+                device_id: descriptor.device_id.clone(),
+                identity_id: IdentityId::from_opaque(oid("identity-trusted")),
+            },
+            created_at_unix_ms: 1,
+            logical_order: 1,
+            content: b"trusted message".to_vec(),
+            attachment_ids: Vec::new(),
+            reply_to: None,
+            relations: Vec::new(),
+            crypto_metadata: None,
+            delivery_policy: DeliveryPolicy::Durable,
+            delivery_state: DeliveryState::Created,
+            origin: OriginRef {
+                principal_id: Some(PrincipalId::from_opaque(oid("principal-trusted"))),
+                endpoint_id: None,
+                integration_id: None,
+            },
+            correlation: CorrelationContext {
+                correlation_id: oid("correlation-trusted"),
+                causation_id: None,
+                idempotency_key: None,
+            },
+            extensions: Vec::new(),
+            external_mappings: Vec::new(),
+            signature: None,
+        };
+        let binding = message_signing_binding(&message).expect("message binding");
+        let signature = signer.sign_message_binding(&binding);
+        message.signature = Some(MessageSignature {
+            key_id: descriptor.key_id.clone(),
+            algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ALGORITHM_VERSION,
+            signature: signature.0.to_vec(),
+        });
+        message
+    }
+
+    #[test]
+    fn active_trust_controls_message_verification_and_revocation_denies_same_signature() {
+        let store = MemoryLocalStore::default();
+        let scope = scope("tenant-runtime", None);
+        let signer = SigningKeyMaterial::generate().expect("signing key");
+        let descriptor = PublicKeyDescriptor {
+            key_id: KeyId::from_opaque(oid("runtime-key")),
+            device_id: DeviceId::from_opaque(oid("runtime-device")),
+            purpose: KeyPurpose::Signing,
+            algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ALGORITHM_VERSION,
+            key_format_version: KEY_FORMAT_VERSION,
+            public_key: signer.verifying_key().0.to_vec(),
+        };
+        store
+            .provision_trusted_signing_key(&scope, &descriptor)
+            .expect("provision trust");
+        let message = signed_message(&signer, &descriptor, &scope);
+        assert_eq!(
+            verify_message_signature_with_trust(&message, &store),
+            Ok(())
+        );
+
+        let mut tampered = message.clone();
+        tampered.content.push(b'!');
+        assert_eq!(
+            verify_message_signature_with_trust(&tampered, &store),
+            Err(TrustedMessageSignatureError::Verification(
+                MessageSignatureVerificationError::InvalidSignature
+            ))
+        );
+
+        store
+            .revoke_trusted_signing_key(&scope, &descriptor.device_id, &descriptor.key_id)
+            .expect("revoke trust");
+        assert_eq!(
+            verify_message_signature_with_trust(&message, &store),
+            Err(TrustedMessageSignatureError::Trust(
+                TrustedKeyResolutionError::NotTrusted
+            ))
+        );
+    }
+
+    #[test]
+    fn active_trust_controls_handshake_and_peer_claim_cannot_self_provision() {
+        let store = MemoryLocalStore::default();
+        let scope = scope("tenant-handshake", None);
+        let signer = SigningKeyMaterial::generate().expect("signing key");
+        let descriptor = PublicKeyDescriptor {
+            key_id: KeyId::from_opaque(oid("handshake-key")),
+            device_id: DeviceId::from_opaque(oid("handshake-device")),
+            purpose: KeyPurpose::Signing,
+            algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ALGORITHM_VERSION,
+            key_format_version: KEY_FORMAT_VERSION,
+            public_key: signer.verifying_key().0.to_vec(),
+        };
+        store
+            .provision_trusted_signing_key(&scope, &descriptor)
+            .expect("provision trust");
+
+        let local = AgreementKeyPair::generate().expect("local agreement");
+        let peer = AgreementKeyPair::generate().expect("peer agreement");
+        let binding = TranscriptBinding::from_bytes([11_u8; 32]);
+        let input = TrustedSessionHandshakeInput {
+            scope: scope.clone(),
+            suite: CryptoSuite::UcrV1,
+            role: SessionRole::Initiator,
+            peer_agreement: peer.public_key(),
+            initiator_public: local.public_key(),
+            responder_public: peer.public_key(),
+            peer_signing_descriptor: descriptor.clone(),
+            peer_signature: signer.sign_transcript(&binding),
+            binding,
+        };
+        assert!(begin_session_with_trusted_peer(local, &input, &store, &store).is_ok());
+
+        let local_claim = AgreementKeyPair::generate().expect("local claim agreement");
+        let peer_claim = AgreementKeyPair::generate().expect("peer claim agreement");
+        let claim_binding = TranscriptBinding::from_bytes([12_u8; 32]);
+        let mut false_claim = descriptor.clone();
+        false_claim.public_key[0] ^= 1;
+        let false_input = TrustedSessionHandshakeInput {
+            scope: scope.clone(),
+            suite: CryptoSuite::UcrV1,
+            role: SessionRole::Initiator,
+            peer_agreement: peer_claim.public_key(),
+            initiator_public: local_claim.public_key(),
+            responder_public: peer_claim.public_key(),
+            peer_signing_descriptor: false_claim,
+            peer_signature: signer.sign_transcript(&claim_binding),
+            binding: claim_binding,
+        };
+        assert_eq!(
+            begin_session_with_trusted_peer(local_claim, &false_input, &store, &store)
+                .expect_err("peer claim must not self-provision"),
+            TrustedSessionError::Trust(TrustedKeyResolutionError::NotTrusted)
+        );
+
+        store
+            .revoke_trusted_signing_key(&scope, &descriptor.device_id, &descriptor.key_id)
+            .expect("revoke trust");
+        let local_revoked = AgreementKeyPair::generate().expect("local revoked agreement");
+        let peer_revoked = AgreementKeyPair::generate().expect("peer revoked agreement");
+        let revoked_binding = TranscriptBinding::from_bytes([13_u8; 32]);
+        let revoked_input = TrustedSessionHandshakeInput {
+            scope: scope.clone(),
+            suite: CryptoSuite::UcrV1,
+            role: SessionRole::Initiator,
+            peer_agreement: peer_revoked.public_key(),
+            initiator_public: local_revoked.public_key(),
+            responder_public: peer_revoked.public_key(),
+            peer_signing_descriptor: descriptor,
+            peer_signature: signer.sign_transcript(&revoked_binding),
+            binding: revoked_binding,
+        };
+        assert_eq!(
+            begin_session_with_trusted_peer(local_revoked, &revoked_input, &store, &store)
+                .expect_err("revoked key must not authenticate"),
+            TrustedSessionError::Trust(TrustedKeyResolutionError::NotTrusted)
+        );
+    }
+
+    #[test]
+    fn malformed_or_non_signing_descriptors_never_enter_trust_state() {
+        let store = MemoryLocalStore::default();
+        let scope = scope("tenant-a", None);
+        let mut agreement = descriptor("key-agreement", "device-a", 5);
+        agreement.purpose = KeyPurpose::KeyAgreement;
+        assert_eq!(
+            store.provision_trusted_signing_key(&scope, &agreement),
+            Err(DurableStoreError::InvalidRecord)
+        );
+
+        let mut malformed = descriptor("key-short", "device-a", 6);
+        malformed.public_key.pop();
+        assert_eq!(
+            store.provision_trusted_signing_key(&scope, &malformed),
+            Err(DurableStoreError::InvalidRecord)
         );
     }
 }

@@ -29,6 +29,7 @@ Canonical device lifecycle states are Active, Stale, Reverification Required, Ex
 `DEVICE_LIFECYCLE_STATE_UNSPECIFIED` is a protobuf wire default only and is invalid after semantic decoding.
 
 Revocation is security-significant: a revoked device must not receive new protected content or new credentials. Exact behavior for Stale, Reverification Required, and Expired is policy/recovery work and must not be guessed by transports.
+Trusted signing-key lifecycle is deliberately narrower than Device lifecycle. Revoking a trusted signing key prevents that key from authenticating new UCR Message/handshake operations through the trust resolver, but it does not mutate or duplicate the canonical Device state. Conversely, complete Device revocation must eventually revoke/deny all relevant credential and key-delivery paths, not merely one signing key.
 
 ## 5. Multi-device invariant
 

@@ -2,9 +2,11 @@ use crate::kdf::derive_session_secrets;
 use crate::{
     AgreementError, AgreementKeyPair, AgreementPublicKey, ConfirmationError, ConfirmationKey,
     ConfirmationTag, DerivationError, SignatureBytes, SignatureError, TrafficKey,
-    TranscriptBinding, VerifyingKeyBytes, verify_transcript_signature,
+    TranscriptBinding, TrustedKeyResolutionError, TrustedSigningKeyResolver, VerifyingKeyBytes,
+    verify_transcript_signature,
 };
-use ucr_model::CryptoSuite;
+use ucr_model::{CryptoSuite, PublicKeyDescriptor, TenantScope};
+use ucr_protocol::validate_trusted_signing_key_descriptor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionRole {
@@ -22,6 +24,25 @@ pub struct SessionHandshakeInput {
     pub trusted_peer_verifying_key: VerifyingKeyBytes,
     pub peer_signature: SignatureBytes,
     pub binding: TranscriptBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedSessionHandshakeInput {
+    pub scope: TenantScope,
+    pub suite: CryptoSuite,
+    pub role: SessionRole,
+    pub peer_agreement: AgreementPublicKey,
+    pub initiator_public: AgreementPublicKey,
+    pub responder_public: AgreementPublicKey,
+    pub peer_signing_descriptor: PublicKeyDescriptor,
+    pub peer_signature: SignatureBytes,
+    pub binding: TranscriptBinding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustedSessionError {
+    Trust(TrustedKeyResolutionError),
+    Session(SessionError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +179,57 @@ pub fn begin_session<R: ReplayProtector>(
         local_confirmation,
         peer_confirmation,
     })
+}
+
+/// Resolves an active trusted peer signing descriptor before beginning a secure session.
+///
+/// The peer-supplied descriptor is a claim, not a trust source. It must exactly equal
+/// the independently resolved active descriptor for the requested scope/device/key.
+///
+/// # Errors
+/// Returns a non-disclosing trust failure or the underlying session failure.
+pub fn begin_session_with_trusted_peer<R, T>(
+    local_agreement: AgreementKeyPair,
+    input: &TrustedSessionHandshakeInput,
+    replay: &R,
+    trust: &T,
+) -> Result<PendingSession, TrustedSessionError>
+where
+    R: ReplayProtector,
+    T: TrustedSigningKeyResolver,
+{
+    let claim = &input.peer_signing_descriptor;
+    let trusted = trust
+        .resolve_active_signing_key(&input.scope, &claim.device_id, &claim.key_id)
+        .map_err(TrustedSessionError::Trust)?;
+    if trusted != *claim {
+        return Err(TrustedSessionError::Trust(
+            TrustedKeyResolutionError::NotTrusted,
+        ));
+    }
+    validate_trusted_signing_key_descriptor(&trusted)
+        .map_err(|_| TrustedSessionError::Trust(TrustedKeyResolutionError::Corrupt))?;
+    let public_key: [u8; 32] = trusted
+        .public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| TrustedSessionError::Trust(TrustedKeyResolutionError::Corrupt))?;
+
+    begin_session(
+        local_agreement,
+        SessionHandshakeInput {
+            suite: input.suite,
+            role: input.role,
+            peer_agreement: input.peer_agreement,
+            initiator_public: input.initiator_public,
+            responder_public: input.responder_public,
+            trusted_peer_verifying_key: VerifyingKeyBytes(public_key),
+            peer_signature: input.peer_signature,
+            binding: input.binding,
+        },
+        replay,
+    )
+    .map_err(TrustedSessionError::Session)
 }
 
 impl PendingSession {

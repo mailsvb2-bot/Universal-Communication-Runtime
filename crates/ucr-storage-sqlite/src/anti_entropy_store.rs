@@ -484,7 +484,7 @@ mod tests {
             let connection = Connection::open(db.path()).expect("raw open");
             connection
                 .execute_batch(
-                    "PRAGMA foreign_keys=OFF; DROP TABLE message_extensions; DROP TABLE command_extensions; DROP TABLE command_protocol_metadata; DROP TABLE event_extensions; PRAGMA user_version=7;",
+                    "PRAGMA foreign_keys=OFF; DROP TABLE trusted_signing_keys; DROP TABLE message_extensions; DROP TABLE command_extensions; DROP TABLE command_protocol_metadata; DROP TABLE event_extensions; PRAGMA user_version=7;",
                 )
                 .expect("simulate exact v7 shape");
         }

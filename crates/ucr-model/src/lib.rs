@@ -432,6 +432,19 @@ pub struct PublicKeyDescriptor {
     pub public_key: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustedSigningKeyState {
+    Active,
+    Revoked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedSigningKeyRecord {
+    pub scope: TenantScope,
+    pub descriptor: PublicKeyDescriptor,
+    pub state: TrustedSigningKeyState,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HandshakeNonce([u8; 32]);
 

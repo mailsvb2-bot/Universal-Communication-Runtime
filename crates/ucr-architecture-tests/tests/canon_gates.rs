@@ -355,7 +355,6 @@ fn threat_model_keeps_production_blockers_visible() {
         .expect("read threat model");
 
     for blocker in [
-        "trusted peer signing-key provisioning and lifecycle integration",
         "production OS/hardware-backed key providers for supported targets",
         "tenant-scoped authorization enforcement",
         "Service Principal authentication/least-privilege enforcement",
@@ -1129,7 +1128,8 @@ fn message_intent_and_error_wire_parity_survives_v10_storage() {
     assert!(error_protocol.contains("pub fn canonical_error_envelope"));
     assert!(error_spec.contains("Unknown future non-zero numeric codes remain failures"));
 
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 10;"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V10: u32 = 10;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 11;"));
     assert!(sqlite_root.contains("fn migrate_v9_to_v10"));
     assert!(sqlite_message.contains("CREATE TABLE message_extensions"));
     let sqlite_command =
@@ -1565,12 +1565,100 @@ fn message_signature_verification_binds_authored_semantics_without_claiming_key_
     assert!(spec.contains("d71367107172322ca408610f8a1de9b00fff44383f33ee56e4316fd5043d09d2"));
     assert!(spec.contains("`delivery_state`, `external_mappings`, and `signature` are excluded"));
     assert!(spec.contains("`key_id` inside a Message never establishes trust by itself"));
-    assert!(threat.contains("trusted peer signing-key provisioning and lifecycle integration"));
+    assert!(!threat.contains("- trusted peer signing-key provisioning and lifecycle integration;"));
     assert!(
         !threat.contains(
             "- cryptographic Message-signature verification over canonical signing bytes;"
         )
     );
+}
+
+#[test]
+fn trusted_signing_key_lifecycle_is_scoped_restart_safe_and_runtime_integrated() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+    let resolver = fs::read_to_string(workspace.join("crates/ucr-crypto/src/trusted_key.rs"))
+        .expect("trusted key resolver");
+    let message = fs::read_to_string(workspace.join("crates/ucr-crypto/src/message_signature.rs"))
+        .expect("message trust integration");
+    let session = fs::read_to_string(workspace.join("crates/ucr-crypto/src/session.rs"))
+        .expect("session trust integration");
+    let sqlite =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/trusted_key_store.rs"))
+            .expect("sqlite trust store");
+    let sqlite_root = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory trust store");
+    let crypto_spec = fs::read_to_string(workspace.join("spec/crypto.md")).expect("crypto spec");
+    let storage_spec =
+        fs::read_to_string(workspace.join("spec/local-storage.md")).expect("storage spec");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+
+    for invariant in [
+        "pub enum TrustedSigningKeyState",
+        "pub struct TrustedSigningKeyRecord",
+    ] {
+        assert!(
+            model.contains(invariant),
+            "model trust invariant missing: {invariant}"
+        );
+    }
+    assert!(core.contains("pub trait TrustedSigningKeyStore"));
+    assert!(core.contains("rotate_trusted_signing_key"));
+    assert!(core.contains("revoke_trusted_signing_key"));
+    assert!(resolver.contains("pub trait TrustedSigningKeyResolver"));
+    assert!(resolver.contains("NotTrusted"));
+    assert!(message.contains("verify_message_signature_with_trust"));
+    assert!(session.contains("begin_session_with_trusted_peer"));
+    assert!(session.contains("if trusted != *claim"));
+
+    for evidence in [
+        "trusted_key_rotation_revocation_and_resolver_survive_restart",
+        "concurrent_trusted_key_rotation_has_single_winner",
+        "v10_to_v11_migration_preserves_existing_security_state_and_starts_empty_trust",
+        "corrupt_trusted_key_row_is_rejected_on_reopen",
+        "missing_active_key_unique_index_is_rejected_on_reopen",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "sqlite trust evidence missing: {evidence}"
+        );
+    }
+    assert!(sqlite.contains("trusted_signing_keys_one_active_per_device"));
+    assert!(sqlite.contains("WHERE state = 'active'"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V10: u32 = 10"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 11"));
+    assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
+
+    for evidence in [
+        "trusted_signing_key_lifecycle_is_atomic_idempotent_and_irreversible",
+        "active_trust_controls_message_verification_and_revocation_denies_same_signature",
+        "active_trust_controls_handshake_and_peer_claim_cannot_self_provision",
+    ] {
+        assert!(
+            memory.contains(evidence),
+            "memory trust evidence missing: {evidence}"
+        );
+    }
+    assert!(crypto_spec.contains("peer or referenced by a Message remains a claim"));
+    assert!(storage_spec.contains("Schema v11 migrates v10 transactionally"));
+    assert!(!threat.contains("- trusted peer signing-key provisioning and lifecycle integration;"));
+    for remaining in [
+        "production OS/hardware-backed key providers for supported targets",
+        "tenant-scoped authorization enforcement",
+        "device revocation enforcement in credential/key delivery",
+    ] {
+        assert!(
+            threat.contains(remaining),
+            "neighboring blocker disappeared: {remaining}"
+        );
+    }
 }
 
 #[test]

@@ -76,6 +76,8 @@ Reference tests include RFC 7748 X25519, RFC 8032 Ed25519, RFC 5869 HKDF-SHA-256
 
 Phase 7 crypto plus the Phase-8 Recovery Model now provide an explicit encrypted recovery-package primitive and recovery policy binding. They still do not claim complete credential re-issuance, historical-message key archive design, production OS keystore coverage on every target, formal verification, post-quantum security, or long-lived rekey policy.
 
-A successful Phase-7 session authenticates the trusted device key supplied by the caller. How that device key became trusted, how it is linked/revoked, and recovery consequences remain governed by Identity/Device and Phase-8 recovery contracts.
+Trusted signing-key resolution is now an explicit runtime boundary. `TrustedSigningKeyResolver` resolves only an Active UCR-v1 Signing descriptor for an exact Tenant/Namespace scope, Device ID, and key ID. A descriptor carried by a peer or referenced by a Message remains a claim: it must match independently resolved trust before handshake or Message verification proceeds. Absence, revocation, and ordinary mismatch fail as non-disclosing `NotTrusted`.
+
+The durable reference lifecycle supports first provisioning, expected-current atomic rotation, irreversible key revocation, and exact retry idempotency. Revoked key IDs are never reactivated. This key lifecycle does not duplicate `DeviceLifecycleState`; Device revocation enforcement across credential/content delivery remains separate. Authorization of callers who mutate key trust also remains a separate permissions/runtime responsibility.
 
 Crypto algorithms are replaceable only through a new versioned suite/key format and explicit compatibility policy. Compromised algorithms must be disabled by policy; peers must never silently downgrade to keep a connection alive.
