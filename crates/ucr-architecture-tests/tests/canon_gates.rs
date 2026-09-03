@@ -1936,3 +1936,133 @@ fn tenant_scoped_durable_runtime_authorization_covers_every_current_method() {
     );
     assert!(threat.contains("- Service Principal authentication/least-privilege enforcement;"));
 }
+
+fn canonical_threat_boundaries(threat: &str) -> std::collections::BTreeSet<String> {
+    let boundary_block = threat
+        .split("The canonical boundaries are:\n")
+        .nth(1)
+        .and_then(|tail| tail.split("\n\n").next())
+        .expect("numbered trust-boundary block");
+    let boundaries = boundary_block
+        .lines()
+        .filter_map(|line| line.split_once(". ").map(|(_, name)| name.to_owned()))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        boundaries.len() >= 10,
+        "canonical trust-boundary baseline must not shrink silently"
+    );
+    boundaries
+}
+
+fn metadata_visibility_rows(inventory: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut lines = inventory.lines();
+    assert_eq!(
+        lines.next(),
+        Some(
+            "component_id\tboundary_name\timplementation_status\tmay_observe\tmust_not_observe\tretention\texport_rule"
+        )
+    );
+    let mut component_ids = std::collections::BTreeSet::new();
+    let mut rows = std::collections::BTreeMap::new();
+    for line in lines {
+        let columns = line.split('\t').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            columns.len(),
+            7,
+            "metadata row must have exactly seven columns: {line}"
+        );
+        assert!(
+            columns.iter().all(|value| !value.trim().is_empty()),
+            "metadata row contains an empty required field: {line}"
+        );
+        assert!(
+            matches!(
+                columns[2].as_str(),
+                "implemented" | "partial" | "not_implemented" | "cross_cutting"
+            ),
+            "unknown implementation status: {}",
+            columns[2]
+        );
+        assert!(
+            component_ids.insert(columns[0].clone()),
+            "duplicate metadata component_id: {}",
+            columns[0]
+        );
+        assert!(
+            rows.insert(columns[1].clone(), columns).is_none(),
+            "duplicate metadata boundary"
+        );
+    }
+    rows
+}
+
+#[test]
+fn every_infrastructure_boundary_has_machine_checked_metadata_visibility() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let spec = fs::read_to_string(workspace.join("spec/metadata-visibility.md"))
+        .expect("metadata visibility spec");
+    let inventory = fs::read_to_string(workspace.join("spec/metadata-visibility.tsv"))
+        .expect("metadata visibility inventory");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0029-infrastructure-metadata-visibility-is-explicit-and-machine-checked.md",
+    ))
+    .expect("adr 0029");
+    let boundaries = canonical_threat_boundaries(&threat);
+    let rows = metadata_visibility_rows(&inventory);
+    let inventory_boundaries = rows
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for boundary in &boundaries {
+        assert!(
+            rows.contains_key(boundary),
+            "missing metadata inventory row: {boundary}"
+        );
+    }
+    assert_eq!(inventory_boundaries.len(), boundaries.len() + 1);
+    assert!(inventory_boundaries.contains("Observability"));
+
+    let relay = rows.get("Relay").expect("relay row");
+    assert!(relay[3].contains("encrypted payload length and timing"));
+    assert!(relay[4].contains("plaintext message or attachment content"));
+    let bridge = rows.get("Bridge").expect("bridge row");
+    assert!(bridge[3].contains(
+        "only when the explicit bridge action and policy require provider-visible content"
+    ));
+    let sfu = rows.get("SFU").expect("sfu row");
+    assert!(sfu[3].contains("encrypted media packet size/timing"));
+    assert!(
+        sfu[4].contains(
+            "media plaintext unless an explicitly reviewed media architecture requires it"
+        )
+    );
+    assert!(rows["Cloud Infrastructure"][6].contains("no cloud account"));
+    for forbidden in [
+        "plaintext messages",
+        "authentication secrets",
+        "KEY_MATERIAL",
+    ] {
+        assert!(rows["Observability"][4].contains(forbidden));
+    }
+
+    assert!(spec.contains("minimum-disclosure ceiling"));
+    assert!(spec.contains(
+        "does **not** close the separate `secret/plaintext telemetry regression tests` blocker"
+    ));
+    assert!(adr.contains("future privacy ceiling"));
+    assert!(adr.contains("does not close telemetry leak testing"));
+    assert!(
+        !threat.contains("- metadata-visibility documentation for each infrastructure component;")
+    );
+    assert!(threat.contains("- secret/plaintext telemetry regression tests."));
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+    assert!(ci.contains(
+        "docs/adr/0029-infrastructure-metadata-visibility-is-explicit-and-machine-checked.md"
+    ));
+}

@@ -2,7 +2,7 @@
 
 Status: **Experimental / Phase 0**
 
-Normative detail documents include `framing.md`, `negotiation.md`, `errors.md`, `identity-addressing.md`, `principal-actor-device.md`, `tenant-scope.md`, `permissions.md`, `commands-events.md`, and `local-storage.md`.
+Normative detail documents include `framing.md`, `negotiation.md`, `errors.md`, `identity-addressing.md`, `principal-actor-device.md`, `tenant-scope.md`, `permissions.md`, `commands-events.md`, `local-storage.md`, and `metadata-visibility.md`.
 
 ## 1. Namespaces and versioning
 
