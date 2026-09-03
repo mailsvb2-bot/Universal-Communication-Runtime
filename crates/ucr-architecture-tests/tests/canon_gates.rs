@@ -362,7 +362,6 @@ fn threat_model_keeps_production_blockers_visible() {
         "device revocation enforcement",
         "end-to-end recovery workflow",
         "required threat simulations",
-        "required fuzz targets",
         "secret/plaintext telemetry regression tests",
     ] {
         assert!(
@@ -1571,5 +1570,89 @@ fn message_signature_verification_binds_authored_semantics_without_claiming_key_
         !threat.contains(
             "- cryptographic Message-signature verification over canonical signing bytes;"
         )
+    );
+}
+
+#[test]
+fn implemented_untrusted_boundaries_have_bounded_required_fuzzing() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+    let smoke = fs::read_to_string(workspace.join("fuzz/run-smoke.sh")).expect("fuzz smoke");
+    let manifest = fs::read_to_string(workspace.join("fuzz/Cargo.toml")).expect("fuzz manifest");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+
+    assert!(manifest.contains("[workspace]"));
+    assert!(manifest.contains("libfuzzer-sys = \"=0.4.13\""));
+    assert!(workspace.join("fuzz/Cargo.lock").is_file());
+
+    for target in [
+        "framing_parser",
+        "opaque_id_wire",
+        "message_envelope",
+        "crypto_wrapper",
+    ] {
+        assert!(
+            workspace
+                .join(format!("fuzz/fuzz_targets/{target}.rs"))
+                .is_file()
+        );
+        assert!(workspace.join(format!("fuzz/corpus/{target}")).is_dir());
+        assert!(smoke.contains(&format!("run_target {target} ")));
+    }
+
+    for budget in [
+        "-max_total_time=",
+        "-timeout=",
+        "-rss_limit_mb=",
+        "-max_len=",
+        "mktemp -d",
+    ] {
+        assert!(smoke.contains(budget), "fuzz budget missing: {budget}");
+    }
+
+    assert!(ci.contains("fuzz-smoke:"));
+    assert!(ci.contains("nightly-2026-09-02"));
+    assert!(ci.contains("cargo install cargo-fuzz --version 0.13.2 --locked"));
+    assert!(ci.contains("./fuzz/run-smoke.sh"));
+    assert!(ci.contains("cargo fmt --manifest-path fuzz/Cargo.toml -- --check"));
+    assert!(ci.contains("cargo check --manifest-path fuzz/Cargo.toml --all-targets --locked"));
+    assert!(ci.contains(
+        "cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --locked -- -D warnings"
+    ));
+    assert!(ci.contains("cargo audit --file fuzz/Cargo.lock --deny warnings"));
+    assert!(ci.contains("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"));
+
+    let framing = fs::read_to_string(workspace.join("fuzz/fuzz_targets/framing_parser.rs"))
+        .expect("framing fuzz target");
+    let opaque = fs::read_to_string(workspace.join("fuzz/fuzz_targets/opaque_id_wire.rs"))
+        .expect("opaque id fuzz target");
+    let message = fs::read_to_string(workspace.join("fuzz/fuzz_targets/message_envelope.rs"))
+        .expect("message fuzz target");
+    let crypto = fs::read_to_string(workspace.join("fuzz/fuzz_targets/crypto_wrapper.rs"))
+        .expect("crypto fuzz target");
+
+    assert!(framing.contains("decode_frame_prefix"));
+    assert!(framing.contains("payload.len()"));
+    assert!(opaque.contains("OpaqueId::from_wire_bytes"));
+    assert!(opaque.contains("assert_eq!(id.as_wire_bytes(), data)"));
+    assert!(message.contains("canonical_message"));
+    assert!(message.contains("message_signing_binding"));
+    assert!(crypto.contains("verify_message_binding_signature"));
+    assert!(crypto.contains("verify_transcript_signature"));
+    assert!(crypto.contains("open_recovery_material"));
+
+    assert!(
+        threat.contains(
+            "Current implemented untrusted boundaries have executable bounded fuzz targets"
+        )
+    );
+    assert!(threat.contains("each requires a real fuzz target when its implementation appears"));
+    assert!(
+        !threat.contains("- required fuzz targets for implemented parsers/wrappers;"),
+        "fuzz blocker must only be removed with the positive executable evidence above"
     );
 }

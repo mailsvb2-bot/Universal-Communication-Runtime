@@ -60,6 +60,7 @@ This repository intentionally does not begin with chat UI, messenger adapters, W
 - `crates/ucr-storage-memory/` — storage contract test implementation.
 - `crates/ucr-storage-sqlite/` — local SQLite reference implementation.
 - `crates/ucr-architecture-tests/` — architectural regression gates.
+- `fuzz/` — isolated bounded libFuzzer/ASan targets for implemented untrusted parser/wrapper boundaries.
 
 ## Quality gate
 
@@ -71,6 +72,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo test --workspace --all-targets --locked
 cargo test --workspace --all-targets --release --locked
 cargo audit --deny warnings
+# fuzzing uses separately pinned nightly/cargo-fuzz; see fuzz/README.md
+./fuzz/run-smoke.sh
 ```
 
 ## Non-goals

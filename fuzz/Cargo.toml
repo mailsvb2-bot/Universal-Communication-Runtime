@@ -1,0 +1,44 @@
+[package]
+name = "ucr-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+ucr-crypto = { path = "../crates/ucr-crypto" }
+ucr-model = { path = "../crates/ucr-model" }
+ucr-protocol = { path = "../crates/ucr-protocol" }
+
+[[bin]]
+name = "framing_parser"
+path = "fuzz_targets/framing_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "opaque_id_wire"
+path = "fuzz_targets/opaque_id_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "message_envelope"
+path = "fuzz_targets/message_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypto_wrapper"
+path = "fuzz_targets/crypto_wrapper.rs"
+test = false
+doc = false
+bench = false
