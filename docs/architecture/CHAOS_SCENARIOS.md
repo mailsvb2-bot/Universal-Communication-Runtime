@@ -1,0 +1,30 @@
+# Applicable chaos-scenario evidence
+
+Status: **implemented local/reference boundaries only**.
+
+This matrix indexes executable chaos evidence for capabilities that actually exist in the Rust reference runtime. It does not create placeholder transports, Relay/SFU implementations, DNS dependencies, or crash hooks merely to make the Canon checklist appear complete. A scenario becomes required against a new real boundary in the same change that introduces or promotes that boundary.
+
+| Canon chaos scenario | Current boundary | Executable evidence | Invariant proved | Remaining limitation |
+|---|---|---|---|---|
+| App restart | SQLite command acceptance | `app_restart_chaos_preserves_command_deduplication` | a committed command survives reopen; an equivalent retry is Duplicate and points to the original Command ID | restart is not proof of an OS-level process kill during a transaction |
+| Packet/request duplication | canonical command ingress + SQLite | `duplicate_ingress_chaos_has_one_canonical_acceptance` | two concurrent equivalent retries produce exactly one Accepted and one Duplicate outcome | this is implemented command-ingress duplication, not a production network packet layer |
+| Clock drift / rollback | Service Principal quota/admission + audit | `clock_rollback_chaos_fails_closed_and_is_audited` | backward time cannot reset/bypass quota; access fails TemporarilyUnavailable and records QuotaUnavailable | distributed/global clock and edge-rate-limit behavior is not implemented |
+| Network partition / merge (local/reference replica model) | two Memory stores + Sync/Anti-Entropy | `local_partition_merge_chaos_recovers_missing_and_refuses_damaged_state` | missing Event converges, exact duplicate remains duplicate, conflicting same-ID Event is never overwritten | authenticated remote Sync/Anti-Entropy transport and damaged-replica repair policy remain blockers |
+| Old client | protocol version policy | `old_client_chaos_cannot_force_policy_downgrade` | an overlapping but policy-too-old client fails explicitly instead of lowering the security minimum | production transport/client rollout behavior is not implemented |
+| Packet/content corruption at implemented authentication boundary | Message signature + trusted Device key resolver | `authenticated_message_corruption_chaos_fails_closed` | post-signature content corruption becomes InvalidSignature | production transport packet corruption/reorder and receive-side persistence integration remain unimplemented |
+| Revoked Device + restart | SQLite Device lifecycle + trusted signing-key resolver | `revoked_device_restart_chaos_never_resurrects_trust` | revoke survives reopen, old trust stays unusable, replacement key and Active re-registration are denied | device-bound credential/content delivery beyond trusted-key paths remains separate work |
+| Process kill | durable storage | **OPEN: deterministic mid-operation process-kill injection does not exist** | none claimed | ordinary drop/reopen or rollback tests are not accepted as proof of an OS kill |
+| Storage full | SQLite | **OPEN: only SQLITE_FULL error mapping evidence exists today** | none claimed | requires end-to-end fault injection proving no partial/ambiguous durable mutation |
+| Network loss / network switch | transport | **Not implemented: no production network transport exists** | none claimed | required when a real transport is introduced |
+| DNS failure | transport discovery | **Not implemented: no production DNS-dependent path exists** | none claimed | required when such discovery exists |
+| Relay failure | Relay | **Not implemented: Relay does not exist yet** | none claimed | a mock Relay is not accepted as evidence |
+| SFU failure | SFU | **Not implemented: SFU does not exist yet** | none claimed | a mock SFU is not accepted as evidence |
+| Peer disappearance | remote peer/session transport | **Not implemented: no production peer-liveness/transport boundary exists** | none claimed | required with real remote session integration |
+| Packet reorder | transport receive path | **Not implemented: no production packet receive/reorder boundary exists** | none claimed | protocol collection canonicalization is not a substitute |
+| Slow consumer | transport/queue consumer | **Not implemented: no production consumer/backpressure boundary exists** | none claimed | required when queues/consumers become real runtime capabilities |
+
+## Evidence ownership
+
+Executable scenarios live in `crates/ucr-security-tests/tests/chaos_scenarios.rs`. That crate is evidence-only: it composes public UCR APIs and must not own retry, authorization, identity, crypto, Sync, Device, or persistence policy.
+
+The executable scenarios deliberately assert durable/security outcomes rather than “did not crash”. New real infrastructure boundaries must extend this matrix and executable evidence before Production maturity. Existing open rows stay open until the relevant real failure can be injected without inventing a second runtime or a fake production component.

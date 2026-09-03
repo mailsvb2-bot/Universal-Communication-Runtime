@@ -2608,3 +2608,76 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
         "docs/adr/0034-implemented-trust-boundaries-require-cross-crate-threat-simulations.md"
     ));
 }
+
+#[test]
+fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let chaos =
+        fs::read_to_string(workspace.join("crates/ucr-security-tests/tests/chaos_scenarios.rs"))
+            .expect("chaos scenarios");
+    let matrix = fs::read_to_string(workspace.join("docs/architecture/CHAOS_SCENARIOS.md"))
+        .expect("chaos evidence matrix");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let adr = fs::read_to_string(
+        workspace
+            .join("docs/adr/0035-applicable-chaos-evidence-composes-real-runtime-boundaries.md"),
+    )
+    .expect("adr 0035");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    let scenarios = [
+        "app_restart_chaos_preserves_command_deduplication",
+        "duplicate_ingress_chaos_has_one_canonical_acceptance",
+        "clock_rollback_chaos_fails_closed_and_is_audited",
+        "local_partition_merge_chaos_recovers_missing_and_refuses_damaged_state",
+        "old_client_chaos_cannot_force_policy_downgrade",
+        "authenticated_message_corruption_chaos_fails_closed",
+        "revoked_device_restart_chaos_never_resurrects_trust",
+    ];
+    for scenario in scenarios {
+        assert!(
+            chaos.contains(&format!("fn {scenario}()")),
+            "missing executable chaos scenario: {scenario}"
+        );
+        assert!(
+            matrix.contains(scenario),
+            "missing chaos evidence index: {scenario}"
+        );
+    }
+    let chaos_test_count = chaos
+        .lines()
+        .filter(|line| line.trim_start().starts_with("fn ") && line.contains("_chaos_"))
+        .count();
+    assert_eq!(chaos_test_count, scenarios.len());
+
+    for open_evidence in [
+        "OPEN: deterministic mid-operation process-kill injection does not exist",
+        "OPEN: only SQLITE_FULL error mapping evidence exists today",
+        "Not implemented: no production network transport exists",
+        "Not implemented: Relay does not exist yet",
+        "Not implemented: SFU does not exist yet",
+        "Not implemented: no production packet receive/reorder boundary exists",
+        "Not implemented: no production consumer/backpressure boundary exists",
+    ] {
+        assert!(
+            matrix.contains(open_evidence),
+            "chaos limitation disappeared without evidence: {open_evidence}"
+        );
+    }
+    assert!(!threat.contains("- applicable chaos scenarios;"));
+    assert!(threat.contains(
+        "remaining chaos scenarios: deterministic process-kill and end-to-end storage-full fault injection"
+    ));
+    assert!(threat.contains("seven executable chaos scenarios"));
+    assert!(adr.contains("An application restart is not claimed to be a process-kill test"));
+    assert!(adr.contains(
+        "Create fake Relay/SFU/network implementations only to satisfy the checklist: rejected"
+    ));
+    assert!(
+        ci.contains("docs/adr/0035-applicable-chaos-evidence-composes-real-runtime-boundaries.md")
+    );
+}
