@@ -874,7 +874,8 @@ mod tests {
         let connection = Connection::open(db.path()).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE command_extensions;
+                "DROP TABLE message_extensions;
+                 DROP TABLE command_extensions;
                  DROP TABLE command_protocol_metadata;
                  DROP TABLE event_extensions;
                  DROP TABLE sync_checkpoints;

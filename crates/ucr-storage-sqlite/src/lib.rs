@@ -29,7 +29,8 @@ const SQLITE_SCHEMA_V5: u32 = 5;
 const SQLITE_SCHEMA_V6: u32 = 6;
 const SQLITE_SCHEMA_V7: u32 = 7;
 const SQLITE_SCHEMA_V8: u32 = 8;
-pub const SQLITE_SCHEMA_VERSION: u32 = 9;
+const SQLITE_SCHEMA_V9: u32 = 9;
+pub const SQLITE_SCHEMA_VERSION: u32 = 10;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -352,7 +353,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         if count_user_tables(connection)? != 0 {
             return Err(DurableStoreError::ForeignStore);
         }
-        return initialize_schema_v9(connection);
+        return initialize_schema_v10(connection);
     }
     if application_id != UCR_SQLITE_APPLICATION_ID {
         return Err(DurableStoreError::ForeignStore);
@@ -366,7 +367,8 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
-            migrate_v8_to_v9(connection)
+            migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)
         }
         SQLITE_SCHEMA_V2 => {
             migrate_v2_to_v3(connection)?;
@@ -375,7 +377,8 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
-            migrate_v8_to_v9(connection)
+            migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)
         }
         SQLITE_SCHEMA_V3 => {
             migrate_v3_to_v4(connection)?;
@@ -383,37 +386,46 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
-            migrate_v8_to_v9(connection)
+            migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)
         }
         SQLITE_SCHEMA_V4 => {
             migrate_v4_to_v5(connection)?;
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
-            migrate_v8_to_v9(connection)
+            migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)
         }
         SQLITE_SCHEMA_V5 => {
             migrate_v5_to_v6(connection)?;
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
-            migrate_v8_to_v9(connection)
+            migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)
         }
         SQLITE_SCHEMA_V6 => {
             migrate_v6_to_v7(connection)?;
             migrate_v7_to_v8(connection)?;
-            migrate_v8_to_v9(connection)
+            migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)
         }
         SQLITE_SCHEMA_V7 => {
             migrate_v7_to_v8(connection)?;
-            migrate_v8_to_v9(connection)
+            migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)
         }
-        SQLITE_SCHEMA_V8 => migrate_v8_to_v9(connection),
-        SQLITE_SCHEMA_VERSION => command_store::verify_schema_v9(connection),
+        SQLITE_SCHEMA_V8 => {
+            migrate_v8_to_v9(connection)?;
+            migrate_v9_to_v10(connection)
+        }
+        SQLITE_SCHEMA_V9 => migrate_v9_to_v10(connection),
+        SQLITE_SCHEMA_VERSION => message_store::verify_schema_v10(connection),
         _ => Err(DurableStoreError::UnsupportedSchemaVersion),
     }
 }
 
-fn initialize_schema_v9(connection: &mut Connection) -> Result<(), DurableStoreError> {
+fn initialize_schema_v10(connection: &mut Connection) -> Result<(), DurableStoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -447,6 +459,7 @@ fn initialize_schema_v9(connection: &mut Connection) -> Result<(), DurableStoreE
     sync_store::create_v7_objects(&transaction)?;
     event_journal::create_v8_objects(&transaction)?;
     command_store::create_v9_objects(&transaction)?;
+    message_store::create_v10_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -577,12 +590,27 @@ fn migrate_v8_to_v9(connection: &mut Connection) -> Result<(), DurableStoreError
     command_store::create_v9_objects(&transaction)?;
     command_store::backfill_legacy_v8_commands(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V9)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     command_store::verify_schema_v9(connection)
+}
+
+fn migrate_v9_to_v10(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    command_store::verify_schema_v9(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    message_store::create_v10_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    message_store::verify_schema_v10(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -897,7 +925,7 @@ mod tests {
         DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, ProtocolExtension,
         ProtocolVersion, TenantId, TenantScope,
     };
-    use ucr_protocol::CommandReceiptStatus;
+    use ucr_protocol::{CommandReceiptStatus, MAX_PROTOCOL_EXTENSIONS};
 
     use super::{SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID};
 
@@ -1133,7 +1161,8 @@ mod tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF;
-                     DROP TABLE command_extensions;
+                     DROP TABLE message_extensions;
+                 DROP TABLE command_extensions;
                      DROP TABLE command_protocol_metadata;
                      PRAGMA user_version=8;",
                 )
@@ -1324,6 +1353,81 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("read user version");
         assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn oversized_persisted_command_extension_set_is_rejected_on_reopen() {
+        let db = TestDbPath::new();
+        let value = command(
+            "command-extension-budget",
+            "retry-extension-budget",
+            b"payload",
+            Some("namespace-a"),
+        );
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            store.accept_command(&value).expect("accept command");
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open raw sqlite");
+            for position in 0..=MAX_PROTOCOL_EXTENSIONS {
+                connection
+                    .execute(
+                        "INSERT INTO command_extensions (
+                            tenant_id, namespace_present, namespace_id, command_id,
+                            position, name, critical, payload
+                         ) VALUES (?1,1,?2,?3,?4,?5,0,?6)",
+                        rusqlite::params![
+                            "tenant-a",
+                            "namespace-a",
+                            value.command_id.as_opaque().as_str(),
+                            i64::try_from(position).expect("position"),
+                            format!("vendor.example.command-{position}"),
+                            Vec::<u8>::new(),
+                        ],
+                    )
+                    .expect("insert corrupt command extension");
+            }
+        }
+        assert_eq!(
+            SqliteLocalStore::open(db.path()).err(),
+            Some(DurableStoreError::Corrupt)
+        );
+    }
+
+    #[test]
+    fn oversized_persisted_event_extension_set_is_rejected_on_reopen() {
+        let db = TestDbPath::new();
+        let value = event("event-extension-budget", "command-a", b"payload");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            store.append_event(&value).expect("append event");
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open raw sqlite");
+            for position in 0..=MAX_PROTOCOL_EXTENSIONS {
+                connection
+                    .execute(
+                        "INSERT INTO event_extensions (
+                            tenant_id, namespace_present, namespace_id, event_id,
+                            position, name, critical, payload
+                         ) VALUES (?1,1,?2,?3,?4,?5,0,?6)",
+                        rusqlite::params![
+                            "tenant-a",
+                            "namespace-a",
+                            value.event_id.as_opaque().as_str(),
+                            i64::try_from(position).expect("position"),
+                            format!("vendor.example.event-{position}"),
+                            Vec::<u8>::new(),
+                        ],
+                    )
+                    .expect("insert corrupt event extension");
+            }
+        }
+        assert_eq!(
+            SqliteLocalStore::open(db.path()).err(),
+            Some(DurableStoreError::Corrupt)
+        );
     }
 
     #[test]

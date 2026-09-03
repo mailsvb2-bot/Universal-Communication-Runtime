@@ -5,11 +5,13 @@ use ucr_model::{
     ConversationRecord, ConversationRef, CorrelationContext, CryptoSuite, DeliveryPolicy,
     DeliveryState, DeviceId, DeviceRef, EndpointId, ExternalMessageMapping, IdentityId,
     IntegrationId, KeyId, MessageCryptoMetadata, MessageEnvelope, MessageId, MessageRelation,
-    MessageRelationKind, MessageSignature, OpaqueId, OriginRef, PrincipalId, TenantScope,
+    MessageRelationKind, MessageSignature, OpaqueId, OriginRef, PrincipalId, ProtocolExtension,
+    TenantScope,
 };
 use ucr_protocol::{
-    EXTERNAL_MESSAGE_ID_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT, canonical_message,
-    validate_conversation, validate_conversation_parent_kind,
+    EXTERNAL_MESSAGE_ID_LIMIT, MAX_PROTOCOL_EXTENSIONS, MESSAGE_CRYPTO_METADATA_LIMIT,
+    canonical_message, canonical_protocol_extensions, validate_conversation,
+    validate_conversation_parent_kind,
 };
 
 use super::{
@@ -120,6 +122,25 @@ CREATE TABLE message_external_mappings (
 ) WITHOUT ROWID;
 ";
 
+const V10_OBJECTS_SQL: &str = "
+CREATE TABLE message_extensions (
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+    namespace_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK(position >= 0),
+    name TEXT NOT NULL,
+    critical INTEGER NOT NULL CHECK(critical IN (0, 1)),
+    payload BLOB NOT NULL,
+    PRIMARY KEY(tenant_id, namespace_present, namespace_id, message_id, position),
+    UNIQUE(tenant_id, namespace_present, namespace_id, message_id, name),
+    FOREIGN KEY(tenant_id, namespace_present, namespace_id, message_id)
+      REFERENCES messages(tenant_id, namespace_present, namespace_id, message_id) ON DELETE CASCADE,
+    CHECK((namespace_present = 0 AND namespace_id = '') OR
+          (namespace_present = 1 AND namespace_id <> ''))
+) WITHOUT ROWID;
+";
+
 pub(super) fn create_v5_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
     for sql in [
         V5_OBJECTS_SQL,
@@ -132,6 +153,44 @@ pub(super) fn create_v5_objects(transaction: &Transaction<'_>) -> Result<(), Dur
             .map_err(|error| map_schema_change_error(&error))?;
     }
     Ok(())
+}
+
+pub(super) fn create_v10_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(V10_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn verify_schema_v10(connection: &Connection) -> Result<(), DurableStoreError> {
+    super::command_store::verify_schema_v9(connection)?;
+    verify_table_columns(
+        connection,
+        "message_extensions",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("message_id", "TEXT", 1, 4),
+            ("position", "INTEGER", 1, 5),
+            ("name", "TEXT", 1, 0),
+            ("critical", "INTEGER", 1, 0),
+            ("payload", "BLOB", 1, 0),
+        ],
+    )?;
+    let mut foreign_key_check = connection
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(|error| map_sqlite_error(&error))?;
+    if foreign_key_check
+        .query([])
+        .map_err(|error| map_sqlite_error(&error))?
+        .next()
+        .map_err(|error| map_sqlite_error(&error))?
+        .is_some()
+    {
+        return Err(DurableStoreError::Corrupt);
+    }
+    drop(foreign_key_check);
+    verify_message_extension_rows(connection)
 }
 
 pub(super) fn verify_schema_v5(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -648,6 +707,26 @@ fn insert_message_children(
             )
             .map_err(|error| map_sqlite_error(&error))?;
     }
+    for (position, extension) in message.extensions.iter().enumerate() {
+        transaction
+            .execute(
+                "INSERT INTO message_extensions (
+                    tenant_id, namespace_present, namespace_id, message_id,
+                    position, name, critical, payload
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    message.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    message.message_id.as_opaque().as_str(),
+                    i64::try_from(position).map_err(|_| DurableStoreError::InvalidRecord)?,
+                    extension.name,
+                    i64::from(extension.critical),
+                    extension.payload,
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+    }
     Ok(())
 }
 
@@ -816,6 +895,7 @@ fn load_message_from(
     let attachment_ids = load_attachments(connection, scope, message_id)?;
     let relations = load_relations(connection, scope, message_id)?;
     let external_mappings = load_external_mappings(connection, scope, message_id)?;
+    let extensions = load_message_extensions(connection, scope, message_id)?;
     let message = decode_message_row(
         scope,
         message_id,
@@ -823,6 +903,7 @@ fn load_message_from(
         attachment_ids,
         relations,
         external_mappings,
+        extensions,
     )?;
     canonical_message(&message)
         .map(Some)
@@ -836,6 +917,7 @@ fn decode_message_row(
     attachment_ids: Vec<AttachmentId>,
     relations: Vec<MessageRelation>,
     external_mappings: Vec<ExternalMessageMapping>,
+    extensions: Vec<ProtocolExtension>,
 ) -> Result<MessageEnvelope, DurableStoreError> {
     let logical_order: [u8; 8] = row
         .logical_order
@@ -907,6 +989,7 @@ fn decode_message_row(
             causation_id: row.causation_id.map(parse_opaque).transpose()?,
             idempotency_key: row.idempotency_key,
         },
+        extensions,
         external_mappings,
         signature,
     })
@@ -1052,6 +1135,102 @@ fn load_external_mappings(
     .collect()
 }
 
+fn load_message_extensions(
+    connection: &Connection,
+    scope: &TenantScope,
+    message_id: &MessageId,
+) -> Result<Vec<ProtocolExtension>, DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let mut statement = connection
+        .prepare(
+            "SELECT position, name, critical, payload FROM message_extensions
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND message_id=?4
+             ORDER BY position ASC",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map(
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                message_id.as_opaque().as_str(),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            },
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut extensions = Vec::new();
+    for (expected_position, row) in rows.enumerate() {
+        if expected_position >= MAX_PROTOCOL_EXTENSIONS {
+            return Err(DurableStoreError::Corrupt);
+        }
+        let (position, name, critical, payload) = row.map_err(|error| map_sqlite_error(&error))?;
+        if position != i64::try_from(expected_position).map_err(|_| DurableStoreError::Corrupt)? {
+            return Err(DurableStoreError::Corrupt);
+        }
+        let critical = match critical {
+            0 => false,
+            1 => true,
+            _ => return Err(DurableStoreError::Corrupt),
+        };
+        extensions.push(ProtocolExtension {
+            name,
+            critical,
+            payload,
+        });
+    }
+    let canonical =
+        canonical_protocol_extensions(&extensions).map_err(|_| DurableStoreError::Corrupt)?;
+    if canonical != extensions {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(extensions)
+}
+
+fn verify_message_extension_rows(connection: &Connection) -> Result<(), DurableStoreError> {
+    let mut statement = connection
+        .prepare("SELECT tenant_id, namespace_present, namespace_id, message_id FROM messages")
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut keys = Vec::new();
+    for row in rows {
+        keys.push(row.map_err(|error| map_sqlite_error(&error))?);
+    }
+    drop(statement);
+    for (tenant, present, namespace, message_id) in keys {
+        let namespace_id = match (present, namespace.is_empty()) {
+            (0, true) => None,
+            (1, false) => Some(ucr_model::NamespaceId::from_opaque(parse_opaque(
+                namespace,
+            )?)),
+            _ => return Err(DurableStoreError::Corrupt),
+        };
+        let scope = TenantScope {
+            tenant_id: ucr_model::TenantId::from_opaque(parse_opaque(tenant)?),
+            namespace_id,
+        };
+        let message_id = MessageId::from_opaque(parse_opaque(message_id)?);
+        load_message_extensions(connection, &scope, &message_id)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::{
@@ -1070,7 +1249,7 @@ pub(crate) mod tests {
         MessageStore, StorageProvider,
     };
     use ucr_model::*;
-    use ucr_protocol::{CommandReceiptStatus, canonical_message};
+    use ucr_protocol::{CommandReceiptStatus, MAX_PROTOCOL_EXTENSIONS, canonical_message};
 
     use super::SqliteLocalStore;
     use crate::{SQLITE_SCHEMA_VERSION, UCR_SQLITE_APPLICATION_ID};
@@ -1171,6 +1350,7 @@ pub(crate) mod tests {
                 causation_id: Some(oid("causation-a")),
                 idempotency_key: Some("message-idempotency-a".to_owned()),
             },
+            extensions: Vec::new(),
             external_mappings: vec![
                 ExternalMessageMapping {
                     integration_id: IntegrationId::from_opaque(oid("integration-z")),
@@ -1276,6 +1456,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn message_extensions_survive_restart_and_are_part_of_conflict_semantics() {
+        let db = TestDb::new();
+        let mut first = message(b"extension-message");
+        first.extensions = vec![
+            ProtocolExtension {
+                name: "vendor.example.z".to_owned(),
+                critical: false,
+                payload: b"z".to_vec(),
+            },
+            ProtocolExtension {
+                name: "ucr.example.a".to_owned(),
+                critical: false,
+                payload: b"a".to_vec(),
+            },
+        ];
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            store
+                .persist_conversation(&conversation())
+                .expect("persist conversation");
+            assert_eq!(
+                store.persist_message(&first),
+                Ok(DurableRecordStatus::Persisted)
+            );
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen store");
+        let loaded = reopened
+            .message(&scope(), &first.message_id)
+            .expect("load message")
+            .expect("message exists");
+        assert_eq!(loaded.extensions[0].name, "ucr.example.a");
+        assert_eq!(loaded.extensions[1].name, "vendor.example.z");
+
+        let mut reordered = first.clone();
+        reordered.extensions.reverse();
+        assert_eq!(
+            reopened.persist_message(&reordered),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+
+        let mut changed = reordered;
+        changed.extensions[0].payload.push(b'!');
+        assert_eq!(
+            reopened.persist_message(&changed),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
     fn scoped_message_id_reuse_with_different_semantics_conflicts() {
         let db = TestDb::new();
         let store = SqliteLocalStore::open(db.path()).expect("open store");
@@ -1367,6 +1597,105 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn v9_to_v10_migration_preserves_existing_messages_as_empty_extensions() {
+        let db = TestDb::new();
+        let legacy = message(b"pre-v10");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create current store");
+            store
+                .persist_conversation(&conversation())
+                .expect("persist conversation");
+            store
+                .persist_message(&legacy)
+                .expect("persist legacy message");
+        }
+        {
+            let connection = Connection::open(db.path()).expect("open raw sqlite");
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys=OFF;
+                     DROP TABLE message_extensions;
+                     PRAGMA user_version=9;",
+                )
+                .expect("simulate exact v9 shape");
+        }
+
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v9 to v10");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        let loaded = migrated
+            .message(&scope(), &legacy.message_id)
+            .expect("load migrated message")
+            .expect("message exists");
+        assert!(loaded.extensions.is_empty());
+    }
+
+    #[test]
+    fn oversized_persisted_message_extension_set_is_rejected_on_reopen() {
+        let db = TestDb::new();
+        let value = message(b"extension-budget");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            store
+                .persist_conversation(&conversation())
+                .expect("persist conversation");
+            store.persist_message(&value).expect("persist message");
+        }
+        {
+            let connection = Connection::open(db.path()).expect("raw sqlite");
+            for position in 0..=MAX_PROTOCOL_EXTENSIONS {
+                connection
+                    .execute(
+                        "INSERT INTO message_extensions (
+                            tenant_id, namespace_present, namespace_id, message_id,
+                            position, name, critical, payload
+                         ) VALUES (?1,1,?2,?3,?4,?5,0,?6)",
+                        rusqlite::params![
+                            "tenant-a",
+                            "namespace-a",
+                            value.message_id.as_opaque().as_str(),
+                            i64::try_from(position).expect("position"),
+                            format!("vendor.example.message-{position}"),
+                            Vec::<u8>::new(),
+                        ],
+                    )
+                    .expect("insert corrupt message extension");
+            }
+        }
+        assert!(matches!(
+            SqliteLocalStore::open(db.path()),
+            Err(DurableStoreError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn corrupt_message_extension_rows_are_rejected_on_reopen() {
+        let db = TestDb::new();
+        let mut value = message(b"corrupt-extension");
+        value.extensions.push(ProtocolExtension {
+            name: "ucr.example.valid".to_owned(),
+            critical: false,
+            payload: b"payload".to_vec(),
+        });
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            store
+                .persist_conversation(&conversation())
+                .expect("persist conversation");
+            store.persist_message(&value).expect("persist message");
+        }
+        {
+            let connection = Connection::open(db.path()).expect("raw sqlite");
+            connection
+                .execute("UPDATE message_extensions SET name='not-namespaced'", [])
+                .expect("corrupt extension");
+        }
+        assert!(matches!(
+            SqliteLocalStore::open(db.path()),
+            Err(DurableStoreError::Corrupt)
+        ));
+    }
+
+    #[test]
     fn v4_store_migrates_to_v5_without_losing_existing_durable_state() {
         let db = TestDb::new();
         {
@@ -1377,7 +1706,8 @@ pub(crate) mod tests {
         let connection = Connection::open(db.path()).expect("open raw store");
         connection
             .execute_batch(
-                "DROP TABLE command_extensions;
+                "DROP TABLE message_extensions;
+                 DROP TABLE command_extensions;
                  DROP TABLE command_protocol_metadata;
                  DROP TABLE event_extensions;
                  DROP TABLE sync_checkpoints;

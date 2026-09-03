@@ -6,8 +6,8 @@ use ucr_model::{
 };
 
 use crate::{
-    ALGORITHM_VERSION, DEFAULT_MAX_PAYLOAD_LEN, SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN,
-    validate_origin_ref,
+    ALGORITHM_VERSION, DEFAULT_MAX_PAYLOAD_LEN, ExtensionError, SIGNATURE_ALGORITHM_ID,
+    SIGNATURE_LEN, canonical_protocol_extensions, validate_origin_ref,
 };
 
 pub const MESSAGE_ATTACHMENT_LIMIT: usize = 128;
@@ -40,6 +40,10 @@ pub enum MessageError {
     DuplicateExternalMapping,
     EmptyOrigin,
     InvalidSignature,
+    InvalidExtension,
+    DuplicateExtension,
+    TooManyExtensions,
+    ExtensionPayloadTooLarge,
 }
 
 /// Validates provider-independent Conversation structure.
@@ -158,6 +162,7 @@ pub fn validate_message(message: &MessageEnvelope) -> Result<(), MessageError> {
     if let Some(signature) = &message.signature {
         validate_message_signature(signature)?;
     }
+    canonical_protocol_extensions(&message.extensions).map_err(map_extension_error)?;
     Ok(())
 }
 
@@ -186,6 +191,8 @@ pub fn canonical_message(message: &MessageEnvelope) -> Result<MessageEnvelope, M
             .as_str()
             .cmp(right.integration_id.as_opaque().as_str())
     });
+    canonical.extensions =
+        canonical_protocol_extensions(&message.extensions).map_err(map_extension_error)?;
     Ok(canonical)
 }
 
@@ -198,6 +205,17 @@ const fn relation_rank(kind: MessageRelationKind) -> u8 {
         MessageRelationKind::ThreadParent => 5,
         MessageRelationKind::Forward => 6,
         MessageRelationKind::Reference => 7,
+    }
+}
+
+const fn map_extension_error(error: ExtensionError) -> MessageError {
+    match error {
+        ExtensionError::InvalidNamespace | ExtensionError::UnsupportedCritical => {
+            MessageError::InvalidExtension
+        }
+        ExtensionError::DuplicateExtension => MessageError::DuplicateExtension,
+        ExtensionError::TooManyExtensions => MessageError::TooManyExtensions,
+        ExtensionError::PayloadTooLarge => MessageError::ExtensionPayloadTooLarge,
     }
 }
 
@@ -279,6 +297,7 @@ mod tests {
                 causation_id: None,
                 idempotency_key: Some("message-idempotency-a".into()),
             },
+            extensions: Vec::new(),
             external_mappings: Vec::new(),
             signature: None,
         }
@@ -286,6 +305,31 @@ mod tests {
     #[test]
     fn canonical_message_is_accepted() {
         assert_eq!(validate_message(&message()), Ok(()));
+    }
+
+    #[test]
+    fn message_extensions_are_canonical_and_duplicate_names_fail_closed() {
+        let mut value = message();
+        value.extensions = vec![
+            ProtocolExtension {
+                name: "vendor.example.z".to_owned(),
+                critical: false,
+                payload: b"z".to_vec(),
+            },
+            ProtocolExtension {
+                name: "ucr.example.a".to_owned(),
+                critical: false,
+                payload: b"a".to_vec(),
+            },
+        ];
+        let canonical = canonical_message(&value).expect("canonical message");
+        assert_eq!(canonical.extensions[0].name, "ucr.example.a");
+
+        value.extensions[1].name = "vendor.example.z".to_owned();
+        assert_eq!(
+            validate_message(&value),
+            Err(MessageError::DuplicateExtension)
+        );
     }
 
     #[test]

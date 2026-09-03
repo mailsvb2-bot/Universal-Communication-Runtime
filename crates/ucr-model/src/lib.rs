@@ -709,6 +709,7 @@ pub struct MessageEnvelope {
     pub delivery_state: DeliveryState,
     pub origin: OriginRef,
     pub correlation: CorrelationContext,
+    pub extensions: Vec<ProtocolExtension>,
     pub external_mappings: Vec<ExternalMessageMapping>,
     pub signature: Option<MessageSignature>,
 }
@@ -717,10 +718,10 @@ pub struct MessageEnvelope {
 pub struct IntentConstraints {
     pub allowed_transport_capabilities: Vec<String>,
     pub forbidden_transport_capabilities: Vec<String>,
-    pub privacy_profile: SecurityProfile,
+    pub privacy_profile: Option<String>,
     pub region_constraint: Option<String>,
     pub max_cost_microunits: Option<u64>,
-    pub priority_class: Option<u8>,
+    pub priority_class: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -730,6 +731,8 @@ pub struct CommunicationIntent {
     pub target_identity_id: IdentityId,
     pub payload: Vec<u8>,
     pub constraints: IntentConstraints,
+    pub correlation: CorrelationContext,
+    pub extensions: Vec<ProtocolExtension>,
 }
 
 #[cfg(test)]

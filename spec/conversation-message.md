@@ -19,7 +19,9 @@ A `TOPIC` requires one existing parent root Conversation in the same Tenant/Name
 Self-parenting, missing parents, cross-scope parents, `TOPIC -> TOPIC`, and `THREAD -> root` are invalid. SQLite additionally enforces a same-scope parent foreign key.
 ## 3. Canonical Message
 
-A Message carries: scoped `message_id`, Conversation, author Actor, author Device, wall-clock creation time, logical order, content, attachment IDs, reply projection, typed relations, crypto metadata, delivery policy/state, origin, correlation, external mappings, and optional signature metadata.
+A Message carries: scoped `message_id`, Conversation, author Actor, author Device, wall-clock creation time, logical order, content, attachment IDs, reply projection, typed relations, crypto metadata, delivery policy/state, origin, correlation, protocol extensions, external mappings, and optional signature metadata.
+
+The protobuf `author_device` field is optional only as a wire-presence mechanism. Canonical Message semantic decoding requires an author Device; absence is invalid rather than permission to invent, infer, or drop device provenance.
 
 Canonical IDs are offline-capable opaque IDs. No Message or Conversation identity depends on provider IDs, IP addresses, hostnames, or a server database sequence.
 
@@ -34,7 +36,7 @@ Message content is bounded by the protocol frame payload budget. Attachments, re
 
 Duplicate attachments, duplicate relations, self-relations, empty external mapping IDs, and duplicate integration mappings fail closed. `reply_to` is a projection and must exactly match the single `REPLY` relation when present.
 
-Relation order and external-mapping order are not semantic and are canonicalized deterministically before durable comparison. Attachment order remains semantic.
+Relation order, external-mapping order, and protocol-extension order are not semantic and are canonicalized deterministically before durable comparison. Attachment order remains semantic. Message extensions use the shared namespace, duplicate-name, count, and payload limits.
 
 An empty Message with no content, attachments, or relations is invalid. Origin must contain at least one canonical Principal, Endpoint, or Integration reference.
 
@@ -49,7 +51,7 @@ The Phase-9 boundary intentionally stops at `PERSISTED`. `ENCRYPTED`, `QUEUED`, 
 
 A Message requires its exact Conversation to exist in the same scope and with the same Conversation kind. The same scoped Message ID plus identical canonical semantics is a duplicate; the same ID with different semantics is `CONFLICT`.
 
-SQLite schema v5 stores Conversations and Messages in normalized tables, including ordered attachments and relations plus external mappings. Migration from v4 is additive and preserves existing durable state.
+SQLite schema v5 stores Conversations and Messages in normalized tables, including ordered attachments and relations plus external mappings. Migration from v4 is additive and preserves existing durable state. Post-Phase-12 schema v10 adds normalized `message_extensions`; migration from v9 preserves every existing Message as having the empty extension set, matching the only Message extension semantics representable before v10.
 ## 6. Security and privacy nonclaims
 
 Phase 9 may persist Message content locally before transport encryption, matching `Create -> Persist -> Encrypt -> Queue`. The SQLite reference store therefore does not claim message-content encryption at rest; filesystem/database protection and a future at-rest key policy remain explicit deployment/security work.
@@ -60,6 +62,6 @@ Edit and reaction relations establish canonical relationship vocabulary, but Pha
 
 ## 7. Required evidence
 
-Reference implementations must prove restart-safe Message round-trip, exact duplicate/conflict behavior, valid Conversation hierarchy, concurrent conflicting Message single-winner behavior, and v4-to-v5 migration without loss of pre-existing durable state.
+Reference implementations must prove restart-safe Message round-trip, exact duplicate/conflict behavior including extension semantics, valid Conversation hierarchy, concurrent conflicting Message single-winner behavior, v4-to-v5 migration without loss of pre-existing durable state, and v9-to-v10 migration preserving legacy Messages as empty-extension Messages.
 
 Protobuf compatibility is additive: the original `MessageEnvelope` fields 1-11 remain unchanged; Phase-9 fields use numbers 12-19.
