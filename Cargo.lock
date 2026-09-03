@@ -560,6 +560,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-security-tests"
+version = "0.0.1"
+dependencies = [
+ "ucr-core",
+ "ucr-crypto",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-memory",
+ "ucr-storage-sqlite",
+]
+
+[[package]]
 name = "ucr-storage-memory"
 version = "0.0.1"
 dependencies = [

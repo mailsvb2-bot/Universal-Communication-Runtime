@@ -2519,3 +2519,92 @@ fn every_infrastructure_boundary_has_machine_checked_metadata_visibility() {
         "docs/adr/0029-infrastructure-metadata-visibility-is-explicit-and-machine-checked.md"
     ));
 }
+
+#[test]
+fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let workspace_manifest = fs::read_to_string(workspace.join("Cargo.toml")).expect("workspace");
+    let manifest = fs::read_to_string(workspace.join("crates/ucr-security-tests/Cargo.toml"))
+        .expect("security test manifest");
+    let lib = fs::read_to_string(workspace.join("crates/ucr-security-tests/src/lib.rs"))
+        .expect("security test lib");
+    let simulations =
+        fs::read_to_string(workspace.join("crates/ucr-security-tests/tests/threat_simulations.rs"))
+            .expect("threat simulations");
+    let matrix = fs::read_to_string(workspace.join("docs/architecture/THREAT_SIMULATIONS.md"))
+        .expect("threat simulation matrix");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0034-implemented-trust-boundaries-require-cross-crate-threat-simulations.md",
+    ))
+    .expect("adr 0034");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(workspace_manifest.contains("\"crates/ucr-security-tests\""));
+    assert!(manifest.contains("publish = false"));
+    for dependency in [
+        "ucr-core",
+        "ucr-crypto",
+        "ucr-model",
+        "ucr-protocol",
+        "ucr-storage-memory",
+        "ucr-storage-sqlite",
+    ] {
+        assert!(
+            manifest.contains(dependency),
+            "missing cross-crate dependency: {dependency}"
+        );
+    }
+    assert!(lib.contains("Cross-crate executable threat simulations"));
+    assert!(
+        !lib.contains("pub fn "),
+        "security evidence crate must not grow a second runtime brain"
+    );
+
+    let scenarios = [
+        "replay_simulation_survives_process_restart_and_rejects_duplicate_binding",
+        "mitm_simulation_cannot_replace_trusted_peer_signature_or_poison_replay_state",
+        "forged_identity_simulation_fails_even_with_valid_device_private_key",
+        "malicious_tenant_simulation_cannot_cross_scope_or_mutate_storage",
+        "malicious_service_account_simulation_cannot_bypass_admission_proof",
+        "malicious_peer_simulation_cannot_self_provision_claimed_key",
+        "invalid_permission_simulation_denies_mutation_before_storage",
+        "revoked_device_simulation_denies_existing_signature_and_future_key_access",
+    ];
+    for scenario in scenarios {
+        assert!(
+            simulations.contains(&format!("fn {scenario}()")),
+            "missing executable threat scenario: {scenario}"
+        );
+        assert!(
+            matrix.contains(scenario),
+            "missing threat evidence index: {scenario}"
+        );
+    }
+    let simulation_test_count = simulations
+        .lines()
+        .filter(|line| line.trim_start().starts_with("fn ") && line.contains("_simulation_"))
+        .count();
+    assert_eq!(simulation_test_count, scenarios.len());
+
+    assert!(matrix.contains("Compromised Bridge"));
+    assert!(matrix.contains(
+        "**Not implemented: Bridge does not exist yet; a mock is not accepted as evidence**"
+    ));
+    assert!(threat.contains(
+        "required threat simulations for not-yet-implemented Bridge/remote-transport boundaries"
+    ));
+    assert!(!threat.contains("- required threat simulations;"));
+    assert!(
+        adr.contains(
+            "Create placeholder Bridge/transport implementations only for tests: rejected"
+        )
+    );
+    assert!(ci.contains(
+        "docs/adr/0034-implemented-trust-boundaries-require-cross-crate-threat-simulations.md"
+    ));
+}

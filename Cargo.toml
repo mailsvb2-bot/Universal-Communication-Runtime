@@ -8,6 +8,7 @@ members = [
     "crates/ucr-storage-memory",
     "crates/ucr-storage-sqlite",
     "crates/ucr-architecture-tests",
+    "crates/ucr-security-tests",
 ]
 
 [workspace.package]
