@@ -16,7 +16,10 @@ use rusqlite::{
 };
 use ucr_core::{CommandAcceptanceStore, DurableStoreError, StorageHealth, StorageProvider};
 use ucr_model::{CommandEnvelope, CommandId, OpaqueId, TenantScope};
-use ucr_protocol::{CommandError, CommandReceipt, CommandReceiptStatus, canonical_command};
+use ucr_protocol::{
+    CommandError, CommandReceipt, accepted_command_receipt, canonical_command,
+    duplicate_command_receipt,
+};
 
 const SQLITE_SCHEMA_V1: u32 = 1;
 const SQLITE_SCHEMA_V2: u32 = 2;
@@ -277,11 +280,7 @@ impl CommandAcceptanceStore for SqliteLocalStore {
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
 
-        Ok(CommandReceipt {
-            command_id: command.command_id.clone(),
-            status: CommandReceiptStatus::Accepted,
-            original_command_id: None,
-        })
+        Ok(accepted_command_receipt(command.command_id.clone()))
     }
 }
 #[derive(Debug)]
@@ -317,11 +316,10 @@ fn duplicate_receipt(
     {
         return Err(DurableStoreError::Conflict);
     }
-    Ok(CommandReceipt {
-        command_id: incoming.command_id.clone(),
-        status: CommandReceiptStatus::Duplicate,
-        original_command_id: Some(original_id),
-    })
+    Ok(duplicate_command_receipt(
+        incoming.command_id.clone(),
+        original_id,
+    ))
 }
 
 fn configure_safe_connection(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1022,6 +1020,8 @@ mod tests {
             let store = SqliteLocalStore::open(db.path()).expect("open store");
             let accepted = store.accept_command(&first).expect("accept command");
             assert_eq!(accepted.status, CommandReceiptStatus::Accepted);
+            assert_eq!(accepted.schema_version, ProtocolVersion::new(1, 0));
+            assert!(accepted.extensions.is_empty());
         }
 
         let retry = command("command-b", "retry-a", b"payload", Some("namespace-a"));
@@ -1029,6 +1029,8 @@ mod tests {
         let duplicate = reopened.accept_command(&retry).expect("deduplicate retry");
         assert_eq!(duplicate.status, CommandReceiptStatus::Duplicate);
         assert_eq!(duplicate.original_command_id, Some(first.command_id));
+        assert_eq!(duplicate.schema_version, ProtocolVersion::new(1, 0));
+        assert!(duplicate.extensions.is_empty());
     }
 
     #[test]

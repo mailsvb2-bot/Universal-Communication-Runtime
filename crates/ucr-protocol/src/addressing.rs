@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use ucr_model::{EndpointAddress, EndpointDescriptor, EndpointKind, ExternalIdentityBinding};
 
-use crate::validate_namespaced_identifier;
+use crate::{CapabilityError, canonical_capability_descriptor, validate_namespaced_identifier};
 
 pub const MAX_ADDRESS_VALUE_LEN: usize = 2 * 1024;
 pub const MAX_EXTERNAL_ENTITY_ID_LEN: usize = 2 * 1024;
@@ -19,6 +19,8 @@ pub enum AddressingError {
     TooManyCapabilities,
     DuplicateCapability,
     InvalidCapability,
+    InvalidCapabilityExtension,
+    CapabilityExtensionBudgetExceeded,
     DeviceEndpointMissingDevice,
     DeviceEndpointMissingIdentity,
     DeviceBindingWithoutIdentity,
@@ -76,14 +78,32 @@ pub fn validate_endpoint_descriptor(endpoint: &EndpointDescriptor) -> Result<(),
 
     let mut capabilities = BTreeSet::new();
     for capability in &endpoint.capabilities {
-        validate_namespaced_identifier(&capability.id)
-            .map_err(|_| AddressingError::InvalidCapability)?;
+        canonical_capability_descriptor(capability).map_err(map_capability_error)?;
         if !capabilities.insert(capability.id.as_str()) {
             return Err(AddressingError::DuplicateCapability);
         }
     }
     Ok(())
 }
+const fn map_capability_error(error: CapabilityError) -> AddressingError {
+    match error {
+        CapabilityError::InvalidIdentifier => AddressingError::InvalidCapability,
+        CapabilityError::InvalidExtension | CapabilityError::DuplicateExtension => {
+            AddressingError::InvalidCapabilityExtension
+        }
+        CapabilityError::TooManyExtensions | CapabilityError::ExtensionPayloadTooLarge => {
+            AddressingError::CapabilityExtensionBudgetExceeded
+        }
+        CapabilityError::DuplicateAdvertisement
+        | CapabilityError::InvalidRequirement
+        | CapabilityError::MissingRequired
+        | CapabilityError::RequiredBelowMaturity
+        | CapabilityError::CriticalExtensionRequiresExplicitNegotiation => {
+            AddressingError::InvalidCapability
+        }
+    }
+}
+
 /// Validates an external-entity to canonical-Identity binding.
 ///
 /// The external namespace and opaque entity ID are locators in an integration
@@ -155,6 +175,7 @@ mod tests {
             capabilities: vec![CapabilityDescriptor {
                 id: "ucr.message.text".to_owned(),
                 maturity: CapabilityMaturity::Production,
+                extensions: Vec::new(),
             }],
             addresses: vec![address(b"opaque-address")],
         }
@@ -274,7 +295,7 @@ mod tests {
 mod additional_tests {
     use ucr_model::{
         CapabilityDescriptor, CapabilityMaturity, DeviceId, EndpointAddress, EndpointDescriptor,
-        EndpointId, EndpointKind, IdentityId, OpaqueId,
+        EndpointId, EndpointKind, IdentityId, OpaqueId, ProtocolExtension,
     };
 
     use super::{
@@ -313,10 +334,36 @@ mod additional_tests {
         endpoint.capabilities.push(CapabilityDescriptor {
             id: "text".to_owned(),
             maturity: CapabilityMaturity::Production,
+            extensions: Vec::new(),
         });
         assert_eq!(
             validate_endpoint_descriptor(&endpoint),
             Err(AddressingError::InvalidCapability)
+        );
+    }
+
+    #[test]
+    fn endpoint_capability_extension_shape_is_validated() {
+        let mut endpoint = base_endpoint();
+        endpoint.capabilities.push(CapabilityDescriptor {
+            id: "ucr.message.rich".to_owned(),
+            maturity: CapabilityMaturity::Production,
+            extensions: vec![
+                ProtocolExtension {
+                    name: "vendor.example.same".to_owned(),
+                    critical: false,
+                    payload: b"a".to_vec(),
+                },
+                ProtocolExtension {
+                    name: "vendor.example.same".to_owned(),
+                    critical: false,
+                    payload: b"b".to_vec(),
+                },
+            ],
+        });
+        assert_eq!(
+            validate_endpoint_descriptor(&endpoint),
+            Err(AddressingError::InvalidCapabilityExtension)
         );
     }
 
@@ -339,6 +386,7 @@ mod additional_tests {
             .map(|index| CapabilityDescriptor {
                 id: format!("ucr.test.capability-{index}"),
                 maturity: CapabilityMaturity::Experimental,
+                extensions: Vec::new(),
             })
             .collect();
         assert_eq!(

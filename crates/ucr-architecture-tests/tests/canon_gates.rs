@@ -492,6 +492,122 @@ fn command_receipt_is_not_event_or_effect_proof() {
 }
 
 #[test]
+fn runtime_response_envelopes_keep_wire_parity_and_ack_nonclaim() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let commands = fs::read_to_string(workspace.join("crates/ucr-protocol/src/commands.rs"))
+        .expect("command protocol");
+    let acknowledgement =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/acknowledgement.rs"))
+            .expect("acknowledgement protocol");
+    let framing = fs::read_to_string(workspace.join("crates/ucr-protocol/src/framing.rs"))
+        .expect("framing protocol");
+    let runtime =
+        fs::read_to_string(workspace.join("proto/ucr/v1/runtime.proto")).expect("runtime proto");
+    let framing_spec = fs::read_to_string(workspace.join("spec/framing.md")).expect("framing spec");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+    let sqlite = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite store");
+
+    let receipt = commands
+        .split("pub struct CommandReceipt")
+        .nth(1)
+        .and_then(|tail| tail.split("/// Validates receipt shape").next())
+        .expect("CommandReceipt Rust block");
+    assert!(receipt.contains("pub schema_version: ProtocolVersion"));
+    assert!(receipt.contains("pub extensions: Vec<ProtocolExtension>"));
+    assert!(commands.contains("pub fn canonical_command_receipt"));
+    assert!(commands.contains("RUNTIME_ENVELOPE_SCHEMA_V1"));
+
+    assert!(acknowledgement.contains("pub struct AcknowledgementEnvelope"));
+    assert!(acknowledgement.contains("pub acknowledged_id: OpaqueId"));
+    assert!(acknowledgement.contains("pub schema_version: ProtocolVersion"));
+    assert!(acknowledgement.contains("pub extensions: Vec<ProtocolExtension>"));
+    assert!(acknowledgement.contains("pub fn canonical_acknowledgement"));
+
+    assert!(runtime.contains("message CommandReceipt"));
+    assert!(runtime.contains("ProtocolVersion schema_version = 4;"));
+    assert!(runtime.contains("repeated Extension extensions = 5;"));
+    assert!(runtime.contains("message AcknowledgementEnvelope"));
+    assert!(runtime.contains("OpaqueId acknowledged_id = 1;"));
+    assert!(runtime.contains("ProtocolVersion schema_version = 2;"));
+    assert!(runtime.contains("repeated Extension extensions = 3;"));
+    assert!(framing.contains("Acknowledgement = 6"));
+
+    assert!(memory.contains("accepted_command_receipt"));
+    assert!(memory.contains("duplicate_command_receipt"));
+    assert!(sqlite.contains("accepted_command_receipt"));
+    assert!(sqlite.contains("duplicate_command_receipt"));
+    assert!(framing_spec.contains("not `DeliveryState::ACKNOWLEDGED`"));
+    assert!(
+        framing_spec
+            .contains("cannot be promoted into provider/transport/device/user delivery evidence")
+    );
+}
+
+#[test]
+fn negotiation_and_capabilities_preserve_payload_bearing_extension_wire_semantics() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let capability = fs::read_to_string(workspace.join("crates/ucr-protocol/src/capability.rs"))
+        .expect("capability protocol");
+    let handshake = fs::read_to_string(workspace.join("crates/ucr-protocol/src/handshake.rs"))
+        .expect("handshake protocol");
+    let extension = fs::read_to_string(workspace.join("crates/ucr-protocol/src/extension.rs"))
+        .expect("extension protocol");
+    let common =
+        fs::read_to_string(workspace.join("proto/ucr/v1/common.proto")).expect("common proto");
+    let runtime =
+        fs::read_to_string(workspace.join("proto/ucr/v1/runtime.proto")).expect("runtime proto");
+    let negotiation_spec =
+        fs::read_to_string(workspace.join("spec/negotiation.md")).expect("negotiation spec");
+
+    let capability_model = model
+        .split("pub struct CapabilityDescriptor")
+        .nth(1)
+        .and_then(|tail| tail.split("#[derive").next())
+        .expect("CapabilityDescriptor model block");
+    assert!(capability_model.contains("pub extensions: Vec<ProtocolExtension>"));
+    assert!(common.contains("message Capability"));
+    assert!(common.contains("repeated Extension extensions = 3;"));
+    assert!(capability.contains("pub fn canonical_capability_descriptor"));
+    assert!(capability.contains("CriticalExtensionRequiresExplicitNegotiation"));
+
+    let hello = handshake
+        .split("pub struct PeerHello")
+        .nth(1)
+        .and_then(|tail| tail.split("#[derive").next())
+        .expect("PeerHello block");
+    assert!(hello.contains("pub extensions: Vec<ProtocolExtension>"));
+    assert!(runtime.contains("message NegotiationHello"));
+    assert!(runtime.contains("repeated Extension extensions = 3;"));
+
+    let result = handshake
+        .split("pub struct NegotiationResultEnvelope")
+        .nth(1)
+        .and_then(|tail| tail.split("#[derive").next())
+        .expect("NegotiationResultEnvelope block");
+    assert!(result.contains("pub capabilities: Vec<CapabilityDescriptor>"));
+    assert!(result.contains("pub extensions: Vec<ProtocolExtension>"));
+    assert!(result.contains("pub transcript_binding: Vec<u8>"));
+    assert!(runtime.contains("message NegotiationResult"));
+    assert!(runtime.contains("bytes transcript_binding = 4 [deprecated = true];"));
+    assert!(handshake.contains("DeprecatedTranscriptBindingNotEmpty"));
+    assert!(handshake.contains("pub fn canonical_negotiation_result"));
+
+    assert!(!extension.contains("pub struct ExtensionDescriptor"));
+    assert!(negotiation_spec.contains("extension payload bytes are never discarded"));
+    assert!(negotiation_spec.contains("critical capability-level extension fails negotiation"));
+    assert!(negotiation_spec.contains("does not infer response extensions from either Hello"));
+}
+
+#[test]
 fn command_idempotency_contract_keeps_restart_nonclaim_visible() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

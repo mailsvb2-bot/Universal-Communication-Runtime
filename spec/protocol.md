@@ -8,7 +8,7 @@ Normative detail documents include `framing.md`, `negotiation.md`, `errors.md`, 
 
 Stable canonical identifiers use `ucr.*`. Experimental extensions use `experimental.*`. Vendor and organization extensions use `vendor.<name>.*` and `organization.<id>.*`.
 
-Every protocol envelope carries an explicit schema/protocol version. Unknown optional extensions are tolerated according to the enclosing schema. Unknown critical extensions fail explicitly.
+Every protocol envelope carries an explicit schema/protocol version. Runtime response envelopes such as `CommandReceipt` and `AcknowledgementEnvelope`, negotiation Hello/Result, and public Capability descriptors preserve their version/extension boundary in both protobuf and the Rust reference implementation. `ProtocolExtension` is the single payload-bearing Rust extension value; a payload-less parallel extension model is forbidden. Unknown optional extensions are tolerated according to the enclosing schema. Unknown critical extensions fail explicitly when support is evaluated.
 
 ## 2. Canonical IDs and scope
 

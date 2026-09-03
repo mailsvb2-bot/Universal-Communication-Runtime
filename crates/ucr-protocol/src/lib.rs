@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod acknowledgement;
 mod addressing;
 mod anti_entropy;
 mod authorization;
@@ -19,6 +20,10 @@ mod scope;
 mod sync;
 mod version;
 
+pub use acknowledgement::{
+    AcknowledgementEnvelope, AcknowledgementError, acknowledgement_for, canonical_acknowledgement,
+    validate_acknowledgement,
+};
 pub use addressing::{
     AddressingError, MAX_ADDRESS_VALUE_LEN, MAX_ENDPOINT_ADDRESSES, MAX_ENDPOINT_CAPABILITIES,
     MAX_EXTERNAL_ENTITY_ID_LEN, validate_endpoint_address, validate_endpoint_descriptor,
@@ -36,12 +41,13 @@ pub use authorization::{
 };
 pub use capability::{
     CapabilityDescriptor, CapabilityError, CapabilityMaturity, CapabilityRequirement,
-    negotiate_capabilities,
+    canonical_capabilities, canonical_capability_descriptor, negotiate_capabilities,
 };
 pub use commands::{
     CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
-    ReceiptError, canonical_command, canonical_event, compare_command_idempotency,
-    validate_command, validate_command_receipt, validate_event,
+    ReceiptError, accepted_command_receipt, canonical_command, canonical_command_receipt,
+    canonical_event, compare_command_idempotency, duplicate_command_receipt, validate_command,
+    validate_command_receipt, validate_event,
 };
 pub use crypto_contract::{
     AEAD_ALGORITHM_ID, AGREEMENT_ALGORITHM_ID, ALGORITHM_VERSION, CRYPTO_SUITE_ID,
@@ -59,7 +65,7 @@ pub use delivery::{
 };
 pub use error::{CanonicalError, CanonicalErrorCode};
 pub use extension::{
-    ExtensionDescriptor, ExtensionError, MAX_EXTENSION_PAYLOAD_LEN, MAX_PROTOCOL_EXTENSIONS,
+    ExtensionError, MAX_EXTENSION_PAYLOAD_LEN, MAX_PROTOCOL_EXTENSIONS,
     canonical_protocol_extensions, require_supported_extensions, validate_extension_name,
     validate_namespaced_identifier,
 };
@@ -68,7 +74,9 @@ pub use framing::{
     FrameHeader, FrameKind, FramePolicy, decode_frame_prefix, decode_header,
 };
 pub use handshake::{
-    HandshakeError, NegotiatedSession, NegotiationPolicy, PeerHello, negotiate_session,
+    HandshakeError, NegotiatedSession, NegotiationPolicy, NegotiationResultEnvelope,
+    NegotiationResultError, PeerHello, canonical_negotiation_result, negotiate_session,
+    negotiation_result_for_session, validate_negotiation_result,
 };
 pub use message::{
     ConversationError, EXTERNAL_MESSAGE_ID_LIMIT, EXTERNAL_MESSAGE_MAPPING_LIMIT,
@@ -87,6 +95,6 @@ pub use sync::{
     validate_sync_transition,
 };
 pub use version::{
-    ProtocolVersion, VersionNegotiationError, VersionPolicy, VersionRange, negotiate_version,
-    negotiate_version_sets,
+    ProtocolVersion, RUNTIME_ENVELOPE_SCHEMA_V1, VersionNegotiationError, VersionPolicy,
+    VersionRange, negotiate_version, negotiate_version_sets,
 };

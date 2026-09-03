@@ -1,8 +1,8 @@
 use crate::{
-    AddressingError, AuthorizationError, CapabilityError, CommandError, ConversationError,
-    CryptoContractError, CryptoNegotiationError, DeliveryError, EventError, ExtensionError,
-    FrameError, HandshakeError, MessageError, ProvenanceError, RecoveryError, ScopeError,
-    SyncError, VersionNegotiationError,
+    AcknowledgementError, AddressingError, AuthorizationError, CapabilityError, CommandError,
+    ConversationError, CryptoContractError, CryptoNegotiationError, DeliveryError, EventError,
+    ExtensionError, FrameError, HandshakeError, MessageError, NegotiationResultError,
+    ProvenanceError, ReceiptError, RecoveryError, ScopeError, SyncError, VersionNegotiationError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +110,19 @@ impl From<CryptoNegotiationError> for CanonicalError {
             | CryptoNegotiationError::DuplicatePolicySuite => CanonicalErrorCode::InvalidArgument,
         };
         Self::new(code)
+    }
+}
+
+impl From<NegotiationResultError> for CanonicalError {
+    fn from(error: NegotiationResultError) -> Self {
+        match error {
+            NegotiationResultError::InvalidVersion
+            | NegotiationResultError::DeprecatedTranscriptBindingNotEmpty => {
+                Self::new(CanonicalErrorCode::InvalidArgument)
+            }
+            NegotiationResultError::Capability(inner) => Self::from(inner),
+            NegotiationResultError::Extension(inner) => Self::from(inner),
+        }
     }
 }
 
@@ -263,6 +276,37 @@ impl From<CommandError> for CanonicalError {
     }
 }
 
+impl From<ReceiptError> for CanonicalError {
+    fn from(error: ReceiptError) -> Self {
+        let code = match error {
+            ReceiptError::TooManyExtensions | ReceiptError::ExtensionPayloadTooLarge => {
+                CanonicalErrorCode::ResourceExhausted
+            }
+            ReceiptError::AcceptedHasOriginal
+            | ReceiptError::DuplicateMissingOriginal
+            | ReceiptError::InvalidSchemaVersion
+            | ReceiptError::InvalidExtension
+            | ReceiptError::DuplicateExtension => CanonicalErrorCode::InvalidArgument,
+        };
+        Self::new(code)
+    }
+}
+
+impl From<AcknowledgementError> for CanonicalError {
+    fn from(error: AcknowledgementError) -> Self {
+        let code = match error {
+            AcknowledgementError::TooManyExtensions
+            | AcknowledgementError::ExtensionPayloadTooLarge => {
+                CanonicalErrorCode::ResourceExhausted
+            }
+            AcknowledgementError::InvalidSchemaVersion
+            | AcknowledgementError::InvalidExtension
+            | AcknowledgementError::DuplicateExtension => CanonicalErrorCode::InvalidArgument,
+        };
+        Self::new(code)
+    }
+}
+
 impl From<EventError> for CanonicalError {
     fn from(error: EventError) -> Self {
         let code = match error {
@@ -284,7 +328,15 @@ impl From<CapabilityError> for CanonicalError {
         let code = match error {
             CapabilityError::InvalidIdentifier
             | CapabilityError::DuplicateAdvertisement
-            | CapabilityError::InvalidRequirement => CanonicalErrorCode::InvalidArgument,
+            | CapabilityError::InvalidRequirement
+            | CapabilityError::InvalidExtension
+            | CapabilityError::DuplicateExtension => CanonicalErrorCode::InvalidArgument,
+            CapabilityError::TooManyExtensions | CapabilityError::ExtensionPayloadTooLarge => {
+                CanonicalErrorCode::ResourceExhausted
+            }
+            CapabilityError::CriticalExtensionRequiresExplicitNegotiation => {
+                CanonicalErrorCode::UnsupportedCriticalExtension
+            }
             CapabilityError::MissingRequired | CapabilityError::RequiredBelowMaturity => {
                 CanonicalErrorCode::CapabilityMismatch
             }
@@ -299,12 +351,14 @@ impl From<AddressingError> for CanonicalError {
             AddressingError::AddressValueTooLong
             | AddressingError::TooManyAddresses
             | AddressingError::TooManyCapabilities
+            | AddressingError::CapabilityExtensionBudgetExceeded
             | AddressingError::ExternalEntityIdTooLong => CanonicalErrorCode::ResourceExhausted,
             AddressingError::InvalidScheme
             | AddressingError::EmptyAddressValue
             | AddressingError::DuplicateAddress
             | AddressingError::DuplicateCapability
             | AddressingError::InvalidCapability
+            | AddressingError::InvalidCapabilityExtension
             | AddressingError::DeviceEndpointMissingDevice
             | AddressingError::DeviceEndpointMissingIdentity
             | AddressingError::DeviceBindingWithoutIdentity
@@ -319,8 +373,10 @@ impl From<AddressingError> for CanonicalError {
 mod tests {
     use super::{CanonicalError, CanonicalErrorCode};
     use crate::{
-        AddressingError, AuthorizationError, CommandError, ConversationError, CryptoContractError,
-        DeliveryError, MessageError, ProvenanceError, RecoveryError, ScopeError, SyncError,
+        AcknowledgementError, AddressingError, AuthorizationError, CapabilityError, CommandError,
+        ConversationError, CryptoContractError, DeliveryError, MessageError,
+        NegotiationResultError, ProvenanceError, ReceiptError, RecoveryError, ScopeError,
+        SyncError,
     };
 
     #[test]
@@ -329,6 +385,43 @@ mod tests {
         assert!(CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable).retryable);
         assert!(!CanonicalError::new(CanonicalErrorCode::IntegrityFailure).retryable);
         assert!(!CanonicalError::new(CanonicalErrorCode::PermissionDenied).retryable);
+    }
+
+    #[test]
+    fn receipt_and_acknowledgement_failures_keep_validation_and_budget_categories_stable() {
+        assert_eq!(
+            CanonicalError::from(ReceiptError::InvalidSchemaVersion).code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            CanonicalError::from(ReceiptError::ExtensionPayloadTooLarge).code,
+            CanonicalErrorCode::ResourceExhausted
+        );
+        assert_eq!(
+            CanonicalError::from(AcknowledgementError::DuplicateExtension).code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            CanonicalError::from(AcknowledgementError::TooManyExtensions).code,
+            CanonicalErrorCode::ResourceExhausted
+        );
+    }
+
+    #[test]
+    fn negotiation_extension_failures_keep_fail_closed_categories_stable() {
+        assert_eq!(
+            CanonicalError::from(CapabilityError::CriticalExtensionRequiresExplicitNegotiation)
+                .code,
+            CanonicalErrorCode::UnsupportedCriticalExtension
+        );
+        assert_eq!(
+            CanonicalError::from(CapabilityError::ExtensionPayloadTooLarge).code,
+            CanonicalErrorCode::ResourceExhausted
+        );
+        assert_eq!(
+            CanonicalError::from(NegotiationResultError::DeprecatedTranscriptBindingNotEmpty).code,
+            CanonicalErrorCode::InvalidArgument
+        );
     }
 
     #[test]
