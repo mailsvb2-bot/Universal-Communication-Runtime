@@ -124,6 +124,7 @@ id_type!(IntentId);
 id_type!(KeyId);
 id_type!(RecoveryPlanId);
 id_type!(ServiceCredentialId);
+id_type!(AuditRecordId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrincipalKind {
@@ -540,6 +541,36 @@ impl fmt::Debug for ServiceCredentialRecord {
             .field("state", &self.state)
             .finish()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceQuotaPolicy {
+    pub subject: ScopedPrincipal,
+    pub max_requests: u64,
+    pub window_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceAuditOutcome {
+    AuthenticationFailed,
+    AuthenticationUnavailable,
+    RateLimited,
+    QuotaUnavailable,
+    PermissionDenied,
+    AuthorizationUnavailable,
+    Authorized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceAuditRecord {
+    pub audit_id: AuditRecordId,
+    pub credential_id: ServiceCredentialId,
+    pub presented_scope: TenantScope,
+    pub subject: Option<ScopedPrincipal>,
+    pub permission: String,
+    pub resource_scope: TenantScope,
+    pub outcome: ServiceAuditOutcome,
+    pub occurred_at_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

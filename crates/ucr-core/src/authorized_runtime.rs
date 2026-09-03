@@ -2,9 +2,10 @@ use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
     ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
     DeliveryState, DeviceId, EventEnvelope, EventId, EventReconciliation, EventSummary, IdentityId,
-    KeyId, MessageEnvelope, MessageId, PermissionGrant, PermissionScope, PublicKeyDescriptor,
-    RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceCredentialId, ServiceCredentialRecord,
-    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    KeyId, MessageEnvelope, MessageId, PermissionGrant, PermissionScope, PrincipalKind,
+    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditRecord,
+    ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint,
+    SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{
     ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, COMMAND_ACCEPT_PERMISSION,
@@ -14,17 +15,20 @@ use ucr_protocol::{
     MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
     PERMISSION_GRANT_REVOKE_PERMISSION, RECOVERY_PLAN_INSTALL_PERMISSION,
     RECOVERY_PLAN_READ_PERMISSION, RECOVERY_PLAN_REVOKE_PERMISSION,
-    RECOVERY_PLAN_ROTATE_PERMISSION, SERVICE_CREDENTIAL_PROVISION_PERMISSION,
-    SERVICE_CREDENTIAL_REVOKE_PERMISSION, SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION,
-    TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_READ_PERMISSION,
-    TRUSTED_SIGNING_KEY_REVOKE_PERMISSION, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
+    RECOVERY_PLAN_ROTATE_PERMISSION, SERVICE_AUDIT_READ_PERMISSION,
+    SERVICE_CREDENTIAL_PROVISION_PERMISSION, SERVICE_CREDENTIAL_REVOKE_PERMISSION,
+    SERVICE_QUOTA_READ_PERMISSION, SERVICE_QUOTA_WRITE_PERMISSION, SYNC_READ_PERMISSION,
+    SYNC_WRITE_PERMISSION, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
+    TRUSTED_SIGNING_KEY_READ_PERMISSION, TRUSTED_SIGNING_KEY_REVOKE_PERMISSION,
+    TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
 };
 
 use crate::{
     AntiEntropyStore, AuthorizationEvaluator, AuthorizedMutationError, CommandAcceptanceStore,
     CommandOutcomeStore, ConversationStore, DeliveryStore, DurableRecordStatus, DurableStoreError,
     EventAppendStatus, EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore,
-    ServiceCredentialStore, SyncStore, TrustedSigningKeyStore,
+    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaStore, SyncStore,
+    TrustedSigningKeyStore,
 };
 
 /// Authorization-enforcing runtime boundary over tenant-scoped durable capabilities.
@@ -55,12 +59,25 @@ where
         scope: &TenantScope,
         permission: &str,
     ) -> Result<(), AuthorizedMutationError> {
+        let request = AuthorizationRequest {
+            subject: subject.clone(),
+            permission: permission.to_owned(),
+            resource_scope: scope.clone(),
+        };
+        if subject.principal.kind == PrincipalKind::ServiceAccount
+            && !self
+                .authorization
+                .service_principal_admission_proof()
+                .is_some_and(|proof| proof.matches(&request))
+        {
+            return Err(AuthorizedMutationError::Authorization(
+                ucr_protocol::CanonicalError::new(
+                    ucr_protocol::CanonicalErrorCode::PermissionDenied,
+                ),
+            ));
+        }
         self.authorization
-            .authorize(&AuthorizationRequest {
-                subject: subject.clone(),
-                permission: permission.to_owned(),
-                resource_scope: scope.clone(),
-            })
+            .authorize(&request)
             .map_err(AuthorizedMutationError::Authorization)
     }
 }
@@ -166,6 +183,68 @@ where
         self.require(subject, scope, SERVICE_CREDENTIAL_REVOKE_PERMISSION)?;
         self.store
             .revoke_service_credential(scope, credential_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: ServiceQuotaStore,
+{
+    /// Reads one Service Principal quota policy only after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn service_quota_policy(
+        &self,
+        subject: &ScopedPrincipal,
+        target: &ScopedPrincipal,
+    ) -> Result<Option<ServiceQuotaPolicy>, AuthorizedMutationError> {
+        self.require(subject, &target.scope, SERVICE_QUOTA_READ_PERMISSION)?;
+        self.store
+            .service_quota_policy(target)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Installs or replaces one Service Principal quota policy only after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn set_service_quota_policy(
+        &self,
+        subject: &ScopedPrincipal,
+        policy: &ServiceQuotaPolicy,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(
+            subject,
+            &policy.subject.scope,
+            SERVICE_QUOTA_WRITE_PERMISSION,
+        )?;
+        self.store
+            .set_service_quota_policy(policy)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: ServiceAuditStore,
+{
+    /// Reads the newest bounded Service Principal admission audit records after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn service_audit_records(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        max_items: usize,
+    ) -> Result<Vec<ServiceAuditRecord>, AuthorizedMutationError> {
+        self.require(subject, scope, SERVICE_AUDIT_READ_PERMISSION)?;
+        self.store
+            .service_audit_records(scope, max_items)
             .map_err(AuthorizedMutationError::Store)
     }
 }

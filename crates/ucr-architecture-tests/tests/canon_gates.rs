@@ -356,7 +356,6 @@ fn threat_model_keeps_production_blockers_visible() {
 
     for blocker in [
         "production OS/hardware-backed key providers for supported targets",
-        "Service Principal quota and audit enforcement",
         "device revocation enforcement",
         "end-to-end recovery workflow",
         "required threat simulations",
@@ -1130,11 +1129,13 @@ fn message_intent_and_error_wire_parity_survives_v10_storage() {
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V10: u32 = 10;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 13;"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 14;"));
     assert!(sqlite_root.contains("fn migrate_v9_to_v10"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
+    assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
     assert!(sqlite_message.contains("CREATE TABLE message_extensions"));
     let sqlite_command =
         fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/command_store.rs"))
@@ -1639,10 +1640,12 @@ fn trusted_signing_key_lifecycle_is_scoped_restart_safe_and_runtime_integrated()
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V10: u32 = 10"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 13"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 14"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
+    assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
 
     for evidence in [
         "trusted_signing_key_lifecycle_is_atomic_idempotent_and_irreversible",
@@ -1801,9 +1804,11 @@ fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overc
             .contains("v11_to_v12_migration_preserves_trusted_key_state_and_starts_without_grants")
     );
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 13;"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 14;"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
+    assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
     assert!(spec.contains("SQLite schema v12"));
     assert!(adr.contains("does not claim every Command/Message/Sync/Delivery/runtime operation"));
     assert!(threat.contains("SQLite v12 state"));
@@ -1812,6 +1817,9 @@ fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overc
 const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
     "provision_service_credential",
     "revoke_service_credential",
+    "service_quota_policy",
+    "set_service_quota_policy",
+    "service_audit_records",
     "grant_permission",
     "revoke_permission",
     "permission_grants_for",
@@ -1849,6 +1857,9 @@ const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
 const AUTHORIZED_RUNTIME_PERMISSIONS: &[&str] = &[
     "SERVICE_CREDENTIAL_PROVISION_PERMISSION",
     "SERVICE_CREDENTIAL_REVOKE_PERMISSION",
+    "SERVICE_QUOTA_READ_PERMISSION",
+    "SERVICE_QUOTA_WRITE_PERMISSION",
+    "SERVICE_AUDIT_READ_PERMISSION",
     "PERMISSION_GRANT_READ_PERMISSION",
     "PERMISSION_GRANT_CREATE_PERMISSION",
     "PERMISSION_GRANT_REVOKE_PERMISSION",
@@ -1945,7 +1956,7 @@ fn tenant_scoped_durable_runtime_authorization_covers_every_current_method() {
         "authorization blocker may be removed only with complete runtime evidence"
     );
     assert!(!threat.contains("- Service Principal authentication/least-privilege enforcement;"));
-    assert!(threat.contains("- Service Principal quota and audit enforcement;"));
+    assert!(!threat.contains("- Service Principal quota and audit enforcement;"));
 }
 
 #[test]
@@ -1994,10 +2005,12 @@ fn service_principal_authentication_resolves_canonical_identity_before_least_pri
     assert!(protocol.contains("ucr.authentication.service_credential.provision"));
     assert!(protocol.contains("ucr.authentication.service_credential.revoke"));
     assert!(memory.contains(
-        "credential_authentication_is_non_disclosing_revocable_and_feeds_least_privilege_runtime"
+        "credential_authentication_is_non_disclosing_revocable_and_raw_runtime_cannot_bypass_gate"
     ));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 13"));
+    assert!(sqlite.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 14"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V12 => migrate_v12_to_v13(connection)?"));
+    assert!(sqlite.contains("SQLITE_SCHEMA_V13 => migrate_v13_to_v14(connection)?"));
     assert!(
         sqlite_credentials.contains("credential_survives_restart_and_revocation_remains_effective")
     );
@@ -2020,9 +2033,152 @@ fn service_principal_authentication_resolves_canonical_identity_before_least_pri
         "authentication/least-privilege blocker may disappear only with this executable evidence"
     );
     assert!(
-        threat.contains("- Service Principal quota and audit enforcement;"),
-        "remaining production Service Principal requirements must stay visible"
+        !threat.contains("- Service Principal quota and audit enforcement;"),
+        "quota/audit blocker may disappear only with dedicated executable evidence"
     );
+}
+
+#[test]
+fn service_principal_request_ingress_requires_unforgeable_single_use_quota_context() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+    let request = fs::read_to_string(workspace.join("crates/ucr-core/src/service_request.rs"))
+        .expect("service request gate");
+    let runtime = fs::read_to_string(workspace.join("crates/ucr-core/src/authorized_runtime.rs"))
+        .expect("authorized runtime");
+    let authorization =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/authorization.rs"))
+            .expect("authorization protocol");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+
+    assert!(core.contains("pub trait ServiceQuotaStore"));
+    assert!(core.contains("pub trait ServiceAuditStore"));
+    assert!(request.contains("pub struct ServicePrincipalRequestGate"));
+    assert!(request.contains("pub struct ServicePrincipalRequestAuthorization"));
+    assert!(request.contains("pub struct ServicePrincipalAdmissionProof"));
+    assert!(core.contains("service_principal_admission_proof"));
+    assert!(runtime.contains("PrincipalKind::ServiceAccount"));
+    assert!(runtime.contains("service_principal_admission_proof()"));
+    assert!(request.contains("AuthorizationEvaluator for ServicePrincipalRequestAuthorization"));
+    assert!(request.contains("authenticate_service_principal"));
+    assert!(request.contains("consume_service_request(&self.proof.subject, now)"));
+    assert!(request.contains("self.authorization.authorize(request)"));
+    assert!(request.contains("append_service_audit(&record)"));
+    assert!(request.contains("self.used.swap(true"));
+    assert!(request.contains("request.permission == self.permission"));
+    assert!(request.contains("request.resource_scope == self.resource_scope"));
+    assert!(request.contains("if !self.proof.matches(request)"));
+    assert!(request.contains("ServiceQuotaConsumeError::NotConfigured"));
+    assert!(request.contains("ServiceQuotaConsumeError::ClockRollback"));
+    assert!(request.contains("CanonicalErrorCode::RateLimited"));
+    assert!(request.contains("CanonicalErrorCode::TemporarilyUnavailable"));
+
+    for permission in [
+        "SERVICE_QUOTA_READ_PERMISSION",
+        "SERVICE_QUOTA_WRITE_PERMISSION",
+        "SERVICE_AUDIT_READ_PERMISSION",
+    ] {
+        assert!(authorization.contains(permission));
+        assert!(runtime.contains(permission));
+    }
+    assert!(runtime.contains("pub fn service_quota_policy("));
+    assert!(runtime.contains("pub fn set_service_quota_policy("));
+    assert!(runtime.contains("pub fn service_audit_records("));
+    assert!(!runtime.contains("pub fn consume_service_request("));
+    assert!(!runtime.contains("pub fn append_service_audit("));
+
+    for evidence in [
+        "credential_authentication_is_non_disclosing_revocable_and_raw_runtime_cannot_bypass_gate",
+        "service_request_gate_enforces_fixed_window_quota_and_audits_decisions",
+        "service_request_gate_audits_bad_secret_clock_rollback_and_context_reuse",
+        "quota_policy_and_audit_read_use_independent_admin_permissions",
+    ] {
+        assert!(
+            memory.contains(evidence),
+            "memory evidence missing: {evidence}"
+        );
+    }
+}
+
+#[test]
+fn service_principal_audit_storage_and_governance_close_only_the_evidenced_blocker() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let control = fs::read_to_string(workspace.join("crates/ucr-protocol/src/service_control.rs"))
+        .expect("service control protocol");
+    let sqlite_root = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let sqlite = fs::read_to_string(
+        workspace.join("crates/ucr-storage-sqlite/src/service_control_store.rs"),
+    )
+    .expect("sqlite service controls");
+    let spec = fs::read_to_string(workspace.join("spec/service-principal-control.md"))
+        .expect("service principal control spec");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let adr =
+        fs::read_to_string(workspace.join(
+            "docs/adr/0031-service-principal-requests-require-quota-and-append-only-audit.md",
+        ))
+        .expect("adr 0031");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(model.contains("pub struct ServiceQuotaPolicy"));
+    assert!(model.contains("pub struct ServiceAuditRecord"));
+    let audit_fields = model
+        .split("pub struct ServiceAuditRecord")
+        .nth(1)
+        .and_then(|tail| tail.split('}').next())
+        .expect("audit record fields");
+    for forbidden in ["secret", "secret_digest", "payload", "message_content"] {
+        assert!(
+            !audit_fields.contains(forbidden),
+            "audit record leaked: {forbidden}"
+        );
+    }
+    assert!(control.contains("UCR-SERVICE-AUDIT-HASH-V1\\0"));
+    assert!(control.contains("722e882fce879eb31f509d6deaedea36208817adac3bb99138e025907711efa4"));
+    assert!(control.contains("MAX_SERVICE_REQUEST_PERMISSION_LEN"));
+    for evidence in [
+        "quota_accounting_survives_restart_and_identical_policy_does_not_reset_usage",
+        "audit_is_append_only_and_offline_semantic_tampering_is_detected_on_reopen",
+        "v13_to_v14_migration_preserves_credentials_and_permissions_and_starts_empty_controls",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "sqlite evidence missing: {evidence}"
+        );
+    }
+    assert!(sqlite.contains("CREATE TRIGGER service_audit_no_update"));
+    assert!(sqlite.contains("CREATE TRIGGER service_audit_no_delete"));
+    assert!(sqlite.contains("verify_audit_chain"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 14;"));
+    assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
+    assert!(spec.contains("single-use"));
+    assert!(spec.contains("not a distributed global rate limiter"));
+    assert!(spec.contains("not a claim that an attacker with privileged filesystem control"));
+    assert!(
+        adr.contains(
+            "closes the production blocker `Service Principal quota and audit enforcement`"
+        )
+    );
+    assert!(ci.contains("spec/service-principal-control.md"));
+    assert!(ci.contains(
+        "docs/adr/0031-service-principal-requests-require-quota-and-append-only-audit.md"
+    ));
+    assert!(!threat.contains("- Service Principal quota and audit enforcement;"));
+    assert!(
+        threat.contains("- production OS/hardware-backed key providers for supported targets;")
+    );
+    assert!(threat.contains("- device revocation enforcement in credential/key delivery;"));
 }
 
 fn canonical_threat_boundaries(threat: &str) -> std::collections::BTreeSet<String> {

@@ -26,4 +26,4 @@ SQLite schema v13 persists this lifecycle and migrates additively from v12 witho
 
 ## Explicit non-goals
 
-This foundation does not define public HTTP/gRPC bearer syntax, browser sessions, human login, OAuth/OIDC federation, quotas/rate limits, or audit-log persistence. It also does not replace Device authentication or remote peer/session authentication. Service Principal quota and audit enforcement remain production work.
+This foundation does not define public HTTP/gRPC bearer syntax, browser sessions, human login, OAuth/OIDC federation, Device authentication, or remote peer/session authentication. The separate `service-principal-control.md` contract composes quota and admission audit after this credential authentication without changing credential semantics.
