@@ -168,4 +168,5 @@ jobs:
           test -s docs/adr/0032-device-lifecycle-is-durable-and-gates-protected-key-access.md &&
           test -s docs/adr/0033-recovery-device-staging-requires-verified-authority-and-active-plan.md &&
           test -s docs/adr/0034-implemented-trust-boundaries-require-cross-crate-threat-simulations.md &&
-          test -s docs/adr/0035-applicable-chaos-evidence-composes-real-runtime-boundaries.md
+          test -s docs/adr/0035-applicable-chaos-evidence-composes-real-runtime-boundaries.md &&
+          test -s docs/adr/0036-sqlite-storage-full-chaos-uses-provider-private-capacity-injection.md

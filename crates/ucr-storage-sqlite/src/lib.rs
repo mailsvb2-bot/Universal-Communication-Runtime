@@ -984,7 +984,7 @@ mod tests {
         DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, ProtocolExtension,
         ProtocolVersion, TenantId, TenantScope,
     };
-    use ucr_protocol::{CommandReceiptStatus, MAX_PROTOCOL_EXTENSIONS};
+    use ucr_protocol::{CommandReceiptStatus, DEFAULT_MAX_PAYLOAD_LEN, MAX_PROTOCOL_EXTENSIONS};
 
     use super::{SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID};
 
@@ -1747,6 +1747,65 @@ mod tests {
             super::map_sqlite_error(&sqlite_error),
             DurableStoreError::Full
         );
+    }
+
+    #[test]
+    fn sqlite_storage_full_rolls_back_command_acceptance_atomically() {
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open capacity-limited store");
+        {
+            let connection = store.connection.lock().expect("lock capacity connection");
+            connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .expect("checkpoint before capacity limit");
+            let page_count: i64 = connection
+                .pragma_query_value(None, "page_count", |row| row.get(0))
+                .expect("read current page count");
+            connection
+                .pragma_update(None, "max_page_count", page_count)
+                .expect("set exact page ceiling");
+            let max_page_count: i64 = connection
+                .pragma_query_value(None, "max_page_count", |row| row.get(0))
+                .expect("read page ceiling");
+            assert_eq!(max_page_count, page_count);
+        }
+
+        let large_payload = vec![0xA5; DEFAULT_MAX_PAYLOAD_LEN as usize];
+        let full_attempt = command(
+            "storage-full-large",
+            "storage-full-key",
+            &large_payload,
+            Some("namespace-a"),
+        );
+        assert_eq!(
+            store.accept_command(&full_attempt),
+            Err(DurableStoreError::Full)
+        );
+
+        drop(store);
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen after capacity failure");
+        assert_eq!(reopened.health(), Ok(StorageHealth::Healthy));
+        let recovery = command(
+            "storage-full-recovery",
+            "storage-full-key",
+            b"after-full",
+            Some("namespace-a"),
+        );
+        let accepted = reopened
+            .accept_command(&recovery)
+            .expect("accept after capacity returns");
+        assert_eq!(accepted.status, CommandReceiptStatus::Accepted);
+        let retry = command(
+            "storage-full-retry",
+            "storage-full-key",
+            b"after-full",
+            Some("namespace-a"),
+        );
+        let duplicate = reopened
+            .accept_command(&retry)
+            .expect("deduplicate recovery");
+        assert_eq!(duplicate.status, CommandReceiptStatus::Duplicate);
+        assert_eq!(duplicate.original_command_id, Some(recovery.command_id));
     }
     #[test]
     fn foreign_sqlite_database_is_not_adopted_or_mutated() {

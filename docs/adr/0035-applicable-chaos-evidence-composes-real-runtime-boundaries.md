@@ -16,7 +16,7 @@ The test crate does not implement fallback, retry, authorization, Sync, Device, 
 
 ## Fail-closed limitations
 
-An application restart is not claimed to be a process-kill test. The current SQLite `SQLITE_FULL` mapping test is not claimed as end-to-end storage-full chaos evidence. Local two-store Anti-Entropy convergence is not claimed as authenticated production network partition recovery. Authenticated Message corruption is not claimed as a production packet-reorder/receive pipeline. DNS, Relay, SFU, peer-disappearance, transport reorder, and slow-consumer scenarios remain unimplemented until those real boundaries exist.
+An application restart is not claimed to be a process-kill test. At adoption, the SQLite `SQLITE_FULL` mapping test was not claimed as end-to-end storage-full chaos evidence; ADR-0036 later adds provider-owned page-capacity exhaustion evidence without adding a public fault-injection API. Local two-store Anti-Entropy convergence is not claimed as authenticated production network partition recovery. Authenticated Message corruption is not claimed as a production packet-reorder/receive pipeline. DNS, Relay, SFU, peer-disappearance, transport reorder, and slow-consumer scenarios remain unimplemented until those real boundaries exist.
 
 ## Rejected alternatives
 
