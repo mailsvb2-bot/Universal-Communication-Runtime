@@ -2618,6 +2618,8 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
     let chaos =
         fs::read_to_string(workspace.join("crates/ucr-security-tests/tests/chaos_scenarios.rs"))
             .expect("chaos scenarios");
+    let sqlite_store = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite provider");
     let matrix = fs::read_to_string(workspace.join("docs/architecture/CHAOS_SCENARIOS.md"))
         .expect("chaos evidence matrix");
     let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
@@ -2627,6 +2629,10 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
             .join("docs/adr/0035-applicable-chaos-evidence-composes-real-runtime-boundaries.md"),
     )
     .expect("adr 0035");
+    let storage_full_adr = fs::read_to_string(workspace.join(
+        "docs/adr/0036-sqlite-storage-full-chaos-uses-provider-private-capacity-injection.md",
+    ))
+    .expect("adr 0036");
     let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
 
     let scenarios = [
@@ -2654,9 +2660,12 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
         .count();
     assert_eq!(chaos_test_count, scenarios.len());
 
+    let storage_full = "sqlite_storage_full_rolls_back_command_acceptance_atomically";
+    assert!(sqlite_store.contains(&format!("fn {storage_full}()")));
+    assert!(matrix.contains(storage_full));
+
     for open_evidence in [
         "OPEN: deterministic mid-operation process-kill injection does not exist",
-        "OPEN: only SQLITE_FULL error mapping evidence exists today",
         "Not implemented: no production network transport exists",
         "Not implemented: Relay does not exist yet",
         "Not implemented: SFU does not exist yet",
@@ -2670,14 +2679,22 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
     }
     assert!(!threat.contains("- applicable chaos scenarios;"));
     assert!(threat.contains(
-        "remaining chaos scenarios: deterministic process-kill and end-to-end storage-full fault injection"
+        "remaining chaos scenarios: deterministic process-kill fault injection for durable stores"
     ));
-    assert!(threat.contains("seven executable chaos scenarios"));
+    assert!(!threat.contains("end-to-end storage-full fault injection remain open"));
+    assert!(threat.contains("seven executable cross-crate chaos scenarios"));
+    assert!(threat.contains("provider-owned end-to-end page-capacity exhaustion evidence"));
     assert!(adr.contains("An application restart is not claimed to be a process-kill test"));
     assert!(adr.contains(
         "Create fake Relay/SFU/network implementations only to satisfy the checklist: rejected"
     ));
+    assert!(storage_full_adr.contains(
+        "No public fault-injection API, alternate store, or second storage-policy owner is added"
+    ));
     assert!(
         ci.contains("docs/adr/0035-applicable-chaos-evidence-composes-real-runtime-boundaries.md")
     );
+    assert!(ci.contains(
+        "docs/adr/0036-sqlite-storage-full-chaos-uses-provider-private-capacity-injection.md"
+    ));
 }
