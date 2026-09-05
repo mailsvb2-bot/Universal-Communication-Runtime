@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/errors.proto";
+import "ucr/v1/runtime.proto";
+
+// Phase-13 public command ingress. Authentication credentials are presented by the
+// concrete API binding and are deliberately not copied into the canonical command body.
+message IntegrationCommandRequest {
+  CommandEnvelope command = 1;
+}
+
+message IntegrationCommandResponse {
+  oneof result {
+    CommandReceipt receipt = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+service IntegrationService {
+  rpc SubmitCommand(IntegrationCommandRequest) returns (IntegrationCommandResponse);
+}

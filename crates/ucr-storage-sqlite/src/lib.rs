@@ -1018,14 +1018,21 @@ mod tests {
 
     use ucr_core::{
         CommandAcceptanceStore, CommandOutcomeStore, DurableStoreError, EventAppendStatus,
-        EventJournalStore, StorageHealth, StorageProvider,
+        EventJournalStore, IntegrationCommandIngress, PermissionGrantStore, ServiceAuditStore,
+        ServiceCredentialStore, ServiceQuotaStore, StorageHealth, StorageProvider,
+        SystemServiceQuotaClock, issue_service_credential,
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext, DeviceId,
-        DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, ProtocolExtension,
-        ProtocolVersion, TenantId, TenantScope,
+        DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, PermissionGrant,
+        PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension,
+        ProtocolVersion, ScopedPrincipal, ServiceAuditOutcome, ServiceQuotaPolicy, TenantId,
+        TenantScope,
     };
-    use ucr_protocol::{CommandReceiptStatus, DEFAULT_MAX_PAYLOAD_LEN, MAX_PROTOCOL_EXTENSIONS};
+    use ucr_protocol::{
+        COMMAND_ACCEPT_PERMISSION, CommandReceiptStatus, DEFAULT_MAX_PAYLOAD_LEN,
+        MAX_PROTOCOL_EXTENSIONS,
+    };
 
     use super::{SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID};
 
@@ -2154,5 +2161,83 @@ mod tests {
                 assert_eq!(mode, 0);
             }
         }
+    }
+
+    #[test]
+    fn integration_command_ingress_deduplicates_after_sqlite_restart() {
+        let db = TestDbPath::new();
+        let scope = command(
+            "integration-scope",
+            "integration-scope-key",
+            b"",
+            Some("namespace-integration"),
+        )
+        .scope;
+        let subject = ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(opaque("service-integration-sqlite")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        let grant = PermissionGrant {
+            grantee: subject.clone(),
+            permission: COMMAND_ACCEPT_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope.clone()),
+        };
+        let quota = ServiceQuotaPolicy {
+            subject: subject.clone(),
+            max_requests: 4,
+            window_ms: 60_000,
+        };
+        let value = CommandEnvelope {
+            scope: scope.clone(),
+            ..command(
+                "integration-command-sqlite",
+                "integration-command-key",
+                b"persist me",
+                Some("namespace-integration"),
+            )
+        };
+
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open integration store");
+            store
+                .provision_service_credential(&credential)
+                .expect("persist credential");
+            store.grant_permission(&grant).expect("persist permission");
+            store
+                .set_service_quota_policy(&quota)
+                .expect("persist quota");
+            let ingress = IntegrationCommandIngress::new(&SystemServiceQuotaClock, &store, &store);
+            assert_eq!(
+                ingress
+                    .submit_command(&scope, &credential.credential_id, &secret, &value)
+                    .expect("first command")
+                    .status,
+                CommandReceiptStatus::Accepted
+            );
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen integration store");
+        let ingress =
+            IntegrationCommandIngress::new(&SystemServiceQuotaClock, &reopened, &reopened);
+        assert_eq!(
+            ingress
+                .submit_command(&scope, &credential.credential_id, &secret, &value)
+                .expect("retry after restart")
+                .status,
+            CommandReceiptStatus::Duplicate
+        );
+        let audit = reopened
+            .service_audit_records(&scope, 4)
+            .expect("read restart-safe admission audit");
+        assert_eq!(audit.len(), 2);
+        assert!(
+            audit
+                .iter()
+                .all(|record| record.outcome == ServiceAuditOutcome::Authorized)
+        );
     }
 }

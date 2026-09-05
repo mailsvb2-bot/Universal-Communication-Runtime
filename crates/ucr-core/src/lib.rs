@@ -2,6 +2,7 @@
 
 mod authorized_runtime;
 mod id;
+mod integration_api;
 mod recovery_workflow;
 mod service_auth;
 mod service_request;
@@ -20,6 +21,7 @@ use ucr_protocol::{CanonicalError, CommandReceipt};
 
 pub use authorized_runtime::AuthorizedDurableRuntime;
 pub use id::{IdGenerationError, generate_opaque_id};
+pub use integration_api::IntegrationCommandIngress;
 pub use recovery_workflow::{
     DeviceReverificationGate, DeviceReverificationProof, DeviceReverificationVerificationError,
     DeviceReverificationVerifier, RecoveryAdmissionProof, RecoveryAuthorityVerificationError,

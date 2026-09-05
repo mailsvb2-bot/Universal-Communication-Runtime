@@ -2879,3 +2879,91 @@ fn recovered_device_reverification_has_independent_proof_and_atomic_activation_o
     );
     assert!(!threat.contains("re-verification transition/UX evidence"));
 }
+
+#[test]
+fn integration_api_reuses_canonical_command_and_service_principal_owners() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/integration.proto"))
+        .expect("integration proto");
+    let ingress = fs::read_to_string(workspace.join("crates/ucr-core/src/integration_api.rs"))
+        .expect("integration ingress");
+    let spec =
+        fs::read_to_string(workspace.join("spec/integration-api.md")).expect("integration spec");
+    let architecture = fs::read_to_string(workspace.join("docs/architecture/ARCHITECTURE.md"))
+        .expect("architecture");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let inventory = fs::read_to_string(workspace.join("spec/metadata-visibility.tsv"))
+        .expect("metadata inventory");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+    let sqlite = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite store");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0040-integration-api-reuses-canonical-command-and-service-principal-boundaries.md",
+    ))
+    .expect("adr 0040");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
+
+    assert!(proto.contains("service IntegrationService"));
+    assert!(proto.contains("rpc SubmitCommand(IntegrationCommandRequest)"));
+    assert!(proto.contains("CommandEnvelope command = 1;"));
+    assert!(proto.contains("CommandReceipt receipt = 1;"));
+    assert!(proto.contains("ErrorEnvelope error = 2;"));
+    assert!(!proto.contains("SubscribeEvents"));
+
+    assert!(ingress.contains("pub struct IntegrationCommandIngress"));
+    assert!(ingress.contains("ServicePrincipalRequestGate::new"));
+    assert!(ingress.contains("COMMAND_ACCEPT_PERMISSION"));
+    assert!(ingress.contains("AuthorizedDurableRuntime::new"));
+    assert!(ingress.contains(".accept_command(&subject, command)"));
+
+    for forbidden in [
+        "SqliteLocalStore",
+        "MemoryLocalStore",
+        "rusqlite",
+        "telegram",
+        "vk_",
+        "max_messenger",
+        "clientplatform",
+        "businessaios",
+    ] {
+        assert!(
+            !ingress
+                .to_ascii_lowercase()
+                .contains(&forbidden.to_ascii_lowercase()),
+            "Integration ingress leaked forbidden owner/provider: {forbidden}"
+        );
+    }
+
+    assert!(spec.contains(
+        "credential authentication -> quota consumption/audit -> permission evaluation -> durable command acceptance"
+    ));
+    assert!(spec.contains("Phase 14 owns Event API semantics"));
+    assert!(architecture.contains("Phase 13 begins with `IntegrationService.SubmitCommand`"));
+    assert!(threat.contains("Phase-13 `IntegrationCommandIngress`"));
+    assert!(inventory.contains("external_app\tExternal App\tpartial\t"));
+    for evidence in [
+        "integration_ingress_authenticates_audits_authorizes_and_deduplicates",
+        "integration_ingress_denials_never_create_ghost_acceptance",
+        "integration_ingress_rate_limit_fails_before_command_acceptance",
+    ] {
+        assert!(
+            memory.contains(evidence),
+            "missing Integration API evidence: {evidence}"
+        );
+    }
+    assert!(sqlite.contains("integration_command_ingress_deduplicates_after_sqlite_restart"));
+    assert!(adr.contains("Direct database access was rejected"));
+    assert!(adr.contains("does not implement Event API"));
+    assert!(ci.contains("spec/integration-api.md"));
+    assert!(ci.contains("proto/ucr/v1/integration.proto"));
+    assert!(ci.contains(
+        "docs/adr/0040-integration-api-reuses-canonical-command-and-service-principal-boundaries.md"
+    ));
+    assert!(readme.contains("**Phase 13 — Integration API (in progress"));
+}

@@ -56,7 +56,7 @@ The canonical boundaries are:
 No boundary is trusted merely because it is operated by the same organization. A compromised User Device, Personal Node, Organization Node, Relay, Bridge, SFU, or cloud component is an explicit threat case.
 ### Boundary crossing rules
 
-- External App → SDK/API → UCR Core requires authenticated Service Principal context, tenant/namespace scope, permissions, quotas, and auditability. Direct database access is forbidden.
+- External App → SDK/API → UCR Core requires authenticated Service Principal context, tenant/namespace scope, permissions, quotas, and auditability. Direct database access is forbidden. The Phase-13 `IntegrationCommandIngress` implements the first reference path by composing the existing single-use Service Principal admission proof with canonical durable Command acceptance; concrete network/IPC bindings remain separate.
 - SDK is a client of the public contract, not an alternate source of authorization or communication logic.
 - Core → Transport/Relay/Bridge/SFU crosses an explicit capability and policy boundary. Infrastructure cannot silently weaken privacy/security policy.
 - Relay receives only relay-required routing material; it must not require plaintext message content.
