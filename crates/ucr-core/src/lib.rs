@@ -21,8 +21,11 @@ use ucr_protocol::{CanonicalError, CommandReceipt};
 pub use authorized_runtime::AuthorizedDurableRuntime;
 pub use id::{IdGenerationError, generate_opaque_id};
 pub use recovery_workflow::{
-    RecoveryAdmissionProof, RecoveryAuthorityVerificationError, RecoveryAuthorityVerifier,
-    RecoveryDeviceStagingStore, RecoveryRequestGate, authorize_and_stage_recovered_device,
+    DeviceReverificationGate, DeviceReverificationProof, DeviceReverificationVerificationError,
+    DeviceReverificationVerifier, RecoveryAdmissionProof, RecoveryAuthorityVerificationError,
+    RecoveryAuthorityVerifier, RecoveryDeviceStagingStore, RecoveryRequestGate,
+    ReverifiedDeviceActivationStore, authorize_and_activate_reverified_device,
+    authorize_and_stage_recovered_device,
 };
 pub use service_auth::{
     ServiceAuthenticationError, ServiceCredentialIssueError, ServiceCredentialSecret,

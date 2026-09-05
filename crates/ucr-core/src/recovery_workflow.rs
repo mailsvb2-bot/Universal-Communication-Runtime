@@ -6,7 +6,7 @@ use ucr_model::{
 };
 use ucr_protocol::{CanonicalError, CanonicalErrorCode, RecoveryError, validate_recovery_request};
 
-use crate::{DurableStoreError, RecoveryPlanStore, StorageProvider};
+use crate::{DeviceLifecycleStore, DurableStoreError, RecoveryPlanStore, StorageProvider};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryAuthorityVerificationError {
@@ -118,6 +118,171 @@ pub trait RecoveryDeviceStagingStore: StorageProvider {
     ) -> Result<(), DurableStoreError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceReverificationVerificationError {
+    Denied,
+    Unavailable,
+}
+
+/// Trusted boundary that independently proves a staged recovered Device has completed
+/// the deployment-specific re-verification required before it may become Active.
+///
+/// Implementations may bind an interactive challenge, an existing trusted Device,
+/// hardware attestation, organization approval, or another reviewed mechanism. The
+/// verifier owns that evidence; the canonical Device model does not grow provider data.
+pub trait DeviceReverificationVerifier: fmt::Debug + Send + Sync {
+    /// Verifies one exact currently staged `REVERIFICATION_REQUIRED` Device.
+    ///
+    /// # Errors
+    /// `Denied` means re-verification evidence is absent/invalid. `Unavailable` means
+    /// the trusted verifier cannot establish a result and activation must fail closed.
+    fn verify_reverification(
+        &self,
+        device: &DeviceDescriptor,
+    ) -> Result<(), DeviceReverificationVerificationError>;
+}
+
+/// Core-owned, non-forgeable capability to perform exactly one lifecycle promotion
+/// from `REVERIFICATION_REQUIRED` to `ACTIVE` for the bound Device/Identity.
+pub struct DeviceReverificationProof {
+    scope: TenantScope,
+    device_id: DeviceId,
+    identity_id: IdentityId,
+}
+
+impl fmt::Debug for DeviceReverificationProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceReverificationProof")
+            .field("scope", &self.scope)
+            .field("device_id", &self.device_id)
+            .field("identity_id", &self.identity_id)
+            .field("reverification", &"<verified>")
+            .finish()
+    }
+}
+
+impl DeviceReverificationProof {
+    #[must_use]
+    pub const fn scope(&self) -> &TenantScope {
+        &self.scope
+    }
+    #[must_use]
+    pub const fn device_id(&self) -> &DeviceId {
+        &self.device_id
+    }
+    #[must_use]
+    pub const fn identity_id(&self) -> &IdentityId {
+        &self.identity_id
+    }
+}
+
+/// Atomic durable owner for the security-sensitive re-verification promotion.
+/// Implementations must compare the current durable Device state and Identity in the
+/// same atomic action that changes state to Active. A Revoked Device can never be
+/// resurrected by a stale proof.
+pub trait ReverifiedDeviceActivationStore: StorageProvider {
+    /// Atomically promotes the proof-bound Device from re-verification-required to Active.
+    ///
+    /// # Errors
+    /// Returns Conflict when the Device is absent, rebound, already Active, Revoked, or
+    /// otherwise no longer exactly `REVERIFICATION_REQUIRED`; storage failures are explicit.
+    fn activate_reverified_device(
+        &self,
+        proof: &DeviceReverificationProof,
+    ) -> Result<(), DurableStoreError>;
+}
+
+pub struct DeviceReverificationGate<'a, V, S> {
+    verifier: &'a V,
+    store: &'a S,
+}
+
+impl<V, S> fmt::Debug for DeviceReverificationGate<'_, V, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceReverificationGate")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, V, S> DeviceReverificationGate<'a, V, S>
+where
+    V: DeviceReverificationVerifier,
+    S: DeviceLifecycleStore,
+{
+    #[must_use]
+    pub const fn new(verifier: &'a V, store: &'a S) -> Self {
+        Self { verifier, store }
+    }
+
+    /// Loads the exact durable Device, requires the recovery staging state, then invokes
+    /// the independent verifier before minting an unforgeable activation proof.
+    ///
+    /// # Errors
+    /// Missing/mismatched/non-staged Devices and denied proofs are non-disclosing
+    /// `PERMISSION_DENIED`; verifier/storage unavailability fails closed.
+    pub fn authorize_reverification(
+        &self,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_identity_id: &IdentityId,
+    ) -> Result<DeviceReverificationProof, CanonicalError> {
+        let Some(device) = self
+            .store
+            .device(scope, device_id)
+            .map_err(map_store_read_error)?
+        else {
+            return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+        };
+        if device.identity_id != *expected_identity_id
+            || device.state != DeviceLifecycleState::ReverificationRequired
+        {
+            return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+        }
+        self.verifier
+            .verify_reverification(&device)
+            .map_err(map_reverification_verifier_error)?;
+        Ok(DeviceReverificationProof {
+            scope: scope.clone(),
+            device_id: device.device_id,
+            identity_id: device.identity_id,
+        })
+    }
+}
+
+/// Verifies and atomically activates one recovered Device. Re-verification authority is
+/// intentionally separate from ordinary `PermissionGrant` administration.
+///
+/// # Errors
+/// Returns fail-closed canonical errors from durable lookup, independent verification,
+/// or the atomic lifecycle promotion.
+pub fn authorize_and_activate_reverified_device<V, S>(
+    verifier: &V,
+    store: &S,
+    scope: &TenantScope,
+    device_id: &DeviceId,
+    expected_identity_id: &IdentityId,
+) -> Result<DeviceDescriptor, CanonicalError>
+where
+    V: DeviceReverificationVerifier,
+    S: DeviceLifecycleStore + ReverifiedDeviceActivationStore,
+{
+    let proof = DeviceReverificationGate::new(verifier, store).authorize_reverification(
+        scope,
+        device_id,
+        expected_identity_id,
+    )?;
+    store
+        .activate_reverified_device(&proof)
+        .map_err(map_stage_error)?;
+    Ok(DeviceDescriptor {
+        device_id: proof.device_id.clone(),
+        identity_id: proof.identity_id.clone(),
+        state: DeviceLifecycleState::Active,
+    })
+}
+
 pub struct RecoveryRequestGate<'a, V, S> {
     verifier: &'a V,
     store: &'a S,
@@ -221,6 +386,19 @@ const fn map_verifier_error(error: RecoveryAuthorityVerificationError) -> Canoni
             CanonicalError::new(CanonicalErrorCode::PermissionDenied)
         }
         RecoveryAuthorityVerificationError::Unavailable => {
+            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+        }
+    }
+}
+
+const fn map_reverification_verifier_error(
+    error: DeviceReverificationVerificationError,
+) -> CanonicalError {
+    match error {
+        DeviceReverificationVerificationError::Denied => {
+            CanonicalError::new(CanonicalErrorCode::PermissionDenied)
+        }
+        DeviceReverificationVerificationError::Unavailable => {
             CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
         }
     }

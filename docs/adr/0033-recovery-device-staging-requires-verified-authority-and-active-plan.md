@@ -20,7 +20,7 @@ Recovery execution is a distinct security-authority path, not a PermissionGrant.
 
 A stale proof cannot stage a Device after plan revocation/rotation wins the durable race. Recovery can now safely stage an exact Device into mandatory re-verification and preserve that state across restart without auto-trusting any key. The proof boundary is reusable by future concrete recovery providers without changing canonical Recovery Plan semantics.
 
-This ADR does **not** claim that all RecoveryMethod authority providers exist, does not implement credential re-issuance, device-bound content/key delivery, backup restore conformance, historical-key archive policy, or the re-verification-to-Active transition/UX. The end-to-end recovery blocker therefore remains explicit.
+This ADR does **not** claim that all RecoveryMethod authority providers exist, does not implement credential re-issuance, device-bound content/key delivery, backup restore conformance, historical-key archive policy, or production re-verification providers/UX. ADR-0039 now defines the separate Core-owned re-verification-to-Active transition, while the end-to-end recovery blocker remains explicit.
 
 ## Rejected alternatives
 

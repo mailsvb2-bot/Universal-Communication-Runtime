@@ -171,4 +171,5 @@ jobs:
           test -s docs/adr/0035-applicable-chaos-evidence-composes-real-runtime-boundaries.md &&
           test -s docs/adr/0036-sqlite-storage-full-chaos-uses-provider-private-capacity-injection.md &&
           test -s docs/adr/0037-sqlite-process-kill-chaos-uses-test-only-precommit-pause.md &&
-          test -s docs/adr/0038-communication-intent-is-a-durable-scoped-runtime-primitive.md
+          test -s docs/adr/0038-communication-intent-is-a-durable-scoped-runtime-primitive.md &&
+          test -s docs/adr/0039-recovered-device-activation-requires-independent-reverification-proof.md
