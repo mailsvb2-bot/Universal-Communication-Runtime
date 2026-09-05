@@ -3422,6 +3422,97 @@ fn root_identity_v19_public_api_permissions_and_governance_are_locked() {
 }
 
 #[test]
+fn integration_conversation_api_reuses_canonical_owner_and_hides_existence_until_authorized() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/integration.proto"))
+        .expect("integration proto");
+    let ingress = fs::read_to_string(workspace.join("crates/ucr-core/src/integration_api.rs"))
+        .expect("integration ingress");
+    let service_control =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/service_control.rs"))
+            .expect("service control");
+    let memory =
+        fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs")).expect("memory");
+    let sqlite = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let spec =
+        fs::read_to_string(workspace.join("spec/integration-api.md")).expect("integration spec");
+    let conversation_spec = fs::read_to_string(workspace.join("spec/conversation-message.md"))
+        .expect("conversation spec");
+    let adr =
+        fs::read_to_string(workspace.join(
+            "docs/adr/0045-integration-conversation-api-reuses-canonical-conversation-owner.md",
+        ))
+        .expect("adr 0045");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(proto.contains("import \"ucr/v1/communication.proto\";"));
+    assert!(proto.contains("rpc CreateConversation(IntegrationCreateConversationRequest)"));
+    assert!(proto.contains("rpc GetConversation(IntegrationGetConversationRequest)"));
+    assert!(proto.contains("ConversationRecord conversation = 1;"));
+    assert!(proto.contains("OpaqueId conversation_id = 2;"));
+    assert!(!proto.contains("SendMessage"));
+    assert!(!proto.contains("GetMessage"));
+    assert!(ingress.contains("pub fn create_conversation("));
+    assert!(ingress.contains("pub fn get_conversation("));
+    assert!(ingress.contains("CONVERSATION_WRITE_PERMISSION"));
+    assert!(ingress.contains("CONVERSATION_READ_PERMISSION"));
+    assert!(ingress.contains(".persist_conversation(&subject, conversation)"));
+    assert!(ingress.contains(".conversation(&subject, scope, conversation_id)"));
+    assert!(service_control.contains(
+        "SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND: &str = \"ucr.conversation.create\""
+    ));
+    assert!(service_control.contains(
+        "SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND: &str = \"ucr.conversation.read\""
+    ));
+    for forbidden in [
+        "SqliteLocalStore",
+        "MemoryLocalStore",
+        "rusqlite",
+        "provider_conversation",
+    ] {
+        assert!(
+            !ingress
+                .to_ascii_lowercase()
+                .contains(&forbidden.to_ascii_lowercase()),
+            "Conversation ingress leaked parallel/storage owner: {forbidden}"
+        );
+    }
+    for evidence in [
+        "create_conversation_ingress_authenticates_audits_deduplicates_and_conflicts",
+        "create_conversation_denial_and_bad_secret_never_create_ghost_conversation",
+        "get_conversation_hides_existence_until_authorized_and_maps_missing_to_not_found",
+    ] {
+        assert!(
+            memory.contains(evidence),
+            "missing Conversation API evidence: {evidence}"
+        );
+    }
+    assert!(
+        sqlite.contains(
+            "integration_conversation_api_survives_sqlite_restart_through_canonical_owner"
+        )
+    );
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(
+        conversation_spec
+            .contains("A Conversation is a canonical UCR entity and outlives any provider")
+    );
+    assert!(spec.contains("single existing `ConversationStore`"));
+    assert!(
+        spec.contains("Authentication and permission failures occur before existence is disclosed")
+    );
+    assert!(adr.contains("No storage schema changes are required"));
+    assert!(adr.contains("does not implement Message send/read APIs"));
+    assert!(
+        ci.contains("0045-integration-conversation-api-reuses-canonical-conversation-owner.md")
+    );
+}
+
+#[test]
 fn integration_identity_read_side_reuses_canonical_owners_and_hides_existence_until_authorized() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

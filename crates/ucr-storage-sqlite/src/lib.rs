@@ -1073,25 +1073,29 @@ mod tests {
     };
 
     use ucr_core::{
-        CommandAcceptanceStore, CommandOutcomeStore, DurableStoreError, EventAppendStatus,
-        EventJournalStore, ExternalIdentityBindingLookup, ExternalIdentityBindingStore,
-        IdentityStore, IntegrationCommandIngress, IntegrationIngress, PermissionGrantStore,
-        ServiceAuditStore, ServiceCredentialStore, ServiceQuotaStore, StorageHealth,
-        StorageProvider, SystemServiceQuotaClock, issue_service_credential,
+        CommandAcceptanceStore, CommandOutcomeStore, ConversationStore, DurableStoreError,
+        EventAppendStatus, EventJournalStore, ExternalIdentityBindingLookup,
+        ExternalIdentityBindingStore, IdentityStore, IntegrationCommandIngress, IntegrationIngress,
+        PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaStore,
+        StorageHealth, StorageProvider, SystemServiceQuotaClock, issue_service_credential,
     };
     use ucr_model::{
-        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext, DeviceId,
-        DeviceRef, EventEnvelope, EventId, ExternalIdentityBinding, IdentityEvidence, IdentityId,
+        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, ConversationId, ConversationKind,
+        ConversationRecord, ConversationRef, CorrelationContext, DeviceId, DeviceRef,
+        EventEnvelope, EventId, ExternalIdentityBinding, IdentityEvidence, IdentityId,
         IdentityOwnership, IdentityRecord, IntegrationId, NamespaceId, OpaqueId, PermissionGrant,
         PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension,
         ProtocolVersion, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditOutcome,
         ServiceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{
-        COMMAND_ACCEPT_PERMISSION, CommandReceiptStatus, DEFAULT_MAX_PAYLOAD_LEN,
-        EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
-        IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MAX_PROTOCOL_EXTENSIONS,
-        SERVICE_AUDIT_COMMAND_OPERATION_KIND, SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
+        COMMAND_ACCEPT_PERMISSION, CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION,
+        CommandReceiptStatus, DEFAULT_MAX_PAYLOAD_LEN, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
+        EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, IDENTITY_CREATE_PERMISSION,
+        IDENTITY_READ_PERMISSION, MAX_PROTOCOL_EXTENSIONS, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+        SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
+        SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND,
+        SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
         SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND,
         SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
     };
@@ -1191,6 +1195,35 @@ mod tests {
         store
             .grant_permission(&exact_grant(subject, permission, scope))
             .unwrap_or_else(|error| panic!("{context}: {error:?}"));
+    }
+
+    fn seed_conversation_api_fixture(
+        store: &SqliteLocalStore,
+        subject: &ScopedPrincipal,
+        credential: &ucr_model::ServiceCredentialRecord,
+        scope: &TenantScope,
+        quota: &ServiceQuotaPolicy,
+    ) {
+        store
+            .provision_service_credential(credential)
+            .expect("persist credential");
+        grant_exact_permission(
+            store,
+            subject,
+            CONVERSATION_WRITE_PERMISSION,
+            scope,
+            "persist conversation write permission",
+        );
+        grant_exact_permission(
+            store,
+            subject,
+            CONVERSATION_READ_PERMISSION,
+            scope,
+            "persist conversation read permission",
+        );
+        store
+            .set_service_quota_policy(quota)
+            .expect("persist quota");
     }
 
     fn seed_identity_read_fixture(
@@ -2484,6 +2517,102 @@ mod tests {
             &scope,
             &binding_operation,
             "binding read audit after restart",
+        );
+    }
+
+    #[test]
+    fn integration_conversation_api_survives_sqlite_restart_through_canonical_owner() {
+        let db = TestDbPath::new();
+        let scope = command(
+            "conversation-api-scope",
+            "conversation-api-scope-key",
+            b"",
+            Some("namespace-conversation-api"),
+        )
+        .scope;
+        let subject = service_subject(&scope, "service-conversation-api-sqlite");
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        let conversation = ConversationRecord {
+            scope: scope.clone(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(opaque("conversation-api-root")),
+                kind: ConversationKind::Direct,
+            },
+            parent_conversation_id: None,
+        };
+        let quota = ServiceQuotaPolicy {
+            subject: subject.clone(),
+            max_requests: 4,
+            window_ms: 60_000,
+        };
+
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open conversation API store");
+            seed_conversation_api_fixture(&store, &subject, &credential, &scope, &quota);
+            let ingress = IntegrationIngress::new(&SystemServiceQuotaClock, &store, &store);
+            assert_eq!(
+                ingress
+                    .create_conversation(&scope, &credential.credential_id, &secret, &conversation,)
+                    .expect("first public conversation create"),
+                conversation
+            );
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen conversation API store");
+        let ingress = IntegrationIngress::new(&SystemServiceQuotaClock, &reopened, &reopened);
+        assert_eq!(
+            ingress
+                .get_conversation(
+                    &scope,
+                    &credential.credential_id,
+                    &secret,
+                    &scope,
+                    &conversation.conversation.conversation_id,
+                )
+                .expect("public conversation read after restart"),
+            conversation
+        );
+        assert_eq!(
+            ingress
+                .create_conversation(&scope, &credential.credential_id, &secret, &conversation,)
+                .expect("idempotent public conversation create after restart"),
+            conversation
+        );
+        assert_eq!(
+            reopened
+                .conversation(&scope, &conversation.conversation.conversation_id)
+                .expect("canonical conversation lookup after restart"),
+            Some(conversation.clone())
+        );
+
+        let create_operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND.to_owned(),
+            operation_id: conversation
+                .conversation
+                .conversation_id
+                .as_opaque()
+                .clone(),
+        };
+        let read_operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND.to_owned(),
+            operation_id: conversation
+                .conversation
+                .conversation_id
+                .as_opaque()
+                .clone(),
+        };
+        assert_eq!(
+            reopened
+                .service_audit_records_for_operation(&scope, &create_operation, 4)
+                .expect("restart-safe conversation create audit")
+                .len(),
+            2
+        );
+        assert_single_operation_audit(
+            &reopened,
+            &scope,
+            &read_operation,
+            "conversation read audit after restart",
         );
     }
 

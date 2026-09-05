@@ -14,10 +14,12 @@ The implemented Phase-13 vertical surface exposes:
 - `IntegrationService.CreateIdentity` over canonical `IdentityRecord`;
 - `IntegrationService.LinkIdentity` over canonical `ExternalIdentityBinding`;
 - `IntegrationService.GetIdentity` over exact canonical Root Identity lookup;
-- `IntegrationService.ResolveIdentityBinding` over the exact external binding key.
+- `IntegrationService.ResolveIdentityBinding` over the exact external binding key;
+- `IntegrationService.CreateConversation` over canonical `ConversationRecord`;
+- `IntegrationService.GetConversation` over exact `TenantScope + ConversationId`.
 
 These methods reuse existing canonical owners. They do not create Integration-specific Command,
-Identity, audit, permission, or provider-specific communication models. Concrete gRPC, HTTP,
+Identity, Conversation, audit, permission, or provider-specific communication models. Concrete gRPC, HTTP,
 local-IPC, sidecar, or embedded bindings may differ in framing and credential presentation, but
 MUST preserve the same authentication, authorization, quota/audit, idempotency, error, and durable
 semantics.
@@ -39,12 +41,16 @@ trusted from caller-supplied identity. Adapters receive no raw store access.
 - `CreateIdentity` requires `ucr.identity.create`;
 - `LinkIdentity` requires `ucr.identity.external_binding.link`;
 - `GetIdentity` requires `ucr.identity.read`;
-- `ResolveIdentityBinding` requires `ucr.identity.external_binding.read`.
+- `ResolveIdentityBinding` requires `ucr.identity.external_binding.read`;
+- `CreateConversation` requires `ucr.conversation.write`;
+- `GetConversation` requires `ucr.conversation.read`.
 
 Audit attribution is generic security metadata bound before authentication: `ucr.command` +
 canonical `CommandId`, `ucr.identity.create` + canonical `IdentityId`, or
 `ucr.identity.external_binding.link` + target canonical `IdentityId`, `ucr.identity.read` +
-canonical `IdentityId`, or `ucr.identity.external_binding.read` + canonical `IntegrationId`.
+canonical `IdentityId`, `ucr.identity.external_binding.read` + canonical `IntegrationId`,
+`ucr.conversation.create` + canonical `ConversationId`, or `ucr.conversation.read` + canonical
+`ConversationId`.
 External namespace/entity bytes are not copied, encoded, or hashed into generic admission audit
 operation references. An Authorized admission record proves only that the
 security gate passed; later durable validation/conflict may still fail.
@@ -77,7 +83,19 @@ quota/audit, and permission admission. Authentication and permission failures do
 whether an Identity or external binding exists. Binding lookup audit intentionally identifies the
 `IntegrationId` but not the sensitive external namespace/entity bytes.
 
-## 5. Errors and maturity
+## 5. Conversation semantics
+
+`CreateConversation` persists the provider-independent canonical `ConversationRecord` through the
+single existing `ConversationStore`. Equal retries are idempotent; reusing the same scoped
+`ConversationId` with changed canonical semantics conflicts. Topic/Thread parent validation remains
+owned by the existing Conversation capability and is not reimplemented in Integration API.
+
+`GetConversation` reads the same owner. Authorized absence is canonical non-retryable `NOT_FOUND`.
+Authentication and permission failures occur before existence is disclosed. Audit attribution uses
+only the canonical `ConversationId`. No provider conversation ID, business relationship, membership,
+or routing model is added.
+
+## 6. Errors and maturity
 
 Validation failures map to `INVALID_ARGUMENT`; authorized lookup absence to `NOT_FOUND`; semantic identity/idempotency reuse to `CONFLICT`;
 storage-full to `RESOURCE_EXHAUSTED`; temporary storage failure to `TEMPORARILY_UNAVAILABLE`;
@@ -89,11 +107,13 @@ The Phase-13 API remains `Experimental`. Stable compatibility rules apply only a
 Public API Governance promotion decision. Existing `SubmitCommand` wire fields remain unchanged.
 
 This slice does not claim a production gRPC/HTTP server, SDK generation, Event subscriptions,
-webhook delivery, Command execution/dispatch, routing, Message delivery, identity/binding listing or discovery, Persona/Profile APIs, Identity evidence transitions,
+webhook delivery, Command execution/dispatch, routing, Message send/read API, Message delivery,
+Conversation listing/discovery/delete, group membership/moderation, identity/binding listing or
+discovery, Persona/Profile APIs, Identity evidence transitions,
 Identity merge/delete, external-binding unlink/relink,
 or expiry execution. Phase 14 owns Event API semantics; later phases own network transport.
 
-## 6. Required evidence
+## 7. Required evidence
 
 Reference evidence must prove Service Principal authentication, mandatory quota/audit, exact
 permission enforcement, stable error mapping, restart-safe durable ownership, duplicate/conflict
@@ -101,3 +121,6 @@ semantics, and no ghost state after denied/unauthenticated/rate-limited/invalid 
 evidence additionally proves v18→v19 migration invents no Root Identity, new external binding keys
 reject missing targets, historical exact v18 bindings remain readable/idempotently retryable, and
 public Identity/binding reads survive restart without direct DB access or a parallel mapping owner.
+Conversation evidence additionally proves authenticated create/dedup/conflict behavior, no ghost
+state after denied/bad-secret calls, non-disclosing reads, and restart-safe public create/read through
+the existing `ConversationStore`.
