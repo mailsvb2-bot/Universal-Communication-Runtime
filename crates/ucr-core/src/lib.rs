@@ -12,10 +12,11 @@ use ucr_model::{
     CommandEnvelope, CommandId, CommunicationIntent, ConversationId, ConversationRecord,
     DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
     EndpointAddress, EndpointId, EventEnvelope, EventId, EventReconciliation, EventSummary,
-    IdentityId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor,
-    RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
-    ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint,
-    SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    ExternalIdentityBinding, IdentityId, IntegrationId, IntentId, KeyId, MessageEnvelope,
+    MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
+    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
+    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -558,6 +559,34 @@ pub trait CommunicationIntentStore: StorageProvider {
         scope: &TenantScope,
         intent_id: &IntentId,
     ) -> Result<Option<CommunicationIntent>, DurableStoreError>;
+}
+
+/// Durable provider-independent external-entity to canonical-Identity mapping capability.
+///
+/// The durable identity is the exact tuple `(TenantScope, IntegrationId, external_namespace,
+/// external_entity_id bytes)`. Equal retries are duplicates; changing the canonical Identity for
+/// an existing key is a conflict rather than an implicit relink.
+pub trait ExternalIdentityBindingStore: StorageProvider {
+    /// Persists or deduplicates one canonical external Identity binding.
+    ///
+    /// # Errors
+    /// Returns explicit validation, conflict, or storage failures.
+    fn persist_external_identity_binding(
+        &self,
+        binding: &ExternalIdentityBinding,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one exact scoped external Identity binding when present.
+    ///
+    /// # Errors
+    /// Returns explicit validation, storage, or corrupt-state failures.
+    fn external_identity_binding(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        external_namespace: &str,
+        external_entity_id: &[u8],
+    ) -> Result<Option<ExternalIdentityBinding>, DurableStoreError>;
 }
 
 /// Durable provider-independent Conversation capability.

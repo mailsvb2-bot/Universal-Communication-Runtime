@@ -10,10 +10,11 @@ use ucr_core::{
     AntiEntropyStore, AuthorizationEvaluator, CommandAcceptanceStore, CommandOutcomeStore,
     CommunicationIntentStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, MessageStore, PermissionGrantStore, RecoveryAdmissionProof,
-    RecoveryDeviceStagingStore, RecoveryPlanStore, ReverifiedDeviceActivationStore,
-    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
-    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore,
+    EventJournalStore, ExternalIdentityBindingStore, MessageStore, PermissionGrantStore,
+    RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
+    ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
+    ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth, StorageProvider, SyncStore,
+    TrustedSigningKeyStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -23,11 +24,12 @@ use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
     CommunicationIntent, ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence,
     DeliveryId, DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventEnvelope,
-    EventId, EventReconciliation, EventReplicaState, EventSummary, IdentityId, IntentId, KeyId,
-    MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
-    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
-    ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy, SessionId, SyncCheckpoint,
-    SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
+    EventId, EventReconciliation, EventReplicaState, EventSummary, ExternalIdentityBinding,
+    IdentityId, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
+    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
+    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
+    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord, TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -39,9 +41,10 @@ use ucr_protocol::{
     validate_anti_entropy_page_size, validate_anti_entropy_session,
     validate_anti_entropy_summary_count, validate_conversation, validate_conversation_parent_kind,
     validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
-    validate_delivery_evidence_order, validate_delivery_transition, validate_permission_grant,
-    validate_service_audit_record, validate_service_quota_policy, validate_sync_checkpoint,
-    validate_sync_transition, validate_trusted_signing_key_descriptor,
+    validate_delivery_evidence_order, validate_delivery_transition,
+    validate_external_identity_binding, validate_external_identity_binding_key,
+    validate_permission_grant, validate_service_audit_record, validate_service_quota_policy,
+    validate_sync_checkpoint, validate_sync_transition, validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 9;
@@ -54,6 +57,7 @@ type RecoveryIdentityKey = (ScopeKey, String);
 type ConversationKey = (ScopeKey, String);
 type MessageKey = (ScopeKey, String);
 type IntentKey = (ScopeKey, String);
+type ExternalIdentityBindingKey = (ScopeKey, String, String, Vec<u8>);
 type DeliveryKey = (ScopeKey, String);
 type SyncKey = (ScopeKey, String);
 type TrustedSigningKeyRef = (ScopeKey, String);
@@ -82,6 +86,7 @@ struct MemoryState {
     conversations: HashMap<ConversationKey, ConversationRecord>,
     messages: HashMap<MessageKey, MessageEnvelope>,
     intents: HashMap<IntentKey, CommunicationIntent>,
+    external_identity_bindings: HashMap<ExternalIdentityBindingKey, ExternalIdentityBinding>,
     deliveries: HashMap<DeliveryKey, DeliveryAttempt>,
     delivery_evidence: HashMap<DeliveryKey, Vec<DeliveryEvidence>>,
     sync_sessions: HashMap<SyncKey, SyncSession>,
@@ -900,6 +905,20 @@ fn intent_key(scope: &TenantScope, intent_id: &IntentId) -> IntentKey {
     (scope_key(scope), intent_id.as_opaque().as_str().to_owned())
 }
 
+fn external_identity_binding_key(
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    external_namespace: &str,
+    external_entity_id: &[u8],
+) -> ExternalIdentityBindingKey {
+    (
+        scope_key(scope),
+        integration_id.as_opaque().as_str().to_owned(),
+        external_namespace.to_owned(),
+        external_entity_id.to_vec(),
+    )
+}
+
 fn delivery_key(scope: &TenantScope, delivery_id: &DeliveryId) -> DeliveryKey {
     (
         scope_key(scope),
@@ -909,6 +928,55 @@ fn delivery_key(scope: &TenantScope, delivery_id: &DeliveryId) -> DeliveryKey {
 
 fn sync_key(scope: &TenantScope, session_id: &SessionId) -> SyncKey {
     (scope_key(scope), session_id.as_opaque().as_str().to_owned())
+}
+
+impl ExternalIdentityBindingStore for MemoryLocalStore {
+    fn persist_external_identity_binding(
+        &self,
+        binding: &ExternalIdentityBinding,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_external_identity_binding(binding)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = external_identity_binding_key(
+            &binding.scope,
+            &binding.integration_id,
+            &binding.external_namespace,
+            &binding.external_entity_id,
+        );
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.external_identity_bindings.get(&key) {
+            return if existing == binding {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state
+            .external_identity_bindings
+            .insert(key, binding.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn external_identity_binding(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        external_namespace: &str,
+        external_entity_id: &[u8],
+    ) -> Result<Option<ExternalIdentityBinding>, DurableStoreError> {
+        validate_external_identity_binding_key(external_namespace, external_entity_id)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .external_identity_bindings
+            .get(&external_identity_binding_key(
+                scope,
+                integration_id,
+                external_namespace,
+                external_entity_id,
+            ))
+            .cloned())
+    }
 }
 
 impl ConversationStore for MemoryLocalStore {
@@ -2356,6 +2424,120 @@ mod recovery_tests {
 }
 
 #[cfg(test)]
+mod external_identity_binding_tests {
+    use ucr_core::{DurableRecordStatus, DurableStoreError, ExternalIdentityBindingStore};
+    use ucr_model::{
+        ExternalIdentityBinding, IdentityId, IntegrationId, NamespaceId, OpaqueId, TenantId,
+        TenantScope,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-binding-memory")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("namespace-binding-memory"))),
+        }
+    }
+
+    fn binding(entity: &[u8], identity: &str) -> ExternalIdentityBinding {
+        ExternalIdentityBinding {
+            scope: scope(),
+            integration_id: IntegrationId::from_opaque(oid("integration-binding-memory")),
+            external_namespace: "vendor.example.customer".to_owned(),
+            external_entity_id: entity.to_vec(),
+            identity_id: IdentityId::from_opaque(oid(identity)),
+        }
+    }
+
+    #[test]
+    fn exact_external_identity_binding_is_deduplicated_and_never_relinked() {
+        let store = MemoryLocalStore::default();
+        let original = binding(b"Customer-42", "identity-original");
+        assert_eq!(
+            store.persist_external_identity_binding(&original),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.persist_external_identity_binding(&original),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        let changed = binding(b"Customer-42", "identity-other");
+        assert_eq!(
+            store.persist_external_identity_binding(&changed),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            store.external_identity_binding(
+                &original.scope,
+                &original.integration_id,
+                &original.external_namespace,
+                &original.external_entity_id,
+            ),
+            Ok(Some(original))
+        );
+    }
+
+    #[test]
+    fn external_identity_key_preserves_namespace_and_opaque_bytes_exactly() {
+        let store = MemoryLocalStore::default();
+        let upper = binding(b"User", "identity-upper");
+        let lower = binding(b"user", "identity-lower");
+        store
+            .persist_external_identity_binding(&upper)
+            .expect("persist upper");
+        store
+            .persist_external_identity_binding(&lower)
+            .expect("persist lower");
+        assert_ne!(
+            store
+                .external_identity_binding(
+                    &scope(),
+                    &upper.integration_id,
+                    "vendor.example.customer",
+                    b"User",
+                )
+                .expect("upper lookup"),
+            store
+                .external_identity_binding(
+                    &scope(),
+                    &upper.integration_id,
+                    "vendor.example.customer",
+                    b"user",
+                )
+                .expect("lower lookup")
+        );
+        assert_eq!(
+            store.external_identity_binding(
+                &scope(),
+                &upper.integration_id,
+                "vendor.example.contact",
+                b"User",
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn invalid_external_identity_lookup_key_fails_closed() {
+        let store = MemoryLocalStore::default();
+        let integration = IntegrationId::from_opaque(oid("integration-binding-memory"));
+        assert_eq!(
+            store.external_identity_binding(&scope(), &integration, "not namespaced", b"entity"),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        assert_eq!(
+            store.external_identity_binding(&scope(), &integration, "vendor.example.customer", b""),
+            Err(DurableStoreError::InvalidRecord)
+        );
+    }
+}
+
+#[cfg(test)]
 mod intent_tests {
     use ucr_core::{CommunicationIntentStore, DurableRecordStatus, DurableStoreError};
     use ucr_model::{
@@ -3772,24 +3954,27 @@ mod trusted_signing_key_tests {
 mod permission_enforcement_tests {
     use ucr_core::{
         AuthorizedDurableRuntime, AuthorizedMutationError, AuthorizedTrustedSigningKeyMutations,
-        CommunicationIntentStore, ConversationStore, DeviceLifecycleStore, DurableStoreError,
-        MessageStore, PermissionGrantStore, TrustedSigningKeyStore,
+        CommunicationIntentStore, ConversationStore, DeviceLifecycleStore, DurableRecordStatus,
+        DurableStoreError, ExternalIdentityBindingStore, MessageStore, PermissionGrantStore,
+        TrustedSigningKeyStore,
     };
     use ucr_model::{
-        DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, KeyId, KeyPurpose,
-        NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId, PrincipalKind,
-        PrincipalRef, PublicKeyDescriptor, ScopedPrincipal, TenantId, TenantScope,
+        DeviceDescriptor, DeviceId, DeviceLifecycleState, ExternalIdentityBinding, IdentityId,
+        IntegrationId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PermissionGrant, PermissionScope,
+        PrincipalId, PrincipalKind, PrincipalRef, PublicKeyDescriptor, ScopedPrincipal, TenantId,
+        TenantScope,
     };
     use ucr_protocol::{
         ALGORITHM_VERSION, COMMUNICATION_INTENT_READ_PERMISSION,
         COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
         CONVERSATION_WRITE_PERMISSION, CanonicalError, CanonicalErrorCode, DEVICE_READ_PERMISSION,
-        DEVICE_REGISTER_PERMISSION, DEVICE_REVOKE_PERMISSION, KEY_FORMAT_VERSION,
-        MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION,
-        PERMISSION_GRANT_READ_PERMISSION, PERMISSION_GRANT_REVOKE_PERMISSION,
-        SIGNATURE_ALGORITHM_ID, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
-        TRUSTED_SIGNING_KEY_REVOKE_PERMISSION, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
-        canonical_communication_intent,
+        DEVICE_REGISTER_PERMISSION, DEVICE_REVOKE_PERMISSION,
+        EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+        KEY_FORMAT_VERSION, MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION,
+        PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
+        PERMISSION_GRANT_REVOKE_PERMISSION, SIGNATURE_ALGORITHM_ID,
+        TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_REVOKE_PERMISSION,
+        TRUSTED_SIGNING_KEY_ROTATE_PERMISSION, canonical_communication_intent,
     };
 
     use super::MemoryLocalStore;
@@ -4139,6 +4324,80 @@ mod permission_enforcement_tests {
                 .permission_grants_for(&other_target)
                 .expect("other tenant grants")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn unified_runtime_enforces_external_identity_binding_permissions_without_relink_bypass() {
+        let store = MemoryLocalStore::default();
+        let subject = subject("tenant-binding-runtime", Some("namespace-binding-runtime"));
+        let resource = scope("tenant-binding-runtime", Some("namespace-binding-runtime"));
+        let binding = ExternalIdentityBinding {
+            scope: resource.clone(),
+            integration_id: IntegrationId::from_opaque(oid("integration-binding-runtime")),
+            external_namespace: "vendor.example.customer".to_owned(),
+            external_entity_id: b"customer-42".to_vec(),
+            identity_id: IdentityId::from_opaque(oid("identity-binding-runtime")),
+        };
+        let runtime = AuthorizedDurableRuntime::new(&store, &store);
+
+        assert_eq!(
+            runtime.link_external_identity(&subject, &binding),
+            Err(denied())
+        );
+        assert_eq!(
+            store.external_identity_binding(
+                &resource,
+                &binding.integration_id,
+                &binding.external_namespace,
+                &binding.external_entity_id,
+            ),
+            Ok(None)
+        );
+        store
+            .grant_permission(&exact_grant(
+                &subject,
+                EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
+                &resource,
+            ))
+            .expect("bootstrap binding link");
+        assert_eq!(
+            runtime.link_external_identity(&subject, &binding),
+            Ok(DurableRecordStatus::Persisted)
+        );
+
+        assert_eq!(
+            runtime.external_identity_binding(
+                &subject,
+                &resource,
+                &binding.integration_id,
+                &binding.external_namespace,
+                &binding.external_entity_id,
+            ),
+            Err(denied())
+        );
+        store
+            .grant_permission(&exact_grant(
+                &subject,
+                EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+                &resource,
+            ))
+            .expect("bootstrap binding read");
+        assert_eq!(
+            runtime.external_identity_binding(
+                &subject,
+                &resource,
+                &binding.integration_id,
+                &binding.external_namespace,
+                &binding.external_entity_id,
+            ),
+            Ok(Some(binding.clone()))
+        );
+        let mut changed = binding;
+        changed.identity_id = IdentityId::from_opaque(oid("identity-binding-other"));
+        assert_eq!(
+            runtime.link_external_identity(&subject, &changed),
+            Err(AuthorizedMutationError::Store(DurableStoreError::Conflict))
         );
     }
 

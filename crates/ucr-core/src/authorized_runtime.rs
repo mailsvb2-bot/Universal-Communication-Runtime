@@ -2,11 +2,11 @@ use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
     ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
     DeliveryState, DeviceDescriptor, DeviceId, EventEnvelope, EventId, EventReconciliation,
-    EventSummary, IdentityId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
-    PermissionScope, PrincipalKind, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
-    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
-    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
-    TenantScope, TrustedSigningKeyRecord,
+    EventSummary, ExternalIdentityBinding, IdentityId, IntegrationId, IntentId, KeyId,
+    MessageEnvelope, MessageId, PermissionGrant, PermissionScope, PrincipalKind,
+    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
+    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy,
+    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{
     ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, COMMAND_ACCEPT_PERMISSION,
@@ -14,8 +14,9 @@ use ucr_protocol::{
     COMMUNICATION_INTENT_READ_PERMISSION, COMMUNICATION_INTENT_WRITE_PERMISSION,
     CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION, DELIVERY_READ_PERMISSION,
     DELIVERY_WRITE_PERMISSION, DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION,
-    DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION, MESSAGE_READ_PERMISSION,
-    MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
+    DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
+    EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION,
+    PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
     PERMISSION_GRANT_REVOKE_PERMISSION, RECOVERY_PLAN_INSTALL_PERMISSION,
     RECOVERY_PLAN_READ_PERMISSION, RECOVERY_PLAN_REVOKE_PERMISSION,
     RECOVERY_PLAN_ROTATE_PERMISSION, SERVICE_AUDIT_READ_PERMISSION,
@@ -30,8 +31,9 @@ use crate::{
     AntiEntropyStore, AuthorizationEvaluator, AuthorizedMutationError, CommandAcceptanceStore,
     CommandOutcomeStore, CommunicationIntentStore, ConversationStore, DeliveryStore,
     DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore, ServiceAuditStore,
-    ServiceCredentialStore, ServiceQuotaStore, SyncStore, TrustedSigningKeyStore,
+    EventJournalStore, ExternalIdentityBindingStore, MessageStore, PermissionGrantStore,
+    RecoveryPlanStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaStore, SyncStore,
+    TrustedSigningKeyStore,
 };
 
 /// Authorization-enforcing runtime boundary over tenant-scoped durable capabilities.
@@ -549,6 +551,56 @@ where
         self.require(subject, scope, COMMUNICATION_INTENT_READ_PERMISSION)?;
         self.store
             .communication_intent(scope, intent_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: ExternalIdentityBindingStore,
+{
+    /// Links one exact integration-scoped external entity to canonical Identity.
+    ///
+    /// Existing keys cannot be silently reassigned to another Identity.
+    ///
+    /// # Errors
+    /// Returns authorization before storage access, then explicit validation/conflict/storage errors.
+    pub fn link_external_identity(
+        &self,
+        subject: &ScopedPrincipal,
+        binding: &ExternalIdentityBinding,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(
+            subject,
+            &binding.scope,
+            EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
+        )?;
+        self.store
+            .persist_external_identity_binding(binding)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Loads one exact integration-scoped external Identity binding after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization before storage access, then explicit validation/storage errors.
+    pub fn external_identity_binding(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        external_namespace: &str,
+        external_entity_id: &[u8],
+    ) -> Result<Option<ExternalIdentityBinding>, AuthorizedMutationError> {
+        self.require(subject, scope, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION)?;
+        self.store
+            .external_identity_binding(
+                scope,
+                integration_id,
+                external_namespace,
+                external_entity_id,
+            )
             .map_err(AuthorizedMutationError::Store)
     }
 }

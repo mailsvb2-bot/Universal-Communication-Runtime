@@ -114,12 +114,26 @@ const fn map_capability_error(error: CapabilityError) -> AddressingError {
 pub fn validate_external_identity_binding(
     binding: &ExternalIdentityBinding,
 ) -> Result<(), AddressingError> {
-    validate_namespaced_identifier(&binding.external_namespace)
+    validate_external_identity_binding_key(&binding.external_namespace, &binding.external_entity_id)
+}
+
+/// Validates the integration-local external identity key used for durable lookup.
+///
+/// The key preserves opaque entity bytes exactly. No Unicode, case, provider, or business-domain
+/// normalization is applied by Core.
+///
+/// # Errors
+/// Rejects malformed namespaces plus empty or oversized opaque external identifiers.
+pub fn validate_external_identity_binding_key(
+    external_namespace: &str,
+    external_entity_id: &[u8],
+) -> Result<(), AddressingError> {
+    validate_namespaced_identifier(external_namespace)
         .map_err(|_| AddressingError::InvalidExternalNamespace)?;
-    if binding.external_entity_id.is_empty() {
+    if external_entity_id.is_empty() {
         return Err(AddressingError::EmptyExternalEntityId);
     }
-    if binding.external_entity_id.len() > MAX_EXTERNAL_ENTITY_ID_LEN {
+    if external_entity_id.len() > MAX_EXTERNAL_ENTITY_ID_LEN {
         return Err(AddressingError::ExternalEntityIdTooLong);
     }
     Ok(())
