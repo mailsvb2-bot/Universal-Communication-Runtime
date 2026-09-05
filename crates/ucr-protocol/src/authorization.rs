@@ -14,6 +14,8 @@ pub const SERVICE_AUDIT_READ_PERMISSION: &str = "ucr.audit.service_principal.rea
 pub const DEVICE_READ_PERMISSION: &str = "ucr.identity.device.read";
 pub const DEVICE_REGISTER_PERMISSION: &str = "ucr.identity.device.register";
 pub const DEVICE_REVOKE_PERMISSION: &str = "ucr.identity.device.revoke";
+pub const EXTERNAL_IDENTITY_BINDING_READ_PERMISSION: &str = "ucr.identity.external_binding.read";
+pub const EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION: &str = "ucr.identity.external_binding.link";
 pub const TRUSTED_SIGNING_KEY_PROVISION_PERMISSION: &str =
     "ucr.crypto.trusted_signing_key.provision";
 pub const TRUSTED_SIGNING_KEY_ROTATE_PERMISSION: &str = "ucr.crypto.trusted_signing_key.rotate";
@@ -52,6 +54,8 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     DEVICE_READ_PERMISSION,
     DEVICE_REGISTER_PERMISSION,
     DEVICE_REVOKE_PERMISSION,
+    EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+    EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
     PERMISSION_GRANT_READ_PERMISSION,
     PERMISSION_GRANT_CREATE_PERMISSION,
     PERMISSION_GRANT_REVOKE_PERMISSION,

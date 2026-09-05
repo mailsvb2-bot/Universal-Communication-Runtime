@@ -1128,7 +1128,7 @@ fn message_intent_and_error_wire_parity_survives_v10_storage() {
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 18;"));
     assert!(sqlite_root.contains("fn migrate_v9_to_v10"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
@@ -1639,7 +1639,7 @@ fn trusted_signing_key_lifecycle_is_scoped_restart_safe_and_runtime_integrated()
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 18"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
@@ -1805,7 +1805,7 @@ fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overc
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 18;"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
@@ -1825,6 +1825,8 @@ const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
     "register_device",
     "revoke_device",
     "device",
+    "link_external_identity",
+    "external_identity_binding",
     "grant_permission",
     "revoke_permission",
     "permission_grants_for",
@@ -1870,6 +1872,8 @@ const AUTHORIZED_RUNTIME_PERMISSIONS: &[&str] = &[
     "DEVICE_READ_PERMISSION",
     "DEVICE_REGISTER_PERMISSION",
     "DEVICE_REVOKE_PERMISSION",
+    "EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION",
+    "EXTERNAL_IDENTITY_BINDING_READ_PERMISSION",
     "PERMISSION_GRANT_READ_PERMISSION",
     "PERMISSION_GRANT_CREATE_PERMISSION",
     "PERMISSION_GRANT_REVOKE_PERMISSION",
@@ -2061,7 +2065,7 @@ fn device_lifecycle_is_durable_and_gates_protected_key_access() {
     }
     assert!(sqlite_device.contains("CREATE TABLE devices"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 18;"));
     assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
     assert!(storage_spec.contains("migration does not invent an Identity binding"));
     assert!(spec.contains("one exact-scope durable `DeviceLifecycleStore`"));
@@ -2214,7 +2218,7 @@ fn service_principal_authentication_resolves_canonical_identity_before_least_pri
         "credential_authentication_is_non_disclosing_revocable_and_raw_runtime_cannot_bypass_gate"
     ));
     assert!(sqlite.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 18"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V12 => migrate_v12_to_v13(connection)?"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V13 => migrate_v13_to_v14(connection)?"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V14 => migrate_v14_to_v15(connection)?"));
@@ -2370,7 +2374,7 @@ fn service_principal_audit_storage_and_governance_close_only_the_evidenced_block
     assert!(sqlite.contains("verify_audit_chain"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 18;"));
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
     assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
     assert!(spec.contains("single-use"));
@@ -2760,7 +2764,7 @@ fn communication_intent_storage_is_durable_scoped_and_has_one_owner() {
     assert!(sqlite.contains("CREATE TABLE communication_intent_extensions"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V15: u32 = 15;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V16: u32 = 16;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 18;"));
     assert!(sqlite_root.contains("fn migrate_v15_to_v16"));
 
     for evidence in [
@@ -3067,7 +3071,7 @@ fn service_principal_audit_operation_binding_has_v17_migration_and_governance() 
     assert!(sqlite.contains("CREATE TRIGGER service_audit_operation_no_delete"));
     assert!(sqlite.contains("LEFT JOIN service_audit_operations"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V16: u32 = 16;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 18;"));
     assert!(sqlite_root.contains("fn migrate_v16_to_v17"));
     for evidence in [
         "operation_bound_audit_survives_restart_and_exact_lookup",
@@ -3102,4 +3106,140 @@ fn service_principal_audit_operation_binding_has_v17_migration_and_governance() 
             "second audit owner leaked: {forbidden}"
         );
     }
+}
+
+#[test]
+fn external_identity_binding_reuses_one_canonical_owner_and_permissions() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/addressing.rs"))
+        .expect("addressing protocol");
+    let authorization =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/authorization.rs"))
+            .expect("authorization protocol");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+    let runtime = fs::read_to_string(workspace.join("crates/ucr-core/src/authorized_runtime.rs"))
+        .expect("authorized runtime");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+
+    assert!(model.contains("pub struct ExternalIdentityBinding"));
+    assert!(protocol.contains("pub fn validate_external_identity_binding_key("));
+    assert!(core.contains("pub trait ExternalIdentityBindingStore: StorageProvider"));
+    assert!(core.contains("fn persist_external_identity_binding("));
+    assert!(core.contains("fn external_identity_binding("));
+    assert!(memory.contains("impl ExternalIdentityBindingStore for MemoryLocalStore"));
+    assert!(authorization.contains("EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION"));
+    assert!(authorization.contains("ucr.identity.external_binding.link"));
+    assert!(authorization.contains("EXTERNAL_IDENTITY_BINDING_READ_PERMISSION"));
+    assert!(authorization.contains("ucr.identity.external_binding.read"));
+    assert!(runtime.contains("pub fn link_external_identity("));
+    assert!(runtime.contains("pub fn external_identity_binding("));
+
+    for evidence in [
+        "exact_external_identity_binding_is_deduplicated_and_never_relinked",
+        "external_identity_key_preserves_namespace_and_opaque_bytes_exactly",
+        "unified_runtime_enforces_external_identity_binding_permissions_without_relink_bypass",
+    ] {
+        assert!(
+            memory.contains(evidence),
+            "missing memory binding evidence: {evidence}"
+        );
+    }
+    for forbidden in [
+        "CustomerIdentityBindingStore",
+        "PatientIdentityBindingStore",
+        "ClientPlatformIdentityBindingStore",
+        "ProviderIdentityBindingStore",
+    ] {
+        assert!(
+            !core.contains(forbidden),
+            "second identity owner leaked into Core: {forbidden}"
+        );
+        assert!(
+            !memory.contains(forbidden),
+            "second identity owner leaked into Memory: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn external_identity_binding_v18_is_exact_scoped_migrated_and_governed() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let sqlite_root = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let sqlite = fs::read_to_string(
+        workspace.join("crates/ucr-storage-sqlite/src/identity_binding_store.rs"),
+    )
+    .expect("sqlite identity binding store");
+    let identity_spec =
+        fs::read_to_string(workspace.join("spec/identity-addressing.md")).expect("identity spec");
+    let storage_spec =
+        fs::read_to_string(workspace.join("spec/local-storage.md")).expect("storage spec");
+    let permission_spec =
+        fs::read_to_string(workspace.join("spec/permissions.md")).expect("permission spec");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0042-external-identity-binding-is-a-durable-scoped-integration-primitive.md",
+    ))
+    .expect("adr 0042");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(sqlite.contains("impl ExternalIdentityBindingStore for SqliteLocalStore"));
+    for component in [
+        "tenant_id",
+        "namespace_present",
+        "namespace_id",
+        "integration_id",
+        "external_namespace",
+        "external_entity_id",
+    ] {
+        assert!(
+            sqlite.contains(component),
+            "binding key component missing: {component}"
+        );
+    }
+    assert!(sqlite.contains("PRIMARY KEY("));
+    assert!(sqlite.contains("external_namespace, external_entity_id"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V17: u32 = 17;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 18;"));
+    assert!(sqlite_root.contains("fn migrate_v17_to_v18("));
+    assert!(sqlite_root.contains("identity_binding_store::create_v18_objects"));
+    assert!(sqlite_root.contains("identity_binding_store::verify_schema_v18"));
+
+    for evidence in [
+        "external_identity_binding_survives_restart_and_relink_conflicts",
+        "concurrent_conflicting_external_identity_links_have_one_winner",
+        "v17_to_v18_migration_starts_with_no_inferred_identity_bindings",
+        "missing_or_malformed_v18_identity_binding_owner_is_rejected_on_reopen",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "missing sqlite binding evidence: {evidence}"
+        );
+    }
+    assert!(identity_spec.contains(
+        "exact durable key is `TenantScope + IntegrationId + external_namespace + external_entity_id bytes`"
+    ));
+    assert!(identity_spec.contains("No relink/unlink lifecycle is defined yet"));
+    assert!(storage_spec.contains("Schema v18 migrates v17 transactionally"));
+    assert!(storage_spec.contains("External Identity Binding scope + integration namespace + opaque external entity ID + Identity target"));
+    assert!(storage_spec.contains("identity-binding lifecycle retention"));
+    assert!(storage_spec.contains("PRIVATE / identity and provider metadata"));
+    assert!(permission_spec.contains("45 externally callable tenant-scoped durable methods"));
+    assert!(permission_spec.contains("37 unique permission IDs"));
+    assert!(threat.contains("SQLite v18 adds the single durable `ExternalIdentityBinding` owner"));
+    assert!(adr.contains("No implicit relink or unlink operation is defined"));
+    assert!(adr.contains("Direct integration database access was rejected"));
+    assert!(
+        ci.contains("0042-external-identity-binding-is-a-durable-scoped-integration-primitive.md")
+    );
+    assert!(!sqlite.contains("ProviderIdentityBindingStore"));
 }

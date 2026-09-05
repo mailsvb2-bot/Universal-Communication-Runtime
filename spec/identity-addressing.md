@@ -40,6 +40,8 @@ An endpoint may exist with zero currently usable addresses; lack of a route must
 `ExternalIdentityBinding` maps an integration-scoped external entity ID to canonical UCR Identity inside an explicit tenant/namespace scope.
 
 The binding does not import business meaning into UCR. The runtime may know that an opaque external entity maps to an Identity; it does not infer that the entity is a customer, patient, lead, employee, payer, or other business-domain object.
+
+Phase-13 durability uses one `ExternalIdentityBindingStore`. The exact durable key is `TenantScope + IntegrationId + external_namespace + external_entity_id bytes`; opaque entity bytes are preserved without case, Unicode, provider, or application normalization. First link is persisted, an equal retry is duplicate, and the same exact key with a different `IdentityId` conflicts. No relink/unlink lifecycle is defined yet; future replacement or deletion requires a separate canonical contract rather than storage-level overwrite. Independent `ucr.identity.external_binding.link` and `ucr.identity.external_binding.read` permissions guard the authorized runtime surface.
 ## 6. Route
 
 Route selection belongs to UCR runtime/orchestration. A route candidate references a canonical Endpoint and one opaque EndpointAddress together with a transport capability.
