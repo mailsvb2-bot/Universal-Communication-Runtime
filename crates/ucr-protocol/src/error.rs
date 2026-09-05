@@ -165,10 +165,12 @@ impl From<IntentError> for CanonicalError {
     fn from(error: IntentError) -> Self {
         let code = match error {
             IntentError::PayloadTooLarge
+            | IntentError::PolicyValueTooLong
             | IntentError::TooManyTransportConstraints
             | IntentError::TooManyExtensions
             | IntentError::ExtensionPayloadTooLarge => CanonicalErrorCode::ResourceExhausted,
-            IntentError::InvalidTransportCapability
+            IntentError::IdempotencyKeyTooLong
+            | IntentError::InvalidTransportCapability
             | IntentError::DuplicateTransportCapability
             | IntentError::ConflictingTransportCapability
             | IntentError::InvalidExtension
@@ -759,6 +761,14 @@ mod tests {
         assert_eq!(
             CanonicalError::from(crate::IntentError::TooManyTransportConstraints).code,
             CanonicalErrorCode::ResourceExhausted
+        );
+        assert_eq!(
+            CanonicalError::from(crate::IntentError::PolicyValueTooLong).code,
+            CanonicalErrorCode::ResourceExhausted
+        );
+        assert_eq!(
+            CanonicalError::from(crate::IntentError::IdempotencyKeyTooLong).code,
+            CanonicalErrorCode::InvalidArgument
         );
     }
 }

@@ -11,7 +11,7 @@ use ucr_model::{
     CommandEnvelope, CommandId, CommunicationIntent, ConversationId, ConversationRecord,
     DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
     EndpointAddress, EndpointId, EventEnvelope, EventId, EventReconciliation, EventSummary,
-    IdentityId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor,
+    IdentityId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor,
     RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditRecord, ServiceCredentialId,
     ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
     TenantScope, TrustedSigningKeyRecord,
@@ -517,6 +517,31 @@ pub trait CommandAcceptanceStore: StorageProvider {
 pub enum DurableRecordStatus {
     Persisted,
     Duplicate,
+}
+
+/// Durable provider-independent Communication Intent capability.
+///
+/// The scoped `IntentId` is the durable identity. Canonically equivalent retries
+/// are duplicates; reusing the same scoped ID with changed semantics is a conflict.
+pub trait CommunicationIntentStore: StorageProvider {
+    /// Persists or deduplicates one canonical Communication Intent.
+    ///
+    /// # Errors
+    /// Returns explicit validation, conflict, or storage failures.
+    fn persist_communication_intent(
+        &self,
+        intent: &CommunicationIntent,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one scoped Communication Intent when present.
+    ///
+    /// # Errors
+    /// Returns explicit storage or corrupt-state failures.
+    fn communication_intent(
+        &self,
+        scope: &TenantScope,
+        intent_id: &IntentId,
+    ) -> Result<Option<CommunicationIntent>, DurableStoreError>;
 }
 
 /// Durable provider-independent Conversation capability.

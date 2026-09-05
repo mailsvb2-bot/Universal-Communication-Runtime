@@ -11,7 +11,7 @@ The storage abstraction must support at minimum:
 - server durable stores;
 - future embedded stores.
 
-The abstraction must not be reduced to the lowest common denominator. Domain capabilities use explicit storage interfaces such as `CommandAcceptanceStore`, `EventJournalStore`, `RecoveryPlanStore`, `ConversationStore`, and `MessageStore`; `DeliveryStore`, `SyncStore`, and `AntiEntropyStore` are additional capability-specific contracts above `StorageProvider`; future identity and attachment stores add their own contracts without reducing the abstraction.
+The abstraction must not be reduced to the lowest common denominator. Domain capabilities use explicit storage interfaces such as `CommandAcceptanceStore`, `EventJournalStore`, `RecoveryPlanStore`, `ConversationStore`, `MessageStore`, and `CommunicationIntentStore`; `DeliveryStore`, `SyncStore`, and `AntiEntropyStore` are additional capability-specific contracts above `StorageProvider`; future identity and attachment stores add their own contracts without reducing the abstraction.
 
 ## Command acceptance durability
 
@@ -56,11 +56,12 @@ Schema v2 migrates v1 transactionally: existing command acceptance/deduplication
 Schema v11 migrates v10 transactionally by adding scoped trusted public signing-key lifecycle state. The migration starts with an empty trusted-key set because no pre-v11 durable trust owner existed; all existing Command/Event/replay/recovery/Message/Delivery/Sync state is preserved. A partial unique index enforces at most one Active trusted signing key per exact Tenant/Namespace scope and Device.
 Schema v12 migrates v11 transactionally by adding explicit PermissionGrants; it starts with no grants because prior rows are not authorization evidence. Schema v13 adds restart-safe Service Principal credential digests/revocation without storing credential plaintext. Schema v14 adds fixed-window Service Principal quota accounting and append-only hash-chained admission audit.
 Schema v15 migrates v14 transactionally by adding the exact-scope `devices` lifecycle table. Existing trusted signing-key rows are preserved, but migration does not invent an Identity binding for them: no Device row is backfilled from a key row. Consequently a migrated key remains fail-closed for new protected access until trusted deployment/recovery code explicitly registers the correct canonical Device/Identity. Revoking a Device and revoking its current active trusted signing key are one SQLite transaction.
+Schema v16 migrates v15 transactionally by adding normalized `communication_intents`, ordered allow/forbid transport-capability rows, and canonical Intent extension rows. Migration creates no inferred Intent from Message, Delivery, Event, or provider state. The scoped `IntentId` is the durable identity; a canonically equal retry is a duplicate and changed semantics under the same scoped ID conflict. `u64` maximum-cost values are stored losslessly as exactly eight bytes rather than narrowed through SQLite signed INTEGER.
 
 On Unix, the database file is created and hardened as owner-only (`0600`), and SQLite WAL/SHM sidecars must not widen group/other access. Other operating systems must rely on the platform's private application-data ACL/sandbox and must not expose the database as a user-shared document.
 ## Explicit failure semantics
 
-Storage exhaustion, corruption, unavailability, permission failures, foreign-store detection, schema incompatibility, invalid records, and idempotency conflicts are explicit failures. None may be converted to success. Persisted extension collections are bounded while being read: a corrupt Command, Event, or Message extension journal that exceeds the shared protocol-extension count limit fails before the loader accumulates additional rows.
+Storage exhaustion, corruption, unavailability, permission failures, foreign-store detection, schema incompatibility, invalid records, and idempotency conflicts are explicit failures. None may be converted to success. Persisted extension collections are bounded while being read: a corrupt Command, Event, Message, or Communication Intent extension journal that exceeds the shared protocol-extension count limit fails before the loader accumulates additional rows.
 
 `SQLITE_FULL` maps to the canonical storage-full state. Corrupt or non-database files fail explicitly. Busy/locked/I/O/open failures are unavailable, not accepted.
 
@@ -84,6 +85,8 @@ Storage exhaustion, corruption, unavailability, permission failures, foreign-sto
 | recovery plan + authority identifiers | durable recovery policy and CAS rotation | UCR Recovery | recovery-policy retention | SECURITY METADATA / AUDIT |
 | Conversation identity/kind/parent | provider-independent durable communication context | UCR Conversation | conversation retention policy | INTERNAL / identity metadata |
 | Message content + provenance + relations | durable canonical user communication | UCR Message | message retention policy | PRIVATE or originating classification |
+| Communication Intent target + payload + private policy + correlation | durable provider-independent request for communication before route selection | UCR Intent/Core | intent retention policy | PRIVATE / identity metadata |
+| Communication Intent transport constraints + extensions | route-policy requirements and versioned extension semantics; not a selected route | UCR Protocol/Intent | intent retention policy | INTERNAL / inherits extension payload classification |
 | Message crypto/signature metadata | future verification/decryption context | UCR Message/Crypto | message retention policy | SECURITY METADATA |
 | Trusted public signing key + key trust state | scoped author/peer authentication trust lifecycle | UCR Crypto/Core trust owner | security trust/audit retention | SECURITY METADATA / AUDIT |
 | Service Principal credential ID + digest + lifecycle | exact-scope Service Account authentication; no plaintext secret | UCR Core authentication owner | credential lifecycle retention | SECURITY METADATA / AUTHENTICATION |

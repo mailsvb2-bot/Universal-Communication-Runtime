@@ -959,7 +959,7 @@ mod tests {
         let connection = Connection::open(db.path()).expect("raw connection");
         connection
             .execute_batch(
-                "DROP TABLE devices;
+                "DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices;
                  DROP TRIGGER service_audit_no_update;
                  DROP TRIGGER service_audit_no_delete;
                  DROP INDEX service_audit_scope_sequence;

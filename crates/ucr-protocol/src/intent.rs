@@ -8,10 +8,14 @@ use crate::{
 };
 
 pub const MAX_INTENT_TRANSPORT_CONSTRAINTS: usize = 256;
+pub const MAX_INTENT_POLICY_VALUE_LEN: usize = 1024;
+pub const MAX_INTENT_IDEMPOTENCY_KEY_LEN: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntentError {
     PayloadTooLarge,
+    PolicyValueTooLong,
+    IdempotencyKeyTooLong,
     TooManyTransportConstraints,
     InvalidTransportCapability,
     DuplicateTransportCapability,
@@ -32,6 +36,25 @@ pub fn validate_communication_intent(intent: &CommunicationIntent) -> Result<(),
         u32::try_from(intent.payload.len()).map_err(|_| IntentError::PayloadTooLarge)?;
     if payload_len > DEFAULT_MAX_PAYLOAD_LEN {
         return Err(IntentError::PayloadTooLarge);
+    }
+    for value in [
+        intent.constraints.privacy_profile.as_deref(),
+        intent.constraints.region_constraint.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if value.len() > MAX_INTENT_POLICY_VALUE_LEN {
+            return Err(IntentError::PolicyValueTooLong);
+        }
+    }
+    if intent
+        .correlation
+        .idempotency_key
+        .as_deref()
+        .is_some_and(|value| value.len() > MAX_INTENT_IDEMPOTENCY_KEY_LEN)
+    {
+        return Err(IntentError::IdempotencyKeyTooLong);
     }
     let total_constraints = intent
         .constraints
@@ -154,6 +177,33 @@ mod tests {
         let canonical = canonical_communication_intent(&value).expect("canonical intent");
         assert_eq!(canonical.correlation, value.correlation);
         assert_eq!(canonical.extensions[0].name, "ucr.example.a");
+    }
+
+    #[test]
+    fn durable_policy_and_idempotency_budgets_fail_closed() {
+        let mut privacy = intent();
+        privacy.constraints.privacy_profile =
+            Some("x".repeat(super::MAX_INTENT_POLICY_VALUE_LEN + 1));
+        assert_eq!(
+            validate_communication_intent(&privacy),
+            Err(IntentError::PolicyValueTooLong)
+        );
+
+        let mut region = intent();
+        region.constraints.region_constraint =
+            Some("x".repeat(super::MAX_INTENT_POLICY_VALUE_LEN + 1));
+        assert_eq!(
+            validate_communication_intent(&region),
+            Err(IntentError::PolicyValueTooLong)
+        );
+
+        let mut idempotency = intent();
+        idempotency.correlation.idempotency_key =
+            Some("x".repeat(super::MAX_INTENT_IDEMPOTENCY_KEY_LEN + 1));
+        assert_eq!(
+            validate_communication_intent(&idempotency),
+            Err(IntentError::IdempotencyKeyTooLong)
+        );
     }
 
     #[test]

@@ -1080,8 +1080,6 @@ fn message_intent_and_error_wire_parity_survives_v10_storage() {
     let message_spec =
         fs::read_to_string(workspace.join("spec/conversation-message.md")).expect("message spec");
     let error_spec = fs::read_to_string(workspace.join("spec/errors.md")).expect("error spec");
-    let architecture = fs::read_to_string(workspace.join("docs/architecture/ARCHITECTURE.md"))
-        .expect("architecture");
 
     let message_model = model
         .split("pub struct MessageEnvelope")
@@ -1130,7 +1128,7 @@ fn message_intent_and_error_wire_parity_survives_v10_storage() {
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 15;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16;"));
     assert!(sqlite_root.contains("fn migrate_v9_to_v10"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
@@ -1161,7 +1159,6 @@ fn message_intent_and_error_wire_parity_survives_v10_storage() {
         sqlite_root.contains("oversized_persisted_command_extension_set_is_rejected_on_reopen")
     );
     assert!(sqlite_root.contains("oversized_persisted_event_extension_set_is_rejected_on_reopen"));
-    assert!(architecture.contains("durable Intent storage is not yet implemented"));
 }
 
 #[test]
@@ -1642,7 +1639,7 @@ fn trusted_signing_key_lifecycle_is_scoped_restart_safe_and_runtime_integrated()
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 15"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
@@ -1808,7 +1805,7 @@ fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overc
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 15;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16;"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
@@ -1844,6 +1841,8 @@ const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
     "conversation",
     "persist_message",
     "message",
+    "persist_communication_intent",
+    "communication_intent",
     "create_delivery_attempt",
     "transition_delivery",
     "record_delivery_evidence",
@@ -1888,6 +1887,8 @@ const AUTHORIZED_RUNTIME_PERMISSIONS: &[&str] = &[
     "CONVERSATION_WRITE_PERMISSION",
     "MESSAGE_READ_PERMISSION",
     "MESSAGE_WRITE_PERMISSION",
+    "COMMUNICATION_INTENT_READ_PERMISSION",
+    "COMMUNICATION_INTENT_WRITE_PERMISSION",
     "DELIVERY_READ_PERMISSION",
     "DELIVERY_WRITE_PERMISSION",
     "SYNC_READ_PERMISSION",
@@ -2059,7 +2060,7 @@ fn device_lifecycle_is_durable_and_gates_protected_key_access() {
     }
     assert!(sqlite_device.contains("CREATE TABLE devices"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 15;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16;"));
     assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
     assert!(storage_spec.contains("migration does not invent an Identity binding"));
     assert!(spec.contains("one exact-scope durable `DeviceLifecycleStore`"));
@@ -2212,7 +2213,7 @@ fn service_principal_authentication_resolves_canonical_identity_before_least_pri
         "credential_authentication_is_non_disclosing_revocable_and_raw_runtime_cannot_bypass_gate"
     ));
     assert!(sqlite.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 15"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V12 => migrate_v12_to_v13(connection)?"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V13 => migrate_v13_to_v14(connection)?"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V14 => migrate_v14_to_v15(connection)?"));
@@ -2368,7 +2369,7 @@ fn service_principal_audit_storage_and_governance_close_only_the_evidenced_block
     assert!(sqlite.contains("verify_audit_chain"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 15;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16;"));
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
     assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
     assert!(spec.contains("single-use"));
@@ -2717,4 +2718,96 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
     assert!(
         ci.contains("docs/adr/0037-sqlite-process-kill-chaos-uses-test-only-precommit-pause.md")
     );
+}
+
+#[test]
+fn communication_intent_storage_is_durable_scoped_and_has_one_owner() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+    let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/intent.rs"))
+        .expect("intent protocol");
+    let authorization =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/authorization.rs"))
+            .expect("authorization");
+    let memory =
+        fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs")).expect("memory");
+    let sqlite =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/intent_store.rs"))
+            .expect("intent sqlite");
+    let sqlite_root = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let runtime = fs::read_to_string(workspace.join("crates/ucr-core/src/authorized_runtime.rs"))
+        .expect("runtime");
+    let storage = fs::read_to_string(workspace.join("spec/local-storage.md")).expect("storage");
+    let architecture = fs::read_to_string(workspace.join("docs/architecture/ARCHITECTURE.md"))
+        .expect("architecture");
+    let adr = fs::read_to_string(
+        workspace
+            .join("docs/adr/0038-communication-intent-is-a-durable-scoped-runtime-primitive.md"),
+    )
+    .expect("adr 0038");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(core.contains("pub trait CommunicationIntentStore: StorageProvider"));
+    assert!(memory.contains("impl CommunicationIntentStore for MemoryLocalStore"));
+    assert!(sqlite.contains("impl CommunicationIntentStore for SqliteLocalStore"));
+    assert!(sqlite.contains("CREATE TABLE communication_intents"));
+    assert!(sqlite.contains("CREATE TABLE communication_intent_transports"));
+    assert!(sqlite.contains("CREATE TABLE communication_intent_extensions"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V15: u32 = 15;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16;"));
+    assert!(sqlite_root.contains("fn migrate_v15_to_v16"));
+
+    for evidence in [
+        "intent_survives_restart_and_canonical_retries_deduplicate",
+        "scoped_intent_id_reuse_with_changed_semantics_conflicts",
+        "concurrent_conflicting_intents_have_single_winner",
+        "same_intent_id_is_isolated_by_exact_scope",
+        "v15_to_v16_migration_starts_with_no_invented_intents",
+        "malformed_persisted_transport_is_rejected_on_reopen",
+        "orphan_intent_child_is_rejected_on_reopen",
+        "oversized_persisted_root_fields_are_rejected_on_reopen",
+        "oversized_persisted_extension_payload_is_rejected_on_reopen",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "missing Intent durability evidence: {evidence}"
+        );
+    }
+    assert!(protocol.contains("MAX_INTENT_POLICY_VALUE_LEN"));
+    assert!(protocol.contains("MAX_INTENT_IDEMPOTENCY_KEY_LEN"));
+    assert!(protocol.contains("canonical_communication_intent"));
+    assert!(runtime.contains("pub fn persist_communication_intent("));
+    assert!(runtime.contains("pub fn communication_intent("));
+    assert!(authorization.contains("COMMUNICATION_INTENT_READ_PERMISSION"));
+    assert!(authorization.contains("COMMUNICATION_INTENT_WRITE_PERMISSION"));
+    assert!(
+        memory.contains("unified_runtime_enforces_independent_communication_intent_permissions")
+    );
+    assert!(storage.contains("Schema v16 migrates v15 transactionally"));
+    assert!(
+        architecture
+            .contains("`CommunicationIntent` is persisted independently from route availability")
+    );
+    assert!(adr.contains("Intent is neither Message nor Delivery"));
+    assert!(adr.contains("does not claim remote-peer authentication"));
+    assert!(
+        ci.contains("docs/adr/0038-communication-intent-is-a-durable-scoped-runtime-primitive.md")
+    );
+
+    for forbidden in [
+        "telegram_intent",
+        "vk_intent",
+        "max_messenger_intent",
+        "whatsapp_intent",
+        "provider_intent",
+    ] {
+        assert!(
+            !sqlite.contains(forbidden),
+            "provider-specific Intent owner leaked: {forbidden}"
+        );
+    }
 }

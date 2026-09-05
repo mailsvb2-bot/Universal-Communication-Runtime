@@ -33,6 +33,8 @@ pub const CONVERSATION_READ_PERMISSION: &str = "ucr.conversation.read";
 pub const CONVERSATION_WRITE_PERMISSION: &str = "ucr.conversation.write";
 pub const MESSAGE_READ_PERMISSION: &str = "ucr.message.read";
 pub const MESSAGE_WRITE_PERMISSION: &str = "ucr.message.write";
+pub const COMMUNICATION_INTENT_READ_PERMISSION: &str = "ucr.intent.read";
+pub const COMMUNICATION_INTENT_WRITE_PERMISSION: &str = "ucr.intent.write";
 pub const DELIVERY_READ_PERMISSION: &str = "ucr.delivery.read";
 pub const DELIVERY_WRITE_PERMISSION: &str = "ucr.delivery.write";
 pub const SYNC_READ_PERMISSION: &str = "ucr.sync.read";
@@ -68,6 +70,8 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     CONVERSATION_WRITE_PERMISSION,
     MESSAGE_READ_PERMISSION,
     MESSAGE_WRITE_PERMISSION,
+    COMMUNICATION_INTENT_READ_PERMISSION,
+    COMMUNICATION_INTENT_WRITE_PERMISSION,
     DELIVERY_READ_PERMISSION,
     DELIVERY_WRITE_PERMISSION,
     SYNC_READ_PERMISSION,
