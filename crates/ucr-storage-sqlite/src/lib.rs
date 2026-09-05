@@ -6,6 +6,7 @@ mod delivery_store;
 mod device_store;
 mod event_journal;
 mod identity_binding_store;
+mod identity_store;
 mod intent_store;
 mod message_store;
 mod permission_store;
@@ -45,7 +46,8 @@ const SQLITE_SCHEMA_V14: u32 = 14;
 const SQLITE_SCHEMA_V15: u32 = 15;
 const SQLITE_SCHEMA_V16: u32 = 16;
 const SQLITE_SCHEMA_V17: u32 = 17;
-pub const SQLITE_SCHEMA_VERSION: u32 = 18;
+const SQLITE_SCHEMA_V18: u32 = 18;
+pub const SQLITE_SCHEMA_VERSION: u32 = 19;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -388,7 +390,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         if count_user_tables(connection)? != 0 {
             return Err(DurableStoreError::ForeignStore);
         }
-        return initialize_schema_v18(connection);
+        return initialize_schema_v19(connection);
     }
     if application_id != UCR_SQLITE_APPLICATION_ID {
         return Err(DurableStoreError::ForeignStore);
@@ -397,7 +399,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return identity_binding_store::verify_schema_v18(connection);
+        return identity_store::verify_schema_v19(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -425,14 +427,15 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V15 => migrate_v15_to_v16(connection)?,
             SQLITE_SCHEMA_V16 => migrate_v16_to_v17(connection)?,
             SQLITE_SCHEMA_V17 => migrate_v17_to_v18(connection)?,
+            SQLITE_SCHEMA_V18 => migrate_v18_to_v19(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    identity_binding_store::verify_schema_v18(connection)
+    identity_store::verify_schema_v19(connection)
 }
 
-fn initialize_schema_v18(connection: &mut Connection) -> Result<(), DurableStoreError> {
+fn initialize_schema_v19(connection: &mut Connection) -> Result<(), DurableStoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -475,6 +478,7 @@ fn initialize_schema_v18(connection: &mut Connection) -> Result<(), DurableStore
     intent_store::create_v16_objects(&transaction)?;
     service_control_store::create_v17_objects(&transaction)?;
     identity_binding_store::create_v18_objects(&transaction)?;
+    identity_store::create_v19_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -740,12 +744,27 @@ fn migrate_v17_to_v18(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     identity_binding_store::create_v18_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V18)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     identity_binding_store::verify_schema_v18(connection)
+}
+
+fn migrate_v18_to_v19(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    identity_binding_store::verify_schema_v18(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    identity_store::create_v19_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    identity_store::verify_schema_v19(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1055,20 +1074,24 @@ mod tests {
 
     use ucr_core::{
         CommandAcceptanceStore, CommandOutcomeStore, DurableStoreError, EventAppendStatus,
-        EventJournalStore, IntegrationCommandIngress, PermissionGrantStore, ServiceAuditStore,
-        ServiceCredentialStore, ServiceQuotaStore, StorageHealth, StorageProvider,
-        SystemServiceQuotaClock, issue_service_credential,
+        EventJournalStore, ExternalIdentityBindingStore, IdentityStore, IntegrationCommandIngress,
+        IntegrationIngress, PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore,
+        ServiceQuotaStore, StorageHealth, StorageProvider, SystemServiceQuotaClock,
+        issue_service_credential,
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext, DeviceId,
-        DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, PermissionGrant,
+        DeviceRef, EventEnvelope, EventId, ExternalIdentityBinding, IdentityEvidence, IdentityId,
+        IdentityOwnership, IdentityRecord, IntegrationId, NamespaceId, OpaqueId, PermissionGrant,
         PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension,
         ProtocolVersion, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditOutcome,
         ServiceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{
         COMMAND_ACCEPT_PERMISSION, CommandReceiptStatus, DEFAULT_MAX_PAYLOAD_LEN,
+        EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, IDENTITY_CREATE_PERMISSION,
         MAX_PROTOCOL_EXTENSIONS, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+        SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
     };
 
     use super::{SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID};
@@ -1119,6 +1142,28 @@ mod tests {
             },
             schema_version: ProtocolVersion::new(1, 0),
             extensions: Vec::new(),
+        }
+    }
+
+    fn service_subject(scope: &TenantScope, id: &str) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(opaque(id)),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
+    fn exact_grant(
+        subject: &ScopedPrincipal,
+        permission: &str,
+        scope: &TenantScope,
+    ) -> PermissionGrant {
+        PermissionGrant {
+            grantee: subject.clone(),
+            permission: permission.to_owned(),
+            scope: PermissionScope::Exact(scope.clone()),
         }
     }
 
@@ -1367,7 +1412,7 @@ mod tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF;
-                     DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices; DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;
+                     DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices; DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;
                      DROP TABLE message_extensions;
                      DROP TABLE command_extensions;
                      DROP TABLE command_protocol_metadata;
@@ -2291,6 +2336,108 @@ mod tests {
                 .expect("exact command audit after restart")
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn integration_link_identity_ingress_survives_sqlite_restart_without_parallel_owner() {
+        let db = TestDbPath::new();
+        let scope = command(
+            "identity-api-scope",
+            "identity-api-scope-key",
+            b"",
+            Some("namespace-identity-api"),
+        )
+        .scope;
+        let subject = service_subject(&scope, "service-identity-api-sqlite");
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        let identity_create_grant = exact_grant(&subject, IDENTITY_CREATE_PERMISSION, &scope);
+        let binding_grant =
+            exact_grant(&subject, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, &scope);
+        let quota = ServiceQuotaPolicy {
+            subject: subject.clone(),
+            max_requests: 4,
+            window_ms: 60_000,
+        };
+        let identity = IdentityRecord {
+            scope: scope.clone(),
+            identity_id: IdentityId::from_opaque(opaque("identity-api-target")),
+            ownership: IdentityOwnership::UcrNative,
+            evidence: IdentityEvidence::Unverified,
+            expires_at_unix_ms: None,
+        };
+        let binding = ExternalIdentityBinding {
+            scope: scope.clone(),
+            integration_id: IntegrationId::from_opaque(opaque("integration-identity-api")),
+            external_namespace: "vendor.example.account".to_owned(),
+            external_entity_id: b"Opaque-External-Account-77".to_vec(),
+            identity_id: identity.identity_id.clone(),
+        };
+
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open identity API store");
+            store
+                .provision_service_credential(&credential)
+                .expect("persist credential");
+            store
+                .grant_permission(&identity_create_grant)
+                .expect("persist identity create permission");
+            store
+                .grant_permission(&binding_grant)
+                .expect("persist binding link permission");
+            store
+                .set_service_quota_policy(&quota)
+                .expect("persist quota");
+            let ingress = IntegrationIngress::new(&SystemServiceQuotaClock, &store, &store);
+            assert_eq!(
+                ingress
+                    .create_identity(&scope, &credential.credential_id, &secret, &identity)
+                    .expect("first public root identity create"),
+                identity
+            );
+            assert_eq!(
+                ingress
+                    .link_identity(&scope, &credential.credential_id, &secret, &binding)
+                    .expect("first public identity link"),
+                binding
+            );
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen identity API store");
+        let ingress = IntegrationIngress::new(&SystemServiceQuotaClock, &reopened, &reopened);
+        assert_eq!(
+            reopened.identity(&scope, &identity.identity_id),
+            Ok(Some(identity.clone()))
+        );
+        assert_eq!(
+            ingress
+                .link_identity(&scope, &credential.credential_id, &secret, &binding)
+                .expect("idempotent public identity link after restart"),
+            binding
+        );
+        assert_eq!(
+            reopened
+                .external_identity_binding(
+                    &binding.scope,
+                    &binding.integration_id,
+                    &binding.external_namespace,
+                    &binding.external_entity_id,
+                )
+                .expect("restart-safe binding lookup"),
+            Some(binding.clone())
+        );
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND.to_owned(),
+            operation_id: binding.identity_id.as_opaque().clone(),
+        };
+        let audit = reopened
+            .service_audit_records_for_operation(&scope, &operation, 4)
+            .expect("restart-safe identity-link audit");
+        assert_eq!(audit.len(), 2);
+        assert!(
+            audit
+                .iter()
+                .all(|record| record.outcome == ServiceAuditOutcome::Authorized)
         );
     }
 }

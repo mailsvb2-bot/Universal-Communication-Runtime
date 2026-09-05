@@ -292,6 +292,29 @@ pub enum IdentityEvidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityOwnership {
+    UcrNative,
+    UserManaged,
+    PlatformManaged,
+    OrganizationManaged,
+    Federated,
+    Temporary,
+}
+
+/// Minimal durable Root Identity record.
+///
+/// Identity deliberately contains no phone, email, provider ID, display name, avatar,
+/// endpoint or business-domain identifier. Those belong to separate canonical layers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityRecord {
+    pub scope: TenantScope,
+    pub identity_id: IdentityId,
+    pub ownership: IdentityOwnership,
+    pub evidence: IdentityEvidence,
+    pub expires_at_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceLifecycleState {
     Active,
     Stale,

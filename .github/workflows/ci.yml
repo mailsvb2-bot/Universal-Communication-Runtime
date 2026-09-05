@@ -177,4 +177,5 @@ jobs:
           test -s docs/adr/0039-recovered-device-activation-requires-independent-reverification-proof.md &&
           test -s docs/adr/0040-integration-api-reuses-canonical-command-and-service-principal-boundaries.md &&
           test -s docs/adr/0041-service-principal-audit-operation-reference-is-versioned-and-append-only.md &&
-          test -s docs/adr/0042-external-identity-binding-is-a-durable-scoped-integration-primitive.md
+          test -s docs/adr/0042-external-identity-binding-is-a-durable-scoped-integration-primitive.md &&
+          test -s docs/adr/0043-root-identity-is-durable-accountless-and-provider-independent.md

@@ -27,7 +27,7 @@ Internet   Direct     External bridges
 
 ## Canonical invariants
 
-- `Identity` is not a phone number, email address, provider ID, hostname, IP address, or database sequence.
+- `Identity` is not a phone number, email address, provider ID, hostname, IP address, or database sequence. The Root Identity owner is exact-scope, durable, accountless, and provider-independent.
 - `Endpoint` is replaceable and can disappear without destroying `Identity`.
 - `Conversation` is not owned by a transport/provider.
 - `CommunicationIntent` is persisted independently from route availability through one capability-specific durable owner; Transport, Message, and Delivery do not own or recreate Intent state.
@@ -40,7 +40,7 @@ Internet   Direct     External bridges
 
 ## Public contract boundary
 
-The public contract is represented first as a versioned protocol specification plus protobuf schemas. Rust types are a reference mapping of the specification, not the specification itself. Phase 13 also reuses the canonical `ExternalIdentityBinding` model through one durable exact-scope owner; integration-specific business mappings and direct database access remain outside Core. Phase 13 begins with `IntegrationService.SubmitCommand`, which reuses the canonical Command/Receipt/Error envelopes and the existing Service Principal admission chain. Its admission audit is bound to a generic operation reference (`ucr.command` + canonical `CommandId`) rather than a Command-specific audit owner; this attribution is security metadata and does not alter Command semantics.
+The public contract is represented first as a versioned protocol specification plus protobuf schemas. Rust types are a reference mapping of the specification, not the specification itself. SQLite v19 now provides one exact-scope durable Root `IdentityStore`; the minimal Root Identity is accountless/provider-independent and keeps ownership/evidence/lifecycle metadata separate from addresses, endpoints, profiles, and external entities. Phase 13 reuses that owner plus the canonical `ExternalIdentityBinding` owner through `IntegrationService.CreateIdentity` and `IntegrationService.LinkIdentity`, while `IntegrationService.SubmitCommand` continues to reuse canonical Command/Receipt/Error envelopes. All three operations pass through the same Service Principal authentication, quota/audit and permission boundary; integration-specific business mappings and direct database access remain outside Core. Generic audit operation references bind canonical IDs rather than copying business payload or opaque external entity bytes into audit.
 
 Supported contract surfaces are expected to include protobuf/gRPC, HTTP where appropriate, event streams, local IPC and embedded APIs. They must express the same canonical semantics.
 
@@ -48,7 +48,7 @@ Supported contract surfaces are expected to include protobuf/gRPC, HTTP where ap
 
 A future transport must be addable through a `TransportProvider`-style boundary containing capabilities, addressing, delivery semantics, health, failure mapping and conformance behavior without changing the meaning of canonical entities.
 
-An external platform integrates through Service Principal authentication, quotas/audit, permissions, the public Integration API, events, identity bindings and policies. The implemented Phase-13 command ingress does not grant raw `AuthorizedDurableRuntime` or storage access.
+An external platform integrates through Service Principal authentication, quotas/audit, permissions, the public Integration API, events, Root Identity/external identity bindings and policies. The implemented Phase-13 ingress exposes canonical SubmitCommand/CreateIdentity/LinkIdentity operations without granting raw `AuthorizedDurableRuntime` or storage access.
 
 ## Deferred implementation
 

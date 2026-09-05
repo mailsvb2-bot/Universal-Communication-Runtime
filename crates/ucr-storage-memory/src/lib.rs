@@ -10,8 +10,8 @@ use ucr_core::{
     AntiEntropyStore, AuthorizationEvaluator, CommandAcceptanceStore, CommandOutcomeStore,
     CommunicationIntentStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, ExternalIdentityBindingStore, MessageStore, PermissionGrantStore,
-    RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
+    EventJournalStore, ExternalIdentityBindingStore, IdentityStore, MessageStore,
+    PermissionGrantStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
     ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
     ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth, StorageProvider, SyncStore,
     TrustedSigningKeyStore,
@@ -25,11 +25,11 @@ use ucr_model::{
     CommunicationIntent, ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence,
     DeliveryId, DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventEnvelope,
     EventId, EventReconciliation, EventReplicaState, EventSummary, ExternalIdentityBinding,
-    IdentityId, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
-    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
-    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
-    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord, TrustedSigningKeyState,
+    IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId,
+    PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
+    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
+    ServiceCredentialState, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
+    TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -43,11 +43,12 @@ use ucr_protocol::{
     validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
     validate_delivery_evidence_order, validate_delivery_transition,
     validate_external_identity_binding, validate_external_identity_binding_key,
-    validate_permission_grant, validate_service_audit_record, validate_service_quota_policy,
-    validate_sync_checkpoint, validate_sync_transition, validate_trusted_signing_key_descriptor,
+    validate_identity_record, validate_permission_grant, validate_service_audit_record,
+    validate_service_quota_policy, validate_sync_checkpoint, validate_sync_transition,
+    validate_trusted_signing_key_descriptor,
 };
 
-const SCHEMA_VERSION: u32 = 9;
+const SCHEMA_VERSION: u32 = 10;
 type ScopeKey = (String, Option<String>);
 type CommandKey = (ScopeKey, String);
 type CommandRefKey = (ScopeKey, String);
@@ -57,6 +58,7 @@ type RecoveryIdentityKey = (ScopeKey, String);
 type ConversationKey = (ScopeKey, String);
 type MessageKey = (ScopeKey, String);
 type IntentKey = (ScopeKey, String);
+type IdentityKey = (ScopeKey, String);
 type ExternalIdentityBindingKey = (ScopeKey, String, String, Vec<u8>);
 type DeliveryKey = (ScopeKey, String);
 type SyncKey = (ScopeKey, String);
@@ -86,6 +88,7 @@ struct MemoryState {
     conversations: HashMap<ConversationKey, ConversationRecord>,
     messages: HashMap<MessageKey, MessageEnvelope>,
     intents: HashMap<IntentKey, CommunicationIntent>,
+    identities: HashMap<IdentityKey, IdentityRecord>,
     external_identity_bindings: HashMap<ExternalIdentityBindingKey, ExternalIdentityBinding>,
     deliveries: HashMap<DeliveryKey, DeliveryAttempt>,
     delivery_evidence: HashMap<DeliveryKey, Vec<DeliveryEvidence>>,
@@ -905,6 +908,13 @@ fn intent_key(scope: &TenantScope, intent_id: &IntentId) -> IntentKey {
     (scope_key(scope), intent_id.as_opaque().as_str().to_owned())
 }
 
+fn identity_key(scope: &TenantScope, identity_id: &IdentityId) -> IdentityKey {
+    (
+        scope_key(scope),
+        identity_id.as_opaque().as_str().to_owned(),
+    )
+}
+
 fn external_identity_binding_key(
     scope: &TenantScope,
     integration_id: &IntegrationId,
@@ -930,6 +940,38 @@ fn sync_key(scope: &TenantScope, session_id: &SessionId) -> SyncKey {
     (scope_key(scope), session_id.as_opaque().as_str().to_owned())
 }
 
+impl IdentityStore for MemoryLocalStore {
+    fn persist_identity(
+        &self,
+        identity: &IdentityRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_identity_record(identity).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = identity_key(&identity.scope, &identity.identity_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.identities.get(&key) {
+            return if existing == identity {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.identities.insert(key, identity.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+    ) -> Result<Option<IdentityRecord>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .identities
+            .get(&identity_key(scope, identity_id))
+            .cloned())
+    }
+}
+
 impl ExternalIdentityBindingStore for MemoryLocalStore {
     fn persist_external_identity_binding(
         &self,
@@ -950,6 +992,12 @@ impl ExternalIdentityBindingStore for MemoryLocalStore {
             } else {
                 Err(DurableStoreError::Conflict)
             };
+        }
+        if !state
+            .identities
+            .contains_key(&identity_key(&binding.scope, &binding.identity_id))
+        {
+            return Err(DurableStoreError::InvalidRecord);
         }
         state
             .external_identity_bindings
@@ -2424,11 +2472,89 @@ mod recovery_tests {
 }
 
 #[cfg(test)]
-mod external_identity_binding_tests {
-    use ucr_core::{DurableRecordStatus, DurableStoreError, ExternalIdentityBindingStore};
+mod identity_store_tests {
+    use ucr_core::{DurableRecordStatus, DurableStoreError, IdentityStore};
     use ucr_model::{
-        ExternalIdentityBinding, IdentityId, IntegrationId, NamespaceId, OpaqueId, TenantId,
-        TenantScope,
+        IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, NamespaceId, OpaqueId,
+        TenantId, TenantScope,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope(namespace: &str) -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-root-memory")),
+            namespace_id: Some(NamespaceId::from_opaque(oid(namespace))),
+        }
+    }
+
+    fn identity(namespace: &str) -> IdentityRecord {
+        IdentityRecord {
+            scope: scope(namespace),
+            identity_id: IdentityId::from_opaque(oid("identity-root-memory")),
+            ownership: IdentityOwnership::UserManaged,
+            evidence: IdentityEvidence::SelfAsserted,
+            expires_at_unix_ms: None,
+        }
+    }
+
+    #[test]
+    fn root_identity_is_exact_scoped_deduplicated_and_not_redefinable() {
+        let store = MemoryLocalStore::default();
+        let original = identity("namespace-a");
+        assert_eq!(
+            store.persist_identity(&original),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.persist_identity(&original),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        let mut changed = original.clone();
+        changed.ownership = IdentityOwnership::PlatformManaged;
+        assert_eq!(
+            store.persist_identity(&changed),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            store.identity(&original.scope, &original.identity_id),
+            Ok(Some(original.clone()))
+        );
+        let other_scope = scope("namespace-b");
+        assert_eq!(
+            store.identity(&other_scope, &original.identity_id),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn root_identity_rejects_invalid_expiry_without_partial_state() {
+        let store = MemoryLocalStore::default();
+        let mut invalid = identity("namespace-a");
+        invalid.expires_at_unix_ms = Some(0);
+        assert_eq!(
+            store.persist_identity(&invalid),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        assert_eq!(
+            store.identity(&invalid.scope, &invalid.identity_id),
+            Ok(None)
+        );
+    }
+}
+
+#[cfg(test)]
+mod external_identity_binding_tests {
+    use ucr_core::{
+        DurableRecordStatus, DurableStoreError, ExternalIdentityBindingStore, IdentityStore,
+    };
+    use ucr_model::{
+        ExternalIdentityBinding, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord,
+        IntegrationId, NamespaceId, OpaqueId, TenantId, TenantScope,
     };
 
     use super::MemoryLocalStore;
@@ -2444,6 +2570,22 @@ mod external_identity_binding_tests {
         }
     }
 
+    fn identity(id: &str) -> IdentityRecord {
+        IdentityRecord {
+            scope: scope(),
+            identity_id: IdentityId::from_opaque(oid(id)),
+            ownership: IdentityOwnership::UcrNative,
+            evidence: IdentityEvidence::Unverified,
+            expires_at_unix_ms: None,
+        }
+    }
+
+    fn seed_identity(store: &MemoryLocalStore, id: &str) {
+        store
+            .persist_identity(&identity(id))
+            .expect("seed identity");
+    }
+
     fn binding(entity: &[u8], identity: &str) -> ExternalIdentityBinding {
         ExternalIdentityBinding {
             scope: scope(),
@@ -2457,6 +2599,8 @@ mod external_identity_binding_tests {
     #[test]
     fn exact_external_identity_binding_is_deduplicated_and_never_relinked() {
         let store = MemoryLocalStore::default();
+        seed_identity(&store, "identity-original");
+        seed_identity(&store, "identity-other");
         let original = binding(b"Customer-42", "identity-original");
         assert_eq!(
             store.persist_external_identity_binding(&original),
@@ -2485,6 +2629,8 @@ mod external_identity_binding_tests {
     #[test]
     fn external_identity_key_preserves_namespace_and_opaque_bytes_exactly() {
         let store = MemoryLocalStore::default();
+        seed_identity(&store, "identity-upper");
+        seed_identity(&store, "identity-lower");
         let upper = binding(b"User", "identity-upper");
         let lower = binding(b"user", "identity-lower");
         store
@@ -2517,6 +2663,25 @@ mod external_identity_binding_tests {
                 &upper.integration_id,
                 "vendor.example.contact",
                 b"User",
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn new_external_binding_requires_existing_canonical_identity() {
+        let store = MemoryLocalStore::default();
+        let dangling = binding(b"missing-target", "identity-missing");
+        assert_eq!(
+            store.persist_external_identity_binding(&dangling),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        assert_eq!(
+            store.external_identity_binding(
+                &dangling.scope,
+                &dangling.integration_id,
+                &dangling.external_namespace,
+                &dangling.external_entity_id,
             ),
             Ok(None)
         );
@@ -3955,14 +4120,14 @@ mod permission_enforcement_tests {
     use ucr_core::{
         AuthorizedDurableRuntime, AuthorizedMutationError, AuthorizedTrustedSigningKeyMutations,
         CommunicationIntentStore, ConversationStore, DeviceLifecycleStore, DurableRecordStatus,
-        DurableStoreError, ExternalIdentityBindingStore, MessageStore, PermissionGrantStore,
-        TrustedSigningKeyStore,
+        DurableStoreError, ExternalIdentityBindingStore, IdentityStore, MessageStore,
+        PermissionGrantStore, TrustedSigningKeyStore,
     };
     use ucr_model::{
-        DeviceDescriptor, DeviceId, DeviceLifecycleState, ExternalIdentityBinding, IdentityId,
-        IntegrationId, KeyId, KeyPurpose, NamespaceId, OpaqueId, PermissionGrant, PermissionScope,
-        PrincipalId, PrincipalKind, PrincipalRef, PublicKeyDescriptor, ScopedPrincipal, TenantId,
-        TenantScope,
+        DeviceDescriptor, DeviceId, DeviceLifecycleState, ExternalIdentityBinding,
+        IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, KeyId,
+        KeyPurpose, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
+        PrincipalKind, PrincipalRef, PublicKeyDescriptor, ScopedPrincipal, TenantId, TenantScope,
     };
     use ucr_protocol::{
         ALGORITHM_VERSION, COMMUNICATION_INTENT_READ_PERMISSION,
@@ -3970,11 +4135,12 @@ mod permission_enforcement_tests {
         CONVERSATION_WRITE_PERMISSION, CanonicalError, CanonicalErrorCode, DEVICE_READ_PERMISSION,
         DEVICE_REGISTER_PERMISSION, DEVICE_REVOKE_PERMISSION,
         EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
-        KEY_FORMAT_VERSION, MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION,
-        PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
-        PERMISSION_GRANT_REVOKE_PERMISSION, SIGNATURE_ALGORITHM_ID,
-        TRUSTED_SIGNING_KEY_PROVISION_PERMISSION, TRUSTED_SIGNING_KEY_REVOKE_PERMISSION,
-        TRUSTED_SIGNING_KEY_ROTATE_PERMISSION, canonical_communication_intent,
+        IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, KEY_FORMAT_VERSION,
+        MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION,
+        PERMISSION_GRANT_READ_PERMISSION, PERMISSION_GRANT_REVOKE_PERMISSION,
+        SIGNATURE_ALGORITHM_ID, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
+        TRUSTED_SIGNING_KEY_REVOKE_PERMISSION, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
+        canonical_communication_intent,
     };
 
     use super::MemoryLocalStore;
@@ -4328,6 +4494,47 @@ mod permission_enforcement_tests {
     }
 
     #[test]
+    fn unified_runtime_enforces_independent_root_identity_create_and_read_permissions() {
+        let store = MemoryLocalStore::default();
+        let subject = subject("tenant-root-runtime", Some("namespace-root-runtime"));
+        let resource = scope("tenant-root-runtime", Some("namespace-root-runtime"));
+        let identity = IdentityRecord {
+            scope: resource.clone(),
+            identity_id: IdentityId::from_opaque(oid("identity-root-runtime")),
+            ownership: IdentityOwnership::UserManaged,
+            evidence: IdentityEvidence::SelfAsserted,
+            expires_at_unix_ms: None,
+        };
+        let runtime = AuthorizedDurableRuntime::new(&store, &store);
+
+        assert_eq!(runtime.persist_identity(&subject, &identity), Err(denied()));
+        assert_eq!(store.identity(&resource, &identity.identity_id), Ok(None));
+        store
+            .grant_permission(&exact_grant(
+                &subject,
+                IDENTITY_CREATE_PERMISSION,
+                &resource,
+            ))
+            .expect("bootstrap identity create");
+        assert_eq!(
+            runtime.persist_identity(&subject, &identity),
+            Ok(DurableRecordStatus::Persisted)
+        );
+
+        assert_eq!(
+            runtime.identity(&subject, &resource, &identity.identity_id),
+            Err(denied())
+        );
+        store
+            .grant_permission(&exact_grant(&subject, IDENTITY_READ_PERMISSION, &resource))
+            .expect("bootstrap identity read");
+        assert_eq!(
+            runtime.identity(&subject, &resource, &identity.identity_id),
+            Ok(Some(identity))
+        );
+    }
+
+    #[test]
     fn unified_runtime_enforces_external_identity_binding_permissions_without_relink_bypass() {
         let store = MemoryLocalStore::default();
         let subject = subject("tenant-binding-runtime", Some("namespace-binding-runtime"));
@@ -4339,6 +4546,24 @@ mod permission_enforcement_tests {
             external_entity_id: b"customer-42".to_vec(),
             identity_id: IdentityId::from_opaque(oid("identity-binding-runtime")),
         };
+        store
+            .persist_identity(&IdentityRecord {
+                scope: resource.clone(),
+                identity_id: binding.identity_id.clone(),
+                ownership: IdentityOwnership::UcrNative,
+                evidence: IdentityEvidence::Unverified,
+                expires_at_unix_ms: None,
+            })
+            .expect("seed canonical identity");
+        store
+            .persist_identity(&IdentityRecord {
+                scope: resource.clone(),
+                identity_id: IdentityId::from_opaque(oid("identity-binding-other")),
+                ownership: IdentityOwnership::UcrNative,
+                evidence: IdentityEvidence::Unverified,
+                expires_at_unix_ms: None,
+            })
+            .expect("seed conflicting canonical identity");
         let runtime = AuthorizedDurableRuntime::new(&store, &store);
 
         assert_eq!(
@@ -4990,18 +5215,22 @@ mod integration_api_tests {
     use std::sync::atomic::{AtomicI64, Ordering};
 
     use ucr_core::{
-        IntegrationCommandIngress, PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore,
-        ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore, issue_service_credential,
+        ExternalIdentityBindingStore, IdentityStore, IntegrationCommandIngress, IntegrationIngress,
+        PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock,
+        ServiceQuotaClockError, ServiceQuotaStore, issue_service_credential,
     };
     use ucr_model::{
-        CommandEnvelope, CommandId, CorrelationContext, NamespaceId, OpaqueId, PermissionGrant,
-        PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ProtocolVersion,
-        ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditOutcome, ServiceQuotaPolicy,
-        TenantId, TenantScope,
+        CommandEnvelope, CommandId, CorrelationContext, ExternalIdentityBinding, IdentityEvidence,
+        IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, NamespaceId, OpaqueId,
+        PermissionGrant, PermissionScope, PrincipalId, PrincipalKind, PrincipalRef,
+        ProtocolVersion, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditOutcome,
+        ServiceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{
         COMMAND_ACCEPT_PERMISSION, CanonicalErrorCode, CommandReceiptStatus,
-        SERVICE_AUDIT_COMMAND_OPERATION_KIND, SERVICE_AUDIT_READ_PERMISSION,
+        EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, IDENTITY_CREATE_PERMISSION,
+        SERVICE_AUDIT_COMMAND_OPERATION_KIND, SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
+        SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, SERVICE_AUDIT_READ_PERMISSION,
     };
 
     use super::MemoryLocalStore;
@@ -5050,6 +5279,56 @@ mod integration_api_tests {
             grantee: subject.clone(),
             permission: COMMAND_ACCEPT_PERMISSION.to_owned(),
             scope: PermissionScope::Exact(scope()),
+        }
+    }
+
+    fn identity_create_grant(subject: &ScopedPrincipal) -> PermissionGrant {
+        PermissionGrant {
+            grantee: subject.clone(),
+            permission: IDENTITY_CREATE_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope()),
+        }
+    }
+
+    fn identity(id: &str) -> IdentityRecord {
+        IdentityRecord {
+            scope: scope(),
+            identity_id: IdentityId::from_opaque(oid(id)),
+            ownership: IdentityOwnership::UcrNative,
+            evidence: IdentityEvidence::Unverified,
+            expires_at_unix_ms: None,
+        }
+    }
+
+    fn identity_operation(identity: &IdentityRecord) -> ServiceAuditOperationRef {
+        ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND.to_owned(),
+            operation_id: identity.identity_id.as_opaque().clone(),
+        }
+    }
+
+    fn binding_grant(subject: &ScopedPrincipal) -> PermissionGrant {
+        PermissionGrant {
+            grantee: subject.clone(),
+            permission: EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope()),
+        }
+    }
+
+    fn binding(identity: &str, external_entity_id: &[u8]) -> ExternalIdentityBinding {
+        ExternalIdentityBinding {
+            scope: scope(),
+            integration_id: IntegrationId::from_opaque(oid("integration-public-api")),
+            external_namespace: "vendor.example.account".to_owned(),
+            external_entity_id: external_entity_id.to_vec(),
+            identity_id: IdentityId::from_opaque(oid(identity)),
+        }
+    }
+
+    fn binding_operation(binding: &ExternalIdentityBinding) -> ServiceAuditOperationRef {
+        ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND.to_owned(),
+            operation_id: binding.identity_id.as_opaque().clone(),
         }
     }
 
@@ -5269,6 +5548,333 @@ mod integration_api_tests {
         assert_eq!(audit[0].operation.as_ref(), Some(&operation(&first)));
         assert_eq!(audit[1].operation.as_ref(), Some(&operation(&second)));
         assert_eq!(audit[2].operation.as_ref(), Some(&operation(&second)));
+    }
+
+    #[test]
+    fn create_identity_ingress_denial_and_bad_secret_never_create_ghost_identity() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        install_quota(&store, &subject, 4);
+        let clock = TestClock::new(33_000);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+        let value = identity("identity-public-denied");
+
+        let denied = ingress
+            .create_identity(&subject.scope, &credential.credential_id, &secret, &value)
+            .expect_err("missing identity create permission denied");
+        assert_eq!(denied.code, CanonicalErrorCode::PermissionDenied);
+        assert_eq!(store.identity(&value.scope, &value.identity_id), Ok(None));
+
+        let wrong = ucr_core::ServiceCredentialSecret::from_bytes([0xA5; 32]);
+        let unauthenticated = ingress
+            .create_identity(&subject.scope, &credential.credential_id, &wrong, &value)
+            .expect_err("wrong identity credential rejected");
+        assert_eq!(unauthenticated.code, CanonicalErrorCode::Unauthenticated);
+        assert_eq!(store.identity(&value.scope, &value.identity_id), Ok(None));
+
+        store
+            .grant_permission(&identity_create_grant(&subject))
+            .expect("grant identity create after denials");
+        assert_eq!(
+            ingress
+                .create_identity(&subject.scope, &credential.credential_id, &secret, &value)
+                .expect("same Identity remains new after denials"),
+            value
+        );
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("identity admission audit");
+        assert_eq!(
+            audit
+                .iter()
+                .map(|record| record.outcome)
+                .collect::<Vec<_>>(),
+            vec![
+                ServiceAuditOutcome::PermissionDenied,
+                ServiceAuditOutcome::AuthenticationFailed,
+                ServiceAuditOutcome::Authorized,
+            ]
+        );
+        let expected = identity_operation(&value);
+        assert!(
+            audit
+                .iter()
+                .all(|record| record.operation.as_ref() == Some(&expected))
+        );
+    }
+
+    #[test]
+    fn create_identity_ingress_authenticates_audits_and_deduplicates_without_ghosts() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        store
+            .grant_permission(&identity_create_grant(&subject))
+            .expect("bootstrap identity create permission");
+        install_quota(&store, &subject, 3);
+        let clock = TestClock::new(34_000);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+        let value = identity("identity-public-create");
+
+        assert_eq!(
+            ingress
+                .create_identity(&subject.scope, &credential.credential_id, &secret, &value)
+                .expect("create identity"),
+            value
+        );
+        assert_eq!(
+            ingress
+                .create_identity(&subject.scope, &credential.credential_id, &secret, &value)
+                .expect("idempotent identity retry"),
+            value
+        );
+        let mut changed = value.clone();
+        changed.evidence = IdentityEvidence::SelfAsserted;
+        let conflict = ingress
+            .create_identity(&subject.scope, &credential.credential_id, &secret, &changed)
+            .expect_err("same IdentityId cannot be silently redefined");
+        assert_eq!(conflict.code, CanonicalErrorCode::Conflict);
+        assert_eq!(
+            store.identity(&value.scope, &value.identity_id),
+            Ok(Some(value.clone()))
+        );
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("read identity audit");
+        assert_eq!(audit.len(), 3);
+        let expected = identity_operation(&value);
+        assert!(
+            audit
+                .iter()
+                .all(|record| record.operation.as_ref() == Some(&expected))
+        );
+    }
+
+    #[test]
+    fn link_identity_ingress_authenticates_audits_deduplicates_and_refuses_relink() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        store
+            .grant_permission(&binding_grant(&subject))
+            .expect("bootstrap identity link permission");
+        install_quota(&store, &subject, 4);
+        store
+            .persist_identity(&identity("identity-public-a"))
+            .expect("seed target a");
+        store
+            .persist_identity(&identity("identity-public-b"))
+            .expect("seed target b");
+        let clock = TestClock::new(35_000);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+        let original = binding("identity-public-a", b"External-User-42");
+
+        assert_eq!(
+            ingress
+                .link_identity(
+                    &subject.scope,
+                    &credential.credential_id,
+                    &secret,
+                    &original
+                )
+                .expect("first identity link"),
+            original
+        );
+        assert_eq!(
+            ingress
+                .link_identity(
+                    &subject.scope,
+                    &credential.credential_id,
+                    &secret,
+                    &original
+                )
+                .expect("idempotent identity link retry"),
+            original
+        );
+
+        let conflicting = binding("identity-public-b", b"External-User-42");
+        let conflict = ingress
+            .link_identity(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &conflicting,
+            )
+            .expect_err("public API must not relink an existing external key");
+        assert_eq!(conflict.code, CanonicalErrorCode::Conflict);
+        assert_eq!(
+            store
+                .external_identity_binding(
+                    &original.scope,
+                    &original.integration_id,
+                    &original.external_namespace,
+                    &original.external_entity_id,
+                )
+                .expect("raw reference lookup"),
+            Some(original.clone())
+        );
+
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("read identity-link audit");
+        assert_eq!(audit.len(), 3);
+        assert_eq!(
+            audit[0].operation.as_ref(),
+            Some(&binding_operation(&original))
+        );
+        assert_eq!(
+            audit[1].operation.as_ref(),
+            Some(&binding_operation(&original))
+        );
+        assert_eq!(
+            audit[2].operation.as_ref(),
+            Some(&binding_operation(&conflicting))
+        );
+        assert!(audit.iter().all(|record| {
+            record.operation.as_ref().is_some_and(|operation| {
+                operation.operation_kind == SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND
+            })
+        }));
+    }
+
+    #[test]
+    fn link_identity_ingress_missing_target_fails_without_ghost_binding() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        store
+            .grant_permission(&binding_grant(&subject))
+            .expect("bootstrap link permission");
+        install_quota(&store, &subject, 2);
+        let clock = TestClock::new(35_500);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+        let dangling = binding("identity-not-created", b"missing-target-account");
+
+        let error = ingress
+            .link_identity(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &dangling,
+            )
+            .expect_err("new binding cannot target a missing Root Identity");
+        assert_eq!(error.code, CanonicalErrorCode::InvalidArgument);
+        assert_eq!(
+            store
+                .external_identity_binding(
+                    &dangling.scope,
+                    &dangling.integration_id,
+                    &dangling.external_namespace,
+                    &dangling.external_entity_id,
+                )
+                .expect("lookup after missing-target rejection"),
+            None
+        );
+    }
+
+    #[test]
+    fn link_identity_ingress_denial_bad_secret_and_rate_limit_never_create_ghost_binding() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        install_quota(&store, &subject, 2);
+        store
+            .persist_identity(&identity("identity-guarded-a"))
+            .expect("seed guarded a");
+        store
+            .persist_identity(&identity("identity-guarded-b"))
+            .expect("seed guarded b");
+        let clock = TestClock::new(36_000);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+        let first = binding("identity-guarded-a", b"opaque-guarded-a");
+
+        let denied = ingress
+            .link_identity(&subject.scope, &credential.credential_id, &secret, &first)
+            .expect_err("missing identity link permission denied");
+        assert_eq!(denied.code, CanonicalErrorCode::PermissionDenied);
+        assert_eq!(
+            store
+                .external_identity_binding(
+                    &first.scope,
+                    &first.integration_id,
+                    &first.external_namespace,
+                    &first.external_entity_id,
+                )
+                .expect("lookup after denial"),
+            None
+        );
+
+        let wrong = ucr_core::ServiceCredentialSecret::from_bytes([0xA5; 32]);
+        let unauthenticated = ingress
+            .link_identity(&subject.scope, &credential.credential_id, &wrong, &first)
+            .expect_err("wrong secret rejected");
+        assert_eq!(unauthenticated.code, CanonicalErrorCode::Unauthenticated);
+        store
+            .grant_permission(&binding_grant(&subject))
+            .expect("grant identity link permission");
+        assert_eq!(
+            ingress
+                .link_identity(&subject.scope, &credential.credential_id, &secret, &first)
+                .expect("same binding remains new after denials"),
+            first
+        );
+
+        let second = binding("identity-guarded-b", b"opaque-guarded-b");
+        let limited = ingress
+            .link_identity(&subject.scope, &credential.credential_id, &secret, &second)
+            .expect_err("quota must precede binding mutation");
+        assert_eq!(limited.code, CanonicalErrorCode::RateLimited);
+        assert_eq!(
+            store
+                .external_identity_binding(
+                    &second.scope,
+                    &second.integration_id,
+                    &second.external_namespace,
+                    &second.external_entity_id,
+                )
+                .expect("lookup rate-limited binding"),
+            None
+        );
+
+        clock.set(37_000);
+        assert_eq!(
+            ingress
+                .link_identity(&subject.scope, &credential.credential_id, &secret, &second)
+                .expect("new quota window permits previously blocked link"),
+            second
+        );
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("read guarded link audit");
+        assert_eq!(
+            audit
+                .iter()
+                .map(|record| record.outcome)
+                .collect::<Vec<_>>(),
+            vec![
+                ServiceAuditOutcome::PermissionDenied,
+                ServiceAuditOutcome::AuthenticationFailed,
+                ServiceAuditOutcome::Authorized,
+                ServiceAuditOutcome::RateLimited,
+                ServiceAuditOutcome::Authorized,
+            ]
+        );
     }
 
     #[test]

@@ -484,7 +484,7 @@ mod tests {
             let connection = Connection::open(db.path()).expect("raw open");
             connection
                 .execute_batch(
-                    "PRAGMA foreign_keys=OFF; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices; DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys; DROP TABLE message_extensions; DROP TABLE command_extensions; DROP TABLE command_protocol_metadata; DROP TABLE event_extensions; PRAGMA user_version=7;",
+                    "PRAGMA foreign_keys=OFF; DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices; DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys; DROP TABLE message_extensions; DROP TABLE command_extensions; DROP TABLE command_protocol_metadata; DROP TABLE event_extensions; PRAGMA user_version=7;",
                 )
                 .expect("simulate exact v7 shape");
         }

@@ -2,8 +2,8 @@ use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
     ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
     DeliveryState, DeviceDescriptor, DeviceId, EventEnvelope, EventId, EventReconciliation,
-    EventSummary, ExternalIdentityBinding, IdentityId, IntegrationId, IntentId, KeyId,
-    MessageEnvelope, MessageId, PermissionGrant, PermissionScope, PrincipalKind,
+    EventSummary, ExternalIdentityBinding, IdentityId, IdentityRecord, IntegrationId, IntentId,
+    KeyId, MessageEnvelope, MessageId, PermissionGrant, PermissionScope, PrincipalKind,
     PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
     ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy,
     SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
@@ -15,7 +15,8 @@ use ucr_protocol::{
     CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION, DELIVERY_READ_PERMISSION,
     DELIVERY_WRITE_PERMISSION, DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION,
     DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
-    EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION,
+    EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, IDENTITY_CREATE_PERMISSION,
+    IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION,
     PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
     PERMISSION_GRANT_REVOKE_PERMISSION, RECOVERY_PLAN_INSTALL_PERMISSION,
     RECOVERY_PLAN_READ_PERMISSION, RECOVERY_PLAN_REVOKE_PERMISSION,
@@ -31,9 +32,9 @@ use crate::{
     AntiEntropyStore, AuthorizationEvaluator, AuthorizedMutationError, CommandAcceptanceStore,
     CommandOutcomeStore, CommunicationIntentStore, ConversationStore, DeliveryStore,
     DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, ExternalIdentityBindingStore, MessageStore, PermissionGrantStore,
-    RecoveryPlanStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaStore, SyncStore,
-    TrustedSigningKeyStore,
+    EventJournalStore, ExternalIdentityBindingStore, IdentityStore, MessageStore,
+    PermissionGrantStore, RecoveryPlanStore, ServiceAuditStore, ServiceCredentialStore,
+    ServiceQuotaStore, SyncStore, TrustedSigningKeyStore,
 };
 
 /// Authorization-enforcing runtime boundary over tenant-scoped durable capabilities.
@@ -551,6 +552,43 @@ where
         self.require(subject, scope, COMMUNICATION_INTENT_READ_PERMISSION)?;
         self.store
             .communication_intent(scope, intent_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: IdentityStore,
+{
+    /// Creates one canonical Root Identity after exact-scope authorization.
+    ///
+    /// # Errors
+    /// Returns authorization before storage access, then explicit validation/conflict/storage errors.
+    pub fn persist_identity(
+        &self,
+        subject: &ScopedPrincipal,
+        identity: &IdentityRecord,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &identity.scope, IDENTITY_CREATE_PERMISSION)?;
+        self.store
+            .persist_identity(identity)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Loads one canonical Root Identity after exact-scope authorization.
+    ///
+    /// # Errors
+    /// Returns authorization before storage access, then explicit storage/corruption errors.
+    pub fn identity(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+    ) -> Result<Option<IdentityRecord>, AuthorizedMutationError> {
+        self.require(subject, scope, IDENTITY_READ_PERMISSION)?;
+        self.store
+            .identity(scope, identity_id)
             .map_err(AuthorizedMutationError::Store)
     }
 }
