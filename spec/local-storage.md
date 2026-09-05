@@ -1,6 +1,6 @@
 # UCR local storage contract
 
-Status: **Experimental / Phase 6 foundation, extended through Phase 12 and post-Phase-12 Command parity hardening**
+Status: **Experimental / Phase 6 foundation, extended through Phase 13 Root Identity durability**
 
 Local storage is a capability boundary, not a public database schema and not an alternate UCR protocol. External consumers never receive direct database access.
 
@@ -11,7 +11,7 @@ The storage abstraction must support at minimum:
 - server durable stores;
 - future embedded stores.
 
-The abstraction must not be reduced to the lowest common denominator. Domain capabilities use explicit storage interfaces such as `CommandAcceptanceStore`, `EventJournalStore`, `RecoveryPlanStore`, `ConversationStore`, `MessageStore`, and `CommunicationIntentStore`; `DeliveryStore`, `SyncStore`, and `AntiEntropyStore` are additional capability-specific contracts above `StorageProvider`; future identity and attachment stores add their own contracts without reducing the abstraction.
+The abstraction must not be reduced to the lowest common denominator. Domain capabilities use explicit storage interfaces such as `CommandAcceptanceStore`, `EventJournalStore`, `RecoveryPlanStore`, `ConversationStore`, `MessageStore`, `CommunicationIntentStore`, and `IdentityStore`; `DeliveryStore`, `SyncStore`, `AntiEntropyStore`, and `ExternalIdentityBindingStore` are additional capability-specific contracts above `StorageProvider`; future attachment stores add their own contracts without reducing the abstraction.
 
 ## Command acceptance durability
 
@@ -61,6 +61,8 @@ Schema v17 migrates v16 transactionally by adding normalized `service_audit_oper
 
 Schema v18 migrates v17 transactionally by adding only the canonical `external_identity_bindings` owner. Its composite key preserves exact tenant/namespace scope, `IntegrationId`, external namespace, and opaque external entity bytes. Migration starts empty and never infers identity links from Device, Message, Conversation, Service Principal, provider, or audit state. Equal retries deduplicate, while assigning the same exact external key to another canonical Identity conflicts; no implicit relink is performed.
 
+Schema v19 migrates v18 transactionally by adding only the canonical `identities` Root Identity owner. The exact key is `(TenantScope, IdentityId)` and persisted semantics include canonical ownership, typed verification evidence, and optional positive expiry metadata. Migration starts empty and deliberately does not infer Identity from Device, Recovery, Message, External Identity Binding, Service Principal, provider, or audit state because those rows cannot prove Root Identity ownership/evidence. Existing v18 external bindings therefore remain historical references; a retry of the same exact legacy binding remains idempotent, while every new external binding key must reference an existing v19 Root Identity.
+
 
 On Unix, the database file is created and hardened as owner-only (`0600`), and SQLite WAL/SHM sidecars must not widen group/other access. Other operating systems must rely on the platform's private application-data ACL/sandbox and must not expose the database as a user-shared document.
 ## Explicit failure semantics
@@ -91,6 +93,10 @@ Storage exhaustion, corruption, unavailability, permission failures, foreign-sto
 | Message content + provenance + relations | durable canonical user communication | UCR Message | message retention policy | PRIVATE or originating classification |
 | Communication Intent target + payload + private policy + correlation | durable provider-independent request for communication before route selection | UCR Intent/Core | intent retention policy | PRIVATE / identity metadata |
 | Communication Intent transport constraints + extensions | route-policy requirements and versioned extension semantics; not a selected route | UCR Protocol/Intent | intent retention policy | INTERNAL / inherits extension payload classification |
+| Root Identity scope + IdentityId | exact tenant/namespace canonical Identity lookup and isolation | UCR IdentityStore | Identity lifecycle retention | PRIVATE / identity metadata |
+| Root Identity ownership | explicit ownership/governance semantics without provider inference | UCR IdentityStore | Identity lifecycle retention | SECURITY METADATA / identity governance |
+| Root Identity evidence | typed verification evidence; never a display/profile attribute | UCR IdentityStore | Identity lifecycle retention | SECURITY METADATA / identity evidence |
+| Root Identity optional expiry | lifecycle expiry metadata; does not itself execute deletion | UCR IdentityStore | until lifecycle/retention processing | PRIVATE / lifecycle metadata |
 | External Identity Binding scope + integration namespace + opaque external entity ID + Identity target | restart-safe integration-scoped mapping to canonical Identity without importing business meaning | UCR Identity/Integration boundary | identity-binding lifecycle retention | PRIVATE / identity and provider metadata |
 | Message crypto/signature metadata | future verification/decryption context | UCR Message/Crypto | message retention policy | SECURITY METADATA |
 | Trusted public signing key + key trust state | scoped author/peer authentication trust lifecycle | UCR Crypto/Core trust owner | security trust/audit retention | SECURITY METADATA / AUDIT |
@@ -106,6 +112,8 @@ Storage exhaustion, corruption, unavailability, permission failures, foreign-sto
 Idempotency keys must not be used to carry secrets. Payload persistence is not telemetry and does not imply permission to export it. Private signing/agreement keys are never stored in this general SQLite schema; Phase-7 uses a separate non-exporting key-operation boundary. Payload-at-rest encryption remains a separate explicit decision and is not implied by transport/session crypto.
 
 SQLite schema v12 additionally persists normalized canonical permission grants. Grant rows contain authorization metadata only; authentication credentials, private keys, bearer tokens, and audit history are not stored in the permission table. v11-to-v12 migration starts with an empty grant set rather than inferring authority from existing identities, keys, messages, or tenant-root scope. SQLite schema v13 adds Service Principal credential metadata and one-way digests; plaintext credential secrets are never stored. v12-to-v13 migration is additive and starts with no credentials rather than inferring authentication from grants or signing keys. SQLite schema v14 adds Service Principal quota policy/usage plus a metadata-only append-only audit chain. v13-to-v14 migration is additive and starts with no quota/audit state rather than inferring it from credentials or permission grants.
+
+SQLite schema v19 adds the Root Identity fields above as a new canonical owner. The v18-to-v19 migration is additive and starts with no Identity rows rather than inferring ownership/evidence from existing references. This is required by data minimization and evidence integrity: migration preserves old durable references but does not upgrade them into stronger canonical truth without an explicit trusted creation path.
 
 ## Migration and rollback
 

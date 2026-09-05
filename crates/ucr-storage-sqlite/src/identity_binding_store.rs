@@ -124,6 +124,13 @@ impl ExternalIdentityBindingStore for SqliteLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        if !super::identity_store::identity_exists_in(
+            &transaction,
+            &binding.scope,
+            &binding.identity_id,
+        )? {
+            return Err(DurableStoreError::InvalidRecord);
+        }
         let namespace = namespace_storage_key(&binding.scope);
         transaction
             .execute(
@@ -245,11 +252,12 @@ mod tests {
 
     use rusqlite::Connection;
     use ucr_core::{
-        DurableRecordStatus, DurableStoreError, ExternalIdentityBindingStore, StorageProvider,
+        DurableRecordStatus, DurableStoreError, ExternalIdentityBindingStore, IdentityStore,
+        StorageProvider,
     };
     use ucr_model::{
-        ExternalIdentityBinding, IdentityId, IntegrationId, NamespaceId, OpaqueId, TenantId,
-        TenantScope,
+        ExternalIdentityBinding, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord,
+        IntegrationId, NamespaceId, OpaqueId, TenantId, TenantScope,
     };
 
     use super::SqliteLocalStore;
@@ -291,6 +299,22 @@ mod tests {
             namespace_id: Some(NamespaceId::from_opaque(oid("namespace-binding-sqlite"))),
         }
     }
+    fn identity(id: &str) -> IdentityRecord {
+        IdentityRecord {
+            scope: scope(),
+            identity_id: IdentityId::from_opaque(oid(id)),
+            ownership: IdentityOwnership::UcrNative,
+            evidence: IdentityEvidence::Unverified,
+            expires_at_unix_ms: None,
+        }
+    }
+
+    fn seed_identity(store: &SqliteLocalStore, id: &str) {
+        store
+            .persist_identity(&identity(id))
+            .expect("seed identity");
+    }
+
     fn binding(identity: &str) -> ExternalIdentityBinding {
         ExternalIdentityBinding {
             scope: scope(),
@@ -307,6 +331,8 @@ mod tests {
         let original = binding("identity-original");
         {
             let store = SqliteLocalStore::open(db.path()).expect("open");
+            seed_identity(&store, "identity-original");
+            seed_identity(&store, "identity-other");
             assert_eq!(
                 store.persist_external_identity_binding(&original),
                 Ok(DurableRecordStatus::Persisted)
@@ -336,7 +362,11 @@ mod tests {
     #[test]
     fn concurrent_conflicting_external_identity_links_have_one_winner() {
         let db = TestDb::new();
-        SqliteLocalStore::open(db.path()).expect("initialize");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("initialize");
+            seed_identity(&store, "identity-a");
+            seed_identity(&store, "identity-b");
+        }
         let barrier = Arc::new(Barrier::new(3));
         let mut handles = Vec::new();
         for identity in ["identity-a", "identity-b"] {
@@ -372,8 +402,8 @@ mod tests {
         }
         let connection = Connection::open(db.path()).expect("raw connection");
         connection
-            .execute_batch("DROP TABLE external_identity_bindings;")
-            .expect("restore v17 shape");
+            .execute_batch("DROP TABLE identities; DROP TABLE external_identity_bindings;")
+            .expect("restore exact v17 shape");
         connection
             .pragma_update(None, "user_version", SQLITE_SCHEMA_V17)
             .expect("v17 version");

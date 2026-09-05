@@ -11,6 +11,8 @@ pub const SERVICE_CREDENTIAL_REVOKE_PERMISSION: &str =
 pub const SERVICE_QUOTA_READ_PERMISSION: &str = "ucr.authorization.service_quota.read";
 pub const SERVICE_QUOTA_WRITE_PERMISSION: &str = "ucr.authorization.service_quota.write";
 pub const SERVICE_AUDIT_READ_PERMISSION: &str = "ucr.audit.service_principal.read";
+pub const IDENTITY_READ_PERMISSION: &str = "ucr.identity.read";
+pub const IDENTITY_CREATE_PERMISSION: &str = "ucr.identity.create";
 pub const DEVICE_READ_PERMISSION: &str = "ucr.identity.device.read";
 pub const DEVICE_REGISTER_PERMISSION: &str = "ucr.identity.device.register";
 pub const DEVICE_REVOKE_PERMISSION: &str = "ucr.identity.device.revoke";
@@ -51,6 +53,8 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     SERVICE_QUOTA_READ_PERMISSION,
     SERVICE_QUOTA_WRITE_PERMISSION,
     SERVICE_AUDIT_READ_PERMISSION,
+    IDENTITY_READ_PERMISSION,
+    IDENTITY_CREATE_PERMISSION,
     DEVICE_READ_PERMISSION,
     DEVICE_REGISTER_PERMISSION,
     DEVICE_REVOKE_PERMISSION,

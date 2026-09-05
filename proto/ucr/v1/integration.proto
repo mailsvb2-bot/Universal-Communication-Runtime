@@ -3,6 +3,7 @@ syntax = "proto3";
 package ucr.v1;
 
 import "ucr/v1/errors.proto";
+import "ucr/v1/identity.proto";
 import "ucr/v1/runtime.proto";
 
 // Phase-13 public command ingress. Authentication credentials are presented by the
@@ -18,6 +19,34 @@ message IntegrationCommandResponse {
   }
 }
 
+// Public canonical Root Identity creation. Credential presentation belongs to the concrete
+// binding, never to this request body. Equal retries are idempotent at the durable owner.
+message IntegrationCreateIdentityRequest {
+  IdentityRecord identity = 1;
+}
+
+message IntegrationCreateIdentityResponse {
+  oneof result {
+    IdentityRecord identity = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Public semantic Identity-link operation over the canonical ExternalIdentityBinding.
+// Credential presentation belongs to the concrete binding, never to this request body.
+message IntegrationLinkIdentityRequest {
+  ExternalIdentityBinding binding = 1;
+}
+
+message IntegrationLinkIdentityResponse {
+  oneof result {
+    ExternalIdentityBinding binding = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 service IntegrationService {
   rpc SubmitCommand(IntegrationCommandRequest) returns (IntegrationCommandResponse);
+  rpc CreateIdentity(IntegrationCreateIdentityRequest) returns (IntegrationCreateIdentityResponse);
+  rpc LinkIdentity(IntegrationLinkIdentityRequest) returns (IntegrationLinkIdentityResponse);
 }

@@ -4,62 +4,87 @@ Status: **Experimental / Phase 13 foundation**.
 
 ## 1. Public boundary
 
-Integration API is the public, language-independent boundary for external UCR consumers.
-It is not the Rust ABI, `AuthorizedDurableRuntime`, a storage trait, or direct database access.
-The canonical v1 request/response shape is defined in `proto/ucr/v1/integration.proto`.
+Integration API is the public, language-independent boundary for external UCR consumers. It is not
+the Rust ABI, `AuthorizedDurableRuntime`, a storage trait, or direct database access. The canonical
+v1 request/response shape is defined in `proto/ucr/v1/integration.proto`.
 
-The first Phase-13 vertical slice exposes `IntegrationService.SubmitCommand`.
-It reuses the canonical `CommandEnvelope`, `CommandReceipt`, and `ErrorEnvelope`; it does not
-create an Integration-specific Command model or provider-specific message core.
+The implemented Phase-13 vertical surface exposes:
 
-Concrete gRPC, HTTP, local-IPC, sidecar, or embedded bindings may differ in framing and
-credential presentation, but MUST preserve the same authentication, authorization,
-idempotency, error, and command-acceptance semantics.
+- `IntegrationService.SubmitCommand` over canonical `CommandEnvelope`/`CommandReceipt`;
+- `IntegrationService.CreateIdentity` over canonical `IdentityRecord`;
+- `IntegrationService.LinkIdentity` over canonical `ExternalIdentityBinding`.
+
+These methods reuse existing canonical owners. They do not create Integration-specific Command,
+Identity, audit, permission, or provider-specific communication models. Concrete gRPC, HTTP,
+local-IPC, sidecar, or embedded bindings may differ in framing and credential presentation, but
+MUST preserve the same authentication, authorization, quota/audit, idempotency, error, and durable
+semantics.
 
 ## 2. Authentication and request admission
 
-External consumers authenticate as the existing canonical Service Principal.
-Credentials are binding metadata and MUST NOT be copied into `CommandEnvelope`, correlation,
-extensions, events, logs, or durable command state.
+External consumers authenticate as the existing canonical Service Principal. Credentials are
+binding metadata and MUST NOT be copied into canonical Commands, Identity records, external binding
+records, extensions, Events, logs, or business payloads.
 
-A conforming request path is:
+Every implemented external operation follows:
 
-`credential authentication -> quota consumption/audit -> permission evaluation -> durable command acceptance`.
+`credential authentication -> quota consumption/audit -> permission evaluation -> canonical durable operation`.
 
-The command's `TenantScope` is the resource scope. The authenticated Service Principal scope
-is resolved from durable credential state rather than trusted from caller-supplied identity.
-Every `SubmitCommand` requires `ucr.command.accept`; no public adapter may call raw
-`CommandAcceptanceStore` on behalf of an external Service Principal.
+The authenticated Service Principal scope is resolved from durable credential state rather than
+trusted from caller-supplied identity. Adapters receive no raw store access.
+
+- `SubmitCommand` requires `ucr.command.accept`;
+- `CreateIdentity` requires `ucr.identity.create`;
+- `LinkIdentity` requires `ucr.identity.external_binding.link`.
+
+Audit attribution is generic security metadata bound before authentication: `ucr.command` +
+canonical `CommandId`, `ucr.identity.create` + canonical `IdentityId`, or
+`ucr.identity.external_binding.link` + target canonical `IdentityId`. External entity bytes are not
+copied into audit operation references. An Authorized admission record proves only that the
+security gate passed; later durable validation/conflict may still fail.
 
 ## 3. Command semantics
 
-`SubmitCommand` returns only `ACCEPTED` or `DUPLICATE` receipt semantics after durable commit.
-A receipt is not an Event and is not proof that a requested real-world effect occurred.
-The existing scoped command ID/idempotency contract remains the only command deduplication owner.
-Changed semantics under the same durable identity fail with canonical `CONFLICT`.
+`SubmitCommand` returns only `ACCEPTED` or `DUPLICATE` receipt semantics after durable commit. A
+receipt is not an Event and is not proof that a requested real-world effect occurred. The existing
+scoped command ID/idempotency contract remains the only command deduplication owner. Changed
+semantics under the same durable identity fail with canonical `CONFLICT`.
 
-Validation failures map to `INVALID_ARGUMENT`; storage-full to `RESOURCE_EXHAUSTED`; temporary
-storage failure to `TEMPORARILY_UNAVAILABLE`; permission denial remains `PERMISSION_DENIED`;
-internal/corrupt/foreign-store failures do not disclose storage internals and map to `INTERNAL`.
+## 4. Identity semantics
 
-The protobuf response uses exactly one result: canonical `CommandReceipt` or canonical
-`ErrorEnvelope`. Binding-specific transport status MUST NOT replace or weaken canonical error
-semantics for a successfully decoded UCR request.
+`CreateIdentity` persists the minimal accountless/provider-independent Root `IdentityRecord` through
+the single `IdentityStore`. Equal retries are idempotent. Reusing the same `(TenantScope,
+IdentityId)` with changed ownership, evidence, or expiry conflicts rather than silently mutating
+Identity semantics.
 
-## 4. Maturity and non-claims
+`LinkIdentity` persists the canonical external mapping through the single
+`ExternalIdentityBindingStore`. A new external key requires its exact target Root Identity to
+already exist. Equal retries are idempotent; changing the target of an existing exact external key
+conflicts. No public relink/unlink or direct SQL overwrite is defined.
 
-The Phase-13 API is `Experimental`. Stable API compatibility rules still apply only after a
-surface is explicitly promoted under Public API Governance; promotion cannot silently change
-canonical Command semantics.
+A successful `CreateIdentity`/`LinkIdentity` response returns the canonical record that was durably
+accepted. No parallel Integration receipt/status model is introduced.
 
-This slice does not claim an Internet communication transport, a production gRPC/HTTP server,
-SDK generation, Event subscriptions, webhook delivery, Command execution/dispatch, routing,
-or Message delivery. `SubmitCommand` binds the admission audit to the generic operation reference `ucr.command` plus the canonical `CommandId` before credential authentication. Exact-operation audit queries reuse the existing Service Principal audit-read permission; no Command-specific audit table, permission, or second audit owner is introduced. An `Authorized` admission record still proves only that the security gate passed: command validation, durable acceptance, dispatch, and real-world effects may still fail afterward.
-Phase 14 owns Event API semantics; later phases own network transport.
+## 5. Errors and maturity
 
-## 5. Required evidence
+Validation failures map to `INVALID_ARGUMENT`; semantic identity/idempotency reuse to `CONFLICT`;
+storage-full to `RESOURCE_EXHAUSTED`; temporary storage failure to `TEMPORARILY_UNAVAILABLE`;
+permission denial remains `PERMISSION_DENIED`; internal/corrupt/foreign-store failures map to
+`INTERNAL` without exposing storage internals. Binding-specific transport status MUST NOT replace or
+weaken canonical UCR error semantics after successful request decoding.
 
-The reference ingress MUST prove valid Service Principal command submission, restart-safe
-acceptance/deduplication through the durable owner, fail-closed wrong credentials, independent
-permission denial, quota enforcement, mandatory audit, stable canonical error mapping, and that
-denied/failed requests cannot create a ghost accepted command.
+The Phase-13 API remains `Experimental`. Stable compatibility rules apply only after a separate
+Public API Governance promotion decision. Existing `SubmitCommand` wire fields remain unchanged.
+
+This slice does not claim a production gRPC/HTTP server, SDK generation, Event subscriptions,
+webhook delivery, Command execution/dispatch, routing, Message delivery, Persona/Profile APIs,
+Identity evidence transitions, Identity merge/delete, discovery, external-binding unlink/relink,
+or expiry execution. Phase 14 owns Event API semantics; later phases own network transport.
+
+## 6. Required evidence
+
+Reference evidence must prove Service Principal authentication, mandatory quota/audit, exact
+permission enforcement, stable error mapping, restart-safe durable ownership, duplicate/conflict
+semantics, and no ghost state after denied/unauthenticated/rate-limited/invalid requests. Identity
+evidence additionally proves v18→v19 migration invents no Root Identity, new external binding keys
+reject missing targets, and historical exact v18 bindings remain readable/idempotently retryable.

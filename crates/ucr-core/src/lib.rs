@@ -12,17 +12,17 @@ use ucr_model::{
     CommandEnvelope, CommandId, CommunicationIntent, ConversationId, ConversationRecord,
     DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
     EndpointAddress, EndpointId, EventEnvelope, EventId, EventReconciliation, EventSummary,
-    ExternalIdentityBinding, IdentityId, IntegrationId, IntentId, KeyId, MessageEnvelope,
-    MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
-    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
-    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord,
+    ExternalIdentityBinding, IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId,
+    MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
+    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
+    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
+    TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
 pub use authorized_runtime::AuthorizedDurableRuntime;
 pub use id::{IdGenerationError, generate_opaque_id};
-pub use integration_api::IntegrationCommandIngress;
+pub use integration_api::{IntegrationCommandIngress, IntegrationIngress};
 pub use recovery_workflow::{
     DeviceReverificationGate, DeviceReverificationProof, DeviceReverificationVerificationError,
     DeviceReverificationVerifier, RecoveryAdmissionProof, RecoveryAuthorityVerificationError,
@@ -559,6 +559,32 @@ pub trait CommunicationIntentStore: StorageProvider {
         scope: &TenantScope,
         intent_id: &IntentId,
     ) -> Result<Option<CommunicationIntent>, DurableStoreError>;
+}
+
+/// Durable exact-scope owner for canonical Root Identity.
+///
+/// Identity is durable and independent from Address, Endpoint, Route, provider account,
+/// display/profile data, and external business identifiers. Equal retries deduplicate; the same
+/// scoped `IdentityId` cannot be silently redefined with different ownership/evidence/lifecycle data.
+pub trait IdentityStore: StorageProvider {
+    /// Persists or deduplicates one canonical Root Identity.
+    ///
+    /// # Errors
+    /// Returns explicit validation, conflict, or storage failures.
+    fn persist_identity(
+        &self,
+        identity: &IdentityRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one exact scoped Identity when present.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+    ) -> Result<Option<IdentityRecord>, DurableStoreError>;
 }
 
 /// Durable provider-independent external-entity to canonical-Identity mapping capability.
