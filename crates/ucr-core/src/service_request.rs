@@ -5,12 +5,13 @@ use core::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ucr_model::{
-    AuditRecordId, AuthorizationRequest, ScopedPrincipal, ServiceAuditOutcome, ServiceAuditRecord,
-    ServiceCredentialId, TenantScope,
+    AuditRecordId, AuthorizationRequest, ScopedPrincipal, ServiceAuditOperationRef,
+    ServiceAuditOutcome, ServiceAuditRecord, ServiceCredentialId, TenantScope,
 };
 use ucr_protocol::{
-    CanonicalError, CanonicalErrorCode, MAX_SERVICE_REQUEST_PERMISSION_LEN,
-    validate_namespaced_identifier,
+    CanonicalError, CanonicalErrorCode, MAX_SERVICE_AUDIT_OPERATION_KIND_LEN,
+    MAX_SERVICE_REQUEST_PERMISSION_LEN, validate_namespaced_identifier,
+    validate_service_audit_operation_ref,
 };
 
 use crate::{
@@ -69,6 +70,15 @@ impl ServiceQuotaClock for SystemServiceQuotaClock {
 /// Authentication happens once here. The returned evaluator is single-use and bound to one
 /// permission/resource tuple; it applies quota, delegates to the existing authorization owner,
 /// and persists an audit decision before any authorized durable operation is reached.
+#[derive(Clone, Copy)]
+struct ServiceAuditRequestContext<'a> {
+    credential_id: &'a ServiceCredentialId,
+    presented_scope: &'a TenantScope,
+    permission: &'a str,
+    resource_scope: &'a TenantScope,
+    operation: Option<&'a ServiceAuditOperationRef>,
+}
+
 pub struct ServicePrincipalRequestGate<'a, C, A, S> {
     clock: &'a C,
     authorization: &'a A,
@@ -111,11 +121,65 @@ where
         permission: &str,
         resource_scope: &TenantScope,
     ) -> Result<ServicePrincipalRequestAuthorization<'a, C, A, S>, CanonicalError> {
+        self.authenticate_request_inner(
+            presented_scope,
+            credential_id,
+            secret,
+            permission,
+            resource_scope,
+            None,
+        )
+    }
+
+    /// Authenticates one request while binding its audit trail to one canonical operation.
+    ///
+    /// # Errors
+    /// Fails closed for malformed operation metadata plus all ordinary request-admission errors.
+    pub fn authenticate_request_for_operation(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        permission: &str,
+        resource_scope: &TenantScope,
+        operation: &ServiceAuditOperationRef,
+    ) -> Result<ServicePrincipalRequestAuthorization<'a, C, A, S>, CanonicalError> {
+        if operation.operation_kind.len() > MAX_SERVICE_AUDIT_OPERATION_KIND_LEN {
+            return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+        }
+        validate_service_audit_operation_ref(operation)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+        self.authenticate_request_inner(
+            presented_scope,
+            credential_id,
+            secret,
+            permission,
+            resource_scope,
+            Some(operation),
+        )
+    }
+
+    fn authenticate_request_inner(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        permission: &str,
+        resource_scope: &TenantScope,
+        operation: Option<&ServiceAuditOperationRef>,
+    ) -> Result<ServicePrincipalRequestAuthorization<'a, C, A, S>, CanonicalError> {
         if permission.len() > MAX_SERVICE_REQUEST_PERMISSION_LEN {
             return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
         }
         validate_namespaced_identifier(permission)
             .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+        let audit_context = ServiceAuditRequestContext {
+            credential_id,
+            presented_scope,
+            permission,
+            resource_scope,
+            operation,
+        };
         let now = self.clock.now_unix_ms().map_err(map_clock_error)?;
         let subject = match authenticate_service_principal(
             self.store,
@@ -133,15 +197,7 @@ where
                         ServiceAuditOutcome::AuthenticationUnavailable
                     }
                 };
-                let record = new_audit_record(
-                    credential_id,
-                    presented_scope,
-                    None,
-                    permission,
-                    resource_scope,
-                    outcome,
-                    now,
-                )?;
+                let record = new_audit_record(audit_context, None, outcome, now)?;
                 self.store
                     .append_service_audit(&record)
                     .map_err(map_store_error)?;
@@ -158,6 +214,7 @@ where
                 resource_scope: resource_scope.clone(),
             },
             credential_id: credential_id.clone(),
+            operation: operation.cloned(),
             used: AtomicBool::new(false),
         })
     }
@@ -169,6 +226,7 @@ pub struct ServicePrincipalRequestAuthorization<'a, C, A, S> {
     store: &'a S,
     proof: ServicePrincipalAdmissionProof,
     credential_id: ServiceCredentialId,
+    operation: Option<ServiceAuditOperationRef>,
     used: AtomicBool,
 }
 
@@ -178,6 +236,7 @@ impl<C, A, S> fmt::Debug for ServicePrincipalRequestAuthorization<'_, C, A, S> {
             .debug_struct("ServicePrincipalRequestAuthorization")
             .field("proof", &self.proof)
             .field("credential_id", &self.credential_id)
+            .field("has_operation", &self.operation.is_some())
             .field("used", &self.used.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
@@ -248,12 +307,16 @@ where
         now_unix_ms: i64,
         result: Result<T, CanonicalError>,
     ) -> Result<T, CanonicalError> {
+        let context = ServiceAuditRequestContext {
+            credential_id: &self.credential_id,
+            presented_scope: &self.proof.subject.scope,
+            permission: &self.proof.permission,
+            resource_scope: &self.proof.resource_scope,
+            operation: self.operation.as_ref(),
+        };
         let record = new_audit_record(
-            &self.credential_id,
-            &self.proof.subject.scope,
+            context,
             Some(self.proof.subject.clone()),
-            &self.proof.permission,
-            &self.proof.resource_scope,
             outcome,
             now_unix_ms,
         )?;
@@ -265,24 +328,22 @@ where
 }
 
 fn new_audit_record(
-    credential_id: &ServiceCredentialId,
-    presented_scope: &TenantScope,
+    context: ServiceAuditRequestContext<'_>,
     subject: Option<ScopedPrincipal>,
-    permission: &str,
-    resource_scope: &TenantScope,
     outcome: ServiceAuditOutcome,
     now_unix_ms: i64,
 ) -> Result<ServiceAuditRecord, CanonicalError> {
     let audit_id = AuditRecordId::from_opaque(generate_opaque_id().map_err(map_id_error)?);
     Ok(ServiceAuditRecord {
         audit_id,
-        credential_id: credential_id.clone(),
-        presented_scope: presented_scope.clone(),
+        credential_id: context.credential_id.clone(),
+        presented_scope: context.presented_scope.clone(),
         subject,
-        permission: permission.to_owned(),
-        resource_scope: resource_scope.clone(),
+        permission: context.permission.to_owned(),
+        resource_scope: context.resource_scope.clone(),
         outcome,
         occurred_at_unix_ms: now_unix_ms,
+        operation: context.operation.cloned(),
     })
 }
 

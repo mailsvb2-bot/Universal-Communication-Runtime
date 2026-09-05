@@ -4,9 +4,9 @@ use ucr_model::{
     DeliveryState, DeviceDescriptor, DeviceId, EventEnvelope, EventId, EventReconciliation,
     EventSummary, IdentityId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
     PermissionScope, PrincipalKind, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
-    ScopedPrincipal, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
-    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord,
+    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
+    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
+    TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{
     ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, COMMAND_ACCEPT_PERMISSION,
@@ -248,6 +248,23 @@ where
         self.require(subject, scope, SERVICE_AUDIT_READ_PERMISSION)?;
         self.store
             .service_audit_records(scope, max_items)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Reads admission audit records bound to one exact canonical operation reference.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn service_audit_records_for_operation(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        operation: &ServiceAuditOperationRef,
+        max_items: usize,
+    ) -> Result<Vec<ServiceAuditRecord>, AuthorizedMutationError> {
+        self.require(subject, scope, SERVICE_AUDIT_READ_PERMISSION)?;
+        self.store
+            .service_audit_records_for_operation(scope, operation, max_items)
             .map_err(AuthorizedMutationError::Store)
     }
 }

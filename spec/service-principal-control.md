@@ -26,11 +26,11 @@ Reusing the request evaluator, changing its subject, permission, or resource sco
 
 ## Audit record
 
-A Service Principal admission audit record contains only security metadata: audit ID, credential ID, presented scope, optional resolved canonical Service Principal, requested permission, resource scope, admission outcome, and audit wall time. It contains no credential secret, secret digest, message content, attachment content, request payload, decrypted material, or provider credential.
+A Service Principal admission audit record contains only security metadata: audit ID, credential ID, presented scope, optional resolved canonical Service Principal, requested permission, resource scope, admission outcome, audit wall time, and an optional generic operation reference. The operation reference is a namespaced operation kind plus one canonical opaque operation ID; it contains no payload. It contains no credential secret, secret digest, message content, attachment content, request payload, decrypted material, or provider credential. An operation reference attached before authentication is caller-controlled attribution metadata until normal admission succeeds; it grants no authority and is not resource-existence or execution evidence.
 
 Authentication failures retain no resolved subject. Successful authentication and all later quota/authorization outcomes carry the independently resolved canonical Service Account subject.
 
-The protocol-owned `UCR-SERVICE-AUDIT-HASH-V1` binding hashes every semantic audit field plus the previous record hash. SQLite v14 stores this chain and enforces append-only application access with UPDATE/DELETE rejection triggers. Reopen validates the schema, quota state, and complete audit chain. Exact duplicate audit-ID retries are idempotent; conflicting reuse fails closed.
+The protocol-owned `UCR-SERVICE-AUDIT-HASH-V1` binding remains the exact byte-compatible hash for legacy audit records without an operation reference. Operation-bound records use `UCR-SERVICE-AUDIT-HASH-V2`, which binds the same legacy fields and previous record hash plus operation kind and operation ID. Both versions continue one append-only chain. SQLite v14 stores the original base chain; SQLite v17 adds a normalized append-only operation child, exact-operation lookup index, and independent UPDATE/DELETE rejection triggers. Reopen reconstructs each record and validates the complete mixed V1/V2 chain. Exact duplicate audit-ID retries are idempotent; conflicting reuse fails closed.
 
 This provides application-level append-only integrity and tamper evidence for partial/offline corruption. It is not a claim that an attacker with privileged filesystem control who can rewrite the entire database and recompute every unkeyed hash is defeated. Deployments requiring a cryptographically anchored audit trail must bind the chain to an independently protected signing/HMAC root; production OS/hardware-backed key-provider work remains a separate release blocker.
 
@@ -40,7 +40,7 @@ Quota and audit administration reuse the canonical permission model:
 
 - `ucr.authorization.service_quota.read` reads one Service Principal quota policy;
 - `ucr.authorization.service_quota.write` installs or replaces a quota policy;
-- `ucr.audit.service_principal.read` reads bounded recent admission audit records for an authorized scope.
+- `ucr.audit.service_principal.read` reads bounded recent admission audit records for an authorized scope and exact-operation audit queries in that same scope. Operation lookup does not introduce a new permission or audit owner.
 
 Quota consumption and audit append are internal security actions, not permissions that an external principal can grant itself. Raw storage methods remain trusted local implementation capabilities and are not public SDK/API escape hatches.
 
@@ -51,3 +51,6 @@ SQLite schema v14 adds `service_quota_policies`, restart-safe `service_quota_usa
 ## Non-claims
 
 The local/reference quota is per durable store. It is not a distributed global rate limiter across multiple independent nodes, and it does not replace unauthenticated network-edge throttling, transport backpressure, billing limits, or organization-specific quotas. Audit admission means a request passed or failed the security gate; `Authorized` does not claim the later business/storage operation succeeded.
+
+
+SQLite schema v17 migrates v16 transactionally by adding only `service_audit_operations`, its exact-operation lookup index, and append-only triggers. Existing `service_audit_records` rows and their V1 `record_hash` values are not rewritten or rehashed, and migration invents no operation attribution. New operation-bound rows use V2 while legacy rows remain V1 in the same chain. Phase-13 `SubmitCommand` binds `ucr.command` plus the canonical `CommandId` before credential authentication, so authentication failure, quota failure, permission denial, authorization success, duplicate retry, and semantic conflict retain the attempted operation without creating a Command-specific audit store.

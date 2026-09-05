@@ -1128,7 +1128,7 @@ fn message_intent_and_error_wire_parity_survives_v10_storage() {
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17;"));
     assert!(sqlite_root.contains("fn migrate_v9_to_v10"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
@@ -1639,7 +1639,7 @@ fn trusted_signing_key_lifecycle_is_scoped_restart_safe_and_runtime_integrated()
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
@@ -1805,7 +1805,7 @@ fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overc
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17;"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
@@ -1821,6 +1821,7 @@ const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
     "service_quota_policy",
     "set_service_quota_policy",
     "service_audit_records",
+    "service_audit_records_for_operation",
     "register_device",
     "revoke_device",
     "device",
@@ -2060,7 +2061,7 @@ fn device_lifecycle_is_durable_and_gates_protected_key_access() {
     }
     assert!(sqlite_device.contains("CREATE TABLE devices"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17;"));
     assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
     assert!(storage_spec.contains("migration does not invent an Identity binding"));
     assert!(spec.contains("one exact-scope durable `DeviceLifecycleStore`"));
@@ -2213,7 +2214,7 @@ fn service_principal_authentication_resolves_canonical_identity_before_least_pri
         "credential_authentication_is_non_disclosing_revocable_and_raw_runtime_cannot_bypass_gate"
     ));
     assert!(sqlite.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V12 => migrate_v12_to_v13(connection)?"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V13 => migrate_v13_to_v14(connection)?"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V14 => migrate_v14_to_v15(connection)?"));
@@ -2369,7 +2370,7 @@ fn service_principal_audit_storage_and_governance_close_only_the_evidenced_block
     assert!(sqlite.contains("verify_audit_chain"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17;"));
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
     assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
     assert!(spec.contains("single-use"));
@@ -2758,7 +2759,8 @@ fn communication_intent_storage_is_durable_scoped_and_has_one_owner() {
     assert!(sqlite.contains("CREATE TABLE communication_intent_transports"));
     assert!(sqlite.contains("CREATE TABLE communication_intent_extensions"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V15: u32 = 15;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 16;"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V16: u32 = 16;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17;"));
     assert!(sqlite_root.contains("fn migrate_v15_to_v16"));
 
     for evidence in [
@@ -2943,7 +2945,8 @@ fn integration_api_reuses_canonical_command_and_service_principal_owners() {
     assert!(spec.contains(
         "credential authentication -> quota consumption/audit -> permission evaluation -> durable command acceptance"
     ));
-    assert!(spec.contains("Phase 14 owns Event API semantics"));
+    assert!(spec.contains("Phase 14 owns Event API"));
+    assert!(spec.contains("semantics; later phases own network transport"));
     assert!(architecture.contains("Phase 13 begins with `IntegrationService.SubmitCommand`"));
     assert!(threat.contains("Phase-13 `IntegrationCommandIngress`"));
     assert!(inventory.contains("external_app\tExternal App\tpartial\t"));
@@ -2966,4 +2969,137 @@ fn integration_api_reuses_canonical_command_and_service_principal_owners() {
         "docs/adr/0040-integration-api-reuses-canonical-command-and-service-principal-boundaries.md"
     ));
     assert!(readme.contains("**Phase 13 — Integration API (in progress"));
+}
+
+#[test]
+fn service_principal_audit_operation_binding_reuses_existing_core_owner() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/service_control.rs"))
+        .expect("service control protocol");
+    let request = fs::read_to_string(workspace.join("crates/ucr-core/src/service_request.rs"))
+        .expect("service request gate");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+    let runtime = fs::read_to_string(workspace.join("crates/ucr-core/src/authorized_runtime.rs"))
+        .expect("authorized runtime");
+    let ingress = fs::read_to_string(workspace.join("crates/ucr-core/src/integration_api.rs"))
+        .expect("integration ingress");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+
+    assert!(model.contains("pub struct ServiceAuditOperationRef"));
+    assert!(model.contains("pub operation: Option<ServiceAuditOperationRef>"));
+    assert!(protocol.contains("UCR-SERVICE-AUDIT-HASH-V1\\0"));
+    assert!(protocol.contains("UCR-SERVICE-AUDIT-HASH-V2\\0"));
+    assert!(protocol.contains("SERVICE_AUDIT_COMMAND_OPERATION_KIND"));
+    assert!(protocol.contains("fn service_audit_hash_v1("));
+    assert!(protocol.contains("fn service_audit_hash_v2("));
+    assert!(!protocol.contains("pub fn service_audit_hash_v1("));
+    assert!(!protocol.contains("pub fn service_audit_hash_v2("));
+    assert!(protocol.contains("def3f98563a1590f6c6fe3f5901c179102c90aaea125729ed513d961a25f599a"));
+    assert!(request.contains("pub fn authenticate_request_for_operation("));
+    assert!(core.contains("fn service_audit_records_for_operation("));
+    let lookup = runtime
+        .split("pub fn service_audit_records_for_operation(")
+        .nth(1)
+        .and_then(|tail| tail.split("\n    }").next())
+        .expect("authorized operation audit lookup");
+    assert!(lookup.contains("SERVICE_AUDIT_READ_PERMISSION"));
+    assert!(lookup.contains(".service_audit_records_for_operation("));
+    assert!(ingress.contains("SERVICE_AUDIT_COMMAND_OPERATION_KIND"));
+    assert!(ingress.contains("command.command_id.as_opaque().clone()"));
+    assert!(ingress.contains(".authenticate_request_for_operation("));
+    for evidence in [
+        "integration_ingress_authenticates_audits_authorizes_and_deduplicates",
+        "integration_ingress_denials_never_create_ghost_acceptance",
+        "integration_ingress_rate_limit_fails_before_command_acceptance",
+        "operation_audit_lookup_uses_existing_audit_read_permission",
+    ] {
+        assert!(
+            memory.contains(evidence),
+            "missing operation-binding evidence: {evidence}"
+        );
+    }
+    for forbidden in [
+        "service_command_audit",
+        "command_audit_records",
+        "integration_audit_store",
+    ] {
+        assert!(
+            !request.contains(forbidden),
+            "second audit owner leaked: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn service_principal_audit_operation_binding_has_v17_migration_and_governance() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let sqlite_root = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let sqlite = fs::read_to_string(
+        workspace.join("crates/ucr-storage-sqlite/src/service_control_store.rs"),
+    )
+    .expect("sqlite service audit");
+    let service_spec = fs::read_to_string(workspace.join("spec/service-principal-control.md"))
+        .expect("service principal control spec");
+    let integration_spec =
+        fs::read_to_string(workspace.join("spec/integration-api.md")).expect("integration spec");
+    let storage_spec =
+        fs::read_to_string(workspace.join("spec/local-storage.md")).expect("storage spec");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0041-service-principal-audit-operation-reference-is-versioned-and-append-only.md",
+    ))
+    .expect("adr 0041");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(sqlite.contains("CREATE TABLE service_audit_operations"));
+    assert!(sqlite.contains("CREATE INDEX service_audit_operation_lookup"));
+    assert!(sqlite.contains("CREATE TRIGGER service_audit_operation_no_update"));
+    assert!(sqlite.contains("CREATE TRIGGER service_audit_operation_no_delete"));
+    assert!(sqlite.contains("LEFT JOIN service_audit_operations"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V16: u32 = 16;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 17;"));
+    assert!(sqlite_root.contains("fn migrate_v16_to_v17"));
+    for evidence in [
+        "operation_bound_audit_survives_restart_and_exact_lookup",
+        "operation_audit_child_is_append_only_and_offline_tampering_is_detected",
+        "offline_operation_addition_to_legacy_v1_row_is_detected_on_reopen",
+        "offline_operation_deletion_from_v2_row_is_detected_on_reopen",
+        "missing_v17_operation_owner_is_rejected_on_reopen",
+        "v16_to_v17_migration_preserves_legacy_v1_hash_without_inventing_operations",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "missing v17 audit evidence: {evidence}"
+        );
+    }
+    assert!(service_spec.contains("SQLite schema v17 migrates v16 transactionally"));
+    assert!(service_spec.contains("UCR-SERVICE-AUDIT-HASH-V2"));
+    assert!(integration_spec.contains("generic operation reference `ucr.command`"));
+    assert!(storage_spec.contains("Schema v17 migrates v16 transactionally"));
+    assert!(threat.contains("SQLite v17 extends the same Service Principal audit owner"));
+    assert!(adr.contains("`service_audit_records` table is not rewritten"));
+    assert!(adr.contains("not proof that Command validation"));
+    assert!(ci.contains(
+        "0041-service-principal-audit-operation-reference-is-versioned-and-append-only.md"
+    ));
+    for forbidden in [
+        "service_command_audit",
+        "command_audit_records",
+        "integration_audit_store",
+    ] {
+        assert!(
+            !sqlite.contains(forbidden),
+            "second audit owner leaked: {forbidden}"
+        );
+    }
 }

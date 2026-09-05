@@ -42,7 +42,8 @@ const SQLITE_SCHEMA_V12: u32 = 12;
 const SQLITE_SCHEMA_V13: u32 = 13;
 const SQLITE_SCHEMA_V14: u32 = 14;
 const SQLITE_SCHEMA_V15: u32 = 15;
-pub const SQLITE_SCHEMA_VERSION: u32 = 16;
+const SQLITE_SCHEMA_V16: u32 = 16;
+pub const SQLITE_SCHEMA_VERSION: u32 = 17;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -385,7 +386,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         if count_user_tables(connection)? != 0 {
             return Err(DurableStoreError::ForeignStore);
         }
-        return initialize_schema_v16(connection);
+        return initialize_schema_v17(connection);
     }
     if application_id != UCR_SQLITE_APPLICATION_ID {
         return Err(DurableStoreError::ForeignStore);
@@ -394,7 +395,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return intent_store::verify_schema_v16(connection);
+        return service_control_store::verify_schema_v17(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -420,14 +421,15 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V13 => migrate_v13_to_v14(connection)?,
             SQLITE_SCHEMA_V14 => migrate_v14_to_v15(connection)?,
             SQLITE_SCHEMA_V15 => migrate_v15_to_v16(connection)?,
+            SQLITE_SCHEMA_V16 => migrate_v16_to_v17(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    intent_store::verify_schema_v16(connection)
+    service_control_store::verify_schema_v17(connection)
 }
 
-fn initialize_schema_v16(connection: &mut Connection) -> Result<(), DurableStoreError> {
+fn initialize_schema_v17(connection: &mut Connection) -> Result<(), DurableStoreError> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -468,6 +470,7 @@ fn initialize_schema_v16(connection: &mut Connection) -> Result<(), DurableStore
     service_control_store::create_v14_objects(&transaction)?;
     device_store::create_v15_objects(&transaction)?;
     intent_store::create_v16_objects(&transaction)?;
+    service_control_store::create_v17_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -703,12 +706,27 @@ fn migrate_v15_to_v16(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     intent_store::create_v16_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V16)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     intent_store::verify_schema_v16(connection)
+}
+
+fn migrate_v16_to_v17(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    intent_store::verify_schema_v16(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    service_control_store::create_v17_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    service_control_store::verify_schema_v17(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1026,12 +1044,12 @@ mod tests {
         ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext, DeviceId,
         DeviceRef, EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, PermissionGrant,
         PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension,
-        ProtocolVersion, ScopedPrincipal, ServiceAuditOutcome, ServiceQuotaPolicy, TenantId,
-        TenantScope,
+        ProtocolVersion, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditOutcome,
+        ServiceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{
         COMMAND_ACCEPT_PERMISSION, CommandReceiptStatus, DEFAULT_MAX_PAYLOAD_LEN,
-        MAX_PROTOCOL_EXTENSIONS,
+        MAX_PROTOCOL_EXTENSIONS, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
     };
 
     use super::{SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID};
@@ -1330,7 +1348,7 @@ mod tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF;
-                     DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices; DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;
+                     DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices; DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;
                      DROP TABLE message_extensions;
                      DROP TABLE command_extensions;
                      DROP TABLE command_protocol_metadata;
@@ -2238,6 +2256,22 @@ mod tests {
             audit
                 .iter()
                 .all(|record| record.outcome == ServiceAuditOutcome::Authorized)
+        );
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_COMMAND_OPERATION_KIND.to_owned(),
+            operation_id: value.command_id.as_opaque().clone(),
+        };
+        assert!(
+            audit
+                .iter()
+                .all(|record| record.operation.as_ref() == Some(&operation))
+        );
+        assert_eq!(
+            reopened
+                .service_audit_records_for_operation(&scope, &operation, 4)
+                .expect("exact command audit after restart")
+                .len(),
+            2
         );
     }
 }
