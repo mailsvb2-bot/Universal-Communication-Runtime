@@ -4699,3 +4699,257 @@ mod service_principal_quota_audit_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod integration_api_tests {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    use ucr_core::{
+        IntegrationCommandIngress, PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore,
+        ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore, issue_service_credential,
+    };
+    use ucr_model::{
+        CommandEnvelope, CommandId, CorrelationContext, NamespaceId, OpaqueId, PermissionGrant,
+        PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ProtocolVersion,
+        ScopedPrincipal, ServiceAuditOutcome, ServiceQuotaPolicy, TenantId, TenantScope,
+    };
+    use ucr_protocol::{COMMAND_ACCEPT_PERMISSION, CanonicalErrorCode, CommandReceiptStatus};
+
+    use super::MemoryLocalStore;
+
+    #[derive(Debug)]
+    struct TestClock(AtomicI64);
+
+    impl TestClock {
+        fn new(now: i64) -> Self {
+            Self(AtomicI64::new(now))
+        }
+        fn set(&self, now: i64) {
+            self.0.store(now, Ordering::Release);
+        }
+    }
+
+    impl ServiceQuotaClock for TestClock {
+        fn now_unix_ms(&self) -> Result<i64, ServiceQuotaClockError> {
+            Ok(self.0.load(Ordering::Acquire))
+        }
+    }
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-integration")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("namespace-integration"))),
+        }
+    }
+
+    fn service() -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("service-integration")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
+    fn grant(subject: &ScopedPrincipal) -> PermissionGrant {
+        PermissionGrant {
+            grantee: subject.clone(),
+            permission: COMMAND_ACCEPT_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope()),
+        }
+    }
+
+    fn command(id: &str, key: &str, payload: &[u8]) -> CommandEnvelope {
+        CommandEnvelope {
+            command_id: CommandId::from_opaque(oid(id)),
+            scope: scope(),
+            command_type: "ucr.message.send".to_owned(),
+            payload: payload.to_vec(),
+            correlation: CorrelationContext {
+                correlation_id: oid("correlation-integration"),
+                causation_id: None,
+                idempotency_key: Some(key.to_owned()),
+            },
+            schema_version: ProtocolVersion::new(1, 0),
+            extensions: Vec::new(),
+        }
+    }
+
+    fn install_quota(store: &MemoryLocalStore, subject: &ScopedPrincipal, max_requests: u64) {
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject.clone(),
+                max_requests,
+                window_ms: 1_000,
+            })
+            .expect("bootstrap quota");
+    }
+
+    #[test]
+    fn integration_ingress_authenticates_audits_authorizes_and_deduplicates() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        store
+            .grant_permission(&grant(&subject))
+            .expect("bootstrap command permission");
+        install_quota(&store, &subject, 3);
+        let clock = TestClock::new(10_000);
+        let ingress = IntegrationCommandIngress::new(&clock, &store, &store);
+        let value = command("command-integration", "integration-key", b"hello");
+
+        let accepted = ingress
+            .submit_command(&subject.scope, &credential.credential_id, &secret, &value)
+            .expect("first external command accepted");
+        assert_eq!(accepted.status, CommandReceiptStatus::Accepted);
+
+        let duplicate = ingress
+            .submit_command(&subject.scope, &credential.credential_id, &secret, &value)
+            .expect("retry deduplicated");
+        assert_eq!(duplicate.status, CommandReceiptStatus::Duplicate);
+        assert_eq!(
+            duplicate.original_command_id,
+            Some(value.command_id.clone())
+        );
+
+        let mut conflicting = value.clone();
+        conflicting.payload = b"changed".to_vec();
+        let error = ingress
+            .submit_command(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &conflicting,
+            )
+            .expect_err("changed semantics under same command id conflict");
+        assert_eq!(error.code, CanonicalErrorCode::Conflict);
+
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("read audit");
+        assert_eq!(
+            audit
+                .iter()
+                .map(|record| record.outcome)
+                .collect::<Vec<_>>(),
+            vec![
+                ServiceAuditOutcome::Authorized,
+                ServiceAuditOutcome::Authorized,
+                ServiceAuditOutcome::Authorized,
+            ]
+        );
+    }
+
+    #[test]
+    fn integration_ingress_denials_never_create_ghost_acceptance() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        install_quota(&store, &subject, 4);
+        let clock = TestClock::new(20_000);
+        let ingress = IntegrationCommandIngress::new(&clock, &store, &store);
+        let value = command("command-denied", "denied-key", b"payload");
+
+        let denied = ingress
+            .submit_command(&subject.scope, &credential.credential_id, &secret, &value)
+            .expect_err("missing command permission denied");
+        assert_eq!(denied.code, CanonicalErrorCode::PermissionDenied);
+
+        let wrong = ucr_core::ServiceCredentialSecret::from_bytes([0xA5; 32]);
+        let unauthenticated = ingress
+            .submit_command(&subject.scope, &credential.credential_id, &wrong, &value)
+            .expect_err("wrong secret rejected");
+        assert_eq!(unauthenticated.code, CanonicalErrorCode::Unauthenticated);
+
+        store
+            .grant_permission(&grant(&subject))
+            .expect("grant command permission after denials");
+        let accepted = ingress
+            .submit_command(&subject.scope, &credential.credential_id, &secret, &value)
+            .expect("same command must still be new after denied requests");
+        assert_eq!(accepted.status, CommandReceiptStatus::Accepted);
+
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("read audit");
+        assert_eq!(
+            audit
+                .iter()
+                .map(|record| record.outcome)
+                .collect::<Vec<_>>(),
+            vec![
+                ServiceAuditOutcome::PermissionDenied,
+                ServiceAuditOutcome::AuthenticationFailed,
+                ServiceAuditOutcome::Authorized,
+            ]
+        );
+        assert!(audit[1].subject.is_none());
+    }
+
+    #[test]
+    fn integration_ingress_rate_limit_fails_before_command_acceptance() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        store
+            .grant_permission(&grant(&subject))
+            .expect("bootstrap command permission");
+        install_quota(&store, &subject, 1);
+        let clock = TestClock::new(30_000);
+        let ingress = IntegrationCommandIngress::new(&clock, &store, &store);
+
+        let first = command("command-quota-a", "quota-key-a", b"a");
+        assert_eq!(
+            ingress
+                .submit_command(&subject.scope, &credential.credential_id, &secret, &first)
+                .expect("first request")
+                .status,
+            CommandReceiptStatus::Accepted
+        );
+
+        let second = command("command-quota-b", "quota-key-b", b"b");
+        let limited = ingress
+            .submit_command(&subject.scope, &credential.credential_id, &secret, &second)
+            .expect_err("second request in same window must be rate limited");
+        assert_eq!(limited.code, CanonicalErrorCode::RateLimited);
+        assert_eq!(limited.retry_after_ms, Some(1_000));
+
+        clock.set(31_000);
+        assert_eq!(
+            ingress
+                .submit_command(&subject.scope, &credential.credential_id, &secret, &second)
+                .expect("rate-limited command was never ghost-accepted")
+                .status,
+            CommandReceiptStatus::Accepted
+        );
+
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("read audit");
+        assert_eq!(
+            audit
+                .iter()
+                .map(|record| record.outcome)
+                .collect::<Vec<_>>(),
+            vec![
+                ServiceAuditOutcome::Authorized,
+                ServiceAuditOutcome::RateLimited,
+                ServiceAuditOutcome::Authorized,
+            ]
+        );
+    }
+}

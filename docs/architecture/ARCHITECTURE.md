@@ -40,7 +40,7 @@ Internet   Direct     External bridges
 
 ## Public contract boundary
 
-The public contract is represented first as a versioned protocol specification plus protobuf schemas. Rust types are a reference mapping of the specification, not the specification itself.
+The public contract is represented first as a versioned protocol specification plus protobuf schemas. Rust types are a reference mapping of the specification, not the specification itself. Phase 13 begins with `IntegrationService.SubmitCommand`, which reuses the canonical Command/Receipt/Error envelopes and the existing Service Principal admission chain.
 
 Supported contract surfaces are expected to include protobuf/gRPC, HTTP where appropriate, event streams, local IPC and embedded APIs. They must express the same canonical semantics.
 
@@ -48,7 +48,7 @@ Supported contract surfaces are expected to include protobuf/gRPC, HTTP where ap
 
 A future transport must be addable through a `TransportProvider`-style boundary containing capabilities, addressing, delivery semantics, health, failure mapping and conformance behavior without changing the meaning of canonical entities.
 
-A future external platform must integrate through service principal/auth, permissions, commands, events, identity bindings and policies.
+An external platform integrates through Service Principal authentication, quotas/audit, permissions, the public Integration API, events, identity bindings and policies. The implemented Phase-13 command ingress does not grant raw `AuthorizedDurableRuntime` or storage access.
 
 ## Deferred implementation
 
