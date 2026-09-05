@@ -9,8 +9,9 @@ use std::{
 use ucr_core::{
     AntiEntropyStore, AuthorizationEvaluator, CommandAcceptanceStore, CommandOutcomeStore,
     CommunicationIntentStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
-    DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore, MessageStore,
-    PermissionGrantStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
+    DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
+    EventJournalStore, MessageStore, PermissionGrantStore, RecoveryAdmissionProof,
+    RecoveryDeviceStagingStore, RecoveryPlanStore, ReverifiedDeviceActivationStore,
     ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
     StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore,
 };
@@ -425,6 +426,27 @@ impl DeviceLifecycleStore for MemoryLocalStore {
     ) -> Result<Option<DeviceDescriptor>, DurableStoreError> {
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         Ok(state.devices.get(&device_key(scope, device_id)).cloned())
+    }
+}
+
+impl ReverifiedDeviceActivationStore for MemoryLocalStore {
+    fn activate_reverified_device(
+        &self,
+        proof: &DeviceReverificationProof,
+    ) -> Result<(), DurableStoreError> {
+        let key = device_key(proof.scope(), proof.device_id());
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let device = state
+            .devices
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Conflict)?;
+        if device.identity_id != *proof.identity_id()
+            || device.state != DeviceLifecycleState::ReverificationRequired
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+        device.state = DeviceLifecycleState::Active;
+        Ok(())
     }
 }
 
@@ -1902,9 +1924,11 @@ mod recovery_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ucr_core::{
-        DeviceLifecycleStore, DurableStoreError, RecoveryAuthorityVerificationError,
+        DeviceLifecycleStore, DeviceReverificationGate, DeviceReverificationVerificationError,
+        DeviceReverificationVerifier, DurableStoreError, RecoveryAuthorityVerificationError,
         RecoveryAuthorityVerifier, RecoveryDeviceStagingStore, RecoveryPlanStore,
-        RecoveryRequestGate, TrustedSigningKeyStore, authorize_and_stage_recovered_device,
+        RecoveryRequestGate, ReverifiedDeviceActivationStore, TrustedSigningKeyStore,
+        authorize_and_activate_reverified_device, authorize_and_stage_recovered_device,
     };
     use ucr_model::{
         DeviceId, DeviceLifecycleState, HistoricalMessageAccess, IdentityId, KeyId, KeyPurpose,
@@ -1971,6 +1995,49 @@ mod recovery_tests {
             _plan: &RecoveryPlan,
             _request: &RecoveryRequest,
         ) -> Result<(), RecoveryAuthorityVerificationError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.outcome
+        }
+    }
+
+    #[derive(Debug)]
+    struct ReverificationVerifier {
+        outcome: Result<(), DeviceReverificationVerificationError>,
+        calls: AtomicUsize,
+    }
+
+    impl ReverificationVerifier {
+        fn allow() -> Self {
+            Self {
+                outcome: Ok(()),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn deny() -> Self {
+            Self {
+                outcome: Err(DeviceReverificationVerificationError::Denied),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn unavailable() -> Self {
+            Self {
+                outcome: Err(DeviceReverificationVerificationError::Unavailable),
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl DeviceReverificationVerifier for ReverificationVerifier {
+        fn verify_reverification(
+            &self,
+            _device: &ucr_model::DeviceDescriptor,
+        ) -> Result<(), DeviceReverificationVerificationError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.outcome
         }
@@ -2153,6 +2220,112 @@ mod recovery_tests {
         let error = authorize_and_stage_recovered_device(&verifier, &store, &target)
             .expect_err("recovery cannot downgrade existing active device");
         assert_eq!(error.code, CanonicalErrorCode::Conflict);
+    }
+
+    #[test]
+    fn recovered_device_requires_independent_reverification_before_active() {
+        let store = MemoryLocalStore::default();
+        let active = plan("plan-reverify", "identity-reverify");
+        store.install_recovery_plan(&active).expect("install plan");
+        let request = request(&active, "device-reverify", RecoveryAuthority::RecoveryKey);
+        let recovery = TestVerifier::allow();
+        let staged = authorize_and_stage_recovered_device(&recovery, &store, &request)
+            .expect("stage recovered device");
+        assert_eq!(staged.state, DeviceLifecycleState::ReverificationRequired);
+
+        let denied = ReverificationVerifier::deny();
+        let error = authorize_and_activate_reverified_device(
+            &denied,
+            &store,
+            &active.scope,
+            &request.target_device_id,
+            &active.identity_id,
+        )
+        .expect_err("reverification denial must fail closed");
+        assert_eq!(error.code, CanonicalErrorCode::PermissionDenied);
+        assert_eq!(denied.calls(), 1);
+
+        let wrong_identity = IdentityId::from_opaque(id("wrong-reverify-identity"));
+        let before = denied.calls();
+        let error = authorize_and_activate_reverified_device(
+            &denied,
+            &store,
+            &active.scope,
+            &request.target_device_id,
+            &wrong_identity,
+        )
+        .expect_err("identity mismatch must fail before verifier");
+        assert_eq!(error.code, CanonicalErrorCode::PermissionDenied);
+        assert_eq!(denied.calls(), before);
+
+        let unavailable = ReverificationVerifier::unavailable();
+        let error = authorize_and_activate_reverified_device(
+            &unavailable,
+            &store,
+            &active.scope,
+            &request.target_device_id,
+            &active.identity_id,
+        )
+        .expect_err("unavailable verifier must fail closed");
+        assert_eq!(error.code, CanonicalErrorCode::TemporarilyUnavailable);
+        assert_eq!(unavailable.calls(), 1);
+
+        assert_eq!(
+            store
+                .device(&active.scope, &request.target_device_id)
+                .expect("device")
+                .expect("exists")
+                .state,
+            DeviceLifecycleState::ReverificationRequired
+        );
+
+        let allowed = ReverificationVerifier::allow();
+        let activated = authorize_and_activate_reverified_device(
+            &allowed,
+            &store,
+            &active.scope,
+            &request.target_device_id,
+            &active.identity_id,
+        )
+        .expect("independently reverified device activates");
+        assert_eq!(activated.state, DeviceLifecycleState::Active);
+        assert_eq!(allowed.calls(), 1);
+        store
+            .provision_trusted_signing_key(&active.scope, &signing_key(&request.target_device_id))
+            .expect("active reverified device may receive trusted key");
+    }
+
+    #[test]
+    fn stale_reverification_proof_cannot_resurrect_revoked_device() {
+        let store = MemoryLocalStore::default();
+        let descriptor = ucr_model::DeviceDescriptor {
+            device_id: DeviceId::from_opaque(id("device-stale-proof")),
+            identity_id: IdentityId::from_opaque(id("identity-stale-proof")),
+            state: DeviceLifecycleState::ReverificationRequired,
+        };
+        store
+            .register_device(&plan("unused", "identity-stale-proof").scope, &descriptor)
+            .expect("stage fixture");
+        let scope = plan("unused-2", "identity-stale-proof").scope;
+        let verifier = ReverificationVerifier::allow();
+        let proof = DeviceReverificationGate::new(&verifier, &store)
+            .authorize_reverification(&scope, &descriptor.device_id, &descriptor.identity_id)
+            .expect("mint re-verification proof");
+        store
+            .revoke_device(&scope, &descriptor.device_id, &descriptor.identity_id)
+            .expect("revoke wins race");
+        assert_eq!(
+            store.activate_reverified_device(&proof),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            store
+                .device(&scope, &descriptor.device_id)
+                .expect("device")
+                .expect("exists")
+                .state,
+            DeviceLifecycleState::Revoked
+        );
     }
 }
 

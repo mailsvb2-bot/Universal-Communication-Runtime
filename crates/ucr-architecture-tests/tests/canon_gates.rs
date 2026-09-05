@@ -2157,7 +2157,7 @@ fn recovery_execution_requires_verified_authority_and_atomic_device_staging() {
         "docs/adr/0033-recovery-device-staging-requires-verified-authority-and-active-plan.md"
     ));
     assert!(threat.contains(
-        "- end-to-end recovery workflow: concrete authority-verifier providers, credential re-issuance"
+        "- end-to-end recovery workflow: concrete authority-verifier and re-verification-verifier providers, credential re-issuance"
     ));
     assert!(threat.contains(
         "- device-bound credential/content delivery enforcement beyond implemented trusted-key/authentication paths;"
@@ -2810,4 +2810,72 @@ fn communication_intent_storage_is_durable_scoped_and_has_one_owner() {
             "provider-specific Intent owner leaked: {forbidden}"
         );
     }
+}
+
+#[test]
+fn recovered_device_reverification_has_independent_proof_and_atomic_activation_owner() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let workflow = fs::read_to_string(workspace.join("crates/ucr-core/src/recovery_workflow.rs"))
+        .expect("recovery workflow");
+    let memory = fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs"))
+        .expect("memory store");
+    let sqlite =
+        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/device_store.rs"))
+            .expect("sqlite device store");
+    let spec = fs::read_to_string(workspace.join("spec/recovery.md")).expect("recovery spec");
+    let device_spec =
+        fs::read_to_string(workspace.join("spec/principal-actor-device.md")).expect("device spec");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0039-recovered-device-activation-requires-independent-reverification-proof.md",
+    ))
+    .expect("adr 0039");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(workflow.contains("pub trait DeviceReverificationVerifier"));
+    assert!(workflow.contains("pub struct DeviceReverificationProof"));
+    assert!(workflow.contains("pub trait ReverifiedDeviceActivationStore"));
+    assert!(workflow.contains("authorize_and_activate_reverified_device"));
+    assert!(workflow.contains("DeviceLifecycleState::ReverificationRequired"));
+    assert!(memory.contains("impl ReverifiedDeviceActivationStore for MemoryLocalStore"));
+    assert!(sqlite.contains("impl ReverifiedDeviceActivationStore for SqliteLocalStore"));
+    assert!(sqlite.contains("state='reverification_required'"));
+    for evidence in [
+        "recovered_device_requires_independent_reverification_before_active",
+        "stale_reverification_proof_cannot_resurrect_revoked_device",
+    ] {
+        assert!(
+            memory.contains(evidence),
+            "memory re-verification evidence missing: {evidence}"
+        );
+    }
+    for evidence in [
+        "reverified_device_activation_survives_restart_and_enables_new_key_trust",
+        "concurrent_reverify_and_revoke_never_resurrect_revoked_device",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "sqlite re-verification evidence missing: {evidence}"
+        );
+    }
+    assert!(spec.contains(
+        "Ordinary registration or PermissionGrant administration is not a re-verification bypass"
+    ));
+    assert!(
+        device_spec.contains("Ordinary registration cannot perform the re-verification promotion")
+    );
+    assert!(adr.contains(
+        "Re-verification authority is deliberately not represented as a `PermissionGrant`"
+    ));
+    assert!(threat.contains("private-field `DeviceReverificationProof`"));
+    assert!(
+        ci.contains(
+            "0039-recovered-device-activation-requires-independent-reverification-proof.md"
+        )
+    );
+    assert!(!threat.contains("re-verification transition/UX evidence"));
 }

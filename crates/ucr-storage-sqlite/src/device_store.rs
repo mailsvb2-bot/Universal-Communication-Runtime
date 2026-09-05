@@ -1,5 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use ucr_core::{DeviceLifecycleStore, DurableStoreError};
+use ucr_core::{
+    DeviceLifecycleStore, DeviceReverificationProof, DurableStoreError,
+    ReverifiedDeviceActivationStore,
+};
 use ucr_model::{
     DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, OpaqueId, TenantScope,
 };
@@ -129,6 +132,39 @@ impl DeviceLifecycleStore for SqliteLocalStore {
     ) -> Result<Option<DeviceDescriptor>, DurableStoreError> {
         let connection = self.lock_connection()?;
         load_device(&connection, scope, device_id)
+    }
+}
+
+impl ReverifiedDeviceActivationStore for SqliteLocalStore {
+    fn activate_reverified_device(
+        &self,
+        proof: &DeviceReverificationProof,
+    ) -> Result<(), DurableStoreError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let namespace = namespace_storage_key(proof.scope());
+        let changed = transaction
+            .execute(
+                "UPDATE devices SET state='active'
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND device_id=?4 AND identity_id=?5 AND state='reverification_required'",
+                params![
+                    proof.scope().tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    proof.device_id().as_opaque().as_str(),
+                    proof.identity_id().as_opaque().as_str(),
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        if changed != 1 {
+            return Err(DurableStoreError::Conflict);
+        }
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))
     }
 }
 
@@ -339,7 +375,9 @@ mod tests {
 
     use rusqlite::Connection;
     use ucr_core::{
-        DeviceLifecycleStore, DurableStoreError, StorageProvider, TrustedSigningKeyStore,
+        DeviceLifecycleStore, DeviceReverificationGate, DeviceReverificationVerificationError,
+        DeviceReverificationVerifier, DurableStoreError, ReverifiedDeviceActivationStore,
+        StorageProvider, TrustedSigningKeyStore, authorize_and_activate_reverified_device,
     };
     use ucr_crypto::{TrustedKeyResolutionError, TrustedSigningKeyResolver};
     use ucr_model::{
@@ -405,6 +443,18 @@ mod tests {
             algorithm_version: ALGORITHM_VERSION,
             key_format_version: KEY_FORMAT_VERSION,
             public_key: vec![byte; 32],
+        }
+    }
+
+    #[derive(Debug)]
+    struct AllowReverification;
+
+    impl DeviceReverificationVerifier for AllowReverification {
+        fn verify_reverification(
+            &self,
+            _device: &DeviceDescriptor,
+        ) -> Result<(), DeviceReverificationVerificationError> {
+            Ok(())
         }
     }
 
@@ -719,6 +769,101 @@ mod tests {
         assert_eq!(
             SqliteLocalStore::open(db.path()).expect_err("inconsistent state must fail"),
             DurableStoreError::Corrupt
+        );
+    }
+
+    #[test]
+    fn reverified_device_activation_survives_restart_and_enables_new_key_trust() {
+        let db = TestDb::new();
+        let scope = scope();
+        let staged = device(DeviceLifecycleState::ReverificationRequired);
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open");
+            store
+                .register_device(&scope, &staged)
+                .expect("stage device");
+            let active = authorize_and_activate_reverified_device(
+                &AllowReverification,
+                &store,
+                &scope,
+                &staged.device_id,
+                &staged.identity_id,
+            )
+            .expect("reverified device activates");
+            assert_eq!(active.state, DeviceLifecycleState::Active);
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert_eq!(
+            reopened
+                .device(&scope, &staged.device_id)
+                .expect("lookup")
+                .expect("device")
+                .state,
+            DeviceLifecycleState::Active
+        );
+        reopened
+            .provision_trusted_signing_key(&scope, &key("key-after-reverify", 77))
+            .expect("reverified active device accepts new trusted key");
+    }
+
+    #[test]
+    fn concurrent_reverify_and_revoke_never_resurrect_revoked_device() {
+        let db = TestDb::new();
+        let scope = scope();
+        let staged = device(DeviceLifecycleState::ReverificationRequired);
+        let proof = {
+            let store = SqliteLocalStore::open(db.path()).expect("seed");
+            store
+                .register_device(&scope, &staged)
+                .expect("stage device");
+            DeviceReverificationGate::new(&AllowReverification, &store)
+                .authorize_reverification(&scope, &staged.device_id, &staged.identity_id)
+                .expect("mint proof")
+        };
+
+        let barrier = Arc::new(Barrier::new(3));
+        let activate_path = db.path().to_owned();
+        let activate_barrier = Arc::clone(&barrier);
+        let activate = thread::spawn(move || {
+            let store = SqliteLocalStore::open(activate_path).expect("activation store");
+            activate_barrier.wait();
+            store.activate_reverified_device(&proof)
+        });
+
+        let revoke_path = db.path().to_owned();
+        let revoke_barrier = Arc::clone(&barrier);
+        let revoke_scope = scope.clone();
+        let revoke_device = staged.device_id.clone();
+        let revoke_identity = staged.identity_id.clone();
+        let revoke = thread::spawn(move || {
+            let store = SqliteLocalStore::open(revoke_path).expect("revoke store");
+            revoke_barrier.wait();
+            store.revoke_device(&revoke_scope, &revoke_device, &revoke_identity)
+        });
+
+        barrier.wait();
+        let activation_result = activate.join().expect("activation thread");
+        assert!(matches!(
+            activation_result,
+            Ok(()) | Err(DurableStoreError::Conflict)
+        ));
+        assert_eq!(revoke.join().expect("revoke thread"), Ok(()));
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert_eq!(
+            reopened
+                .device(&scope, &staged.device_id)
+                .expect("lookup")
+                .expect("device")
+                .state,
+            DeviceLifecycleState::Revoked
+        );
+        let error = DeviceReverificationGate::new(&AllowReverification, &reopened)
+            .authorize_reverification(&scope, &staged.device_id, &staged.identity_id)
+            .expect_err("revoked device cannot mint a new proof");
+        assert_eq!(
+            error.code,
+            ucr_protocol::CanonicalErrorCode::PermissionDenied
         );
     }
 }
