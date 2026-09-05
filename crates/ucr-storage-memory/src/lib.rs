@@ -8,11 +8,11 @@ use std::{
 
 use ucr_core::{
     AntiEntropyStore, AuthorizationEvaluator, CommandAcceptanceStore, CommandOutcomeStore,
-    ConversationStore, DeliveryStore, DeviceLifecycleStore, DurableRecordStatus, DurableStoreError,
-    EventAppendStatus, EventJournalStore, MessageStore, PermissionGrantStore,
-    RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore, ServiceAuditStore,
-    ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth,
-    StorageProvider, SyncStore, TrustedSigningKeyStore,
+    CommunicationIntentStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
+    DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore, MessageStore,
+    PermissionGrantStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
+    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
+    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -20,27 +20,27 @@ use ucr_crypto::{
 };
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
-    ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
-    DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventEnvelope, EventId,
-    EventReconciliation, EventReplicaState, EventSummary, IdentityId, KeyId, MessageEnvelope,
-    MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
-    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
-    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord, TrustedSigningKeyState,
+    CommunicationIntent, ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence,
+    DeliveryId, DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventEnvelope,
+    EventId, EventReconciliation, EventReplicaState, EventSummary, IdentityId, IntentId, KeyId,
+    MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
+    ScopedPrincipal, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
+    ServiceCredentialState, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
+    TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
     IdempotencyDecision, MAX_SERVICE_AUDIT_READ_ITEMS, accepted_command_receipt,
-    anti_entropy_session_binding, canonical_command, canonical_event, canonical_message,
-    canonical_recovery_plan, canonical_sync_session, compare_command_idempotency,
-    device_allows_protected_access, duplicate_command_receipt, event_fingerprint,
-    service_audit_hash, validate_anti_entropy_cursor, validate_anti_entropy_page_size,
-    validate_anti_entropy_session, validate_anti_entropy_summary_count, validate_conversation,
-    validate_conversation_parent_kind, validate_delivery_attempt, validate_delivery_evidence,
-    validate_delivery_evidence_binding, validate_delivery_evidence_order,
-    validate_delivery_transition, validate_permission_grant, validate_service_audit_record,
-    validate_service_quota_policy, validate_sync_checkpoint, validate_sync_transition,
-    validate_trusted_signing_key_descriptor,
+    anti_entropy_session_binding, canonical_command, canonical_communication_intent,
+    canonical_event, canonical_message, canonical_recovery_plan, canonical_sync_session,
+    compare_command_idempotency, device_allows_protected_access, duplicate_command_receipt,
+    event_fingerprint, service_audit_hash, validate_anti_entropy_cursor,
+    validate_anti_entropy_page_size, validate_anti_entropy_session,
+    validate_anti_entropy_summary_count, validate_conversation, validate_conversation_parent_kind,
+    validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
+    validate_delivery_evidence_order, validate_delivery_transition, validate_permission_grant,
+    validate_service_audit_record, validate_service_quota_policy, validate_sync_checkpoint,
+    validate_sync_transition, validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 9;
@@ -52,6 +52,7 @@ type ReplayKey = ([u8; 32], [u8; 32]);
 type RecoveryIdentityKey = (ScopeKey, String);
 type ConversationKey = (ScopeKey, String);
 type MessageKey = (ScopeKey, String);
+type IntentKey = (ScopeKey, String);
 type DeliveryKey = (ScopeKey, String);
 type SyncKey = (ScopeKey, String);
 type TrustedSigningKeyRef = (ScopeKey, String);
@@ -79,6 +80,7 @@ struct MemoryState {
     active_recovery_plans: HashMap<RecoveryIdentityKey, String>,
     conversations: HashMap<ConversationKey, ConversationRecord>,
     messages: HashMap<MessageKey, MessageEnvelope>,
+    intents: HashMap<IntentKey, CommunicationIntent>,
     deliveries: HashMap<DeliveryKey, DeliveryAttempt>,
     delivery_evidence: HashMap<DeliveryKey, Vec<DeliveryEvidence>>,
     sync_sessions: HashMap<SyncKey, SyncSession>,
@@ -846,6 +848,10 @@ fn message_key(scope: &TenantScope, message_id: &MessageId) -> MessageKey {
     (scope_key(scope), message_id.as_opaque().as_str().to_owned())
 }
 
+fn intent_key(scope: &TenantScope, intent_id: &IntentId) -> IntentKey {
+    (scope_key(scope), intent_id.as_opaque().as_str().to_owned())
+}
+
 fn delivery_key(scope: &TenantScope, delivery_id: &DeliveryId) -> DeliveryKey {
     (
         scope_key(scope),
@@ -900,6 +906,36 @@ impl ConversationStore for MemoryLocalStore {
             .conversations
             .get(&conversation_key(scope, conversation_id))
             .cloned())
+    }
+}
+
+impl CommunicationIntentStore for MemoryLocalStore {
+    fn persist_communication_intent(
+        &self,
+        intent: &CommunicationIntent,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let canonical =
+            canonical_communication_intent(intent).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = intent_key(&canonical.scope, &canonical.intent_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.intents.get(&key) {
+            return if existing == &canonical {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.intents.insert(key, canonical);
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn communication_intent(
+        &self,
+        scope: &TenantScope,
+        intent_id: &IntentId,
+    ) -> Result<Option<CommunicationIntent>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state.intents.get(&intent_key(scope, intent_id)).cloned())
     }
 }
 
@@ -2117,6 +2153,99 @@ mod recovery_tests {
         let error = authorize_and_stage_recovered_device(&verifier, &store, &target)
             .expect_err("recovery cannot downgrade existing active device");
         assert_eq!(error.code, CanonicalErrorCode::Conflict);
+    }
+}
+
+#[cfg(test)]
+mod intent_tests {
+    use ucr_core::{CommunicationIntentStore, DurableRecordStatus, DurableStoreError};
+    use ucr_model::{
+        CommunicationIntent, CorrelationContext, IdentityId, IntentConstraints, IntentId,
+        NamespaceId, OpaqueId, ProtocolExtension, TenantId, TenantScope,
+    };
+    use ucr_protocol::canonical_communication_intent;
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    pub(super) fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-intent-memory")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("namespace-intent-memory"))),
+        }
+    }
+
+    pub(super) fn intent() -> CommunicationIntent {
+        CommunicationIntent {
+            intent_id: IntentId::from_opaque(oid("intent-memory")),
+            scope: scope(),
+            target_identity_id: IdentityId::from_opaque(oid("identity-target")),
+            payload: b"memory intent".to_vec(),
+            constraints: IntentConstraints {
+                allowed_transport_capabilities: vec![
+                    "ucr.transport.wifi".to_owned(),
+                    "ucr.transport.direct".to_owned(),
+                ],
+                forbidden_transport_capabilities: vec!["ucr.transport.bridge".to_owned()],
+                privacy_profile: Some("vendor.example.private".to_owned()),
+                region_constraint: Some("region-eu".to_owned()),
+                max_cost_microunits: Some(u64::MAX),
+                priority_class: Some(u32::MAX),
+            },
+            correlation: CorrelationContext {
+                correlation_id: oid("correlation-intent-memory"),
+                causation_id: Some(oid("causation-intent-memory")),
+                idempotency_key: Some("intent-memory-key".to_owned()),
+            },
+            extensions: vec![
+                ProtocolExtension {
+                    name: "vendor.example.z".to_owned(),
+                    critical: false,
+                    payload: b"z".to_vec(),
+                },
+                ProtocolExtension {
+                    name: "ucr.intent.a".to_owned(),
+                    critical: false,
+                    payload: b"a".to_vec(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn communication_intent_persists_canonically_and_conflicts_on_changed_semantics() {
+        let store = MemoryLocalStore::default();
+        let first = intent();
+        let expected = canonical_communication_intent(&first).expect("canonical intent");
+        assert_eq!(
+            store.persist_communication_intent(&first),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.communication_intent(&first.scope, &first.intent_id),
+            Ok(Some(expected))
+        );
+
+        let mut reordered = first.clone();
+        reordered
+            .constraints
+            .allowed_transport_capabilities
+            .reverse();
+        reordered.extensions.reverse();
+        assert_eq!(
+            store.persist_communication_intent(&reordered),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+
+        let mut changed = first;
+        changed.payload.push(b'!');
+        assert_eq!(
+            store.persist_communication_intent(&changed),
+            Err(DurableStoreError::Conflict)
+        );
     }
 }
 
@@ -3444,8 +3573,8 @@ mod trusted_signing_key_tests {
 mod permission_enforcement_tests {
     use ucr_core::{
         AuthorizedDurableRuntime, AuthorizedMutationError, AuthorizedTrustedSigningKeyMutations,
-        ConversationStore, DeviceLifecycleStore, DurableStoreError, MessageStore,
-        PermissionGrantStore, TrustedSigningKeyStore,
+        CommunicationIntentStore, ConversationStore, DeviceLifecycleStore, DurableStoreError,
+        MessageStore, PermissionGrantStore, TrustedSigningKeyStore,
     };
     use ucr_model::{
         DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, KeyId, KeyPurpose,
@@ -3453,13 +3582,15 @@ mod permission_enforcement_tests {
         PrincipalRef, PublicKeyDescriptor, ScopedPrincipal, TenantId, TenantScope,
     };
     use ucr_protocol::{
-        ALGORITHM_VERSION, CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION,
-        CanonicalError, CanonicalErrorCode, DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION,
-        DEVICE_REVOKE_PERMISSION, KEY_FORMAT_VERSION, MESSAGE_READ_PERMISSION,
-        MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION,
+        ALGORITHM_VERSION, COMMUNICATION_INTENT_READ_PERMISSION,
+        COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
+        CONVERSATION_WRITE_PERMISSION, CanonicalError, CanonicalErrorCode, DEVICE_READ_PERMISSION,
+        DEVICE_REGISTER_PERMISSION, DEVICE_REVOKE_PERMISSION, KEY_FORMAT_VERSION,
+        MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION,
         PERMISSION_GRANT_READ_PERMISSION, PERMISSION_GRANT_REVOKE_PERMISSION,
         SIGNATURE_ALGORITHM_ID, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
         TRUSTED_SIGNING_KEY_REVOKE_PERMISSION, TRUSTED_SIGNING_KEY_ROTATE_PERMISSION,
+        canonical_communication_intent,
     };
 
     use super::MemoryLocalStore;
@@ -3809,6 +3940,52 @@ mod permission_enforcement_tests {
                 .permission_grants_for(&other_target)
                 .expect("other tenant grants")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn unified_runtime_enforces_independent_communication_intent_permissions() {
+        let store = MemoryLocalStore::default();
+        let subject = subject("tenant-intent-memory", Some("namespace-intent-memory"));
+        let resource = super::intent_tests::scope();
+        let intent = super::intent_tests::intent();
+        let runtime = AuthorizedDurableRuntime::new(&store, &store);
+
+        assert_eq!(
+            runtime.persist_communication_intent(&subject, &intent),
+            Err(denied())
+        );
+        assert_eq!(
+            store.communication_intent(&resource, &intent.intent_id),
+            Ok(None)
+        );
+        store
+            .grant_permission(&exact_grant(
+                &subject,
+                COMMUNICATION_INTENT_WRITE_PERMISSION,
+                &resource,
+            ))
+            .expect("bootstrap intent write");
+        runtime
+            .persist_communication_intent(&subject, &intent)
+            .expect("authorized intent persist");
+
+        assert_eq!(
+            runtime.communication_intent(&subject, &resource, &intent.intent_id),
+            Err(denied())
+        );
+        store
+            .grant_permission(&exact_grant(
+                &subject,
+                COMMUNICATION_INTENT_READ_PERMISSION,
+                &resource,
+            ))
+            .expect("bootstrap intent read");
+        assert_eq!(
+            runtime.communication_intent(&subject, &resource, &intent.intent_id),
+            Ok(Some(
+                canonical_communication_intent(&intent).expect("canonical intent")
+            ))
         );
     }
 

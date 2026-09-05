@@ -2,14 +2,16 @@ use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
     ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
     DeliveryState, DeviceDescriptor, DeviceId, EventEnvelope, EventId, EventReconciliation,
-    EventSummary, IdentityId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PermissionScope,
-    PrincipalKind, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
-    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy,
-    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    EventSummary, IdentityId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
+    PermissionScope, PrincipalKind, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
+    ScopedPrincipal, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
+    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord,
 };
 use ucr_protocol::{
     ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, COMMAND_ACCEPT_PERMISSION,
     COMMAND_OUTCOME_READ_PERMISSION, COMMAND_OUTCOME_WRITE_PERMISSION,
+    COMMUNICATION_INTENT_READ_PERMISSION, COMMUNICATION_INTENT_WRITE_PERMISSION,
     CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION, DELIVERY_READ_PERMISSION,
     DELIVERY_WRITE_PERMISSION, DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION,
     DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION, MESSAGE_READ_PERMISSION,
@@ -26,10 +28,10 @@ use ucr_protocol::{
 
 use crate::{
     AntiEntropyStore, AuthorizationEvaluator, AuthorizedMutationError, CommandAcceptanceStore,
-    CommandOutcomeStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
-    DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore, MessageStore,
-    PermissionGrantStore, RecoveryPlanStore, ServiceAuditStore, ServiceCredentialStore,
-    ServiceQuotaStore, SyncStore, TrustedSigningKeyStore,
+    CommandOutcomeStore, CommunicationIntentStore, ConversationStore, DeliveryStore,
+    DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
+    EventJournalStore, MessageStore, PermissionGrantStore, RecoveryPlanStore, ServiceAuditStore,
+    ServiceCredentialStore, ServiceQuotaStore, SyncStore, TrustedSigningKeyStore,
 };
 
 /// Authorization-enforcing runtime boundary over tenant-scoped durable capabilities.
@@ -489,6 +491,47 @@ where
         self.require(subject, &command.scope, COMMAND_ACCEPT_PERMISSION)?;
         self.store
             .accept_command(command)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: CommunicationIntentStore,
+{
+    /// Persists one Communication Intent only after exact-scope authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures; denied calls never reach storage.
+    pub fn persist_communication_intent(
+        &self,
+        subject: &ScopedPrincipal,
+        intent: &ucr_model::CommunicationIntent,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(
+            subject,
+            &intent.scope,
+            COMMUNICATION_INTENT_WRITE_PERMISSION,
+        )?;
+        self.store
+            .persist_communication_intent(intent)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Loads one Communication Intent only after exact-scope authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn communication_intent(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        intent_id: &IntentId,
+    ) -> Result<Option<ucr_model::CommunicationIntent>, AuthorizedMutationError> {
+        self.require(subject, scope, COMMUNICATION_INTENT_READ_PERMISSION)?;
+        self.store
+            .communication_intent(scope, intent_id)
             .map_err(AuthorizedMutationError::Store)
     }
 }

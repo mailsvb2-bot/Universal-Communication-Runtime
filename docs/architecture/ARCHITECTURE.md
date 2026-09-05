@@ -30,7 +30,7 @@ Internet   Direct     External bridges
 - `Identity` is not a phone number, email address, provider ID, hostname, IP address, or database sequence.
 - `Endpoint` is replaceable and can disappear without destroying `Identity`.
 - `Conversation` is not owned by a transport/provider.
-- `CommunicationIntent` must be persistable independently from route availability; durable Intent storage is not yet implemented.
+- `CommunicationIntent` is persisted independently from route availability through one capability-specific durable owner; Transport, Message, and Delivery do not own or recreate Intent state.
 - `Policy` is evaluated independently from a selected route.
 - Transport/provider implementations may declare capabilities; they may not redefine Message, Conversation, Identity, Delivery, or Policy.
 - External consumers do not get direct database access or hidden APIs.
