@@ -2609,6 +2609,17 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
     ));
 }
 
+fn assert_chaos_evidence(source: &str, matrix: &str, scenario: &str) {
+    assert!(
+        source.contains(&format!("fn {scenario}()")),
+        "missing executable chaos scenario: {scenario}"
+    );
+    assert!(
+        matrix.contains(scenario),
+        "missing chaos evidence index: {scenario}"
+    );
+}
+
 #[test]
 fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2633,6 +2644,10 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
         "docs/adr/0036-sqlite-storage-full-chaos-uses-provider-private-capacity-injection.md",
     ))
     .expect("adr 0036");
+    let process_kill_adr = fs::read_to_string(
+        workspace.join("docs/adr/0037-sqlite-process-kill-chaos-uses-test-only-precommit-pause.md"),
+    )
+    .expect("adr 0037");
     let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
 
     let scenarios = [
@@ -2645,14 +2660,7 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
         "revoked_device_restart_chaos_never_resurrects_trust",
     ];
     for scenario in scenarios {
-        assert!(
-            chaos.contains(&format!("fn {scenario}()")),
-            "missing executable chaos scenario: {scenario}"
-        );
-        assert!(
-            matrix.contains(scenario),
-            "missing chaos evidence index: {scenario}"
-        );
+        assert_chaos_evidence(&chaos, &matrix, scenario);
     }
     let chaos_test_count = chaos
         .lines()
@@ -2661,11 +2669,13 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
     assert_eq!(chaos_test_count, scenarios.len());
 
     let storage_full = "sqlite_storage_full_rolls_back_command_acceptance_atomically";
-    assert!(sqlite_store.contains(&format!("fn {storage_full}()")));
-    assert!(matrix.contains(storage_full));
+    assert_chaos_evidence(&sqlite_store, &matrix, storage_full);
+    let process_kill = "mid_operation_process_kill_rolls_back_command_acceptance_atomically";
+    assert_chaos_evidence(&sqlite_store, &matrix, process_kill);
+    assert!(sqlite_store.contains("#[cfg(test)]\nfn test_pause_command_acceptance_before_commit"));
+    assert!(!sqlite_store.contains("pub fn test_pause_command_acceptance_before_commit"));
 
     for open_evidence in [
-        "OPEN: deterministic mid-operation process-kill injection does not exist",
         "Not implemented: no production network transport exists",
         "Not implemented: Relay does not exist yet",
         "Not implemented: SFU does not exist yet",
@@ -2678,8 +2688,12 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
         );
     }
     assert!(!threat.contains("- applicable chaos scenarios;"));
+    assert!(
+        !matrix.contains("OPEN: deterministic mid-operation process-kill injection does not exist")
+    );
+    assert!(!threat.contains("deterministic process-kill fault injection for durable stores"));
     assert!(threat.contains(
-        "remaining chaos scenarios: deterministic process-kill fault injection for durable stores"
+        "transport/infrastructure chaos evidence for network/DNS/Relay/SFU/peer-disappearance/transport-reorder/slow-consumer"
     ));
     assert!(!threat.contains("end-to-end storage-full fault injection remain open"));
     assert!(threat.contains("seven executable cross-crate chaos scenarios"));
@@ -2691,10 +2705,16 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
     assert!(storage_full_adr.contains(
         "No public fault-injection API, alternate store, or second storage-policy owner is added"
     ));
+    assert!(process_kill_adr.contains("separate instance of the actual SQLite crate test binary"));
+    assert!(process_kill_adr.contains("immediately before the real transaction commit"));
+    assert!(process_kill_adr.contains("No public fault-injection API"));
     assert!(
         ci.contains("docs/adr/0035-applicable-chaos-evidence-composes-real-runtime-boundaries.md")
     );
     assert!(ci.contains(
         "docs/adr/0036-sqlite-storage-full-chaos-uses-provider-private-capacity-injection.md"
     ));
+    assert!(
+        ci.contains("docs/adr/0037-sqlite-process-kill-chaos-uses-test-only-precommit-pause.md")
+    );
 }

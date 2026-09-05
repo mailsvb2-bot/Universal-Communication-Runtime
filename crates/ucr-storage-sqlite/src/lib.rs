@@ -287,6 +287,8 @@ impl CommandAcceptanceStore for SqliteLocalStore {
             )
             .map_err(|error| map_sqlite_error(&error))?;
         command_store::insert_protocol_metadata(&transaction, &command)?;
+        #[cfg(test)]
+        test_pause_command_acceptance_before_commit(&command.command_id);
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
@@ -331,6 +333,24 @@ fn duplicate_receipt(
         incoming.command_id.clone(),
         original_id,
     ))
+}
+
+#[cfg(test)]
+fn test_pause_command_acceptance_before_commit(command_id: &CommandId) {
+    use std::{fs, thread, time::Duration};
+
+    let Some(expected_id) = std::env::var_os("UCR_TEST_PROCESS_KILL_COMMAND_ID") else {
+        return;
+    };
+    if command_id.as_opaque().as_str() != expected_id.to_string_lossy() {
+        return;
+    }
+    let ready_path = std::env::var_os("UCR_TEST_PROCESS_KILL_READY_PATH")
+        .expect("process-kill child must provide ready path");
+    fs::write(ready_path, b"before-commit").expect("signal process-kill parent");
+    loop {
+        thread::sleep(Duration::from_mins(1));
+    }
 }
 
 fn configure_safe_connection(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -968,11 +988,13 @@ mod tests {
     use std::{
         fs,
         path::PathBuf,
+        process::Command,
         sync::{
             Arc, Barrier,
             atomic::{AtomicU64, Ordering},
         },
         thread,
+        time::{Duration, Instant},
     };
 
     use ucr_core::{
@@ -1978,6 +2000,86 @@ mod tests {
             .expect("accept after rollback");
         assert_eq!(receipt.status, CommandReceiptStatus::Accepted);
     }
+    #[test]
+    fn process_kill_child_runs_real_accept_command() {
+        if std::env::var_os("UCR_TEST_PROCESS_KILL_CHILD").is_none() {
+            return;
+        }
+        let db_path = PathBuf::from(
+            std::env::var_os("UCR_TEST_PROCESS_KILL_DB_PATH")
+                .expect("process-kill child database path"),
+        );
+        let store = SqliteLocalStore::open(db_path).expect("open process-kill child store");
+        let interrupted = command(
+            "process-kill-original",
+            "process-kill-key",
+            b"before-kill",
+            Some("namespace-a"),
+        );
+        let outcome = store.accept_command(&interrupted);
+        panic!("process-kill hook returned unexpectedly: {outcome:?}");
+    }
+
+    #[test]
+    fn mid_operation_process_kill_rolls_back_command_acceptance_atomically() {
+        let db = TestDbPath::new();
+        drop(SqliteLocalStore::open(db.path()).expect("initialize process-kill store"));
+        let ready_path = PathBuf::from(format!("{}.kill-ready", db.path().display()));
+        let _ = fs::remove_file(&ready_path);
+
+        let mut child = Command::new(std::env::current_exe().expect("current test binary"))
+            .arg("--exact")
+            .arg("tests::process_kill_child_runs_real_accept_command")
+            .arg("--nocapture")
+            .env("UCR_TEST_PROCESS_KILL_CHILD", "1")
+            .env("UCR_TEST_PROCESS_KILL_DB_PATH", db.path())
+            .env("UCR_TEST_PROCESS_KILL_COMMAND_ID", "process-kill-original")
+            .env("UCR_TEST_PROCESS_KILL_READY_PATH", &ready_path)
+            .spawn()
+            .expect("spawn process-kill child");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready_path.exists() {
+            if let Some(status) = child.try_wait().expect("poll process-kill child") {
+                panic!("process-kill child exited before commit boundary: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "process-kill child never reached pre-commit boundary"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        child.kill().expect("kill child at pre-commit boundary");
+        let status = child.wait().expect("wait for killed child");
+        assert!(!status.success());
+        let _ = fs::remove_file(&ready_path);
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen after process kill");
+        assert_eq!(reopened.health(), Ok(StorageHealth::Healthy));
+        let recovery = command(
+            "process-kill-recovery",
+            "process-kill-key",
+            b"after-kill",
+            Some("namespace-a"),
+        );
+        let accepted = reopened
+            .accept_command(&recovery)
+            .expect("accept same idempotency key after killed transaction");
+        assert_eq!(accepted.status, CommandReceiptStatus::Accepted);
+        let retry = command(
+            "process-kill-retry",
+            "process-kill-key",
+            b"after-kill",
+            Some("namespace-a"),
+        );
+        let duplicate = reopened
+            .accept_command(&retry)
+            .expect("deduplicate post-kill recovery");
+        assert_eq!(duplicate.status, CommandReceiptStatus::Duplicate);
+        assert_eq!(duplicate.original_command_id, Some(recovery.command_id));
+    }
+
     #[cfg(unix)]
     #[test]
     fn sqlite_database_file_is_owner_only() {
