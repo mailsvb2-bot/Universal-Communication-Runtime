@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package ucr.v1;
 
+import "ucr/v1/common.proto";
 import "ucr/v1/errors.proto";
 import "ucr/v1/identity.proto";
 import "ucr/v1/runtime.proto";
@@ -45,8 +46,40 @@ message IntegrationLinkIdentityResponse {
   }
 }
 
+// Public exact-scope Root Identity lookup. Absence is reported only after authenticated
+// authorization and uses the canonical NOT_FOUND error.
+message IntegrationGetIdentityRequest {
+  TenantScope scope = 1;
+  OpaqueId identity_id = 2;
+}
+
+message IntegrationGetIdentityResponse {
+  oneof result {
+    IdentityRecord identity = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Resolves one exact integration-scoped external key through the canonical binding owner.
+// External entity bytes remain request data and are not promoted into canonical Identity.
+message IntegrationResolveIdentityBindingRequest {
+  TenantScope scope = 1;
+  OpaqueId integration_id = 2;
+  string external_namespace = 3;
+  bytes external_entity_id = 4;
+}
+
+message IntegrationResolveIdentityBindingResponse {
+  oneof result {
+    ExternalIdentityBinding binding = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 service IntegrationService {
   rpc SubmitCommand(IntegrationCommandRequest) returns (IntegrationCommandResponse);
   rpc CreateIdentity(IntegrationCreateIdentityRequest) returns (IntegrationCreateIdentityResponse);
   rpc LinkIdentity(IntegrationLinkIdentityRequest) returns (IntegrationLinkIdentityResponse);
+  rpc GetIdentity(IntegrationGetIdentityRequest) returns (IntegrationGetIdentityResponse);
+  rpc ResolveIdentityBinding(IntegrationResolveIdentityBindingRequest) returns (IntegrationResolveIdentityBindingResponse);
 }

@@ -3420,3 +3420,89 @@ fn root_identity_v19_public_api_permissions_and_governance_are_locked() {
     assert!(adr.contains("does not define Person↔Identity ownership"));
     assert!(ci.contains("0043-root-identity-is-durable-accountless-and-provider-independent.md"));
 }
+
+#[test]
+fn integration_identity_read_side_reuses_canonical_owners_and_hides_existence_until_authorized() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/integration.proto"))
+        .expect("integration proto");
+    let ingress = fs::read_to_string(workspace.join("crates/ucr-core/src/integration_api.rs"))
+        .expect("integration ingress");
+    let service_control =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/service_control.rs"))
+            .expect("service control");
+    let memory =
+        fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs")).expect("memory");
+    let sqlite_root = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let spec =
+        fs::read_to_string(workspace.join("spec/integration-api.md")).expect("integration spec");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0044-integration-identity-reads-reuse-canonical-owners-and-minimize-audit.md",
+    ))
+    .expect("adr 0044");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(proto.contains("rpc GetIdentity(IntegrationGetIdentityRequest)"));
+    assert!(proto.contains("rpc ResolveIdentityBinding(IntegrationResolveIdentityBindingRequest)"));
+    assert!(proto.contains("TenantScope scope = 1;"));
+    assert!(proto.contains("OpaqueId identity_id = 2;"));
+    assert!(proto.contains("OpaqueId integration_id = 2;"));
+    assert!(proto.contains("bytes external_entity_id = 4;"));
+    assert!(ingress.contains("pub fn get_identity("));
+    assert!(ingress.contains("pub fn resolve_identity_binding("));
+    assert!(ingress.contains("IDENTITY_READ_PERMISSION"));
+    assert!(ingress.contains("EXTERNAL_IDENTITY_BINDING_READ_PERMISSION"));
+    assert!(ingress.contains(".identity(&subject, scope, identity_id)"));
+    assert!(ingress.contains(".external_identity_binding("));
+    assert!(ingress.contains("CanonicalErrorCode::NotFound"));
+    assert!(
+        service_control
+            .contains("SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND: &str = \"ucr.identity.read\"")
+    );
+    assert!(
+        service_control.contains("SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND: &str =")
+    );
+    assert!(ingress.contains("operation_id: lookup.integration_id.as_opaque().clone()"));
+    for forbidden in [
+        "SqliteLocalStore",
+        "MemoryLocalStore",
+        "rusqlite",
+        "sha2",
+        "hash(",
+    ] {
+        assert!(
+            !ingress
+                .to_ascii_lowercase()
+                .contains(&forbidden.to_ascii_lowercase()),
+            "Integration Identity read path leaked parallel/storage/hash owner: {forbidden}"
+        );
+    }
+    for evidence in [
+        "get_identity_ingress_hides_existence_until_authorized_and_maps_missing_to_not_found",
+        "resolve_identity_binding_ingress_uses_canonical_owner_and_minimizes_audit_metadata",
+    ] {
+        assert!(
+            memory.contains(evidence),
+            "missing read-side evidence: {evidence}"
+        );
+    }
+    assert!(sqlite_root.contains(
+        "integration_identity_read_side_survives_sqlite_restart_through_canonical_owners"
+    ));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(spec.contains("Read-side absence is canonical non-retryable `NOT_FOUND`"));
+    assert!(spec.contains("External namespace/entity bytes are not copied, encoded, or hashed"));
+    assert!(adr.contains("returning `NOT_FOUND` before authentication and"));
+    assert!(adr.contains("No storage schema changes are required"));
+    assert!(
+        adr.contains("does not claim\nthat generic admission audit can answer")
+            || adr.contains("does not claim that generic admission audit can answer")
+    );
+    assert!(
+        ci.contains("0044-integration-identity-reads-reuse-canonical-owners-and-minimize-audit.md")
+    );
+}

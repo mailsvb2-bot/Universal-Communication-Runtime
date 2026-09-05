@@ -5215,9 +5215,10 @@ mod integration_api_tests {
     use std::sync::atomic::{AtomicI64, Ordering};
 
     use ucr_core::{
-        ExternalIdentityBindingStore, IdentityStore, IntegrationCommandIngress, IntegrationIngress,
-        PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock,
-        ServiceQuotaClockError, ServiceQuotaStore, issue_service_credential,
+        ExternalIdentityBindingLookup, ExternalIdentityBindingStore, IdentityStore,
+        IntegrationCommandIngress, IntegrationIngress, PermissionGrantStore, ServiceAuditStore,
+        ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore,
+        issue_service_credential,
     };
     use ucr_model::{
         CommandEnvelope, CommandId, CorrelationContext, ExternalIdentityBinding, IdentityEvidence,
@@ -5228,9 +5229,12 @@ mod integration_api_tests {
     };
     use ucr_protocol::{
         COMMAND_ACCEPT_PERMISSION, CanonicalErrorCode, CommandReceiptStatus,
-        EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, IDENTITY_CREATE_PERMISSION,
-        SERVICE_AUDIT_COMMAND_OPERATION_KIND, SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
-        SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, SERVICE_AUDIT_READ_PERMISSION,
+        EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+        IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+        SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
+        SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND,
+        SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
+        SERVICE_AUDIT_READ_PERMISSION,
     };
 
     use super::MemoryLocalStore;
@@ -5290,6 +5294,14 @@ mod integration_api_tests {
         }
     }
 
+    fn identity_read_grant(subject: &ScopedPrincipal) -> PermissionGrant {
+        PermissionGrant {
+            grantee: subject.clone(),
+            permission: IDENTITY_READ_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope()),
+        }
+    }
+
     fn identity(id: &str) -> IdentityRecord {
         IdentityRecord {
             scope: scope(),
@@ -5307,10 +5319,25 @@ mod integration_api_tests {
         }
     }
 
+    fn identity_read_operation(identity_id: &IdentityId) -> ServiceAuditOperationRef {
+        ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND.to_owned(),
+            operation_id: identity_id.as_opaque().clone(),
+        }
+    }
+
     fn binding_grant(subject: &ScopedPrincipal) -> PermissionGrant {
         PermissionGrant {
             grantee: subject.clone(),
             permission: EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope()),
+        }
+    }
+
+    fn binding_read_grant(subject: &ScopedPrincipal) -> PermissionGrant {
+        PermissionGrant {
+            grantee: subject.clone(),
+            permission: EXTERNAL_IDENTITY_BINDING_READ_PERMISSION.to_owned(),
             scope: PermissionScope::Exact(scope()),
         }
     }
@@ -5329,6 +5356,13 @@ mod integration_api_tests {
         ServiceAuditOperationRef {
             operation_kind: SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND.to_owned(),
             operation_id: binding.identity_id.as_opaque().clone(),
+        }
+    }
+
+    fn binding_read_operation(integration_id: &IntegrationId) -> ServiceAuditOperationRef {
+        ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND.to_owned(),
+            operation_id: integration_id.as_opaque().clone(),
         }
     }
 
@@ -5875,6 +5909,193 @@ mod integration_api_tests {
                 ServiceAuditOutcome::Authorized,
             ]
         );
+    }
+
+    #[test]
+    fn get_identity_ingress_hides_existence_until_authorized_and_maps_missing_to_not_found() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        install_quota(&store, &subject, 5);
+        let existing = identity("identity-public-read");
+        store.persist_identity(&existing).expect("seed identity");
+        let clock = TestClock::new(38_000);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+
+        let denied = ingress
+            .get_identity(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &existing.scope,
+                &existing.identity_id,
+            )
+            .expect_err("missing read permission must hide existing identity");
+        assert_eq!(denied.code, CanonicalErrorCode::PermissionDenied);
+
+        store
+            .grant_permission(&identity_read_grant(&subject))
+            .expect("grant identity read");
+        let wrong = ucr_core::ServiceCredentialSecret::from_bytes([0xA5; 32]);
+        let unauthenticated = ingress
+            .get_identity(
+                &subject.scope,
+                &credential.credential_id,
+                &wrong,
+                &existing.scope,
+                &existing.identity_id,
+            )
+            .expect_err("bad credential must not expose identity existence");
+        assert_eq!(unauthenticated.code, CanonicalErrorCode::Unauthenticated);
+        assert_eq!(
+            ingress
+                .get_identity(
+                    &subject.scope,
+                    &credential.credential_id,
+                    &secret,
+                    &existing.scope,
+                    &existing.identity_id,
+                )
+                .expect("authorized identity read"),
+            existing
+        );
+
+        let missing = IdentityId::from_opaque(oid("identity-public-missing"));
+        let not_found = ingress
+            .get_identity(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &scope(),
+                &missing,
+            )
+            .expect_err("authorized missing identity is not found");
+        assert_eq!(not_found.code, CanonicalErrorCode::NotFound);
+        assert!(!not_found.retryable);
+
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("identity read audit");
+        assert_eq!(audit.len(), 4);
+        assert_eq!(
+            audit[0].operation.as_ref(),
+            Some(&identity_read_operation(&existing.identity_id))
+        );
+        assert_eq!(
+            audit[1].operation.as_ref(),
+            Some(&identity_read_operation(&existing.identity_id))
+        );
+        assert_eq!(
+            audit[2].operation.as_ref(),
+            Some(&identity_read_operation(&existing.identity_id))
+        );
+        assert_eq!(
+            audit[3].operation.as_ref(),
+            Some(&identity_read_operation(&missing))
+        );
+    }
+
+    #[test]
+    fn resolve_identity_binding_ingress_uses_canonical_owner_and_minimizes_audit_metadata() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        install_quota(&store, &subject, 4);
+        let target = identity("identity-resolve-target");
+        store
+            .persist_identity(&target)
+            .expect("seed target identity");
+        let linked = binding("identity-resolve-target", b"Secret-External-Entity-42");
+        store
+            .persist_external_identity_binding(&linked)
+            .expect("seed binding");
+        let clock = TestClock::new(39_000);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+
+        let denied = ingress
+            .resolve_identity_binding(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                ExternalIdentityBindingLookup::new(
+                    &linked.scope,
+                    &linked.integration_id,
+                    &linked.external_namespace,
+                    &linked.external_entity_id,
+                ),
+            )
+            .expect_err("missing binding read permission must hide binding");
+        assert_eq!(denied.code, CanonicalErrorCode::PermissionDenied);
+        store
+            .grant_permission(&binding_read_grant(&subject))
+            .expect("grant binding read");
+        let wrong = ucr_core::ServiceCredentialSecret::from_bytes([0xA5; 32]);
+        let unauthenticated = ingress
+            .resolve_identity_binding(
+                &subject.scope,
+                &credential.credential_id,
+                &wrong,
+                ExternalIdentityBindingLookup::new(
+                    &linked.scope,
+                    &linked.integration_id,
+                    &linked.external_namespace,
+                    &linked.external_entity_id,
+                ),
+            )
+            .expect_err("bad credential must not expose binding existence");
+        assert_eq!(unauthenticated.code, CanonicalErrorCode::Unauthenticated);
+        assert_eq!(
+            ingress
+                .resolve_identity_binding(
+                    &subject.scope,
+                    &credential.credential_id,
+                    &secret,
+                    ExternalIdentityBindingLookup::new(
+                        &linked.scope,
+                        &linked.integration_id,
+                        &linked.external_namespace,
+                        &linked.external_entity_id,
+                    ),
+                )
+                .expect("authorized binding resolution"),
+            linked
+        );
+
+        let not_found = ingress
+            .resolve_identity_binding(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                ExternalIdentityBindingLookup::new(
+                    &linked.scope,
+                    &linked.integration_id,
+                    &linked.external_namespace,
+                    b"missing-external-entity",
+                ),
+            )
+            .expect_err("authorized missing binding is not found");
+        assert_eq!(not_found.code, CanonicalErrorCode::NotFound);
+
+        let expected = binding_read_operation(&linked.integration_id);
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("binding read audit");
+        assert_eq!(audit.len(), 4);
+        assert!(
+            audit
+                .iter()
+                .all(|record| record.operation.as_ref() == Some(&expected))
+        );
+        let audit_debug = format!("{audit:?}");
+        assert!(!audit_debug.contains("Secret-External-Entity-42"));
+        assert!(!audit_debug.contains("missing-external-entity"));
+        assert!(!audit_debug.contains("vendor.example.account"));
     }
 
     #[test]

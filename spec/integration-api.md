@@ -12,7 +12,9 @@ The implemented Phase-13 vertical surface exposes:
 
 - `IntegrationService.SubmitCommand` over canonical `CommandEnvelope`/`CommandReceipt`;
 - `IntegrationService.CreateIdentity` over canonical `IdentityRecord`;
-- `IntegrationService.LinkIdentity` over canonical `ExternalIdentityBinding`.
+- `IntegrationService.LinkIdentity` over canonical `ExternalIdentityBinding`;
+- `IntegrationService.GetIdentity` over exact canonical Root Identity lookup;
+- `IntegrationService.ResolveIdentityBinding` over the exact external binding key.
 
 These methods reuse existing canonical owners. They do not create Integration-specific Command,
 Identity, audit, permission, or provider-specific communication models. Concrete gRPC, HTTP,
@@ -35,12 +37,16 @@ trusted from caller-supplied identity. Adapters receive no raw store access.
 
 - `SubmitCommand` requires `ucr.command.accept`;
 - `CreateIdentity` requires `ucr.identity.create`;
-- `LinkIdentity` requires `ucr.identity.external_binding.link`.
+- `LinkIdentity` requires `ucr.identity.external_binding.link`;
+- `GetIdentity` requires `ucr.identity.read`;
+- `ResolveIdentityBinding` requires `ucr.identity.external_binding.read`.
 
 Audit attribution is generic security metadata bound before authentication: `ucr.command` +
 canonical `CommandId`, `ucr.identity.create` + canonical `IdentityId`, or
-`ucr.identity.external_binding.link` + target canonical `IdentityId`. External entity bytes are not
-copied into audit operation references. An Authorized admission record proves only that the
+`ucr.identity.external_binding.link` + target canonical `IdentityId`, `ucr.identity.read` +
+canonical `IdentityId`, or `ucr.identity.external_binding.read` + canonical `IntegrationId`.
+External namespace/entity bytes are not copied, encoded, or hashed into generic admission audit
+operation references. An Authorized admission record proves only that the
 security gate passed; later durable validation/conflict may still fail.
 
 ## 3. Command semantics
@@ -63,11 +69,17 @@ already exist. Equal retries are idempotent; changing the target of an existing 
 conflicts. No public relink/unlink or direct SQL overwrite is defined.
 
 A successful `CreateIdentity`/`LinkIdentity` response returns the canonical record that was durably
-accepted. No parallel Integration receipt/status model is introduced.
+accepted. `GetIdentity` and `ResolveIdentityBinding` return the canonical existing record from those
+same owners. No parallel Integration receipt/status or mapping model is introduced.
+
+Read-side absence is canonical non-retryable `NOT_FOUND`, but only after successful credential,
+quota/audit, and permission admission. Authentication and permission failures do not disclose
+whether an Identity or external binding exists. Binding lookup audit intentionally identifies the
+`IntegrationId` but not the sensitive external namespace/entity bytes.
 
 ## 5. Errors and maturity
 
-Validation failures map to `INVALID_ARGUMENT`; semantic identity/idempotency reuse to `CONFLICT`;
+Validation failures map to `INVALID_ARGUMENT`; authorized lookup absence to `NOT_FOUND`; semantic identity/idempotency reuse to `CONFLICT`;
 storage-full to `RESOURCE_EXHAUSTED`; temporary storage failure to `TEMPORARILY_UNAVAILABLE`;
 permission denial remains `PERMISSION_DENIED`; internal/corrupt/foreign-store failures map to
 `INTERNAL` without exposing storage internals. Binding-specific transport status MUST NOT replace or
@@ -77,8 +89,8 @@ The Phase-13 API remains `Experimental`. Stable compatibility rules apply only a
 Public API Governance promotion decision. Existing `SubmitCommand` wire fields remain unchanged.
 
 This slice does not claim a production gRPC/HTTP server, SDK generation, Event subscriptions,
-webhook delivery, Command execution/dispatch, routing, Message delivery, Persona/Profile APIs,
-Identity evidence transitions, Identity merge/delete, discovery, external-binding unlink/relink,
+webhook delivery, Command execution/dispatch, routing, Message delivery, identity/binding listing or discovery, Persona/Profile APIs, Identity evidence transitions,
+Identity merge/delete, external-binding unlink/relink,
 or expiry execution. Phase 14 owns Event API semantics; later phases own network transport.
 
 ## 6. Required evidence
@@ -87,4 +99,5 @@ Reference evidence must prove Service Principal authentication, mandatory quota/
 permission enforcement, stable error mapping, restart-safe durable ownership, duplicate/conflict
 semantics, and no ghost state after denied/unauthenticated/rate-limited/invalid requests. Identity
 evidence additionally proves v18→v19 migration invents no Root Identity, new external binding keys
-reject missing targets, and historical exact v18 bindings remain readable/idempotently retryable.
+reject missing targets, historical exact v18 bindings remain readable/idempotently retryable, and
+public Identity/binding reads survive restart without direct DB access or a parallel mapping owner.
