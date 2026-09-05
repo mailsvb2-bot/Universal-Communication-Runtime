@@ -22,7 +22,9 @@ use ucr_protocol::{CanonicalError, CommandReceipt};
 
 pub use authorized_runtime::AuthorizedDurableRuntime;
 pub use id::{IdGenerationError, generate_opaque_id};
-pub use integration_api::{IntegrationCommandIngress, IntegrationIngress};
+pub use integration_api::{
+    ExternalIdentityBindingLookup, IntegrationCommandIngress, IntegrationIngress,
+};
 pub use recovery_workflow::{
     DeviceReverificationGate, DeviceReverificationProof, DeviceReverificationVerificationError,
     DeviceReverificationVerifier, RecoveryAdmissionProof, RecoveryAuthorityVerificationError,

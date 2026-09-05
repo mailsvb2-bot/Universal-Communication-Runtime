@@ -132,11 +132,12 @@ pub use scope::{ScopeError, ScopeRelation, require_exact_scope, scope_relation};
 pub use service_control::{
     MAX_SERVICE_AUDIT_OPERATION_KIND_LEN, MAX_SERVICE_AUDIT_READ_ITEMS,
     MAX_SERVICE_REQUEST_PERMISSION_LEN, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
-    SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND, SERVICE_AUDIT_HASH_LEN,
+    SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
+    SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND, SERVICE_AUDIT_HASH_LEN,
     SERVICE_AUDIT_HASH_V1_DOMAIN, SERVICE_AUDIT_HASH_V2_DOMAIN,
-    SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, ServiceControlValidationError,
-    service_audit_hash, validate_service_audit_operation_ref, validate_service_audit_record,
-    validate_service_quota_policy,
+    SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
+    ServiceControlValidationError, service_audit_hash, validate_service_audit_operation_ref,
+    validate_service_audit_record, validate_service_quota_policy,
 };
 pub use sync::{
     MAX_PARTIAL_SYNC_CONVERSATIONS, MAX_SYNC_RESUME_TOKEN_LEN, SyncError, can_transition_sync,

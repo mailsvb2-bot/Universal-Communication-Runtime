@@ -1074,10 +1074,10 @@ mod tests {
 
     use ucr_core::{
         CommandAcceptanceStore, CommandOutcomeStore, DurableStoreError, EventAppendStatus,
-        EventJournalStore, ExternalIdentityBindingStore, IdentityStore, IntegrationCommandIngress,
-        IntegrationIngress, PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore,
-        ServiceQuotaStore, StorageHealth, StorageProvider, SystemServiceQuotaClock,
-        issue_service_credential,
+        EventJournalStore, ExternalIdentityBindingLookup, ExternalIdentityBindingStore,
+        IdentityStore, IntegrationCommandIngress, IntegrationIngress, PermissionGrantStore,
+        ServiceAuditStore, ServiceCredentialStore, ServiceQuotaStore, StorageHealth,
+        StorageProvider, SystemServiceQuotaClock, issue_service_credential,
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CorrelationContext, DeviceId,
@@ -1089,9 +1089,11 @@ mod tests {
     };
     use ucr_protocol::{
         COMMAND_ACCEPT_PERMISSION, CommandReceiptStatus, DEFAULT_MAX_PAYLOAD_LEN,
-        EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, IDENTITY_CREATE_PERMISSION,
-        MAX_PROTOCOL_EXTENSIONS, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
-        SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
+        EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+        IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MAX_PROTOCOL_EXTENSIONS,
+        SERVICE_AUDIT_COMMAND_OPERATION_KIND, SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
+        SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND,
+        SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
     };
 
     use super::{SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID};
@@ -1165,6 +1167,67 @@ mod tests {
             permission: permission.to_owned(),
             scope: PermissionScope::Exact(scope.clone()),
         }
+    }
+
+    fn assert_single_operation_audit(
+        store: &SqliteLocalStore,
+        scope: &TenantScope,
+        operation: &ServiceAuditOperationRef,
+        context: &str,
+    ) {
+        let rows = store
+            .service_audit_records_for_operation(scope, operation, 4)
+            .unwrap_or_else(|error| panic!("{context}: {error:?}"));
+        assert_eq!(rows.len(), 1, "{context}");
+    }
+
+    fn grant_exact_permission(
+        store: &SqliteLocalStore,
+        subject: &ScopedPrincipal,
+        permission: &str,
+        scope: &TenantScope,
+        context: &str,
+    ) {
+        store
+            .grant_permission(&exact_grant(subject, permission, scope))
+            .unwrap_or_else(|error| panic!("{context}: {error:?}"));
+    }
+
+    fn seed_identity_read_fixture(
+        store: &SqliteLocalStore,
+        subject: &ScopedPrincipal,
+        credential: &ucr_model::ServiceCredentialRecord,
+        identity: &IdentityRecord,
+        binding: &ExternalIdentityBinding,
+    ) {
+        store
+            .provision_service_credential(credential)
+            .expect("persist credential");
+        grant_exact_permission(
+            store,
+            subject,
+            IDENTITY_READ_PERMISSION,
+            &subject.scope,
+            "persist identity read permission",
+        );
+        grant_exact_permission(
+            store,
+            subject,
+            EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+            &subject.scope,
+            "persist binding read permission",
+        );
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject.clone(),
+                max_requests: 4,
+                window_ms: 60_000,
+            })
+            .expect("persist quota");
+        store.persist_identity(identity).expect("persist identity");
+        store
+            .persist_external_identity_binding(binding)
+            .expect("persist binding");
     }
 
     fn event(id: &str, causation: &str, payload: &[u8]) -> EventEnvelope {
@@ -2336,6 +2399,91 @@ mod tests {
                 .expect("exact command audit after restart")
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn integration_identity_read_side_survives_sqlite_restart_through_canonical_owners() {
+        let db = TestDbPath::new();
+        let scope = command(
+            "identity-read-scope",
+            "identity-read-scope-key",
+            b"",
+            Some("namespace-identity-read"),
+        )
+        .scope;
+        let subject = service_subject(&scope, "service-identity-read-sqlite");
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        let identity = IdentityRecord {
+            scope: scope.clone(),
+            identity_id: IdentityId::from_opaque(opaque("identity-read-target")),
+            ownership: IdentityOwnership::UserManaged,
+            evidence: IdentityEvidence::SelfAsserted,
+            expires_at_unix_ms: None,
+        };
+        let binding = ExternalIdentityBinding {
+            scope: scope.clone(),
+            integration_id: IntegrationId::from_opaque(opaque("integration-read-api")),
+            external_namespace: "vendor.example.account".to_owned(),
+            external_entity_id: b"Sensitive-External-42".to_vec(),
+            identity_id: identity.identity_id.clone(),
+        };
+
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open read-side fixture");
+            seed_identity_read_fixture(&store, &subject, &credential, &identity, &binding);
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen read-side fixture");
+        let ingress = IntegrationIngress::new(&SystemServiceQuotaClock, &reopened, &reopened);
+        assert_eq!(
+            ingress
+                .get_identity(
+                    &scope,
+                    &credential.credential_id,
+                    &secret,
+                    &scope,
+                    &identity.identity_id,
+                )
+                .expect("public identity read after restart"),
+            identity
+        );
+        assert_eq!(
+            ingress
+                .resolve_identity_binding(
+                    &scope,
+                    &credential.credential_id,
+                    &secret,
+                    ExternalIdentityBindingLookup::new(
+                        &scope,
+                        &binding.integration_id,
+                        &binding.external_namespace,
+                        &binding.external_entity_id,
+                    ),
+                )
+                .expect("public binding resolution after restart"),
+            binding
+        );
+
+        let identity_operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND.to_owned(),
+            operation_id: identity.identity_id.as_opaque().clone(),
+        };
+        let binding_operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND.to_owned(),
+            operation_id: binding.integration_id.as_opaque().clone(),
+        };
+        assert_single_operation_audit(
+            &reopened,
+            &scope,
+            &identity_operation,
+            "identity read audit after restart",
+        );
+        assert_single_operation_audit(
+            &reopened,
+            &scope,
+            &binding_operation,
+            "binding read audit after restart",
         );
     }
 

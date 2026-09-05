@@ -11,8 +11,11 @@ pub const SERVICE_AUDIT_HASH_V2_DOMAIN: &[u8] = b"UCR-SERVICE-AUDIT-HASH-V2\0";
 pub const SERVICE_AUDIT_HASH_LEN: usize = 32;
 pub const SERVICE_AUDIT_COMMAND_OPERATION_KIND: &str = "ucr.command";
 pub const SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND: &str = "ucr.identity.create";
+pub const SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND: &str = "ucr.identity.read";
 pub const SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND: &str =
     "ucr.identity.external_binding.link";
+pub const SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND: &str =
+    "ucr.identity.external_binding.read";
 pub const MAX_SERVICE_AUDIT_OPERATION_KIND_LEN: usize = 256;
 pub const MAX_SERVICE_AUDIT_READ_ITEMS: usize = 1024;
 pub const MAX_SERVICE_REQUEST_PERMISSION_LEN: usize = 256;
