@@ -12,6 +12,8 @@ pub const SERVICE_AUDIT_HASH_LEN: usize = 32;
 pub const SERVICE_AUDIT_COMMAND_OPERATION_KIND: &str = "ucr.command";
 pub const SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND: &str = "ucr.identity.create";
 pub const SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND: &str = "ucr.identity.read";
+pub const SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND: &str = "ucr.conversation.create";
+pub const SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND: &str = "ucr.conversation.read";
 pub const SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND: &str =
     "ucr.identity.external_binding.link";
 pub const SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND: &str =

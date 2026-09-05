@@ -3,6 +3,7 @@ syntax = "proto3";
 package ucr.v1;
 
 import "ucr/v1/common.proto";
+import "ucr/v1/communication.proto";
 import "ucr/v1/errors.proto";
 import "ucr/v1/identity.proto";
 import "ucr/v1/runtime.proto";
@@ -76,10 +77,39 @@ message IntegrationResolveIdentityBindingResponse {
   }
 }
 
+// Public canonical Conversation creation. Equal retries are delegated to the existing
+// provider-independent Conversation owner; credential presentation stays binding-specific.
+message IntegrationCreateConversationRequest {
+  ConversationRecord conversation = 1;
+}
+
+message IntegrationCreateConversationResponse {
+  oneof result {
+    ConversationRecord conversation = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Public exact-scope Conversation lookup. NOT_FOUND is returned only after authenticated
+// authorization so callers cannot use this method as a Conversation-existence oracle.
+message IntegrationGetConversationRequest {
+  TenantScope scope = 1;
+  OpaqueId conversation_id = 2;
+}
+
+message IntegrationGetConversationResponse {
+  oneof result {
+    ConversationRecord conversation = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 service IntegrationService {
   rpc SubmitCommand(IntegrationCommandRequest) returns (IntegrationCommandResponse);
   rpc CreateIdentity(IntegrationCreateIdentityRequest) returns (IntegrationCreateIdentityResponse);
   rpc LinkIdentity(IntegrationLinkIdentityRequest) returns (IntegrationLinkIdentityResponse);
   rpc GetIdentity(IntegrationGetIdentityRequest) returns (IntegrationGetIdentityResponse);
   rpc ResolveIdentityBinding(IntegrationResolveIdentityBindingRequest) returns (IntegrationResolveIdentityBindingResponse);
+  rpc CreateConversation(IntegrationCreateConversationRequest) returns (IntegrationCreateConversationResponse);
+  rpc GetConversation(IntegrationGetConversationRequest) returns (IntegrationGetConversationResponse);
 }

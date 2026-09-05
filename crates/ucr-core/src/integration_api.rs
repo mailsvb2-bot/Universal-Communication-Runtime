@@ -1,13 +1,16 @@
 use core::fmt;
 
 use ucr_model::{
-    CommandEnvelope, ExternalIdentityBinding, IdentityId, IdentityRecord, IntegrationId,
-    ServiceAuditOperationRef, ServiceCredentialId, TenantScope,
+    CommandEnvelope, ConversationId, ConversationRecord, ExternalIdentityBinding, IdentityId,
+    IdentityRecord, IntegrationId, ServiceAuditOperationRef, ServiceCredentialId, TenantScope,
 };
 use ucr_protocol::{
-    COMMAND_ACCEPT_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceipt,
-    EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
-    IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+    COMMAND_ACCEPT_PERMISSION, CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION,
+    CanonicalError, CanonicalErrorCode, CommandReceipt, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
+    EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, IDENTITY_CREATE_PERMISSION,
+    IDENTITY_READ_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+    SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
+    SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND,
     SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
     SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND,
     SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
@@ -15,8 +18,8 @@ use ucr_protocol::{
 
 use crate::{
     AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError,
-    CommandAcceptanceStore, DurableStoreError, ExternalIdentityBindingStore, IdentityStore,
-    ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
+    CommandAcceptanceStore, ConversationStore, DurableStoreError, ExternalIdentityBindingStore,
+    IdentityStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
     ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
 };
 
@@ -257,6 +260,88 @@ where
         let subject = request.subject().clone();
         AuthorizedDurableRuntime::new(&request, self.store)
             .identity(&subject, scope, identity_id)
+            .map_err(map_authorized_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+}
+
+impl<C, A, S> IntegrationIngress<'_, C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + ConversationStore,
+{
+    /// Authenticates, rate-limits, audits, authorizes, then durably creates one Conversation.
+    ///
+    /// Canonically identical retries return the same Conversation. The existing Conversation
+    /// owner remains authoritative for hierarchy validation, deduplication, and conflicts.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, validation, conflict, and storage failures map to
+    /// stable canonical errors. Denied or failed requests never create a Conversation.
+    pub fn create_conversation(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        conversation: &ConversationRecord,
+    ) -> Result<ConversationRecord, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND.to_owned(),
+            operation_id: conversation
+                .conversation
+                .conversation_id
+                .as_opaque()
+                .clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                CONVERSATION_WRITE_PERMISSION,
+                &conversation.scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .persist_conversation(&subject, conversation)
+            .map_err(map_authorized_error)?;
+        Ok(conversation.clone())
+    }
+
+    /// Authenticates, rate-limits, audits, authorizes, then reads one exact Conversation.
+    ///
+    /// Absence becomes canonical `NOT_FOUND` only after the complete Service Principal admission
+    /// and Conversation-read permission boundary succeeds.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, not-found, and storage failures map to stable canonical
+    /// errors. Unauthorized callers cannot probe Conversation existence.
+    pub fn get_conversation(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        conversation_id: &ConversationId,
+    ) -> Result<ConversationRecord, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND.to_owned(),
+            operation_id: conversation_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                CONVERSATION_READ_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .conversation(&subject, scope, conversation_id)
             .map_err(map_authorized_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
     }
