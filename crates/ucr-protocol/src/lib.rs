@@ -126,8 +126,10 @@ pub use recovery::{
 };
 pub use scope::{ScopeError, ScopeRelation, require_exact_scope, scope_relation};
 pub use service_control::{
-    MAX_SERVICE_AUDIT_READ_ITEMS, MAX_SERVICE_REQUEST_PERMISSION_LEN, SERVICE_AUDIT_HASH_LEN,
-    SERVICE_AUDIT_HASH_V1_DOMAIN, ServiceControlValidationError, service_audit_hash,
+    MAX_SERVICE_AUDIT_OPERATION_KIND_LEN, MAX_SERVICE_AUDIT_READ_ITEMS,
+    MAX_SERVICE_REQUEST_PERMISSION_LEN, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+    SERVICE_AUDIT_HASH_LEN, SERVICE_AUDIT_HASH_V1_DOMAIN, SERVICE_AUDIT_HASH_V2_DOMAIN,
+    ServiceControlValidationError, service_audit_hash, validate_service_audit_operation_ref,
     validate_service_audit_record, validate_service_quota_policy,
 };
 pub use sync::{

@@ -1,10 +1,16 @@
 use sha2::{Digest, Sha256};
-use ucr_model::{PrincipalKind, ServiceAuditOutcome, ServiceAuditRecord, ServiceQuotaPolicy};
+use ucr_model::{
+    PrincipalKind, ServiceAuditOperationRef, ServiceAuditOutcome, ServiceAuditRecord,
+    ServiceQuotaPolicy,
+};
 
 use crate::validate_namespaced_identifier;
 
 pub const SERVICE_AUDIT_HASH_V1_DOMAIN: &[u8] = b"UCR-SERVICE-AUDIT-HASH-V1\0";
+pub const SERVICE_AUDIT_HASH_V2_DOMAIN: &[u8] = b"UCR-SERVICE-AUDIT-HASH-V2\0";
 pub const SERVICE_AUDIT_HASH_LEN: usize = 32;
+pub const SERVICE_AUDIT_COMMAND_OPERATION_KIND: &str = "ucr.command";
+pub const MAX_SERVICE_AUDIT_OPERATION_KIND_LEN: usize = 256;
 pub const MAX_SERVICE_AUDIT_READ_ITEMS: usize = 1024;
 pub const MAX_SERVICE_REQUEST_PERMISSION_LEN: usize = 256;
 
@@ -15,6 +21,7 @@ pub enum ServiceControlValidationError {
     InvalidPermission,
     InvalidTimestamp,
     InvalidAuditSubject,
+    InvalidOperation,
 }
 
 /// Validates one explicit fixed-window Service Principal request quota.
@@ -52,6 +59,9 @@ pub fn validate_service_audit_record(
     if record.occurred_at_unix_ms < 0 {
         return Err(ServiceControlValidationError::InvalidTimestamp);
     }
+    if let Some(operation) = &record.operation {
+        validate_service_audit_operation_ref(operation)?;
+    }
     match record.outcome {
         ServiceAuditOutcome::AuthenticationFailed
         | ServiceAuditOutcome::AuthenticationUnavailable => {
@@ -77,6 +87,21 @@ pub fn validate_service_audit_record(
     Ok(())
 }
 
+/// Validates one generic operation reference carried only as audit metadata.
+///
+/// # Errors
+/// Rejects malformed or over-budget operation kinds. The opaque operation ID is
+/// already bounded by the canonical `OpaqueId` constructor.
+pub fn validate_service_audit_operation_ref(
+    operation: &ServiceAuditOperationRef,
+) -> Result<(), ServiceControlValidationError> {
+    if operation.operation_kind.len() > MAX_SERVICE_AUDIT_OPERATION_KIND_LEN {
+        return Err(ServiceControlValidationError::InvalidOperation);
+    }
+    validate_namespaced_identifier(&operation.operation_kind)
+        .map_err(|_| ServiceControlValidationError::InvalidOperation)
+}
+
 /// Computes the canonical tamper-evident hash for one append-only audit record.
 ///
 /// # Panics
@@ -86,28 +111,57 @@ pub fn service_audit_hash(
     previous_hash: [u8; SERVICE_AUDIT_HASH_LEN],
     record: &ServiceAuditRecord,
 ) -> [u8; SERVICE_AUDIT_HASH_LEN] {
+    match &record.operation {
+        Some(operation) => service_audit_hash_v2(previous_hash, record, operation),
+        None => service_audit_hash_v1(previous_hash, record),
+    }
+}
+
+fn service_audit_hash_v1(
+    previous_hash: [u8; SERVICE_AUDIT_HASH_LEN],
+    record: &ServiceAuditRecord,
+) -> [u8; SERVICE_AUDIT_HASH_LEN] {
     let mut hash = Sha256::new();
     hash.update(SERVICE_AUDIT_HASH_V1_DOMAIN);
     hash.update(previous_hash);
-    hash_id(&mut hash, record.audit_id.as_opaque().as_wire_bytes());
-    hash_id(&mut hash, record.credential_id.as_opaque().as_wire_bytes());
-    hash_scope(&mut hash, &record.presented_scope);
+    hash_legacy_audit_fields(&mut hash, record);
+    hash.finalize().into()
+}
+
+fn service_audit_hash_v2(
+    previous_hash: [u8; SERVICE_AUDIT_HASH_LEN],
+    record: &ServiceAuditRecord,
+    operation: &ServiceAuditOperationRef,
+) -> [u8; SERVICE_AUDIT_HASH_LEN] {
+    let mut hash = Sha256::new();
+    hash.update(SERVICE_AUDIT_HASH_V2_DOMAIN);
+    hash.update(previous_hash);
+    hash_legacy_audit_fields(&mut hash, record);
+    hash.update([1]);
+    hash_id(&mut hash, operation.operation_kind.as_bytes());
+    hash_id(&mut hash, operation.operation_id.as_wire_bytes());
+    hash.finalize().into()
+}
+
+fn hash_legacy_audit_fields(hash: &mut Sha256, record: &ServiceAuditRecord) {
+    hash_id(hash, record.audit_id.as_opaque().as_wire_bytes());
+    hash_id(hash, record.credential_id.as_opaque().as_wire_bytes());
+    hash_scope(hash, &record.presented_scope);
     match &record.subject {
         Some(subject) => {
             hash.update([1]);
-            hash_scope(&mut hash, &subject.scope);
+            hash_scope(hash, &subject.scope);
             hash_id(
-                &mut hash,
+                hash,
                 subject.principal.principal_id.as_opaque().as_wire_bytes(),
             );
         }
         None => hash.update([0]),
     }
-    hash_id(&mut hash, record.permission.as_bytes());
-    hash_scope(&mut hash, &record.resource_scope);
+    hash_id(hash, record.permission.as_bytes());
+    hash_scope(hash, &record.resource_scope);
     hash.update([audit_outcome_code(record.outcome)]);
     hash.update(record.occurred_at_unix_ms.to_be_bytes());
-    hash.finalize().into()
 }
 
 fn hash_scope(hash: &mut Sha256, scope: &ucr_model::TenantScope) {
@@ -183,6 +237,7 @@ mod tests {
             resource_scope: scope(),
             outcome: ServiceAuditOutcome::Authorized,
             occurred_at_unix_ms: 1_000,
+            operation: None,
         }
     }
 
@@ -236,5 +291,41 @@ mod tests {
         changed.outcome = ServiceAuditOutcome::PermissionDenied;
         assert_ne!(digest, service_audit_hash([0_u8; 32], &changed));
         assert_ne!(digest, service_audit_hash([9_u8; 32], &changed));
+    }
+
+    #[test]
+    fn audit_hash_v2_binds_operation_without_changing_v1_vector() {
+        let legacy = record();
+        let legacy_digest = service_audit_hash([0_u8; 32], &legacy);
+        let mut operation_bound = legacy.clone();
+        operation_bound.operation = Some(ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_COMMAND_OPERATION_KIND.to_owned(),
+            operation_id: oid("command-a"),
+        });
+        assert_eq!(validate_service_audit_record(&operation_bound), Ok(()));
+        let digest = service_audit_hash([0_u8; 32], &operation_bound);
+        assert_ne!(legacy_digest, digest);
+        let mut changed_kind = operation_bound.clone();
+        changed_kind
+            .operation
+            .as_mut()
+            .expect("operation")
+            .operation_kind = "ucr.intent".to_owned();
+        assert_ne!(digest, service_audit_hash([0_u8; 32], &changed_kind));
+        let mut changed_id = operation_bound.clone();
+        changed_id
+            .operation
+            .as_mut()
+            .expect("operation")
+            .operation_id = oid("command-b");
+        assert_ne!(digest, service_audit_hash([0_u8; 32], &changed_id));
+        let mut actual = String::with_capacity(64);
+        for byte in digest {
+            write!(&mut actual, "{byte:02x}").expect("write hex");
+        }
+        assert_eq!(
+            actual,
+            "def3f98563a1590f6c6fe3f5901c179102c90aaea125729ed513d961a25f599a"
+        );
     }
 }

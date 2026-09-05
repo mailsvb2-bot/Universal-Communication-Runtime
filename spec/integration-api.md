@@ -54,8 +54,7 @@ canonical Command semantics.
 
 This slice does not claim an Internet communication transport, a production gRPC/HTTP server,
 SDK generation, Event subscriptions, webhook delivery, Command execution/dispatch, routing,
-or Message delivery. The existing admission audit proves the Service Principal admission decision
-but does not yet add a dedicated `command_id` join field for end-to-end per-command audit queries.
+or Message delivery. `SubmitCommand` binds the admission audit to the generic operation reference `ucr.command` plus the canonical `CommandId` before credential authentication. Exact-operation audit queries reuse the existing Service Principal audit-read permission; no Command-specific audit table, permission, or second audit owner is introduced. An `Authorized` admission record still proves only that the security gate passed: command validation, durable acceptance, dispatch, and real-world effects may still fail afterward.
 Phase 14 owns Event API semantics; later phases own network transport.
 
 ## 5. Required evidence

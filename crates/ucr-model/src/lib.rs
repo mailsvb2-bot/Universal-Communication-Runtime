@@ -562,6 +562,12 @@ pub enum ServiceAuditOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceAuditOperationRef {
+    pub operation_kind: String,
+    pub operation_id: OpaqueId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceAuditRecord {
     pub audit_id: AuditRecordId,
     pub credential_id: ServiceCredentialId,
@@ -571,6 +577,7 @@ pub struct ServiceAuditRecord {
     pub resource_scope: TenantScope,
     pub outcome: ServiceAuditOutcome,
     pub occurred_at_unix_ms: i64,
+    pub operation: Option<ServiceAuditOperationRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

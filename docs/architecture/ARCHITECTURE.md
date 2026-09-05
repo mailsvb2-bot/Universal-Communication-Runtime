@@ -40,7 +40,7 @@ Internet   Direct     External bridges
 
 ## Public contract boundary
 
-The public contract is represented first as a versioned protocol specification plus protobuf schemas. Rust types are a reference mapping of the specification, not the specification itself. Phase 13 begins with `IntegrationService.SubmitCommand`, which reuses the canonical Command/Receipt/Error envelopes and the existing Service Principal admission chain.
+The public contract is represented first as a versioned protocol specification plus protobuf schemas. Rust types are a reference mapping of the specification, not the specification itself. Phase 13 begins with `IntegrationService.SubmitCommand`, which reuses the canonical Command/Receipt/Error envelopes and the existing Service Principal admission chain. Its admission audit is bound to a generic operation reference (`ucr.command` + canonical `CommandId`) rather than a Command-specific audit owner; this attribution is security metadata and does not alter Command semantics.
 
 Supported contract surfaces are expected to include protobuf/gRPC, HTTP where appropriate, event streams, local IPC and embedded APIs. They must express the same canonical semantics.
 

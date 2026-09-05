@@ -25,9 +25,9 @@ use ucr_model::{
     DeliveryId, DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventEnvelope,
     EventId, EventReconciliation, EventReplicaState, EventSummary, IdentityId, IntentId, KeyId,
     MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
-    ScopedPrincipal, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
-    ServiceCredentialState, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
-    TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
+    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
+    ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy, SessionId, SyncCheckpoint,
+    SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -327,6 +327,32 @@ impl ServiceAuditStore for MemoryLocalStore {
             .iter()
             .rev()
             .filter(|(record, _)| record.presented_scope == *scope)
+            .take(max_items)
+            .map(|(record, _)| record.clone())
+            .collect::<Vec<_>>();
+        records.reverse();
+        Ok(records)
+    }
+
+    fn service_audit_records_for_operation(
+        &self,
+        scope: &TenantScope,
+        operation: &ServiceAuditOperationRef,
+        max_items: usize,
+    ) -> Result<Vec<ServiceAuditRecord>, DurableStoreError> {
+        if max_items == 0 || max_items > MAX_SERVICE_AUDIT_READ_ITEMS {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        ucr_protocol::validate_service_audit_operation_ref(operation)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut records = state
+            .service_audit_records
+            .iter()
+            .rev()
+            .filter(|(record, _)| {
+                record.presented_scope == *scope && record.operation.as_ref() == Some(operation)
+            })
             .take(max_items)
             .map(|(record, _)| record.clone())
             .collect::<Vec<_>>();
@@ -4711,9 +4737,13 @@ mod integration_api_tests {
     use ucr_model::{
         CommandEnvelope, CommandId, CorrelationContext, NamespaceId, OpaqueId, PermissionGrant,
         PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ProtocolVersion,
-        ScopedPrincipal, ServiceAuditOutcome, ServiceQuotaPolicy, TenantId, TenantScope,
+        ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditOutcome, ServiceQuotaPolicy,
+        TenantId, TenantScope,
     };
-    use ucr_protocol::{COMMAND_ACCEPT_PERMISSION, CanonicalErrorCode, CommandReceiptStatus};
+    use ucr_protocol::{
+        COMMAND_ACCEPT_PERMISSION, CanonicalErrorCode, CommandReceiptStatus,
+        SERVICE_AUDIT_COMMAND_OPERATION_KIND, SERVICE_AUDIT_READ_PERMISSION,
+    };
 
     use super::MemoryLocalStore;
 
@@ -4777,6 +4807,13 @@ mod integration_api_tests {
             },
             schema_version: ProtocolVersion::new(1, 0),
             extensions: Vec::new(),
+        }
+    }
+
+    fn operation(command: &CommandEnvelope) -> ServiceAuditOperationRef {
+        ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_COMMAND_OPERATION_KIND.to_owned(),
+            operation_id: command.command_id.as_opaque().clone(),
         }
     }
 
@@ -4846,6 +4883,19 @@ mod integration_api_tests {
                 ServiceAuditOutcome::Authorized,
             ]
         );
+        let expected_operation = operation(&value);
+        assert!(
+            audit
+                .iter()
+                .all(|record| record.operation.as_ref() == Some(&expected_operation))
+        );
+        assert_eq!(
+            store
+                .service_audit_records_for_operation(&subject.scope, &expected_operation, 8)
+                .expect("lookup exact operation audit")
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -4895,6 +4945,12 @@ mod integration_api_tests {
             ]
         );
         assert!(audit[1].subject.is_none());
+        let expected_operation = operation(&value);
+        assert!(
+            audit
+                .iter()
+                .all(|record| record.operation.as_ref() == Some(&expected_operation))
+        );
     }
 
     #[test]
@@ -4951,5 +5007,48 @@ mod integration_api_tests {
                 ServiceAuditOutcome::Authorized,
             ]
         );
+        assert_eq!(audit[0].operation.as_ref(), Some(&operation(&first)));
+        assert_eq!(audit[1].operation.as_ref(), Some(&operation(&second)));
+        assert_eq!(audit[2].operation.as_ref(), Some(&operation(&second)));
+    }
+
+    #[test]
+    fn operation_audit_lookup_uses_existing_audit_read_permission() {
+        let store = MemoryLocalStore::default();
+        let mut admin = service();
+        admin.principal.kind = PrincipalKind::Person;
+        admin.principal.principal_id = PrincipalId::from_opaque(oid("audit-admin"));
+        let command = command("command-audit-lookup", "lookup-key", b"payload");
+        let operation = operation(&command);
+        let service = service();
+        let (credential, secret) = issue_service_credential(&service).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        store
+            .grant_permission(&grant(&service))
+            .expect("bootstrap command permission");
+        install_quota(&store, &service, 2);
+        IntegrationCommandIngress::new(&TestClock::new(40_000), &store, &store)
+            .submit_command(&service.scope, &credential.credential_id, &secret, &command)
+            .expect("create operation-bound audit");
+
+        let runtime = ucr_core::AuthorizedDurableRuntime::new(&store, &store);
+        assert!(matches!(
+            runtime.service_audit_records_for_operation(&admin, &scope(), &operation, 8),
+            Err(ucr_core::AuthorizedMutationError::Authorization(_))
+        ));
+        store
+            .grant_permission(&PermissionGrant {
+                grantee: admin.clone(),
+                permission: SERVICE_AUDIT_READ_PERMISSION.to_owned(),
+                scope: PermissionScope::Exact(scope()),
+            })
+            .expect("grant existing audit read permission");
+        let rows = runtime
+            .service_audit_records_for_operation(&admin, &scope(), &operation, 8)
+            .expect("authorized exact operation lookup");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].operation.as_ref(), Some(&operation));
     }
 }

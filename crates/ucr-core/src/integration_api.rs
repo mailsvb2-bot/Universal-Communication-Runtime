@@ -1,7 +1,10 @@
 use core::fmt;
 
-use ucr_model::{CommandEnvelope, ServiceCredentialId, TenantScope};
-use ucr_protocol::{COMMAND_ACCEPT_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceipt};
+use ucr_model::{CommandEnvelope, ServiceAuditOperationRef, ServiceCredentialId, TenantScope};
+use ucr_protocol::{
+    COMMAND_ACCEPT_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceipt,
+    SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+};
 
 use crate::{
     AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError,
@@ -56,13 +59,18 @@ where
         secret: &ServiceCredentialSecret,
         command: &CommandEnvelope,
     ) -> Result<CommandReceipt, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_COMMAND_OPERATION_KIND.to_owned(),
+            operation_id: command.command_id.as_opaque().clone(),
+        };
         let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
-            .authenticate_request(
+            .authenticate_request_for_operation(
                 presented_scope,
                 credential_id,
                 secret,
                 COMMAND_ACCEPT_PERMISSION,
                 &command.scope,
+                &operation,
             )?;
         let subject = request.subject().clone();
         AuthorizedDurableRuntime::new(&request, self.store)

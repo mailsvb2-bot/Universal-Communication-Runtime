@@ -67,5 +67,7 @@ file, including the new Integration service.
 ## Non-claims
 
 This ADR does not implement Event API, webhook/stream subscriptions, SDKs, HTTP/gRPC server
-processes, Internet message transport, routing, command execution effects, or a new durable
-per-command audit join field beyond the existing Service Principal admission audit.
+processes, Internet message transport, routing, or command execution effects. The initial slice
+also did not add durable per-operation audit attribution. ADR-0041 subsequently closes that narrow
+Phase-13 audit gap with a generic versioned operation reference inside the existing Service
+Principal audit owner; it does not create a Command-specific audit store or execution-proof claim.

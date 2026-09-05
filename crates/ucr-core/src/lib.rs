@@ -13,9 +13,9 @@ use ucr_model::{
     DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
     EndpointAddress, EndpointId, EventEnvelope, EventId, EventReconciliation, EventSummary,
     IdentityId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor,
-    RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditRecord, ServiceCredentialId,
-    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
-    TenantScope, TrustedSigningKeyRecord,
+    RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
+    ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint,
+    SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -232,6 +232,17 @@ pub trait ServiceAuditStore: StorageProvider {
     fn service_audit_records(
         &self,
         scope: &TenantScope,
+        max_items: usize,
+    ) -> Result<Vec<ServiceAuditRecord>, DurableStoreError>;
+
+    /// Returns the newest bounded audit records for one exact operation reference and scope.
+    ///
+    /// # Errors
+    /// Rejects invalid limits or malformed/corrupt durable state.
+    fn service_audit_records_for_operation(
+        &self,
+        scope: &TenantScope,
+        operation: &ServiceAuditOperationRef,
         max_items: usize,
     ) -> Result<Vec<ServiceAuditRecord>, DurableStoreError>;
 }
