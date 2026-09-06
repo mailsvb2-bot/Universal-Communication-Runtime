@@ -68,9 +68,9 @@ pub use capability::{
 };
 pub use commands::{
     CommandError, CommandReceipt, CommandReceiptStatus, EventError, IdempotencyDecision,
-    ReceiptError, accepted_command_receipt, canonical_command, canonical_command_receipt,
-    canonical_event, compare_command_idempotency, duplicate_command_receipt, validate_command,
-    validate_command_receipt, validate_event,
+    MAX_COMMAND_PAYLOAD_LEN, MAX_IDEMPOTENCY_KEY_LEN, ReceiptError, accepted_command_receipt,
+    canonical_command, canonical_command_receipt, canonical_event, compare_command_idempotency,
+    duplicate_command_receipt, validate_command, validate_command_receipt, validate_event,
 };
 pub use crypto_contract::{
     AEAD_ALGORITHM_ID, AGREEMENT_ALGORITHM_ID, ALGORITHM_VERSION, CRYPTO_SUITE_ID,
@@ -92,9 +92,9 @@ pub use error::{
     canonical_error_envelope, error_envelope_from_canonical, validate_error_envelope,
 };
 pub use extension::{
-    ExtensionError, MAX_EXTENSION_PAYLOAD_LEN, MAX_PROTOCOL_EXTENSIONS,
-    canonical_protocol_extensions, require_supported_extensions, validate_extension_name,
-    validate_namespaced_identifier,
+    ExtensionError, MAX_EXTENSION_PAYLOAD_LEN, MAX_NAMESPACED_IDENTIFIER_LEN,
+    MAX_PROTOCOL_EXTENSIONS, canonical_protocol_extensions, require_supported_extensions,
+    validate_extension_name, validate_namespaced_identifier,
 };
 pub use framing::{
     CURRENT_FRAMING_VERSION, DEFAULT_MAX_PAYLOAD_LEN, FRAME_HEADER_LEN, FRAME_MAGIC, FrameError,

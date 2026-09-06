@@ -3708,6 +3708,140 @@ fn integration_communication_intent_api_reuses_canonical_owner_without_routing_b
 }
 
 #[test]
+fn public_namespaced_identifiers_have_one_bounded_protocol_owner() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let extension = fs::read_to_string(workspace.join("crates/ucr-protocol/src/extension.rs"))
+        .expect("extension protocol");
+    let protocol_lib = fs::read_to_string(workspace.join("crates/ucr-protocol/src/lib.rs"))
+        .expect("protocol exports");
+    let protocol_spec =
+        fs::read_to_string(workspace.join("spec/protocol.md")).expect("protocol spec");
+    let grpc =
+        fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/lib.rs")).expect("grpc adapter");
+    let adr = fs::read_to_string(
+        workspace.join("docs/adr/0048-public-namespaced-identifiers-have-explicit-byte-budget.md"),
+    )
+    .expect("adr 0048");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(extension.contains("pub const MAX_NAMESPACED_IDENTIFIER_LEN: usize = 1024;"));
+    assert!(extension.contains("if name.len() > MAX_NAMESPACED_IDENTIFIER_LEN"));
+    assert!(extension.contains("namespaced_identifier_has_explicit_byte_budget"));
+    assert!(extension.contains("MAX_NAMESPACED_IDENTIFIER_LEN - 7"));
+    assert!(extension.contains("MAX_NAMESPACED_IDENTIFIER_LEN - 6"));
+    assert!(protocol_lib.contains("MAX_NAMESPACED_IDENTIFIER_LEN"));
+    assert!(protocol_spec.contains("at most 1024 bytes (`MAX_NAMESPACED_IDENTIFIER_LEN`)"));
+    assert!(adr.contains("The common validator remains the single owner"));
+    assert!(adr.contains(
+        "Service Principal permissions and audit operation kinds retain their 256-byte limits"
+    ));
+    assert!(ci.contains("0048-public-namespaced-identifiers-have-explicit-byte-budget.md"));
+    assert!(!grpc.contains("MAX_GRPC_NAMESPACED_IDENTIFIER_LEN"));
+    assert!(!grpc.contains("validate_grpc_namespaced_identifier"));
+}
+
+#[test]
+fn phase13_grpc_submit_command_is_thin_binding_without_second_core_or_transport_brain() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let root = fs::read_to_string(workspace.join("Cargo.toml")).expect("workspace manifest");
+    let manifest = fs::read_to_string(workspace.join("crates/ucr-api-grpc/Cargo.toml"))
+        .expect("grpc manifest");
+    let build = fs::read_to_string(workspace.join("crates/ucr-api-grpc/build.rs"))
+        .expect("grpc build script");
+    let grpc =
+        fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/lib.rs")).expect("grpc adapter");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/integration.proto"))
+        .expect("integration proto");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/integration_api.rs"))
+        .expect("core integration ingress");
+    let spec =
+        fs::read_to_string(workspace.join("spec/integration-api.md")).expect("integration spec");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0049-phase13-grpc-submit-command-is-a-thin-binding-over-integration-ingress.md",
+    ))
+    .expect("adr 0048");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(root.contains("\"crates/ucr-api-grpc\""));
+    for pinned in [
+        "tonic = { version = \"=0.14.6\"",
+        "tonic-prost = \"=0.14.6\"",
+        "prost = \"=0.14.4\"",
+        "protoc-bin-vendored = \"=3.2.0\"",
+    ] {
+        assert!(
+            manifest.contains(pinned),
+            "missing pinned gRPC dependency: {pinned}"
+        );
+    }
+    assert!(build.contains("protoc_executable(protoc_bin_vendored::protoc_bin_path()?);"));
+    assert!(build.contains("compile_with_config(prost, &protos, &[proto_root])?;"));
+    assert!(grpc.contains("ucr-service-credential-id-bin"));
+    assert!(grpc.contains("ucr-service-credential-secret-bin"));
+    assert!(grpc.contains("set_sensitive(true)"));
+    assert!(
+        grpc.contains("IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)")
+    );
+    assert!(grpc.contains(".submit_command(&command.scope, &credential_id, &secret, &command)"));
+    assert!(grpc.contains("COMMAND_ENVELOPE_WIRE_MAX_BYTES"));
+    assert!(grpc.contains("MAX_PROTOCOL_EXTENSIONS * EXTENSION_FIELD_WIRE_MAX_BYTES"));
+    assert!(grpc.contains("PROTOBUF_LEN_PREFIX_MAX_BYTES"));
+    assert!(!grpc.contains("GRPC_PROTOBUF_ENVELOPE_OVERHEAD_BUDGET"));
+    assert_eq!(grpc.matches("Status::unimplemented").count(), 10);
+    assert_eq!(
+        grpc.matches("#[allow(").count(),
+        1,
+        "only generated protobuf may relax Clippy"
+    );
+    assert!(grpc.contains("#[allow(clippy::all, clippy::pedantic)]\npub mod pb"));
+    let production_grpc = grpc
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production gRPC adapter section");
+    for forbidden in [
+        "SqliteLocalStore",
+        "MemoryLocalStore",
+        "rusqlite",
+        "TransportProvider",
+    ] {
+        assert!(
+            !production_grpc.contains(forbidden),
+            "gRPC adapter leaked storage/transport implementation owner: {forbidden}"
+        );
+    }
+    assert!(!proto.contains("credential_secret"));
+    assert!(!proto.contains("ucr-service-credential"));
+    assert!(!core.contains("tonic::"));
+    assert!(!core.contains("prost::"));
+    for evidence in [
+        "credential_metadata_is_binary_exact_and_secret_is_sensitive",
+        "submit_command_round_trips_over_real_grpc_and_deduplicates",
+        "permission_denial_over_grpc_cannot_bypass_core_or_create_ghost_acceptance",
+        "grpc_binding_does_not_reintroduce_tonic_four_mib_default",
+        "grpc_decode_budget_contains_maximum_canonical_command_wire_size",
+        "bad_credentials_and_malformed_body_return_canonical_errors_without_ghost_acceptance",
+        "unbound_rpc_is_explicitly_unimplemented_and_does_not_mutate_core",
+    ] {
+        assert!(grpc.contains(evidence), "missing gRPC evidence: {evidence}");
+    }
+    assert!(spec.contains("The first concrete binding lives in the separate `ucr-api-grpc` crate"));
+    assert!(spec.contains("This is not a production network listener or TLS policy"));
+    assert!(
+        adr.contains("There is one Service Principal security gate and one Command durable owner")
+    );
+    assert!(adr.contains("No SQLite schema, permission vocabulary, audit schema, Command model"));
+    assert!(ci.contains(
+        "0049-phase13-grpc-submit-command-is-a-thin-binding-over-integration-ingress.md"
+    ));
+}
+
+#[test]
 fn integration_identity_read_side_reuses_canonical_owners_and_hides_existence_until_authorized() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
