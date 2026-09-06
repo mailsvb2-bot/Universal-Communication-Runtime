@@ -1073,34 +1073,38 @@ mod tests {
     };
 
     use ucr_core::{
-        CommandAcceptanceStore, CommandOutcomeStore, ConversationStore, DurableStoreError,
-        EventAppendStatus, EventJournalStore, ExternalIdentityBindingLookup,
+        CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore, ConversationStore,
+        DurableStoreError, EventAppendStatus, EventJournalStore, ExternalIdentityBindingLookup,
         ExternalIdentityBindingStore, IdentityStore, IntegrationCommandIngress, IntegrationIngress,
         MessageStore, PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore,
         ServiceQuotaStore, StorageHealth, StorageProvider, SystemServiceQuotaClock,
         issue_service_credential,
     };
     use ucr_model::{
-        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, ConversationId, ConversationKind,
-        ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy, DeliveryState,
-        DeviceId, DeviceRef, EventEnvelope, EventId, ExternalIdentityBinding, IdentityEvidence,
-        IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, MessageEnvelope, MessageId,
-        NamespaceId, OpaqueId, OriginRef, PermissionGrant, PermissionScope, PrincipalId,
-        PrincipalKind, PrincipalRef, ProtocolExtension, ProtocolVersion, ScopedPrincipal,
+        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CommunicationIntent,
+        ConversationId, ConversationKind, ConversationRecord, ConversationRef, CorrelationContext,
+        DeliveryPolicy, DeliveryState, DeviceId, DeviceRef, EventEnvelope, EventId,
+        ExternalIdentityBinding, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord,
+        IntegrationId, IntentConstraints, IntentId, MessageEnvelope, MessageId, NamespaceId,
+        OpaqueId, OriginRef, PermissionGrant, PermissionScope, PrincipalId, PrincipalKind,
+        PrincipalRef, ProtocolExtension, ProtocolVersion, ScopedPrincipal,
         ServiceAuditOperationRef, ServiceAuditOutcome, ServiceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{
-        COMMAND_ACCEPT_PERMISSION, CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION,
-        CommandReceiptStatus, DEFAULT_MAX_PAYLOAD_LEN, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
-        EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, IDENTITY_CREATE_PERMISSION,
-        IDENTITY_READ_PERMISSION, MAX_PROTOCOL_EXTENSIONS, MESSAGE_READ_PERMISSION,
-        MESSAGE_WRITE_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+        COMMAND_ACCEPT_PERMISSION, COMMUNICATION_INTENT_READ_PERMISSION,
+        COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
+        CONVERSATION_WRITE_PERMISSION, CommandReceiptStatus, DEFAULT_MAX_PAYLOAD_LEN,
+        EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+        IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MAX_PROTOCOL_EXTENSIONS,
+        MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+        SERVICE_AUDIT_COMMUNICATION_INTENT_CREATE_OPERATION_KIND,
+        SERVICE_AUDIT_COMMUNICATION_INTENT_READ_OPERATION_KIND,
         SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
         SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND,
         SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
         SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND,
         SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND, SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND,
-        SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND,
+        SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND, canonical_communication_intent,
     };
 
     use super::{SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID};
@@ -1196,6 +1200,43 @@ mod tests {
             extensions: Vec::new(),
             external_mappings: Vec::new(),
             signature: None,
+        }
+    }
+
+    fn public_intent(scope: &TenantScope, id: &str, payload: &[u8]) -> CommunicationIntent {
+        CommunicationIntent {
+            intent_id: IntentId::from_opaque(opaque(id)),
+            scope: scope.clone(),
+            target_identity_id: IdentityId::from_opaque(opaque("identity-intent-api-target")),
+            payload: payload.to_vec(),
+            constraints: IntentConstraints {
+                allowed_transport_capabilities: vec![
+                    "ucr.transport.wifi".to_owned(),
+                    "ucr.transport.direct".to_owned(),
+                ],
+                forbidden_transport_capabilities: vec!["ucr.transport.bridge".to_owned()],
+                privacy_profile: Some("vendor.example.private".to_owned()),
+                region_constraint: Some("region-eu".to_owned()),
+                max_cost_microunits: Some(u64::MAX),
+                priority_class: Some(9),
+            },
+            correlation: CorrelationContext {
+                correlation_id: opaque("correlation-intent-api"),
+                causation_id: None,
+                idempotency_key: Some(format!("intent-api-key-{id}")),
+            },
+            extensions: vec![
+                ProtocolExtension {
+                    name: "vendor.example.z".to_owned(),
+                    critical: false,
+                    payload: b"z".to_vec(),
+                },
+                ProtocolExtension {
+                    name: "ucr.intent.a".to_owned(),
+                    critical: false,
+                    payload: b"a".to_vec(),
+                },
+            ],
         }
     }
 
@@ -1308,6 +1349,38 @@ mod tests {
         store
             .persist_conversation(conversation)
             .expect("persist message API conversation");
+    }
+
+    fn seed_intent_api_fixture(
+        store: &SqliteLocalStore,
+        subject: &ScopedPrincipal,
+        credential: &ucr_model::ServiceCredentialRecord,
+        scope: &TenantScope,
+    ) {
+        store
+            .provision_service_credential(credential)
+            .expect("persist intent API credential");
+        grant_exact_permission(
+            store,
+            subject,
+            COMMUNICATION_INTENT_WRITE_PERMISSION,
+            scope,
+            "persist intent write permission",
+        );
+        grant_exact_permission(
+            store,
+            subject,
+            COMMUNICATION_INTENT_READ_PERMISSION,
+            scope,
+            "persist intent read permission",
+        );
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject.clone(),
+                max_requests: 4,
+                window_ms: 60_000,
+            })
+            .expect("persist intent API quota");
     }
 
     fn seed_identity_read_fixture(
@@ -2788,6 +2861,102 @@ mod tests {
             &scope,
             &read_operation,
             "message read audit after restart",
+        );
+    }
+
+    #[test]
+    fn integration_communication_intent_api_survives_sqlite_restart_through_canonical_owner() {
+        let db = TestDbPath::new();
+        let scope = command(
+            "intent-api-scope",
+            "intent-api-scope-key",
+            b"",
+            Some("namespace-intent-api"),
+        )
+        .scope;
+        let subject = service_subject(&scope, "service-intent-api-sqlite");
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        let value = public_intent(&scope, "intent-api-root", b"route this intent");
+        let expected = canonical_communication_intent(&value).expect("canonical intent");
+
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open intent API store");
+            seed_intent_api_fixture(&store, &subject, &credential, &scope);
+            let ingress = IntegrationIngress::new(&SystemServiceQuotaClock, &store, &store);
+            assert_eq!(
+                ingress
+                    .create_communication_intent(&scope, &credential.credential_id, &secret, &value)
+                    .expect("first public intent create")
+                    .acknowledged_id,
+                value.intent_id.as_opaque().clone()
+            );
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen intent API store");
+        let ingress = IntegrationIngress::new(&SystemServiceQuotaClock, &reopened, &reopened);
+        assert_eq!(
+            ingress
+                .get_communication_intent(
+                    &scope,
+                    &credential.credential_id,
+                    &secret,
+                    &scope,
+                    &value.intent_id,
+                )
+                .expect("public intent read after restart"),
+            expected
+        );
+        let mut reordered = value.clone();
+        reordered
+            .constraints
+            .allowed_transport_capabilities
+            .reverse();
+        reordered.extensions.reverse();
+        assert_eq!(
+            ingress
+                .create_communication_intent(
+                    &scope,
+                    &credential.credential_id,
+                    &secret,
+                    &reordered,
+                )
+                .expect("canonical duplicate intent after restart")
+                .acknowledged_id,
+            value.intent_id.as_opaque().clone()
+        );
+        let mut changed = value.clone();
+        changed.payload.push(b'!');
+        let conflict = ingress
+            .create_communication_intent(&scope, &credential.credential_id, &secret, &changed)
+            .expect_err("changed Intent semantics conflict after restart");
+        assert_eq!(conflict.code, ucr_protocol::CanonicalErrorCode::Conflict);
+        assert_eq!(
+            reopened
+                .communication_intent(&scope, &value.intent_id)
+                .expect("canonical intent lookup after restart"),
+            Some(expected)
+        );
+
+        let create_operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_COMMUNICATION_INTENT_CREATE_OPERATION_KIND.to_owned(),
+            operation_id: value.intent_id.as_opaque().clone(),
+        };
+        let read_operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_COMMUNICATION_INTENT_READ_OPERATION_KIND.to_owned(),
+            operation_id: value.intent_id.as_opaque().clone(),
+        };
+        assert_eq!(
+            reopened
+                .service_audit_records_for_operation(&scope, &create_operation, 4)
+                .expect("restart-safe intent create audit")
+                .len(),
+            3
+        );
+        assert_single_operation_audit(
+            &reopened,
+            &scope,
+            &read_operation,
+            "intent read audit after restart",
         );
     }
 

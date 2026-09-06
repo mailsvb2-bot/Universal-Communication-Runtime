@@ -18,10 +18,12 @@ The implemented Phase-13 vertical surface exposes:
 - `IntegrationService.CreateConversation` over canonical `ConversationRecord`;
 - `IntegrationService.GetConversation` over exact `TenantScope + ConversationId`;
 - `IntegrationService.SendMessage` over canonical `MessageEnvelope` with generic `AcknowledgementEnvelope`;
-- `IntegrationService.GetMessage` over exact `TenantScope + MessageId`.
+- `IntegrationService.GetMessage` over exact `TenantScope + MessageId`;
+- `IntegrationService.CreateCommunicationIntent` over canonical `CommunicationIntent` with generic `AcknowledgementEnvelope`;
+- `IntegrationService.GetCommunicationIntent` over exact `TenantScope + IntentId`.
 
 These methods reuse existing canonical owners. They do not create Integration-specific Command,
-Identity, Conversation, Message, audit, permission, or provider-specific communication models. Concrete gRPC, HTTP,
+Identity, Conversation, Message, Communication Intent, audit, permission, or provider-specific communication models. Concrete gRPC, HTTP,
 local-IPC, sidecar, or embedded bindings may differ in framing and credential presentation, but
 MUST preserve the same authentication, authorization, quota/audit, idempotency, error, and durable
 semantics.
@@ -47,15 +49,17 @@ trusted from caller-supplied identity. Adapters receive no raw store access.
 - `CreateConversation` requires `ucr.conversation.write`;
 - `GetConversation` requires `ucr.conversation.read`;
 - `SendMessage` requires `ucr.message.write`;
-- `GetMessage` requires `ucr.message.read`.
+- `GetMessage` requires `ucr.message.read`;
+- `CreateCommunicationIntent` requires `ucr.intent.write`;
+- `GetCommunicationIntent` requires `ucr.intent.read`.
 
 Audit attribution is generic security metadata bound before authentication: `ucr.command` +
 canonical `CommandId`, `ucr.identity.create` + canonical `IdentityId`, or
 `ucr.identity.external_binding.link` + target canonical `IdentityId`, `ucr.identity.read` +
 canonical `IdentityId`, `ucr.identity.external_binding.read` + canonical `IntegrationId`,
 `ucr.conversation.create` + canonical `ConversationId`, `ucr.conversation.read` + canonical
-`ConversationId`, `ucr.message.send` + canonical `MessageId`, or `ucr.message.read` + canonical
-`MessageId`.
+`ConversationId`, `ucr.message.send` + canonical `MessageId`, `ucr.message.read` + canonical
+`MessageId`, `ucr.intent.create` + canonical `IntentId`, or `ucr.intent.read` + canonical `IntentId`.
 External namespace/entity bytes are not copied, encoded, or hashed into generic admission audit
 operation references. An Authorized admission record proves only that the
 security gate passed; later durable validation/conflict may still fail.
@@ -127,7 +131,23 @@ The origin binding is API-source attribution, not cryptographic authorship proof
 Message-signature verification remains outside this Phase-13 slice; deployments requiring verified
 authorship use the existing trusted Device/signing-key verification boundary.
 
-## 7. Errors and maturity
+## 7. Communication Intent semantics
+
+`CreateCommunicationIntent` persists the canonical provider-independent `CommunicationIntent` through
+the single existing `CommunicationIntentStore`. External consumers express target, payload, policy
+constraints, correlation and protocol extensions; this API does not expose or accept an internal route
+graph. The existing owner remains authoritative for bounds, contradictory allow/forbid constraints,
+canonical ordering, duplicate equality and scoped `IntentId` conflict semantics.
+
+A successful create returns the existing generic `AcknowledgementEnvelope` for `IntentId`. The ACK confirms only durable Intent persistence/deduplication. It is not route selection, queueing, provider
+acceptance, Delivery evidence, Event evidence or proof of a real-world communication effect.
+
+`GetCommunicationIntent` reads the same owner and returns canonical stored state. Authorized absence is
+canonical non-retryable `NOT_FOUND`; authentication and permission failures occur before existence is
+disclosed. Audit attribution uses only the canonical `IntentId`; payload, privacy/region/cost policy,
+transport constraints and extension payloads are not copied into generic admission audit.
+
+## 8. Errors and maturity
 
 Validation failures map to `INVALID_ARGUMENT`; authorized lookup absence to `NOT_FOUND`; semantic identity/idempotency reuse to `CONFLICT`;
 storage-full to `RESOURCE_EXHAUSTED`; temporary storage failure to `TEMPORARILY_UNAVAILABLE`;
@@ -139,13 +159,13 @@ The Phase-13 API remains `Experimental`. Stable compatibility rules apply only a
 Public API Governance promotion decision. Existing `SubmitCommand` wire fields remain unchanged.
 
 This slice does not claim a production gRPC/HTTP server, SDK generation, Event subscriptions,
-webhook delivery, Command execution/dispatch, routing, Message delivery/read receipts,
+webhook delivery, Command execution/dispatch, routing/policy execution, Message delivery/read receipts,
 Conversation listing/discovery/delete, group membership/moderation, identity/binding listing or
 discovery, Persona/Profile APIs, Identity evidence transitions,
 Identity merge/delete, external-binding unlink/relink,
 or expiry execution. Phase 14 owns Event API semantics; later phases own network transport.
 
-## 8. Required evidence
+## 9. Required evidence
 
 Reference evidence must prove Service Principal authentication, mandatory quota/audit, exact
 permission enforcement, stable error mapping, restart-safe durable ownership, duplicate/conflict
@@ -159,3 +179,7 @@ the existing `ConversationStore`. Message evidence additionally proves authentic
 generic-ACK non-delivery semantics, equal retry/conflict behavior, forged-origin rejection after
 normal admission, missing-Conversation rejection without ghost state, persisted-state reads,
 non-disclosing `NOT_FOUND`, and restart-safe public send/read through the existing `MessageStore`.
+Intent evidence additionally proves authenticated create/read, generic-ACK non-routing semantics,
+canonical duplicate ordering, semantic conflict, invalid-constraint rejection without ghost state,
+non-disclosing `NOT_FOUND`, and restart-safe public create/read through the existing
+`CommunicationIntentStore`.

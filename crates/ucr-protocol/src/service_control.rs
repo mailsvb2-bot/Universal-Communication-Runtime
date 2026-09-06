@@ -16,6 +16,8 @@ pub const SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND: &str = "ucr.conversa
 pub const SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND: &str = "ucr.conversation.read";
 pub const SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND: &str = "ucr.message.send";
 pub const SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND: &str = "ucr.message.read";
+pub const SERVICE_AUDIT_COMMUNICATION_INTENT_CREATE_OPERATION_KIND: &str = "ucr.intent.create";
+pub const SERVICE_AUDIT_COMMUNICATION_INTENT_READ_OPERATION_KIND: &str = "ucr.intent.read";
 pub const SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND: &str =
     "ucr.identity.external_binding.link";
 pub const SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND: &str =
