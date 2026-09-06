@@ -698,6 +698,15 @@ where
         message: &MessageEnvelope,
     ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
         self.require(subject, &message.scope, MESSAGE_WRITE_PERMISSION)?;
+        if subject.principal.kind == PrincipalKind::ServiceAccount
+            && message.origin.principal_id.as_ref() != Some(&subject.principal.principal_id)
+        {
+            return Err(AuthorizedMutationError::Authorization(
+                ucr_protocol::CanonicalError::new(
+                    ucr_protocol::CanonicalErrorCode::PermissionDenied,
+                ),
+            ));
+        }
         self.store
             .persist_message(message)
             .map_err(AuthorizedMutationError::Store)
