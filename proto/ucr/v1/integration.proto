@@ -131,6 +131,33 @@ message IntegrationGetMessageResponse {
   }
 }
 
+// Public canonical Communication Intent persistence. The acknowledgement confirms only durable
+// intent persistence/deduplication; routing selection and external effect remain separate layers.
+message IntegrationCreateCommunicationIntentRequest {
+  CommunicationIntent intent = 1;
+}
+
+message IntegrationCreateCommunicationIntentResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Public exact-scope Communication Intent lookup. NOT_FOUND is returned only after authenticated
+// authorization so callers cannot probe Intent existence outside their authority.
+message IntegrationGetCommunicationIntentRequest {
+  TenantScope scope = 1;
+  OpaqueId intent_id = 2;
+}
+
+message IntegrationGetCommunicationIntentResponse {
+  oneof result {
+    CommunicationIntent intent = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 service IntegrationService {
   rpc SubmitCommand(IntegrationCommandRequest) returns (IntegrationCommandResponse);
   rpc CreateIdentity(IntegrationCreateIdentityRequest) returns (IntegrationCreateIdentityResponse);
@@ -141,4 +168,6 @@ service IntegrationService {
   rpc GetConversation(IntegrationGetConversationRequest) returns (IntegrationGetConversationResponse);
   rpc SendMessage(IntegrationSendMessageRequest) returns (IntegrationSendMessageResponse);
   rpc GetMessage(IntegrationGetMessageRequest) returns (IntegrationGetMessageResponse);
+  rpc CreateCommunicationIntent(IntegrationCreateCommunicationIntentRequest) returns (IntegrationCreateCommunicationIntentResponse);
+  rpc GetCommunicationIntent(IntegrationGetCommunicationIntentRequest) returns (IntegrationGetCommunicationIntentResponse);
 }

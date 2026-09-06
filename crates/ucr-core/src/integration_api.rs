@@ -1,16 +1,19 @@
 use core::fmt;
 
 use ucr_model::{
-    CommandEnvelope, ConversationId, ConversationRecord, ExternalIdentityBinding, IdentityId,
-    IdentityRecord, IntegrationId, MessageEnvelope, MessageId, ServiceAuditOperationRef,
-    ServiceCredentialId, TenantScope,
+    CommandEnvelope, CommunicationIntent, ConversationId, ConversationRecord,
+    ExternalIdentityBinding, IdentityId, IdentityRecord, IntegrationId, IntentId, MessageEnvelope,
+    MessageId, ServiceAuditOperationRef, ServiceCredentialId, TenantScope,
 };
 use ucr_protocol::{
-    AcknowledgementEnvelope, COMMAND_ACCEPT_PERMISSION, CONVERSATION_READ_PERMISSION,
+    AcknowledgementEnvelope, COMMAND_ACCEPT_PERMISSION, COMMUNICATION_INTENT_READ_PERMISSION,
+    COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
     CONVERSATION_WRITE_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceipt,
     EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
     IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,
     MESSAGE_WRITE_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+    SERVICE_AUDIT_COMMUNICATION_INTENT_CREATE_OPERATION_KIND,
+    SERVICE_AUDIT_COMMUNICATION_INTENT_READ_OPERATION_KIND,
     SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND,
     SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
@@ -22,9 +25,10 @@ use ucr_protocol::{
 
 use crate::{
     AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError,
-    CommandAcceptanceStore, ConversationStore, DurableStoreError, ExternalIdentityBindingStore,
-    IdentityStore, MessageStore, ServiceAuditStore, ServiceCredentialSecret,
-    ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
+    CommandAcceptanceStore, CommunicationIntentStore, ConversationStore, DurableStoreError,
+    ExternalIdentityBindingStore, IdentityStore, MessageStore, ServiceAuditStore,
+    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
+    ServiceQuotaClock, ServiceQuotaStore,
 };
 
 /// Transport-neutral Phase-13 ingress for external Service Principal operations.
@@ -178,6 +182,84 @@ where
             .persist_identity(&subject, identity)
             .map_err(map_authorized_error)?;
         Ok(identity.clone())
+    }
+}
+
+impl<C, A, S> IntegrationIngress<'_, C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + CommunicationIntentStore,
+{
+    /// Authenticates, rate-limits, audits, authorizes, then durably persists one Communication Intent.
+    ///
+    /// Equal retries acknowledge the same canonical Intent. The acknowledgement proves only durable
+    /// persistence/deduplication; it is not route selection, delivery, provider acceptance, or effect proof.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, validation, conflict, and storage failures map to stable
+    /// canonical errors. Denied or failed requests never create an Intent.
+    pub fn create_communication_intent(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        intent: &CommunicationIntent,
+    ) -> Result<AcknowledgementEnvelope, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_COMMUNICATION_INTENT_CREATE_OPERATION_KIND.to_owned(),
+            operation_id: intent.intent_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                COMMUNICATION_INTENT_WRITE_PERMISSION,
+                &intent.scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .persist_communication_intent(&subject, intent)
+            .map_err(map_authorized_error)?;
+        Ok(acknowledgement_for(intent.intent_id.as_opaque().clone()))
+    }
+
+    /// Authenticates, rate-limits, audits, authorizes, then reads one exact Communication Intent.
+    ///
+    /// Absence becomes canonical `NOT_FOUND` only after complete Service Principal admission and
+    /// Intent-read authorization, so unauthorized callers cannot probe Intent existence.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, not-found, and storage failures map to stable canonical
+    /// errors.
+    pub fn get_communication_intent(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        intent_id: &IntentId,
+    ) -> Result<CommunicationIntent, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_COMMUNICATION_INTENT_READ_OPERATION_KIND.to_owned(),
+            operation_id: intent_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                COMMUNICATION_INTENT_READ_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .communication_intent(&subject, scope, intent_id)
+            .map_err(map_authorized_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
     }
 }
 

@@ -5215,32 +5215,37 @@ mod integration_api_tests {
     use std::sync::atomic::{AtomicI64, Ordering};
 
     use ucr_core::{
-        ConversationStore, ExternalIdentityBindingLookup, ExternalIdentityBindingStore,
-        IdentityStore, IntegrationCommandIngress, IntegrationIngress, MessageStore,
-        PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock,
-        ServiceQuotaClockError, ServiceQuotaStore, issue_service_credential,
+        CommunicationIntentStore, ConversationStore, ExternalIdentityBindingLookup,
+        ExternalIdentityBindingStore, IdentityStore, IntegrationCommandIngress, IntegrationIngress,
+        MessageStore, PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore,
+        ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore, issue_service_credential,
     };
     use ucr_model::{
-        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, ConversationId, ConversationKind,
-        ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy, DeliveryState,
-        DeviceId, DeviceRef, ExternalIdentityBinding, IdentityEvidence, IdentityId,
-        IdentityOwnership, IdentityRecord, IntegrationId, MessageEnvelope, MessageId, NamespaceId,
-        OpaqueId, OriginRef, PermissionGrant, PermissionScope, PrincipalId, PrincipalKind,
-        PrincipalRef, ProtocolVersion, ScopedPrincipal, ServiceAuditOperationRef,
+        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, CommunicationIntent,
+        ConversationId, ConversationKind, ConversationRecord, ConversationRef, CorrelationContext,
+        DeliveryPolicy, DeliveryState, DeviceId, DeviceRef, ExternalIdentityBinding,
+        IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
+        IntentConstraints, IntentId, MessageEnvelope, MessageId, NamespaceId, OpaqueId, OriginRef,
+        PermissionGrant, PermissionScope, PrincipalId, PrincipalKind, PrincipalRef,
+        ProtocolExtension, ProtocolVersion, ScopedPrincipal, ServiceAuditOperationRef,
         ServiceAuditOutcome, ServiceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{
-        COMMAND_ACCEPT_PERMISSION, CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION,
-        CanonicalErrorCode, CommandReceiptStatus, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
-        EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, IDENTITY_CREATE_PERMISSION,
-        IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION,
-        SERVICE_AUDIT_COMMAND_OPERATION_KIND, SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
+        COMMAND_ACCEPT_PERMISSION, COMMUNICATION_INTENT_READ_PERMISSION,
+        COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
+        CONVERSATION_WRITE_PERMISSION, CanonicalErrorCode, CommandReceiptStatus,
+        EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+        IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,
+        MESSAGE_WRITE_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+        SERVICE_AUDIT_COMMUNICATION_INTENT_CREATE_OPERATION_KIND,
+        SERVICE_AUDIT_COMMUNICATION_INTENT_READ_OPERATION_KIND,
+        SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
         SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND,
         SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
         SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND,
         SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
         SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND, SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND,
-        SERVICE_AUDIT_READ_PERMISSION,
+        SERVICE_AUDIT_READ_PERMISSION, canonical_communication_intent,
     };
 
     use super::MemoryLocalStore;
@@ -5483,6 +5488,73 @@ mod integration_api_tests {
     fn message_read_operation(id: &MessageId) -> ServiceAuditOperationRef {
         ServiceAuditOperationRef {
             operation_kind: SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND.to_owned(),
+            operation_id: id.as_opaque().clone(),
+        }
+    }
+
+    fn communication_intent(id: &str, payload: &[u8]) -> CommunicationIntent {
+        CommunicationIntent {
+            intent_id: IntentId::from_opaque(oid(id)),
+            scope: scope(),
+            target_identity_id: IdentityId::from_opaque(oid("identity-intent-target")),
+            payload: payload.to_vec(),
+            constraints: IntentConstraints {
+                allowed_transport_capabilities: vec![
+                    "ucr.transport.wifi".to_owned(),
+                    "ucr.transport.direct".to_owned(),
+                ],
+                forbidden_transport_capabilities: vec!["ucr.transport.bridge".to_owned()],
+                privacy_profile: Some("vendor.example.private".to_owned()),
+                region_constraint: Some("region-eu".to_owned()),
+                max_cost_microunits: Some(42),
+                priority_class: Some(7),
+            },
+            correlation: CorrelationContext {
+                correlation_id: oid("correlation-public-intent"),
+                causation_id: None,
+                idempotency_key: Some(format!("intent-key-{id}")),
+            },
+            extensions: vec![
+                ProtocolExtension {
+                    name: "vendor.example.z".to_owned(),
+                    critical: false,
+                    payload: b"z".to_vec(),
+                },
+                ProtocolExtension {
+                    name: "ucr.intent.a".to_owned(),
+                    critical: false,
+                    payload: b"a".to_vec(),
+                },
+            ],
+        }
+    }
+
+    fn intent_write_grant(subject: &ScopedPrincipal) -> PermissionGrant {
+        PermissionGrant {
+            grantee: subject.clone(),
+            permission: COMMUNICATION_INTENT_WRITE_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope()),
+        }
+    }
+
+    fn intent_read_grant(subject: &ScopedPrincipal) -> PermissionGrant {
+        PermissionGrant {
+            grantee: subject.clone(),
+            permission: COMMUNICATION_INTENT_READ_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope()),
+        }
+    }
+
+    fn intent_create_operation(id: &IntentId) -> ServiceAuditOperationRef {
+        ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_COMMUNICATION_INTENT_CREATE_OPERATION_KIND.to_owned(),
+            operation_id: id.as_opaque().clone(),
+        }
+    }
+
+    fn intent_read_operation(id: &IntentId) -> ServiceAuditOperationRef {
+        ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_COMMUNICATION_INTENT_READ_OPERATION_KIND.to_owned(),
             operation_id: id.as_opaque().clone(),
         }
     }
@@ -6643,6 +6715,244 @@ mod integration_api_tests {
         assert_eq!(
             audit[3].operation.as_ref(),
             Some(&message_read_operation(&missing))
+        );
+    }
+
+    #[test]
+    fn create_communication_intent_ingress_audits_deduplicates_and_conflicts() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        store
+            .grant_permission(&intent_write_grant(&subject))
+            .expect("bootstrap intent write permission");
+        install_quota(&store, &subject, 3);
+        let clock = TestClock::new(47_000);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+        let value = communication_intent("intent-public-create", b"contact target");
+
+        assert_eq!(
+            ingress
+                .create_communication_intent(
+                    &subject.scope,
+                    &credential.credential_id,
+                    &secret,
+                    &value
+                )
+                .expect("create intent")
+                .acknowledged_id,
+            value.intent_id.as_opaque().clone()
+        );
+        let mut reordered = value.clone();
+        reordered
+            .constraints
+            .allowed_transport_capabilities
+            .reverse();
+        reordered.extensions.reverse();
+        assert_eq!(
+            ingress
+                .create_communication_intent(
+                    &subject.scope,
+                    &credential.credential_id,
+                    &secret,
+                    &reordered,
+                )
+                .expect("canonical duplicate intent")
+                .acknowledged_id,
+            value.intent_id.as_opaque().clone()
+        );
+        let mut changed = value.clone();
+        changed.payload.push(b'!');
+        let conflict = ingress
+            .create_communication_intent(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &changed,
+            )
+            .expect_err("same scoped IntentId cannot change semantics");
+        assert_eq!(conflict.code, CanonicalErrorCode::Conflict);
+        assert_eq!(
+            store.communication_intent(&value.scope, &value.intent_id),
+            Ok(Some(
+                canonical_communication_intent(&value).expect("canonical intent")
+            ))
+        );
+        let expected = intent_create_operation(&value.intent_id);
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("intent create audit");
+        assert_eq!(audit.len(), 3);
+        assert!(
+            audit
+                .iter()
+                .all(|record| record.operation.as_ref() == Some(&expected))
+        );
+    }
+
+    #[test]
+    fn create_communication_intent_failures_never_create_ghost_intent() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        install_quota(&store, &subject, 3);
+        let clock = TestClock::new(48_000);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+        let value = communication_intent("intent-public-guarded", b"guarded");
+
+        let denied = ingress
+            .create_communication_intent(&subject.scope, &credential.credential_id, &secret, &value)
+            .expect_err("missing intent write permission denied");
+        assert_eq!(denied.code, CanonicalErrorCode::PermissionDenied);
+        assert_eq!(
+            store.communication_intent(&value.scope, &value.intent_id),
+            Ok(None)
+        );
+
+        let wrong = ucr_core::ServiceCredentialSecret::from_bytes([0xA5; 32]);
+        let unauthenticated = ingress
+            .create_communication_intent(&subject.scope, &credential.credential_id, &wrong, &value)
+            .expect_err("bad intent credential rejected");
+        assert_eq!(unauthenticated.code, CanonicalErrorCode::Unauthenticated);
+        assert_eq!(
+            store.communication_intent(&value.scope, &value.intent_id),
+            Ok(None)
+        );
+
+        store
+            .grant_permission(&intent_write_grant(&subject))
+            .expect("grant intent write after denials");
+        let mut invalid = value.clone();
+        invalid.constraints.forbidden_transport_capabilities =
+            invalid.constraints.allowed_transport_capabilities.clone();
+        let invalid_error = ingress
+            .create_communication_intent(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &invalid,
+            )
+            .expect_err("contradictory constraints rejected");
+        assert_eq!(invalid_error.code, CanonicalErrorCode::InvalidArgument);
+        assert_eq!(
+            store.communication_intent(&value.scope, &value.intent_id),
+            Ok(None)
+        );
+
+        assert_eq!(
+            ingress
+                .create_communication_intent(
+                    &subject.scope,
+                    &credential.credential_id,
+                    &secret,
+                    &value
+                )
+                .expect("same Intent remains new after failures")
+                .acknowledged_id,
+            value.intent_id.as_opaque().clone()
+        );
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("guarded intent audit");
+        assert_eq!(
+            audit
+                .iter()
+                .map(|record| record.outcome)
+                .collect::<Vec<_>>(),
+            vec![
+                ServiceAuditOutcome::PermissionDenied,
+                ServiceAuditOutcome::AuthenticationFailed,
+                ServiceAuditOutcome::Authorized,
+                ServiceAuditOutcome::Authorized,
+            ]
+        );
+    }
+
+    #[test]
+    fn get_communication_intent_hides_existence_until_authorized() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        install_quota(&store, &subject, 3);
+        let value = communication_intent("intent-public-read", b"read me");
+        store
+            .persist_communication_intent(&value)
+            .expect("seed intent");
+        let expected = canonical_communication_intent(&value).expect("canonical intent");
+        let clock = TestClock::new(49_000);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+
+        let denied = ingress
+            .get_communication_intent(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &value.scope,
+                &value.intent_id,
+            )
+            .expect_err("missing read permission must hide existing intent");
+        assert_eq!(denied.code, CanonicalErrorCode::PermissionDenied);
+        store
+            .grant_permission(&intent_read_grant(&subject))
+            .expect("grant intent read");
+        let wrong = ucr_core::ServiceCredentialSecret::from_bytes([0xA5; 32]);
+        let unauthenticated = ingress
+            .get_communication_intent(
+                &subject.scope,
+                &credential.credential_id,
+                &wrong,
+                &value.scope,
+                &value.intent_id,
+            )
+            .expect_err("bad credential must not expose intent existence");
+        assert_eq!(unauthenticated.code, CanonicalErrorCode::Unauthenticated);
+        assert_eq!(
+            ingress
+                .get_communication_intent(
+                    &subject.scope,
+                    &credential.credential_id,
+                    &secret,
+                    &value.scope,
+                    &value.intent_id,
+                )
+                .expect("authorized intent read"),
+            expected
+        );
+        let missing = IntentId::from_opaque(oid("intent-public-missing"));
+        let not_found = ingress
+            .get_communication_intent(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &scope(),
+                &missing,
+            )
+            .expect_err("authorized missing intent is not found");
+        assert_eq!(not_found.code, CanonicalErrorCode::NotFound);
+        assert!(!not_found.retryable);
+
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("intent read audit");
+        assert_eq!(audit.len(), 4);
+        let existing = intent_read_operation(&value.intent_id);
+        assert!(
+            audit[..3]
+                .iter()
+                .all(|record| record.operation.as_ref() == Some(&existing))
+        );
+        assert_eq!(
+            audit[3].operation.as_ref(),
+            Some(&intent_read_operation(&missing))
         );
     }
 

@@ -181,4 +181,5 @@ jobs:
           test -s docs/adr/0043-root-identity-is-durable-accountless-and-provider-independent.md &&
           test -s docs/adr/0044-integration-identity-reads-reuse-canonical-owners-and-minimize-audit.md &&
           test -s docs/adr/0045-integration-conversation-api-reuses-canonical-conversation-owner.md &&
-          test -s docs/adr/0046-integration-message-api-reuses-canonical-message-owner-and-generic-ack.md
+          test -s docs/adr/0046-integration-message-api-reuses-canonical-message-owner-and-generic-ack.md &&
+          test -s docs/adr/0047-integration-communication-intent-api-reuses-canonical-owner-and-generic-ack.md
