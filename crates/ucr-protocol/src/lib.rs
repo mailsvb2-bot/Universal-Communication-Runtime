@@ -138,6 +138,7 @@ pub use service_control::{
     SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND, SERVICE_AUDIT_HASH_LEN,
     SERVICE_AUDIT_HASH_V1_DOMAIN, SERVICE_AUDIT_HASH_V2_DOMAIN,
     SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
+    SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND, SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND,
     ServiceControlValidationError, service_audit_hash, validate_service_audit_operation_ref,
     validate_service_audit_record, validate_service_quota_policy,
 };

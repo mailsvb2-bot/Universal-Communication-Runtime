@@ -2,25 +2,29 @@ use core::fmt;
 
 use ucr_model::{
     CommandEnvelope, ConversationId, ConversationRecord, ExternalIdentityBinding, IdentityId,
-    IdentityRecord, IntegrationId, ServiceAuditOperationRef, ServiceCredentialId, TenantScope,
+    IdentityRecord, IntegrationId, MessageEnvelope, MessageId, ServiceAuditOperationRef,
+    ServiceCredentialId, TenantScope,
 };
 use ucr_protocol::{
-    COMMAND_ACCEPT_PERMISSION, CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION,
-    CanonicalError, CanonicalErrorCode, CommandReceipt, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
-    EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, IDENTITY_CREATE_PERMISSION,
-    IDENTITY_READ_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+    AcknowledgementEnvelope, COMMAND_ACCEPT_PERMISSION, CONVERSATION_READ_PERMISSION,
+    CONVERSATION_WRITE_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceipt,
+    EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+    IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,
+    MESSAGE_WRITE_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
     SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND,
     SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
     SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND,
     SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
+    SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND, SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND,
+    acknowledgement_for,
 };
 
 use crate::{
     AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError,
     CommandAcceptanceStore, ConversationStore, DurableStoreError, ExternalIdentityBindingStore,
-    IdentityStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
-    ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
+    IdentityStore, MessageStore, ServiceAuditStore, ServiceCredentialSecret,
+    ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
 };
 
 /// Transport-neutral Phase-13 ingress for external Service Principal operations.
@@ -342,6 +346,84 @@ where
         let subject = request.subject().clone();
         AuthorizedDurableRuntime::new(&request, self.store)
             .conversation(&subject, scope, conversation_id)
+            .map_err(map_authorized_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+}
+
+impl<C, A, S> IntegrationIngress<'_, C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + MessageStore,
+{
+    /// Authenticates, rate-limits, audits, authorizes, then durably persists one Message.
+    ///
+    /// Equal retries acknowledge the same canonical Message. The generic acknowledgement proves
+    /// durable persistence/deduplication only; it is not delivery, read, provider, or effect proof.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, validation, conflict, and storage failures map to
+    /// stable canonical errors. Denied or failed requests never create a Message.
+    pub fn send_message(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        message: &MessageEnvelope,
+    ) -> Result<AcknowledgementEnvelope, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND.to_owned(),
+            operation_id: message.message_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                MESSAGE_WRITE_PERMISSION,
+                &message.scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .persist_message(&subject, message)
+            .map_err(map_authorized_error)?;
+        Ok(acknowledgement_for(message.message_id.as_opaque().clone()))
+    }
+
+    /// Authenticates, rate-limits, audits, authorizes, then reads one exact persisted Message.
+    ///
+    /// Absence becomes canonical `NOT_FOUND` only after the complete Service Principal admission
+    /// and Message-read permission boundary succeeds.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, not-found, and storage failures map to stable canonical
+    /// errors. Unauthorized callers cannot probe Message existence.
+    pub fn get_message(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        message_id: &MessageId,
+    ) -> Result<MessageEnvelope, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND.to_owned(),
+            operation_id: message_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                MESSAGE_READ_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .message(&subject, scope, message_id)
             .map_err(map_authorized_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
     }

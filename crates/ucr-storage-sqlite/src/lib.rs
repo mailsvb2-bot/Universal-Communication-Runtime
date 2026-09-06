@@ -1076,28 +1076,31 @@ mod tests {
         CommandAcceptanceStore, CommandOutcomeStore, ConversationStore, DurableStoreError,
         EventAppendStatus, EventJournalStore, ExternalIdentityBindingLookup,
         ExternalIdentityBindingStore, IdentityStore, IntegrationCommandIngress, IntegrationIngress,
-        PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaStore,
-        StorageHealth, StorageProvider, SystemServiceQuotaClock, issue_service_credential,
+        MessageStore, PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore,
+        ServiceQuotaStore, StorageHealth, StorageProvider, SystemServiceQuotaClock,
+        issue_service_credential,
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, ConversationId, ConversationKind,
-        ConversationRecord, ConversationRef, CorrelationContext, DeviceId, DeviceRef,
-        EventEnvelope, EventId, ExternalIdentityBinding, IdentityEvidence, IdentityId,
-        IdentityOwnership, IdentityRecord, IntegrationId, NamespaceId, OpaqueId, PermissionGrant,
-        PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension,
-        ProtocolVersion, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditOutcome,
-        ServiceQuotaPolicy, TenantId, TenantScope,
+        ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy, DeliveryState,
+        DeviceId, DeviceRef, EventEnvelope, EventId, ExternalIdentityBinding, IdentityEvidence,
+        IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, MessageEnvelope, MessageId,
+        NamespaceId, OpaqueId, OriginRef, PermissionGrant, PermissionScope, PrincipalId,
+        PrincipalKind, PrincipalRef, ProtocolExtension, ProtocolVersion, ScopedPrincipal,
+        ServiceAuditOperationRef, ServiceAuditOutcome, ServiceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{
         COMMAND_ACCEPT_PERMISSION, CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION,
         CommandReceiptStatus, DEFAULT_MAX_PAYLOAD_LEN, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
         EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, IDENTITY_CREATE_PERMISSION,
-        IDENTITY_READ_PERMISSION, MAX_PROTOCOL_EXTENSIONS, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
+        IDENTITY_READ_PERMISSION, MAX_PROTOCOL_EXTENSIONS, MESSAGE_READ_PERMISSION,
+        MESSAGE_WRITE_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
         SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
         SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND,
         SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
         SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND,
-        SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
+        SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND, SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND,
+        SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND,
     };
 
     use super::{SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID};
@@ -1148,6 +1151,51 @@ mod tests {
             },
             schema_version: ProtocolVersion::new(1, 0),
             extensions: Vec::new(),
+        }
+    }
+
+    fn public_message(
+        scope: &TenantScope,
+        conversation: &ConversationRecord,
+        origin_principal_id: &PrincipalId,
+        id: &str,
+        content: &[u8],
+    ) -> MessageEnvelope {
+        MessageEnvelope {
+            message_id: MessageId::from_opaque(opaque(id)),
+            scope: scope.clone(),
+            conversation: conversation.conversation.clone(),
+            author: ActorRef {
+                actor_id: ActorId::from_opaque(opaque("actor-message-api")),
+                kind: ActorKind::Person,
+                on_behalf_of: None,
+            },
+            author_device: DeviceRef {
+                device_id: DeviceId::from_opaque(opaque("device-message-api")),
+                identity_id: IdentityId::from_opaque(opaque("identity-message-api")),
+            },
+            created_at_unix_ms: 1_788_640_000_000,
+            logical_order: 1,
+            content: content.to_vec(),
+            attachment_ids: Vec::new(),
+            reply_to: None,
+            relations: Vec::new(),
+            crypto_metadata: None,
+            delivery_policy: DeliveryPolicy::Durable,
+            delivery_state: DeliveryState::Created,
+            origin: OriginRef {
+                principal_id: Some(origin_principal_id.clone()),
+                endpoint_id: None,
+                integration_id: None,
+            },
+            correlation: CorrelationContext {
+                correlation_id: opaque("correlation-message-api"),
+                causation_id: None,
+                idempotency_key: Some(format!("message-api-key-{id}")),
+            },
+            extensions: Vec::new(),
+            external_mappings: Vec::new(),
+            signature: None,
         }
     }
 
@@ -1224,6 +1272,42 @@ mod tests {
         store
             .set_service_quota_policy(quota)
             .expect("persist quota");
+    }
+
+    fn seed_message_api_fixture(
+        store: &SqliteLocalStore,
+        subject: &ScopedPrincipal,
+        credential: &ucr_model::ServiceCredentialRecord,
+        scope: &TenantScope,
+        conversation: &ConversationRecord,
+    ) {
+        store
+            .provision_service_credential(credential)
+            .expect("persist message API credential");
+        grant_exact_permission(
+            store,
+            subject,
+            MESSAGE_WRITE_PERMISSION,
+            scope,
+            "persist message write permission",
+        );
+        grant_exact_permission(
+            store,
+            subject,
+            MESSAGE_READ_PERMISSION,
+            scope,
+            "persist message read permission",
+        );
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject.clone(),
+                max_requests: 4,
+                window_ms: 60_000,
+            })
+            .expect("persist message API quota");
+        store
+            .persist_conversation(conversation)
+            .expect("persist message API conversation");
     }
 
     fn seed_identity_read_fixture(
@@ -2613,6 +2697,97 @@ mod tests {
             &scope,
             &read_operation,
             "conversation read audit after restart",
+        );
+    }
+
+    #[test]
+    fn integration_message_api_survives_sqlite_restart_through_canonical_owner() {
+        let db = TestDbPath::new();
+        let scope = command(
+            "message-api-scope",
+            "message-api-scope-key",
+            b"",
+            Some("namespace-message-api"),
+        )
+        .scope;
+        let subject = service_subject(&scope, "service-message-api-sqlite");
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        let conversation = ConversationRecord {
+            scope: scope.clone(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(opaque("conversation-message-api")),
+                kind: ConversationKind::Direct,
+            },
+            parent_conversation_id: None,
+        };
+        let value = public_message(
+            &scope,
+            &conversation,
+            &subject.principal.principal_id,
+            "message-api-root",
+            b"restart-safe",
+        );
+
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open message API store");
+            seed_message_api_fixture(&store, &subject, &credential, &scope, &conversation);
+            let ingress = IntegrationIngress::new(&SystemServiceQuotaClock, &store, &store);
+            let acknowledgement = ingress
+                .send_message(&scope, &credential.credential_id, &secret, &value)
+                .expect("first public message send");
+            assert_eq!(
+                acknowledgement.acknowledged_id,
+                value.message_id.as_opaque().clone()
+            );
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen message API store");
+        let ingress = IntegrationIngress::new(&SystemServiceQuotaClock, &reopened, &reopened);
+        let loaded = ingress
+            .get_message(
+                &scope,
+                &credential.credential_id,
+                &secret,
+                &scope,
+                &value.message_id,
+            )
+            .expect("public message read after restart");
+        assert_eq!(loaded.delivery_state, DeliveryState::Persisted);
+        assert_eq!(loaded.content, value.content);
+        assert_eq!(
+            ingress
+                .send_message(&scope, &credential.credential_id, &secret, &value)
+                .expect("idempotent public message send after restart")
+                .acknowledged_id,
+            value.message_id.as_opaque().clone()
+        );
+        assert_eq!(
+            reopened
+                .message(&scope, &value.message_id)
+                .expect("canonical message lookup after restart"),
+            Some(loaded)
+        );
+
+        let send_operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND.to_owned(),
+            operation_id: value.message_id.as_opaque().clone(),
+        };
+        let read_operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND.to_owned(),
+            operation_id: value.message_id.as_opaque().clone(),
+        };
+        assert_eq!(
+            reopened
+                .service_audit_records_for_operation(&scope, &send_operation, 4)
+                .expect("restart-safe message send audit")
+                .len(),
+            2
+        );
+        assert_single_operation_audit(
+            &reopened,
+            &scope,
+            &read_operation,
+            "message read audit after restart",
         );
     }
 

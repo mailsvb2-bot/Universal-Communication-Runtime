@@ -16,10 +16,12 @@ The implemented Phase-13 vertical surface exposes:
 - `IntegrationService.GetIdentity` over exact canonical Root Identity lookup;
 - `IntegrationService.ResolveIdentityBinding` over the exact external binding key;
 - `IntegrationService.CreateConversation` over canonical `ConversationRecord`;
-- `IntegrationService.GetConversation` over exact `TenantScope + ConversationId`.
+- `IntegrationService.GetConversation` over exact `TenantScope + ConversationId`;
+- `IntegrationService.SendMessage` over canonical `MessageEnvelope` with generic `AcknowledgementEnvelope`;
+- `IntegrationService.GetMessage` over exact `TenantScope + MessageId`.
 
 These methods reuse existing canonical owners. They do not create Integration-specific Command,
-Identity, Conversation, audit, permission, or provider-specific communication models. Concrete gRPC, HTTP,
+Identity, Conversation, Message, audit, permission, or provider-specific communication models. Concrete gRPC, HTTP,
 local-IPC, sidecar, or embedded bindings may differ in framing and credential presentation, but
 MUST preserve the same authentication, authorization, quota/audit, idempotency, error, and durable
 semantics.
@@ -43,14 +45,17 @@ trusted from caller-supplied identity. Adapters receive no raw store access.
 - `GetIdentity` requires `ucr.identity.read`;
 - `ResolveIdentityBinding` requires `ucr.identity.external_binding.read`;
 - `CreateConversation` requires `ucr.conversation.write`;
-- `GetConversation` requires `ucr.conversation.read`.
+- `GetConversation` requires `ucr.conversation.read`;
+- `SendMessage` requires `ucr.message.write`;
+- `GetMessage` requires `ucr.message.read`.
 
 Audit attribution is generic security metadata bound before authentication: `ucr.command` +
 canonical `CommandId`, `ucr.identity.create` + canonical `IdentityId`, or
 `ucr.identity.external_binding.link` + target canonical `IdentityId`, `ucr.identity.read` +
 canonical `IdentityId`, `ucr.identity.external_binding.read` + canonical `IntegrationId`,
-`ucr.conversation.create` + canonical `ConversationId`, or `ucr.conversation.read` + canonical
-`ConversationId`.
+`ucr.conversation.create` + canonical `ConversationId`, `ucr.conversation.read` + canonical
+`ConversationId`, `ucr.message.send` + canonical `MessageId`, or `ucr.message.read` + canonical
+`MessageId`.
 External namespace/entity bytes are not copied, encoded, or hashed into generic admission audit
 operation references. An Authorized admission record proves only that the
 security gate passed; later durable validation/conflict may still fail.
@@ -95,7 +100,34 @@ Authentication and permission failures occur before existence is disclosed. Audi
 only the canonical `ConversationId`. No provider conversation ID, business relationship, membership,
 or routing model is added.
 
-## 6. Errors and maturity
+## 6. Message semantics
+
+`SendMessage` persists the provider-independent canonical `MessageEnvelope` through the single existing `MessageStore`. The existing owner validates the exact persisted Conversation, canonicalizes
+non-semantic ordering, rejects invalid states, stores accepted `CREATED`/`PERSISTED` input as
+`PERSISTED`, deduplicates equal scoped `MessageId` retries, and returns `CONFLICT` for changed
+semantics under the same scoped ID.
+
+A successful `SendMessage` returns the existing generic `AcknowledgementEnvelope` for the canonical
+`MessageId`. That ACK confirms only durable Message persistence/deduplication. It is not Message
+delivery, Message read, provider acceptance, route completion, Event evidence, or proof that a
+real-world effect occurred. Callers that need the actual persisted record use `GetMessage`.
+
+For a Service Account caller, Message write authorization is evaluated first through the normal
+single-use Service Principal admission path. Before storage mutation, the canonical authenticated
+Service Principal ID must equal `Message.origin.principal_id`; otherwise the write fails with
+`PERMISSION_DENIED`. This prevents an external application from hiding the authenticated API source.
+`author` and `on_behalf_of` remain explicit Actor/delegation provenance and are not rewritten or
+promoted into permission grants.
+
+`GetMessage` reads the same `MessageStore`. Authorized absence is canonical non-retryable `NOT_FOUND`.
+Authentication and permission failures occur before existence is disclosed. Audit attribution uses
+only the canonical `MessageId`; Message content is not copied into generic admission audit.
+
+The origin binding is API-source attribution, not cryptographic authorship proof. Automatic trusted
+Message-signature verification remains outside this Phase-13 slice; deployments requiring verified
+authorship use the existing trusted Device/signing-key verification boundary.
+
+## 7. Errors and maturity
 
 Validation failures map to `INVALID_ARGUMENT`; authorized lookup absence to `NOT_FOUND`; semantic identity/idempotency reuse to `CONFLICT`;
 storage-full to `RESOURCE_EXHAUSTED`; temporary storage failure to `TEMPORARILY_UNAVAILABLE`;
@@ -107,13 +139,13 @@ The Phase-13 API remains `Experimental`. Stable compatibility rules apply only a
 Public API Governance promotion decision. Existing `SubmitCommand` wire fields remain unchanged.
 
 This slice does not claim a production gRPC/HTTP server, SDK generation, Event subscriptions,
-webhook delivery, Command execution/dispatch, routing, Message send/read API, Message delivery,
+webhook delivery, Command execution/dispatch, routing, Message delivery/read receipts,
 Conversation listing/discovery/delete, group membership/moderation, identity/binding listing or
 discovery, Persona/Profile APIs, Identity evidence transitions,
 Identity merge/delete, external-binding unlink/relink,
 or expiry execution. Phase 14 owns Event API semantics; later phases own network transport.
 
-## 7. Required evidence
+## 8. Required evidence
 
 Reference evidence must prove Service Principal authentication, mandatory quota/audit, exact
 permission enforcement, stable error mapping, restart-safe durable ownership, duplicate/conflict
@@ -123,4 +155,7 @@ reject missing targets, historical exact v18 bindings remain readable/idempotent
 public Identity/binding reads survive restart without direct DB access or a parallel mapping owner.
 Conversation evidence additionally proves authenticated create/dedup/conflict behavior, no ghost
 state after denied/bad-secret calls, non-disclosing reads, and restart-safe public create/read through
-the existing `ConversationStore`.
+the existing `ConversationStore`. Message evidence additionally proves authenticated send/read,
+generic-ACK non-delivery semantics, equal retry/conflict behavior, forged-origin rejection after
+normal admission, missing-Conversation rejection without ghost state, persisted-state reads,
+non-disclosing `NOT_FOUND`, and restart-safe public send/read through the existing `MessageStore`.

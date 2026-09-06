@@ -14,6 +14,8 @@ pub const SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND: &str = "ucr.identity.cre
 pub const SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND: &str = "ucr.identity.read";
 pub const SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND: &str = "ucr.conversation.create";
 pub const SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND: &str = "ucr.conversation.read";
+pub const SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND: &str = "ucr.message.send";
+pub const SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND: &str = "ucr.message.read";
 pub const SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND: &str =
     "ucr.identity.external_binding.link";
 pub const SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND: &str =

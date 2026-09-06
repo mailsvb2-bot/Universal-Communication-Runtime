@@ -5216,28 +5216,30 @@ mod integration_api_tests {
 
     use ucr_core::{
         ConversationStore, ExternalIdentityBindingLookup, ExternalIdentityBindingStore,
-        IdentityStore, IntegrationCommandIngress, IntegrationIngress, PermissionGrantStore,
-        ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaClockError,
-        ServiceQuotaStore, issue_service_credential,
+        IdentityStore, IntegrationCommandIngress, IntegrationIngress, MessageStore,
+        PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock,
+        ServiceQuotaClockError, ServiceQuotaStore, issue_service_credential,
     };
     use ucr_model::{
-        CommandEnvelope, CommandId, ConversationId, ConversationKind, ConversationRecord,
-        ConversationRef, CorrelationContext, ExternalIdentityBinding, IdentityEvidence, IdentityId,
-        IdentityOwnership, IdentityRecord, IntegrationId, NamespaceId, OpaqueId, PermissionGrant,
-        PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ProtocolVersion,
-        ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditOutcome, ServiceQuotaPolicy,
-        TenantId, TenantScope,
+        ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, ConversationId, ConversationKind,
+        ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy, DeliveryState,
+        DeviceId, DeviceRef, ExternalIdentityBinding, IdentityEvidence, IdentityId,
+        IdentityOwnership, IdentityRecord, IntegrationId, MessageEnvelope, MessageId, NamespaceId,
+        OpaqueId, OriginRef, PermissionGrant, PermissionScope, PrincipalId, PrincipalKind,
+        PrincipalRef, ProtocolVersion, ScopedPrincipal, ServiceAuditOperationRef,
+        ServiceAuditOutcome, ServiceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{
         COMMAND_ACCEPT_PERMISSION, CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION,
         CanonicalErrorCode, CommandReceiptStatus, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
         EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, IDENTITY_CREATE_PERMISSION,
-        IDENTITY_READ_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
-        SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
+        IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION,
+        SERVICE_AUDIT_COMMAND_OPERATION_KIND, SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
         SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND,
         SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
         SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND,
         SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
+        SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND, SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND,
         SERVICE_AUDIT_READ_PERMISSION,
     };
 
@@ -5407,6 +5409,80 @@ mod integration_api_tests {
     fn conversation_read_operation(id: &ConversationId) -> ServiceAuditOperationRef {
         ServiceAuditOperationRef {
             operation_kind: SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND.to_owned(),
+            operation_id: id.as_opaque().clone(),
+        }
+    }
+
+    fn message(
+        conversation: &ConversationRecord,
+        origin_principal_id: &PrincipalId,
+        id: &str,
+        content: &[u8],
+    ) -> MessageEnvelope {
+        MessageEnvelope {
+            message_id: MessageId::from_opaque(oid(id)),
+            scope: conversation.scope.clone(),
+            conversation: conversation.conversation.clone(),
+            author: ActorRef {
+                actor_id: ActorId::from_opaque(oid("actor-public-message")),
+                kind: ActorKind::Person,
+                on_behalf_of: None,
+            },
+            author_device: DeviceRef {
+                device_id: DeviceId::from_opaque(oid("device-public-message")),
+                identity_id: IdentityId::from_opaque(oid("identity-public-message")),
+            },
+            created_at_unix_ms: 44_000,
+            logical_order: 1,
+            content: content.to_vec(),
+            attachment_ids: Vec::new(),
+            reply_to: None,
+            relations: Vec::new(),
+            crypto_metadata: None,
+            delivery_policy: DeliveryPolicy::Durable,
+            delivery_state: DeliveryState::Created,
+            origin: OriginRef {
+                principal_id: Some(origin_principal_id.clone()),
+                endpoint_id: None,
+                integration_id: None,
+            },
+            correlation: CorrelationContext {
+                correlation_id: oid("correlation-public-message"),
+                causation_id: None,
+                idempotency_key: Some(format!("message-key-{id}")),
+            },
+            extensions: Vec::new(),
+            external_mappings: Vec::new(),
+            signature: None,
+        }
+    }
+
+    fn message_write_grant(subject: &ScopedPrincipal) -> PermissionGrant {
+        PermissionGrant {
+            grantee: subject.clone(),
+            permission: MESSAGE_WRITE_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope()),
+        }
+    }
+
+    fn message_read_grant(subject: &ScopedPrincipal) -> PermissionGrant {
+        PermissionGrant {
+            grantee: subject.clone(),
+            permission: MESSAGE_READ_PERMISSION.to_owned(),
+            scope: PermissionScope::Exact(scope()),
+        }
+    }
+
+    fn message_send_operation(id: &MessageId) -> ServiceAuditOperationRef {
+        ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND.to_owned(),
+            operation_id: id.as_opaque().clone(),
+        }
+    }
+
+    fn message_read_operation(id: &MessageId) -> ServiceAuditOperationRef {
+        ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND.to_owned(),
             operation_id: id.as_opaque().clone(),
         }
     }
@@ -6334,6 +6410,239 @@ mod integration_api_tests {
         assert_eq!(
             audit[3].operation.as_ref(),
             Some(&conversation_read_operation(&missing))
+        );
+    }
+
+    #[test]
+    fn send_message_ingress_authenticates_audits_deduplicates_and_conflicts() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        store
+            .grant_permission(&message_write_grant(&subject))
+            .expect("bootstrap message write permission");
+        install_quota(&store, &subject, 3);
+        let conversation = conversation("conversation-public-message-send");
+        store
+            .persist_conversation(&conversation)
+            .expect("seed conversation");
+        let value = message(
+            &conversation,
+            &subject.principal.principal_id,
+            "message-public-send",
+            b"hello",
+        );
+        let clock = TestClock::new(44_000);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+
+        let first = ingress
+            .send_message(&subject.scope, &credential.credential_id, &secret, &value)
+            .expect("first public message send");
+        assert_eq!(first.acknowledged_id, value.message_id.as_opaque().clone());
+        let duplicate = ingress
+            .send_message(&subject.scope, &credential.credential_id, &secret, &value)
+            .expect("idempotent public message retry");
+        assert_eq!(duplicate, first);
+
+        let mut changed = value.clone();
+        changed.content = b"changed".to_vec();
+        let conflict = ingress
+            .send_message(&subject.scope, &credential.credential_id, &secret, &changed)
+            .expect_err("same MessageId cannot be redefined");
+        assert_eq!(conflict.code, CanonicalErrorCode::Conflict);
+
+        let persisted = store
+            .message(&value.scope, &value.message_id)
+            .expect("raw canonical lookup")
+            .expect("message exists");
+        assert_eq!(persisted.delivery_state, DeliveryState::Persisted);
+        assert_eq!(persisted.content, b"hello");
+        let expected = message_send_operation(&value.message_id);
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("message send audit");
+        assert_eq!(audit.len(), 3);
+        assert!(
+            audit
+                .iter()
+                .all(|record| record.operation.as_ref() == Some(&expected))
+        );
+    }
+
+    #[test]
+    fn send_message_failures_never_create_ghost_message() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        install_quota(&store, &subject, 5);
+        let conversation = conversation("conversation-public-message-guarded");
+        let value = message(
+            &conversation,
+            &subject.principal.principal_id,
+            "message-public-guarded",
+            b"guarded",
+        );
+        let clock = TestClock::new(45_000);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+
+        let denied = ingress
+            .send_message(&subject.scope, &credential.credential_id, &secret, &value)
+            .expect_err("missing message write permission denied");
+        assert_eq!(denied.code, CanonicalErrorCode::PermissionDenied);
+        assert_eq!(store.message(&value.scope, &value.message_id), Ok(None));
+
+        let wrong = ucr_core::ServiceCredentialSecret::from_bytes([0xA5; 32]);
+        let unauthenticated = ingress
+            .send_message(&subject.scope, &credential.credential_id, &wrong, &value)
+            .expect_err("bad message credential rejected");
+        assert_eq!(unauthenticated.code, CanonicalErrorCode::Unauthenticated);
+        assert_eq!(store.message(&value.scope, &value.message_id), Ok(None));
+
+        store
+            .grant_permission(&message_write_grant(&subject))
+            .expect("grant message write after denials");
+        let mut forged_origin = value.clone();
+        forged_origin.origin.principal_id = Some(PrincipalId::from_opaque(oid("forged-origin")));
+        let provenance_denied = ingress
+            .send_message(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &forged_origin,
+            )
+            .expect_err("authenticated Service Principal cannot hide behind another origin");
+        assert_eq!(provenance_denied.code, CanonicalErrorCode::PermissionDenied);
+        assert_eq!(store.message(&value.scope, &value.message_id), Ok(None));
+
+        let missing_conversation = ingress
+            .send_message(&subject.scope, &credential.credential_id, &secret, &value)
+            .expect_err("missing Conversation must reject Message");
+        assert_eq!(
+            missing_conversation.code,
+            CanonicalErrorCode::InvalidArgument
+        );
+        assert_eq!(store.message(&value.scope, &value.message_id), Ok(None));
+
+        store
+            .persist_conversation(&conversation)
+            .expect("persist required conversation");
+        assert_eq!(
+            ingress
+                .send_message(&subject.scope, &credential.credential_id, &secret, &value)
+                .expect("same Message remains new after failures")
+                .acknowledged_id,
+            value.message_id.as_opaque().clone()
+        );
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("guarded message audit");
+        assert_eq!(
+            audit
+                .iter()
+                .map(|record| record.outcome)
+                .collect::<Vec<_>>(),
+            vec![
+                ServiceAuditOutcome::PermissionDenied,
+                ServiceAuditOutcome::AuthenticationFailed,
+                ServiceAuditOutcome::Authorized,
+                ServiceAuditOutcome::Authorized,
+                ServiceAuditOutcome::Authorized,
+            ]
+        );
+    }
+
+    #[test]
+    fn get_message_hides_existence_until_authorized_and_returns_persisted_state() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        install_quota(&store, &subject, 4);
+        let conversation = conversation("conversation-public-message-read");
+        store
+            .persist_conversation(&conversation)
+            .expect("seed conversation");
+        let value = message(
+            &conversation,
+            &subject.principal.principal_id,
+            "message-public-read",
+            b"persisted",
+        );
+        store.persist_message(&value).expect("seed message");
+        let clock = TestClock::new(46_000);
+        let ingress = IntegrationIngress::new(&clock, &store, &store);
+
+        let denied = ingress
+            .get_message(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &value.scope,
+                &value.message_id,
+            )
+            .expect_err("missing read permission must hide existing message");
+        assert_eq!(denied.code, CanonicalErrorCode::PermissionDenied);
+        store
+            .grant_permission(&message_read_grant(&subject))
+            .expect("grant message read");
+        let wrong = ucr_core::ServiceCredentialSecret::from_bytes([0xA5; 32]);
+        let unauthenticated = ingress
+            .get_message(
+                &subject.scope,
+                &credential.credential_id,
+                &wrong,
+                &value.scope,
+                &value.message_id,
+            )
+            .expect_err("bad credential must not expose message existence");
+        assert_eq!(unauthenticated.code, CanonicalErrorCode::Unauthenticated);
+
+        let loaded = ingress
+            .get_message(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &value.scope,
+                &value.message_id,
+            )
+            .expect("authorized message read");
+        assert_eq!(loaded.delivery_state, DeliveryState::Persisted);
+        assert_eq!(loaded.content, value.content);
+
+        let missing = MessageId::from_opaque(oid("message-public-missing"));
+        let not_found = ingress
+            .get_message(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &scope(),
+                &missing,
+            )
+            .expect_err("authorized missing message is not found");
+        assert_eq!(not_found.code, CanonicalErrorCode::NotFound);
+        assert!(!not_found.retryable);
+
+        let audit = store
+            .service_audit_records(&subject.scope, 8)
+            .expect("message read audit");
+        assert_eq!(audit.len(), 4);
+        let existing = message_read_operation(&value.message_id);
+        assert!(
+            audit[..3]
+                .iter()
+                .all(|record| record.operation.as_ref() == Some(&existing))
+        );
+        assert_eq!(
+            audit[3].operation.as_ref(),
+            Some(&message_read_operation(&missing))
         );
     }
 

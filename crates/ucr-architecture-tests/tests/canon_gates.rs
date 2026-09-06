@@ -3454,8 +3454,6 @@ fn integration_conversation_api_reuses_canonical_owner_and_hides_existence_until
     assert!(proto.contains("rpc GetConversation(IntegrationGetConversationRequest)"));
     assert!(proto.contains("ConversationRecord conversation = 1;"));
     assert!(proto.contains("OpaqueId conversation_id = 2;"));
-    assert!(!proto.contains("SendMessage"));
-    assert!(!proto.contains("GetMessage"));
     assert!(ingress.contains("pub fn create_conversation("));
     assert!(ingress.contains("pub fn get_conversation("));
     assert!(ingress.contains("CONVERSATION_WRITE_PERMISSION"));
@@ -3510,6 +3508,112 @@ fn integration_conversation_api_reuses_canonical_owner_and_hides_existence_until
     assert!(
         ci.contains("0045-integration-conversation-api-reuses-canonical-conversation-owner.md")
     );
+}
+
+#[test]
+fn integration_message_api_reuses_canonical_owner_ack_and_authenticated_origin() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/integration.proto"))
+        .expect("integration proto");
+    let ingress = fs::read_to_string(workspace.join("crates/ucr-core/src/integration_api.rs"))
+        .expect("integration ingress");
+    let runtime = fs::read_to_string(workspace.join("crates/ucr-core/src/authorized_runtime.rs"))
+        .expect("authorized runtime");
+    let service_control =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/service_control.rs"))
+            .expect("service control");
+    let memory =
+        fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs")).expect("memory");
+    let sqlite = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let spec =
+        fs::read_to_string(workspace.join("spec/integration-api.md")).expect("integration spec");
+    let message_spec =
+        fs::read_to_string(workspace.join("spec/conversation-message.md")).expect("message spec");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0046-integration-message-api-reuses-canonical-message-owner-and-generic-ack.md",
+    ))
+    .expect("adr 0046");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(proto.contains("rpc SendMessage(IntegrationSendMessageRequest)"));
+    assert!(proto.contains("rpc GetMessage(IntegrationGetMessageRequest)"));
+    assert!(proto.contains("MessageEnvelope message = 1;"));
+    assert!(proto.contains("AcknowledgementEnvelope acknowledgement = 1;"));
+    assert!(proto.contains("OpaqueId message_id = 2;"));
+    assert!(!proto.contains("SubscribeEvents"));
+    assert!(ingress.contains("pub fn send_message("));
+    assert!(ingress.contains("pub fn get_message("));
+    assert!(ingress.contains("MESSAGE_WRITE_PERMISSION"));
+    assert!(ingress.contains("MESSAGE_READ_PERMISSION"));
+    assert!(ingress.contains(".persist_message(&subject, message)"));
+    assert!(ingress.contains(".message(&subject, scope, message_id)"));
+    assert!(ingress.contains("acknowledgement_for(message.message_id.as_opaque().clone())"));
+    assert!(
+        service_control
+            .contains("SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND: &str = \"ucr.message.send\"")
+    );
+    assert!(
+        service_control
+            .contains("SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND: &str = \"ucr.message.read\"")
+    );
+
+    let persist = runtime
+        .split("pub fn persist_message(")
+        .nth(1)
+        .and_then(|tail| tail.split("\n    }").next())
+        .expect("authorized Message persist body");
+    let require = persist
+        .find("self.require(subject, &message.scope, MESSAGE_WRITE_PERMISSION)")
+        .expect("Message write authorization");
+    let origin = persist
+        .find("message.origin.principal_id.as_ref()")
+        .expect("Service Account origin binding");
+    let store = persist
+        .find(".persist_message(message)")
+        .expect("canonical Message owner");
+    assert!(require < origin && origin < store);
+    assert!(persist.contains("subject.principal.kind == PrincipalKind::ServiceAccount"));
+
+    for forbidden in [
+        "SqliteLocalStore",
+        "MemoryLocalStore",
+        "rusqlite",
+        "provider_message",
+    ] {
+        assert!(
+            !ingress
+                .to_ascii_lowercase()
+                .contains(&forbidden.to_ascii_lowercase()),
+            "Message ingress leaked parallel/storage owner: {forbidden}"
+        );
+    }
+    for evidence in [
+        "send_message_ingress_authenticates_audits_deduplicates_and_conflicts",
+        "send_message_failures_never_create_ghost_message",
+        "get_message_hides_existence_until_authorized_and_returns_persisted_state",
+    ] {
+        assert!(
+            memory.contains(evidence),
+            "missing Message API evidence: {evidence}"
+        );
+    }
+    assert!(
+        sqlite.contains("integration_message_api_survives_sqlite_restart_through_canonical_owner")
+    );
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(spec.contains("single existing `MessageStore`"));
+    assert!(spec.contains("ACK confirms only durable Message persistence/deduplication"));
+    assert!(spec.contains("must equal `Message.origin.principal_id`"));
+    assert!(message_spec.contains("Delivery progression belongs to `DeliveryAttempt`"));
+    assert!(adr.contains("No storage schema changes are required"));
+    assert!(adr.contains("does not implement Delivery creation/progression"));
+    assert!(ci.contains(
+        "0046-integration-message-api-reuses-canonical-message-owner-and-generic-ack.md"
+    ));
 }
 
 #[test]
