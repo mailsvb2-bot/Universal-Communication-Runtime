@@ -4,19 +4,28 @@ use std::{fmt, sync::Arc};
 
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_core::{
-    AuthorizationEvaluator, CommandAcceptanceStore, ExternalIdentityBindingLookup,
-    ExternalIdentityBindingStore, IdentityStore, IntegrationIngress, ServiceAuditStore,
-    ServiceCredentialSecret, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
+    AuthorizationEvaluator, CommandAcceptanceStore, CommunicationIntentStore, ConversationStore,
+    ExternalIdentityBindingLookup, ExternalIdentityBindingStore, IdentityStore, IntegrationIngress,
+    MessageStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
+    ServiceQuotaClock, ServiceQuotaStore,
 };
 use ucr_model::{
-    CommandEnvelope, CommandId, CorrelationContext, ExternalIdentityBinding, IdentityEvidence,
-    IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, NamespaceId, OpaqueId,
-    ProtocolExtension, ProtocolVersion, ServiceCredentialId, TenantId, TenantScope,
+    ActorId, ActorKind, AttachmentId, CommandEnvelope, CommandId, CommunicationIntent,
+    ConversationId, ConversationKind, ConversationRecord, ConversationRef, CorrelationContext,
+    CryptoSuite, DeliveryPolicy, DeliveryState, DeviceId, DeviceRef, EndpointId,
+    ExternalIdentityBinding, ExternalMessageMapping, IdentityEvidence, IdentityId,
+    IdentityOwnership, IdentityRecord, IntegrationId, IntentConstraints, IntentId, KeyId,
+    MessageCryptoMetadata, MessageEnvelope, MessageId, MessageRelation, MessageRelationKind,
+    MessageSignature, NamespaceId, OpaqueId, OriginRef, PrincipalId, ProtocolExtension,
+    ProtocolVersion, ServiceCredentialId, TenantId, TenantScope,
 };
 use ucr_protocol::{
-    CanonicalError, CanonicalErrorCode, CommandReceipt, CommandReceiptStatus,
+    AcknowledgementEnvelope, CanonicalError, CanonicalErrorCode, CommandReceipt,
+    CommandReceiptStatus, EXTERNAL_MESSAGE_ID_LIMIT, EXTERNAL_MESSAGE_MAPPING_LIMIT,
     MAX_COMMAND_PAYLOAD_LEN, MAX_EXTENSION_PAYLOAD_LEN, MAX_IDEMPOTENCY_KEY_LEN,
-    MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS, error_envelope_from_canonical,
+    MAX_INTENT_POLICY_VALUE_LEN, MAX_INTENT_TRANSPORT_CONSTRAINTS, MAX_NAMESPACED_IDENTIFIER_LEN,
+    MAX_PROTOCOL_EXTENSIONS, MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT,
+    MESSAGE_RELATION_LIMIT, SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN, error_envelope_from_canonical,
 };
 
 /// Generated Rust mapping of the versioned public `ucr.v1` protobuf/gRPC contract.
@@ -28,8 +37,11 @@ pub mod pb {
 pub const SERVICE_CREDENTIAL_ID_METADATA_KEY: &str = "ucr-service-credential-id-bin";
 pub const SERVICE_CREDENTIAL_SECRET_METADATA_KEY: &str = "ucr-service-credential-secret-bin";
 pub const GRPC_DIAGNOSTIC_DOMAIN: &str = "ucr.grpc.binding";
-const PROTOBUF_TAG_MAX_BYTES: usize = 1;
+const PROTOBUF_TAG_MAX_BYTES: usize = 2;
 const PROTOBUF_U32_MAX_BYTES: usize = 5;
+const PROTOBUF_U64_MAX_BYTES: usize = 10;
+const PROTOBUF_I64_MAX_BYTES: usize = 10;
+const PROTOBUF_ENUM_MAX_BYTES: usize = 1;
 const PROTOBUF_LEN_PREFIX_MAX_BYTES: usize = 5;
 const PROTOBUF_BOOL_MAX_BYTES: usize = 1;
 const OPAQUE_ID_WIRE_MAX_BYTES: usize =
@@ -41,16 +53,21 @@ const TENANT_SCOPE_FIELD_WIRE_MAX_BYTES: usize =
     PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + TENANT_SCOPE_WIRE_MAX_BYTES;
 const NAMESPACED_STRING_FIELD_WIRE_MAX_BYTES: usize =
     PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + MAX_NAMESPACED_IDENTIFIER_LEN;
+const POLICY_STRING_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + MAX_INTENT_POLICY_VALUE_LEN;
 const COMMAND_PAYLOAD_FIELD_WIRE_MAX_BYTES: usize =
     PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + MAX_COMMAND_PAYLOAD_LEN;
 const IDEMPOTENCY_KEY_FIELD_WIRE_MAX_BYTES: usize =
     PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + MAX_IDEMPOTENCY_KEY_LEN;
+const ENUM_FIELD_WIRE_MAX_BYTES: usize = PROTOBUF_TAG_MAX_BYTES + PROTOBUF_ENUM_MAX_BYTES;
+const U32_FIELD_WIRE_MAX_BYTES: usize = PROTOBUF_TAG_MAX_BYTES + PROTOBUF_U32_MAX_BYTES;
+const U64_FIELD_WIRE_MAX_BYTES: usize = PROTOBUF_TAG_MAX_BYTES + PROTOBUF_U64_MAX_BYTES;
+const I64_FIELD_WIRE_MAX_BYTES: usize = PROTOBUF_TAG_MAX_BYTES + PROTOBUF_I64_MAX_BYTES;
 const CORRELATION_WIRE_MAX_BYTES: usize =
     2 * OPAQUE_ID_FIELD_WIRE_MAX_BYTES + IDEMPOTENCY_KEY_FIELD_WIRE_MAX_BYTES;
 const CORRELATION_FIELD_WIRE_MAX_BYTES: usize =
     PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + CORRELATION_WIRE_MAX_BYTES;
-const PROTOCOL_VERSION_WIRE_MAX_BYTES: usize =
-    2 * (PROTOBUF_TAG_MAX_BYTES + PROTOBUF_U32_MAX_BYTES);
+const PROTOCOL_VERSION_WIRE_MAX_BYTES: usize = 2 * U32_FIELD_WIRE_MAX_BYTES;
 const PROTOCOL_VERSION_FIELD_WIRE_MAX_BYTES: usize =
     PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + PROTOCOL_VERSION_WIRE_MAX_BYTES;
 const EXTENSION_WIRE_MAX_BYTES: usize = NAMESPACED_STRING_FIELD_WIRE_MAX_BYTES
@@ -68,11 +85,108 @@ const COMMAND_ENVELOPE_WIRE_MAX_BYTES: usize = OPAQUE_ID_FIELD_WIRE_MAX_BYTES
     + CORRELATION_FIELD_WIRE_MAX_BYTES
     + PROTOCOL_VERSION_FIELD_WIRE_MAX_BYTES
     + MAX_PROTOCOL_EXTENSIONS * EXTENSION_FIELD_WIRE_MAX_BYTES;
-/// Finite receive budget for the complete `IntegrationCommandRequest`, derived only from
-/// canonical field limits plus protobuf tag/varint upper bounds.
-pub const GRPC_MAX_DECODING_MESSAGE_SIZE: usize =
+const INTEGRATION_COMMAND_REQUEST_WIRE_MAX_BYTES: usize =
     PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + COMMAND_ENVELOPE_WIRE_MAX_BYTES;
-const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE > MAX_COMMAND_PAYLOAD_LEN);
+
+const CONVERSATION_REF_WIRE_MAX_BYTES: usize =
+    OPAQUE_ID_FIELD_WIRE_MAX_BYTES + ENUM_FIELD_WIRE_MAX_BYTES;
+const CONVERSATION_REF_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + CONVERSATION_REF_WIRE_MAX_BYTES;
+const ACTOR_REF_WIRE_MAX_BYTES: usize =
+    2 * OPAQUE_ID_FIELD_WIRE_MAX_BYTES + ENUM_FIELD_WIRE_MAX_BYTES;
+const ACTOR_REF_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + ACTOR_REF_WIRE_MAX_BYTES;
+const DEVICE_REF_WIRE_MAX_BYTES: usize = 2 * OPAQUE_ID_FIELD_WIRE_MAX_BYTES;
+const DEVICE_REF_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + DEVICE_REF_WIRE_MAX_BYTES;
+const ORIGIN_REF_WIRE_MAX_BYTES: usize = 3 * OPAQUE_ID_FIELD_WIRE_MAX_BYTES;
+const ORIGIN_REF_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + ORIGIN_REF_WIRE_MAX_BYTES;
+const MESSAGE_RELATION_WIRE_MAX_BYTES: usize =
+    ENUM_FIELD_WIRE_MAX_BYTES + OPAQUE_ID_FIELD_WIRE_MAX_BYTES;
+const MESSAGE_RELATION_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + MESSAGE_RELATION_WIRE_MAX_BYTES;
+const EXTERNAL_MESSAGE_ID_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + EXTERNAL_MESSAGE_ID_LIMIT;
+const EXTERNAL_MESSAGE_MAPPING_WIRE_MAX_BYTES: usize =
+    OPAQUE_ID_FIELD_WIRE_MAX_BYTES + EXTERNAL_MESSAGE_ID_FIELD_WIRE_MAX_BYTES;
+const EXTERNAL_MESSAGE_MAPPING_FIELD_WIRE_MAX_BYTES: usize = PROTOBUF_TAG_MAX_BYTES
+    + PROTOBUF_LEN_PREFIX_MAX_BYTES
+    + EXTERNAL_MESSAGE_MAPPING_WIRE_MAX_BYTES;
+const MESSAGE_CRYPTO_METADATA_FIELD_BYTES_MAX: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + MESSAGE_CRYPTO_METADATA_LIMIT;
+const MESSAGE_CRYPTO_METADATA_WIRE_MAX_BYTES: usize = ENUM_FIELD_WIRE_MAX_BYTES
+    + OPAQUE_ID_FIELD_WIRE_MAX_BYTES
+    + MESSAGE_CRYPTO_METADATA_FIELD_BYTES_MAX;
+const MESSAGE_CRYPTO_METADATA_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + MESSAGE_CRYPTO_METADATA_WIRE_MAX_BYTES;
+const SIGNATURE_ALGORITHM_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + SIGNATURE_ALGORITHM_ID.len();
+const SIGNATURE_BYTES_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + SIGNATURE_LEN;
+const MESSAGE_SIGNATURE_WIRE_MAX_BYTES: usize = OPAQUE_ID_FIELD_WIRE_MAX_BYTES
+    + SIGNATURE_ALGORITHM_FIELD_WIRE_MAX_BYTES
+    + U32_FIELD_WIRE_MAX_BYTES
+    + SIGNATURE_BYTES_FIELD_WIRE_MAX_BYTES;
+const MESSAGE_SIGNATURE_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + MESSAGE_SIGNATURE_WIRE_MAX_BYTES;
+const MESSAGE_ENVELOPE_WIRE_MAX_BYTES: usize = OPAQUE_ID_FIELD_WIRE_MAX_BYTES
+    + TENANT_SCOPE_FIELD_WIRE_MAX_BYTES
+    + CONVERSATION_REF_FIELD_WIRE_MAX_BYTES
+    + ACTOR_REF_FIELD_WIRE_MAX_BYTES
+    + DEVICE_REF_FIELD_WIRE_MAX_BYTES
+    + U64_FIELD_WIRE_MAX_BYTES
+    + COMMAND_PAYLOAD_FIELD_WIRE_MAX_BYTES
+    + ENUM_FIELD_WIRE_MAX_BYTES
+    + CORRELATION_FIELD_WIRE_MAX_BYTES
+    + MAX_PROTOCOL_EXTENSIONS * EXTENSION_FIELD_WIRE_MAX_BYTES
+    + ORIGIN_REF_FIELD_WIRE_MAX_BYTES
+    + I64_FIELD_WIRE_MAX_BYTES
+    + MESSAGE_ATTACHMENT_LIMIT * OPAQUE_ID_FIELD_WIRE_MAX_BYTES
+    + MESSAGE_RELATION_LIMIT * MESSAGE_RELATION_FIELD_WIRE_MAX_BYTES
+    + MESSAGE_CRYPTO_METADATA_FIELD_WIRE_MAX_BYTES
+    + ENUM_FIELD_WIRE_MAX_BYTES
+    + EXTERNAL_MESSAGE_MAPPING_LIMIT * EXTERNAL_MESSAGE_MAPPING_FIELD_WIRE_MAX_BYTES
+    + MESSAGE_SIGNATURE_FIELD_WIRE_MAX_BYTES
+    + OPAQUE_ID_FIELD_WIRE_MAX_BYTES;
+const INTEGRATION_MESSAGE_REQUEST_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + MESSAGE_ENVELOPE_WIRE_MAX_BYTES;
+
+const INTENT_CONSTRAINTS_WIRE_MAX_BYTES: usize = MAX_INTENT_TRANSPORT_CONSTRAINTS
+    * NAMESPACED_STRING_FIELD_WIRE_MAX_BYTES
+    + 2 * POLICY_STRING_FIELD_WIRE_MAX_BYTES
+    + U64_FIELD_WIRE_MAX_BYTES
+    + U32_FIELD_WIRE_MAX_BYTES;
+const INTENT_CONSTRAINTS_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + INTENT_CONSTRAINTS_WIRE_MAX_BYTES;
+const COMMUNICATION_INTENT_WIRE_MAX_BYTES: usize = OPAQUE_ID_FIELD_WIRE_MAX_BYTES
+    + TENANT_SCOPE_FIELD_WIRE_MAX_BYTES
+    + OPAQUE_ID_FIELD_WIRE_MAX_BYTES
+    + COMMAND_PAYLOAD_FIELD_WIRE_MAX_BYTES
+    + INTENT_CONSTRAINTS_FIELD_WIRE_MAX_BYTES
+    + CORRELATION_FIELD_WIRE_MAX_BYTES
+    + MAX_PROTOCOL_EXTENSIONS * EXTENSION_FIELD_WIRE_MAX_BYTES;
+const INTEGRATION_INTENT_REQUEST_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + COMMUNICATION_INTENT_WIRE_MAX_BYTES;
+
+const fn max3(left: usize, middle: usize, right: usize) -> usize {
+    let pair = if left > middle { left } else { middle };
+    if pair > right { pair } else { right }
+}
+
+/// Finite receive budget for every canonical Phase-13 Integration request.
+///
+/// The three payload-bearing shapes are the maxima: Command, Message, and Communication Intent.
+/// Each upper bound is derived from canonical field/count limits plus protobuf tag/varint bounds;
+/// smaller Identity, binding, Conversation, and lookup requests fit beneath the same ceiling.
+pub const GRPC_MAX_DECODING_MESSAGE_SIZE: usize = max3(
+    INTEGRATION_COMMAND_REQUEST_WIRE_MAX_BYTES,
+    INTEGRATION_MESSAGE_REQUEST_WIRE_MAX_BYTES,
+    INTEGRATION_INTENT_REQUEST_WIRE_MAX_BYTES,
+);
+const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= INTEGRATION_COMMAND_REQUEST_WIRE_MAX_BYTES);
+const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= INTEGRATION_MESSAGE_REQUEST_WIRE_MAX_BYTES);
+const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= INTEGRATION_INTENT_REQUEST_WIRE_MAX_BYTES);
 
 /// Thin Phase-13 gRPC adapter over the canonical Integration ingress.
 pub struct GrpcIntegrationService<C, A, S> {
@@ -110,8 +224,8 @@ impl<C, A, S> fmt::Debug for GrpcIntegrationService<C, A, S> {
     }
 }
 
-/// Builds the generated gRPC server with a bounded request budget compatible with the
-/// canonical command payload limit. TLS/listener policy belongs to the deployment layer.
+/// Builds the generated gRPC server with a bounded request budget compatible with every
+/// canonical Phase-13 Integration request. TLS/listener policy belongs to the deployment layer.
 #[must_use]
 pub fn integration_service_server<C, A, S>(
     service: GrpcIntegrationService<C, A, S>,
@@ -125,6 +239,9 @@ where
         + CommandAcceptanceStore
         + IdentityStore
         + ExternalIdentityBindingStore
+        + ConversationStore
+        + MessageStore
+        + CommunicationIntentStore
         + 'static,
 {
     pb::integration_service_server::IntegrationServiceServer::new(service)
@@ -163,6 +280,9 @@ where
         + CommandAcceptanceStore
         + IdentityStore
         + ExternalIdentityBindingStore
+        + ConversationStore
+        + MessageStore
+        + CommunicationIntentStore
         + 'static,
 {
     async fn submit_command(
@@ -319,55 +439,188 @@ where
 
     async fn create_conversation(
         &self,
-        _request: Request<pb::IntegrationCreateConversationRequest>,
+        request: Request<pb::IntegrationCreateConversationRequest>,
     ) -> Result<Response<pb::IntegrationCreateConversationResponse>, Status> {
-        Err(Status::unimplemented(
-            "CreateConversation gRPC binding is not implemented",
-        ))
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let conversation = body
+            .conversation
+            .ok_or_else(invalid_argument)
+            .and_then(decode_conversation_record);
+
+        let result = match (credentials, conversation) {
+            (Ok((credential_id, secret)), Ok(conversation)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .create_conversation(
+                        &conversation.scope,
+                        &credential_id,
+                        &secret,
+                        &conversation,
+                    )
+                    .map(|conversation| pb_conversation_record(&conversation))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+
+        Ok(Response::new(pb::IntegrationCreateConversationResponse {
+            result: Some(match result {
+                Ok(conversation) => {
+                    pb::integration_create_conversation_response::Result::Conversation(conversation)
+                }
+                Err(error) => {
+                    pb::integration_create_conversation_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
     }
 
     async fn get_conversation(
         &self,
-        _request: Request<pb::IntegrationGetConversationRequest>,
+        request: Request<pb::IntegrationGetConversationRequest>,
     ) -> Result<Response<pb::IntegrationGetConversationResponse>, Status> {
-        Err(Status::unimplemented(
-            "GetConversation gRPC binding is not implemented",
-        ))
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_conversation_lookup(request.into_inner());
+
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, conversation_id))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_conversation(&scope, &credential_id, &secret, &scope, &conversation_id)
+                    .map(|conversation| pb_conversation_record(&conversation))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+
+        Ok(Response::new(pb::IntegrationGetConversationResponse {
+            result: Some(match result {
+                Ok(conversation) => {
+                    pb::integration_get_conversation_response::Result::Conversation(conversation)
+                }
+                Err(error) => {
+                    pb::integration_get_conversation_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
     }
 
     async fn send_message(
         &self,
-        _request: Request<pb::IntegrationSendMessageRequest>,
+        request: Request<pb::IntegrationSendMessageRequest>,
     ) -> Result<Response<pb::IntegrationSendMessageResponse>, Status> {
-        Err(Status::unimplemented(
-            "SendMessage gRPC binding is not implemented",
-        ))
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let message = body
+            .message
+            .ok_or_else(invalid_argument)
+            .and_then(decode_message_envelope);
+
+        let result = match (credentials, message) {
+            (Ok((credential_id, secret)), Ok(message)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .send_message(&message.scope, &credential_id, &secret, &message)
+                    .map(pb_acknowledgement)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+
+        Ok(Response::new(pb::IntegrationSendMessageResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::integration_send_message_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::integration_send_message_response::Result::Error(pb_error(error)),
+            }),
+        }))
     }
 
     async fn get_message(
         &self,
-        _request: Request<pb::IntegrationGetMessageRequest>,
+        request: Request<pb::IntegrationGetMessageRequest>,
     ) -> Result<Response<pb::IntegrationGetMessageResponse>, Status> {
-        Err(Status::unimplemented(
-            "GetMessage gRPC binding is not implemented",
-        ))
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_message_lookup(request.into_inner());
+
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, message_id))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_message(&scope, &credential_id, &secret, &scope, &message_id)
+                    .map(|message| pb_message_envelope(&message))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+
+        Ok(Response::new(pb::IntegrationGetMessageResponse {
+            result: Some(match result {
+                Ok(message) => pb::integration_get_message_response::Result::Message(message),
+                Err(error) => pb::integration_get_message_response::Result::Error(pb_error(error)),
+            }),
+        }))
     }
 
     async fn create_communication_intent(
         &self,
-        _request: Request<pb::IntegrationCreateCommunicationIntentRequest>,
+        request: Request<pb::IntegrationCreateCommunicationIntentRequest>,
     ) -> Result<Response<pb::IntegrationCreateCommunicationIntentResponse>, Status> {
-        Err(Status::unimplemented(
-            "CreateCommunicationIntent gRPC binding is not implemented",
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let intent = body
+            .intent
+            .ok_or_else(invalid_argument)
+            .and_then(decode_communication_intent);
+
+        let result = match (credentials, intent) {
+            (Ok((credential_id, secret)), Ok(intent)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .create_communication_intent(&intent.scope, &credential_id, &secret, &intent)
+                    .map(pb_acknowledgement)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+
+        Ok(Response::new(
+            pb::IntegrationCreateCommunicationIntentResponse {
+                result: Some(match result {
+                    Ok(acknowledgement) => {
+                        pb::integration_create_communication_intent_response::Result::Acknowledgement(
+                            acknowledgement,
+                        )
+                    }
+                    Err(error) => {
+                        pb::integration_create_communication_intent_response::Result::Error(
+                            pb_error(error),
+                        )
+                    }
+                }),
+            },
         ))
     }
 
     async fn get_communication_intent(
         &self,
-        _request: Request<pb::IntegrationGetCommunicationIntentRequest>,
+        request: Request<pb::IntegrationGetCommunicationIntentRequest>,
     ) -> Result<Response<pb::IntegrationGetCommunicationIntentResponse>, Status> {
-        Err(Status::unimplemented(
-            "GetCommunicationIntent gRPC binding is not implemented",
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_communication_intent_lookup(request.into_inner());
+
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, intent_id))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_communication_intent(&scope, &credential_id, &secret, &scope, &intent_id)
+                    .map(|intent| pb_communication_intent(&intent))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+
+        Ok(Response::new(
+            pb::IntegrationGetCommunicationIntentResponse {
+                result: Some(match result {
+                    Ok(intent) => {
+                        pb::integration_get_communication_intent_response::Result::Intent(intent)
+                    }
+                    Err(error) => pb::integration_get_communication_intent_response::Result::Error(
+                        pb_error(error),
+                    ),
+                }),
+            },
         ))
     }
 }
@@ -491,6 +744,273 @@ fn decode_external_identity_binding_lookup(
     ))
 }
 
+fn decode_conversation_record(
+    value: pb::ConversationRecord,
+) -> Result<ConversationRecord, CanonicalError> {
+    Ok(ConversationRecord {
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        conversation: decode_conversation_ref(value.conversation.ok_or_else(invalid_argument)?)?,
+        parent_conversation_id: value
+            .parent_conversation_id
+            .map(|value| decode_opaque(Some(value)).map(ConversationId::from_opaque))
+            .transpose()?,
+    })
+}
+
+fn decode_conversation_ref(value: pb::ConversationRef) -> Result<ConversationRef, CanonicalError> {
+    Ok(ConversationRef {
+        conversation_id: ConversationId::from_opaque(decode_opaque(value.conversation_id)?),
+        kind: decode_conversation_kind(value.kind)?,
+    })
+}
+
+fn decode_conversation_kind(value: i32) -> Result<ConversationKind, CanonicalError> {
+    match pb::ConversationKind::try_from(value).map_err(|_| invalid_argument())? {
+        pb::ConversationKind::Unspecified => Err(invalid_argument()),
+        pb::ConversationKind::Direct => Ok(ConversationKind::Direct),
+        pb::ConversationKind::PrivateGroup => Ok(ConversationKind::PrivateGroup),
+        pb::ConversationKind::PublicGroup => Ok(ConversationKind::PublicGroup),
+        pb::ConversationKind::Broadcast => Ok(ConversationKind::Broadcast),
+        pb::ConversationKind::Community => Ok(ConversationKind::Community),
+        pb::ConversationKind::Room => Ok(ConversationKind::Room),
+        pb::ConversationKind::Topic => Ok(ConversationKind::Topic),
+        pb::ConversationKind::Thread => Ok(ConversationKind::Thread),
+        pb::ConversationKind::System => Ok(ConversationKind::System),
+    }
+}
+
+fn decode_actor_ref(value: pb::ActorRef) -> Result<ucr_model::ActorRef, CanonicalError> {
+    Ok(ucr_model::ActorRef {
+        actor_id: ActorId::from_opaque(decode_opaque(value.actor_id)?),
+        kind: decode_actor_kind(value.kind)?,
+        on_behalf_of: value
+            .on_behalf_of
+            .map(|value| decode_opaque(Some(value)).map(PrincipalId::from_opaque))
+            .transpose()?,
+    })
+}
+
+fn decode_actor_kind(value: i32) -> Result<ActorKind, CanonicalError> {
+    match pb::ActorKind::try_from(value).map_err(|_| invalid_argument())? {
+        pb::ActorKind::Unspecified => Err(invalid_argument()),
+        pb::ActorKind::Person => Ok(ActorKind::Person),
+        pb::ActorKind::AiAgent => Ok(ActorKind::AiAgent),
+        pb::ActorKind::Bot => Ok(ActorKind::Bot),
+        pb::ActorKind::Organization => Ok(ActorKind::Organization),
+        pb::ActorKind::System => Ok(ActorKind::System),
+    }
+}
+
+fn decode_device_ref(value: pb::DeviceRef) -> Result<DeviceRef, CanonicalError> {
+    Ok(DeviceRef {
+        device_id: DeviceId::from_opaque(decode_opaque(value.device_id)?),
+        identity_id: IdentityId::from_opaque(decode_opaque(value.identity_id)?),
+    })
+}
+
+fn decode_origin_ref(value: pb::OriginRef) -> Result<OriginRef, CanonicalError> {
+    Ok(OriginRef {
+        principal_id: value
+            .principal_id
+            .map(|value| decode_opaque(Some(value)).map(PrincipalId::from_opaque))
+            .transpose()?,
+        endpoint_id: value
+            .endpoint_id
+            .map(|value| decode_opaque(Some(value)).map(EndpointId::from_opaque))
+            .transpose()?,
+        integration_id: value
+            .integration_id
+            .map(|value| decode_opaque(Some(value)).map(IntegrationId::from_opaque))
+            .transpose()?,
+    })
+}
+
+fn decode_delivery_policy(value: i32) -> Result<DeliveryPolicy, CanonicalError> {
+    match pb::DeliveryPolicy::try_from(value).map_err(|_| invalid_argument())? {
+        pb::DeliveryPolicy::Unspecified => Err(invalid_argument()),
+        pb::DeliveryPolicy::BestEffort => Ok(DeliveryPolicy::BestEffort),
+        pb::DeliveryPolicy::Durable => Ok(DeliveryPolicy::Durable),
+        pb::DeliveryPolicy::Urgent => Ok(DeliveryPolicy::Urgent),
+        pb::DeliveryPolicy::Expiring => Ok(DeliveryPolicy::Expiring),
+        pb::DeliveryPolicy::LocalOnly => Ok(DeliveryPolicy::LocalOnly),
+        pb::DeliveryPolicy::DirectOnly => Ok(DeliveryPolicy::DirectOnly),
+        pb::DeliveryPolicy::NoRelay => Ok(DeliveryPolicy::NoRelay),
+        pb::DeliveryPolicy::NoExternalBridge => Ok(DeliveryPolicy::NoExternalBridge),
+        pb::DeliveryPolicy::PrivateNetworkOnly => Ok(DeliveryPolicy::PrivateNetworkOnly),
+    }
+}
+
+fn decode_delivery_state(value: i32) -> Result<DeliveryState, CanonicalError> {
+    match pb::DeliveryState::try_from(value).map_err(|_| invalid_argument())? {
+        pb::DeliveryState::Unspecified => Err(invalid_argument()),
+        pb::DeliveryState::Created => Ok(DeliveryState::Created),
+        pb::DeliveryState::Persisted => Ok(DeliveryState::Persisted),
+        pb::DeliveryState::Encrypted => Ok(DeliveryState::Encrypted),
+        pb::DeliveryState::Queued => Ok(DeliveryState::Queued),
+        pb::DeliveryState::RoutePlanned => Ok(DeliveryState::RoutePlanned),
+        pb::DeliveryState::InFlight => Ok(DeliveryState::InFlight),
+        pb::DeliveryState::Acknowledged => Ok(DeliveryState::Acknowledged),
+        pb::DeliveryState::Delivered => Ok(DeliveryState::Delivered),
+        pb::DeliveryState::Read => Ok(DeliveryState::Read),
+        pb::DeliveryState::Failed => Ok(DeliveryState::Failed),
+        pb::DeliveryState::Expired => Ok(DeliveryState::Expired),
+    }
+}
+
+fn decode_message_relation(value: pb::MessageRelation) -> Result<MessageRelation, CanonicalError> {
+    Ok(MessageRelation {
+        kind: decode_message_relation_kind(value.kind)?,
+        target_message_id: MessageId::from_opaque(decode_opaque(value.target_message_id)?),
+    })
+}
+
+fn decode_message_relation_kind(value: i32) -> Result<MessageRelationKind, CanonicalError> {
+    match pb::MessageRelationKind::try_from(value).map_err(|_| invalid_argument())? {
+        pb::MessageRelationKind::Unspecified => Err(invalid_argument()),
+        pb::MessageRelationKind::Reply => Ok(MessageRelationKind::Reply),
+        pb::MessageRelationKind::Quote => Ok(MessageRelationKind::Quote),
+        pb::MessageRelationKind::Edit => Ok(MessageRelationKind::Edit),
+        pb::MessageRelationKind::Reaction => Ok(MessageRelationKind::Reaction),
+        pb::MessageRelationKind::ThreadParent => Ok(MessageRelationKind::ThreadParent),
+        pb::MessageRelationKind::Forward => Ok(MessageRelationKind::Forward),
+        pb::MessageRelationKind::Reference => Ok(MessageRelationKind::Reference),
+    }
+}
+
+fn decode_external_message_mapping(
+    value: pb::ExternalMessageMapping,
+) -> Result<ExternalMessageMapping, CanonicalError> {
+    Ok(ExternalMessageMapping {
+        integration_id: IntegrationId::from_opaque(decode_opaque(value.integration_id)?),
+        external_message_id: value.external_message_id,
+    })
+}
+
+fn decode_crypto_suite(value: i32) -> Result<CryptoSuite, CanonicalError> {
+    match pb::CryptoSuite::try_from(value).map_err(|_| invalid_argument())? {
+        pb::CryptoSuite::Unspecified => Err(invalid_argument()),
+        pb::CryptoSuite::UcrV1 => Ok(CryptoSuite::UcrV1),
+    }
+}
+
+fn decode_message_crypto_metadata(
+    value: pb::MessageCryptoMetadata,
+) -> Result<MessageCryptoMetadata, CanonicalError> {
+    Ok(MessageCryptoMetadata {
+        suite: decode_crypto_suite(value.suite)?,
+        key_id: value
+            .key_id
+            .map(|value| decode_opaque(Some(value)).map(KeyId::from_opaque))
+            .transpose()?,
+        opaque_metadata: value.opaque_metadata,
+    })
+}
+
+fn decode_message_signature(
+    value: pb::MessageSignature,
+) -> Result<MessageSignature, CanonicalError> {
+    Ok(MessageSignature {
+        key_id: KeyId::from_opaque(decode_opaque(value.key_id)?),
+        algorithm_id: value.algorithm_id,
+        algorithm_version: value.algorithm_version,
+        signature: value.signature,
+    })
+}
+
+fn decode_message_envelope(value: pb::MessageEnvelope) -> Result<MessageEnvelope, CanonicalError> {
+    Ok(MessageEnvelope {
+        message_id: MessageId::from_opaque(decode_opaque(value.message_id)?),
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        conversation: decode_conversation_ref(value.conversation.ok_or_else(invalid_argument)?)?,
+        author: decode_actor_ref(value.author.ok_or_else(invalid_argument)?)?,
+        author_device: decode_device_ref(value.author_device.ok_or_else(invalid_argument)?)?,
+        created_at_unix_ms: value.created_at_unix_ms,
+        logical_order: value.logical_order,
+        content: value.content,
+        attachment_ids: value
+            .attachment_ids
+            .into_iter()
+            .map(|value| decode_opaque(Some(value)).map(AttachmentId::from_opaque))
+            .collect::<Result<_, _>>()?,
+        reply_to: value
+            .reply_to
+            .map(|value| decode_opaque(Some(value)).map(MessageId::from_opaque))
+            .transpose()?,
+        relations: value
+            .relations
+            .into_iter()
+            .map(decode_message_relation)
+            .collect::<Result<_, _>>()?,
+        crypto_metadata: value
+            .crypto_metadata
+            .map(decode_message_crypto_metadata)
+            .transpose()?,
+        delivery_policy: decode_delivery_policy(value.delivery_policy)?,
+        delivery_state: decode_delivery_state(value.delivery_state)?,
+        origin: decode_origin_ref(value.origin.ok_or_else(invalid_argument)?)?,
+        correlation: decode_correlation(value.correlation.ok_or_else(invalid_argument)?)?,
+        extensions: value.extensions.into_iter().map(decode_extension).collect(),
+        external_mappings: value
+            .external_mappings
+            .into_iter()
+            .map(decode_external_message_mapping)
+            .collect::<Result<_, _>>()?,
+        signature: value.signature.map(decode_message_signature).transpose()?,
+    })
+}
+
+fn decode_intent_constraints(value: pb::IntentConstraints) -> IntentConstraints {
+    IntentConstraints {
+        allowed_transport_capabilities: value.allowed_transport_capabilities,
+        forbidden_transport_capabilities: value.forbidden_transport_capabilities,
+        privacy_profile: value.privacy_profile,
+        region_constraint: value.region_constraint,
+        max_cost_microunits: value.max_cost_microunits,
+        priority_class: value.priority_class,
+    }
+}
+
+fn decode_communication_intent(
+    value: pb::CommunicationIntent,
+) -> Result<CommunicationIntent, CanonicalError> {
+    Ok(CommunicationIntent {
+        intent_id: IntentId::from_opaque(decode_opaque(value.intent_id)?),
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        target_identity_id: IdentityId::from_opaque(decode_opaque(value.target_identity_id)?),
+        payload: value.payload,
+        constraints: decode_intent_constraints(value.constraints.ok_or_else(invalid_argument)?),
+        correlation: decode_correlation(value.correlation.ok_or_else(invalid_argument)?)?,
+        extensions: value.extensions.into_iter().map(decode_extension).collect(),
+    })
+}
+
+fn decode_conversation_lookup(
+    value: pb::IntegrationGetConversationRequest,
+) -> Result<(TenantScope, ConversationId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        ConversationId::from_opaque(decode_opaque(value.conversation_id)?),
+    ))
+}
+
+fn decode_message_lookup(
+    value: pb::IntegrationGetMessageRequest,
+) -> Result<(TenantScope, MessageId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        MessageId::from_opaque(decode_opaque(value.message_id)?),
+    ))
+}
+
+fn decode_communication_intent_lookup(
+    value: pb::IntegrationGetCommunicationIntentRequest,
+) -> Result<(TenantScope, IntentId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        IntentId::from_opaque(decode_opaque(value.intent_id)?),
+    ))
+}
+
 fn decode_correlation(value: pb::Correlation) -> Result<CorrelationContext, CanonicalError> {
     Ok(CorrelationContext {
         correlation_id: decode_opaque(value.correlation_id)?,
@@ -576,6 +1096,236 @@ fn pb_external_identity_binding(value: ExternalIdentityBinding) -> pb::ExternalI
     }
 }
 
+fn pb_conversation_kind(value: ConversationKind) -> i32 {
+    (match value {
+        ConversationKind::Direct => pb::ConversationKind::Direct,
+        ConversationKind::PrivateGroup => pb::ConversationKind::PrivateGroup,
+        ConversationKind::PublicGroup => pb::ConversationKind::PublicGroup,
+        ConversationKind::Broadcast => pb::ConversationKind::Broadcast,
+        ConversationKind::Community => pb::ConversationKind::Community,
+        ConversationKind::Room => pb::ConversationKind::Room,
+        ConversationKind::Topic => pb::ConversationKind::Topic,
+        ConversationKind::Thread => pb::ConversationKind::Thread,
+        ConversationKind::System => pb::ConversationKind::System,
+    }) as i32
+}
+
+fn pb_conversation_ref(value: &ConversationRef) -> pb::ConversationRef {
+    pb::ConversationRef {
+        conversation_id: Some(pb_opaque(value.conversation_id.as_opaque())),
+        kind: pb_conversation_kind(value.kind),
+    }
+}
+
+fn pb_conversation_record(value: &ConversationRecord) -> pb::ConversationRecord {
+    pb::ConversationRecord {
+        scope: Some(pb_scope(&value.scope)),
+        conversation: Some(pb_conversation_ref(&value.conversation)),
+        parent_conversation_id: value
+            .parent_conversation_id
+            .as_ref()
+            .map(|id| pb_opaque(id.as_opaque())),
+    }
+}
+
+fn pb_actor_kind(value: ActorKind) -> i32 {
+    (match value {
+        ActorKind::Person => pb::ActorKind::Person,
+        ActorKind::AiAgent => pb::ActorKind::AiAgent,
+        ActorKind::Bot => pb::ActorKind::Bot,
+        ActorKind::Organization => pb::ActorKind::Organization,
+        ActorKind::System => pb::ActorKind::System,
+    }) as i32
+}
+
+fn pb_actor_ref(value: &ucr_model::ActorRef) -> pb::ActorRef {
+    pb::ActorRef {
+        actor_id: Some(pb_opaque(value.actor_id.as_opaque())),
+        kind: pb_actor_kind(value.kind),
+        on_behalf_of: value
+            .on_behalf_of
+            .as_ref()
+            .map(|id| pb_opaque(id.as_opaque())),
+    }
+}
+
+fn pb_device_ref(value: &DeviceRef) -> pb::DeviceRef {
+    pb::DeviceRef {
+        device_id: Some(pb_opaque(value.device_id.as_opaque())),
+        identity_id: Some(pb_opaque(value.identity_id.as_opaque())),
+    }
+}
+
+fn pb_origin_ref(value: &OriginRef) -> pb::OriginRef {
+    pb::OriginRef {
+        principal_id: value
+            .principal_id
+            .as_ref()
+            .map(|id| pb_opaque(id.as_opaque())),
+        endpoint_id: value
+            .endpoint_id
+            .as_ref()
+            .map(|id| pb_opaque(id.as_opaque())),
+        integration_id: value
+            .integration_id
+            .as_ref()
+            .map(|id| pb_opaque(id.as_opaque())),
+    }
+}
+
+fn pb_delivery_policy(value: DeliveryPolicy) -> i32 {
+    (match value {
+        DeliveryPolicy::BestEffort => pb::DeliveryPolicy::BestEffort,
+        DeliveryPolicy::Durable => pb::DeliveryPolicy::Durable,
+        DeliveryPolicy::Urgent => pb::DeliveryPolicy::Urgent,
+        DeliveryPolicy::Expiring => pb::DeliveryPolicy::Expiring,
+        DeliveryPolicy::LocalOnly => pb::DeliveryPolicy::LocalOnly,
+        DeliveryPolicy::DirectOnly => pb::DeliveryPolicy::DirectOnly,
+        DeliveryPolicy::NoRelay => pb::DeliveryPolicy::NoRelay,
+        DeliveryPolicy::NoExternalBridge => pb::DeliveryPolicy::NoExternalBridge,
+        DeliveryPolicy::PrivateNetworkOnly => pb::DeliveryPolicy::PrivateNetworkOnly,
+    }) as i32
+}
+
+fn pb_delivery_state(value: DeliveryState) -> i32 {
+    (match value {
+        DeliveryState::Created => pb::DeliveryState::Created,
+        DeliveryState::Persisted => pb::DeliveryState::Persisted,
+        DeliveryState::Encrypted => pb::DeliveryState::Encrypted,
+        DeliveryState::Queued => pb::DeliveryState::Queued,
+        DeliveryState::RoutePlanned => pb::DeliveryState::RoutePlanned,
+        DeliveryState::InFlight => pb::DeliveryState::InFlight,
+        DeliveryState::Acknowledged => pb::DeliveryState::Acknowledged,
+        DeliveryState::Delivered => pb::DeliveryState::Delivered,
+        DeliveryState::Read => pb::DeliveryState::Read,
+        DeliveryState::Failed => pb::DeliveryState::Failed,
+        DeliveryState::Expired => pb::DeliveryState::Expired,
+    }) as i32
+}
+
+fn pb_message_relation_kind(value: MessageRelationKind) -> i32 {
+    (match value {
+        MessageRelationKind::Reply => pb::MessageRelationKind::Reply,
+        MessageRelationKind::Quote => pb::MessageRelationKind::Quote,
+        MessageRelationKind::Edit => pb::MessageRelationKind::Edit,
+        MessageRelationKind::Reaction => pb::MessageRelationKind::Reaction,
+        MessageRelationKind::ThreadParent => pb::MessageRelationKind::ThreadParent,
+        MessageRelationKind::Forward => pb::MessageRelationKind::Forward,
+        MessageRelationKind::Reference => pb::MessageRelationKind::Reference,
+    }) as i32
+}
+
+fn pb_message_relation(value: &MessageRelation) -> pb::MessageRelation {
+    pb::MessageRelation {
+        kind: pb_message_relation_kind(value.kind),
+        target_message_id: Some(pb_opaque(value.target_message_id.as_opaque())),
+    }
+}
+
+fn pb_external_message_mapping(value: &ExternalMessageMapping) -> pb::ExternalMessageMapping {
+    pb::ExternalMessageMapping {
+        integration_id: Some(pb_opaque(value.integration_id.as_opaque())),
+        external_message_id: value.external_message_id.clone(),
+    }
+}
+
+fn pb_crypto_suite(value: CryptoSuite) -> i32 {
+    (match value {
+        CryptoSuite::UcrV1 => pb::CryptoSuite::UcrV1,
+    }) as i32
+}
+
+fn pb_message_crypto_metadata(value: &MessageCryptoMetadata) -> pb::MessageCryptoMetadata {
+    pb::MessageCryptoMetadata {
+        suite: pb_crypto_suite(value.suite),
+        key_id: value.key_id.as_ref().map(|id| pb_opaque(id.as_opaque())),
+        opaque_metadata: value.opaque_metadata.clone(),
+    }
+}
+
+fn pb_message_signature(value: &MessageSignature) -> pb::MessageSignature {
+    pb::MessageSignature {
+        key_id: Some(pb_opaque(value.key_id.as_opaque())),
+        algorithm_id: value.algorithm_id.clone(),
+        algorithm_version: value.algorithm_version,
+        signature: value.signature.clone(),
+    }
+}
+
+fn pb_correlation(value: &CorrelationContext) -> pb::Correlation {
+    pb::Correlation {
+        correlation_id: Some(pb_opaque(&value.correlation_id)),
+        causation_id: value.causation_id.as_ref().map(pb_opaque),
+        idempotency_key: value.idempotency_key.clone(),
+    }
+}
+
+fn pb_message_envelope(value: &MessageEnvelope) -> pb::MessageEnvelope {
+    pb::MessageEnvelope {
+        message_id: Some(pb_opaque(value.message_id.as_opaque())),
+        scope: Some(pb_scope(&value.scope)),
+        conversation: Some(pb_conversation_ref(&value.conversation)),
+        author: Some(pb_actor_ref(&value.author)),
+        author_device: Some(pb_device_ref(&value.author_device)),
+        logical_order: value.logical_order,
+        content: value.content.clone(),
+        delivery_policy: pb_delivery_policy(value.delivery_policy),
+        correlation: Some(pb_correlation(&value.correlation)),
+        extensions: value.extensions.iter().cloned().map(pb_extension).collect(),
+        origin: Some(pb_origin_ref(&value.origin)),
+        created_at_unix_ms: value.created_at_unix_ms,
+        attachment_ids: value
+            .attachment_ids
+            .iter()
+            .map(|id| pb_opaque(id.as_opaque()))
+            .collect(),
+        relations: value.relations.iter().map(pb_message_relation).collect(),
+        crypto_metadata: value
+            .crypto_metadata
+            .as_ref()
+            .map(pb_message_crypto_metadata),
+        delivery_state: pb_delivery_state(value.delivery_state),
+        external_mappings: value
+            .external_mappings
+            .iter()
+            .map(pb_external_message_mapping)
+            .collect(),
+        signature: value.signature.as_ref().map(pb_message_signature),
+        reply_to: value.reply_to.as_ref().map(|id| pb_opaque(id.as_opaque())),
+    }
+}
+
+fn pb_intent_constraints(value: &IntentConstraints) -> pb::IntentConstraints {
+    pb::IntentConstraints {
+        allowed_transport_capabilities: value.allowed_transport_capabilities.clone(),
+        forbidden_transport_capabilities: value.forbidden_transport_capabilities.clone(),
+        privacy_profile: value.privacy_profile.clone(),
+        region_constraint: value.region_constraint.clone(),
+        max_cost_microunits: value.max_cost_microunits,
+        priority_class: value.priority_class,
+    }
+}
+
+fn pb_communication_intent(value: &CommunicationIntent) -> pb::CommunicationIntent {
+    pb::CommunicationIntent {
+        intent_id: Some(pb_opaque(value.intent_id.as_opaque())),
+        scope: Some(pb_scope(&value.scope)),
+        target_identity_id: Some(pb_opaque(value.target_identity_id.as_opaque())),
+        payload: value.payload.clone(),
+        constraints: Some(pb_intent_constraints(&value.constraints)),
+        correlation: Some(pb_correlation(&value.correlation)),
+        extensions: value.extensions.iter().cloned().map(pb_extension).collect(),
+    }
+}
+
+fn pb_acknowledgement(value: AcknowledgementEnvelope) -> pb::AcknowledgementEnvelope {
+    pb::AcknowledgementEnvelope {
+        acknowledged_id: Some(pb_opaque(&value.acknowledged_id)),
+        schema_version: Some(pb_protocol_version(value.schema_version)),
+        extensions: value.extensions.into_iter().map(pb_extension).collect(),
+    }
+}
+
 fn pb_scope(value: &TenantScope) -> pb::TenantScope {
     pb::TenantScope {
         tenant_id: Some(pb_opaque(value.tenant_id.as_opaque())),
@@ -620,27 +1370,35 @@ mod tests {
 
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
-    use tonic::{Code, Request, transport::Server};
+    use tonic::{Request, transport::Server};
     use ucr_core::{
-        IdentityStore, PermissionGrantStore, ServiceCredentialSecret, ServiceCredentialStore,
-        ServiceQuotaStore, SystemServiceQuotaClock, issue_service_credential,
+        CommunicationIntentStore, ConversationStore, IdentityStore, MessageStore,
+        PermissionGrantStore, ServiceCredentialSecret, ServiceCredentialStore, ServiceQuotaStore,
+        SystemServiceQuotaClock, issue_service_credential,
     };
     use ucr_model::{
         IdentityId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{
-        COMMAND_ACCEPT_PERMISSION, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
-        EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, IDENTITY_CREATE_PERMISSION,
+        ALGORITHM_VERSION, COMMAND_ACCEPT_PERMISSION, COMMUNICATION_INTENT_READ_PERMISSION,
+        COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
+        CONVERSATION_WRITE_PERMISSION, DEFAULT_MAX_PAYLOAD_LEN,
+        EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+        EXTERNAL_MESSAGE_ID_LIMIT, EXTERNAL_MESSAGE_MAPPING_LIMIT, IDENTITY_CREATE_PERMISSION,
         IDENTITY_READ_PERMISSION, MAX_COMMAND_PAYLOAD_LEN, MAX_EXTENSION_PAYLOAD_LEN,
-        MAX_IDEMPOTENCY_KEY_LEN, MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS,
+        MAX_IDEMPOTENCY_KEY_LEN, MAX_INTENT_POLICY_VALUE_LEN, MAX_INTENT_TRANSPORT_CONSTRAINTS,
+        MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS, MESSAGE_ATTACHMENT_LIMIT,
+        MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_READ_PERMISSION, MESSAGE_RELATION_LIMIT,
+        MESSAGE_WRITE_PERMISSION, SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN,
+        validate_communication_intent, validate_message,
     };
     use ucr_storage_memory::MemoryLocalStore;
 
     use super::{
         GRPC_MAX_DECODING_MESSAGE_SIZE, GrpcIntegrationService, SERVICE_CREDENTIAL_ID_METADATA_KEY,
         SERVICE_CREDENTIAL_SECRET_METADATA_KEY, attach_service_credential, decode_command,
-        integration_service_server, pb,
+        decode_communication_intent, decode_message_envelope, integration_service_server, pb,
     };
 
     fn oid(value: &str) -> OpaqueId {
@@ -667,6 +1425,127 @@ mod tests {
     fn pb_id(value: &str) -> pb::OpaqueId {
         pb::OpaqueId {
             value: value.as_bytes().to_vec(),
+        }
+    }
+
+    fn budget_pb_id(prefix: &str, index: usize) -> pb::OpaqueId {
+        let stem = format!("{prefix}-{index}-");
+        assert!(stem.len() <= OpaqueId::MAX_LEN);
+        pb::OpaqueId {
+            value: format!("{stem}{}", "x".repeat(OpaqueId::MAX_LEN - stem.len())).into_bytes(),
+        }
+    }
+
+    fn budget_namespaced(prefix: &str, index: usize) -> String {
+        let stem = format!("{prefix}.{index}.");
+        assert!(stem.len() <= MAX_NAMESPACED_IDENTIFIER_LEN);
+        format!(
+            "{stem}{}",
+            "a".repeat(MAX_NAMESPACED_IDENTIFIER_LEN - stem.len())
+        )
+    }
+
+    fn budget_extensions(prefix: &str) -> Vec<pb::Extension> {
+        (0..MAX_PROTOCOL_EXTENSIONS)
+            .map(|index| pb::Extension {
+                name: budget_namespaced(prefix, index),
+                critical: false,
+                payload: vec![0x42; MAX_EXTENSION_PAYLOAD_LEN],
+            })
+            .collect()
+    }
+
+    fn budget_correlation(prefix: &str) -> pb::Correlation {
+        pb::Correlation {
+            correlation_id: Some(budget_pb_id(prefix, 0)),
+            causation_id: Some(budget_pb_id(prefix, 1)),
+            idempotency_key: Some("i".repeat(MAX_IDEMPOTENCY_KEY_LEN)),
+        }
+    }
+
+    fn maximum_message_for_decode_budget() -> pb::MessageEnvelope {
+        pb::MessageEnvelope {
+            message_id: Some(budget_pb_id("message", 0)),
+            scope: Some(pb::TenantScope {
+                tenant_id: Some(budget_pb_id("tenant", 0)),
+                namespace_id: Some(budget_pb_id("namespace", 0)),
+            }),
+            conversation: Some(pb::ConversationRef {
+                conversation_id: Some(budget_pb_id("conversation", 0)),
+                kind: pb::ConversationKind::Direct as i32,
+            }),
+            author: Some(pb::ActorRef {
+                actor_id: Some(budget_pb_id("actor", 0)),
+                kind: pb::ActorKind::Person as i32,
+                on_behalf_of: Some(budget_pb_id("delegator", 0)),
+            }),
+            author_device: Some(pb::DeviceRef {
+                device_id: Some(budget_pb_id("device", 0)),
+                identity_id: Some(budget_pb_id("author-identity", 0)),
+            }),
+            logical_order: u64::MAX,
+            content: vec![0x5a; DEFAULT_MAX_PAYLOAD_LEN as usize],
+            delivery_policy: pb::DeliveryPolicy::Durable as i32,
+            correlation: Some(budget_correlation("message-correlation")),
+            extensions: budget_extensions("vendor.grpc_message_budget"),
+            origin: Some(pb::OriginRef {
+                principal_id: Some(budget_pb_id("principal", 0)),
+                endpoint_id: Some(budget_pb_id("endpoint", 0)),
+                integration_id: Some(budget_pb_id("origin-integration", 0)),
+            }),
+            created_at_unix_ms: i64::MIN,
+            attachment_ids: (0..MESSAGE_ATTACHMENT_LIMIT)
+                .map(|index| budget_pb_id("attachment", index))
+                .collect(),
+            relations: (0..MESSAGE_RELATION_LIMIT)
+                .map(|index| pb::MessageRelation {
+                    kind: pb::MessageRelationKind::Reference as i32,
+                    target_message_id: Some(budget_pb_id("relation-target", index)),
+                })
+                .collect(),
+            crypto_metadata: Some(pb::MessageCryptoMetadata {
+                suite: pb::CryptoSuite::UcrV1 as i32,
+                key_id: Some(budget_pb_id("crypto-key", 0)),
+                opaque_metadata: vec![0x6b; MESSAGE_CRYPTO_METADATA_LIMIT],
+            }),
+            delivery_state: pb::DeliveryState::Created as i32,
+            external_mappings: (0..EXTERNAL_MESSAGE_MAPPING_LIMIT)
+                .map(|index| pb::ExternalMessageMapping {
+                    integration_id: Some(budget_pb_id("mapping-integration", index)),
+                    external_message_id: vec![0x80; EXTERNAL_MESSAGE_ID_LIMIT],
+                })
+                .collect(),
+            signature: Some(pb::MessageSignature {
+                key_id: Some(budget_pb_id("signature-key", 0)),
+                algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+                algorithm_version: ALGORITHM_VERSION,
+                signature: vec![0x7a; SIGNATURE_LEN],
+            }),
+            reply_to: None,
+        }
+    }
+
+    fn maximum_intent_for_decode_budget() -> pb::CommunicationIntent {
+        pb::CommunicationIntent {
+            intent_id: Some(budget_pb_id("intent", 0)),
+            scope: Some(pb::TenantScope {
+                tenant_id: Some(budget_pb_id("tenant", 0)),
+                namespace_id: Some(budget_pb_id("namespace", 0)),
+            }),
+            target_identity_id: Some(budget_pb_id("target-identity", 0)),
+            payload: vec![0x5a; DEFAULT_MAX_PAYLOAD_LEN as usize],
+            constraints: Some(pb::IntentConstraints {
+                allowed_transport_capabilities: (0..MAX_INTENT_TRANSPORT_CONSTRAINTS)
+                    .map(|index| budget_namespaced("ucr.transport.grpc_budget", index))
+                    .collect(),
+                forbidden_transport_capabilities: Vec::new(),
+                privacy_profile: Some("p".repeat(MAX_INTENT_POLICY_VALUE_LEN)),
+                region_constraint: Some("r".repeat(MAX_INTENT_POLICY_VALUE_LEN)),
+                max_cost_microunits: Some(u64::MAX),
+                priority_class: Some(u32::MAX),
+            }),
+            correlation: Some(budget_correlation("intent-correlation")),
+            extensions: budget_extensions("vendor.grpc_intent_budget"),
         }
     }
 
@@ -698,6 +1577,98 @@ mod tests {
             external_namespace: "vendor.example.customer".to_owned(),
             external_entity_id,
             identity_id: Some(pb_id(identity_id)),
+        }
+    }
+
+    fn conversation(id: &str, kind: pb::ConversationKind) -> pb::ConversationRecord {
+        pb::ConversationRecord {
+            scope: Some(wire_scope()),
+            conversation: Some(pb::ConversationRef {
+                conversation_id: Some(pb_id(id)),
+                kind: kind as i32,
+            }),
+            parent_conversation_id: None,
+        }
+    }
+
+    fn message(
+        id: &str,
+        conversation_id: &str,
+        content: &[u8],
+        external_message_id: Vec<u8>,
+    ) -> pb::MessageEnvelope {
+        pb::MessageEnvelope {
+            message_id: Some(pb_id(id)),
+            scope: Some(wire_scope()),
+            conversation: Some(pb::ConversationRef {
+                conversation_id: Some(pb_id(conversation_id)),
+                kind: pb::ConversationKind::Direct as i32,
+            }),
+            author: Some(pb::ActorRef {
+                actor_id: Some(pb_id("actor-grpc")),
+                kind: pb::ActorKind::Person as i32,
+                on_behalf_of: None,
+            }),
+            author_device: Some(pb::DeviceRef {
+                device_id: Some(pb_id("device-grpc")),
+                identity_id: Some(pb_id("identity-grpc-author")),
+            }),
+            logical_order: 7,
+            content: content.to_vec(),
+            delivery_policy: pb::DeliveryPolicy::Durable as i32,
+            correlation: Some(pb::Correlation {
+                correlation_id: Some(pb_id("correlation-message-grpc")),
+                causation_id: None,
+                idempotency_key: Some(format!("message-key-{id}")),
+            }),
+            extensions: vec![pb::Extension {
+                name: "vendor.example.message".to_owned(),
+                critical: false,
+                payload: vec![0, 255, 128, 77],
+            }],
+            origin: Some(pb::OriginRef {
+                principal_id: Some(pb_id("service-grpc")),
+                endpoint_id: None,
+                integration_id: Some(pb_id("integration-grpc")),
+            }),
+            created_at_unix_ms: 1_700_000_000_123,
+            attachment_ids: Vec::new(),
+            relations: Vec::new(),
+            crypto_metadata: None,
+            delivery_state: pb::DeliveryState::Created as i32,
+            external_mappings: vec![pb::ExternalMessageMapping {
+                integration_id: Some(pb_id("integration-grpc")),
+                external_message_id,
+            }],
+            signature: None,
+            reply_to: None,
+        }
+    }
+
+    fn intent(id: &str, payload: &[u8]) -> pb::CommunicationIntent {
+        pb::CommunicationIntent {
+            intent_id: Some(pb_id(id)),
+            scope: Some(wire_scope()),
+            target_identity_id: Some(pb_id("identity-grpc-target")),
+            payload: payload.to_vec(),
+            constraints: Some(pb::IntentConstraints {
+                allowed_transport_capabilities: vec!["ucr.transport.direct".to_owned()],
+                forbidden_transport_capabilities: vec!["ucr.transport.relay".to_owned()],
+                privacy_profile: Some("ucr.privacy.private".to_owned()),
+                region_constraint: Some("ee".to_owned()),
+                max_cost_microunits: Some(42),
+                priority_class: Some(2),
+            }),
+            correlation: Some(pb::Correlation {
+                correlation_id: Some(pb_id("correlation-intent-grpc")),
+                causation_id: Some(pb_id("cause-intent-grpc")),
+                idempotency_key: Some(format!("intent-key-{id}")),
+            }),
+            extensions: vec![pb::Extension {
+                name: "vendor.example.intent".to_owned(),
+                critical: false,
+                payload: vec![0, 255, 128, 73],
+            }],
         }
     }
 
@@ -972,6 +1943,34 @@ mod tests {
             command: Some(wire),
         };
         assert!(request.encoded_len() <= GRPC_MAX_DECODING_MESSAGE_SIZE);
+    }
+
+    #[test]
+    fn grpc_decode_budget_contains_maximum_canonical_message_wire_size() {
+        use prost::Message as _;
+
+        let mut request = pb::IntegrationSendMessageRequest {
+            message: Some(maximum_message_for_decode_budget()),
+        };
+        let encoded_len = request.encoded_len();
+        let decoded = decode_message_envelope(request.message.take().expect("maximum message"))
+            .expect("maximum message decodes");
+        validate_message(&decoded).expect("maximum message remains canonical");
+        assert!(encoded_len <= GRPC_MAX_DECODING_MESSAGE_SIZE);
+    }
+
+    #[test]
+    fn grpc_decode_budget_contains_maximum_canonical_intent_wire_size() {
+        use prost::Message as _;
+
+        let mut request = pb::IntegrationCreateCommunicationIntentRequest {
+            intent: Some(maximum_intent_for_decode_budget()),
+        };
+        let encoded_len = request.encoded_len();
+        let decoded = decode_communication_intent(request.intent.take().expect("maximum intent"))
+            .expect("maximum intent decodes");
+        validate_communication_intent(&decoded).expect("maximum intent remains canonical");
+        assert!(encoded_len <= GRPC_MAX_DECODING_MESSAGE_SIZE);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1456,16 +2455,584 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn unbound_rpc_is_explicitly_unimplemented_and_does_not_mutate_core() {
+    async fn conversation_create_retry_get_conflict_and_non_disclosure_round_trip_over_grpc() {
         let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[CONVERSATION_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION],
+        );
         let (mut client, server) = client_and_server(Arc::clone(&store)).await;
-        let error = client
-            .create_conversation(Request::new(pb::IntegrationCreateConversationRequest {
-                conversation: None,
-            }))
+        let created = conversation("conversation-grpc", pb::ConversationKind::Direct);
+
+        for _ in 0..2 {
+            let mut request = Request::new(pb::IntegrationCreateConversationRequest {
+                conversation: Some(created.clone()),
+            });
+            attach_service_credential(&mut request, &credential_id, &secret);
+            let response = client
+                .create_conversation(request)
+                .await
+                .expect("conversation create is application response")
+                .into_inner();
+            assert!(matches!(
+                response.result,
+                Some(pb::integration_create_conversation_response::Result::Conversation(value))
+                    if value == created
+            ));
+        }
+
+        let mut lookup = Request::new(pb::IntegrationGetConversationRequest {
+            scope: Some(wire_scope()),
+            conversation_id: Some(pb_id("conversation-grpc")),
+        });
+        attach_service_credential(&mut lookup, &credential_id, &secret);
+        let response = client
+            .get_conversation(lookup)
             .await
-            .expect_err("unbound RPC must be explicit");
-        assert_eq!(error.code(), Code::Unimplemented);
+            .expect("conversation get")
+            .into_inner();
+        assert!(matches!(
+            response.result,
+            Some(pb::integration_get_conversation_response::Result::Conversation(value))
+                if value == created
+        ));
+
+        let changed = conversation("conversation-grpc", pb::ConversationKind::Broadcast);
+        let mut conflict = Request::new(pb::IntegrationCreateConversationRequest {
+            conversation: Some(changed),
+        });
+        attach_service_credential(&mut conflict, &credential_id, &secret);
+        let response = client
+            .create_conversation(conflict)
+            .await
+            .expect("conversation conflict is application response")
+            .into_inner();
+        let error = match response.result.expect("conflict result") {
+            pb::integration_create_conversation_response::Result::Error(error) => error,
+            pb::integration_create_conversation_response::Result::Conversation(_) => {
+                panic!("conflicting conversation accepted")
+            }
+        };
+        assert_eq!(error.code, pb::ErrorCode::Conflict as i32);
+        server.abort();
+
+        let hidden_store = Arc::new(MemoryLocalStore::default());
+        let (hidden_credential, hidden_secret) =
+            seed_with_permissions(&hidden_store, &[CONVERSATION_WRITE_PERMISSION]);
+        let record = ucr_model::ConversationRecord {
+            scope: scope(),
+            conversation: ucr_model::ConversationRef {
+                conversation_id: ucr_model::ConversationId::from_opaque(oid("conversation-hidden")),
+                kind: ucr_model::ConversationKind::Direct,
+            },
+            parent_conversation_id: None,
+        };
+        hidden_store
+            .persist_conversation(&record)
+            .expect("seed hidden conversation");
+        let (mut hidden_client, hidden_server) = client_and_server(Arc::clone(&hidden_store)).await;
+        for id in ["conversation-hidden", "conversation-absent"] {
+            let mut request = Request::new(pb::IntegrationGetConversationRequest {
+                scope: Some(wire_scope()),
+                conversation_id: Some(pb_id(id)),
+            });
+            attach_service_credential(&mut request, &hidden_credential, &hidden_secret);
+            let response = hidden_client
+                .get_conversation(request)
+                .await
+                .expect("unauthorized lookup is application response")
+                .into_inner();
+            let error = match response.result.expect("lookup result") {
+                pb::integration_get_conversation_response::Result::Error(error) => error,
+                pb::integration_get_conversation_response::Result::Conversation(_) => {
+                    panic!("unauthorized lookup disclosed existence")
+                }
+            };
+            assert_eq!(error.code, pb::ErrorCode::PermissionDenied as i32);
+        }
+        hidden_server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn message_send_retry_get_preserves_opaque_mapping_and_service_principal_provenance() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[
+                CONVERSATION_WRITE_PERMISSION,
+                MESSAGE_WRITE_PERMISSION,
+                MESSAGE_READ_PERMISSION,
+            ],
+        );
+        let (mut client, server) = client_and_server(Arc::clone(&store)).await;
+
+        let mut create_conversation = Request::new(pb::IntegrationCreateConversationRequest {
+            conversation: Some(conversation(
+                "conversation-message-grpc",
+                pb::ConversationKind::Direct,
+            )),
+        });
+        attach_service_credential(&mut create_conversation, &credential_id, &secret);
+        client
+            .create_conversation(create_conversation)
+            .await
+            .expect("create conversation for message");
+
+        let opaque_external = vec![0, 255, 128, 77, 1];
+        let sent = message(
+            "message-grpc",
+            "conversation-message-grpc",
+            b"hello over grpc",
+            opaque_external.clone(),
+        );
+        for _ in 0..2 {
+            let mut request = Request::new(pb::IntegrationSendMessageRequest {
+                message: Some(sent.clone()),
+            });
+            attach_service_credential(&mut request, &credential_id, &secret);
+            let response = client
+                .send_message(request)
+                .await
+                .expect("message send is application response")
+                .into_inner();
+            let acknowledgement = match response.result.expect("send result") {
+                pb::integration_send_message_response::Result::Acknowledgement(value) => value,
+                pb::integration_send_message_response::Result::Error(error) => {
+                    panic!("message send failed: {error:?}")
+                }
+            };
+            assert_eq!(acknowledgement.acknowledged_id, Some(pb_id("message-grpc")));
+        }
+
+        let mut lookup = Request::new(pb::IntegrationGetMessageRequest {
+            scope: Some(wire_scope()),
+            message_id: Some(pb_id("message-grpc")),
+        });
+        attach_service_credential(&mut lookup, &credential_id, &secret);
+        let response = client
+            .get_message(lookup)
+            .await
+            .expect("message get")
+            .into_inner();
+        let persisted = match response.result.expect("message result") {
+            pb::integration_get_message_response::Result::Message(value) => value,
+            pb::integration_get_message_response::Result::Error(error) => {
+                panic!("message lookup failed: {error:?}")
+            }
+        };
+        assert_eq!(persisted.content, b"hello over grpc");
+        assert_eq!(
+            persisted.external_mappings[0].external_message_id,
+            opaque_external
+        );
+        assert_eq!(
+            persisted.origin.expect("origin").principal_id,
+            Some(pb_id("service-grpc"))
+        );
+        assert_eq!(
+            persisted.delivery_state,
+            pb::DeliveryState::Persisted as i32
+        );
+
+        let changed = message(
+            "message-grpc",
+            "conversation-message-grpc",
+            b"different payload",
+            vec![9],
+        );
+        let mut conflict = Request::new(pb::IntegrationSendMessageRequest {
+            message: Some(changed),
+        });
+        attach_service_credential(&mut conflict, &credential_id, &secret);
+        let response = client
+            .send_message(conflict)
+            .await
+            .expect("message conflict response")
+            .into_inner();
+        let error = match response.result.expect("conflict result") {
+            pb::integration_send_message_response::Result::Error(error) => error,
+            pb::integration_send_message_response::Result::Acknowledgement(_) => {
+                panic!("conflicting message accepted")
+            }
+        };
+        assert_eq!(error.code, pb::ErrorCode::Conflict as i32);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn message_provenance_denial_creates_no_ghost_and_valid_retry_succeeds() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[CONVERSATION_WRITE_PERMISSION, MESSAGE_WRITE_PERMISSION],
+        );
+        let (mut client, server) = client_and_server(Arc::clone(&store)).await;
+        let mut create_conversation = Request::new(pb::IntegrationCreateConversationRequest {
+            conversation: Some(conversation(
+                "conversation-provenance-grpc",
+                pb::ConversationKind::Direct,
+            )),
+        });
+        attach_service_credential(&mut create_conversation, &credential_id, &secret);
+        client
+            .create_conversation(create_conversation)
+            .await
+            .expect("create conversation");
+
+        let mut denied = message(
+            "message-provenance-grpc",
+            "conversation-provenance-grpc",
+            b"provenance",
+            vec![1, 2, 3],
+        );
+        denied.origin.as_mut().expect("origin").principal_id = Some(pb_id("other-service"));
+        let mut request = Request::new(pb::IntegrationSendMessageRequest {
+            message: Some(denied),
+        });
+        attach_service_credential(&mut request, &credential_id, &secret);
+        let response = client
+            .send_message(request)
+            .await
+            .expect("provenance denial response")
+            .into_inner();
+        let error = match response.result.expect("denial result") {
+            pb::integration_send_message_response::Result::Error(error) => error,
+            pb::integration_send_message_response::Result::Acknowledgement(_) => {
+                panic!("provenance mismatch accepted")
+            }
+        };
+        assert_eq!(error.code, pb::ErrorCode::PermissionDenied as i32);
+        assert!(
+            store
+                .message(
+                    &scope(),
+                    &ucr_model::MessageId::from_opaque(oid("message-provenance-grpc"))
+                )
+                .expect("read message owner")
+                .is_none()
+        );
+
+        let mut valid = Request::new(pb::IntegrationSendMessageRequest {
+            message: Some(message(
+                "message-provenance-grpc",
+                "conversation-provenance-grpc",
+                b"provenance",
+                vec![1, 2, 3],
+            )),
+        });
+        attach_service_credential(&mut valid, &credential_id, &secret);
+        let response = client
+            .send_message(valid)
+            .await
+            .expect("valid retry")
+            .into_inner();
+        assert!(matches!(
+            response.result,
+            Some(pb::integration_send_message_response::Result::Acknowledgement(_))
+        ));
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn message_reads_hide_existence_until_authorized_and_then_return_not_found() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[CONVERSATION_WRITE_PERMISSION, MESSAGE_WRITE_PERMISSION],
+        );
+        let (mut client, server) = client_and_server(Arc::clone(&store)).await;
+
+        let mut create_conversation = Request::new(pb::IntegrationCreateConversationRequest {
+            conversation: Some(conversation(
+                "conversation-read-hide-grpc",
+                pb::ConversationKind::Direct,
+            )),
+        });
+        attach_service_credential(&mut create_conversation, &credential_id, &secret);
+        client
+            .create_conversation(create_conversation)
+            .await
+            .expect("create conversation");
+        let mut send = Request::new(pb::IntegrationSendMessageRequest {
+            message: Some(message(
+                "message-read-hide-grpc",
+                "conversation-read-hide-grpc",
+                b"hidden",
+                vec![7, 8, 9],
+            )),
+        });
+        attach_service_credential(&mut send, &credential_id, &secret);
+        client
+            .send_message(send)
+            .await
+            .expect("seed hidden message");
+
+        for id in ["message-read-hide-grpc", "message-read-absent-grpc"] {
+            let mut request = Request::new(pb::IntegrationGetMessageRequest {
+                scope: Some(wire_scope()),
+                message_id: Some(pb_id(id)),
+            });
+            attach_service_credential(&mut request, &credential_id, &secret);
+            let response = client
+                .get_message(request)
+                .await
+                .expect("unauthorized read is application response")
+                .into_inner();
+            let error = match response.result.expect("read result") {
+                pb::integration_get_message_response::Result::Error(error) => error,
+                pb::integration_get_message_response::Result::Message(_) => {
+                    panic!("unauthorized message read disclosed existence")
+                }
+            };
+            assert_eq!(error.code, pb::ErrorCode::PermissionDenied as i32);
+        }
+
+        store
+            .grant_permission(&PermissionGrant {
+                grantee: subject(),
+                permission: MESSAGE_READ_PERMISSION.to_owned(),
+                scope: PermissionScope::Exact(scope()),
+            })
+            .expect("grant message read");
+        let mut missing = Request::new(pb::IntegrationGetMessageRequest {
+            scope: Some(wire_scope()),
+            message_id: Some(pb_id("message-read-absent-grpc")),
+        });
+        attach_service_credential(&mut missing, &credential_id, &secret);
+        let response = client
+            .get_message(missing)
+            .await
+            .expect("authorized missing read")
+            .into_inner();
+        assert!(matches!(
+            response.result,
+            Some(pb::integration_get_message_response::Result::Error(error))
+                if error.code == pb::ErrorCode::NotFound as i32
+        ));
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn communication_intent_create_retry_get_and_conflict_round_trip_over_grpc() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[
+                COMMUNICATION_INTENT_WRITE_PERMISSION,
+                COMMUNICATION_INTENT_READ_PERMISSION,
+            ],
+        );
+        let (mut client, server) = client_and_server(Arc::clone(&store)).await;
+        let created = intent("intent-grpc", &[0, 255, 128, 73, 1]);
+
+        for _ in 0..2 {
+            let mut request = Request::new(pb::IntegrationCreateCommunicationIntentRequest {
+                intent: Some(created.clone()),
+            });
+            attach_service_credential(&mut request, &credential_id, &secret);
+            let response = client
+                .create_communication_intent(request)
+                .await
+                .expect("intent create")
+                .into_inner();
+            let acknowledgement = match response.result.expect("intent result") {
+                pb::integration_create_communication_intent_response::Result::Acknowledgement(
+                    value,
+                ) => value,
+                pb::integration_create_communication_intent_response::Result::Error(error) => {
+                    panic!("intent create failed: {error:?}")
+                }
+            };
+            assert_eq!(acknowledgement.acknowledged_id, Some(pb_id("intent-grpc")));
+        }
+
+        let mut lookup = Request::new(pb::IntegrationGetCommunicationIntentRequest {
+            scope: Some(wire_scope()),
+            intent_id: Some(pb_id("intent-grpc")),
+        });
+        attach_service_credential(&mut lookup, &credential_id, &secret);
+        let response = client
+            .get_communication_intent(lookup)
+            .await
+            .expect("intent get")
+            .into_inner();
+        let persisted = match response.result.expect("get result") {
+            pb::integration_get_communication_intent_response::Result::Intent(value) => value,
+            pb::integration_get_communication_intent_response::Result::Error(error) => {
+                panic!("intent lookup failed: {error:?}")
+            }
+        };
+        assert_eq!(persisted.payload, vec![0, 255, 128, 73, 1]);
+        assert_eq!(persisted.constraints, created.constraints);
+        assert_eq!(persisted.correlation, created.correlation);
+        assert_eq!(persisted.extensions, created.extensions);
+
+        let mut changed = created.clone();
+        changed.payload = b"changed".to_vec();
+        let mut conflict = Request::new(pb::IntegrationCreateCommunicationIntentRequest {
+            intent: Some(changed),
+        });
+        attach_service_credential(&mut conflict, &credential_id, &secret);
+        let response = client
+            .create_communication_intent(conflict)
+            .await
+            .expect("intent conflict response")
+            .into_inner();
+        let error = match response.result.expect("conflict result") {
+            pb::integration_create_communication_intent_response::Result::Error(error) => error,
+            pb::integration_create_communication_intent_response::Result::Acknowledgement(_) => {
+                panic!("conflicting intent accepted")
+            }
+        };
+        assert_eq!(error.code, pb::ErrorCode::Conflict as i32);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn communication_intent_reads_hide_existence_until_authorized() {
+        let hidden_store = Arc::new(MemoryLocalStore::default());
+        let (hidden_credential, hidden_secret) =
+            seed_with_permissions(&hidden_store, &[COMMUNICATION_INTENT_WRITE_PERMISSION]);
+        let (mut hidden_client, hidden_server) = client_and_server(Arc::clone(&hidden_store)).await;
+        let mut create = Request::new(pb::IntegrationCreateCommunicationIntentRequest {
+            intent: Some(intent("intent-hidden", b"hidden")),
+        });
+        attach_service_credential(&mut create, &hidden_credential, &hidden_secret);
+        hidden_client
+            .create_communication_intent(create)
+            .await
+            .expect("seed hidden intent");
+        for id in ["intent-hidden", "intent-absent"] {
+            let mut request = Request::new(pb::IntegrationGetCommunicationIntentRequest {
+                scope: Some(wire_scope()),
+                intent_id: Some(pb_id(id)),
+            });
+            attach_service_credential(&mut request, &hidden_credential, &hidden_secret);
+            let response = hidden_client
+                .get_communication_intent(request)
+                .await
+                .expect("unauthorized lookup")
+                .into_inner();
+            let error = match response.result.expect("lookup result") {
+                pb::integration_get_communication_intent_response::Result::Error(error) => error,
+                pb::integration_get_communication_intent_response::Result::Intent(_) => {
+                    panic!("unauthorized intent lookup disclosed existence")
+                }
+            };
+            assert_eq!(error.code, pb::ErrorCode::PermissionDenied as i32);
+        }
+        hidden_server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn malformed_message_enum_is_invalid_argument_without_ghost_state() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(&store, &[MESSAGE_WRITE_PERMISSION]);
+        let (mut client, server) = client_and_server(Arc::clone(&store)).await;
+        let mut malformed = message(
+            "message-malformed-grpc",
+            "conversation-malformed-message-grpc",
+            b"bad enum",
+            vec![1],
+        );
+        malformed.delivery_policy = 9_999;
+        let mut request = Request::new(pb::IntegrationSendMessageRequest {
+            message: Some(malformed),
+        });
+        attach_service_credential(&mut request, &credential_id, &secret);
+        let response = client
+            .send_message(request)
+            .await
+            .expect("malformed message response")
+            .into_inner();
+        assert!(matches!(
+            response.result,
+            Some(pb::integration_send_message_response::Result::Error(error))
+                if error.code == pb::ErrorCode::InvalidArgument as i32
+        ));
+        assert!(
+            store
+                .message(
+                    &scope(),
+                    &ucr_model::MessageId::from_opaque(oid("message-malformed-grpc"))
+                )
+                .expect("message owner")
+                .is_none()
+        );
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn malformed_remaining_rpc_shapes_are_invalid_argument_without_ghost_state() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[
+                CONVERSATION_WRITE_PERMISSION,
+                MESSAGE_WRITE_PERMISSION,
+                COMMUNICATION_INTENT_WRITE_PERMISSION,
+            ],
+        );
+        let (mut client, server) = client_and_server(Arc::clone(&store)).await;
+
+        let mut bad_conversation = conversation(
+            "conversation-malformed-grpc",
+            pb::ConversationKind::Unspecified,
+        );
+        bad_conversation
+            .conversation
+            .as_mut()
+            .expect("conversation")
+            .kind = 9_999;
+        let mut request = Request::new(pb::IntegrationCreateConversationRequest {
+            conversation: Some(bad_conversation),
+        });
+        attach_service_credential(&mut request, &credential_id, &secret);
+        let response = client
+            .create_conversation(request)
+            .await
+            .expect("malformed conversation response")
+            .into_inner();
+        assert!(matches!(
+            response.result,
+            Some(pb::integration_create_conversation_response::Result::Error(error))
+                if error.code == pb::ErrorCode::InvalidArgument as i32
+        ));
+        assert!(
+            store
+                .conversation(
+                    &scope(),
+                    &ucr_model::ConversationId::from_opaque(oid("conversation-malformed-grpc"))
+                )
+                .expect("conversation owner")
+                .is_none()
+        );
+
+        let mut malformed_intent = intent("intent-malformed-grpc", b"bad");
+        malformed_intent.constraints = None;
+        let mut request = Request::new(pb::IntegrationCreateCommunicationIntentRequest {
+            intent: Some(malformed_intent),
+        });
+        attach_service_credential(&mut request, &credential_id, &secret);
+        let response = client
+            .create_communication_intent(request)
+            .await
+            .expect("malformed intent response")
+            .into_inner();
+        assert!(matches!(
+            response.result,
+            Some(pb::integration_create_communication_intent_response::Result::Error(error))
+                if error.code == pb::ErrorCode::InvalidArgument as i32
+        ));
+        assert!(
+            store
+                .communication_intent(
+                    &scope(),
+                    &ucr_model::IntentId::from_opaque(oid("intent-malformed-grpc"))
+                )
+                .expect("intent owner")
+                .is_none()
+        );
         server.abort();
     }
 }

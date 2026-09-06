@@ -2991,7 +2991,9 @@ fn integration_api_reuses_canonical_command_and_service_principal_owners() {
     assert!(ci.contains(
         "docs/adr/0040-integration-api-reuses-canonical-command-and-service-principal-boundaries.md"
     ));
-    assert!(readme.contains("**Phase 13 — Integration API (in progress"));
+    assert!(readme.contains(
+        "**Phase 13 — Integration API (local/reference complete; Phase 14 Event API not started).**"
+    ));
 }
 
 #[test]
@@ -3790,10 +3792,14 @@ fn phase13_grpc_bindings_are_thin_without_second_core_or_transport_brain() {
     );
     assert!(grpc.contains(".submit_command(&command.scope, &credential_id, &secret, &command)"));
     assert!(grpc.contains("COMMAND_ENVELOPE_WIRE_MAX_BYTES"));
+    assert!(grpc.contains("MESSAGE_ENVELOPE_WIRE_MAX_BYTES"));
+    assert!(grpc.contains("COMMUNICATION_INTENT_WIRE_MAX_BYTES"));
+    assert!(grpc.contains("INTEGRATION_MESSAGE_REQUEST_WIRE_MAX_BYTES"));
+    assert!(grpc.contains("INTEGRATION_INTENT_REQUEST_WIRE_MAX_BYTES"));
     assert!(grpc.contains("MAX_PROTOCOL_EXTENSIONS * EXTENSION_FIELD_WIRE_MAX_BYTES"));
     assert!(grpc.contains("PROTOBUF_LEN_PREFIX_MAX_BYTES"));
     assert!(!grpc.contains("GRPC_PROTOBUF_ENVELOPE_OVERHEAD_BUDGET"));
-    assert_eq!(grpc.matches("Status::unimplemented").count(), 6);
+    assert_eq!(grpc.matches("Status::unimplemented").count(), 0);
     assert_eq!(
         grpc.matches("#[allow(").count(),
         1,
@@ -3825,8 +3831,9 @@ fn phase13_grpc_bindings_are_thin_without_second_core_or_transport_brain() {
         "permission_denial_over_grpc_cannot_bypass_core_or_create_ghost_acceptance",
         "grpc_binding_does_not_reintroduce_tonic_four_mib_default",
         "grpc_decode_budget_contains_maximum_canonical_command_wire_size",
+        "grpc_decode_budget_contains_maximum_canonical_message_wire_size",
+        "grpc_decode_budget_contains_maximum_canonical_intent_wire_size",
         "bad_credentials_and_malformed_body_return_canonical_errors_without_ghost_acceptance",
-        "unbound_rpc_is_explicitly_unimplemented_and_does_not_mutate_core",
     ] {
         assert!(grpc.contains(evidence), "missing gRPC evidence: {evidence}");
     }
@@ -3842,7 +3849,7 @@ fn phase13_grpc_bindings_are_thin_without_second_core_or_transport_brain() {
 }
 
 #[test]
-fn phase13_grpc_identity_bindings_reuse_canonical_owners_and_keep_six_unbound_rpcs() {
+fn phase13_grpc_identity_bindings_reuse_canonical_owners_after_service_completion() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -3881,11 +3888,86 @@ fn phase13_grpc_identity_bindings_reuse_canonical_owners_and_keep_six_unbound_rp
             "missing Identity gRPC evidence: {evidence}"
         );
     }
-    assert_eq!(grpc.matches("Status::unimplemented").count(), 6);
+    assert_eq!(grpc.matches("Status::unimplemented").count(), 0);
     assert!(adr.contains("four Identity-facing gRPC methods"));
     assert!(adr.contains("six remaining Integration RPCs"));
     assert!(adr.contains("No second Identity, authorization, audit, quota, or storage owner"));
     assert!(ci.contains("0050-phase13-grpc-identity-bindings-reuse-canonical-owners.md"));
+    assert!(
+        ci.contains("0051-phase13-grpc-completes-integration-service-over-canonical-owners.md")
+    );
+}
+
+#[test]
+fn phase13_grpc_complete_surface_reuses_conversation_message_and_intent_owners() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let grpc =
+        fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/lib.rs")).expect("grpc adapter");
+    let adr =
+        fs::read_to_string(workspace.join(
+            "docs/adr/0051-phase13-grpc-completes-integration-service-over-canonical-owners.md",
+        ))
+        .expect("adr 0051");
+    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
+    let spec =
+        fs::read_to_string(workspace.join("spec/integration-api.md")).expect("integration spec");
+    let architecture = fs::read_to_string(workspace.join("docs/architecture/ARCHITECTURE.md"))
+        .expect("architecture");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+
+    for binding in [
+        ".create_conversation(",
+        ".get_conversation(&scope, &credential_id, &secret, &scope, &conversation_id)",
+        ".send_message(&message.scope, &credential_id, &secret, &message)",
+        ".get_message(&scope, &credential_id, &secret, &scope, &message_id)",
+        ".create_communication_intent(&intent.scope, &credential_id, &secret, &intent)",
+        ".get_communication_intent(&scope, &credential_id, &secret, &scope, &intent_id)",
+        "decode_conversation_kind",
+        "decode_message_envelope",
+        "decode_communication_intent",
+        "pb_acknowledgement",
+    ] {
+        assert!(
+            grpc.contains(binding),
+            "missing complete gRPC binding: {binding}"
+        );
+    }
+    assert_eq!(grpc.matches("Status::unimplemented").count(), 0);
+    for evidence in [
+        "conversation_create_retry_get_conflict_and_non_disclosure_round_trip_over_grpc",
+        "message_send_retry_get_preserves_opaque_mapping_and_service_principal_provenance",
+        "message_provenance_denial_creates_no_ghost_and_valid_retry_succeeds",
+        "message_reads_hide_existence_until_authorized_and_then_return_not_found",
+        "malformed_message_enum_is_invalid_argument_without_ghost_state",
+        "communication_intent_create_retry_get_and_conflict_round_trip_over_grpc",
+        "communication_intent_reads_hide_existence_until_authorized",
+        "malformed_remaining_rpc_shapes_are_invalid_argument_without_ghost_state",
+    ] {
+        assert!(
+            grpc.contains(evidence),
+            "missing complete gRPC evidence: {evidence}"
+        );
+    }
+    assert!(adr.contains("all eleven checked-in `IntegrationService` RPCs"));
+    assert!(adr.contains("No SQLite schema or new permission/audit/storage vocabulary"));
+    assert!(adr.contains("This does not implement Phase 14 Event API"));
+    assert!(readme.contains(
+        "Phase 13 — Integration API (local/reference complete; Phase 14 Event API not started)"
+    ));
+    assert!(spec.contains("It now binds all eleven"));
+    assert!(spec.contains("checked-in `IntegrationService` RPCs"));
+    assert!(spec.contains("three payload-bearing request shapes"));
+    assert!(adr.contains("three payload-bearing maxima"));
+    assert!(
+        architecture.contains(
+            "Phase 13 is therefore complete at the local/reference Integration API layer"
+        )
+    );
+    assert!(threat.contains("all eleven checked-in `IntegrationService` RPCs"));
 }
 
 #[test]

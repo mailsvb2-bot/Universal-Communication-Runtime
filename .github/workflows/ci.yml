@@ -185,4 +185,5 @@ jobs:
           test -s docs/adr/0047-integration-communication-intent-api-reuses-canonical-owner-and-generic-ack.md &&
           test -s docs/adr/0048-public-namespaced-identifiers-have-explicit-byte-budget.md &&
           test -s docs/adr/0049-phase13-grpc-submit-command-is-a-thin-binding-over-integration-ingress.md &&
-          test -s docs/adr/0050-phase13-grpc-identity-bindings-reuse-canonical-owners.md
+          test -s docs/adr/0050-phase13-grpc-identity-bindings-reuse-canonical-owners.md &&
+          test -s docs/adr/0051-phase13-grpc-completes-integration-service-over-canonical-owners.md
