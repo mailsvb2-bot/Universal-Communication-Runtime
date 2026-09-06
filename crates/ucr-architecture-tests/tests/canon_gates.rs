@@ -3744,7 +3744,7 @@ fn public_namespaced_identifiers_have_one_bounded_protocol_owner() {
 }
 
 #[test]
-fn phase13_grpc_submit_command_is_thin_binding_without_second_core_or_transport_brain() {
+fn phase13_grpc_bindings_are_thin_without_second_core_or_transport_brain() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -3793,7 +3793,7 @@ fn phase13_grpc_submit_command_is_thin_binding_without_second_core_or_transport_
     assert!(grpc.contains("MAX_PROTOCOL_EXTENSIONS * EXTENSION_FIELD_WIRE_MAX_BYTES"));
     assert!(grpc.contains("PROTOBUF_LEN_PREFIX_MAX_BYTES"));
     assert!(!grpc.contains("GRPC_PROTOBUF_ENVELOPE_OVERHEAD_BUDGET"));
-    assert_eq!(grpc.matches("Status::unimplemented").count(), 10);
+    assert_eq!(grpc.matches("Status::unimplemented").count(), 6);
     assert_eq!(
         grpc.matches("#[allow(").count(),
         1,
@@ -3839,6 +3839,53 @@ fn phase13_grpc_submit_command_is_thin_binding_without_second_core_or_transport_
     assert!(ci.contains(
         "0049-phase13-grpc-submit-command-is-a-thin-binding-over-integration-ingress.md"
     ));
+}
+
+#[test]
+fn phase13_grpc_identity_bindings_reuse_canonical_owners_and_keep_six_unbound_rpcs() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let grpc =
+        fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/lib.rs")).expect("grpc adapter");
+    let adr = fs::read_to_string(
+        workspace.join("docs/adr/0050-phase13-grpc-identity-bindings-reuse-canonical-owners.md"),
+    )
+    .expect("adr 0050");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    for binding in [
+        ".create_identity(&identity.scope, &credential_id, &secret, &identity)",
+        ".link_identity(&binding.scope, &credential_id, &secret, &binding)",
+        ".get_identity(&scope, &credential_id, &secret, &scope, &identity_id)",
+        ".resolve_identity_binding(&scope, &credential_id, &secret, lookup)",
+        "decode_identity_ownership",
+        "decode_identity_evidence",
+        "ExternalIdentityBindingLookup::new",
+    ] {
+        assert!(
+            grpc.contains(binding),
+            "missing Identity gRPC binding: {binding}"
+        );
+    }
+    for evidence in [
+        "identity_create_retry_get_and_semantic_conflict_round_trip_over_grpc",
+        "identity_link_retry_resolve_preserves_opaque_external_entity_bytes",
+        "identity_permission_denial_and_bad_secret_never_create_ghost_identity",
+        "identity_reads_hide_existence_until_authorized_and_authorized_absence_is_not_found",
+        "malformed_identity_enum_values_are_invalid_argument_without_ghost_and_valid_retry_succeeds",
+    ] {
+        assert!(
+            grpc.contains(evidence),
+            "missing Identity gRPC evidence: {evidence}"
+        );
+    }
+    assert_eq!(grpc.matches("Status::unimplemented").count(), 6);
+    assert!(adr.contains("four Identity-facing gRPC methods"));
+    assert!(adr.contains("six remaining Integration RPCs"));
+    assert!(adr.contains("No second Identity, authorization, audit, quota, or storage owner"));
+    assert!(ci.contains("0050-phase13-grpc-identity-bindings-reuse-canonical-owners.md"));
 }
 
 #[test]

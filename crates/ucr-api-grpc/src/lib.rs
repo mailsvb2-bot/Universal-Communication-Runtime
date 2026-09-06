@@ -4,12 +4,14 @@ use std::{fmt, sync::Arc};
 
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_core::{
-    AuthorizationEvaluator, CommandAcceptanceStore, IntegrationIngress, ServiceAuditStore,
+    AuthorizationEvaluator, CommandAcceptanceStore, ExternalIdentityBindingLookup,
+    ExternalIdentityBindingStore, IdentityStore, IntegrationIngress, ServiceAuditStore,
     ServiceCredentialSecret, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
 };
 use ucr_model::{
-    CommandEnvelope, CommandId, CorrelationContext, NamespaceId, OpaqueId, ProtocolExtension,
-    ProtocolVersion, ServiceCredentialId, TenantId, TenantScope,
+    CommandEnvelope, CommandId, CorrelationContext, ExternalIdentityBinding, IdentityEvidence,
+    IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, NamespaceId, OpaqueId,
+    ProtocolExtension, ProtocolVersion, ServiceCredentialId, TenantId, TenantScope,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, CommandReceipt, CommandReceiptStatus,
@@ -121,6 +123,8 @@ where
         + ServiceQuotaStore
         + ServiceAuditStore
         + CommandAcceptanceStore
+        + IdentityStore
+        + ExternalIdentityBindingStore
         + 'static,
 {
     pb::integration_service_server::IntegrationServiceServer::new(service)
@@ -157,6 +161,8 @@ where
         + ServiceQuotaStore
         + ServiceAuditStore
         + CommandAcceptanceStore
+        + IdentityStore
+        + ExternalIdentityBindingStore
         + 'static,
 {
     async fn submit_command(
@@ -189,37 +195,125 @@ where
 
     async fn create_identity(
         &self,
-        _request: Request<pb::IntegrationCreateIdentityRequest>,
+        request: Request<pb::IntegrationCreateIdentityRequest>,
     ) -> Result<Response<pb::IntegrationCreateIdentityResponse>, Status> {
-        Err(Status::unimplemented(
-            "CreateIdentity gRPC binding is not implemented",
-        ))
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let identity = body
+            .identity
+            .ok_or_else(invalid_argument)
+            .and_then(decode_identity_record);
+
+        let result = match (credentials, identity) {
+            (Ok((credential_id, secret)), Ok(identity)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .create_identity(&identity.scope, &credential_id, &secret, &identity)
+                    .map(|identity| pb_identity_record(&identity))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+
+        Ok(Response::new(pb::IntegrationCreateIdentityResponse {
+            result: Some(match result {
+                Ok(identity) => {
+                    pb::integration_create_identity_response::Result::Identity(identity)
+                }
+                Err(error) => {
+                    pb::integration_create_identity_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
     }
 
     async fn link_identity(
         &self,
-        _request: Request<pb::IntegrationLinkIdentityRequest>,
+        request: Request<pb::IntegrationLinkIdentityRequest>,
     ) -> Result<Response<pb::IntegrationLinkIdentityResponse>, Status> {
-        Err(Status::unimplemented(
-            "LinkIdentity gRPC binding is not implemented",
-        ))
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let binding = body
+            .binding
+            .ok_or_else(invalid_argument)
+            .and_then(decode_external_identity_binding);
+
+        let result = match (credentials, binding) {
+            (Ok((credential_id, secret)), Ok(binding)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .link_identity(&binding.scope, &credential_id, &secret, &binding)
+                    .map(pb_external_identity_binding)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+
+        Ok(Response::new(pb::IntegrationLinkIdentityResponse {
+            result: Some(match result {
+                Ok(binding) => pb::integration_link_identity_response::Result::Binding(binding),
+                Err(error) => {
+                    pb::integration_link_identity_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
     }
 
     async fn get_identity(
         &self,
-        _request: Request<pb::IntegrationGetIdentityRequest>,
+        request: Request<pb::IntegrationGetIdentityRequest>,
     ) -> Result<Response<pb::IntegrationGetIdentityResponse>, Status> {
-        Err(Status::unimplemented(
-            "GetIdentity gRPC binding is not implemented",
-        ))
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_identity_lookup(body);
+
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, identity_id))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_identity(&scope, &credential_id, &secret, &scope, &identity_id)
+                    .map(|identity| pb_identity_record(&identity))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+
+        Ok(Response::new(pb::IntegrationGetIdentityResponse {
+            result: Some(match result {
+                Ok(identity) => pb::integration_get_identity_response::Result::Identity(identity),
+                Err(error) => pb::integration_get_identity_response::Result::Error(pb_error(error)),
+            }),
+        }))
     }
 
     async fn resolve_identity_binding(
         &self,
-        _request: Request<pb::IntegrationResolveIdentityBindingRequest>,
+        request: Request<pb::IntegrationResolveIdentityBindingRequest>,
     ) -> Result<Response<pb::IntegrationResolveIdentityBindingResponse>, Status> {
-        Err(Status::unimplemented(
-            "ResolveIdentityBinding gRPC binding is not implemented",
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_external_identity_binding_lookup(body);
+
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, integration_id, namespace, entity_id))) => {
+                let lookup = ExternalIdentityBindingLookup::new(
+                    &scope,
+                    &integration_id,
+                    &namespace,
+                    &entity_id,
+                );
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .resolve_identity_binding(&scope, &credential_id, &secret, lookup)
+                    .map(pb_external_identity_binding)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+
+        Ok(Response::new(
+            pb::IntegrationResolveIdentityBindingResponse {
+                result: Some(match result {
+                    Ok(binding) => {
+                        pb::integration_resolve_identity_binding_response::Result::Binding(binding)
+                    }
+                    Err(error) => pb::integration_resolve_identity_binding_response::Result::Error(
+                        pb_error(error),
+                    ),
+                }),
+            },
         ))
     }
 
@@ -329,6 +423,74 @@ fn decode_scope(value: pb::TenantScope) -> Result<TenantScope, CanonicalError> {
     })
 }
 
+fn decode_identity_record(value: pb::IdentityRecord) -> Result<IdentityRecord, CanonicalError> {
+    Ok(IdentityRecord {
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        identity_id: IdentityId::from_opaque(decode_opaque(value.identity_id)?),
+        ownership: decode_identity_ownership(value.ownership)?,
+        evidence: decode_identity_evidence(value.evidence)?,
+        expires_at_unix_ms: value.expires_at_unix_ms,
+    })
+}
+
+fn decode_identity_ownership(value: i32) -> Result<IdentityOwnership, CanonicalError> {
+    match pb::IdentityOwnership::try_from(value).map_err(|_| invalid_argument())? {
+        pb::IdentityOwnership::Unspecified => Err(invalid_argument()),
+        pb::IdentityOwnership::UcrNative => Ok(IdentityOwnership::UcrNative),
+        pb::IdentityOwnership::UserManaged => Ok(IdentityOwnership::UserManaged),
+        pb::IdentityOwnership::PlatformManaged => Ok(IdentityOwnership::PlatformManaged),
+        pb::IdentityOwnership::OrganizationManaged => Ok(IdentityOwnership::OrganizationManaged),
+        pb::IdentityOwnership::Federated => Ok(IdentityOwnership::Federated),
+        pb::IdentityOwnership::Temporary => Ok(IdentityOwnership::Temporary),
+    }
+}
+
+fn decode_identity_evidence(value: i32) -> Result<IdentityEvidence, CanonicalError> {
+    match pb::IdentityEvidence::try_from(value).map_err(|_| invalid_argument())? {
+        pb::IdentityEvidence::Unspecified => Err(invalid_argument()),
+        pb::IdentityEvidence::Unverified => Ok(IdentityEvidence::Unverified),
+        pb::IdentityEvidence::SelfAsserted => Ok(IdentityEvidence::SelfAsserted),
+        pb::IdentityEvidence::DeviceVerified => Ok(IdentityEvidence::DeviceVerified),
+        pb::IdentityEvidence::ContactVerified => Ok(IdentityEvidence::ContactVerified),
+        pb::IdentityEvidence::OrganizationVerified => Ok(IdentityEvidence::OrganizationVerified),
+        pb::IdentityEvidence::ExternalProviderVerified => {
+            Ok(IdentityEvidence::ExternalProviderVerified)
+        }
+    }
+}
+
+fn decode_external_identity_binding(
+    value: pb::ExternalIdentityBinding,
+) -> Result<ExternalIdentityBinding, CanonicalError> {
+    Ok(ExternalIdentityBinding {
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        integration_id: IntegrationId::from_opaque(decode_opaque(value.integration_id)?),
+        external_namespace: value.external_namespace,
+        external_entity_id: value.external_entity_id,
+        identity_id: IdentityId::from_opaque(decode_opaque(value.identity_id)?),
+    })
+}
+
+fn decode_identity_lookup(
+    value: pb::IntegrationGetIdentityRequest,
+) -> Result<(TenantScope, IdentityId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        IdentityId::from_opaque(decode_opaque(value.identity_id)?),
+    ))
+}
+
+fn decode_external_identity_binding_lookup(
+    value: pb::IntegrationResolveIdentityBindingRequest,
+) -> Result<(TenantScope, IntegrationId, String, Vec<u8>), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        IntegrationId::from_opaque(decode_opaque(value.integration_id)?),
+        value.external_namespace,
+        value.external_entity_id,
+    ))
+}
+
 fn decode_correlation(value: pb::Correlation) -> Result<CorrelationContext, CanonicalError> {
     Ok(CorrelationContext {
         correlation_id: decode_opaque(value.correlation_id)?,
@@ -378,6 +540,52 @@ fn pb_extension(value: ProtocolExtension) -> pb::Extension {
     }
 }
 
+fn pb_identity_record(value: &IdentityRecord) -> pb::IdentityRecord {
+    pb::IdentityRecord {
+        scope: Some(pb_scope(&value.scope)),
+        identity_id: Some(pb_opaque(value.identity_id.as_opaque())),
+        ownership: match value.ownership {
+            IdentityOwnership::UcrNative => pb::IdentityOwnership::UcrNative,
+            IdentityOwnership::UserManaged => pb::IdentityOwnership::UserManaged,
+            IdentityOwnership::PlatformManaged => pb::IdentityOwnership::PlatformManaged,
+            IdentityOwnership::OrganizationManaged => pb::IdentityOwnership::OrganizationManaged,
+            IdentityOwnership::Federated => pb::IdentityOwnership::Federated,
+            IdentityOwnership::Temporary => pb::IdentityOwnership::Temporary,
+        } as i32,
+        evidence: match value.evidence {
+            IdentityEvidence::Unverified => pb::IdentityEvidence::Unverified,
+            IdentityEvidence::SelfAsserted => pb::IdentityEvidence::SelfAsserted,
+            IdentityEvidence::DeviceVerified => pb::IdentityEvidence::DeviceVerified,
+            IdentityEvidence::ContactVerified => pb::IdentityEvidence::ContactVerified,
+            IdentityEvidence::OrganizationVerified => pb::IdentityEvidence::OrganizationVerified,
+            IdentityEvidence::ExternalProviderVerified => {
+                pb::IdentityEvidence::ExternalProviderVerified
+            }
+        } as i32,
+        expires_at_unix_ms: value.expires_at_unix_ms,
+    }
+}
+
+fn pb_external_identity_binding(value: ExternalIdentityBinding) -> pb::ExternalIdentityBinding {
+    pb::ExternalIdentityBinding {
+        scope: Some(pb_scope(&value.scope)),
+        integration_id: Some(pb_opaque(value.integration_id.as_opaque())),
+        external_namespace: value.external_namespace,
+        external_entity_id: value.external_entity_id,
+        identity_id: Some(pb_opaque(value.identity_id.as_opaque())),
+    }
+}
+
+fn pb_scope(value: &TenantScope) -> pb::TenantScope {
+    pb::TenantScope {
+        tenant_id: Some(pb_opaque(value.tenant_id.as_opaque())),
+        namespace_id: value
+            .namespace_id
+            .as_ref()
+            .map(|id| pb_opaque(id.as_opaque())),
+    }
+}
+
 fn pb_command_receipt(value: CommandReceipt) -> pb::CommandReceipt {
     let status = match value.status {
         CommandReceiptStatus::Accepted => pb::CommandReceiptStatus::Accepted,
@@ -414,15 +622,17 @@ mod tests {
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{Code, Request, transport::Server};
     use ucr_core::{
-        PermissionGrantStore, ServiceCredentialSecret, ServiceCredentialStore, ServiceQuotaStore,
-        SystemServiceQuotaClock, issue_service_credential,
+        IdentityStore, PermissionGrantStore, ServiceCredentialSecret, ServiceCredentialStore,
+        ServiceQuotaStore, SystemServiceQuotaClock, issue_service_credential,
     };
     use ucr_model::{
-        NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId, PrincipalKind,
-        PrincipalRef, ScopedPrincipal, ServiceQuotaPolicy, TenantId, TenantScope,
+        IdentityId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
+        PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{
-        COMMAND_ACCEPT_PERMISSION, MAX_COMMAND_PAYLOAD_LEN, MAX_EXTENSION_PAYLOAD_LEN,
+        COMMAND_ACCEPT_PERMISSION, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
+        EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, IDENTITY_CREATE_PERMISSION,
+        IDENTITY_READ_PERMISSION, MAX_COMMAND_PAYLOAD_LEN, MAX_EXTENSION_PAYLOAD_LEN,
         MAX_IDEMPOTENCY_KEY_LEN, MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS,
     };
     use ucr_storage_memory::MemoryLocalStore;
@@ -460,6 +670,37 @@ mod tests {
         }
     }
 
+    fn wire_scope() -> pb::TenantScope {
+        pb::TenantScope {
+            tenant_id: Some(pb_id("tenant-grpc")),
+            namespace_id: Some(pb_id("namespace-grpc")),
+        }
+    }
+
+    fn identity(
+        id: &str,
+        ownership: pb::IdentityOwnership,
+        evidence: pb::IdentityEvidence,
+    ) -> pb::IdentityRecord {
+        pb::IdentityRecord {
+            scope: Some(wire_scope()),
+            identity_id: Some(pb_id(id)),
+            ownership: ownership as i32,
+            evidence: evidence as i32,
+            expires_at_unix_ms: None,
+        }
+    }
+
+    fn binding(identity_id: &str, external_entity_id: Vec<u8>) -> pb::ExternalIdentityBinding {
+        pb::ExternalIdentityBinding {
+            scope: Some(wire_scope()),
+            integration_id: Some(pb_id("integration-grpc")),
+            external_namespace: "vendor.example.customer".to_owned(),
+            external_entity_id,
+            identity_id: Some(pb_id(identity_id)),
+        }
+    }
+
     fn command(id: &str, key: &str, payload: &[u8]) -> pb::CommandEnvelope {
         pb::CommandEnvelope {
             command_id: Some(pb_id(id)),
@@ -479,27 +720,36 @@ mod tests {
         }
     }
 
-    fn seed(store: &MemoryLocalStore) -> (ucr_model::ServiceCredentialId, ServiceCredentialSecret) {
+    fn seed_with_permissions(
+        store: &MemoryLocalStore,
+        permissions: &[&str],
+    ) -> (ucr_model::ServiceCredentialId, ServiceCredentialSecret) {
         let subject = subject();
         let (record, secret) = issue_service_credential(&subject).expect("issue credential");
         store
             .provision_service_credential(&record)
             .expect("persist credential");
-        store
-            .grant_permission(&PermissionGrant {
-                grantee: subject.clone(),
-                permission: COMMAND_ACCEPT_PERMISSION.to_owned(),
-                scope: PermissionScope::Exact(scope()),
-            })
-            .expect("grant command permission");
+        for permission in permissions {
+            store
+                .grant_permission(&PermissionGrant {
+                    grantee: subject.clone(),
+                    permission: (*permission).to_owned(),
+                    scope: PermissionScope::Exact(scope()),
+                })
+                .expect("grant permission");
+        }
         store
             .set_service_quota_policy(&ServiceQuotaPolicy {
                 subject,
-                max_requests: 16,
+                max_requests: 64,
                 window_ms: 60_000,
             })
             .expect("install quota");
         (record.credential_id, secret)
+    }
+
+    fn seed(store: &MemoryLocalStore) -> (ucr_model::ServiceCredentialId, ServiceCredentialSecret) {
+        seed_with_permissions(store, &[COMMAND_ACCEPT_PERMISSION])
     }
 
     async fn client_and_server(
@@ -813,12 +1063,405 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn identity_create_retry_get_and_semantic_conflict_round_trip_over_grpc() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION],
+        );
+        let (mut client, server) = client_and_server(Arc::clone(&store)).await;
+        let wire = identity(
+            "identity-grpc",
+            pb::IdentityOwnership::UserManaged,
+            pb::IdentityEvidence::SelfAsserted,
+        );
+
+        for attempt in 0..2 {
+            let mut request = Request::new(pb::IntegrationCreateIdentityRequest {
+                identity: Some(wire.clone()),
+            });
+            attach_service_credential(&mut request, &credential_id, &secret);
+            let response = client
+                .create_identity(request)
+                .await
+                .expect("create/retry is canonical application response")
+                .into_inner();
+            let created = match response.result.expect("identity result") {
+                pb::integration_create_identity_response::Result::Identity(identity) => identity,
+                pb::integration_create_identity_response::Result::Error(error) => {
+                    panic!("identity attempt {attempt} failed: {}", error.code)
+                }
+            };
+            assert_eq!(created, wire);
+        }
+
+        let mut changed = wire.clone();
+        changed.ownership = pb::IdentityOwnership::PlatformManaged as i32;
+        let mut request = Request::new(pb::IntegrationCreateIdentityRequest {
+            identity: Some(changed),
+        });
+        attach_service_credential(&mut request, &credential_id, &secret);
+        let response = client
+            .create_identity(request)
+            .await
+            .expect("semantic conflict is application response")
+            .into_inner();
+        let error = match response.result.expect("conflict result") {
+            pb::integration_create_identity_response::Result::Error(error) => error,
+            pb::integration_create_identity_response::Result::Identity(_) => {
+                panic!("identity semantic rewrite was accepted")
+            }
+        };
+        assert_eq!(error.code, pb::ErrorCode::Conflict as i32);
+
+        let mut request = Request::new(pb::IntegrationGetIdentityRequest {
+            scope: Some(wire_scope()),
+            identity_id: Some(pb_id("identity-grpc")),
+        });
+        attach_service_credential(&mut request, &credential_id, &secret);
+        let response = client
+            .get_identity(request)
+            .await
+            .expect("authorized get succeeds")
+            .into_inner();
+        let fetched = match response.result.expect("get result") {
+            pb::integration_get_identity_response::Result::Identity(identity) => identity,
+            pb::integration_get_identity_response::Result::Error(error) => {
+                panic!("get failed: {}", error.code)
+            }
+        };
+        assert_eq!(fetched, wire);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn identity_link_retry_resolve_preserves_opaque_external_entity_bytes() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[
+                IDENTITY_CREATE_PERMISSION,
+                EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
+                EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+            ],
+        );
+        let (mut client, server) = client_and_server(Arc::clone(&store)).await;
+        let target = identity(
+            "identity-grpc-binding",
+            pb::IdentityOwnership::Federated,
+            pb::IdentityEvidence::ExternalProviderVerified,
+        );
+        let mut create = Request::new(pb::IntegrationCreateIdentityRequest {
+            identity: Some(target),
+        });
+        attach_service_credential(&mut create, &credential_id, &secret);
+        let response = client
+            .create_identity(create)
+            .await
+            .expect("target identity creation")
+            .into_inner();
+        assert!(matches!(
+            response.result,
+            Some(pb::integration_create_identity_response::Result::Identity(
+                _
+            ))
+        ));
+
+        let opaque_entity = vec![0x00, 0xff, 0x80, 0x58, 0x01];
+        let wire = binding("identity-grpc-binding", opaque_entity.clone());
+        for attempt in 0..2 {
+            let mut request = Request::new(pb::IntegrationLinkIdentityRequest {
+                binding: Some(wire.clone()),
+            });
+            attach_service_credential(&mut request, &credential_id, &secret);
+            let response = client
+                .link_identity(request)
+                .await
+                .expect("link/retry is application response")
+                .into_inner();
+            let linked = match response.result.expect("link result") {
+                pb::integration_link_identity_response::Result::Binding(binding) => binding,
+                pb::integration_link_identity_response::Result::Error(error) => {
+                    panic!("link attempt {attempt} failed: {}", error.code)
+                }
+            };
+            assert_eq!(linked.external_entity_id, opaque_entity);
+        }
+
+        let mut resolve = Request::new(pb::IntegrationResolveIdentityBindingRequest {
+            scope: Some(wire_scope()),
+            integration_id: Some(pb_id("integration-grpc")),
+            external_namespace: "vendor.example.customer".to_owned(),
+            external_entity_id: opaque_entity.clone(),
+        });
+        attach_service_credential(&mut resolve, &credential_id, &secret);
+        let response = client
+            .resolve_identity_binding(resolve)
+            .await
+            .expect("resolve succeeds")
+            .into_inner();
+        let resolved = match response.result.expect("resolve result") {
+            pb::integration_resolve_identity_binding_response::Result::Binding(binding) => binding,
+            pb::integration_resolve_identity_binding_response::Result::Error(error) => {
+                panic!("resolve failed: {}", error.code)
+            }
+        };
+        assert_eq!(resolved.external_entity_id, opaque_entity);
+        assert_eq!(resolved, wire);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn identity_permission_denial_and_bad_secret_never_create_ghost_identity() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let subject = subject();
+        let (record, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&record)
+            .expect("persist credential");
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject.clone(),
+                max_requests: 64,
+                window_ms: 60_000,
+            })
+            .expect("install quota");
+        let credential_id = record.credential_id;
+        let (mut client, server) = client_and_server(Arc::clone(&store)).await;
+
+        let denied_id = "identity-grpc-denied";
+        let denied_wire = identity(
+            denied_id,
+            pb::IdentityOwnership::UcrNative,
+            pb::IdentityEvidence::Unverified,
+        );
+        let mut denied = Request::new(pb::IntegrationCreateIdentityRequest {
+            identity: Some(denied_wire.clone()),
+        });
+        attach_service_credential(&mut denied, &credential_id, &secret);
+        let response = client
+            .create_identity(denied)
+            .await
+            .expect("permission denial is application response")
+            .into_inner();
+        let error = match response.result.expect("denied result") {
+            pb::integration_create_identity_response::Result::Error(error) => error,
+            pb::integration_create_identity_response::Result::Identity(_) => {
+                panic!("denial bypassed")
+            }
+        };
+        assert_eq!(error.code, pb::ErrorCode::PermissionDenied as i32);
+        assert!(
+            store
+                .identity(&scope(), &IdentityId::from_opaque(oid(denied_id)))
+                .expect("read durable owner")
+                .is_none()
+        );
+
+        store
+            .grant_permission(&PermissionGrant {
+                grantee: subject,
+                permission: IDENTITY_CREATE_PERMISSION.to_owned(),
+                scope: PermissionScope::Exact(scope()),
+            })
+            .expect("grant identity create");
+
+        let bad_secret_id = "identity-grpc-bad-secret";
+        let bad_secret_wire = identity(
+            bad_secret_id,
+            pb::IdentityOwnership::UserManaged,
+            pb::IdentityEvidence::SelfAsserted,
+        );
+        let mut bad_secret = Request::new(pb::IntegrationCreateIdentityRequest {
+            identity: Some(bad_secret_wire.clone()),
+        });
+        attach_service_credential(
+            &mut bad_secret,
+            &credential_id,
+            &ServiceCredentialSecret::from_bytes([0x31; 32]),
+        );
+        let response = client
+            .create_identity(bad_secret)
+            .await
+            .expect("bad secret is application response")
+            .into_inner();
+        let error = match response.result.expect("bad-secret result") {
+            pb::integration_create_identity_response::Result::Error(error) => error,
+            pb::integration_create_identity_response::Result::Identity(_) => {
+                panic!("bad secret accepted")
+            }
+        };
+        assert_eq!(error.code, pb::ErrorCode::Unauthenticated as i32);
+        assert!(
+            store
+                .identity(&scope(), &IdentityId::from_opaque(oid(bad_secret_id)))
+                .expect("read durable owner")
+                .is_none()
+        );
+
+        for wire in [denied_wire, bad_secret_wire] {
+            let mut retry = Request::new(pb::IntegrationCreateIdentityRequest {
+                identity: Some(wire.clone()),
+            });
+            attach_service_credential(&mut retry, &credential_id, &secret);
+            let response = client
+                .create_identity(retry)
+                .await
+                .expect("correct retry succeeds")
+                .into_inner();
+            assert!(matches!(
+                response.result,
+                Some(pb::integration_create_identity_response::Result::Identity(identity)) if identity == wire
+            ));
+        }
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn identity_reads_hide_existence_until_authorized_and_authorized_absence_is_not_found() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(&store, &[IDENTITY_CREATE_PERMISSION]);
+        let (mut client, server) = client_and_server(Arc::clone(&store)).await;
+        let existing_id = "identity-grpc-private";
+        let mut create = Request::new(pb::IntegrationCreateIdentityRequest {
+            identity: Some(identity(
+                existing_id,
+                pb::IdentityOwnership::UserManaged,
+                pb::IdentityEvidence::ContactVerified,
+            )),
+        });
+        attach_service_credential(&mut create, &credential_id, &secret);
+        let response = client
+            .create_identity(create)
+            .await
+            .expect("create existing identity")
+            .into_inner();
+        assert!(matches!(
+            response.result,
+            Some(pb::integration_create_identity_response::Result::Identity(
+                _
+            ))
+        ));
+
+        for id in [existing_id, "identity-grpc-missing"] {
+            let mut lookup = Request::new(pb::IntegrationGetIdentityRequest {
+                scope: Some(wire_scope()),
+                identity_id: Some(pb_id(id)),
+            });
+            attach_service_credential(&mut lookup, &credential_id, &secret);
+            let response = client
+                .get_identity(lookup)
+                .await
+                .expect("unauthorized lookup is application response")
+                .into_inner();
+            let error = match response.result.expect("lookup result") {
+                pb::integration_get_identity_response::Result::Error(error) => error,
+                pb::integration_get_identity_response::Result::Identity(_) => {
+                    panic!("unauthorized lookup disclosed existence")
+                }
+            };
+            assert_eq!(error.code, pb::ErrorCode::PermissionDenied as i32);
+        }
+
+        store
+            .grant_permission(&PermissionGrant {
+                grantee: subject(),
+                permission: IDENTITY_READ_PERMISSION.to_owned(),
+                scope: PermissionScope::Exact(scope()),
+            })
+            .expect("grant identity read");
+        let mut missing = Request::new(pb::IntegrationGetIdentityRequest {
+            scope: Some(wire_scope()),
+            identity_id: Some(pb_id("identity-grpc-missing")),
+        });
+        attach_service_credential(&mut missing, &credential_id, &secret);
+        let response = client
+            .get_identity(missing)
+            .await
+            .expect("authorized missing lookup is application response")
+            .into_inner();
+        let error = match response.result.expect("missing result") {
+            pb::integration_get_identity_response::Result::Error(error) => error,
+            pb::integration_get_identity_response::Result::Identity(_) => {
+                panic!("missing identity fabricated")
+            }
+        };
+        assert_eq!(error.code, pb::ErrorCode::NotFound as i32);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn malformed_identity_enum_values_are_invalid_argument_without_ghost_and_valid_retry_succeeds()
+     {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(&store, &[IDENTITY_CREATE_PERMISSION]);
+        let (mut client, server) = client_and_server(Arc::clone(&store)).await;
+        let id = "identity-grpc-malformed";
+
+        let mut unspecified = identity(
+            id,
+            pb::IdentityOwnership::Unspecified,
+            pb::IdentityEvidence::SelfAsserted,
+        );
+        let mut unknown = identity(
+            id,
+            pb::IdentityOwnership::UserManaged,
+            pb::IdentityEvidence::SelfAsserted,
+        );
+        unknown.evidence = 9_999;
+        for malformed in [&mut unspecified, &mut unknown] {
+            let mut request = Request::new(pb::IntegrationCreateIdentityRequest {
+                identity: Some((*malformed).clone()),
+            });
+            attach_service_credential(&mut request, &credential_id, &secret);
+            let response = client
+                .create_identity(request)
+                .await
+                .expect("malformed enum is application response")
+                .into_inner();
+            let error = match response.result.expect("malformed result") {
+                pb::integration_create_identity_response::Result::Error(error) => error,
+                pb::integration_create_identity_response::Result::Identity(_) => {
+                    panic!("malformed identity accepted")
+                }
+            };
+            assert_eq!(error.code, pb::ErrorCode::InvalidArgument as i32);
+            assert!(
+                store
+                    .identity(&scope(), &IdentityId::from_opaque(oid(id)))
+                    .expect("read durable owner")
+                    .is_none()
+            );
+        }
+
+        let valid = identity(
+            id,
+            pb::IdentityOwnership::UserManaged,
+            pb::IdentityEvidence::SelfAsserted,
+        );
+        let mut retry = Request::new(pb::IntegrationCreateIdentityRequest {
+            identity: Some(valid.clone()),
+        });
+        attach_service_credential(&mut retry, &credential_id, &secret);
+        let response = client
+            .create_identity(retry)
+            .await
+            .expect("valid retry succeeds")
+            .into_inner();
+        assert!(matches!(
+            response.result,
+            Some(pb::integration_create_identity_response::Result::Identity(identity)) if identity == valid
+        ));
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn unbound_rpc_is_explicitly_unimplemented_and_does_not_mutate_core() {
         let store = Arc::new(MemoryLocalStore::default());
         let (mut client, server) = client_and_server(Arc::clone(&store)).await;
         let error = client
-            .create_identity(Request::new(pb::IntegrationCreateIdentityRequest {
-                identity: None,
+            .create_conversation(Request::new(pb::IntegrationCreateConversationRequest {
+                conversation: None,
             }))
             .await
             .expect_err("unbound RPC must be explicit");

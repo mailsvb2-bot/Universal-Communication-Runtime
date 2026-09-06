@@ -149,9 +149,10 @@ transport constraints and extension payloads are not copied into generic admissi
 
 ## 8. Reference gRPC binding
 
-The first concrete binding lives in the separate `ucr-api-grpc` crate and implements only
-`IntegrationService.SubmitCommand`. Generated Tonic/Prost Rust types are disposable mappings of the
-checked-in protobuf contract; they are not a second protocol definition and are not imported into Core.
+The first concrete binding lives in the separate `ucr-api-grpc` crate. It began with
+`IntegrationService.SubmitCommand` and now also binds `CreateIdentity`, `GetIdentity`, `LinkIdentity`,
+and `ResolveIdentityBinding`. Generated Tonic/Prost Rust types are disposable mappings of the checked-in
+protobuf contract; they are not a second protocol definition and are not imported into Core.
 
 The binding presents Service Principal credentials only as binary gRPC metadata:
 `ucr-service-credential-id-bin` carries the exact credential-ID wire bytes and
@@ -159,11 +160,15 @@ The binding presents Service Principal credentials only as binary gRPC metadata:
 metadata values sensitive. Credential metadata is not copied into `IntegrationCommandRequest`, the
 canonical `CommandEnvelope`, extensions, audit payloads, or durable storage.
 
-After structural protobuf decoding, `SubmitCommand` delegates to the existing `IntegrationIngress`.
-Canonical UCR failures use `IntegrationCommandResponse.error`; gRPC `UNIMPLEMENTED` is used for the ten
-Integration methods that this binding slice has not implemented. The server decode budget is derived
-from the canonical Command payload, maximum extension count/payload/name budgets, plus a bounded 2 MiB
-protobuf-envelope allowance. This avoids Tonic's smaller default without creating an unbounded input path.
+After structural protobuf decoding, every implemented RPC delegates to the existing
+`IntegrationIngress` and its existing durable owner. Canonical UCR failures use the method-specific
+response `error` envelope; gRPC `UNIMPLEMENTED` is used for the six Integration methods that remain
+unbound. Identity enum values that are protobuf `UNSPECIFIED` or unknown are structural
+`INVALID_ARGUMENT`; no adapter-level ownership/evidence vocabulary is invented. External entity IDs
+remain opaque bytes through link/resolve. The server decode budget is derived from the complete maximum
+canonical `IntegrationCommandRequest`, including IDs, scope, command type, correlation, schema version,
+extension count/name/payload bounds, and protobuf tag/length-prefix upper bounds. No guessed adapter
+envelope allowance is used. This avoids Tonic's smaller default without creating an unbounded input path.
 
 A real plaintext HTTP/2 loopback client/server is required as interoperability evidence only. This is not a production network listener or TLS policy and does not implement Phase-15 Internet Transport.
 
@@ -204,4 +209,4 @@ canonical duplicate ordering, semantic conflict, invalid-constraint rejection wi
 non-disclosing `NOT_FOUND`, and restart-safe public create/read through the existing
 `CommunicationIntentStore`.
 
-Reference gRPC evidence additionally proves real loopback `SubmitCommand` framing, exact sensitive binary credential metadata, canonical error-envelope mapping, no ghost acceptance after bad credentials, explicit `UNIMPLEMENTED` behavior for unbound RPCs, and build-time vendored `protoc` without changing Core ownership.
+Reference gRPC evidence additionally proves real loopback `SubmitCommand` framing, exact sensitive binary credential metadata, canonical error-envelope mapping, no ghost acceptance after bad credentials, Root Identity create/retry/get/conflict semantics, external binding link/retry/resolve with opaque entity bytes preserved bit-for-bit, denial/bad-secret ghost prevention, read-side non-disclosure before authorization, authorized `NOT_FOUND`, malformed Identity enum rejection without ghost state, explicit `UNIMPLEMENTED` behavior for the six still-unbound RPCs, and build-time vendored `protoc` without changing Core ownership.
