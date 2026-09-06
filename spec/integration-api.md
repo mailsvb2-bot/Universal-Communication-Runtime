@@ -147,7 +147,27 @@ canonical non-retryable `NOT_FOUND`; authentication and permission failures occu
 disclosed. Audit attribution uses only the canonical `IntentId`; payload, privacy/region/cost policy,
 transport constraints and extension payloads are not copied into generic admission audit.
 
-## 8. Errors and maturity
+## 8. Reference gRPC binding
+
+The first concrete binding lives in the separate `ucr-api-grpc` crate and implements only
+`IntegrationService.SubmitCommand`. Generated Tonic/Prost Rust types are disposable mappings of the
+checked-in protobuf contract; they are not a second protocol definition and are not imported into Core.
+
+The binding presents Service Principal credentials only as binary gRPC metadata:
+`ucr-service-credential-id-bin` carries the exact credential-ID wire bytes and
+`ucr-service-credential-secret-bin` carries the 32-byte secret. The reference client helper marks both
+metadata values sensitive. Credential metadata is not copied into `IntegrationCommandRequest`, the
+canonical `CommandEnvelope`, extensions, audit payloads, or durable storage.
+
+After structural protobuf decoding, `SubmitCommand` delegates to the existing `IntegrationIngress`.
+Canonical UCR failures use `IntegrationCommandResponse.error`; gRPC `UNIMPLEMENTED` is used for the ten
+Integration methods that this binding slice has not implemented. The server decode budget is derived
+from the canonical Command payload, maximum extension count/payload/name budgets, plus a bounded 2 MiB
+protobuf-envelope allowance. This avoids Tonic's smaller default without creating an unbounded input path.
+
+A real plaintext HTTP/2 loopback client/server is required as interoperability evidence only. This is not a production network listener or TLS policy and does not implement Phase-15 Internet Transport.
+
+## 9. Errors and maturity
 
 Validation failures map to `INVALID_ARGUMENT`; authorized lookup absence to `NOT_FOUND`; semantic identity/idempotency reuse to `CONFLICT`;
 storage-full to `RESOURCE_EXHAUSTED`; temporary storage failure to `TEMPORARILY_UNAVAILABLE`;
@@ -158,14 +178,14 @@ weaken canonical UCR error semantics after successful request decoding.
 The Phase-13 API remains `Experimental`. Stable compatibility rules apply only after a separate
 Public API Governance promotion decision. Existing `SubmitCommand` wire fields remain unchanged.
 
-This slice does not claim a production gRPC/HTTP server, SDK generation, Event subscriptions,
+This slice does not claim a production gRPC/HTTP listener/deployment, complete gRPC method coverage, SDK generation, Event subscriptions,
 webhook delivery, Command execution/dispatch, routing/policy execution, Message delivery/read receipts,
 Conversation listing/discovery/delete, group membership/moderation, identity/binding listing or
 discovery, Persona/Profile APIs, Identity evidence transitions,
 Identity merge/delete, external-binding unlink/relink,
 or expiry execution. Phase 14 owns Event API semantics; later phases own network transport.
 
-## 9. Required evidence
+## 10. Required evidence
 
 Reference evidence must prove Service Principal authentication, mandatory quota/audit, exact
 permission enforcement, stable error mapping, restart-safe durable ownership, duplicate/conflict
@@ -183,3 +203,5 @@ Intent evidence additionally proves authenticated create/read, generic-ACK non-r
 canonical duplicate ordering, semantic conflict, invalid-constraint rejection without ghost state,
 non-disclosing `NOT_FOUND`, and restart-safe public create/read through the existing
 `CommunicationIntentStore`.
+
+Reference gRPC evidence additionally proves real loopback `SubmitCommand` framing, exact sensitive binary credential metadata, canonical error-envelope mapping, no ghost acceptance after bad credentials, explicit `UNIMPLEMENTED` behavior for unbound RPCs, and build-time vendored `protoc` without changing Core ownership.

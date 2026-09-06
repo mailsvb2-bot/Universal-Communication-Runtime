@@ -1,0 +1,29 @@
+[package]
+name = "ucr-api-grpc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[dependencies]
+prost = "=0.14.4"
+tonic = { version = "=0.14.6", features = ["transport"] }
+tonic-prost = "=0.14.6"
+ucr-core = { path = "../ucr-core" }
+ucr-model = { path = "../ucr-model" }
+ucr-protocol = { path = "../ucr-protocol" }
+
+[build-dependencies]
+prost-build = "=0.14.4"
+protoc-bin-vendored = "=3.2.0"
+tonic-prost-build = "=0.14.6"
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-stream = { version = "=0.1.17", features = ["net"] }
+ucr-storage-memory = { path = "../ucr-storage-memory" }
+
+[lints]
+workspace = true

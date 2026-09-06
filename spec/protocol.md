@@ -26,6 +26,12 @@ A `Command` requests an action. An accepted command is not evidence that its req
 
 Commands and events carry correlation/idempotency data for effectively-once user experience without claiming universal exactly-once execution.
 
+Namespaced public identifiers share one protocol-owned syntax and resource ceiling. Extension names,
+Command/Event types, Capability IDs, transport-capability constraints, address schemes and external
+Identity namespaces are at most 1024 bytes (`MAX_NAMESPACED_IDENTIFIER_LEN`) before deeper processing.
+Capabilities with an existing narrower limit retain that narrower limit; API bindings do not define an
+alternate identifier vocabulary.
+
 ## 4. Communication Intent
 
 Communication Intent is a first-class primitive. External consumers express target, payload, policy constraints, correlation, and protocol extensions; they do not control the internal routing graph. The optional `privacy_profile` is preserved as an opaque string at the public boundary so unknown future profiles are not silently discarded. Transport capability allow/forbid constraints are namespaced, bounded, duplicate-free, and contradictory declarations fail closed. The reference durable identity is `(TenantScope, IntentId)`: canonically equivalent retries are duplicates and scoped ID reuse with changed semantics is a conflict. `privacy_profile` and `region_constraint` are individually bounded to 1024 bytes and the optional Intent idempotency key to 256 bytes before persistence; these bounds do not narrow the vocabulary of valid future privacy/region values.

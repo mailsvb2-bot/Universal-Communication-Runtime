@@ -2,6 +2,7 @@ use ucr_model::ProtocolExtension;
 
 pub const MAX_PROTOCOL_EXTENSIONS: usize = 64;
 pub const MAX_EXTENSION_PAYLOAD_LEN: usize = 1024 * 1024;
+pub const MAX_NAMESPACED_IDENTIFIER_LEN: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensionError {
@@ -17,6 +18,9 @@ pub enum ExtensionError {
 /// # Errors
 /// Returns [`ExtensionError::InvalidNamespace`] for malformed or unscoped names.
 pub fn validate_namespaced_identifier(name: &str) -> Result<(), ExtensionError> {
+    if name.len() > MAX_NAMESPACED_IDENTIFIER_LEN {
+        return Err(ExtensionError::InvalidNamespace);
+    }
     let valid_prefix = name.starts_with("ucr.")
         || name.starts_with("experimental.")
         || name.starts_with("vendor.")
@@ -92,7 +96,10 @@ pub fn require_supported_extensions<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{ExtensionError, require_supported_extensions, validate_extension_name};
+    use super::{
+        ExtensionError, MAX_NAMESPACED_IDENTIFIER_LEN, require_supported_extensions,
+        validate_extension_name, validate_namespaced_identifier,
+    };
 
     #[test]
     fn namespace_is_explicit() {
@@ -104,6 +111,20 @@ mod tests {
         );
         assert_eq!(
             validate_extension_name("ucr.message..edit"),
+            Err(ExtensionError::InvalidNamespace)
+        );
+    }
+
+    #[test]
+    fn namespaced_identifier_has_explicit_byte_budget() {
+        let exact = format!("vendor.{}", "a".repeat(MAX_NAMESPACED_IDENTIFIER_LEN - 7));
+        assert_eq!(exact.len(), MAX_NAMESPACED_IDENTIFIER_LEN);
+        assert!(validate_namespaced_identifier(&exact).is_ok());
+
+        let oversized = format!("vendor.{}", "a".repeat(MAX_NAMESPACED_IDENTIFIER_LEN - 6));
+        assert_eq!(oversized.len(), MAX_NAMESPACED_IDENTIFIER_LEN + 1);
+        assert_eq!(
+            validate_namespaced_identifier(&oversized),
             Err(ExtensionError::InvalidNamespace)
         );
     }
