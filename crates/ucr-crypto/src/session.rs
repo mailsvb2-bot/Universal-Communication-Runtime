@@ -120,7 +120,7 @@ impl core::fmt::Debug for EstablishedSession {
 /// # Errors
 /// Fails closed on invalid signature, replay-state failure, non-contributory key
 /// agreement, or key derivation failure.
-pub fn begin_session<R: ReplayProtector>(
+pub fn begin_session<R: ReplayProtector + ?Sized>(
     local_agreement: AgreementKeyPair,
     input: SessionHandshakeInput,
     replay: &R,
@@ -195,8 +195,8 @@ pub fn begin_session_with_trusted_peer<R, T>(
     trust: &T,
 ) -> Result<PendingSession, TrustedSessionError>
 where
-    R: ReplayProtector,
-    T: TrustedSigningKeyResolver,
+    R: ReplayProtector + ?Sized,
+    T: TrustedSigningKeyResolver + ?Sized,
 {
     let claim = &input.peer_signing_descriptor;
     let trusted = trust

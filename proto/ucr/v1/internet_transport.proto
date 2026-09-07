@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+
+// Phase-15 context is carried as a critical NegotiationHello extension payload.
+// Raw TenantScope identifiers are not repeated; the exact scope is bound by
+// a domain-separated SHA-256 digest included in the signed handshake transcript.
+message InternetTransportContext {
+  OpaqueId endpoint_id = 1;
+  bytes scope_binding = 2;
+}
+
+// One session-encrypted chunk. Attempt id and coordinates are authenticated AAD.
+message InternetTransportData {
+  OpaqueId attempt_id = 1;
+  uint32 chunk_index = 2;
+  uint32 chunk_count = 3;
+  bytes nonce = 4;
+  bytes ciphertext = 5;
+}
+
+enum InternetTransportReceiptStatus {
+  INTERNET_TRANSPORT_RECEIPT_STATUS_UNSPECIFIED = 0;
+  INTERNET_TRANSPORT_RECEIPT_STATUS_ACCEPTED = 1;
+  INTERNET_TRANSPORT_RECEIPT_STATUS_DUPLICATE = 2;
+}
+
+// Receipt payload is itself session-encrypted; the plaintext status means only
+// transport-sink acceptance/deduplication, never Device/User delivery evidence.
+message InternetTransportReceiptPlaintext {
+  OpaqueId attempt_id = 1;
+  InternetTransportReceiptStatus status = 2;
+}
+
+message InternetTransportReceipt {
+  OpaqueId attempt_id = 1;
+  bytes nonce = 2;
+  bytes ciphertext = 3;
+}

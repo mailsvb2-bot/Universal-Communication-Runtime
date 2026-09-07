@@ -1,6 +1,6 @@
 # Event API
 
-Status: **Phase 14 local/reference complete; Phase 15 Internet Transport not started**.
+Status: **Phase 14 local/reference complete; Phase 15 exists separately and does not change Event API semantics**.
 
 Phase 14 exposes canonical UCR Events to authenticated external consumers without exposing the database or creating a second Event model. The one canonical append-only Event journal, `EventJournalStore`, remains authoritative for Event facts; `EventSubscriptionStore` owns only durable consumer state layered over that journal.
 
@@ -28,7 +28,7 @@ Replay is explicit and idempotent through an opaque replay ID. A new replay gene
 
 Webhook subscriptions use the same durable subscription/retry/cursor/DLQ owner as polling. The canonical subscription persists only a bounded HTTPS destination; credentials, bearer tokens, signing secrets, DNS results, and provider-specific state are not persisted in it. Userinfo, query strings, and fragments are rejected from the canonical URI.
 
-`EventWebhookDispatcher` is a reference dispatcher over an injected `EventWebhookSink`. It performs one bounded Event attempt and commits ACK/retry/DLQ only after the sink result. Phase 14 deliberately does not implement an HTTP client, DNS resolver, TLS/listener, Internet route, or egress policy. A production network webhook sink belongs to Phase 15+ deployment/transport work and must enforce SSRF/egress/DNS/TLS policy there.
+`EventWebhookDispatcher` is a reference dispatcher over an injected `EventWebhookSink`. It performs one bounded Event attempt and commits ACK/retry/DLQ only after the sink result. Phase 14 deliberately does not implement an HTTP client, DNS resolver, TLS/listener, Internet route, or egress policy. A production HTTP webhook sink remains a separate deployment/integration layer and must enforce its own SSRF/egress/DNS/TLS policy; the Phase-15 UCR TCP transport is not that HTTP client.
 
 ## Persistence
 
@@ -42,4 +42,4 @@ The reference Tonic binding derives a finite request decode budget from the maxi
 
 ## Nonclaims
 
-Phase 14 does not claim exactly-once side effects, HTTP webhook delivery over the public Internet, Internet transport, DNS safety, distributed queues, a globally ordered Event log, or production deployment. Effectively-once consumer behavior is obtained only from canonical Event IDs, durable cursor state, idempotent ACK/reject/replay operations, and consumer-side idempotency. Phase 15 remains unstarted.
+Phase 14 does not claim exactly-once side effects, HTTP webhook delivery over the public Internet, Internet transport, DNS safety, distributed queues, a globally ordered Event log, or production deployment. Effectively-once consumer behavior is obtained only from canonical Event IDs, durable cursor state, idempotent ACK/reject/replay operations, and consumer-side idempotency. Phase 15 is implemented separately as a Prepared UCR TCP transport; Event webhook networking remains unimplemented.

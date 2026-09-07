@@ -26,3 +26,5 @@ run_target framing_parser 65536 512
 run_target opaque_id_wire 512 512
 run_target message_envelope 4096 768
 run_target crypto_wrapper 256 512
+
+run_target internet_transport_wire 131072 768

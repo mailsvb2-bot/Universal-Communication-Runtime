@@ -2595,6 +2595,7 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
         "malicious_peer_simulation_cannot_self_provision_claimed_key",
         "invalid_permission_simulation_denies_mutation_before_storage",
         "revoked_device_simulation_denies_existing_signature_and_future_key_access",
+        "internet_transport_boundary_simulation_blocks_lan_and_dns_before_network_side_effects",
     ];
     for scenario in scenarios {
         assert!(
@@ -2617,7 +2618,7 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
         "**Not implemented: Bridge does not exist yet; a mock is not accepted as evidence**"
     ));
     assert!(threat.contains(
-        "required threat simulations for not-yet-implemented Bridge/remote-transport boundaries"
+        "required threat simulations for not-yet-implemented Bridge and future implemented trust boundaries"
     ));
     assert!(!threat.contains("- required threat simulations;"));
     assert!(
@@ -2698,10 +2699,9 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
     assert!(!sqlite_store.contains("pub fn test_pause_command_acceptance_before_commit"));
 
     for open_evidence in [
-        "Not implemented: no production network transport exists",
+        "Not implemented: no production DNS-dependent path exists",
         "Not implemented: Relay does not exist yet",
         "Not implemented: SFU does not exist yet",
-        "Not implemented: no production packet receive/reorder boundary exists",
     ] {
         assert!(
             matrix.contains(open_evidence),
@@ -2714,7 +2714,7 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
     );
     assert!(!threat.contains("deterministic process-kill fault injection for durable stores"));
     assert!(threat.contains(
-        "transport/infrastructure chaos evidence for network/DNS/Relay/SFU/peer-disappearance/transport-reorder"
+        "remaining transport/infrastructure chaos evidence for OS/interface network switching, future DNS discovery, Relay and SFU"
     ));
     assert!(!threat.contains("end-to-end storage-full fault injection remain open"));
     assert!(threat.contains("eight executable cross-crate chaos scenarios"));
@@ -3002,9 +3002,7 @@ fn integration_api_reuses_canonical_command_and_service_principal_owners() {
     assert!(ci.contains(
         "docs/adr/0040-integration-api-reuses-canonical-command-and-service-principal-boundaries.md"
     ));
-    assert!(readme.contains(
-        "**Phase 14 — Event API (local/reference complete; Phase 15 Internet Transport not started).**"
-    ));
+    assert!(readme.contains("**Phase 15 — Internet Transport (Prepared/reference complete; Phase 16 Local Transport not started).**"));
 }
 
 #[test]
@@ -3907,14 +3905,12 @@ fn phase14_public_event_binding_governance_and_backpressure_are_locked() {
     assert!(spec.contains("one canonical append-only Event journal"));
     assert!(spec.contains("MAX_EVENT_DELIVERY_BATCH_BYTES"));
     assert!(spec.contains("5 MiB Event"));
-    assert!(spec.contains("Phase 15 remains unstarted"));
+    assert!(spec.contains("Phase 15 is implemented separately as a Prepared UCR TCP transport"));
     assert!(adr.contains(
         "Creating a second outbound Event log or provider queue would create a second brain"
     ));
     assert!(adr.contains("This completes Phase 14 at the local/reference API layer"));
-    assert!(readme.contains(
-        "**Phase 14 — Event API (local/reference complete; Phase 15 Internet Transport not started).**"
-    ));
+    assert!(readme.contains("**Phase 15 — Internet Transport (Prepared/reference complete; Phase 16 Local Transport not started).**"));
     assert!(ci.contains("spec/event-api.md"));
     assert!(ci.contains("proto/ucr/v1/event_api.proto"));
     assert!(ci.contains(
@@ -4145,7 +4141,7 @@ fn phase13_grpc_complete_surface_reuses_conversation_message_and_intent_owners()
     assert!(adr.contains("No SQLite schema or new permission/audit/storage vocabulary"));
     assert!(adr.contains("This does not implement Phase 14 Event API"));
     assert!(readme.contains(
-        "Phase 14 — Event API (local/reference complete; Phase 15 Internet Transport not started)"
+        "Phase 15 — Internet Transport (Prepared/reference complete; Phase 16 Local Transport not started)"
     ));
     assert!(spec.contains("It now binds all eleven"));
     assert!(spec.contains("checked-in `IntegrationService` RPCs"));
@@ -4157,6 +4153,81 @@ fn phase13_grpc_complete_surface_reuses_conversation_message_and_intent_owners()
         )
     );
     assert!(threat.contains("all eleven checked-in `IntegrationService` RPCs"));
+}
+
+#[test]
+fn phase15_internet_transport_is_prepared_bounded_and_reuses_canonical_owners() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let root = fs::read_to_string(workspace.join("Cargo.toml")).expect("workspace manifest");
+    let manifest = fs::read_to_string(workspace.join("crates/ucr-transport-internet/Cargo.toml"))
+        .expect("internet transport manifest");
+    let provider =
+        fs::read_to_string(workspace.join("crates/ucr-transport-internet/src/provider.rs"))
+            .expect("internet provider");
+    let handshake =
+        fs::read_to_string(workspace.join("crates/ucr-transport-internet/src/handshake.rs"))
+            .expect("internet handshake");
+    let route = fs::read_to_string(workspace.join("crates/ucr-transport-internet/src/route.rs"))
+        .expect("internet route");
+    let wire = fs::read_to_string(workspace.join("crates/ucr-transport-internet/src/wire.rs"))
+        .expect("internet wire");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/internet_transport.proto"))
+        .expect("internet proto");
+    let spec =
+        fs::read_to_string(workspace.join("spec/internet-transport.md")).expect("internet spec");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0053-phase15-internet-transport-reuses-canonical-transport-and-crypto-owners.md",
+    ))
+    .expect("ADR 0053");
+    let architecture = fs::read_to_string(workspace.join("docs/architecture/ARCHITECTURE.md"))
+        .expect("architecture");
+    let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
+        .expect("threat model");
+    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    assert!(root.contains("\"crates/ucr-transport-internet\""));
+    assert!(manifest.contains("publish = false"));
+    assert!(manifest.contains("ucr-core = { path = \"../ucr-core\" }"));
+    assert!(manifest.contains("ucr-crypto = { path = \"../ucr-crypto\" }"));
+    assert!(provider.contains("impl TransportProvider for InternetTransportProvider"));
+    assert!(provider.contains("CapabilityMaturity::Prepared"));
+    assert!(provider.contains("UCR-INTERNET-ATTEMPT-ID-V2"));
+    assert!(provider.contains("source_endpoint"));
+    assert!(provider.contains("destination_endpoint"));
+    assert!(provider.contains("encrypt_outbound"));
+    assert!(provider.contains("decrypt_inbound"));
+    assert!(provider.contains("lost_receipt_reconnects_with_same_attempt_and_deduplicates"));
+    assert!(provider.contains("tampered_encrypted_receipt_fails_closed"));
+    assert!(provider.contains("maximum_canonical_envelope_round_trip_remains_bounded"));
+    assert!(provider.contains("authenticated_peer_reordered_chunk_is_rejected_before_sink"));
+    assert!(provider.contains("authenticated_peer_cannot_force_unbounded_chunk_reassembly"));
+    assert!(handshake.contains("begin_session_with_trusted_peer"));
+    assert!(handshake.contains("bind_handshake_transcript"));
+    assert!(wire.contains("scope_binding"));
+    assert!(route.contains("IpAddr"));
+    assert!(!route.contains("ToSocketAddrs"));
+    assert!(!provider.contains("RoutePlanner"));
+    assert!(!provider.contains("TransportOrchestrator"));
+    assert!(proto.contains("message InternetTransportData"));
+    assert!(proto.contains("message InternetTransportReceipt"));
+    assert!(spec.contains("Prepared"));
+    assert!(spec.contains("ACCEPTED_BY_TRANSPORT"));
+    assert!(spec.contains("Phase 24"));
+    assert!(adr.contains("no-second-brain rule"));
+    assert!(
+        architecture.contains("Phase 15 now adds a Prepared `ucr-transport-internet` provider")
+    );
+    assert!(threat.contains("Phase 15 adds the implemented Internet Transport boundary"));
+    assert!(readme.contains("Phase 16 Local Transport not started"));
+    assert!(ci.contains("spec/internet-transport.md"));
+    assert!(ci.contains("proto/ucr/v1/internet_transport.proto"));
+    assert!(ci.contains(
+        "0053-phase15-internet-transport-reuses-canonical-transport-and-crypto-owners.md"
+    ));
 }
 
 #[test]

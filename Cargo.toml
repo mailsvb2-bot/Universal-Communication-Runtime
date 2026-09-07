@@ -10,6 +10,7 @@ members = [
     "crates/ucr-architecture-tests",
     "crates/ucr-security-tests",
     "crates/ucr-api-grpc",
+    "crates/ucr-transport-internet",
 ]
 
 [workspace.package]

@@ -14,6 +14,7 @@ libfuzzer-sys = "=0.4.13"
 ucr-crypto = { path = "../crates/ucr-crypto" }
 ucr-model = { path = "../crates/ucr-model" }
 ucr-protocol = { path = "../crates/ucr-protocol" }
+ucr-transport-internet = { path = "../crates/ucr-transport-internet", features = ["fuzzing"] }
 
 [[bin]]
 name = "framing_parser"
@@ -39,6 +40,13 @@ bench = false
 [[bin]]
 name = "crypto_wrapper"
 path = "fuzz_targets/crypto_wrapper.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "internet_transport_wire"
+path = "fuzz_targets/internet_transport_wire.rs"
 test = false
 doc = false
 bench = false
