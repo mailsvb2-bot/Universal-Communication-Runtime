@@ -113,7 +113,10 @@ mod tests {
             "[::]:443",
             "example.local:443",
         ] {
-            assert!(local_socket_addr(&route(value)).is_err(), "accepted {value}");
+            assert!(
+                local_socket_addr(&route(value)).is_err(),
+                "accepted {value}"
+            );
         }
     }
 
