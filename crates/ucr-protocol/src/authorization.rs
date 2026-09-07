@@ -46,6 +46,10 @@ pub const SYNC_WRITE_PERMISSION: &str = "ucr.sync.write";
 pub const ANTI_ENTROPY_READ_PERMISSION: &str = "ucr.sync.anti_entropy.read";
 pub const ANTI_ENTROPY_RECONCILE_PERMISSION: &str = "ucr.sync.anti_entropy.reconcile";
 pub const EVENT_APPEND_PERMISSION: &str = "ucr.event.append";
+pub const EVENT_SUBSCRIBE_PERMISSION: &str = "ucr.event.subscribe";
+pub const EVENT_CONSUME_PERMISSION: &str = "ucr.event.consume";
+pub const EVENT_REPLAY_PERMISSION: &str = "ucr.event.replay";
+pub const EVENT_DEAD_LETTER_READ_PERMISSION: &str = "ucr.event.dead_letter.read";
 
 pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     SERVICE_CREDENTIAL_PROVISION_PERMISSION,
@@ -87,6 +91,10 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     ANTI_ENTROPY_READ_PERMISSION,
     ANTI_ENTROPY_RECONCILE_PERMISSION,
     EVENT_APPEND_PERMISSION,
+    EVENT_SUBSCRIBE_PERMISSION,
+    EVENT_CONSUME_PERMISSION,
+    EVENT_REPLAY_PERMISSION,
+    EVENT_DEAD_LETTER_READ_PERMISSION,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

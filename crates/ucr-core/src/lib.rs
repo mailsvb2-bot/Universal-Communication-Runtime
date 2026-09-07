@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod authorized_runtime;
+mod event_api;
 mod id;
 mod integration_api;
 mod recovery_workflow;
@@ -11,16 +12,22 @@ use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CapabilityDescriptor,
     CommandEnvelope, CommandId, CommunicationIntent, ConversationId, ConversationRecord,
     DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
-    EndpointAddress, EndpointId, EventEnvelope, EventId, EventReconciliation, EventSummary,
-    ExternalIdentityBinding, IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId,
-    MessageEnvelope, MessageId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
-    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
-    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
-    TenantScope, TrustedSigningKeyRecord,
+    EndpointAddress, EndpointId, EventConsumerCursor, EventDeadLetter, EventDeliveryFailureKind,
+    EventEnvelope, EventId, EventPollResult, EventReconciliation, EventSubscription,
+    EventSubscriptionId, EventSummary, ExternalIdentityBinding, IdentityId, IdentityRecord,
+    IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
+    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
+    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy,
+    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
 pub use authorized_runtime::AuthorizedDurableRuntime;
+pub use event_api::{
+    EventApiIngress, EventCursorRejection, EventDeliveryClock, EventDeliveryClockError,
+    EventWebhookDeliveryError, EventWebhookDispatcher, EventWebhookSink, SystemEventDeliveryClock,
+    WebhookDispatchOutcome,
+};
 pub use id::{IdGenerationError, generate_opaque_id};
 pub use integration_api::{
     ExternalIdentityBindingLookup, IntegrationCommandIngress, IntegrationIngress,
@@ -774,6 +781,91 @@ pub trait EventJournalStore: StorageProvider {
     /// Returns explicit validation/conflict/storage failures. Reusing one
     /// scoped event ID with different semantics is a conflict.
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError>;
+}
+
+/// Durable Phase-14 Event consumer state layered over the one canonical append-only Event journal.
+///
+/// Implementations may use private local ordering to maintain cursors. Raw storage positions never
+/// become canonical Event ordering and are never exposed through this interface.
+pub trait EventSubscriptionStore: EventJournalStore {
+    /// Creates or deduplicates one canonical subscription.
+    ///
+    /// # Errors
+    /// Returns validation, same-ID semantic conflict, or explicit storage failures.
+    fn persist_event_subscription(
+        &self,
+        subscription: &EventSubscription,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one exact scoped subscription when present.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn event_subscription(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+    ) -> Result<Option<EventSubscription>, DurableStoreError>;
+
+    /// Polls one bounded durable batch. An unacknowledged batch is redelivered with the same cursor.
+    ///
+    /// # Errors
+    /// Returns validation, missing-subscription, cursor-state, or explicit storage failures.
+    fn poll_event_subscription(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        max_items: usize,
+        now_unix_ms: i64,
+    ) -> Result<EventPollResult, DurableStoreError>;
+
+    /// Acknowledges the exact active consumer cursor. Identical retries are idempotent.
+    ///
+    /// # Errors
+    /// Returns conflict for stale/opposite cursor actions and explicit storage failures.
+    fn acknowledge_event_cursor(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        cursor: &EventConsumerCursor,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Rejects the exact active batch, applying bounded retry or dead-letter policy atomically.
+    /// Identical retries of the same cursor action are idempotent.
+    ///
+    /// # Errors
+    /// Returns conflict for stale/opposite cursor actions and explicit storage failures.
+    fn reject_event_cursor(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        cursor: &EventConsumerCursor,
+        failure_kind: EventDeliveryFailureKind,
+        now_unix_ms: i64,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Resets one subscription to the beginning for explicit replay. Replay ID makes retries
+    /// idempotent and a new generation invalidates all prior cursors.
+    ///
+    /// # Errors
+    /// Returns validation, missing-subscription, or explicit storage failures.
+    fn replay_event_subscription(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        replay_id: &ucr_model::OpaqueId,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Returns a bounded dead-letter view for one exact subscription.
+    ///
+    /// # Errors
+    /// Returns validation, missing-subscription, or explicit storage/corruption failures.
+    fn event_dead_letters(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        max_items: usize,
+    ) -> Result<Vec<EventDeadLetter>, DurableStoreError>;
 }
 
 /// Event-level Anti-Entropy capability bound to durable Sync sessions.

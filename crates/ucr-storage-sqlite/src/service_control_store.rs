@@ -1357,6 +1357,7 @@ mod tests {
                  DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations;",
             )
             .expect("restore exact v16 shape");
+        crate::test_remove_v20_objects(&connection).expect("remove future v20 objects");
         connection
             .pragma_update(None, "user_version", SQLITE_SCHEMA_V16)
             .expect("v16 version");
@@ -1424,6 +1425,7 @@ mod tests {
         connection
             .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
             .expect("application id");
+        crate::test_remove_v20_objects(&connection).expect("remove future v20 objects");
         connection
             .pragma_update(None, "user_version", SQLITE_SCHEMA_V13)
             .expect("v13 version");

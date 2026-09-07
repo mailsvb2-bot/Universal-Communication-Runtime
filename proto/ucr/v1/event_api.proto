@@ -1,0 +1,190 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/runtime.proto";
+
+enum EventSubscriptionMode {
+  EVENT_SUBSCRIPTION_MODE_UNSPECIFIED = 0;
+  EVENT_SUBSCRIPTION_MODE_DURABLE_STREAM = 1;
+  EVENT_SUBSCRIPTION_MODE_WEBHOOK = 2;
+}
+
+enum EventSubscriptionStart {
+  EVENT_SUBSCRIPTION_START_UNSPECIFIED = 0;
+  EVENT_SUBSCRIPTION_START_BEGINNING = 1;
+  EVENT_SUBSCRIPTION_START_LATEST = 2;
+}
+
+enum EventDeliveryFailureKind {
+  EVENT_DELIVERY_FAILURE_KIND_UNSPECIFIED = 0;
+  EVENT_DELIVERY_FAILURE_KIND_RETRYABLE = 1;
+  EVENT_DELIVERY_FAILURE_KIND_PERMANENT = 2;
+}
+
+enum EventAppendResult {
+  EVENT_APPEND_RESULT_UNSPECIFIED = 0;
+  EVENT_APPEND_RESULT_APPENDED = 1;
+  EVENT_APPEND_RESULT_DUPLICATE = 2;
+}
+
+message EventSubscription {
+  OpaqueId subscription_id = 1;
+  TenantScope scope = 2;
+  EventSubscriptionMode mode = 3;
+  optional string webhook_uri = 4;
+  repeated string event_types = 5;
+  uint32 max_in_flight = 6;
+  uint32 max_attempts = 7;
+  EventSubscriptionStart start = 8;
+}
+
+message EventConsumerCursor {
+  bytes token = 1;
+}
+
+message EventDeliveryBatch {
+  OpaqueId subscription_id = 1;
+  TenantScope scope = 2;
+  repeated EventEnvelope events = 3;
+  EventConsumerCursor cursor = 4;
+  uint32 attempt = 5;
+}
+
+message EventDeadLetter {
+  OpaqueId subscription_id = 1;
+  TenantScope scope = 2;
+  EventEnvelope event = 3;
+  uint32 attempts = 4;
+  EventDeliveryFailureKind failure_kind = 5;
+}
+
+message EventPublishReceipt {
+  OpaqueId event_id = 1;
+  EventAppendResult result = 2;
+}
+
+message EventPollEmpty {}
+
+message EventPollRetryAfter {
+  uint64 retry_after_ms = 1;
+}
+
+message EventDeadLetterList {
+  repeated EventDeadLetter dead_letters = 1;
+}
+
+message EventPublishRequest {
+  EventEnvelope event = 1;
+}
+
+message EventPublishResponse {
+  oneof result {
+    EventPublishReceipt receipt = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message EventCreateSubscriptionRequest {
+  EventSubscription subscription = 1;
+}
+
+message EventCreateSubscriptionResponse {
+  oneof result {
+    EventSubscription subscription = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message EventGetSubscriptionRequest {
+  TenantScope scope = 1;
+  OpaqueId subscription_id = 2;
+}
+
+message EventGetSubscriptionResponse {
+  oneof result {
+    EventSubscription subscription = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message EventPollRequest {
+  TenantScope scope = 1;
+  OpaqueId subscription_id = 2;
+  uint32 max_items = 3;
+}
+
+message EventPollResponse {
+  oneof result {
+    EventDeliveryBatch batch = 1;
+    EventPollEmpty empty = 2;
+    EventPollRetryAfter retry_after = 3;
+    ErrorEnvelope error = 4;
+  }
+}
+
+message EventAcknowledgeRequest {
+  TenantScope scope = 1;
+  OpaqueId subscription_id = 2;
+  EventConsumerCursor cursor = 3;
+}
+
+message EventAcknowledgeResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message EventRejectRequest {
+  TenantScope scope = 1;
+  OpaqueId subscription_id = 2;
+  EventConsumerCursor cursor = 3;
+  EventDeliveryFailureKind failure_kind = 4;
+}
+
+message EventRejectResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message EventReplayRequest {
+  TenantScope scope = 1;
+  OpaqueId subscription_id = 2;
+  OpaqueId replay_id = 3;
+}
+
+message EventReplayResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message EventListDeadLettersRequest {
+  TenantScope scope = 1;
+  OpaqueId subscription_id = 2;
+  uint32 max_items = 3;
+}
+
+message EventListDeadLettersResponse {
+  oneof result {
+    EventDeadLetterList dead_letters = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+service EventService {
+  rpc PublishEvent(EventPublishRequest) returns (EventPublishResponse);
+  rpc CreateSubscription(EventCreateSubscriptionRequest) returns (EventCreateSubscriptionResponse);
+  rpc GetSubscription(EventGetSubscriptionRequest) returns (EventGetSubscriptionResponse);
+  rpc PollEvents(EventPollRequest) returns (EventPollResponse);
+  rpc AcknowledgeEvents(EventAcknowledgeRequest) returns (EventAcknowledgeResponse);
+  rpc RejectEvents(EventRejectRequest) returns (EventRejectResponse);
+  rpc ReplaySubscription(EventReplayRequest) returns (EventReplayResponse);
+  rpc ListDeadLetters(EventListDeadLettersRequest) returns (EventListDeadLettersResponse);
+}

@@ -21,7 +21,7 @@ This matrix indexes executable chaos evidence for capabilities that actually exi
 | SFU failure | SFU | **Not implemented: SFU does not exist yet** | none claimed | a mock SFU is not accepted as evidence |
 | Peer disappearance | remote peer/session transport | **Not implemented: no production peer-liveness/transport boundary exists** | none claimed | required with real remote session integration |
 | Packet reorder | transport receive path | **Not implemented: no production packet receive/reorder boundary exists** | none claimed | protocol collection canonicalization is not a substitute |
-| Slow consumer | transport/queue consumer | **Not implemented: no production consumer/backpressure boundary exists** | none claimed | required when queues/consumers become real runtime capabilities |
+| Slow consumer | Phase-14 durable Event subscription consumer | `slow_consumer_chaos_enforces_bounded_in_flight_and_cursor_redelivery` | `max_in_flight=1` bounds the batch; an unacknowledged batch is redelivered with the same opaque cursor/attempt and the next Event is not exposed until ACK | production Internet/network backpressure remains a Phase-15+ transport concern |
 
 ## Evidence ownership
 

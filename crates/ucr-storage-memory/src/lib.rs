@@ -10,9 +10,9 @@ use ucr_core::{
     AntiEntropyStore, AuthorizationEvaluator, CommandAcceptanceStore, CommandOutcomeStore,
     CommunicationIntentStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, ExternalIdentityBindingStore, IdentityStore, MessageStore,
-    PermissionGrantStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
-    ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
+    EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, IdentityStore,
+    MessageStore, PermissionGrantStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore,
+    RecoveryPlanStore, ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
     ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth, StorageProvider, SyncStore,
     TrustedSigningKeyStore,
 };
@@ -23,29 +23,34 @@ use ucr_crypto::{
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
     CommunicationIntent, ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence,
-    DeliveryId, DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventEnvelope,
-    EventId, EventReconciliation, EventReplicaState, EventSummary, ExternalIdentityBinding,
-    IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId,
-    PermissionGrant, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
-    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
-    ServiceCredentialState, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
-    TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
+    DeliveryId, DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState,
+    EventConsumerCursor, EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind,
+    EventEnvelope, EventId, EventPollResult, EventReconciliation, EventReplicaState,
+    EventSubscription, EventSubscriptionId, EventSubscriptionStart, EventSummary,
+    ExternalIdentityBinding, IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId,
+    MessageEnvelope, MessageId, OpaqueId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan,
+    RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
+    ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy,
+    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
-    IdempotencyDecision, MAX_SERVICE_AUDIT_READ_ITEMS, accepted_command_receipt,
-    anti_entropy_session_binding, canonical_command, canonical_communication_intent,
-    canonical_event, canonical_message, canonical_recovery_plan, canonical_sync_session,
+    IdempotencyDecision, MAX_EVENT_DELIVERY_BATCH_BYTES, MAX_SERVICE_AUDIT_READ_ITEMS,
+    accepted_command_receipt, anti_entropy_session_binding, canonical_command,
+    canonical_communication_intent, canonical_event, canonical_event_subscription,
+    canonical_message, canonical_recovery_plan, canonical_sync_session,
     compare_command_idempotency, device_allows_protected_access, duplicate_command_receipt,
-    event_fingerprint, service_audit_hash, validate_anti_entropy_cursor,
-    validate_anti_entropy_page_size, validate_anti_entropy_session,
+    event_consumer_cursor_token, event_delivery_batch_next_size, event_delivery_size,
+    event_fingerprint, event_matches_subscription, event_retry_delay_ms, service_audit_hash,
+    validate_anti_entropy_cursor, validate_anti_entropy_page_size, validate_anti_entropy_session,
     validate_anti_entropy_summary_count, validate_conversation, validate_conversation_parent_kind,
     validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
-    validate_delivery_evidence_order, validate_delivery_transition,
-    validate_external_identity_binding, validate_external_identity_binding_key,
-    validate_identity_record, validate_permission_grant, validate_service_audit_record,
-    validate_service_quota_policy, validate_sync_checkpoint, validate_sync_transition,
-    validate_trusted_signing_key_descriptor,
+    validate_delivery_evidence_order, validate_delivery_transition, validate_event_batch_size,
+    validate_event_consumer_cursor, validate_external_identity_binding,
+    validate_external_identity_binding_key, validate_identity_record, validate_permission_grant,
+    validate_service_audit_record, validate_service_quota_policy, validate_sync_checkpoint,
+    validate_sync_transition, validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 10;
@@ -53,6 +58,7 @@ type ScopeKey = (String, Option<String>);
 type CommandKey = (ScopeKey, String);
 type CommandRefKey = (ScopeKey, String);
 type EventKey = (ScopeKey, String);
+type EventSubscriptionKey = (ScopeKey, String);
 type ReplayKey = ([u8; 32], [u8; 32]);
 type RecoveryIdentityKey = (ScopeKey, String);
 type ConversationKey = (ScopeKey, String);
@@ -75,12 +81,37 @@ struct MemoryQuotaUsage {
     last_observed_unix_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryEventCursorAction {
+    Acknowledge,
+    Reject,
+}
+
+#[derive(Debug, Clone)]
+struct MemoryEventActiveBatch {
+    end_position: u64,
+    attempt: u32,
+    not_before_unix_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+struct MemoryEventSubscriptionState {
+    subscription: EventSubscription,
+    committed_position: u64,
+    generation: u64,
+    active: Option<MemoryEventActiveBatch>,
+    last_cursor_action: Option<(Vec<u8>, MemoryEventCursorAction)>,
+    last_replay_id: Option<OpaqueId>,
+    dead_letters: Vec<EventDeadLetter>,
+}
+
 #[derive(Default)]
 struct MemoryState {
     accepted: HashMap<CommandKey, CommandEnvelope>,
     accepted_by_id: HashMap<CommandRefKey, CommandEnvelope>,
     events: HashMap<EventKey, EventEnvelope>,
     event_order: Vec<EventKey>,
+    event_subscriptions: HashMap<EventSubscriptionKey, MemoryEventSubscriptionState>,
     terminal_events: HashMap<CommandRefKey, EventId>,
     seen_handshakes: HashSet<ReplayKey>,
     recovery_plans: HashMap<String, RecoveryPlan>,
@@ -1536,6 +1567,98 @@ fn event_key(event: &EventEnvelope) -> EventKey {
     )
 }
 
+fn event_subscription_key(
+    scope: &TenantScope,
+    subscription_id: &EventSubscriptionId,
+) -> EventSubscriptionKey {
+    (
+        scope_key(scope),
+        subscription_id.as_opaque().as_str().to_owned(),
+    )
+}
+
+fn map_event_api_error(_error: ucr_protocol::EventApiError) -> DurableStoreError {
+    DurableStoreError::InvalidRecord
+}
+
+fn memory_next_event_batch(
+    state: &MemoryState,
+    subscription_state: &MemoryEventSubscriptionState,
+    limit: usize,
+) -> Result<Option<(Vec<EventEnvelope>, u64)>, DurableStoreError> {
+    let start = usize::try_from(subscription_state.committed_position)
+        .map_err(|_| DurableStoreError::Corrupt)?;
+    if start > state.event_order.len() {
+        return Err(DurableStoreError::Corrupt);
+    }
+    let mut events = Vec::with_capacity(limit);
+    let mut end_position = subscription_state.committed_position;
+    let mut batch_bytes = 0_usize;
+    for (offset, event_key) in state.event_order[start..].iter().enumerate() {
+        let position = start
+            .checked_add(offset)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(DurableStoreError::Corrupt)?;
+        let position = u64::try_from(position).map_err(|_| DurableStoreError::Corrupt)?;
+        let event = state
+            .events
+            .get(event_key)
+            .ok_or(DurableStoreError::Corrupt)?;
+        if !event_matches_subscription(&subscription_state.subscription, event) {
+            end_position = position;
+            continue;
+        }
+        let Some(next_batch_bytes) =
+            event_delivery_batch_next_size(batch_bytes, event).map_err(map_event_error)?
+        else {
+            if events.is_empty() {
+                return Err(DurableStoreError::Corrupt);
+            }
+            break;
+        };
+        events.push(event.clone());
+        batch_bytes = next_batch_bytes;
+        end_position = position;
+        if events.len() == limit {
+            break;
+        }
+    }
+    Ok((!events.is_empty()).then_some((events, end_position)))
+}
+
+fn memory_active_events(
+    state: &MemoryState,
+    subscription_state: &MemoryEventSubscriptionState,
+    active: &MemoryEventActiveBatch,
+) -> Result<Vec<EventEnvelope>, DurableStoreError> {
+    let start = usize::try_from(subscription_state.committed_position)
+        .map_err(|_| DurableStoreError::Corrupt)?;
+    let end = usize::try_from(active.end_position).map_err(|_| DurableStoreError::Corrupt)?;
+    if start > end || end > state.event_order.len() {
+        return Err(DurableStoreError::Corrupt);
+    }
+    let mut events = Vec::new();
+    let mut batch_bytes = 0_usize;
+    for key in &state.event_order[start..end] {
+        let event = state.events.get(key).ok_or(DurableStoreError::Corrupt)?;
+        if event_matches_subscription(&subscription_state.subscription, event) {
+            batch_bytes = batch_bytes
+                .checked_add(event_delivery_size(event).map_err(map_event_error)?)
+                .ok_or(DurableStoreError::Corrupt)?;
+            events.push(event.clone());
+        }
+    }
+    if events.is_empty()
+        || events.len()
+            > usize::try_from(subscription_state.subscription.max_in_flight)
+                .map_err(|_| DurableStoreError::Corrupt)?
+        || batch_bytes > MAX_EVENT_DELIVERY_BATCH_BYTES
+    {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(events)
+}
+
 fn receipt_for_existing(
     original: &CommandEnvelope,
     incoming: &CommandEnvelope,
@@ -1568,6 +1691,312 @@ impl EventJournalStore for MemoryLocalStore {
         state.events.insert(key.clone(), event);
         state.event_order.push(key);
         Ok(EventAppendStatus::Appended)
+    }
+}
+
+impl EventSubscriptionStore for MemoryLocalStore {
+    fn persist_event_subscription(
+        &self,
+        subscription: &EventSubscription,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let canonical = canonical_event_subscription(subscription).map_err(map_event_api_error)?;
+        let key = event_subscription_key(&canonical.scope, &canonical.subscription_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.event_subscriptions.get(&key) {
+            return if existing.subscription == canonical {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        let committed_position = match canonical.start {
+            EventSubscriptionStart::Beginning => 0,
+            EventSubscriptionStart::Latest => {
+                u64::try_from(state.event_order.len()).map_err(|_| DurableStoreError::Internal)?
+            }
+        };
+        state.event_subscriptions.insert(
+            key,
+            MemoryEventSubscriptionState {
+                subscription: canonical,
+                committed_position,
+                generation: 1,
+                active: None,
+                last_cursor_action: None,
+                last_replay_id: None,
+                dead_letters: Vec::new(),
+            },
+        );
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn event_subscription(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+    ) -> Result<Option<EventSubscription>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .event_subscriptions
+            .get(&event_subscription_key(scope, subscription_id))
+            .map(|value| value.subscription.clone()))
+    }
+
+    fn poll_event_subscription(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        max_items: usize,
+        now_unix_ms: i64,
+    ) -> Result<EventPollResult, DurableStoreError> {
+        validate_event_batch_size(max_items).map_err(map_event_api_error)?;
+        if now_unix_ms < 0 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let key = event_subscription_key(scope, subscription_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let snapshot = state
+            .event_subscriptions
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if snapshot.subscription.scope != *scope {
+            return Err(DurableStoreError::Corrupt);
+        }
+        if let Some(active) = snapshot.active.clone() {
+            if now_unix_ms < active.not_before_unix_ms {
+                let retry_after_ms = u64::try_from(active.not_before_unix_ms - now_unix_ms)
+                    .map_err(|_| DurableStoreError::Corrupt)?;
+                return Ok(EventPollResult::RetryAfter { retry_after_ms });
+            }
+            let events = memory_active_events(&state, &snapshot, &active)?;
+            let cursor = event_consumer_cursor_token(
+                scope,
+                &snapshot.subscription,
+                snapshot.generation,
+                active.end_position,
+                active.attempt,
+            );
+            return Ok(EventPollResult::Batch(EventDeliveryBatch {
+                subscription_id: subscription_id.clone(),
+                scope: scope.clone(),
+                events,
+                cursor,
+                attempt: active.attempt,
+            }));
+        }
+
+        let max_in_flight = usize::try_from(snapshot.subscription.max_in_flight)
+            .map_err(|_| DurableStoreError::Corrupt)?;
+        let limit = max_items.min(max_in_flight);
+        let Some((events, end_position)) = memory_next_event_batch(&state, &snapshot, limit)?
+        else {
+            let latest =
+                u64::try_from(state.event_order.len()).map_err(|_| DurableStoreError::Internal)?;
+            state
+                .event_subscriptions
+                .get_mut(&key)
+                .ok_or(DurableStoreError::Corrupt)?
+                .committed_position = latest;
+            return Ok(EventPollResult::Empty);
+        };
+        let active = MemoryEventActiveBatch {
+            end_position,
+            attempt: 1,
+            not_before_unix_ms: now_unix_ms,
+        };
+        state
+            .event_subscriptions
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Corrupt)?
+            .active = Some(active.clone());
+        let cursor = event_consumer_cursor_token(
+            scope,
+            &snapshot.subscription,
+            snapshot.generation,
+            active.end_position,
+            active.attempt,
+        );
+        Ok(EventPollResult::Batch(EventDeliveryBatch {
+            subscription_id: subscription_id.clone(),
+            scope: scope.clone(),
+            events,
+            cursor,
+            attempt: active.attempt,
+        }))
+    }
+
+    fn acknowledge_event_cursor(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        cursor: &EventConsumerCursor,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_event_consumer_cursor(cursor).map_err(map_event_api_error)?;
+        let key = event_subscription_key(scope, subscription_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let snapshot = state
+            .event_subscriptions
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if let Some((last, action)) = &snapshot.last_cursor_action
+            && *last == cursor.token
+        {
+            return if *action == MemoryEventCursorAction::Acknowledge {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        let active = snapshot.active.ok_or(DurableStoreError::Conflict)?;
+        let expected = event_consumer_cursor_token(
+            scope,
+            &snapshot.subscription,
+            snapshot.generation,
+            active.end_position,
+            active.attempt,
+        );
+        if expected != *cursor {
+            return Err(DurableStoreError::Conflict);
+        }
+        let subscription = state
+            .event_subscriptions
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Corrupt)?;
+        subscription.committed_position = active.end_position;
+        subscription.active = None;
+        subscription.last_cursor_action =
+            Some((cursor.token.clone(), MemoryEventCursorAction::Acknowledge));
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn reject_event_cursor(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        cursor: &EventConsumerCursor,
+        failure_kind: EventDeliveryFailureKind,
+        now_unix_ms: i64,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_event_consumer_cursor(cursor).map_err(map_event_api_error)?;
+        if now_unix_ms < 0 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let key = event_subscription_key(scope, subscription_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let snapshot = state
+            .event_subscriptions
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if let Some((last, action)) = &snapshot.last_cursor_action
+            && *last == cursor.token
+        {
+            return if *action == MemoryEventCursorAction::Reject {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        let active = snapshot.active.clone().ok_or(DurableStoreError::Conflict)?;
+        let expected = event_consumer_cursor_token(
+            scope,
+            &snapshot.subscription,
+            snapshot.generation,
+            active.end_position,
+            active.attempt,
+        );
+        if expected != *cursor {
+            return Err(DurableStoreError::Conflict);
+        }
+        let terminal = failure_kind == EventDeliveryFailureKind::Permanent
+            || active.attempt >= snapshot.subscription.max_attempts;
+        let dead_letter_events = terminal
+            .then(|| memory_active_events(&state, &snapshot, &active))
+            .transpose()?;
+        let subscription = state
+            .event_subscriptions
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Corrupt)?;
+        subscription.last_cursor_action =
+            Some((cursor.token.clone(), MemoryEventCursorAction::Reject));
+        if terminal {
+            for event in dead_letter_events.ok_or(DurableStoreError::Corrupt)? {
+                subscription.dead_letters.push(EventDeadLetter {
+                    subscription_id: subscription_id.clone(),
+                    scope: scope.clone(),
+                    event,
+                    attempts: active.attempt,
+                    failure_kind,
+                });
+            }
+            subscription.committed_position = active.end_position;
+            subscription.active = None;
+        } else {
+            let next_attempt = active
+                .attempt
+                .checked_add(1)
+                .ok_or(DurableStoreError::Corrupt)?;
+            let delay = event_retry_delay_ms(next_attempt);
+            let delay = i64::try_from(delay).map_err(|_| DurableStoreError::Internal)?;
+            let not_before_unix_ms = now_unix_ms
+                .checked_add(delay)
+                .ok_or(DurableStoreError::InvalidRecord)?;
+            subscription.active = Some(MemoryEventActiveBatch {
+                end_position: active.end_position,
+                attempt: next_attempt,
+                not_before_unix_ms,
+            });
+        }
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn replay_event_subscription(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        replay_id: &OpaqueId,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let key = event_subscription_key(scope, subscription_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let subscription = state
+            .event_subscriptions
+            .get_mut(&key)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if subscription.last_replay_id.as_ref() == Some(replay_id) {
+            return Ok(DurableRecordStatus::Duplicate);
+        }
+        subscription.generation = subscription
+            .generation
+            .checked_add(1)
+            .ok_or(DurableStoreError::Corrupt)?;
+        subscription.committed_position = 0;
+        subscription.active = None;
+        subscription.last_cursor_action = None;
+        subscription.dead_letters.clear();
+        subscription.last_replay_id = Some(replay_id.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn event_dead_letters(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        max_items: usize,
+    ) -> Result<Vec<EventDeadLetter>, DurableStoreError> {
+        validate_event_batch_size(max_items).map_err(map_event_api_error)?;
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let subscription = state
+            .event_subscriptions
+            .get(&event_subscription_key(scope, subscription_id))
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        Ok(subscription
+            .dead_letters
+            .iter()
+            .take(max_items)
+            .cloned()
+            .collect())
     }
 }
 
@@ -6994,5 +7423,369 @@ mod integration_api_tests {
             .expect("authorized exact operation lookup");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].operation.as_ref(), Some(&operation));
+    }
+}
+
+#[cfg(test)]
+mod phase14_event_subscription_tests {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    use ucr_core::{
+        DurableRecordStatus, EventApiIngress, EventAppendStatus, EventDeliveryClock,
+        EventDeliveryClockError, EventJournalStore, EventSubscriptionStore, PermissionGrantStore,
+        ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore,
+        issue_service_credential,
+    };
+    use ucr_model::{
+        ActorId, ActorKind, ActorRef, CorrelationContext, DeviceId, DeviceRef,
+        EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult, EventSubscription,
+        EventSubscriptionId, EventSubscriptionMode, EventSubscriptionStart, IdentityId, OpaqueId,
+        PermissionGrant, PermissionScope, PrincipalId, PrincipalKind, PrincipalRef,
+        ProtocolVersion, ScopedPrincipal, ServiceQuotaPolicy, TenantId, TenantScope,
+    };
+    use ucr_protocol::{CanonicalErrorCode, EVENT_APPEND_PERMISSION, EVENT_SUBSCRIBE_PERMISSION};
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-event-api")),
+            namespace_id: None,
+        }
+    }
+
+    fn event(id: &str, event_type: &str, payload: &[u8]) -> EventEnvelope {
+        EventEnvelope {
+            event_id: EventId::from_opaque(oid(id)),
+            scope: scope(),
+            event_type: event_type.to_owned(),
+            payload: payload.to_vec(),
+            actor: ActorRef {
+                actor_id: ActorId::from_opaque(oid("actor-event-api")),
+                kind: ActorKind::System,
+                on_behalf_of: None,
+            },
+            source_device: DeviceRef {
+                device_id: DeviceId::from_opaque(oid("device-event-api")),
+                identity_id: IdentityId::from_opaque(oid("identity-event-api")),
+            },
+            wall_time_unix_ms: 1_000,
+            logical_order: 1,
+            correlation: CorrelationContext {
+                correlation_id: oid("correlation-event-api"),
+                causation_id: None,
+                idempotency_key: None,
+            },
+            schema_version: ProtocolVersion::new(1, 0),
+            integrity_metadata: vec![1, 2, 3],
+            extensions: Vec::new(),
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestClock(AtomicI64);
+
+    impl TestClock {
+        fn new(now: i64) -> Self {
+            Self(AtomicI64::new(now))
+        }
+    }
+
+    impl ServiceQuotaClock for TestClock {
+        fn now_unix_ms(&self) -> Result<i64, ServiceQuotaClockError> {
+            Ok(self.0.load(Ordering::Acquire))
+        }
+    }
+
+    impl EventDeliveryClock for TestClock {
+        fn now_unix_ms(&self) -> Result<i64, EventDeliveryClockError> {
+            Ok(self.0.load(Ordering::Acquire))
+        }
+    }
+
+    fn service() -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("service-event-api")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
+    fn grant(subject: &ScopedPrincipal, permission: &str) -> PermissionGrant {
+        PermissionGrant {
+            grantee: subject.clone(),
+            permission: permission.to_owned(),
+            scope: PermissionScope::Exact(scope()),
+        }
+    }
+
+    fn subscription(id: &str, start: EventSubscriptionStart) -> EventSubscription {
+        EventSubscription {
+            subscription_id: EventSubscriptionId::from_opaque(oid(id)),
+            scope: scope(),
+            mode: EventSubscriptionMode::DurableStream,
+            webhook_uri: None,
+            event_types: vec!["ucr.message.created".to_owned()],
+            max_in_flight: 2,
+            max_attempts: 2,
+            start,
+        }
+    }
+
+    #[test]
+    fn event_ingress_denials_leave_no_ghosts_and_authorized_retries_deduplicate() {
+        let store = MemoryLocalStore::default();
+        let subject = service();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&credential)
+            .expect("provision credential");
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject.clone(),
+                max_requests: 16,
+                window_ms: 60_000,
+            })
+            .expect("install quota");
+        let clock = TestClock::new(50_000);
+        let ingress = EventApiIngress::new(&clock, &clock, &store, &store);
+        let subscription = subscription("subscription-ingress", EventSubscriptionStart::Beginning);
+        let denied = ingress
+            .create_subscription(
+                &subject.scope,
+                &credential.credential_id,
+                &secret,
+                &subscription,
+            )
+            .expect_err("missing subscribe permission denied");
+        assert_eq!(denied.code, CanonicalErrorCode::PermissionDenied);
+        assert_eq!(
+            store.event_subscription(&scope(), &subscription.subscription_id),
+            Ok(None)
+        );
+
+        let value = event("event-ingress", "ucr.message.created", b"payload");
+        let wrong = ucr_core::ServiceCredentialSecret::from_bytes([0xa5; 32]);
+        let unauthenticated = ingress
+            .publish_event(&subject.scope, &credential.credential_id, &wrong, &value)
+            .expect_err("wrong secret denied");
+        assert_eq!(unauthenticated.code, CanonicalErrorCode::Unauthenticated);
+
+        store
+            .grant_permission(&grant(&subject, EVENT_APPEND_PERMISSION))
+            .expect("grant append");
+        assert_eq!(
+            ingress.publish_event(&subject.scope, &credential.credential_id, &secret, &value),
+            Ok(EventAppendStatus::Appended)
+        );
+        assert_eq!(
+            ingress.publish_event(&subject.scope, &credential.credential_id, &secret, &value),
+            Ok(EventAppendStatus::Duplicate)
+        );
+        store
+            .grant_permission(&grant(&subject, EVENT_SUBSCRIBE_PERMISSION))
+            .expect("grant subscribe");
+        assert_eq!(
+            ingress
+                .create_subscription(
+                    &subject.scope,
+                    &credential.credential_id,
+                    &secret,
+                    &subscription
+                )
+                .expect("create subscription"),
+            subscription
+        );
+    }
+
+    #[test]
+    fn durable_stream_cursor_ack_backpressure_and_filter_are_idempotent() {
+        let store = MemoryLocalStore::default();
+        let subscription = subscription("subscription-memory", EventSubscriptionStart::Beginning);
+        assert_eq!(
+            store.persist_event_subscription(&subscription),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.persist_event_subscription(&subscription),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        assert_eq!(
+            store.append_event(&event("event-ignore", "ucr.device.revoked", b"ignore")),
+            Ok(EventAppendStatus::Appended)
+        );
+        for id in ["event-a", "event-b", "event-c"] {
+            assert_eq!(
+                store.append_event(&event(id, "ucr.message.created", id.as_bytes())),
+                Ok(EventAppendStatus::Appended)
+            );
+        }
+        let first = match store
+            .poll_event_subscription(&scope(), &subscription.subscription_id, 2, 10_000)
+            .expect("poll")
+        {
+            EventPollResult::Batch(batch) => batch,
+            other => panic!("unexpected poll: {other:?}"),
+        };
+        assert_eq!(first.events.len(), 2);
+        let same = store
+            .poll_event_subscription(&scope(), &subscription.subscription_id, 2, 10_001)
+            .expect("redelivery");
+        assert!(matches!(
+            same,
+            EventPollResult::Batch(ref batch) if batch.cursor == first.cursor && batch.events == first.events
+        ));
+        assert_eq!(
+            store.acknowledge_event_cursor(&scope(), &subscription.subscription_id, &first.cursor),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.acknowledge_event_cursor(&scope(), &subscription.subscription_id, &first.cursor),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        let next = match store
+            .poll_event_subscription(&scope(), &subscription.subscription_id, 2, 10_002)
+            .expect("next poll")
+        {
+            EventPollResult::Batch(batch) => batch,
+            other => panic!("unexpected next poll: {other:?}"),
+        };
+        assert_eq!(next.events.len(), 1);
+        assert_eq!(next.events[0].event_id.as_opaque().as_str(), "event-c");
+    }
+
+    #[test]
+    fn retry_dead_letter_and_replay_are_durable_state_machine_semantics() {
+        let store = MemoryLocalStore::default();
+        let subscription = subscription("subscription-retry", EventSubscriptionStart::Beginning);
+        store
+            .persist_event_subscription(&subscription)
+            .expect("subscription");
+        store
+            .append_event(&event("event-retry", "ucr.message.created", b"retry"))
+            .expect("event");
+        let first = match store
+            .poll_event_subscription(&scope(), &subscription.subscription_id, 1, 20_000)
+            .expect("first")
+        {
+            EventPollResult::Batch(batch) => batch,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(first.attempt, 1);
+        assert_eq!(
+            store.reject_event_cursor(
+                &scope(),
+                &subscription.subscription_id,
+                &first.cursor,
+                EventDeliveryFailureKind::Retryable,
+                20_000,
+            ),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.reject_event_cursor(
+                &scope(),
+                &subscription.subscription_id,
+                &first.cursor,
+                EventDeliveryFailureKind::Retryable,
+                20_000,
+            ),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        assert!(matches!(
+            store
+                .poll_event_subscription(&scope(), &subscription.subscription_id, 1, 20_500)
+                .expect("retry wait"),
+            EventPollResult::RetryAfter {
+                retry_after_ms: 500
+            }
+        ));
+        let retry = match store
+            .poll_event_subscription(&scope(), &subscription.subscription_id, 1, 21_000)
+            .expect("retry")
+        {
+            EventPollResult::Batch(batch) => batch,
+            other => panic!("unexpected retry: {other:?}"),
+        };
+        assert_eq!(retry.attempt, 2);
+        assert_ne!(retry.cursor, first.cursor);
+        store
+            .reject_event_cursor(
+                &scope(),
+                &subscription.subscription_id,
+                &retry.cursor,
+                EventDeliveryFailureKind::Retryable,
+                21_000,
+            )
+            .expect("max attempts dead-letter");
+        let dead = store
+            .event_dead_letters(&scope(), &subscription.subscription_id, 8)
+            .expect("dead letters");
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].event.event_id.as_opaque().as_str(), "event-retry");
+        let replay_id = oid("replay-memory");
+        assert_eq!(
+            store.replay_event_subscription(&scope(), &subscription.subscription_id, &replay_id),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.replay_event_subscription(&scope(), &subscription.subscription_id, &replay_id),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        assert!(
+            store
+                .event_dead_letters(&scope(), &subscription.subscription_id, 8)
+                .expect("cleared dead letters")
+                .is_empty()
+        );
+        let replayed = match store
+            .poll_event_subscription(&scope(), &subscription.subscription_id, 1, 30_000)
+            .expect("replayed")
+        {
+            EventPollResult::Batch(batch) => batch,
+            other => panic!("unexpected replay: {other:?}"),
+        };
+        assert_eq!(
+            replayed.events[0].event_id.as_opaque().as_str(),
+            "event-retry"
+        );
+        assert_ne!(replayed.cursor, retry.cursor);
+        assert_eq!(
+            store.acknowledge_event_cursor(&scope(), &subscription.subscription_id, &retry.cursor),
+            Err(ucr_core::DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn latest_subscription_starts_after_existing_events() {
+        let store = MemoryLocalStore::default();
+        store
+            .append_event(&event("event-old", "ucr.message.created", b"old"))
+            .expect("old event");
+        let subscription = subscription("subscription-latest", EventSubscriptionStart::Latest);
+        store
+            .persist_event_subscription(&subscription)
+            .expect("latest subscription");
+        assert_eq!(
+            store
+                .poll_event_subscription(&scope(), &subscription.subscription_id, 1, 40_000)
+                .expect("empty"),
+            EventPollResult::Empty
+        );
+        store
+            .append_event(&event("event-new", "ucr.message.created", b"new"))
+            .expect("new event");
+        assert!(matches!(
+            store
+                .poll_event_subscription(&scope(), &subscription.subscription_id, 1, 40_001)
+                .expect("new poll"),
+            EventPollResult::Batch(ref batch) if batch.events[0].event_id.as_opaque().as_str() == "event-new"
+        ));
     }
 }

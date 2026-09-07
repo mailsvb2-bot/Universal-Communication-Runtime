@@ -459,6 +459,7 @@ mod tests {
         connection
             .execute_batch("DROP TABLE identities;")
             .expect("restore v18 shape");
+        crate::test_remove_v20_objects(&connection).expect("remove future v20 objects");
         connection
             .pragma_update(None, "user_version", SQLITE_SCHEMA_V18)
             .expect("v18 version");

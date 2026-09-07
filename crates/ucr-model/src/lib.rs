@@ -120,6 +120,7 @@ id_type!(DeliveryId);
 id_type!(IntegrationId);
 id_type!(CommandId);
 id_type!(EventId);
+id_type!(EventSubscriptionId);
 id_type!(IntentId);
 id_type!(KeyId);
 id_type!(RecoveryPlanId);
@@ -726,6 +727,118 @@ impl fmt::Debug for EventEnvelope {
             .field("integrity_metadata", &"<opaque>")
             .field("integrity_metadata_len", &self.integrity_metadata.len())
             .field("extensions", &self.extensions)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventSubscriptionMode {
+    DurableStream,
+    Webhook,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventSubscriptionStart {
+    Beginning,
+    Latest,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct EventSubscription {
+    pub subscription_id: EventSubscriptionId,
+    pub scope: TenantScope,
+    pub mode: EventSubscriptionMode,
+    pub webhook_uri: Option<String>,
+    pub event_types: Vec<String>,
+    pub max_in_flight: u32,
+    pub max_attempts: u32,
+    pub start: EventSubscriptionStart,
+}
+
+impl fmt::Debug for EventSubscription {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EventSubscription")
+            .field("subscription_id", &self.subscription_id)
+            .field("scope", &self.scope)
+            .field("mode", &self.mode)
+            .field("has_webhook_uri", &self.webhook_uri.is_some())
+            .field("event_types", &self.event_types)
+            .field("max_in_flight", &self.max_in_flight)
+            .field("max_attempts", &self.max_attempts)
+            .field("start", &self.start)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct EventConsumerCursor {
+    pub token: Vec<u8>,
+}
+
+impl fmt::Debug for EventConsumerCursor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EventConsumerCursor")
+            .field("token", &"<opaque>")
+            .field("token_len", &self.token.len())
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventDeliveryFailureKind {
+    Retryable,
+    Permanent,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct EventDeliveryBatch {
+    pub subscription_id: EventSubscriptionId,
+    pub scope: TenantScope,
+    pub events: Vec<EventEnvelope>,
+    pub cursor: EventConsumerCursor,
+    pub attempt: u32,
+}
+
+impl fmt::Debug for EventDeliveryBatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EventDeliveryBatch")
+            .field("subscription_id", &self.subscription_id)
+            .field("scope", &self.scope)
+            .field("events", &self.events)
+            .field("cursor", &self.cursor)
+            .field("attempt", &self.attempt)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventPollResult {
+    Empty,
+    RetryAfter { retry_after_ms: u64 },
+    Batch(EventDeliveryBatch),
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct EventDeadLetter {
+    pub subscription_id: EventSubscriptionId,
+    pub scope: TenantScope,
+    pub event: EventEnvelope,
+    pub attempts: u32,
+    pub failure_kind: EventDeliveryFailureKind,
+}
+
+impl fmt::Debug for EventDeadLetter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EventDeadLetter")
+            .field("subscription_id", &self.subscription_id)
+            .field("scope", &self.scope)
+            .field("event", &self.event)
+            .field("attempts", &self.attempts)
+            .field("failure_kind", &self.failure_kind)
             .finish()
     }
 }

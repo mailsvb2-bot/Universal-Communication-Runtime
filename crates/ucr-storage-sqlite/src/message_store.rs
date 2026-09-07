@@ -1611,6 +1611,7 @@ pub(crate) mod tests {
         }
         {
             let connection = Connection::open(db.path()).expect("open raw sqlite");
+            crate::test_remove_v20_objects(&connection).expect("remove future v20 objects");
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF;
@@ -1727,6 +1728,7 @@ pub(crate) mod tests {
         connection
             .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
             .expect("keep application id");
+        crate::test_remove_v20_objects(&connection).expect("remove future v20 objects");
         connection
             .pragma_update(None, "user_version", 4_u32)
             .expect("set v4");

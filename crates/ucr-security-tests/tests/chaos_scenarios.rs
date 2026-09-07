@@ -10,10 +10,12 @@ use std::{
 
 use ucr_core::{
     AntiEntropyStore, AuthorizedDurableRuntime, AuthorizedMutationError, CommandAcceptanceStore,
-    DeviceLifecycleStore, DurableStoreError, EventAppendStatus, EventJournalStore,
-    PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore, ServicePrincipalRequestGate,
-    ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore, SyncStore,
-    TrustedSigningKeyStore, issue_service_credential,
+    DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
+    EventDeliveryClock, EventDeliveryClockError, EventJournalStore, EventSubscriptionStore,
+    EventWebhookDeliveryError, EventWebhookDispatcher, EventWebhookSink, PermissionGrantStore,
+    ServiceAuditStore, ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock,
+    ServiceQuotaClockError, ServiceQuotaStore, SyncStore, TrustedSigningKeyStore,
+    WebhookDispatchOutcome, issue_service_credential,
 };
 use ucr_crypto::{
     MessageSignatureVerificationError, SigningKeyMaterial, TrustedKeyResolutionError,
@@ -22,12 +24,13 @@ use ucr_crypto::{
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CommandEnvelope, CommandId, ConversationId, ConversationKind,
     ConversationRef, CorrelationContext, DeliveryPolicy, DeliveryState, DeviceDescriptor, DeviceId,
-    DeviceLifecycleState, DeviceRef, EndpointId, EventEnvelope, EventId, EventReplicaState,
-    IdentityId, KeyId, KeyPurpose, MessageEnvelope, MessageId, MessageSignature, NamespaceId,
-    OpaqueId, OriginRef, PermissionGrant, PermissionScope, PrincipalId, PrincipalKind,
-    PrincipalRef, ProtocolVersion, PublicKeyDescriptor, ScopedPrincipal, ServiceAuditOutcome,
-    ServiceQuotaPolicy, SessionId, SyncLinkKind, SyncMode, SyncSelection, SyncSession, SyncState,
-    TenantId, TenantScope,
+    DeviceLifecycleState, DeviceRef, EndpointId, EventEnvelope, EventId, EventPollResult,
+    EventReplicaState, EventSubscription, EventSubscriptionId, EventSubscriptionMode,
+    EventSubscriptionStart, IdentityId, KeyId, KeyPurpose, MessageEnvelope, MessageId,
+    MessageSignature, NamespaceId, OpaqueId, OriginRef, PermissionGrant, PermissionScope,
+    PrincipalId, PrincipalKind, PrincipalRef, ProtocolVersion, PublicKeyDescriptor,
+    ScopedPrincipal, ServiceAuditOutcome, ServiceQuotaPolicy, SessionId, SyncLinkKind, SyncMode,
+    SyncSelection, SyncSession, SyncState, TenantId, TenantScope,
 };
 use ucr_protocol::{
     ALGORITHM_VERSION, CONVERSATION_READ_PERMISSION, CanonicalError, CanonicalErrorCode,
@@ -79,6 +82,25 @@ impl TestClock {
 impl ServiceQuotaClock for TestClock {
     fn now_unix_ms(&self) -> Result<i64, ServiceQuotaClockError> {
         Ok(self.0.load(Ordering::Acquire))
+    }
+}
+
+impl EventDeliveryClock for TestClock {
+    fn now_unix_ms(&self) -> Result<i64, EventDeliveryClockError> {
+        Ok(self.0.load(Ordering::Acquire))
+    }
+}
+
+#[derive(Debug)]
+struct RetryableWebhookSink;
+
+impl EventWebhookSink for RetryableWebhookSink {
+    fn deliver(
+        &self,
+        _subscription: &EventSubscription,
+        _event: &EventEnvelope,
+    ) -> Result<(), EventWebhookDeliveryError> {
+        Err(EventWebhookDeliveryError::Retryable)
     }
 }
 
@@ -445,6 +467,120 @@ fn local_partition_merge_chaos_recovers_missing_and_refuses_damaged_state() {
     assert_eq!(after[0].state, EventReplicaState::Matching);
     assert_eq!(after[1].state, EventReplicaState::Damaged);
     assert_eq!(after[2].state, EventReplicaState::Matching);
+}
+
+#[test]
+fn slow_consumer_chaos_enforces_bounded_in_flight_and_cursor_redelivery() {
+    let store = MemoryLocalStore::default();
+    let sync = sync_session();
+    let subscription = EventSubscription {
+        subscription_id: EventSubscriptionId::from_opaque(oid("chaos-slow-consumer")),
+        scope: sync.scope.clone(),
+        mode: EventSubscriptionMode::DurableStream,
+        webhook_uri: None,
+        event_types: vec!["ucr.chaos.event".to_owned()],
+        max_in_flight: 1,
+        max_attempts: 3,
+        start: EventSubscriptionStart::Beginning,
+    };
+    assert_eq!(
+        store.persist_event_subscription(&subscription),
+        Ok(DurableRecordStatus::Persisted)
+    );
+    for (id, payload) in [
+        ("chaos-slow-event-a", b"a".as_slice()),
+        ("chaos-slow-event-b", b"b".as_slice()),
+    ] {
+        store
+            .append_event(&event(&sync, id, payload))
+            .expect("append slow-consumer Event");
+    }
+
+    let first = match store
+        .poll_event_subscription(&sync.scope, &subscription.subscription_id, 64, 50_000)
+        .expect("first slow-consumer poll")
+    {
+        EventPollResult::Batch(batch) => batch,
+        other => panic!("expected first bounded batch, got {other:?}"),
+    };
+    assert_eq!(first.events.len(), 1);
+    assert_eq!(
+        first.events[0].event_id.as_opaque().as_str(),
+        "chaos-slow-event-a"
+    );
+
+    let repeated = match store
+        .poll_event_subscription(&sync.scope, &subscription.subscription_id, 64, 50_001)
+        .expect("repeat slow-consumer poll")
+    {
+        EventPollResult::Batch(batch) => batch,
+        other => panic!("expected redelivery batch, got {other:?}"),
+    };
+    assert_eq!(repeated.events, first.events);
+    assert_eq!(repeated.cursor, first.cursor);
+    assert_eq!(repeated.attempt, first.attempt);
+
+    assert_eq!(
+        store.acknowledge_event_cursor(&sync.scope, &subscription.subscription_id, &first.cursor),
+        Ok(DurableRecordStatus::Persisted)
+    );
+    let second = match store
+        .poll_event_subscription(&sync.scope, &subscription.subscription_id, 64, 50_002)
+        .expect("post-ack slow-consumer poll")
+    {
+        EventPollResult::Batch(batch) => batch,
+        other => panic!("expected second batch after ack, got {other:?}"),
+    };
+    assert_eq!(second.events.len(), 1);
+    assert_eq!(
+        second.events[0].event_id.as_opaque().as_str(),
+        "chaos-slow-event-b"
+    );
+}
+
+#[test]
+fn webhook_dispatcher_uses_durable_retry_and_dead_letter_state() {
+    let store = MemoryLocalStore::default();
+    let sync = sync_session();
+    let subscription = EventSubscription {
+        subscription_id: EventSubscriptionId::from_opaque(oid("chaos-webhook")),
+        scope: sync.scope.clone(),
+        mode: EventSubscriptionMode::Webhook,
+        webhook_uri: Some("https://events.example.test/ucr".to_owned()),
+        event_types: vec!["ucr.chaos.event".to_owned()],
+        max_in_flight: 1,
+        max_attempts: 2,
+        start: EventSubscriptionStart::Beginning,
+    };
+    store
+        .persist_event_subscription(&subscription)
+        .expect("persist webhook subscription");
+    store
+        .append_event(&event(&sync, "chaos-webhook-event", b"webhook"))
+        .expect("append webhook Event");
+    let clock = TestClock::new(60_000);
+    let sink = RetryableWebhookSink;
+    let dispatcher = EventWebhookDispatcher::new(&clock, &store, &sink);
+    assert_eq!(
+        dispatcher.dispatch_once(&sync.scope, &subscription.subscription_id),
+        Ok(WebhookDispatchOutcome::RetryScheduled)
+    );
+    assert_eq!(
+        dispatcher.dispatch_once(&sync.scope, &subscription.subscription_id),
+        Ok(WebhookDispatchOutcome::RetryAfter {
+            retry_after_ms: 1_000
+        })
+    );
+    clock.set(61_000);
+    assert_eq!(
+        dispatcher.dispatch_once(&sync.scope, &subscription.subscription_id),
+        Ok(WebhookDispatchOutcome::DeadLettered)
+    );
+    let dead_letters = store
+        .event_dead_letters(&sync.scope, &subscription.subscription_id, 8)
+        .expect("webhook dead letters");
+    assert_eq!(dead_letters.len(), 1);
+    assert_eq!(dead_letters[0].attempts, 2);
 }
 
 #[test]
