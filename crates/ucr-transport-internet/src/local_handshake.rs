@@ -21,8 +21,8 @@ use crate::handshake::{InternetPeerExpectationError, InternetPeerExpectationReso
 use crate::local_route::LOCAL_TCP_CAPABILITY;
 use crate::wire::{
     WireError, auth_frame, confirmation_frame, decode_agreement, decode_auth, decode_confirmation,
-    decode_hello, decode_negotiation_result, decode_opaque, encode_hello, encode_negotiation_result,
-    key_exchange_frame, pb, pb_opaque, read_message_frame, write_frame,
+    decode_hello, decode_negotiation_result, decode_opaque, encode_hello,
+    encode_negotiation_result, key_exchange_frame, pb, pb_opaque, read_message_frame, write_frame,
 };
 
 pub const LOCAL_CONTEXT_EXTENSION: &str = "ucr.transport.local.context.v1";
