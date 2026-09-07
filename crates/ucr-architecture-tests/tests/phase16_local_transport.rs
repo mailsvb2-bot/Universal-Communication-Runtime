@@ -94,7 +94,10 @@ fn phase16_does_not_create_a_second_canonical_delivery_or_identity_model() {
         "trait MessageStore",
         "trait ConversationStore",
     ] {
-        assert!(!local.contains(forbidden), "local transport owns {forbidden}");
+        assert!(
+            !local.contains(forbidden),
+            "local transport owns {forbidden}"
+        );
         assert!(
             !handshake.contains(forbidden),
             "local handshake owns {forbidden}"
