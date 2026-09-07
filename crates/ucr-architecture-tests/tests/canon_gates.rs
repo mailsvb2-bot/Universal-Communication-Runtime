@@ -1128,7 +1128,7 @@ fn message_intent_and_error_wire_parity_survives_v10_storage() {
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
     assert!(sqlite_root.contains("fn migrate_v9_to_v10"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
@@ -1639,7 +1639,7 @@ fn trusted_signing_key_lifecycle_is_scoped_restart_safe_and_runtime_integrated()
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
@@ -1805,7 +1805,7 @@ fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overc
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
@@ -1858,6 +1858,13 @@ const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
     "sync_session",
     "latest_sync_checkpoint",
     "append_event",
+    "persist_event_subscription",
+    "event_subscription",
+    "poll_event_subscription",
+    "acknowledge_event_cursor",
+    "reject_event_cursor",
+    "replay_event_subscription",
+    "event_dead_letters",
     "anti_entropy_summary_page",
     "classify_event_summaries",
     "reconcile_event",
@@ -1905,6 +1912,10 @@ const AUTHORIZED_RUNTIME_PERMISSIONS: &[&str] = &[
     "ANTI_ENTROPY_READ_PERMISSION",
     "ANTI_ENTROPY_RECONCILE_PERMISSION",
     "EVENT_APPEND_PERMISSION",
+    "EVENT_SUBSCRIBE_PERMISSION",
+    "EVENT_CONSUME_PERMISSION",
+    "EVENT_REPLAY_PERMISSION",
+    "EVENT_DEAD_LETTER_READ_PERMISSION",
 ];
 
 #[test]
@@ -2069,7 +2080,7 @@ fn device_lifecycle_is_durable_and_gates_protected_key_access() {
     }
     assert!(sqlite_device.contains("CREATE TABLE devices"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
     assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
     assert!(storage_spec.contains("migration does not invent an Identity binding"));
     assert!(spec.contains("one exact-scope durable `DeviceLifecycleStore`"));
@@ -2222,7 +2233,7 @@ fn service_principal_authentication_resolves_canonical_identity_before_least_pri
         "credential_authentication_is_non_disclosing_revocable_and_raw_runtime_cannot_bypass_gate"
     ));
     assert!(sqlite.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V12 => migrate_v12_to_v13(connection)?"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V13 => migrate_v13_to_v14(connection)?"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V14 => migrate_v14_to_v15(connection)?"));
@@ -2378,7 +2389,7 @@ fn service_principal_audit_storage_and_governance_close_only_the_evidenced_block
     assert!(sqlite.contains("verify_audit_chain"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
     assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
     assert!(spec.contains("single-use"));
@@ -2668,6 +2679,7 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
         "old_client_chaos_cannot_force_policy_downgrade",
         "authenticated_message_corruption_chaos_fails_closed",
         "revoked_device_restart_chaos_never_resurrects_trust",
+        "slow_consumer_chaos_enforces_bounded_in_flight_and_cursor_redelivery",
     ];
     for scenario in scenarios {
         assert_chaos_evidence(&chaos, &matrix, scenario);
@@ -2690,7 +2702,6 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
         "Not implemented: Relay does not exist yet",
         "Not implemented: SFU does not exist yet",
         "Not implemented: no production packet receive/reorder boundary exists",
-        "Not implemented: no production consumer/backpressure boundary exists",
     ] {
         assert!(
             matrix.contains(open_evidence),
@@ -2703,10 +2714,10 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
     );
     assert!(!threat.contains("deterministic process-kill fault injection for durable stores"));
     assert!(threat.contains(
-        "transport/infrastructure chaos evidence for network/DNS/Relay/SFU/peer-disappearance/transport-reorder/slow-consumer"
+        "transport/infrastructure chaos evidence for network/DNS/Relay/SFU/peer-disappearance/transport-reorder"
     ));
     assert!(!threat.contains("end-to-end storage-full fault injection remain open"));
-    assert!(threat.contains("seven executable cross-crate chaos scenarios"));
+    assert!(threat.contains("eight executable cross-crate chaos scenarios"));
     assert!(threat.contains("provider-owned end-to-end page-capacity exhaustion evidence"));
     assert!(adr.contains("An application restart is not claimed to be a process-kill test"));
     assert!(adr.contains(
@@ -2768,7 +2779,7 @@ fn communication_intent_storage_is_durable_scoped_and_has_one_owner() {
     assert!(sqlite.contains("CREATE TABLE communication_intent_extensions"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V15: u32 = 15;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V16: u32 = 16;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
     assert!(sqlite_root.contains("fn migrate_v15_to_v16"));
 
     for evidence in [
@@ -2992,7 +3003,7 @@ fn integration_api_reuses_canonical_command_and_service_principal_owners() {
         "docs/adr/0040-integration-api-reuses-canonical-command-and-service-principal-boundaries.md"
     ));
     assert!(readme.contains(
-        "**Phase 13 — Integration API (local/reference complete; Phase 14 Event API not started).**"
+        "**Phase 14 — Event API (local/reference complete; Phase 15 Internet Transport not started).**"
     ));
 }
 
@@ -3092,7 +3103,7 @@ fn service_principal_audit_operation_binding_has_v17_migration_and_governance() 
     assert!(sqlite.contains("CREATE TRIGGER service_audit_operation_no_delete"));
     assert!(sqlite.contains("LEFT JOIN service_audit_operations"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V16: u32 = 16;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
     assert!(sqlite_root.contains("fn migrate_v16_to_v17"));
     for evidence in [
         "operation_bound_audit_survives_restart_and_exact_lookup",
@@ -3232,7 +3243,7 @@ fn external_identity_binding_v18_is_exact_scoped_migrated_and_governed() {
     assert!(sqlite.contains("external_namespace, external_entity_id"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V17: u32 = 17;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V18: u32 = 18;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
     assert!(sqlite_root.contains("fn migrate_v17_to_v18("));
     assert!(sqlite_root.contains("identity_binding_store::create_v18_objects"));
     assert!(sqlite_root.contains("identity_binding_store::verify_schema_v18"));
@@ -3256,8 +3267,8 @@ fn external_identity_binding_v18_is_exact_scoped_migrated_and_governed() {
     assert!(storage_spec.contains("External Identity Binding scope + integration namespace + opaque external entity ID + Identity target"));
     assert!(storage_spec.contains("identity-binding lifecycle retention"));
     assert!(storage_spec.contains("PRIVATE / identity and provider metadata"));
-    assert!(permission_spec.contains("47 externally callable tenant-scoped durable methods"));
-    assert!(permission_spec.contains("39 unique permission IDs"));
+    assert!(permission_spec.contains("54 externally callable tenant-scoped durable methods"));
+    assert!(permission_spec.contains("43 unique permission IDs"));
     assert!(threat.contains("SQLite v18 adds the single durable `ExternalIdentityBinding` owner"));
     assert!(adr.contains("No implicit relink or unlink operation is defined"));
     assert!(adr.contains("Direct integration database access was rejected"));
@@ -3343,7 +3354,7 @@ fn root_identity_v19_model_and_storage_have_one_accountless_owner() {
     assert!(sqlite.contains("impl IdentityStore for SqliteLocalStore"));
     assert!(sqlite.contains("CREATE TABLE identities"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V18: u32 = 18;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
     assert!(sqlite_root.contains("fn migrate_v18_to_v19("));
     assert!(sqlite_root.contains("identity_store::create_v19_objects"));
     assert!(sqlite_root.contains("identity_store::verify_schema_v19"));
@@ -3496,7 +3507,7 @@ fn integration_conversation_api_reuses_canonical_owner_and_hides_existence_until
             "integration_conversation_api_survives_sqlite_restart_through_canonical_owner"
         )
     );
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
     assert!(
         conversation_spec
             .contains("A Conversation is a canonical UCR entity and outlives any provider")
@@ -3606,7 +3617,7 @@ fn integration_message_api_reuses_canonical_owner_ack_and_authenticated_origin()
     assert!(
         sqlite.contains("integration_message_api_survives_sqlite_restart_through_canonical_owner")
     );
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
     assert!(spec.contains("single existing `MessageStore`"));
     assert!(spec.contains("ACK confirms only durable Message persistence/deduplication"));
     assert!(spec.contains("must equal `Message.origin.principal_id`"));
@@ -3695,7 +3706,7 @@ fn integration_communication_intent_api_reuses_canonical_owner_without_routing_b
     assert!(sqlite.contains(
         "integration_communication_intent_api_survives_sqlite_restart_through_canonical_owner"
     ));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
     assert!(spec.contains("single existing `CommunicationIntentStore`"));
     assert!(spec.contains("ACK confirms only durable Intent persistence/deduplication"));
     assert!(spec.contains("does not expose or accept an internal route"));
@@ -3743,6 +3754,184 @@ fn public_namespaced_identifiers_have_one_bounded_protocol_owner() {
     assert!(ci.contains("0048-public-namespaced-identifiers-have-explicit-byte-budget.md"));
     assert!(!grpc.contains("MAX_GRPC_NAMESPACED_IDENTIFIER_LEN"));
     assert!(!grpc.contains("validate_grpc_namespaced_identifier"));
+}
+
+#[test]
+fn phase14_event_api_reuses_one_event_journal_and_durable_consumer_state() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model");
+    let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/event_api.rs"))
+        .expect("event protocol");
+    let authorization =
+        fs::read_to_string(workspace.join("crates/ucr-protocol/src/authorization.rs"))
+            .expect("authorization");
+    let core = fs::read_to_string(workspace.join("crates/ucr-core/src/lib.rs")).expect("core");
+    let ingress = fs::read_to_string(workspace.join("crates/ucr-core/src/event_api.rs"))
+        .expect("event ingress");
+    let memory =
+        fs::read_to_string(workspace.join("crates/ucr-storage-memory/src/lib.rs")).expect("memory");
+    let sqlite_root = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
+        .expect("sqlite root");
+    let sqlite = fs::read_to_string(
+        workspace.join("crates/ucr-storage-sqlite/src/event_subscription_store.rs"),
+    )
+    .expect("sqlite Event subscription store");
+
+    for required in [
+        "pub struct EventSubscription",
+        "pub struct EventConsumerCursor",
+        "pub struct EventDeliveryBatch",
+        "pub struct EventDeadLetter",
+    ] {
+        assert!(
+            model.contains(required),
+            "missing Phase-14 model: {required}"
+        );
+    }
+    assert!(core.contains("pub trait EventSubscriptionStore: EventJournalStore"));
+    assert_eq!(core.matches("pub trait EventJournalStore").count(), 1);
+    assert!(ingress.contains("pub struct EventApiIngress"));
+    assert!(ingress.contains("pub struct EventWebhookDispatcher"));
+    assert!(ingress.contains("EventWebhookSink"));
+    for permission in [
+        "EVENT_APPEND_PERMISSION",
+        "EVENT_SUBSCRIBE_PERMISSION",
+        "EVENT_CONSUME_PERMISSION",
+        "EVENT_REPLAY_PERMISSION",
+        "EVENT_DEAD_LETTER_READ_PERMISSION",
+    ] {
+        assert!(authorization.contains(permission));
+        assert!(ingress.contains(permission));
+    }
+    for semantic in [
+        "MAX_EVENT_BATCH_ITEMS",
+        "MAX_EVENT_DELIVERY_ATTEMPTS",
+        "EVENT_RETRY_BASE_MS",
+        "EVENT_RETRY_MAX_MS",
+        "event_consumer_cursor_token",
+        "event_delivery_batch_next_size",
+        "MAX_EVENT_DELIVERY_BATCH_BYTES",
+        "canonical_event_subscription",
+    ] {
+        assert!(
+            protocol.contains(semantic),
+            "missing Event semantic: {semantic}"
+        );
+    }
+    assert!(memory.contains("impl EventSubscriptionStore for MemoryLocalStore"));
+    assert!(sqlite.contains("impl EventSubscriptionStore for SqliteLocalStore"));
+    assert!(memory.contains("event_delivery_batch_next_size"));
+    assert!(sqlite.contains("event_delivery_batch_next_size"));
+    assert!(
+        memory.contains("event_ingress_denials_leave_no_ghosts_and_authorized_retries_deduplicate")
+    );
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V19: u32 = 19;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(sqlite_root.contains("fn migrate_v19_to_v20"));
+    assert!(sqlite_root.contains("event_subscription_store::create_v20_objects"));
+    for evidence in [
+        "retry_cursor_dead_letter_and_replay_survive_restart",
+        "v19_to_v20_migration_preserves_events_and_invents_no_subscriptions",
+    ] {
+        assert!(
+            sqlite.contains(evidence),
+            "missing SQLite Phase-14 evidence: {evidence}"
+        );
+    }
+}
+
+#[test]
+fn phase14_public_event_binding_governance_and_backpressure_are_locked() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/event_api.proto"))
+        .expect("Event API proto");
+    let grpc =
+        fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/lib.rs")).expect("grpc adapter");
+    let ingress = fs::read_to_string(workspace.join("crates/ucr-core/src/event_api.rs"))
+        .expect("event ingress");
+    let spec = fs::read_to_string(workspace.join("spec/event-api.md")).expect("Event API spec");
+    let chaos =
+        fs::read_to_string(workspace.join("crates/ucr-security-tests/tests/chaos_scenarios.rs"))
+            .expect("chaos evidence");
+    let matrix = fs::read_to_string(workspace.join("docs/architecture/CHAOS_SCENARIOS.md"))
+        .expect("chaos matrix");
+    let adr = fs::read_to_string(workspace.join(
+        "docs/adr/0052-phase14-event-api-reuses-append-only-journal-with-durable-consumer-state.md",
+    ))
+    .expect("ADR 0052");
+    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
+
+    for rpc in [
+        "rpc PublishEvent(",
+        "rpc CreateSubscription(",
+        "rpc GetSubscription(",
+        "rpc PollEvents(",
+        "rpc AcknowledgeEvents(",
+        "rpc RejectEvents(",
+        "rpc ReplaySubscription(",
+        "rpc ListDeadLetters(",
+    ] {
+        assert!(proto.contains(rpc), "missing EventService RPC: {rpc}");
+    }
+    assert_eq!(proto.matches("  rpc ").count(), 8);
+    assert!(grpc.contains("pub struct GrpcEventService"));
+    assert!(grpc.contains("EventApiIngress::new"));
+    assert!(grpc.contains("EVENT_PUBLISH_REQUEST_WIRE_MAX_BYTES"));
+    assert!(grpc.contains("GRPC_MAX_ENCODING_MESSAGE_SIZE"));
+    assert!(grpc.contains(".max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE)"));
+    assert!(!grpc.contains("Status::unimplemented"));
+    for evidence in [
+        "event_publish_poll_backpressure_ack_and_duplicate_round_trip_over_grpc",
+        "event_permanent_reject_dead_letter_and_replay_round_trip_over_grpc",
+        "event_permission_denial_hides_subscription_and_large_event_exceeds_tonic_default",
+        "grpc_decode_budget_contains_maximum_canonical_event_wire_size",
+    ] {
+        assert!(
+            grpc.contains(evidence),
+            "missing gRPC Event evidence: {evidence}"
+        );
+    }
+    assert!(chaos.contains("slow_consumer_chaos_enforces_bounded_in_flight_and_cursor_redelivery"));
+    assert!(chaos.contains("webhook_dispatcher_uses_durable_retry_and_dead_letter_state"));
+    assert!(matrix.contains("Phase-14 durable Event subscription consumer"));
+    assert!(
+        !matrix.contains("Not implemented: no production consumer/backpressure boundary exists")
+    );
+    assert!(spec.contains("one canonical append-only Event journal"));
+    assert!(spec.contains("MAX_EVENT_DELIVERY_BATCH_BYTES"));
+    assert!(spec.contains("5 MiB Event"));
+    assert!(spec.contains("Phase 15 remains unstarted"));
+    assert!(adr.contains(
+        "Creating a second outbound Event log or provider queue would create a second brain"
+    ));
+    assert!(adr.contains("This completes Phase 14 at the local/reference API layer"));
+    assert!(readme.contains(
+        "**Phase 14 — Event API (local/reference complete; Phase 15 Internet Transport not started).**"
+    ));
+    assert!(ci.contains("spec/event-api.md"));
+    assert!(ci.contains("proto/ucr/v1/event_api.proto"));
+    assert!(ci.contains(
+        "0052-phase14-event-api-reuses-append-only-journal-with-durable-consumer-state.md"
+    ));
+    for forbidden in [
+        "reqwest::",
+        "hyper::client",
+        "TcpStream::connect",
+        "hickory",
+        "trust_dns",
+    ] {
+        assert!(
+            !ingress.contains(forbidden),
+            "Phase 15 transport leaked into Phase 14 Core: {forbidden}"
+        );
+    }
 }
 
 #[test]
@@ -3956,7 +4145,7 @@ fn phase13_grpc_complete_surface_reuses_conversation_message_and_intent_owners()
     assert!(adr.contains("No SQLite schema or new permission/audit/storage vocabulary"));
     assert!(adr.contains("This does not implement Phase 14 Event API"));
     assert!(readme.contains(
-        "Phase 13 — Integration API (local/reference complete; Phase 14 Event API not started)"
+        "Phase 14 — Event API (local/reference complete; Phase 15 Internet Transport not started)"
     ));
     assert!(spec.contains("It now binds all eleven"));
     assert!(spec.contains("checked-in `IntegrationService` RPCs"));
@@ -4042,7 +4231,7 @@ fn integration_identity_read_side_reuses_canonical_owners_and_hides_existence_un
     assert!(sqlite_root.contains(
         "integration_identity_read_side_survives_sqlite_restart_through_canonical_owners"
     ));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 19;"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
     assert!(spec.contains("Read-side absence is canonical non-retryable `NOT_FOUND`"));
     assert!(spec.contains("External namespace/entity bytes are not copied, encoded, or hashed"));
     assert!(adr.contains("returning `NOT_FOUND` before authentication and"));

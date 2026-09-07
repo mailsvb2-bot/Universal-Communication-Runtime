@@ -28,6 +28,7 @@ pub enum CommandError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventError {
     InvalidEventType,
+    IdempotencyKeyTooLong,
     PayloadTooLarge,
     IntegrityMetadataTooLarge,
     InvalidSchemaVersion,
@@ -200,6 +201,14 @@ const fn map_command_extension_error(error: ExtensionError) -> CommandError {
 /// Rejects malformed event type identifiers.
 pub fn validate_event(event: &EventEnvelope) -> Result<(), EventError> {
     validate_namespaced_identifier(&event.event_type).map_err(|_| EventError::InvalidEventType)?;
+    if event
+        .correlation
+        .idempotency_key
+        .as_ref()
+        .is_some_and(|key| key.len() > MAX_IDEMPOTENCY_KEY_LEN)
+    {
+        return Err(EventError::IdempotencyKeyTooLong);
+    }
     if event.payload.len() > MAX_EVENT_PAYLOAD_LEN {
         return Err(EventError::PayloadTooLarge);
     }
@@ -551,6 +560,17 @@ mod tests {
             Err(CommandError::PayloadTooLarge)
         );
     }
+    #[test]
+    fn event_idempotency_key_budget_fails_closed_before_storage() {
+        let mut oversized = event("ucr.message.created");
+        oversized.correlation.idempotency_key =
+            Some("x".repeat(super::MAX_IDEMPOTENCY_KEY_LEN + 1));
+        assert_eq!(
+            validate_event(&oversized),
+            Err(EventError::IdempotencyKeyTooLong)
+        );
+    }
+
     #[test]
     fn event_payload_budget_fails_closed_before_storage() {
         let mut oversized = event("ucr.message.created");

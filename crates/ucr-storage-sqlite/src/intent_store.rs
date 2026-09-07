@@ -833,6 +833,7 @@ mod tests {
         }
         {
             let connection = Connection::open(db.path()).expect("raw sqlite");
+            crate::test_remove_v20_objects(&connection).expect("remove future v20 objects");
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF;

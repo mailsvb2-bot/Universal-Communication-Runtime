@@ -887,6 +887,7 @@ mod tests {
         connection
             .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
             .expect("application id");
+        crate::test_remove_v20_objects(&connection).expect("remove future v20 objects");
         connection
             .pragma_update(None, "user_version", 6_u32)
             .expect("set v6");

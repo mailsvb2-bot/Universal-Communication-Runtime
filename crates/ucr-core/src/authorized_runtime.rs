@@ -1,12 +1,14 @@
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
     ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
-    DeliveryState, DeviceDescriptor, DeviceId, EventEnvelope, EventId, EventReconciliation,
-    EventSummary, ExternalIdentityBinding, IdentityId, IdentityRecord, IntegrationId, IntentId,
-    KeyId, MessageEnvelope, MessageId, PermissionGrant, PermissionScope, PrincipalKind,
-    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
-    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy,
-    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    DeliveryState, DeviceDescriptor, DeviceId, EventConsumerCursor, EventDeadLetter,
+    EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult, EventReconciliation,
+    EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding, IdentityId,
+    IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
+    PermissionScope, PrincipalKind, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
+    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
+    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
+    TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{
     ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, COMMAND_ACCEPT_PERMISSION,
@@ -14,10 +16,11 @@ use ucr_protocol::{
     COMMUNICATION_INTENT_READ_PERMISSION, COMMUNICATION_INTENT_WRITE_PERMISSION,
     CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION, DELIVERY_READ_PERMISSION,
     DELIVERY_WRITE_PERMISSION, DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION,
-    DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
-    EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, IDENTITY_CREATE_PERMISSION,
-    IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION, MESSAGE_WRITE_PERMISSION,
-    PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
+    DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION, EVENT_CONSUME_PERMISSION,
+    EVENT_DEAD_LETTER_READ_PERMISSION, EVENT_REPLAY_PERMISSION, EVENT_SUBSCRIBE_PERMISSION,
+    EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+    IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,
+    MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
     PERMISSION_GRANT_REVOKE_PERMISSION, RECOVERY_PLAN_INSTALL_PERMISSION,
     RECOVERY_PLAN_READ_PERMISSION, RECOVERY_PLAN_REVOKE_PERMISSION,
     RECOVERY_PLAN_ROTATE_PERMISSION, SERVICE_AUDIT_READ_PERMISSION,
@@ -32,9 +35,9 @@ use crate::{
     AntiEntropyStore, AuthorizationEvaluator, AuthorizedMutationError, CommandAcceptanceStore,
     CommandOutcomeStore, CommunicationIntentStore, ConversationStore, DeliveryStore,
     DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, ExternalIdentityBindingStore, IdentityStore, MessageStore,
-    PermissionGrantStore, RecoveryPlanStore, ServiceAuditStore, ServiceCredentialStore,
-    ServiceQuotaStore, SyncStore, TrustedSigningKeyStore,
+    EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, IdentityStore,
+    MessageStore, PermissionGrantStore, RecoveryPlanStore, ServiceAuditStore,
+    ServiceCredentialStore, ServiceQuotaStore, SyncStore, TrustedSigningKeyStore,
 };
 
 /// Authorization-enforcing runtime boundary over tenant-scoped durable capabilities.
@@ -925,6 +928,131 @@ where
         self.require(subject, &event.scope, EVENT_APPEND_PERMISSION)?;
         self.store
             .append_event(event)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: EventSubscriptionStore,
+{
+    /// Creates/deduplicates a durable Event subscription after explicit subscribe authority.
+    ///
+    /// # Errors
+    /// Returns authorization failure before storage access or the underlying durable-store error.
+    pub fn persist_event_subscription(
+        &self,
+        subject: &ScopedPrincipal,
+        subscription: &EventSubscription,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &subscription.scope, EVENT_SUBSCRIBE_PERMISSION)?;
+        self.store
+            .persist_event_subscription(subscription)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Reads a subscription only after explicit subscribe authority.
+    ///
+    /// # Errors
+    /// Returns authorization failure before storage access or the underlying durable-store error.
+    pub fn event_subscription(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+    ) -> Result<Option<EventSubscription>, AuthorizedMutationError> {
+        self.require(subject, scope, EVENT_SUBSCRIBE_PERMISSION)?;
+        self.store
+            .event_subscription(scope, subscription_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Polls one bounded durable batch after explicit consumer authority.
+    ///
+    /// # Errors
+    /// Returns authorization failure before storage access or the underlying durable-store error.
+    pub fn poll_event_subscription(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        max_items: usize,
+        now_unix_ms: i64,
+    ) -> Result<EventPollResult, AuthorizedMutationError> {
+        self.require(subject, scope, EVENT_CONSUME_PERMISSION)?;
+        self.store
+            .poll_event_subscription(scope, subscription_id, max_items, now_unix_ms)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Acknowledges one exact active Event cursor after explicit consumer authority.
+    ///
+    /// # Errors
+    /// Returns authorization failure before storage access or the underlying durable-store error.
+    pub fn acknowledge_event_cursor(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        cursor: &EventConsumerCursor,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, scope, EVENT_CONSUME_PERMISSION)?;
+        self.store
+            .acknowledge_event_cursor(scope, subscription_id, cursor)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Rejects one exact active Event cursor after explicit consumer authority.
+    ///
+    /// # Errors
+    /// Returns authorization failure before storage access or the underlying durable-store error.
+    pub fn reject_event_cursor(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        cursor: &EventConsumerCursor,
+        failure_kind: EventDeliveryFailureKind,
+        now_unix_ms: i64,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, scope, EVENT_CONSUME_PERMISSION)?;
+        self.store
+            .reject_event_cursor(scope, subscription_id, cursor, failure_kind, now_unix_ms)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Starts an explicit full replay after independent replay authority.
+    ///
+    /// # Errors
+    /// Returns authorization failure before storage access or the underlying durable-store error.
+    pub fn replay_event_subscription(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        replay_id: &ucr_model::OpaqueId,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, scope, EVENT_REPLAY_PERMISSION)?;
+        self.store
+            .replay_event_subscription(scope, subscription_id, replay_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Reads bounded dead letters after independent dead-letter read authority.
+    ///
+    /// # Errors
+    /// Returns authorization failure before storage access or the underlying durable-store error.
+    pub fn event_dead_letters(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+        max_items: usize,
+    ) -> Result<Vec<EventDeadLetter>, AuthorizedMutationError> {
+        self.require(subject, scope, EVENT_DEAD_LETTER_READ_PERMISSION)?;
+        self.store
+            .event_dead_letters(scope, subscription_id, max_items)
             .map_err(AuthorizedMutationError::Store)
     }
 }

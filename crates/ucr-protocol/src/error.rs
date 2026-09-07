@@ -433,6 +433,7 @@ impl From<EventError> for CanonicalError {
     fn from(error: EventError) -> Self {
         let code = match error {
             EventError::InvalidEventType
+            | EventError::IdempotencyKeyTooLong
             | EventError::InvalidSchemaVersion
             | EventError::InvalidExtension
             | EventError::DuplicateExtension => CanonicalErrorCode::InvalidArgument,

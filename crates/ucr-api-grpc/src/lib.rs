@@ -5,27 +5,32 @@ use std::{fmt, sync::Arc};
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_core::{
     AuthorizationEvaluator, CommandAcceptanceStore, CommunicationIntentStore, ConversationStore,
-    ExternalIdentityBindingLookup, ExternalIdentityBindingStore, IdentityStore, IntegrationIngress,
-    MessageStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
-    ServiceQuotaClock, ServiceQuotaStore,
+    EventApiIngress, EventAppendStatus, EventCursorRejection, EventDeliveryClock,
+    EventSubscriptionStore, ExternalIdentityBindingLookup, ExternalIdentityBindingStore,
+    IdentityStore, IntegrationIngress, MessageStore, ServiceAuditStore, ServiceCredentialSecret,
+    ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
 };
 use ucr_model::{
     ActorId, ActorKind, AttachmentId, CommandEnvelope, CommandId, CommunicationIntent,
     ConversationId, ConversationKind, ConversationRecord, ConversationRef, CorrelationContext,
     CryptoSuite, DeliveryPolicy, DeliveryState, DeviceId, DeviceRef, EndpointId,
-    ExternalIdentityBinding, ExternalMessageMapping, IdentityEvidence, IdentityId,
-    IdentityOwnership, IdentityRecord, IntegrationId, IntentConstraints, IntentId, KeyId,
-    MessageCryptoMetadata, MessageEnvelope, MessageId, MessageRelation, MessageRelationKind,
+    EventConsumerCursor, EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind,
+    EventEnvelope, EventPollResult, EventSubscription, EventSubscriptionId, EventSubscriptionMode,
+    EventSubscriptionStart, ExternalIdentityBinding, ExternalMessageMapping, IdentityEvidence,
+    IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, IntentConstraints, IntentId,
+    KeyId, MessageCryptoMetadata, MessageEnvelope, MessageId, MessageRelation, MessageRelationKind,
     MessageSignature, NamespaceId, OpaqueId, OriginRef, PrincipalId, ProtocolExtension,
     ProtocolVersion, ServiceCredentialId, TenantId, TenantScope,
 };
 use ucr_protocol::{
     AcknowledgementEnvelope, CanonicalError, CanonicalErrorCode, CommandReceipt,
     CommandReceiptStatus, EXTERNAL_MESSAGE_ID_LIMIT, EXTERNAL_MESSAGE_MAPPING_LIMIT,
-    MAX_COMMAND_PAYLOAD_LEN, MAX_EXTENSION_PAYLOAD_LEN, MAX_IDEMPOTENCY_KEY_LEN,
-    MAX_INTENT_POLICY_VALUE_LEN, MAX_INTENT_TRANSPORT_CONSTRAINTS, MAX_NAMESPACED_IDENTIFIER_LEN,
-    MAX_PROTOCOL_EXTENSIONS, MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT,
-    MESSAGE_RELATION_LIMIT, SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN, error_envelope_from_canonical,
+    MAX_COMMAND_PAYLOAD_LEN, MAX_EVENT_BATCH_ITEMS, MAX_EVENT_DELIVERY_BATCH_BYTES,
+    MAX_EVENT_DELIVERY_SIZE, MAX_EVENT_INTEGRITY_METADATA_LEN, MAX_EVENT_PAYLOAD_LEN,
+    MAX_EXTENSION_PAYLOAD_LEN, MAX_IDEMPOTENCY_KEY_LEN, MAX_INTENT_POLICY_VALUE_LEN,
+    MAX_INTENT_TRANSPORT_CONSTRAINTS, MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS,
+    MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_RELATION_LIMIT,
+    SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN, acknowledgement_for, error_envelope_from_canonical,
 };
 
 /// Generated Rust mapping of the versioned public `ucr.v1` protobuf/gRPC contract.
@@ -88,6 +93,11 @@ const COMMAND_ENVELOPE_WIRE_MAX_BYTES: usize = OPAQUE_ID_FIELD_WIRE_MAX_BYTES
 const INTEGRATION_COMMAND_REQUEST_WIRE_MAX_BYTES: usize =
     PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + COMMAND_ENVELOPE_WIRE_MAX_BYTES;
 
+const EVENT_PAYLOAD_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + MAX_EVENT_PAYLOAD_LEN;
+const EVENT_INTEGRITY_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + MAX_EVENT_INTEGRITY_METADATA_LEN;
+
 const CONVERSATION_REF_WIRE_MAX_BYTES: usize =
     OPAQUE_ID_FIELD_WIRE_MAX_BYTES + ENUM_FIELD_WIRE_MAX_BYTES;
 const CONVERSATION_REF_FIELD_WIRE_MAX_BYTES: usize =
@@ -99,6 +109,38 @@ const ACTOR_REF_FIELD_WIRE_MAX_BYTES: usize =
 const DEVICE_REF_WIRE_MAX_BYTES: usize = 2 * OPAQUE_ID_FIELD_WIRE_MAX_BYTES;
 const DEVICE_REF_FIELD_WIRE_MAX_BYTES: usize =
     PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + DEVICE_REF_WIRE_MAX_BYTES;
+const EVENT_ENVELOPE_WIRE_MAX_BYTES: usize = OPAQUE_ID_FIELD_WIRE_MAX_BYTES
+    + TENANT_SCOPE_FIELD_WIRE_MAX_BYTES
+    + NAMESPACED_STRING_FIELD_WIRE_MAX_BYTES
+    + EVENT_PAYLOAD_FIELD_WIRE_MAX_BYTES
+    + U64_FIELD_WIRE_MAX_BYTES
+    + CORRELATION_FIELD_WIRE_MAX_BYTES
+    + PROTOCOL_VERSION_FIELD_WIRE_MAX_BYTES
+    + EVENT_INTEGRITY_FIELD_WIRE_MAX_BYTES
+    + MAX_PROTOCOL_EXTENSIONS * EXTENSION_FIELD_WIRE_MAX_BYTES
+    + ACTOR_REF_FIELD_WIRE_MAX_BYTES
+    + DEVICE_REF_FIELD_WIRE_MAX_BYTES
+    + I64_FIELD_WIRE_MAX_BYTES;
+const EVENT_PUBLISH_REQUEST_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + EVENT_ENVELOPE_WIRE_MAX_BYTES;
+const EVENT_ENVELOPE_WIRE_OVERHEAD_MAX_BYTES: usize =
+    EVENT_ENVELOPE_WIRE_MAX_BYTES - MAX_EVENT_DELIVERY_SIZE;
+const EVENT_CURSOR_WIRE_MAX_BYTES: usize = PROTOBUF_TAG_MAX_BYTES
+    + PROTOBUF_LEN_PREFIX_MAX_BYTES
+    + ucr_protocol::MAX_EVENT_CONSUMER_CURSOR_LEN;
+const EVENT_CURSOR_FIELD_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + EVENT_CURSOR_WIRE_MAX_BYTES;
+const EVENT_BATCH_EVENT_FIELD_OVERHEAD_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES;
+const EVENT_DELIVERY_BATCH_WIRE_MAX_BYTES: usize = OPAQUE_ID_FIELD_WIRE_MAX_BYTES
+    + TENANT_SCOPE_FIELD_WIRE_MAX_BYTES
+    + MAX_EVENT_DELIVERY_BATCH_BYTES
+    + MAX_EVENT_BATCH_ITEMS
+        * (EVENT_ENVELOPE_WIRE_OVERHEAD_MAX_BYTES + EVENT_BATCH_EVENT_FIELD_OVERHEAD_MAX_BYTES)
+    + EVENT_CURSOR_FIELD_WIRE_MAX_BYTES
+    + U32_FIELD_WIRE_MAX_BYTES;
+const EVENT_POLL_RESPONSE_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + EVENT_DELIVERY_BATCH_WIRE_MAX_BYTES;
 const ORIGIN_REF_WIRE_MAX_BYTES: usize = 3 * OPAQUE_ID_FIELD_WIRE_MAX_BYTES;
 const ORIGIN_REF_FIELD_WIRE_MAX_BYTES: usize =
     PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + ORIGIN_REF_WIRE_MAX_BYTES;
@@ -169,24 +211,38 @@ const COMMUNICATION_INTENT_WIRE_MAX_BYTES: usize = OPAQUE_ID_FIELD_WIRE_MAX_BYTE
 const INTEGRATION_INTENT_REQUEST_WIRE_MAX_BYTES: usize =
     PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + COMMUNICATION_INTENT_WIRE_MAX_BYTES;
 
-const fn max3(left: usize, middle: usize, right: usize) -> usize {
-    let pair = if left > middle { left } else { middle };
-    if pair > right { pair } else { right }
+const fn max4(left: usize, middle: usize, right: usize, fourth: usize) -> usize {
+    let first_pair = if left > middle { left } else { middle };
+    let second_pair = if right > fourth { right } else { fourth };
+    if first_pair > second_pair {
+        first_pair
+    } else {
+        second_pair
+    }
 }
 
-/// Finite receive budget for every canonical Phase-13 Integration request.
+/// Finite receive budget for every canonical Phase-13 Integration and Phase-14 Event request.
 ///
-/// The three payload-bearing shapes are the maxima: Command, Message, and Communication Intent.
+/// The payload-bearing maxima are Command, Message, Communication Intent, and Event.
 /// Each upper bound is derived from canonical field/count limits plus protobuf tag/varint bounds;
-/// smaller Identity, binding, Conversation, and lookup requests fit beneath the same ceiling.
-pub const GRPC_MAX_DECODING_MESSAGE_SIZE: usize = max3(
+/// smaller Identity, binding, Conversation, subscription, cursor, and lookup requests fit beneath
+/// the same ceiling.
+pub const GRPC_MAX_DECODING_MESSAGE_SIZE: usize = max4(
     INTEGRATION_COMMAND_REQUEST_WIRE_MAX_BYTES,
     INTEGRATION_MESSAGE_REQUEST_WIRE_MAX_BYTES,
     INTEGRATION_INTENT_REQUEST_WIRE_MAX_BYTES,
+    EVENT_PUBLISH_REQUEST_WIRE_MAX_BYTES,
 );
 const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= INTEGRATION_COMMAND_REQUEST_WIRE_MAX_BYTES);
 const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= INTEGRATION_MESSAGE_REQUEST_WIRE_MAX_BYTES);
 const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= INTEGRATION_INTENT_REQUEST_WIRE_MAX_BYTES);
+const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= EVENT_PUBLISH_REQUEST_WIRE_MAX_BYTES);
+
+/// Finite send budget for public responses. The Phase-14 Event poll batch is the largest
+/// response shape because aggregate semantic Event bytes are bounded independently of item count.
+pub const GRPC_MAX_ENCODING_MESSAGE_SIZE: usize = EVENT_POLL_RESPONSE_WIRE_MAX_BYTES;
+const _: () = assert!(GRPC_MAX_ENCODING_MESSAGE_SIZE >= MESSAGE_ENVELOPE_WIRE_MAX_BYTES);
+const _: () = assert!(GRPC_MAX_ENCODING_MESSAGE_SIZE >= COMMUNICATION_INTENT_WIRE_MAX_BYTES);
 
 /// Thin Phase-13 gRPC adapter over the canonical Integration ingress.
 pub struct GrpcIntegrationService<C, A, S> {
@@ -246,6 +302,7 @@ where
 {
     pb::integration_service_server::IntegrationServiceServer::new(service)
         .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
+        .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE)
 }
 
 /// Adds the binding-specific Service Principal credential to one outgoing gRPC request.
@@ -622,6 +679,586 @@ where
                 }),
             },
         ))
+    }
+}
+
+/// Thin Phase-14 gRPC adapter over the canonical Event API ingress.
+pub struct GrpcEventService<Q, E, A, S> {
+    quota_clock: Arc<Q>,
+    event_clock: Arc<E>,
+    authorization: Arc<A>,
+    store: Arc<S>,
+}
+
+impl<Q, E, A, S> GrpcEventService<Q, E, A, S> {
+    #[must_use]
+    pub const fn new(
+        quota_clock: Arc<Q>,
+        event_clock: Arc<E>,
+        authorization: Arc<A>,
+        store: Arc<S>,
+    ) -> Self {
+        Self {
+            quota_clock,
+            event_clock,
+            authorization,
+            store,
+        }
+    }
+}
+
+impl<Q, E, A, S> Clone for GrpcEventService<Q, E, A, S> {
+    fn clone(&self) -> Self {
+        Self {
+            quota_clock: Arc::clone(&self.quota_clock),
+            event_clock: Arc::clone(&self.event_clock),
+            authorization: Arc::clone(&self.authorization),
+            store: Arc::clone(&self.store),
+        }
+    }
+}
+
+impl<Q, E, A, S> fmt::Debug for GrpcEventService<Q, E, A, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrpcEventService")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Builds the generated Phase-14 Event gRPC server with the shared canonical request budget.
+/// TLS/listener/Internet policy remains a deployment/Phase-15 concern.
+#[must_use]
+pub fn event_service_server<Q, E, A, S>(
+    service: GrpcEventService<Q, E, A, S>,
+) -> pb::event_service_server::EventServiceServer<GrpcEventService<Q, E, A, S>>
+where
+    Q: ServiceQuotaClock + 'static,
+    E: EventDeliveryClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: ServiceCredentialStore
+        + ServiceQuotaStore
+        + ServiceAuditStore
+        + EventSubscriptionStore
+        + 'static,
+{
+    pb::event_service_server::EventServiceServer::new(service)
+        .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
+        .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE)
+}
+
+#[tonic::async_trait]
+impl<Q, E, A, S> pb::event_service_server::EventService for GrpcEventService<Q, E, A, S>
+where
+    Q: ServiceQuotaClock + 'static,
+    E: EventDeliveryClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: ServiceCredentialStore
+        + ServiceQuotaStore
+        + ServiceAuditStore
+        + EventSubscriptionStore
+        + 'static,
+{
+    async fn publish_event(
+        &self,
+        request: Request<pb::EventPublishRequest>,
+    ) -> Result<Response<pb::EventPublishResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let event = request
+            .into_inner()
+            .event
+            .ok_or_else(invalid_argument)
+            .and_then(decode_event_envelope);
+        let result = match (credentials, event) {
+            (Ok((credential_id, secret)), Ok(event)) => EventApiIngress::new(
+                &*self.quota_clock,
+                &*self.event_clock,
+                &*self.authorization,
+                &*self.store,
+            )
+            .publish_event(&event.scope, &credential_id, &secret, &event)
+            .map(|status| pb_event_publish_receipt(&event, status)),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::EventPublishResponse {
+            result: Some(match result {
+                Ok(receipt) => pb::event_publish_response::Result::Receipt(receipt),
+                Err(error) => pb::event_publish_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn create_subscription(
+        &self,
+        request: Request<pb::EventCreateSubscriptionRequest>,
+    ) -> Result<Response<pb::EventCreateSubscriptionResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let subscription = request
+            .into_inner()
+            .subscription
+            .ok_or_else(invalid_argument)
+            .and_then(decode_event_subscription);
+        let result = match (credentials, subscription) {
+            (Ok((credential_id, secret)), Ok(subscription)) => EventApiIngress::new(
+                &*self.quota_clock,
+                &*self.event_clock,
+                &*self.authorization,
+                &*self.store,
+            )
+            .create_subscription(&subscription.scope, &credential_id, &secret, &subscription)
+            .map(|value| pb_event_subscription(&value)),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::EventCreateSubscriptionResponse {
+            result: Some(match result {
+                Ok(subscription) => {
+                    pb::event_create_subscription_response::Result::Subscription(subscription)
+                }
+                Err(error) => {
+                    pb::event_create_subscription_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
+    async fn get_subscription(
+        &self,
+        request: Request<pb::EventGetSubscriptionRequest>,
+    ) -> Result<Response<pb::EventGetSubscriptionResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_event_subscription_lookup(request.into_inner());
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, subscription_id))) => EventApiIngress::new(
+                &*self.quota_clock,
+                &*self.event_clock,
+                &*self.authorization,
+                &*self.store,
+            )
+            .get_subscription(&scope, &credential_id, &secret, &scope, &subscription_id)
+            .map(|value| pb_event_subscription(&value)),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::EventGetSubscriptionResponse {
+            result: Some(match result {
+                Ok(subscription) => {
+                    pb::event_get_subscription_response::Result::Subscription(subscription)
+                }
+                Err(error) => pb::event_get_subscription_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn poll_events(
+        &self,
+        request: Request<pb::EventPollRequest>,
+    ) -> Result<Response<pb::EventPollResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let poll = decode_event_poll(request.into_inner());
+        let result = match (credentials, poll) {
+            (Ok((credential_id, secret)), Ok((scope, subscription_id, max_items))) => {
+                EventApiIngress::new(
+                    &*self.quota_clock,
+                    &*self.event_clock,
+                    &*self.authorization,
+                    &*self.store,
+                )
+                .poll_events(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    &scope,
+                    &subscription_id,
+                    max_items,
+                )
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::EventPollResponse {
+            result: Some(match result {
+                Ok(EventPollResult::Empty) => {
+                    pb::event_poll_response::Result::Empty(pb::EventPollEmpty {})
+                }
+                Ok(EventPollResult::RetryAfter { retry_after_ms }) => {
+                    pb::event_poll_response::Result::RetryAfter(pb::EventPollRetryAfter {
+                        retry_after_ms,
+                    })
+                }
+                Ok(EventPollResult::Batch(batch)) => {
+                    pb::event_poll_response::Result::Batch(pb_event_delivery_batch(&batch))
+                }
+                Err(error) => pb::event_poll_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn acknowledge_events(
+        &self,
+        request: Request<pb::EventAcknowledgeRequest>,
+    ) -> Result<Response<pb::EventAcknowledgeResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let acknowledgement = decode_event_acknowledgement(request.into_inner());
+        let result = match (credentials, acknowledgement) {
+            (Ok((credential_id, secret)), Ok((scope, subscription_id, cursor))) => {
+                EventApiIngress::new(
+                    &*self.quota_clock,
+                    &*self.event_clock,
+                    &*self.authorization,
+                    &*self.store,
+                )
+                .acknowledge_events(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    &scope,
+                    &subscription_id,
+                    &cursor,
+                )
+                .map(|_| {
+                    pb_acknowledgement(acknowledgement_for(subscription_id.as_opaque().clone()))
+                })
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::EventAcknowledgeResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::event_acknowledge_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::event_acknowledge_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn reject_events(
+        &self,
+        request: Request<pb::EventRejectRequest>,
+    ) -> Result<Response<pb::EventRejectResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let rejection = decode_event_rejection(request.into_inner());
+        let result = match (credentials, rejection) {
+            (Ok((credential_id, secret)), Ok((scope, subscription_id, cursor, failure_kind))) => {
+                EventApiIngress::new(
+                    &*self.quota_clock,
+                    &*self.event_clock,
+                    &*self.authorization,
+                    &*self.store,
+                )
+                .reject_events(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    EventCursorRejection {
+                        scope: &scope,
+                        subscription_id: &subscription_id,
+                        cursor: &cursor,
+                        failure_kind,
+                    },
+                )
+                .map(|_| {
+                    pb_acknowledgement(acknowledgement_for(subscription_id.as_opaque().clone()))
+                })
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::EventRejectResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::event_reject_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::event_reject_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn replay_subscription(
+        &self,
+        request: Request<pb::EventReplayRequest>,
+    ) -> Result<Response<pb::EventReplayResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let replay = decode_event_replay(request.into_inner());
+        let result = match (credentials, replay) {
+            (Ok((credential_id, secret)), Ok((scope, subscription_id, replay_id))) => {
+                EventApiIngress::new(
+                    &*self.quota_clock,
+                    &*self.event_clock,
+                    &*self.authorization,
+                    &*self.store,
+                )
+                .replay_subscription(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    &scope,
+                    &subscription_id,
+                    &replay_id,
+                )
+                .map(|_| {
+                    pb_acknowledgement(acknowledgement_for(subscription_id.as_opaque().clone()))
+                })
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::EventReplayResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::event_replay_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::event_replay_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn list_dead_letters(
+        &self,
+        request: Request<pb::EventListDeadLettersRequest>,
+    ) -> Result<Response<pb::EventListDeadLettersResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_event_dead_letter_lookup(request.into_inner());
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, subscription_id, max_items))) => {
+                EventApiIngress::new(
+                    &*self.quota_clock,
+                    &*self.event_clock,
+                    &*self.authorization,
+                    &*self.store,
+                )
+                .list_dead_letters(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    &scope,
+                    &subscription_id,
+                    max_items,
+                )
+                .map(|dead_letters| pb::EventDeadLetterList {
+                    dead_letters: dead_letters.iter().map(pb_event_dead_letter).collect(),
+                })
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::EventListDeadLettersResponse {
+            result: Some(match result {
+                Ok(dead_letters) => {
+                    pb::event_list_dead_letters_response::Result::DeadLetters(dead_letters)
+                }
+                Err(error) => pb::event_list_dead_letters_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+}
+
+fn decode_event_envelope(value: pb::EventEnvelope) -> Result<EventEnvelope, CanonicalError> {
+    Ok(EventEnvelope {
+        event_id: ucr_model::EventId::from_opaque(decode_opaque(value.event_id)?),
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        event_type: value.event_type,
+        payload: value.payload,
+        actor: decode_actor_ref(value.actor.ok_or_else(invalid_argument)?)?,
+        source_device: decode_device_ref(value.source_device.ok_or_else(invalid_argument)?)?,
+        wall_time_unix_ms: value.wall_time_unix_ms,
+        logical_order: value.logical_order,
+        correlation: decode_correlation(value.correlation.ok_or_else(invalid_argument)?)?,
+        schema_version: decode_protocol_version(value.schema_version.ok_or_else(invalid_argument)?),
+        integrity_metadata: value.integrity_metadata,
+        extensions: value.extensions.into_iter().map(decode_extension).collect(),
+    })
+}
+
+fn decode_event_subscription(
+    value: pb::EventSubscription,
+) -> Result<EventSubscription, CanonicalError> {
+    Ok(EventSubscription {
+        subscription_id: EventSubscriptionId::from_opaque(decode_opaque(value.subscription_id)?),
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        mode: decode_event_subscription_mode(value.mode)?,
+        webhook_uri: value.webhook_uri,
+        event_types: value.event_types,
+        max_in_flight: value.max_in_flight,
+        max_attempts: value.max_attempts,
+        start: decode_event_subscription_start(value.start)?,
+    })
+}
+
+fn decode_event_subscription_mode(value: i32) -> Result<EventSubscriptionMode, CanonicalError> {
+    match pb::EventSubscriptionMode::try_from(value).map_err(|_| invalid_argument())? {
+        pb::EventSubscriptionMode::Unspecified => Err(invalid_argument()),
+        pb::EventSubscriptionMode::DurableStream => Ok(EventSubscriptionMode::DurableStream),
+        pb::EventSubscriptionMode::Webhook => Ok(EventSubscriptionMode::Webhook),
+    }
+}
+
+fn decode_event_subscription_start(value: i32) -> Result<EventSubscriptionStart, CanonicalError> {
+    match pb::EventSubscriptionStart::try_from(value).map_err(|_| invalid_argument())? {
+        pb::EventSubscriptionStart::Unspecified => Err(invalid_argument()),
+        pb::EventSubscriptionStart::Beginning => Ok(EventSubscriptionStart::Beginning),
+        pb::EventSubscriptionStart::Latest => Ok(EventSubscriptionStart::Latest),
+    }
+}
+
+fn decode_event_failure_kind(value: i32) -> Result<EventDeliveryFailureKind, CanonicalError> {
+    match pb::EventDeliveryFailureKind::try_from(value).map_err(|_| invalid_argument())? {
+        pb::EventDeliveryFailureKind::Unspecified => Err(invalid_argument()),
+        pb::EventDeliveryFailureKind::Retryable => Ok(EventDeliveryFailureKind::Retryable),
+        pb::EventDeliveryFailureKind::Permanent => Ok(EventDeliveryFailureKind::Permanent),
+    }
+}
+
+fn decode_event_subscription_lookup(
+    value: pb::EventGetSubscriptionRequest,
+) -> Result<(TenantScope, EventSubscriptionId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        EventSubscriptionId::from_opaque(decode_opaque(value.subscription_id)?),
+    ))
+}
+
+fn decode_event_poll(
+    value: pb::EventPollRequest,
+) -> Result<(TenantScope, EventSubscriptionId, usize), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        EventSubscriptionId::from_opaque(decode_opaque(value.subscription_id)?),
+        usize::try_from(value.max_items).map_err(|_| invalid_argument())?,
+    ))
+}
+
+fn decode_event_cursor(value: pb::EventConsumerCursor) -> EventConsumerCursor {
+    EventConsumerCursor { token: value.token }
+}
+
+fn decode_event_acknowledgement(
+    value: pb::EventAcknowledgeRequest,
+) -> Result<(TenantScope, EventSubscriptionId, EventConsumerCursor), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        EventSubscriptionId::from_opaque(decode_opaque(value.subscription_id)?),
+        decode_event_cursor(value.cursor.ok_or_else(invalid_argument)?),
+    ))
+}
+
+fn decode_event_rejection(
+    value: pb::EventRejectRequest,
+) -> Result<
+    (
+        TenantScope,
+        EventSubscriptionId,
+        EventConsumerCursor,
+        EventDeliveryFailureKind,
+    ),
+    CanonicalError,
+> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        EventSubscriptionId::from_opaque(decode_opaque(value.subscription_id)?),
+        decode_event_cursor(value.cursor.ok_or_else(invalid_argument)?),
+        decode_event_failure_kind(value.failure_kind)?,
+    ))
+}
+
+fn decode_event_replay(
+    value: pb::EventReplayRequest,
+) -> Result<(TenantScope, EventSubscriptionId, OpaqueId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        EventSubscriptionId::from_opaque(decode_opaque(value.subscription_id)?),
+        decode_opaque(value.replay_id)?,
+    ))
+}
+
+fn decode_event_dead_letter_lookup(
+    value: pb::EventListDeadLettersRequest,
+) -> Result<(TenantScope, EventSubscriptionId, usize), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        EventSubscriptionId::from_opaque(decode_opaque(value.subscription_id)?),
+        usize::try_from(value.max_items).map_err(|_| invalid_argument())?,
+    ))
+}
+
+fn pb_event_envelope(value: &EventEnvelope) -> pb::EventEnvelope {
+    pb::EventEnvelope {
+        event_id: Some(pb_opaque(value.event_id.as_opaque())),
+        scope: Some(pb_scope(&value.scope)),
+        event_type: value.event_type.clone(),
+        payload: value.payload.clone(),
+        logical_order: value.logical_order,
+        correlation: Some(pb_correlation(&value.correlation)),
+        schema_version: Some(pb_protocol_version(value.schema_version)),
+        integrity_metadata: value.integrity_metadata.clone(),
+        extensions: value.extensions.iter().cloned().map(pb_extension).collect(),
+        actor: Some(pb_actor_ref(&value.actor)),
+        source_device: Some(pb_device_ref(&value.source_device)),
+        wall_time_unix_ms: value.wall_time_unix_ms,
+    }
+}
+
+fn pb_event_subscription_mode(value: EventSubscriptionMode) -> i32 {
+    match value {
+        EventSubscriptionMode::DurableStream => pb::EventSubscriptionMode::DurableStream as i32,
+        EventSubscriptionMode::Webhook => pb::EventSubscriptionMode::Webhook as i32,
+    }
+}
+
+fn pb_event_subscription_start(value: EventSubscriptionStart) -> i32 {
+    match value {
+        EventSubscriptionStart::Beginning => pb::EventSubscriptionStart::Beginning as i32,
+        EventSubscriptionStart::Latest => pb::EventSubscriptionStart::Latest as i32,
+    }
+}
+
+fn pb_event_failure_kind(value: EventDeliveryFailureKind) -> i32 {
+    match value {
+        EventDeliveryFailureKind::Retryable => pb::EventDeliveryFailureKind::Retryable as i32,
+        EventDeliveryFailureKind::Permanent => pb::EventDeliveryFailureKind::Permanent as i32,
+    }
+}
+
+fn pb_event_subscription(value: &EventSubscription) -> pb::EventSubscription {
+    pb::EventSubscription {
+        subscription_id: Some(pb_opaque(value.subscription_id.as_opaque())),
+        scope: Some(pb_scope(&value.scope)),
+        mode: pb_event_subscription_mode(value.mode),
+        webhook_uri: value.webhook_uri.clone(),
+        event_types: value.event_types.clone(),
+        max_in_flight: value.max_in_flight,
+        max_attempts: value.max_attempts,
+        start: pb_event_subscription_start(value.start),
+    }
+}
+
+fn pb_event_delivery_batch(value: &EventDeliveryBatch) -> pb::EventDeliveryBatch {
+    pb::EventDeliveryBatch {
+        subscription_id: Some(pb_opaque(value.subscription_id.as_opaque())),
+        scope: Some(pb_scope(&value.scope)),
+        events: value.events.iter().map(pb_event_envelope).collect(),
+        cursor: Some(pb::EventConsumerCursor {
+            token: value.cursor.token.clone(),
+        }),
+        attempt: value.attempt,
+    }
+}
+
+fn pb_event_dead_letter(value: &EventDeadLetter) -> pb::EventDeadLetter {
+    pb::EventDeadLetter {
+        subscription_id: Some(pb_opaque(value.subscription_id.as_opaque())),
+        scope: Some(pb_scope(&value.scope)),
+        event: Some(pb_event_envelope(&value.event)),
+        attempts: value.attempts,
+        failure_kind: pb_event_failure_kind(value.failure_kind),
+    }
+}
+
+fn pb_event_publish_receipt(
+    event: &EventEnvelope,
+    status: EventAppendStatus,
+) -> pb::EventPublishReceipt {
+    let result = match status {
+        EventAppendStatus::Appended => pb::EventAppendResult::Appended,
+        EventAppendStatus::Duplicate => pb::EventAppendResult::Duplicate,
+    };
+    pb::EventPublishReceipt {
+        event_id: Some(pb_opaque(event.event_id.as_opaque())),
+        result: result as i32,
     }
 }
 
@@ -1374,7 +2011,7 @@ mod tests {
     use ucr_core::{
         CommunicationIntentStore, ConversationStore, IdentityStore, MessageStore,
         PermissionGrantStore, ServiceCredentialSecret, ServiceCredentialStore, ServiceQuotaStore,
-        SystemServiceQuotaClock, issue_service_credential,
+        SystemEventDeliveryClock, SystemServiceQuotaClock, issue_service_credential,
     };
     use ucr_model::{
         IdentityId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
@@ -1383,22 +2020,26 @@ mod tests {
     use ucr_protocol::{
         ALGORITHM_VERSION, COMMAND_ACCEPT_PERMISSION, COMMUNICATION_INTENT_READ_PERMISSION,
         COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
-        CONVERSATION_WRITE_PERMISSION, DEFAULT_MAX_PAYLOAD_LEN,
-        EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
-        EXTERNAL_MESSAGE_ID_LIMIT, EXTERNAL_MESSAGE_MAPPING_LIMIT, IDENTITY_CREATE_PERMISSION,
-        IDENTITY_READ_PERMISSION, MAX_COMMAND_PAYLOAD_LEN, MAX_EXTENSION_PAYLOAD_LEN,
-        MAX_IDEMPOTENCY_KEY_LEN, MAX_INTENT_POLICY_VALUE_LEN, MAX_INTENT_TRANSPORT_CONSTRAINTS,
-        MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS, MESSAGE_ATTACHMENT_LIMIT,
-        MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_READ_PERMISSION, MESSAGE_RELATION_LIMIT,
-        MESSAGE_WRITE_PERMISSION, SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN,
-        validate_communication_intent, validate_message,
+        CONVERSATION_WRITE_PERMISSION, DEFAULT_MAX_PAYLOAD_LEN, EVENT_APPEND_PERMISSION,
+        EVENT_CONSUME_PERMISSION, EVENT_DEAD_LETTER_READ_PERMISSION, EVENT_REPLAY_PERMISSION,
+        EVENT_SUBSCRIBE_PERMISSION, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
+        EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, EXTERNAL_MESSAGE_ID_LIMIT,
+        EXTERNAL_MESSAGE_MAPPING_LIMIT, IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION,
+        MAX_COMMAND_PAYLOAD_LEN, MAX_EVENT_INTEGRITY_METADATA_LEN, MAX_EVENT_PAYLOAD_LEN,
+        MAX_EXTENSION_PAYLOAD_LEN, MAX_IDEMPOTENCY_KEY_LEN, MAX_INTENT_POLICY_VALUE_LEN,
+        MAX_INTENT_TRANSPORT_CONSTRAINTS, MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS,
+        MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_READ_PERMISSION,
+        MESSAGE_RELATION_LIMIT, MESSAGE_WRITE_PERMISSION, SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN,
+        validate_communication_intent, validate_event, validate_message,
     };
     use ucr_storage_memory::MemoryLocalStore;
 
     use super::{
-        GRPC_MAX_DECODING_MESSAGE_SIZE, GrpcIntegrationService, SERVICE_CREDENTIAL_ID_METADATA_KEY,
+        GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, GrpcEventService,
+        GrpcIntegrationService, SERVICE_CREDENTIAL_ID_METADATA_KEY,
         SERVICE_CREDENTIAL_SECRET_METADATA_KEY, attach_service_credential, decode_command,
-        decode_communication_intent, decode_message_envelope, integration_service_server, pb,
+        decode_communication_intent, decode_event_envelope, decode_message_envelope,
+        event_service_server, integration_service_server, pb,
     };
 
     fn oid(value: &str) -> OpaqueId {
@@ -1549,6 +2190,36 @@ mod tests {
         }
     }
 
+    fn maximum_event_for_decode_budget() -> pb::EventEnvelope {
+        pb::EventEnvelope {
+            event_id: Some(budget_pb_id("event", 0)),
+            scope: Some(pb::TenantScope {
+                tenant_id: Some(budget_pb_id("tenant", 0)),
+                namespace_id: Some(budget_pb_id("namespace", 0)),
+            }),
+            event_type: budget_namespaced("vendor.grpc_event_budget", 0),
+            payload: vec![0x5a; MAX_EVENT_PAYLOAD_LEN],
+            logical_order: u64::MAX,
+            correlation: Some(budget_correlation("event-correlation")),
+            schema_version: Some(pb::ProtocolVersion {
+                major: u32::MAX,
+                minor: u32::MAX,
+            }),
+            integrity_metadata: vec![0x6b; MAX_EVENT_INTEGRITY_METADATA_LEN],
+            extensions: budget_extensions("vendor.grpc_event_extension_budget"),
+            actor: Some(pb::ActorRef {
+                actor_id: Some(budget_pb_id("event-actor", 0)),
+                kind: pb::ActorKind::System as i32,
+                on_behalf_of: Some(budget_pb_id("event-delegator", 0)),
+            }),
+            source_device: Some(pb::DeviceRef {
+                device_id: Some(budget_pb_id("event-device", 0)),
+                identity_id: Some(budget_pb_id("event-identity", 0)),
+            }),
+            wall_time_unix_ms: i64::MIN,
+        }
+    }
+
     fn wire_scope() -> pb::TenantScope {
         pb::TenantScope {
             tenant_id: Some(pb_id("tenant-grpc")),
@@ -1672,6 +2343,51 @@ mod tests {
         }
     }
 
+    fn event(id: &str, payload: &[u8]) -> pb::EventEnvelope {
+        pb::EventEnvelope {
+            event_id: Some(pb_id(id)),
+            scope: Some(wire_scope()),
+            event_type: "ucr.message.created".to_owned(),
+            payload: payload.to_vec(),
+            logical_order: 11,
+            correlation: Some(pb::Correlation {
+                correlation_id: Some(pb_id(&format!("correlation-{id}"))),
+                causation_id: None,
+                idempotency_key: None,
+            }),
+            schema_version: Some(pb::ProtocolVersion { major: 1, minor: 0 }),
+            integrity_metadata: vec![0x91, 0x92],
+            extensions: vec![pb::Extension {
+                name: "vendor.example.event".to_owned(),
+                critical: false,
+                payload: vec![0, 255, 128, 69],
+            }],
+            actor: Some(pb::ActorRef {
+                actor_id: Some(pb_id("actor-event-grpc")),
+                kind: pb::ActorKind::System as i32,
+                on_behalf_of: None,
+            }),
+            source_device: Some(pb::DeviceRef {
+                device_id: Some(pb_id("device-event-grpc")),
+                identity_id: Some(pb_id("identity-event-grpc")),
+            }),
+            wall_time_unix_ms: 1_700_000_000_456,
+        }
+    }
+
+    fn subscription(id: &str, max_attempts: u32) -> pb::EventSubscription {
+        pb::EventSubscription {
+            subscription_id: Some(pb_id(id)),
+            scope: Some(wire_scope()),
+            mode: pb::EventSubscriptionMode::DurableStream as i32,
+            webhook_uri: None,
+            event_types: vec!["ucr.message.created".to_owned()],
+            max_in_flight: 1,
+            max_attempts,
+            start: pb::EventSubscriptionStart::Beginning as i32,
+        }
+    }
+
     fn command(id: &str, key: &str, payload: &[u8]) -> pb::CommandEnvelope {
         pb::CommandEnvelope {
             command_id: Some(pb_id(id)),
@@ -1749,7 +2465,39 @@ mod tests {
             "http://{address}"
         ))
         .await
-        .expect("connect loopback client");
+        .expect("connect loopback client")
+        .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
+        (client, server)
+    }
+
+    async fn event_client_and_server(
+        store: Arc<MemoryLocalStore>,
+    ) -> (
+        pb::event_service_client::EventServiceClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Event loopback listener");
+        let address = listener.local_addr().expect("Event listener address");
+        let incoming = TcpListenerStream::new(listener);
+        let service = GrpcEventService::new(
+            Arc::new(SystemServiceQuotaClock),
+            Arc::new(SystemEventDeliveryClock),
+            Arc::clone(&store),
+            store,
+        );
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(event_service_server(service))
+                .serve_with_incoming(incoming)
+                .await
+        });
+        let client =
+            pb::event_service_client::EventServiceClient::connect(format!("http://{address}"))
+                .await
+                .expect("connect Event loopback client")
+                .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
         (client, server)
     }
 
@@ -1970,6 +2718,20 @@ mod tests {
         let decoded = decode_communication_intent(request.intent.take().expect("maximum intent"))
             .expect("maximum intent decodes");
         validate_communication_intent(&decoded).expect("maximum intent remains canonical");
+        assert!(encoded_len <= GRPC_MAX_DECODING_MESSAGE_SIZE);
+    }
+
+    #[test]
+    fn grpc_decode_budget_contains_maximum_canonical_event_wire_size() {
+        use prost::Message as _;
+
+        let mut request = pb::EventPublishRequest {
+            event: Some(maximum_event_for_decode_budget()),
+        };
+        let encoded_len = request.encoded_len();
+        let decoded = decode_event_envelope(request.event.take().expect("maximum event"))
+            .expect("maximum event decodes");
+        validate_event(&decoded).expect("maximum event remains canonical");
         assert!(encoded_len <= GRPC_MAX_DECODING_MESSAGE_SIZE);
     }
 
@@ -3033,6 +3795,380 @@ mod tests {
                 .expect("intent owner")
                 .is_none()
         );
+        server.abort();
+    }
+    type EventGrpcClient = pb::event_service_client::EventServiceClient<tonic::transport::Channel>;
+
+    async fn grpc_create_event_subscription(
+        client: &mut EventGrpcClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        value: pb::EventSubscription,
+    ) {
+        let mut request = Request::new(pb::EventCreateSubscriptionRequest {
+            subscription: Some(value),
+        });
+        attach_service_credential(&mut request, credential_id, secret);
+        let response = client
+            .create_subscription(request)
+            .await
+            .expect("create Event subscription transport")
+            .into_inner();
+        assert!(matches!(
+            response.result,
+            Some(pb::event_create_subscription_response::Result::Subscription(_))
+        ));
+    }
+
+    async fn grpc_publish_event(
+        client: &mut EventGrpcClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        value: pb::EventEnvelope,
+    ) -> pb::EventPublishReceipt {
+        let mut request = Request::new(pb::EventPublishRequest { event: Some(value) });
+        attach_service_credential(&mut request, credential_id, secret);
+        let response = client
+            .publish_event(request)
+            .await
+            .expect("publish Event transport")
+            .into_inner();
+        match response.result.expect("publish Event result") {
+            pb::event_publish_response::Result::Receipt(receipt) => receipt,
+            pb::event_publish_response::Result::Error(error) => {
+                panic!("unexpected Event publish error: {}", error.code)
+            }
+        }
+    }
+
+    async fn grpc_poll_event_subscription(
+        client: &mut EventGrpcClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        subscription_id: &str,
+    ) -> pb::EventPollResponse {
+        let mut request = Request::new(pb::EventPollRequest {
+            scope: Some(wire_scope()),
+            subscription_id: Some(pb_id(subscription_id)),
+            max_items: 1,
+        });
+        attach_service_credential(&mut request, credential_id, secret);
+        client
+            .poll_events(request)
+            .await
+            .expect("poll Event subscription transport")
+            .into_inner()
+    }
+
+    fn require_event_batch(response: pb::EventPollResponse) -> pb::EventDeliveryBatch {
+        match response.result.expect("Event poll result") {
+            pb::event_poll_response::Result::Batch(batch) => batch,
+            other => panic!("expected Event batch, got {other:?}"),
+        }
+    }
+
+    async fn grpc_ack_event_batch(
+        client: &mut EventGrpcClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        subscription_id: &str,
+        cursor: pb::EventConsumerCursor,
+    ) {
+        let mut request = Request::new(pb::EventAcknowledgeRequest {
+            scope: Some(wire_scope()),
+            subscription_id: Some(pb_id(subscription_id)),
+            cursor: Some(cursor),
+        });
+        attach_service_credential(&mut request, credential_id, secret);
+        assert!(matches!(
+            client
+                .acknowledge_events(request)
+                .await
+                .expect("Event ack transport")
+                .into_inner()
+                .result,
+            Some(pb::event_acknowledge_response::Result::Acknowledgement(_))
+        ));
+    }
+
+    async fn grpc_reject_event_batch_permanently(
+        client: &mut EventGrpcClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        subscription_id: &str,
+        cursor: Option<pb::EventConsumerCursor>,
+    ) {
+        let mut request = Request::new(pb::EventRejectRequest {
+            scope: Some(wire_scope()),
+            subscription_id: Some(pb_id(subscription_id)),
+            cursor,
+            failure_kind: pb::EventDeliveryFailureKind::Permanent as i32,
+        });
+        attach_service_credential(&mut request, credential_id, secret);
+        client
+            .reject_events(request)
+            .await
+            .expect("permanent Event reject transport");
+    }
+
+    async fn grpc_event_dead_letters(
+        client: &mut EventGrpcClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        subscription_id: &str,
+    ) -> pb::EventDeadLetterList {
+        let mut request = Request::new(pb::EventListDeadLettersRequest {
+            scope: Some(wire_scope()),
+            subscription_id: Some(pb_id(subscription_id)),
+            max_items: 8,
+        });
+        attach_service_credential(&mut request, credential_id, secret);
+        match client
+            .list_dead_letters(request)
+            .await
+            .expect("Event DLQ list transport")
+            .into_inner()
+            .result
+            .expect("Event DLQ list result")
+        {
+            pb::event_list_dead_letters_response::Result::DeadLetters(list) => list,
+            pb::event_list_dead_letters_response::Result::Error(error) => {
+                panic!("unexpected Event DLQ list error: {}", error.code)
+            }
+        }
+    }
+
+    async fn grpc_replay_event_subscription(
+        client: &mut EventGrpcClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        subscription_id: &str,
+        replay_id: &str,
+    ) {
+        let mut request = Request::new(pb::EventReplayRequest {
+            scope: Some(wire_scope()),
+            subscription_id: Some(pb_id(subscription_id)),
+            replay_id: Some(pb_id(replay_id)),
+        });
+        attach_service_credential(&mut request, credential_id, secret);
+        client
+            .replay_subscription(request)
+            .await
+            .expect("Event replay transport");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn event_publish_poll_backpressure_ack_and_duplicate_round_trip_over_grpc() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[
+                EVENT_APPEND_PERMISSION,
+                EVENT_SUBSCRIBE_PERMISSION,
+                EVENT_CONSUME_PERMISSION,
+            ],
+        );
+        let (mut client, server) = event_client_and_server(store).await;
+        grpc_create_event_subscription(
+            &mut client,
+            &credential_id,
+            &secret,
+            subscription("subscription-grpc", 3),
+        )
+        .await;
+
+        let wire_event = event("event-grpc", b"event-payload");
+        for expected in [
+            pb::EventAppendResult::Appended,
+            pb::EventAppendResult::Duplicate,
+        ] {
+            let receipt =
+                grpc_publish_event(&mut client, &credential_id, &secret, wire_event.clone()).await;
+            assert_eq!(receipt.result, expected as i32);
+        }
+
+        let first_batch = require_event_batch(
+            grpc_poll_event_subscription(&mut client, &credential_id, &secret, "subscription-grpc")
+                .await,
+        );
+        assert_eq!(first_batch.events.len(), 1);
+        assert_eq!(first_batch.events[0].payload, b"event-payload");
+        let first_cursor = first_batch.cursor.clone().expect("first cursor");
+        let repeated_batch = require_event_batch(
+            grpc_poll_event_subscription(&mut client, &credential_id, &secret, "subscription-grpc")
+                .await,
+        );
+        assert_eq!(repeated_batch.cursor.as_ref(), Some(&first_cursor));
+        assert_eq!(repeated_batch.attempt, first_batch.attempt);
+        grpc_ack_event_batch(
+            &mut client,
+            &credential_id,
+            &secret,
+            "subscription-grpc",
+            first_cursor,
+        )
+        .await;
+        assert!(matches!(
+            grpc_poll_event_subscription(
+                &mut client,
+                &credential_id,
+                &secret,
+                "subscription-grpc",
+            )
+            .await
+            .result,
+            Some(pb::event_poll_response::Result::Empty(_))
+        ));
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn event_permanent_reject_dead_letter_and_replay_round_trip_over_grpc() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[
+                EVENT_APPEND_PERMISSION,
+                EVENT_SUBSCRIBE_PERMISSION,
+                EVENT_CONSUME_PERMISSION,
+                EVENT_REPLAY_PERMISSION,
+                EVENT_DEAD_LETTER_READ_PERMISSION,
+            ],
+        );
+        let (mut client, server) = event_client_and_server(store).await;
+        grpc_create_event_subscription(
+            &mut client,
+            &credential_id,
+            &secret,
+            subscription("subscription-dlq-grpc", 4),
+        )
+        .await;
+        grpc_publish_event(
+            &mut client,
+            &credential_id,
+            &secret,
+            event("event-dlq-grpc", b"dlq-payload"),
+        )
+        .await;
+        let batch = require_event_batch(
+            grpc_poll_event_subscription(
+                &mut client,
+                &credential_id,
+                &secret,
+                "subscription-dlq-grpc",
+            )
+            .await,
+        );
+        grpc_reject_event_batch_permanently(
+            &mut client,
+            &credential_id,
+            &secret,
+            "subscription-dlq-grpc",
+            batch.cursor,
+        )
+        .await;
+        let dead_letters = grpc_event_dead_letters(
+            &mut client,
+            &credential_id,
+            &secret,
+            "subscription-dlq-grpc",
+        )
+        .await;
+        assert_eq!(dead_letters.dead_letters.len(), 1);
+        assert_eq!(
+            dead_letters.dead_letters[0].failure_kind,
+            pb::EventDeliveryFailureKind::Permanent as i32
+        );
+        grpc_replay_event_subscription(
+            &mut client,
+            &credential_id,
+            &secret,
+            "subscription-dlq-grpc",
+            "replay-dlq-grpc",
+        )
+        .await;
+        let replayed_batch = require_event_batch(
+            grpc_poll_event_subscription(
+                &mut client,
+                &credential_id,
+                &secret,
+                "subscription-dlq-grpc",
+            )
+            .await,
+        );
+        assert_eq!(replayed_batch.events.len(), 1);
+        assert_eq!(replayed_batch.events[0].payload, b"dlq-payload");
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn event_permission_denial_hides_subscription_and_large_event_exceeds_tonic_default() {
+        let hidden_store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) =
+            seed_with_permissions(&hidden_store, &[EVENT_APPEND_PERMISSION]);
+        let (mut hidden_client, hidden_server) = event_client_and_server(hidden_store).await;
+        let mut hidden = Request::new(pb::EventGetSubscriptionRequest {
+            scope: Some(wire_scope()),
+            subscription_id: Some(pb_id("hidden-subscription")),
+        });
+        attach_service_credential(&mut hidden, &credential_id, &secret);
+        let hidden = hidden_client
+            .get_subscription(hidden)
+            .await
+            .expect("permission denial remains canonical response")
+            .into_inner();
+        let error = match hidden.result.expect("hidden result") {
+            pb::event_get_subscription_response::Result::Error(error) => error,
+            pb::event_get_subscription_response::Result::Subscription(_) => {
+                panic!("unauthorized caller disclosed subscription")
+            }
+        };
+        assert_eq!(error.code, pb::ErrorCode::PermissionDenied as i32);
+        hidden_server.abort();
+
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[
+                EVENT_APPEND_PERMISSION,
+                EVENT_SUBSCRIBE_PERMISSION,
+                EVENT_CONSUME_PERMISSION,
+            ],
+        );
+        let (mut client, server) = event_client_and_server(store).await;
+        grpc_create_event_subscription(
+            &mut client,
+            &credential_id,
+            &secret,
+            subscription("subscription-five-mib", 2),
+        )
+        .await;
+        let large_payload = vec![0x5a; 5 * 1024 * 1024];
+        let mut publish = Request::new(pb::EventPublishRequest {
+            event: Some(event("event-five-mib", &large_payload)),
+        });
+        attach_service_credential(&mut publish, &credential_id, &secret);
+        let response = client
+            .publish_event(publish)
+            .await
+            .expect("Event above Tonic default must pass")
+            .into_inner();
+        assert!(matches!(
+            response.result,
+            Some(pb::event_publish_response::Result::Receipt(_))
+        ));
+        let batch = require_event_batch(
+            grpc_poll_event_subscription(
+                &mut client,
+                &credential_id,
+                &secret,
+                "subscription-five-mib",
+            )
+            .await,
+        );
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0].payload.len(), large_payload.len());
+        assert_eq!(batch.events[0].payload, large_payload);
         server.abort();
     }
 }
