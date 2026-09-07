@@ -14,15 +14,18 @@ use ucr_model::{CapabilityDescriptor, CapabilityMaturity, EndpointId, OpaqueId, 
 use crate::local_handshake::{
     LocalHandshakeError, LocalTransportIdentity, accept_local_handshake, initiate_local_handshake,
 };
-use crate::local_route::{LOCAL_TCP_CAPABILITY, LocalRouteError, is_local_direct_ip, local_socket_addr};
-use crate::provider::{
-    InternetAcceptStatus, InternetEnvelopeSink, InternetSinkError, InternetTransportConfigError,
-    InternetTransportPolicy,
+use crate::local_route::{
+    LOCAL_TCP_CAPABILITY, LocalRouteError, is_local_direct_ip, local_socket_addr,
 };
+use crate::provider::{
+    InternetAcceptStatus, InternetSinkError, InternetTransportConfigError, InternetTransportPolicy,
+};
+#[cfg(test)]
+use crate::wire::{INTERNET_CHUNK_PLAINTEXT_MAX, INTERNET_ENVELOPE_MAX};
 use crate::wire::{
-    INTERNET_CHUNK_PLAINTEXT_MAX, INTERNET_CHUNK_PLAINTEXT_MIN, INTERNET_ENVELOPE_MAX,
-    INTERNET_NONCE_LEN, INTERNET_RECEIPT_ACCEPTED, INTERNET_RECEIPT_DUPLICATE, WireError,
-    data_frame, decode_opaque, pb, pb_opaque, read_message_frame, receipt_frame, write_frame,
+    INTERNET_CHUNK_PLAINTEXT_MIN, INTERNET_NONCE_LEN, INTERNET_RECEIPT_ACCEPTED,
+    INTERNET_RECEIPT_DUPLICATE, WireError, data_frame, decode_opaque, pb, pb_opaque,
+    read_message_frame, receipt_frame, write_frame,
 };
 
 const ATTEMPT_ID_DOMAIN: &[u8] = b"UCR-LOCAL-ATTEMPT-ID-V1\0";
@@ -621,11 +624,7 @@ fn hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-fn retry_delay(
-    policy: &LocalTransportPolicy,
-    attempt_id: &OpaqueId,
-    retry_index: u32,
-) -> Duration {
+fn retry_delay(policy: &LocalTransportPolicy, attempt_id: &OpaqueId, retry_index: u32) -> Duration {
     let shift = retry_index.min(31);
     let factor = 1_u32 << shift;
     let exponential = policy
@@ -830,12 +829,11 @@ mod tests {
             encrypted_envelope: &[u8],
         ) -> Result<LocalAcceptStatus, LocalSinkError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            let mut accepted = self
-                .accepted
-                .lock()
-                .map_err(|_| LocalSinkError::Internal)?;
+            let mut accepted = self.accepted.lock().map_err(|_| LocalSinkError::Internal)?;
             match accepted.get(attempt_id.as_str()) {
-                Some(existing) if existing == encrypted_envelope => Ok(LocalAcceptStatus::Duplicate),
+                Some(existing) if existing == encrypted_envelope => {
+                    Ok(LocalAcceptStatus::Duplicate)
+                }
                 Some(_) => Err(LocalSinkError::Rejected),
                 None => {
                     accepted.insert(attempt_id.as_str().to_owned(), encrypted_envelope.to_vec());
@@ -1004,12 +1002,9 @@ mod tests {
     fn authenticated_local_round_trip_is_encrypted_bounded_and_observable() {
         let fixture = fixture();
         let sink = Arc::new(DedupSink::default());
-        let server = LocalTransportServer::new(
-            fixture.server_identity,
-            fast_policy(),
-            sink.clone(),
-        )
-        .expect("server");
+        let server =
+            LocalTransportServer::new(fixture.server_identity, fast_policy(), sink.clone())
+                .expect("server");
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let server_thread = thread::spawn(move || server.accept_once(&listener));
