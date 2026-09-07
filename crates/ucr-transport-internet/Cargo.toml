@@ -1,20 +1,30 @@
 [package]
-name = "ucr-security-tests"
+name = "ucr-transport-internet"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+build = "build.rs"
 
-[lints]
-workspace = true
+[features]
+fuzzing = []
 
-[dev-dependencies]
+[dependencies]
+prost = "=0.14.4"
+sha2 = "=0.11.0"
 ucr-core = { path = "../ucr-core" }
 ucr-crypto = { path = "../ucr-crypto" }
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
+
+[build-dependencies]
+prost-build = "=0.14.4"
+protoc-bin-vendored = "=3.2.0"
+
+[dev-dependencies]
 ucr-storage-memory = { path = "../ucr-storage-memory" }
-ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
-ucr-transport-internet = { path = "../ucr-transport-internet" }
+
+[lints]
+workspace = true

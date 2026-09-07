@@ -12,6 +12,11 @@ pub enum FrameKind {
     Event = 4,
     Error = 5,
     Acknowledgement = 6,
+    HandshakeKeyExchange = 7,
+    HandshakeAuthentication = 8,
+    KeyConfirmation = 9,
+    InternetData = 10,
+    InternetReceipt = 11,
 }
 
 impl TryFrom<u8> for FrameKind {
@@ -25,6 +30,11 @@ impl TryFrom<u8> for FrameKind {
             4 => Ok(Self::Event),
             5 => Ok(Self::Error),
             6 => Ok(Self::Acknowledgement),
+            7 => Ok(Self::HandshakeKeyExchange),
+            8 => Ok(Self::HandshakeAuthentication),
+            9 => Ok(Self::KeyConfirmation),
+            10 => Ok(Self::InternetData),
+            11 => Ok(Self::InternetReceipt),
             _ => Err(FrameError::UnknownKind),
         }
     }

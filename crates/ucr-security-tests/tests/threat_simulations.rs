@@ -1,12 +1,15 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use ucr_core::{
     AuthorizedDurableRuntime, AuthorizedMutationError, DeviceLifecycleStore, PermissionGrantStore,
-    TrustedSigningKeyStore,
+    RouteCandidate, TransportProvider, TrustedSigningKeyStore,
 };
 use ucr_crypto::{
     AgreementKeyPair, ReplayError, ReplayProtector, SessionError, SessionRole, SignatureError,
@@ -15,19 +18,28 @@ use ucr_crypto::{
     verify_message_signature_with_trust,
 };
 use ucr_model::{
-    ActorId, ActorKind, ActorRef, ConversationId, ConversationKind, ConversationRef,
-    CorrelationContext, CryptoSuite, DeliveryPolicy, DeliveryState, DeviceDescriptor, DeviceId,
-    DeviceLifecycleState, DeviceRef, IdentityId, KeyId, KeyPurpose, MessageEnvelope, MessageId,
+    ActorId, ActorKind, ActorRef, CapabilityDescriptor, CapabilityMaturity, ConversationId,
+    ConversationKind, ConversationRef, CorrelationContext, CryptoSuite, DeliveryPolicy,
+    DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, DeviceRef, EndpointAddress,
+    EndpointId, HandshakeNonce, IdentityId, KeyId, KeyPurpose, MessageEnvelope, MessageId,
     MessageSignature, NamespaceId, OpaqueId, OriginRef, PermissionGrant, PermissionScope,
     PrincipalId, PrincipalKind, PrincipalRef, PublicKeyDescriptor, ScopedPrincipal, TenantId,
     TenantScope,
 };
 use ucr_protocol::{
-    ALGORITHM_VERSION, CanonicalErrorCode, DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION,
-    KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID, message_signing_binding,
+    ALGORITHM_VERSION, CanonicalErrorCode, CapabilityRequirement, CryptoPolicy,
+    DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION, KEY_FORMAT_VERSION, NegotiationPolicy,
+    PeerHello, ProtocolVersion, SIGNATURE_ALGORITHM_ID, VersionPolicy, VersionRange,
+    message_signing_binding,
 };
 use ucr_storage_memory::MemoryLocalStore;
 use ucr_storage_sqlite::SqliteLocalStore;
+
+use ucr_transport_internet::{
+    INTERNET_TCP_CAPABILITY, INTERNET_TCP_SCHEME, InternetPeerExpectation,
+    InternetPeerExpectationError, InternetPeerExpectationResolver, InternetTransportIdentity,
+    InternetTransportPolicy, InternetTransportProvider,
+};
 
 static DB_SEQUENCE: AtomicU64 = AtomicU64::new(120_000);
 
@@ -416,4 +428,96 @@ fn revoked_device_simulation_denies_existing_signature_and_future_key_access() {
         store.provision_trusted_signing_key(&tenant, &replacement),
         Err(ucr_core::DurableStoreError::PermissionDenied)
     );
+}
+
+#[derive(Debug)]
+struct NoPeerExpectations;
+
+impl InternetPeerExpectationResolver for NoPeerExpectations {
+    fn expected_peer(
+        &self,
+        _scope: &TenantScope,
+        _endpoint_id: &EndpointId,
+    ) -> Result<InternetPeerExpectation, InternetPeerExpectationError> {
+        Err(InternetPeerExpectationError::NotFound)
+    }
+}
+
+fn internet_boundary_identity(tenant: &TenantScope) -> Arc<InternetTransportIdentity> {
+    let signer = Arc::new(SigningKeyMaterial::generate().expect("transport signer"));
+    let device_id = DeviceId::from_opaque(oid("internet-boundary-device"));
+    let descriptor = signing_descriptor(signer.as_ref(), "internet-boundary-key", &device_id);
+    let store = Arc::new(MemoryLocalStore::default());
+    Arc::new(InternetTransportIdentity {
+        scope: tenant.clone(),
+        endpoint_id: EndpointId::from_opaque(oid("internet-boundary-local")),
+        hello_template: PeerHello {
+            supported_versions: vec![
+                VersionRange::new(ProtocolVersion::new(1, 0), ProtocolVersion::new(1, 0))
+                    .expect("version"),
+            ],
+            supported_crypto_suites: vec![CryptoSuite::UcrV1],
+            nonce: HandshakeNonce::new([9; 32]),
+            capabilities: vec![CapabilityDescriptor {
+                id: INTERNET_TCP_CAPABILITY.to_owned(),
+                maturity: CapabilityMaturity::Prepared,
+                extensions: Vec::new(),
+            }],
+            extensions: Vec::new(),
+        },
+        negotiation_policy: NegotiationPolicy {
+            version: VersionPolicy {
+                minimum: ProtocolVersion::new(1, 0),
+            },
+            crypto: CryptoPolicy {
+                preferred_suites: vec![CryptoSuite::UcrV1],
+            },
+            required_capabilities: vec![CapabilityRequirement {
+                id: INTERNET_TCP_CAPABILITY.to_owned(),
+                minimum: CapabilityMaturity::Prepared,
+                allow_deprecated: false,
+            }],
+        },
+        signing_descriptor: descriptor,
+        signing_key: signer,
+        trusted_keys: store.clone(),
+        replay: store,
+        peer_expectations: Arc::new(NoPeerExpectations),
+    })
+}
+
+#[test]
+fn internet_transport_boundary_simulation_blocks_lan_and_dns_before_network_side_effects() {
+    let tenant = scope("tenant-internet-boundary", None);
+    let provider = InternetTransportProvider::new(
+        internet_boundary_identity(&tenant),
+        InternetTransportPolicy::default(),
+    )
+    .expect("provider");
+    let endpoint = EndpointId::from_opaque(oid("remote-endpoint"));
+    for (address, expected) in [
+        (
+            "127.0.0.1:443",
+            ucr_core::CanonicalTransportError::PolicyDenied,
+        ),
+        (
+            "192.168.1.5:443",
+            ucr_core::CanonicalTransportError::PolicyDenied,
+        ),
+        (
+            "example.com:443",
+            ucr_core::CanonicalTransportError::Rejected,
+        ),
+    ] {
+        let route = RouteCandidate {
+            endpoint_id: endpoint.clone(),
+            transport_capability: INTERNET_TCP_CAPABILITY.to_owned(),
+            address: EndpointAddress {
+                scheme: INTERNET_TCP_SCHEME.to_owned(),
+                value: address.as_bytes().to_vec(),
+            },
+        };
+        assert_eq!(provider.transmit(&tenant, &route, b"opaque"), Err(expected));
+    }
+    assert_eq!(provider.metrics().connection_attempts, 0);
 }
