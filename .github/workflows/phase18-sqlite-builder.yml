@@ -1,4 +1,4 @@
-name: Phase18 SQLite Builder V5
+name: Phase18 SQLite Builder V6
 
 on:
   push:
@@ -37,11 +37,7 @@ jobs:
           lib.write_text(text)
 
           patcher = Path('.github/phase18_sqlite_wiring.py')
-          patch = patcher.read_text()
-          old_guard = 'if patched_fixtures < 18:'
-          new_guard = 'if patched_fixtures < 5:'
-          if old_guard in patch:
-              patch = patch.replace(old_guard, new_guard, 1)
+          patch = patcher.read_text().replace('if patched_fixtures < 18:', 'if patched_fixtures < 5:', 1)
           patcher.write_text(patch)
           PY
       - name: Apply SQLite v21 wiring
@@ -60,7 +56,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/phase18_sqlite_wiring.py .github/workflows/phase18-sqlite-builder.yml
+          git rm -f .github/phase18_sqlite_wiring.py .github/workflows/phase18-sqlite-builder.yml
           git add crates/ucr-storage-sqlite Cargo.lock
           git commit -m "Add restart-safe Phase 18 SQLite Group owner"
           git push origin HEAD:phase18-groups
