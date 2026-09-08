@@ -72,9 +72,18 @@ fn phase18_groups_create_no_second_conversation_message_delivery_or_identity_bra
         "CREATE TABLE group_deliveries",
         "CREATE TABLE group_identities",
     ] {
-        assert!(!model.contains(forbidden), "model leaked second owner: {forbidden}");
-        assert!(!core.contains(forbidden), "core leaked second owner: {forbidden}");
-        assert!(!sqlite.contains(forbidden), "sqlite leaked second owner: {forbidden}");
+        assert!(
+            !model.contains(forbidden),
+            "model leaked second owner: {forbidden}"
+        );
+        assert!(
+            !core.contains(forbidden),
+            "core leaked second owner: {forbidden}"
+        );
+        assert!(
+            !sqlite.contains(forbidden),
+            "sqlite leaked second owner: {forbidden}"
+        );
     }
 
     assert!(core.contains("MessageStore"));
@@ -88,9 +97,10 @@ fn phase18_release_truth_and_repository_guards_are_machine_locked() {
     let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
     let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
 
-    assert!(readme.contains(
-        "**Phase 18 — Groups (Prepared/reference complete; Phase 19 not started).**"
-    ));
+    assert!(
+        readme
+            .contains("**Phase 18 — Groups (Prepared/reference complete; Phase 19 not started).**")
+    );
     assert!(readme.contains("Phase 19 is not started"));
     assert!(ci.contains("test -s spec/groups.md"));
     assert!(ci.contains(
