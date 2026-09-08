@@ -46,9 +46,7 @@ fn phase17_chat_is_thin_prepared_layer_over_canonical_owners() {
     assert!(readme.contains(
         "**Phase 17 — Chat (Prepared/reference complete; Phase 18 Groups not started).**"
     ));
-    assert!(readme.contains(
-        "Phase 18 Groups and Phase 24 Transport Orchestrator are not started"
-    ));
+    assert!(readme.contains("Phase 18 Groups and Phase 24 Transport Orchestrator are not started"));
     assert!(ci.contains("test -s spec/chat.md"));
     assert!(ci.contains(
         "0055-phase17-chat-reuses-canonical-conversation-message-and-delivery-owners.md"
