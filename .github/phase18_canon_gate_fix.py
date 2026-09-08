@@ -31,8 +31,8 @@ text, version_replacements = pattern.subn(
     lambda match: f"assert!(current_sqlite_schema_version(&{match.group(1)}) >= 20);",
     text,
 )
-if version_replacements < 15:
-    raise SystemExit(f"expected at least 15 stale schema assertions, replaced {version_replacements}")
+if version_replacements < 15 and "current_sqlite_schema_version(&sqlite" not in text:
+    raise SystemExit(f"expected historical schema assertions or prior repair, replaced {version_replacements}")
 
 method_marker = '    "message",\n'
 method_block = method_marker + '''    "create_group",
@@ -58,9 +58,62 @@ if '    "GROUP_CREATE_PERMISSION",\n' not in text:
         raise SystemExit("authorized permissions marker missing")
     text = text.replace(permission_marker, permission_block, 1)
 
+old_loop = '''    for method in AUTHORIZED_DURABLE_METHODS {
+        assert!(
+            runtime.contains(&format!("pub fn {method}(")),
+            "authorized runtime method missing: {method}"
+        );
+    }
+    assert_eq!(
+        runtime.matches("pub fn ").count(),
+        AUTHORIZED_DURABLE_METHODS.len()
+    );
+    assert_eq!(
+        runtime.matches("self.require(").count(),
+        AUTHORIZED_DURABLE_METHODS.len()
+    );
+'''
+new_loop = '''    for method in AUTHORIZED_DURABLE_METHODS {
+        let marker = format!("pub fn {method}(");
+        let start = runtime
+            .find(&marker)
+            .unwrap_or_else(|| panic!("authorized runtime method missing: {method}"));
+        let tail = &runtime[start + marker.len()..];
+        let end = tail.find("\\n    pub fn ").unwrap_or(tail.len());
+        assert!(
+            tail[..end].contains("self.require("),
+            "authorized runtime method lacks an explicit permission check: {method}"
+        );
+    }
+    let public_methods = runtime
+        .lines()
+        .filter_map(|line| {
+            line.trim_start()
+                .strip_prefix("pub fn ")
+                .and_then(|rest| rest.split_once('(').map(|(name, _)| name))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(public_methods.len(), AUTHORIZED_DURABLE_METHODS.len());
+    for method in public_methods {
+        assert!(
+            AUTHORIZED_DURABLE_METHODS.contains(&method),
+            "untracked authorized runtime method: {method}"
+        );
+    }
+'''
+if old_loop in text:
+    text = text.replace(old_loop, new_loop, 1)
+elif "authorized runtime method lacks an explicit permission check" not in text:
+    raise SystemExit("authorized runtime count gate marker missing")
+
 text = text.replace(
     'assert!(adr.contains("mirrors all 32 methods"));',
     'assert!(adr.contains("every currently implemented tenant-scoped durable capability"));',
+    1,
+)
+text = text.replace(
+    'assert!(permission_spec.contains("54 externally callable tenant-scoped durable methods"));',
+    'assert!(permission_spec.contains("Phase 18 contributes seven Group façade methods"));',
     1,
 )
 canon.write_text(text)
@@ -69,9 +122,11 @@ adr = Path("docs/adr/0028-tenant-scoped-durable-runtime-operations-require-expli
 text = adr.read_text()
 old = "`AuthorizedDurableRuntime` is the authorization-enforcing runtime façade for every currently implemented tenant-scoped durable capability. It mirrors all 32 methods owned by `PermissionGrantStore`, `TrustedSigningKeyStore`, `RecoveryPlanStore`, `CommandAcceptanceStore`, `ConversationStore`, `MessageStore`, `DeliveryStore`, `SyncStore`, `EventJournalStore`, `AntiEntropyStore`, and `CommandOutcomeStore`."
 new = "`AuthorizedDurableRuntime` is the authorization-enforcing runtime façade for every currently implemented tenant-scoped durable capability. Architecture tests enumerate the complete façade method set and require it to stay aligned as canonical owners grow. The covered durable owners include permission/service administration, Identity/Device, trusted keys, recovery, Commands, Conversation, Message, Communication Intent, Delivery, Sync, Event/Anti-Entropy, and Phase 18 `GroupStore` / `GroupMessageStore`; Group authorization reuses this same boundary rather than creating a second policy brain."
-if old not in text:
-    raise SystemExit("ADR 0028 historical method-count marker missing")
-adr.write_text(text.replace(old, new, 1))
+if old in text:
+    text = text.replace(old, new, 1)
+elif new not in text:
+    raise SystemExit("ADR 0028 authorization surface marker missing")
+adr.write_text(text)
 
 spec = Path("spec/permissions.md")
 text = spec.read_text()
@@ -86,7 +141,12 @@ text = text.replace(
     1,
 )
 old_count = "the current façade covers 54 externally callable tenant-scoped durable methods and the registry contains 43 unique permission IDs."
-new_count = "the current façade covers 61 externally callable tenant-scoped durable methods and the registry contains 46 unique permission IDs. Phase 18 contributes seven Group façade methods and three protocol-owned Group permissions; later phases must extend these explicit enumerations rather than freeze a historical count."
-if old_count not in text:
-    raise SystemExit("permissions current-count marker missing")
-spec.write_text(text.replace(old_count, new_count, 1))
+old_phase_count = "the current façade covers 61 externally callable tenant-scoped durable methods and the registry contains 46 unique permission IDs. Phase 18 contributes seven Group façade methods and three protocol-owned Group permissions; later phases must extend these explicit enumerations rather than freeze a historical count."
+new_count = "Phase 18 contributes seven Group façade methods and three protocol-owned Group permissions. Architecture tests enumerate the complete current façade and permission vocabulary directly, so later phases extend those explicit enumerations without freezing a historical method or permission count in prose."
+if old_count in text:
+    text = text.replace(old_count, new_count, 1)
+elif old_phase_count in text:
+    text = text.replace(old_phase_count, new_count, 1)
+elif new_count not in text:
+    raise SystemExit("permissions authorization-surface marker missing")
+spec.write_text(text)
