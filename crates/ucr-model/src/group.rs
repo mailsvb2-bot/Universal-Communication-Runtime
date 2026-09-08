@@ -176,8 +176,10 @@ pub enum GroupChangeKind {
 
 /// One idempotent security-sensitive Group mutation.
 ///
-/// `event_id` is the unique fact identifier. The generic Event API may project the same fact later;
-/// this structure never stores localized human-readable system text.
+/// `event_id` is the exact-scope unique fact identifier. A committed Group change reserves that
+/// identity against unrelated generic Event append; any future same-fact Event projection must use
+/// an explicit reconciliation path rather than silently reusing the identifier.
+/// This structure never stores localized human-readable system text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupChange {
     pub event_id: EventId,

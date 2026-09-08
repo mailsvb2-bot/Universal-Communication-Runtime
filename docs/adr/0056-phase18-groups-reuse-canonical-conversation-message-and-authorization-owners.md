@@ -15,7 +15,7 @@ Phase 18 introduces one Group aggregate for Group-specific state only. `GroupRec
 
 Messages in Groups are ordinary canonical `MessageEnvelope`s. `GroupMessageStore` is an atomic membership-gated access boundary over the same `MessageStore` data. Memory writes the same message map, and SQLite writes the existing `messages`/children tables. There is no `GroupMessage` model, second message database, or alternate delivery state machine.
 
-Group management remains behind existing explicit tenant-scoped UCR permissions. Durable membership/role checks are additional authorization facts evaluated inside the Group storage action. Membership changes use optimistic Group revision plus a canonical Event-ID fingerprint so exact retries deduplicate and changed semantics conflict.
+Group management remains behind existing explicit tenant-scoped UCR permissions. Durable membership/role checks are additional authorization facts evaluated inside the Group storage action. Membership changes use optimistic Group revision plus a canonical Event-ID fingerprint so exact retries deduplicate and changed semantics conflict. The Event ID namespace is exact-scope-wide: Group changes cannot reuse an ID across Groups, and Group/Event writes mutually reject ordinary reuse so two canonical facts cannot silently acquire one identity. Future same-fact Event projection requires an explicit reconciliation path rather than a second Event owner.
 
 Removed members are durable tombstones. SQLite schema v21 stores normalized Group, membership, bridge-mapping and change-fingerprint state while deriving role permissions from the canonical protocol mapping rather than persisting a second permission truth.
 
@@ -28,6 +28,7 @@ Group crypto state remains an opaque capability/state reference owned by the sta
 - Generic Message paths cannot be used to bypass Group membership checks.
 - Service Account Message provenance remains Core-owned and applies to Group writes too.
 - Add/remove/role/ownership changes and their idempotency record are atomic.
+- `EventId` remains one exact-scope fact namespace across Group changes and the canonical Event journal.
 - A removed member cannot regain authority merely because the process restarts or a mutation is retried.
 - Public discovery metadata is not identity, authorization, or membership evidence.
 - Unsupported custom history/crypto behavior fails closed.

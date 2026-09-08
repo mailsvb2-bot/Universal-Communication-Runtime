@@ -38,9 +38,14 @@ fn phase18_groups_reuse_canonical_owners_and_are_restart_safe() {
     assert!(protocol.contains("group_change_fingerprint"));
     assert!(protocol.contains("WouldOrphanGroup"));
     assert!(memory.contains("persist_message_in_state"));
+    assert!(memory.contains("membership.member == *member"));
+    assert!(memory.contains("membership.member == subject.principal"));
+    assert!(memory.contains("state.events.contains_key(&change_key)"));
     assert!(sqlite.contains("insert_message_row"));
     assert!(sqlite.contains("insert_message_children"));
     assert!(sqlite.contains("group_changes"));
+    assert!(sqlite.contains("PRIMARY KEY(tenant_id, namespace_present, namespace_id, event_id)"));
+    assert!(sqlite.contains("load_event_by_id(&transaction, &change.scope, &change.event_id)"));
     assert!(sqlite.contains("group_memberships"));
     assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 21"));
     assert!(sqlite_root.contains("migrate_v20_to_v21"));

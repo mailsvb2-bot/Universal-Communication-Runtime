@@ -103,6 +103,7 @@ impl GroupStore for MemoryLocalStore {
         Ok(state
             .group_memberships
             .get(&membership_key(scope, group_id, member))
+            .filter(|membership| membership.member == *member)
             .cloned())
     }
 
@@ -138,11 +139,7 @@ impl GroupStore for MemoryLocalStore {
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let fingerprint = group_change_fingerprint(change).map_err(map_group_error)?;
         let group_key = group_key(&change.scope, &change.group_id);
-        let change_key = change_key(
-            &change.scope,
-            &change.group_id,
-            change.event_id.as_opaque().as_str(),
-        );
+        let change_key = change_key(&change.scope, change.event_id.as_opaque().as_str());
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.group_changes.get(&change_key) {
             return if existing == &fingerprint {
@@ -150,6 +147,9 @@ impl GroupStore for MemoryLocalStore {
             } else {
                 Err(DurableStoreError::Conflict)
             };
+        }
+        if state.events.contains_key(&change_key) {
+            return Err(DurableStoreError::Conflict);
         }
         let group = state
             .groups
@@ -232,6 +232,7 @@ impl GroupMessageStore for MemoryLocalStore {
                 &group.group_id,
                 &subject.principal,
             ))
+            .filter(|membership| membership.member == subject.principal)
             .ok_or(DurableStoreError::PermissionDenied)?;
         if membership.state != GroupMemberState::Active
             || !membership
@@ -267,6 +268,7 @@ impl GroupMessageStore for MemoryLocalStore {
         let membership = state
             .group_memberships
             .get(&membership_key(scope, &group.group_id, &subject.principal))
+            .filter(|membership| membership.member == subject.principal)
             .ok_or(DurableStoreError::PermissionDenied)?;
         if membership.state != GroupMemberState::Active
             || !membership
@@ -296,12 +298,8 @@ fn membership_key(
     )
 }
 
-fn change_key(scope: &TenantScope, group_id: &GroupId, event_id: &str) -> GroupChangeKey {
-    (
-        scope_key(scope),
-        group_id.as_opaque().as_str().to_owned(),
-        event_id.to_owned(),
-    )
+fn change_key(scope: &TenantScope, event_id: &str) -> GroupChangeKey {
+    (scope_key(scope), event_id.to_owned())
 }
 
 fn history_floor_for_add(
@@ -367,5 +365,254 @@ fn map_group_error(error: ucr_protocol::GroupError) -> DurableStoreError {
         | GroupError::WouldOrphanGroup => DurableStoreError::Conflict,
         GroupError::TooManyMembers => DurableStoreError::Full,
         _ => DurableStoreError::InvalidRecord,
+    }
+}
+
+#[cfg(test)]
+mod phase18_memory_security_tests {
+    use ucr_core::{
+        DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore,
+        GroupMessageStore, GroupStore,
+    };
+    use ucr_model::*;
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("test id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("phase18-security-tenant")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("phase18-security-namespace"))),
+        }
+    }
+
+    fn subject(value: &str, kind: PrincipalKind) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid(value)),
+                kind,
+            },
+        }
+    }
+
+    fn group_fixture(suffix: &str, owner: &ScopedPrincipal) -> (ConversationRecord, GroupRecord) {
+        let conversation = ConversationRecord {
+            scope: scope(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(oid(&format!(
+                    "memory-conversation-{suffix}"
+                ))),
+                kind: ConversationKind::PrivateGroup,
+            },
+            parent_conversation_id: None,
+        };
+        let group = GroupRecord {
+            scope: scope(),
+            group_id: GroupId::from_opaque(oid(&format!("memory-group-{suffix}"))),
+            conversation: conversation.conversation.clone(),
+            ownership: GroupOwnership::PersonOwned(owner.principal.clone()),
+            history_policy: GroupHistoryPolicy::FullHistory,
+            delivery_policy: DeliveryPolicy::Durable,
+            crypto_state: GroupCryptoState {
+                capability_id: None,
+                epoch: 0,
+                state_ref: None,
+            },
+            public_policy: None,
+            media_state: GroupMediaState::Idle,
+            bridge_mappings: Vec::new(),
+            replication_generation: 0,
+            revision: 0,
+        };
+        (conversation, group)
+    }
+
+    fn message(
+        conversation: &ConversationRef,
+        principal_id: &PrincipalId,
+        suffix: &str,
+    ) -> MessageEnvelope {
+        MessageEnvelope {
+            message_id: MessageId::from_opaque(oid(&format!("memory-message-{suffix}"))),
+            scope: scope(),
+            conversation: conversation.clone(),
+            author: ActorRef {
+                actor_id: ActorId::from_opaque(oid(&format!("memory-actor-{suffix}"))),
+                kind: ActorKind::Person,
+                on_behalf_of: None,
+            },
+            author_device: DeviceRef {
+                device_id: DeviceId::from_opaque(oid(&format!("memory-device-{suffix}"))),
+                identity_id: IdentityId::from_opaque(oid(&format!("memory-identity-{suffix}"))),
+            },
+            created_at_unix_ms: 1,
+            logical_order: 1,
+            content: b"group-message".to_vec(),
+            attachment_ids: Vec::new(),
+            reply_to: None,
+            relations: Vec::new(),
+            crypto_metadata: None,
+            delivery_policy: DeliveryPolicy::Durable,
+            delivery_state: DeliveryState::Created,
+            origin: OriginRef {
+                principal_id: Some(principal_id.clone()),
+                endpoint_id: None,
+                integration_id: None,
+            },
+            correlation: CorrelationContext {
+                correlation_id: oid(&format!("memory-correlation-{suffix}")),
+                causation_id: None,
+                idempotency_key: Some(format!("memory-idempotency-{suffix}")),
+            },
+            extensions: Vec::new(),
+            external_mappings: Vec::new(),
+            signature: None,
+        }
+    }
+
+    fn event(id: &str) -> EventEnvelope {
+        EventEnvelope {
+            event_id: EventId::from_opaque(oid(id)),
+            scope: scope(),
+            event_type: "ucr.group.member_added".to_owned(),
+            payload: b"projection".to_vec(),
+            actor: ActorRef {
+                actor_id: ActorId::from_opaque(oid("memory-event-actor")),
+                kind: ActorKind::System,
+                on_behalf_of: None,
+            },
+            source_device: DeviceRef {
+                device_id: DeviceId::from_opaque(oid("memory-event-device")),
+                identity_id: IdentityId::from_opaque(oid("memory-event-identity")),
+            },
+            wall_time_unix_ms: 1,
+            logical_order: 1,
+            correlation: CorrelationContext {
+                correlation_id: oid("memory-event-correlation"),
+                causation_id: None,
+                idempotency_key: None,
+            },
+            schema_version: ProtocolVersion::new(1, 0),
+            integrity_metadata: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn principal_kind_alias_cannot_inherit_group_membership() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("shared-principal-id", PrincipalKind::Person);
+        let alias = subject("shared-principal-id", PrincipalKind::Organization);
+        let (conversation, group) = group_fixture("principal-kind", &owner);
+        assert_eq!(
+            store.create_group(&conversation, &group, &owner),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert!(
+            store
+                .group_membership(&scope(), &group.group_id, &alias.principal)
+                .expect("alias lookup")
+                .is_none()
+        );
+        let original = message(
+            &conversation.conversation,
+            &owner.principal.principal_id,
+            "owner",
+        );
+        assert_eq!(
+            store.persist_group_message(&owner, &original),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.group_message(&alias, &scope(), &original.message_id),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        let forged = message(
+            &conversation.conversation,
+            &alias.principal.principal_id,
+            "alias",
+        );
+        assert_eq!(
+            store.persist_group_message(&alias, &forged),
+            Err(DurableStoreError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn group_change_event_id_is_scope_wide_and_cannot_alias_event_journal() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("memory-event-owner", PrincipalKind::Person);
+        let (conversation_a, group_a) = group_fixture("event-a", &owner);
+        let (conversation_b, group_b) = group_fixture("event-b", &owner);
+        store
+            .create_group(&conversation_a, &group_a, &owner)
+            .expect("group a");
+        store
+            .create_group(&conversation_b, &group_b, &owner)
+            .expect("group b");
+
+        let shared_id = EventId::from_opaque(oid("memory-shared-event-id"));
+        let change_a = GroupChange {
+            event_id: shared_id.clone(),
+            scope: scope(),
+            group_id: group_a.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: subject("memory-member-a", PrincipalKind::Person).principal,
+                role: GroupRole::Member,
+            },
+            next_crypto_state: None,
+        };
+        let change_b = GroupChange {
+            event_id: shared_id.clone(),
+            scope: scope(),
+            group_id: group_b.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: subject("memory-member-b", PrincipalKind::Person).principal,
+                role: GroupRole::Member,
+            },
+            next_crypto_state: None,
+        };
+        assert_eq!(
+            store.apply_group_change(&owner, &change_a),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.apply_group_change(&owner, &change_a),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        assert_eq!(
+            store.apply_group_change(&owner, &change_b),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            store.append_event(&event("memory-shared-event-id")),
+            Err(DurableStoreError::Conflict)
+        );
+
+        assert_eq!(
+            store.append_event(&event("memory-event-first-id")),
+            Ok(EventAppendStatus::Appended)
+        );
+        let event_first_change = GroupChange {
+            event_id: EventId::from_opaque(oid("memory-event-first-id")),
+            scope: scope(),
+            group_id: group_b.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: subject("memory-member-c", PrincipalKind::Person).principal,
+                role: GroupRole::Member,
+            },
+            next_crypto_state: None,
+        };
+        assert_eq!(
+            store.apply_group_change(&owner, &event_first_change),
+            Err(DurableStoreError::Conflict)
+        );
     }
 }

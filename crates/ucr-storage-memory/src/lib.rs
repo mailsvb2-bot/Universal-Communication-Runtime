@@ -66,7 +66,7 @@ type RecoveryIdentityKey = (ScopeKey, String);
 type ConversationKey = (ScopeKey, String);
 type GroupKey = (ScopeKey, String);
 type GroupMembershipKey = (ScopeKey, String, String);
-type GroupChangeKey = (ScopeKey, String, String);
+type GroupChangeKey = (ScopeKey, String);
 type MessageKey = (ScopeKey, String);
 type IntentKey = (ScopeKey, String);
 type IdentityKey = (ScopeKey, String);
@@ -1702,6 +1702,9 @@ impl EventJournalStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        if state.group_changes.contains_key(&key) {
+            return Err(DurableStoreError::Conflict);
+        }
         state.events.insert(key.clone(), event);
         state.event_order.push(key);
         Ok(EventAppendStatus::Appended)
@@ -2183,6 +2186,9 @@ impl AntiEntropyStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        if state.group_changes.contains_key(&key) {
+            return Err(DurableStoreError::Conflict);
+        }
         state.events.insert(key.clone(), event);
         state.event_order.push(key);
         Ok(EventAppendStatus::Appended)
@@ -2216,6 +2222,9 @@ impl CommandOutcomeStore for MemoryLocalStore {
                 Some(original) if original == &event => Ok(EventAppendStatus::Duplicate),
                 _ => Err(DurableStoreError::Conflict),
             };
+        }
+        if state.group_changes.contains_key(&event_key) {
+            return Err(DurableStoreError::Conflict);
         }
         if let Some(original) = state.events.get(&event_key) {
             if original != &event {

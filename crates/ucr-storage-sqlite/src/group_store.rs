@@ -92,7 +92,7 @@ CREATE TABLE group_changes (
     group_id TEXT NOT NULL,
     event_id TEXT NOT NULL,
     fingerprint BLOB NOT NULL CHECK(length(fingerprint)=32),
-    PRIMARY KEY(tenant_id, namespace_present, namespace_id, group_id, event_id),
+    PRIMARY KEY(tenant_id, namespace_present, namespace_id, event_id),
     FOREIGN KEY(tenant_id, namespace_present, namespace_id, group_id)
       REFERENCES groups(tenant_id, namespace_present, namespace_id, group_id) ON DELETE CASCADE,
     CHECK((namespace_present=0 AND namespace_id='') OR (namespace_present=1 AND namespace_id<>''))
@@ -190,8 +190,8 @@ fn verify_group_table_shapes(connection: &Connection) -> Result<(), DurableStore
             ("tenant_id", "TEXT", 1, 1),
             ("namespace_present", "INTEGER", 1, 2),
             ("namespace_id", "TEXT", 1, 3),
-            ("group_id", "TEXT", 1, 4),
-            ("event_id", "TEXT", 1, 5),
+            ("group_id", "TEXT", 1, 0),
+            ("event_id", "TEXT", 1, 4),
             ("fingerprint", "BLOB", 1, 0),
         ],
     )
@@ -342,7 +342,6 @@ impl GroupStore for SqliteLocalStore {
         if let Some(existing) = load_change_fingerprint(
             &transaction,
             &change.scope,
-            &change.group_id,
             change.event_id.as_opaque().as_str(),
         )? {
             return if existing == fingerprint {
@@ -350,6 +349,11 @@ impl GroupStore for SqliteLocalStore {
             } else {
                 Err(DurableStoreError::Conflict)
             };
+        }
+        if super::event_journal::load_event_by_id(&transaction, &change.scope, &change.event_id)?
+            .is_some()
+        {
+            return Err(DurableStoreError::Conflict);
         }
         let group = load_group_from(&transaction, &change.scope, &change.group_id)?
             .ok_or(DurableStoreError::InvalidRecord)?;
@@ -857,13 +861,12 @@ fn decode_membership(
 fn load_change_fingerprint(
     connection: &Connection,
     scope: &TenantScope,
-    group_id: &GroupId,
     event_id: &str,
 ) -> Result<Option<[u8; 32]>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let value = connection.query_row(
-        "SELECT fingerprint FROM group_changes WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4 AND event_id=?5",
-        params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group_id.as_opaque().as_str(), event_id],
+        "SELECT fingerprint FROM group_changes WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND event_id=?4",
+        params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, event_id],
         |row| row.get::<_,Vec<u8>>(0),
     ).optional().map_err(|error| map_sqlite_error(&error))?;
     value
@@ -1458,6 +1461,156 @@ mod phase18_restart_security_tests {
                 .expect("final group exists")
                 .revision,
             2
+        );
+    }
+}
+
+#[cfg(test)]
+mod phase18_event_identity_security_tests {
+    use ucr_core::{
+        DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore, GroupStore,
+    };
+    use ucr_model::*;
+
+    use super::SqliteLocalStore;
+    use crate::message_store::tests::{TestDb, scope};
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("test id")
+    }
+    fn owner() -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("sqlite-event-owner")),
+                kind: PrincipalKind::Person,
+            },
+        }
+    }
+    fn group_fixture(suffix: &str, owner: &ScopedPrincipal) -> (ConversationRecord, GroupRecord) {
+        let conversation = ConversationRecord {
+            scope: scope(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(oid(&format!(
+                    "sqlite-event-conversation-{suffix}"
+                ))),
+                kind: ConversationKind::PrivateGroup,
+            },
+            parent_conversation_id: None,
+        };
+        let group = GroupRecord {
+            scope: scope(),
+            group_id: GroupId::from_opaque(oid(&format!("sqlite-event-group-{suffix}"))),
+            conversation: conversation.conversation.clone(),
+            ownership: GroupOwnership::PersonOwned(owner.principal.clone()),
+            history_policy: GroupHistoryPolicy::FullHistory,
+            delivery_policy: DeliveryPolicy::Durable,
+            crypto_state: GroupCryptoState {
+                capability_id: None,
+                epoch: 0,
+                state_ref: None,
+            },
+            public_policy: None,
+            media_state: GroupMediaState::Idle,
+            bridge_mappings: Vec::new(),
+            replication_generation: 0,
+            revision: 0,
+        };
+        (conversation, group)
+    }
+    fn member(value: &str) -> PrincipalRef {
+        PrincipalRef {
+            principal_id: PrincipalId::from_opaque(oid(value)),
+            kind: PrincipalKind::Person,
+        }
+    }
+    fn change(group: &GroupRecord, event_id: &str, member_id: &str) -> GroupChange {
+        GroupChange {
+            event_id: EventId::from_opaque(oid(event_id)),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: member(member_id),
+                role: GroupRole::Member,
+            },
+            next_crypto_state: None,
+        }
+    }
+    fn event(id: &str) -> EventEnvelope {
+        EventEnvelope {
+            event_id: EventId::from_opaque(oid(id)),
+            scope: scope(),
+            event_type: "ucr.group.member_added".to_owned(),
+            payload: b"projection".to_vec(),
+            actor: ActorRef {
+                actor_id: ActorId::from_opaque(oid("sqlite-event-actor")),
+                kind: ActorKind::System,
+                on_behalf_of: None,
+            },
+            source_device: DeviceRef {
+                device_id: DeviceId::from_opaque(oid("sqlite-event-device")),
+                identity_id: IdentityId::from_opaque(oid("sqlite-event-identity")),
+            },
+            wall_time_unix_ms: 1,
+            logical_order: 1,
+            correlation: CorrelationContext {
+                correlation_id: oid("sqlite-event-correlation"),
+                causation_id: None,
+                idempotency_key: None,
+            },
+            schema_version: ProtocolVersion::new(1, 0),
+            integrity_metadata: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn group_change_event_id_is_scope_wide_and_event_journal_exclusive() {
+        let db = TestDb::new();
+        let owner = owner();
+        let (conversation_a, group_a) = group_fixture("a", &owner);
+        let (conversation_b, group_b) = group_fixture("b", &owner);
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open");
+            store
+                .create_group(&conversation_a, &group_a, &owner)
+                .expect("group a");
+            store
+                .create_group(&conversation_b, &group_b, &owner)
+                .expect("group b");
+            let first = change(&group_a, "sqlite-shared-event", "sqlite-member-a");
+            assert_eq!(
+                store.apply_group_change(&owner, &first),
+                Ok(DurableRecordStatus::Persisted)
+            );
+            assert_eq!(
+                store.apply_group_change(&owner, &first),
+                Ok(DurableRecordStatus::Duplicate)
+            );
+            assert_eq!(
+                store.apply_group_change(
+                    &owner,
+                    &change(&group_b, "sqlite-shared-event", "sqlite-member-b")
+                ),
+                Err(DurableStoreError::Conflict)
+            );
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert_eq!(
+            reopened.append_event(&event("sqlite-shared-event")),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            reopened.append_event(&event("sqlite-event-first")),
+            Ok(EventAppendStatus::Appended)
+        );
+        assert_eq!(
+            reopened.apply_group_change(
+                &owner,
+                &change(&group_b, "sqlite-event-first", "sqlite-member-c")
+            ),
+            Err(DurableStoreError::Conflict)
         );
     }
 }

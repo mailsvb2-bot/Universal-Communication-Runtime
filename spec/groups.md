@@ -18,7 +18,9 @@ Security-sensitive Group changes are applied atomically against the authenticate
 
 ## Idempotent changes
 
-Every Group change has a canonical `EventId` and fingerprint. Replaying the same scoped event with identical semantics is a duplicate. Reusing that event identity with different semantics is a conflict. Membership/role/ownership transitions and the Group revision are committed in one storage action.
+Every Group change has a canonical `EventId` and fingerprint. `EventId` is unique across the entire exact `TenantScope`, not merely inside one Group: the same scoped identifier cannot name changes in two different Groups. Replaying the same scoped Group fact with identical semantics is a duplicate; reusing that identity with different semantics is a conflict. Membership/role/ownership transitions and the Group revision are committed in one storage action.
+
+A committed Group change also reserves its scoped `EventId` against ordinary canonical Event append, and an existing canonical Event reserves the same identity against Group mutation. Phase 18 therefore fails closed instead of creating two facts with one ID. A future same-fact projection into the Event journal requires an explicit reconciliation contract; generic Event append is not that contract.
 
 The Prepared change set includes add member, remove member, change role, transfer ownership, set history policy, set public policy, and set delivery policy.
 
