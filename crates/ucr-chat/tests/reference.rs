@@ -125,6 +125,76 @@ fn message(id: &str, logical_order: u64, content: &[u8]) -> MessageEnvelope {
     }
 }
 
+fn create_persisted_delivery(store: &MemoryLocalStore, message: &MessageEnvelope) -> DeliveryId {
+    let delivery_id = DeliveryId::from_opaque(oid("delivery-read"));
+    let attempt = DeliveryAttempt {
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
+        message_id: message.message_id.clone(),
+        state: DeliveryState::Persisted,
+    };
+    let persisted = DeliveryEvidence {
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
+        message_id: message.message_id.clone(),
+        kind: DeliveryEvidenceKind::PersistedLocal,
+        logical_order: 1,
+    };
+    store
+        .create_delivery_attempt(&attempt, &persisted)
+        .expect("create delivery");
+    delivery_id
+}
+
+fn advance_delivery_to_delivered(
+    store: &MemoryLocalStore,
+    delivery_id: &DeliveryId,
+    message_id: &MessageId,
+) {
+    for (from, to) in [
+        (DeliveryState::Persisted, DeliveryState::Encrypted),
+        (DeliveryState::Encrypted, DeliveryState::Queued),
+        (DeliveryState::Queued, DeliveryState::RoutePlanned),
+        (DeliveryState::RoutePlanned, DeliveryState::InFlight),
+    ] {
+        store
+            .transition_delivery(&scope(), delivery_id, from, to, None)
+            .expect("advance delivery");
+    }
+    let acknowledged = DeliveryEvidence {
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
+        message_id: message_id.clone(),
+        kind: DeliveryEvidenceKind::AcceptedByTransport,
+        logical_order: 2,
+    };
+    store
+        .transition_delivery(
+            &scope(),
+            delivery_id,
+            DeliveryState::InFlight,
+            DeliveryState::Acknowledged,
+            Some(&acknowledged),
+        )
+        .expect("acknowledge delivery");
+    let delivered = DeliveryEvidence {
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
+        message_id: message_id.clone(),
+        kind: DeliveryEvidenceKind::PresentedToUser,
+        logical_order: 3,
+    };
+    store
+        .transition_delivery(
+            &scope(),
+            delivery_id,
+            DeliveryState::Acknowledged,
+            DeliveryState::Delivered,
+            Some(&delivered),
+        )
+        .expect("deliver message");
+}
+
 #[test]
 fn direct_chat_send_and_bounded_transcript_reuse_canonical_message_store() {
     let store = MemoryLocalStore::default();
@@ -204,30 +274,13 @@ fn read_requires_delivered_state_and_records_read_by_user_through_delivery_owner
     let sink = RecordingSink::default();
     let clock = FixedClock(10_000);
     let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
-    let direct = conversation(ConversationKind::Direct);
-    chat.open_direct_chat(&subject(), &direct)
+    chat.open_direct_chat(&subject(), &conversation(ConversationKind::Direct))
         .expect("open direct chat");
     let chat_message = message("message-read", 10, b"read me");
     chat.send_text(&subject(), &chat_message)
         .expect("send message");
+    let delivery_id = create_persisted_delivery(&store, &chat_message);
 
-    let delivery_id = DeliveryId::from_opaque(oid("delivery-read"));
-    let attempt = DeliveryAttempt {
-        delivery_id: delivery_id.clone(),
-        scope: scope(),
-        message_id: chat_message.message_id.clone(),
-        state: DeliveryState::Persisted,
-    };
-    let persisted = DeliveryEvidence {
-        delivery_id: delivery_id.clone(),
-        scope: scope(),
-        message_id: chat_message.message_id.clone(),
-        kind: DeliveryEvidenceKind::PersistedLocal,
-        logical_order: 1,
-    };
-    store
-        .create_delivery_attempt(&attempt, &persisted)
-        .expect("create delivery");
     assert_eq!(
         chat.mark_read(
             &subject(),
@@ -238,50 +291,7 @@ fn read_requires_delivered_state_and_records_read_by_user_through_delivery_owner
         ),
         Err(ChatError::ReadRequiresDelivered)
     );
-
-    for (from, to) in [
-        (DeliveryState::Persisted, DeliveryState::Encrypted),
-        (DeliveryState::Encrypted, DeliveryState::Queued),
-        (DeliveryState::Queued, DeliveryState::RoutePlanned),
-        (DeliveryState::RoutePlanned, DeliveryState::InFlight),
-    ] {
-        store
-            .transition_delivery(&scope(), &delivery_id, from, to, None)
-            .expect("advance delivery");
-    }
-    let acknowledged = DeliveryEvidence {
-        delivery_id: delivery_id.clone(),
-        scope: scope(),
-        message_id: chat_message.message_id.clone(),
-        kind: DeliveryEvidenceKind::AcceptedByTransport,
-        logical_order: 2,
-    };
-    store
-        .transition_delivery(
-            &scope(),
-            &delivery_id,
-            DeliveryState::InFlight,
-            DeliveryState::Acknowledged,
-            Some(&acknowledged),
-        )
-        .expect("acknowledge delivery");
-    let delivered = DeliveryEvidence {
-        delivery_id: delivery_id.clone(),
-        scope: scope(),
-        message_id: chat_message.message_id.clone(),
-        kind: DeliveryEvidenceKind::PresentedToUser,
-        logical_order: 3,
-    };
-    store
-        .transition_delivery(
-            &scope(),
-            &delivery_id,
-            DeliveryState::Acknowledged,
-            DeliveryState::Delivered,
-            Some(&delivered),
-        )
-        .expect("deliver message");
-
+    advance_delivery_to_delivered(&store, &delivery_id, &chat_message.message_id);
     assert_eq!(
         chat.mark_read(
             &subject(),
