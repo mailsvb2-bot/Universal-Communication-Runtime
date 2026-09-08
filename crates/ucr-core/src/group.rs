@@ -23,6 +23,9 @@ pub trait GroupStore: StorageProvider {
     ) -> Result<DurableRecordStatus, DurableStoreError>;
 
     /// Loads one exact Group aggregate. Absence is not an error.
+    ///
+    /// # Errors
+    /// Returns an explicit durable-store failure for unavailable, corrupt, or invalid persisted state.
     fn group(
         &self,
         scope: &TenantScope,
@@ -30,6 +33,9 @@ pub trait GroupStore: StorageProvider {
     ) -> Result<Option<GroupRecord>, DurableStoreError>;
 
     /// Resolves the Group aggregate bound to one exact canonical Conversation.
+    ///
+    /// # Errors
+    /// Returns an explicit durable-store failure for unavailable, corrupt, or invalid persisted state.
     fn group_for_conversation(
         &self,
         scope: &TenantScope,
@@ -37,6 +43,9 @@ pub trait GroupStore: StorageProvider {
     ) -> Result<Option<GroupRecord>, DurableStoreError>;
 
     /// Loads one membership tombstone/active row by canonical principal.
+    ///
+    /// # Errors
+    /// Returns an explicit durable-store failure for unavailable, corrupt, or invalid persisted state.
     fn group_membership(
         &self,
         scope: &TenantScope,
@@ -45,6 +54,9 @@ pub trait GroupStore: StorageProvider {
     ) -> Result<Option<GroupMembership>, DurableStoreError>;
 
     /// Loads a bounded canonical membership set, including removed tombstones.
+    ///
+    /// # Errors
+    /// Rejects an invalid list bound and returns explicit durable-store failures.
     fn group_memberships(
         &self,
         scope: &TenantScope,
@@ -55,6 +67,9 @@ pub trait GroupStore: StorageProvider {
     /// Applies one idempotent security-sensitive Group change with optimistic revision checking.
     /// The authenticated actor is supplied by the Core authorization façade and must be checked
     /// against the durable active membership/role inside the same atomic storage action.
+    ///
+    /// # Errors
+    /// Rejects unauthorized, stale, conflicting, cross-scope, or invalid transitions and storage failures.
     fn apply_group_change(
         &self,
         actor: &ScopedPrincipal,
@@ -67,12 +82,20 @@ pub trait GroupStore: StorageProvider {
 /// Implementations MUST write/read the same Message storage used by [`MessageStore`]; this trait
 /// exists only so membership cannot race or be bypassed between an external check and persistence.
 pub trait GroupMessageStore: GroupStore + MessageStore {
+    /// Persists one group Message only while the authenticated subject has active send membership.
+    ///
+    /// # Errors
+    /// Rejects non-group/cross-scope messages, inactive or unauthorized members, conflicts, and storage failures.
     fn persist_group_message(
         &self,
         subject: &ScopedPrincipal,
         message: &MessageEnvelope,
     ) -> Result<DurableRecordStatus, DurableStoreError>;
 
+    /// Reads one group Message only while the authenticated subject may access its Group history.
+    ///
+    /// # Errors
+    /// Rejects inactive or unauthorized members, invalid history access, and durable-store failures.
     fn group_message(
         &self,
         subject: &ScopedPrincipal,
