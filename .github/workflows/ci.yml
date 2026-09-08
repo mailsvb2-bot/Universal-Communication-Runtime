@@ -124,7 +124,8 @@ jobs:
           test -s spec/sync.md &&
           test -s spec/integration-api.md &&
           test -s spec/event-api.md &&
-          test -s spec/internet-transport.md
+          test -s spec/internet-transport.md &&
+          test -s spec/local-transport.md
       - name: Public contract exists
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
@@ -192,4 +193,5 @@ jobs:
           test -s docs/adr/0050-phase13-grpc-identity-bindings-reuse-canonical-owners.md &&
           test -s docs/adr/0051-phase13-grpc-completes-integration-service-over-canonical-owners.md &&
           test -s docs/adr/0052-phase14-event-api-reuses-append-only-journal-with-durable-consumer-state.md &&
-          test -s docs/adr/0053-phase15-internet-transport-reuses-canonical-transport-and-crypto-owners.md
+          test -s docs/adr/0053-phase15-internet-transport-reuses-canonical-transport-and-crypto-owners.md &&
+          test -s docs/adr/0054-phase16-local-direct-transport-reuses-canonical-transport-and-crypto-owners.md

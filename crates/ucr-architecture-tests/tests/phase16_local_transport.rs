@@ -27,6 +27,8 @@ fn phase16_local_transport_is_prepared_and_reuses_canonical_owners() {
         "docs/adr/0054-phase16-local-direct-transport-reuses-canonical-transport-and-crypto-owners.md",
     ))
     .expect("ADR 0054");
+    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
+    let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
 
     assert!(core.contains("pub trait TransportProvider"));
     assert!(local.contains("impl TransportProvider for LocalTransportProvider"));
@@ -74,6 +76,15 @@ fn phase16_local_transport_is_prepared_and_reuses_canonical_owners() {
     assert!(adr.contains("Rejected. That creates a second communication brain"));
     assert!(adr.contains("Phase 15 deliberately rejects local/private client routes"));
     assert!(adr.contains("Phase 17 Chat is explicitly outside this ADR"));
+
+    assert!(readme.contains(
+        "**Phase 16 — LAN / Direct Transport (Prepared/reference complete; Phase 17 Chat not started).**"
+    ));
+    assert!(readme.contains("Phase 17 Chat and Phase 24 Transport Orchestrator are not started"));
+    assert!(ci.contains("test -s spec/local-transport.md"));
+    assert!(ci.contains(
+        "0054-phase16-local-direct-transport-reuses-canonical-transport-and-crypto-owners.md"
+    ));
 }
 
 #[test]
