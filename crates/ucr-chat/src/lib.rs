@@ -314,11 +314,11 @@ where
         update: &TypingUpdate,
     ) -> Result<(), ChatError> {
         require_exact_subject_scope(subject, &update.scope)?;
+        self.authorize_message_write(subject, &update.scope)?;
         let conversation = AuthorizedDurableRuntime::new(self.authorization, self.store)
             .conversation(subject, &update.scope, &update.conversation_id)?
             .ok_or(ChatError::NotFound)?;
         require_direct_conversation(&conversation)?;
-        self.authorize_message_write(subject, &update.scope)?;
 
         let now = self.clock.now_unix_ms()?;
         let ttl = update
