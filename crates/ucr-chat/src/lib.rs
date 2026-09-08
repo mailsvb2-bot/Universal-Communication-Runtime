@@ -8,7 +8,7 @@ use std::{
 
 use ucr_core::{
     AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError, DeliveryStore,
-    DurableRecordStatus,
+    DurableRecordStatus, DurableStoreError,
 };
 use ucr_model::{
     AuthorizationRequest, ConversationId, ConversationKind, ConversationRecord, DeliveryEvidence,
@@ -251,7 +251,9 @@ where
     /// Records explicit `READ_BY_USER` evidence and advances Delivered -> Read.
     ///
     /// Transport/relay acknowledgement is intentionally insufficient; the caller must invoke this
-    /// only after an actual user-read action. Retrying an already-Read delivery is idempotent.
+    /// only after an actual user-read action. Retrying an already-Read delivery is idempotent and
+    /// still passes through the canonical delivery-write authorization boundary. A concurrent
+    /// competing read that wins the CAS is recovered by an authorized re-read of the same attempt.
     ///
     /// # Errors
     /// Rejects non-direct Messages, mismatched delivery binding, premature read, or auth/store errors.
@@ -275,10 +277,10 @@ where
         if attempt.message_id != *message_id {
             return Err(ChatError::DeliveryMessageMismatch);
         }
-        if attempt.state == DeliveryState::Read {
-            return Ok(DurableRecordStatus::Duplicate);
-        }
-        if attempt.state != DeliveryState::Delivered {
+        if !matches!(
+            attempt.state,
+            DeliveryState::Delivered | DeliveryState::Read
+        ) {
             return Err(ChatError::ReadRequiresDelivered);
         }
         let evidence = DeliveryEvidence {
@@ -288,16 +290,32 @@ where
             kind: DeliveryEvidenceKind::ReadByUser,
             logical_order,
         };
-        runtime
-            .transition_delivery(
-                subject,
-                scope,
-                delivery_id,
-                DeliveryState::Delivered,
-                DeliveryState::Read,
-                Some(&evidence),
-            )
-            .map_err(ChatError::from)
+        match runtime.transition_delivery(
+            subject,
+            scope,
+            delivery_id,
+            DeliveryState::Delivered,
+            DeliveryState::Read,
+            Some(&evidence),
+        ) {
+            Ok(status) => Ok(status),
+            Err(AuthorizedMutationError::Store(DurableStoreError::Conflict)) => {
+                let current = runtime
+                    .delivery_attempt(subject, scope, delivery_id)?
+                    .ok_or(ChatError::NotFound)?;
+                if current.message_id != *message_id {
+                    return Err(ChatError::DeliveryMessageMismatch);
+                }
+                if current.state == DeliveryState::Read {
+                    Ok(DurableRecordStatus::Duplicate)
+                } else {
+                    Err(ChatError::Authorized(AuthorizedMutationError::Store(
+                        DurableStoreError::Conflict,
+                    )))
+                }
+            }
+            Err(error) => Err(ChatError::Authorized(error)),
+        }
     }
 
     /// Publishes a bounded-TTL best-effort typing hint without persisting it.
