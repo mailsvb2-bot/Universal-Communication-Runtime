@@ -476,9 +476,11 @@ impl GroupMessageStore for SqliteLocalStore {
             &message.conversation.conversation_id,
         )?
         .ok_or(DurableStoreError::Corrupt)?;
-        let membership =
+        let Some(membership) =
             load_membership_from(&transaction, scope, &group.group_id, &subject.principal)?
-                .ok_or(DurableStoreError::PermissionDenied)?;
+        else {
+            return Ok(None);
+        };
         if membership.state != GroupMemberState::Active
             || !membership
                 .permissions
@@ -759,7 +761,7 @@ fn load_membership_from(
     };
     let stored_kind = parse_principal_kind(&row.0)?;
     if stored_kind != member.kind {
-        return Err(DurableStoreError::PermissionDenied);
+        return Ok(None);
     }
     let group = load_group_from(connection, scope, group_id)?.ok_or(DurableStoreError::Corrupt)?;
     let fields = StoredMembershipFields {
@@ -927,7 +929,22 @@ fn history_floor_for_add(
                 params![group.scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group.conversation.conversation_id.as_opaque().as_str(), offset],
                 |row| row.get::<_,Vec<u8>>(0),
             ).optional().map_err(|error| map_sqlite_error(&error))?;
-            floor.map_or(Ok(0), |bytes| decode_u64(&bytes))
+            let Some(bytes) = floor else {
+                return Ok(0);
+            };
+            let cutoff = decode_u64(&bytes)?;
+            let visible_at_or_above: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM messages WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND conversation_id=?4 AND logical_order>=?5",
+                params![group.scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group.conversation.conversation_id.as_opaque().as_str(), bytes],
+                |row| row.get(0),
+            ).map_err(|error| map_sqlite_error(&error))?;
+            if visible_at_or_above > i64::from(*count) {
+                cutoff
+                    .checked_add(1)
+                    .ok_or(DurableStoreError::InvalidRecord)
+            } else {
+                Ok(cutoff)
+            }
         }
         GroupHistoryPolicy::CustomPolicy(_) => Ok(u64::MAX),
     }
@@ -942,8 +959,7 @@ fn history_allows(
         return false;
     }
     match group.history_policy {
-        GroupHistoryPolicy::FromTimestamp(timestamp) => message.created_at_unix_ms >= timestamp,
-        GroupHistoryPolicy::CustomPolicy(_) => false,
+        GroupHistoryPolicy::FromTimestamp(_) | GroupHistoryPolicy::CustomPolicy(_) => false,
         GroupHistoryPolicy::NoHistory
         | GroupHistoryPolicy::FromJoin
         | GroupHistoryPolicy::LastNMessages(_)
@@ -1461,6 +1477,111 @@ mod phase18_restart_security_tests {
                 .expect("final group exists")
                 .revision,
             2
+        );
+    }
+
+    #[test]
+    fn private_group_message_read_is_non_oracular_for_kind_alias() {
+        let db = TestDb::new();
+        let (conversation, group, owner) = group_fixture();
+        let original = member_message(&conversation.conversation, &owner.principal, "oracle");
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        store
+            .persist_group_message(&owner, &original)
+            .expect("message");
+        let alias = ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: owner.principal.principal_id.clone(),
+                kind: PrincipalKind::Organization,
+            },
+        };
+        assert_eq!(
+            store.group_message(&alias, &scope(), &original.message_id),
+            Ok(None)
+        );
+        assert_eq!(
+            store.group_message(
+                &alias,
+                &scope(),
+                &MessageId::from_opaque(oid("sqlite-unknown-message"))
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn from_timestamp_history_fails_closed_on_untrusted_message_time() {
+        let db = TestDb::new();
+        let (conversation, mut group, owner) = group_fixture();
+        group.history_policy = GroupHistoryPolicy::FromTimestamp(1);
+        let mut forged = member_message(&conversation.conversation, &owner.principal, "timestamp");
+        forged.created_at_unix_ms = i64::MAX;
+        forged.logical_order = 7;
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        store
+            .persist_group_message(&owner, &forged)
+            .expect("message");
+        assert_eq!(
+            store.group_message(&owner, &scope(), &forged.message_id),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn last_n_tied_cutoff_never_over_discloses_and_future_order_remains_visible() {
+        let db = TestDb::new();
+        let (conversation, mut group, owner) = group_fixture();
+        group.history_policy = GroupHistoryPolicy::LastNMessages(1);
+        let member = subject("lastn-member");
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        let mut first = member_message(&conversation.conversation, &owner.principal, "tie-a");
+        first.logical_order = 7;
+        let mut second = member_message(&conversation.conversation, &owner.principal, "tie-b");
+        second.logical_order = 7;
+        store.persist_group_message(&owner, &first).expect("first");
+        store
+            .persist_group_message(&owner, &second)
+            .expect("second");
+        let add = GroupChange {
+            event_id: EventId::from_opaque(oid("sqlite-lastn-add")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: member.principal.clone(),
+                role: GroupRole::Member,
+            },
+            next_crypto_state: None,
+        };
+        store.apply_group_change(&owner, &add).expect("add member");
+        assert_eq!(
+            store.group_message(&member, &scope(), &first.message_id),
+            Ok(None)
+        );
+        assert_eq!(
+            store.group_message(&member, &scope(), &second.message_id),
+            Ok(None)
+        );
+        let mut future = member_message(&conversation.conversation, &owner.principal, "future");
+        future.logical_order = 8;
+        store
+            .persist_group_message(&owner, &future)
+            .expect("future");
+        assert!(
+            store
+                .group_message(&member, &scope(), &future.message_id)
+                .expect("read")
+                .is_some()
         );
     }
 }

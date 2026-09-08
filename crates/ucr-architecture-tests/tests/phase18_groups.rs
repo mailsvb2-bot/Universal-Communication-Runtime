@@ -52,6 +52,16 @@ fn phase18_groups_reuse_canonical_owners_and_are_restart_safe() {
     assert!(spec.contains("Status: **Prepared reference implementation**, not Production."));
     assert!(spec.contains("Removed members remain tombstones"));
     assert!(spec.contains("existing `MessageStore`"));
+    assert!(
+        spec.contains("does not trust `MessageEnvelope.created_at_unix_ms` as a security clock")
+    );
+    assert!(spec.contains("may expose fewer than N historical messages rather than over-disclose"));
+    assert!(memory.contains(
+        "GroupHistoryPolicy::FromTimestamp(_) | GroupHistoryPolicy::CustomPolicy(_) => false"
+    ));
+    assert!(sqlite.contains(
+        "GroupHistoryPolicy::FromTimestamp(_) | GroupHistoryPolicy::CustomPolicy(_) => false"
+    ));
     assert!(adr.contains("second communication brain"));
     assert!(adr.contains("membership could race removal"));
 }

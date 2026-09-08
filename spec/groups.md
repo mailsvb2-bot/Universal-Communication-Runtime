@@ -28,7 +28,7 @@ The Prepared change set includes add member, remove member, change role, transfe
 
 Group messages remain canonical `MessageEnvelope`s in the existing `MessageStore`. Phase 18 does not create a Group-message database or alternate message identity. A Group message write requires an active membership with `SendMessage`, exact scope and canonical provenance; Service Account provenance remains enforced by Core.
 
-History reads require active membership plus `ReadHistory`. `NoHistory`, `FromJoin`, `LastNMessages`, `FromTimestamp`, `FullHistory`, and opaque `CustomPolicy` are represented explicitly. The reference implementation fails closed for unsupported custom history behavior rather than guessing policy semantics.
+History reads require active membership plus `ReadHistory`. `NoHistory`, `FromJoin`, `LastNMessages`, `FromTimestamp`, `FullHistory`, and opaque `CustomPolicy` are represented explicitly. The Prepared reference implementation does not trust `MessageEnvelope.created_at_unix_ms` as a security clock, so `FromTimestamp` fails closed until a trusted timestamp/order source exists. `LastNMessages` uses the durable logical-order floor when it is unambiguous; if the Nth cutoff is tied on `logical_order`, the reference store advances the floor past the tied order and may expose fewer than N historical messages rather than over-disclose without a durable `(logical_order, MessageId)` boundary. Unsupported custom history behavior also fails closed.
 
 Membership change and message persistence are restart-safe in SQLite schema v21. The Group-message path checks membership and writes the same canonical `messages` tables under one SQLite transaction so membership cannot race an external pre-check.
 

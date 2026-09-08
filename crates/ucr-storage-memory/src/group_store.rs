@@ -265,11 +265,13 @@ impl GroupMessageStore for MemoryLocalStore {
             .values()
             .find(|group| group.scope == *scope && group.conversation == message.conversation)
             .ok_or(DurableStoreError::Corrupt)?;
-        let membership = state
+        let Some(membership) = state
             .group_memberships
             .get(&membership_key(scope, &group.group_id, &subject.principal))
             .filter(|membership| membership.member == subject.principal)
-            .ok_or(DurableStoreError::PermissionDenied)?;
+        else {
+            return Ok(None);
+        };
         if membership.state != GroupMemberState::Active
             || !membership
                 .permissions
@@ -325,11 +327,18 @@ fn history_floor_for_add(
             .ok_or(DurableStoreError::InvalidRecord),
         GroupHistoryPolicy::LastNMessages(count) => {
             let count = usize::try_from(*count).map_err(|_| DurableStoreError::InvalidRecord)?;
-            Ok(if orders.len() <= count {
-                0
+            if orders.len() <= count {
+                return Ok(0);
+            }
+            let cutoff = orders[orders.len() - count];
+            let visible_at_or_above = orders.iter().filter(|order| **order >= cutoff).count();
+            if visible_at_or_above > count {
+                cutoff
+                    .checked_add(1)
+                    .ok_or(DurableStoreError::InvalidRecord)
             } else {
-                orders[orders.len() - count]
-            })
+                Ok(cutoff)
+            }
         }
         GroupHistoryPolicy::CustomPolicy(_) => Ok(u64::MAX),
     }
@@ -344,8 +353,7 @@ fn history_allows(
         return false;
     }
     match group.history_policy {
-        GroupHistoryPolicy::FromTimestamp(timestamp) => message.created_at_unix_ms >= timestamp,
-        GroupHistoryPolicy::CustomPolicy(_) => false,
+        GroupHistoryPolicy::FromTimestamp(_) | GroupHistoryPolicy::CustomPolicy(_) => false,
         GroupHistoryPolicy::NoHistory
         | GroupHistoryPolicy::FromJoin
         | GroupHistoryPolicy::LastNMessages(_)
@@ -529,7 +537,15 @@ mod phase18_memory_security_tests {
         );
         assert_eq!(
             store.group_message(&alias, &scope(), &original.message_id),
-            Err(DurableStoreError::PermissionDenied)
+            Ok(None)
+        );
+        assert_eq!(
+            store.group_message(
+                &alias,
+                &scope(),
+                &MessageId::from_opaque(oid("memory-message-unknown"))
+            ),
+            Ok(None)
         );
         let forged = message(
             &conversation.conversation,
@@ -613,6 +629,94 @@ mod phase18_memory_security_tests {
         assert_eq!(
             store.apply_group_change(&owner, &event_first_change),
             Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn from_timestamp_history_fails_closed_on_untrusted_message_time() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("timestamp-owner", PrincipalKind::Person);
+        let (conversation, mut group) = group_fixture("timestamp", &owner);
+        group.history_policy = GroupHistoryPolicy::FromTimestamp(1);
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        let mut forged = message(
+            &conversation.conversation,
+            &owner.principal.principal_id,
+            "timestamp",
+        );
+        forged.created_at_unix_ms = i64::MAX;
+        forged.logical_order = 7;
+        store
+            .persist_group_message(&owner, &forged)
+            .expect("persist");
+        assert_eq!(
+            store.group_message(&owner, &scope(), &forged.message_id),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn last_n_tied_cutoff_never_over_discloses_and_future_order_remains_visible() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("lastn-owner", PrincipalKind::Person);
+        let member = subject("lastn-member", PrincipalKind::Person);
+        let (conversation, mut group) = group_fixture("lastn", &owner);
+        group.history_policy = GroupHistoryPolicy::LastNMessages(1);
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        let mut first = message(
+            &conversation.conversation,
+            &owner.principal.principal_id,
+            "tie-a",
+        );
+        first.logical_order = 7;
+        let mut second = message(
+            &conversation.conversation,
+            &owner.principal.principal_id,
+            "tie-b",
+        );
+        second.logical_order = 7;
+        store.persist_group_message(&owner, &first).expect("first");
+        store
+            .persist_group_message(&owner, &second)
+            .expect("second");
+        let add = GroupChange {
+            event_id: EventId::from_opaque(oid("lastn-add")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: member.principal.clone(),
+                role: GroupRole::Member,
+            },
+            next_crypto_state: None,
+        };
+        store.apply_group_change(&owner, &add).expect("add member");
+        assert_eq!(
+            store.group_message(&member, &scope(), &first.message_id),
+            Ok(None)
+        );
+        assert_eq!(
+            store.group_message(&member, &scope(), &second.message_id),
+            Ok(None)
+        );
+        let mut future = message(
+            &conversation.conversation,
+            &owner.principal.principal_id,
+            "future",
+        );
+        future.logical_order = 8;
+        store
+            .persist_group_message(&owner, &future)
+            .expect("future");
+        assert!(
+            store
+                .group_message(&member, &scope(), &future.message_id)
+                .expect("read")
+                .is_some()
         );
     }
 }

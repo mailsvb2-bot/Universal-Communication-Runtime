@@ -32,6 +32,8 @@ Group crypto state remains an opaque capability/state reference owned by the sta
 - A removed member cannot regain authority merely because the process restarts or a mutation is retried.
 - Public discovery metadata is not identity, authorization, or membership evidence.
 - Unsupported custom history/crypto behavior fails closed.
+- `FromTimestamp` never trusts caller-supplied message display time as authorization evidence; the Prepared store fails closed until trusted time/order evidence exists.
+- `LastNMessages` never over-discloses across a tied logical-order cutoff; without a durable MessageId tie boundary it advances past the ambiguous order and may return fewer historical messages.
 
 ## Durability consequences
 
