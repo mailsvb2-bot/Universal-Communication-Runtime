@@ -5,6 +5,8 @@ on:
     branches: [phase18-groups]
     paths:
       - .github/workflows/phase18-canon-gate-fixer.yml
+      - .github/phase18_canon_gate_fix.py
+      - .github/phase18_security_review_fix.py
 
 permissions:
   contents: write
