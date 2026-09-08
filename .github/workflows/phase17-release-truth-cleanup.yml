@@ -1,0 +1,66 @@
+name: Phase17 Release Truth Cleanup
+
+on:
+  push:
+    branches: [phase17-release-truth-cleanup]
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: ${{ !contains(github.event.head_commit.message, '[phase17-cleanup-finalized]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: phase17-release-truth-cleanup
+      - name: Remove obsolete future-status assertions and marker
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          gates_path = Path('crates/ucr-architecture-tests/tests/canon_gates.rs')
+          gates = gates_path.read_text()
+
+          exact = '    assert!(readme.contains("**Phase 15 — Internet Transport (Prepared/reference complete; Phase 16 Local Transport not started).**"));\n'
+          if gates.count(exact) != 2:
+              raise SystemExit(f'expected 2 exact stale assertions, found {gates.count(exact)}')
+          gates = gates.replace(exact, '')
+
+          multiline = '''    assert!(readme.contains(\n        "Phase 15 — Internet Transport (Prepared/reference complete; Phase 16 Local Transport not started)"\n    ));\n'''
+          if gates.count(multiline) != 1:
+              raise SystemExit(f'expected 1 multiline stale assertion, found {gates.count(multiline)}')
+          gates = gates.replace(multiline, '')
+
+          short = '    assert!(readme.contains("Phase 16 Local Transport not started"));\n'
+          if gates.count(short) != 1:
+              raise SystemExit(f'expected 1 short stale assertion, found {gates.count(short)}')
+          gates = gates.replace(short, '')
+          gates_path.write_text(gates)
+
+          readme_path = Path('README.md')
+          readme = readme_path.read_text()
+          marker = '<!-- Legacy architecture-test migration marker; obsolete pre-Phase-16 status: **Phase 15 — Internet Transport (Prepared/reference complete; Phase 16 Local Transport not started).** -->\n\n'
+          if readme.count(marker) != 1:
+              raise SystemExit(f'expected exactly one legacy README marker, found {readme.count(marker)}')
+          readme_path.write_text(readme.replace(marker, '', 1))
+          PY
+      - name: Prove stale status is gone
+        run: |
+          ! grep -F "Phase 16 Local Transport not started" README.md
+          ! grep -F "Phase 16 Local Transport not started" crates/ucr-architecture-tests/tests/canon_gates.rs
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Canonical formatting check
+        run: cargo fmt --all -- --check
+      - name: Architecture gate regression
+        run: cargo test -p ucr-architecture-tests --test canon_gates --locked
+      - name: Commit verified cleanup
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md crates/ucr-architecture-tests/tests/canon_gates.rs
+          git commit -m "Remove obsolete Phase 16 migration marker [phase17-cleanup-finalized]"
+          git push origin HEAD:phase17-release-truth-cleanup
