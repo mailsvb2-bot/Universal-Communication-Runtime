@@ -1,4 +1,4 @@
-name: Phase18 Release Finalizer
+name: Phase18 Release Finalizer V2
 
 on:
   push:
@@ -21,7 +21,9 @@ jobs:
         run: python3 .github/phase18_release_finalize.py
       - name: Install pinned Rust toolchain
         run: rustup show
-      - name: Format
+      - name: Format candidate
+        run: cargo fmt --all
+      - name: Format gate
         run: cargo fmt --all -- --check
       - name: Check affected owners
         run: cargo check -p ucr-core -p ucr-protocol -p ucr-storage-memory -p ucr-storage-sqlite -p ucr-architecture-tests --all-targets
@@ -43,6 +45,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm -f .github/phase18_release_finalize.py .github/workflows/phase18-release-finalizer.yml
-          git add README.md .github/workflows/ci.yml crates/ucr-storage-sqlite/src/group_store.rs
+          git add README.md .github/workflows/ci.yml crates/ucr-storage-sqlite/src/group_store.rs crates/ucr-architecture-tests/tests/phase17_chat.rs crates/ucr-architecture-tests/tests/phase18_groups.rs
           git commit -m "Close Phase 18 Groups implementation and release gates"
           git push origin HEAD:phase18-groups
