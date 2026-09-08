@@ -78,9 +78,8 @@ fn phase16_local_transport_is_prepared_and_reuses_canonical_owners() {
     assert!(adr.contains("Phase 17 Chat is explicitly outside this ADR"));
 
     assert!(readme.contains(
-        "**Phase 16 — LAN / Direct Transport (Prepared/reference complete; Phase 17 Chat not started).**"
+        "Phase 16 separately adds the Prepared `ucr.transport.local.tcp` / `ucr.local.tcp` LAN/direct path"
     ));
-    assert!(readme.contains("Phase 17 Chat and Phase 24 Transport Orchestrator are not started"));
     assert!(ci.contains("test -s spec/local-transport.md"));
     assert!(ci.contains(
         "0054-phase16-local-direct-transport-reuses-canonical-transport-and-crypto-owners.md"
