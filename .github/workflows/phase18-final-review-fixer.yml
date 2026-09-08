@@ -1,0 +1,48 @@
+name: Phase18 Final Review Fix Verifier
+
+on:
+  push:
+    branches: [phase18-groups]
+    paths:
+      - .github/phase18_final_review_fix.py
+      - .github/workflows/phase18-final-review-fixer.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: phase18-groups
+      - name: Apply final review fixes
+        run: python3 .github/phase18_final_review_fix.py
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Format
+        run: cargo fmt --all
+      - name: Format gate
+        run: cargo fmt --all -- --check
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
+      - name: Strict Clippy workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Full workspace tests
+        run: cargo test --workspace --all-targets --locked
+      - name: Release architecture tests
+        run: cargo test -p ucr-architecture-tests --release --locked
+      - name: Commit verified final review fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            crates/ucr-storage-memory/src/group_store.rs \
+            crates/ucr-storage-sqlite/src/group_store.rs \
+            crates/ucr-architecture-tests/tests/phase18_groups.rs \
+            spec/groups.md \
+            docs/adr/0056-phase18-groups-reuse-canonical-conversation-message-and-authorization-owners.md
+          git commit -m "Resolve final Phase 18 review findings"
+          git push origin HEAD:phase18-groups
