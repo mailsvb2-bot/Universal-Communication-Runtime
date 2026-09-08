@@ -138,6 +138,67 @@ impl GroupStore for MemoryLocalStore {
         Ok(memberships)
     }
 
+    fn group_membership_for_active_member(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        member: &PrincipalRef,
+    ) -> Result<Option<GroupMembership>, DurableStoreError> {
+        if subject.scope != *scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let caller = state
+            .group_memberships
+            .get(&membership_key(scope, group_id, &subject.principal))
+            .filter(|membership| membership.member == subject.principal);
+        if !caller.is_some_and(|membership| membership.state == GroupMemberState::Active) {
+            return Ok(None);
+        }
+        Ok(state
+            .group_memberships
+            .get(&membership_key(scope, group_id, member))
+            .filter(|membership| membership.member == *member)
+            .cloned())
+    }
+
+    fn group_memberships_for_active_member(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<GroupMembership>, DurableStoreError> {
+        if subject.scope != *scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let caller = state
+            .group_memberships
+            .get(&membership_key(scope, group_id, &subject.principal))
+            .filter(|membership| membership.member == subject.principal);
+        if !caller.is_some_and(|membership| membership.state == GroupMemberState::Active) {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        validate_group_member_list_limit(max_items).map_err(map_group_error)?;
+        let group = state
+            .groups
+            .get(&group_key(scope, group_id))
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        let mut memberships = state
+            .group_memberships
+            .values()
+            .filter(|membership| membership.scope == *scope && membership.group_id == *group_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        memberships = canonical_group_memberships(group, &memberships).map_err(map_group_error)?;
+        if memberships.len() > max_items {
+            return Err(DurableStoreError::Full);
+        }
+        Ok(memberships)
+    }
+
     fn apply_group_change(
         &self,
         actor: &ScopedPrincipal,
@@ -526,6 +587,86 @@ mod phase18_memory_security_tests {
             integrity_metadata: Vec::new(),
             extensions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn membership_gated_reads_fail_after_caller_removal() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("snapshot-owner", PrincipalKind::Person);
+        let caller = subject("snapshot-caller", PrincipalKind::Person);
+        let target = subject("snapshot-target", PrincipalKind::Organization);
+        let (conversation, group) = group_fixture("snapshot-read", &owner);
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        for (revision, event_id, principal) in [
+            (0, "snapshot-add-caller", caller.principal.clone()),
+            (1, "snapshot-add-target", target.principal.clone()),
+        ] {
+            store
+                .apply_group_change(
+                    &owner,
+                    &GroupChange {
+                        event_id: EventId::from_opaque(oid(event_id)),
+                        scope: scope(),
+                        group_id: group.group_id.clone(),
+                        expected_revision: revision,
+                        kind: GroupChangeKind::AddMember {
+                            member: principal,
+                            role: GroupRole::Member,
+                        },
+                        next_crypto_state: None,
+                    },
+                )
+                .expect("add member");
+        }
+        assert_eq!(
+            store
+                .group_membership_for_active_member(
+                    &caller,
+                    &scope(),
+                    &group.group_id,
+                    &target.principal,
+                )
+                .expect("gated membership")
+                .map(|membership| membership.member),
+            Some(target.principal.clone())
+        );
+        assert!(
+            store
+                .group_memberships_for_active_member(&caller, &scope(), &group.group_id, 16)
+                .expect("gated memberships")
+                .iter()
+                .any(|membership| membership.member == target.principal)
+        );
+        store
+            .apply_group_change(
+                &owner,
+                &GroupChange {
+                    event_id: EventId::from_opaque(oid("snapshot-remove-caller")),
+                    scope: scope(),
+                    group_id: group.group_id.clone(),
+                    expected_revision: 2,
+                    kind: GroupChangeKind::RemoveMember {
+                        member: caller.principal.clone(),
+                    },
+                    next_crypto_state: None,
+                },
+            )
+            .expect("remove caller");
+        assert_eq!(
+            store.group_membership_for_active_member(
+                &caller,
+                &scope(),
+                &group.group_id,
+                &target.principal,
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            store.group_memberships_for_active_member(&caller, &scope(), &group.group_id, 16),
+            Err(DurableStoreError::PermissionDenied)
+        );
     }
 
     #[test]

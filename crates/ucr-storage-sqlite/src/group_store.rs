@@ -340,6 +340,59 @@ impl GroupStore for SqliteLocalStore {
         load_memberships_from(&connection, &group, max_items)
     }
 
+    fn group_membership_for_active_member(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        member: &PrincipalRef,
+    ) -> Result<Option<GroupMembership>, DurableStoreError> {
+        if subject.scope != *scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| map_sqlite_error(&error))?;
+        let caller = load_membership_from(&transaction, scope, group_id, &subject.principal)?;
+        if !caller.is_some_and(|membership| membership.state == GroupMemberState::Active) {
+            return Ok(None);
+        }
+        let result = load_membership_from(&transaction, scope, group_id, member)?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(result)
+    }
+
+    fn group_memberships_for_active_member(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<GroupMembership>, DurableStoreError> {
+        if subject.scope != *scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| map_sqlite_error(&error))?;
+        let caller = load_membership_from(&transaction, scope, group_id, &subject.principal)?;
+        if !caller.is_some_and(|membership| membership.state == GroupMemberState::Active) {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        validate_group_member_list_limit(max_items).map_err(map_group_error)?;
+        let group = load_group_from(&transaction, scope, group_id)?
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        let result = load_memberships_from(&transaction, &group, max_items)?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(result)
+    }
+
     fn apply_group_change(
         &self,
         actor: &ScopedPrincipal,
@@ -1512,6 +1565,92 @@ mod phase18_restart_security_tests {
                 .expect("final group exists")
                 .revision,
             2
+        );
+    }
+
+    #[test]
+    fn membership_gated_reads_fail_after_caller_removal() {
+        let db = TestDb::new();
+        let (conversation, group, owner) = group_fixture();
+        let caller = subject("phase18-snapshot-caller");
+        let target = ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("phase18-snapshot-target")),
+                kind: PrincipalKind::Organization,
+            },
+        };
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        for (revision, event_id, principal) in [
+            (0, "phase18-snapshot-add-caller", caller.principal.clone()),
+            (1, "phase18-snapshot-add-target", target.principal.clone()),
+        ] {
+            store
+                .apply_group_change(
+                    &owner,
+                    &GroupChange {
+                        event_id: EventId::from_opaque(oid(event_id)),
+                        scope: scope(),
+                        group_id: group.group_id.clone(),
+                        expected_revision: revision,
+                        kind: GroupChangeKind::AddMember {
+                            member: principal,
+                            role: GroupRole::Member,
+                        },
+                        next_crypto_state: None,
+                    },
+                )
+                .expect("add member");
+        }
+        assert_eq!(
+            store
+                .group_membership_for_active_member(
+                    &caller,
+                    &scope(),
+                    &group.group_id,
+                    &target.principal,
+                )
+                .expect("gated membership")
+                .map(|membership| membership.member),
+            Some(target.principal.clone())
+        );
+        assert!(
+            store
+                .group_memberships_for_active_member(&caller, &scope(), &group.group_id, 16)
+                .expect("gated memberships")
+                .iter()
+                .any(|membership| membership.member == target.principal)
+        );
+        store
+            .apply_group_change(
+                &owner,
+                &GroupChange {
+                    event_id: EventId::from_opaque(oid("phase18-snapshot-remove-caller")),
+                    scope: scope(),
+                    group_id: group.group_id.clone(),
+                    expected_revision: 2,
+                    kind: GroupChangeKind::RemoveMember {
+                        member: caller.principal.clone(),
+                    },
+                    next_crypto_state: None,
+                },
+            )
+            .expect("remove caller");
+        assert_eq!(
+            store.group_membership_for_active_member(
+                &caller,
+                &scope(),
+                &group.group_id,
+                &target.principal,
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            store.group_memberships_for_active_member(&caller, &scope(), &group.group_id, 16),
+            Err(DurableStoreError::PermissionDenied)
         );
     }
 

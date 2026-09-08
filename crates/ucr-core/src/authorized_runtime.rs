@@ -1241,7 +1241,7 @@ where
     /// Reads one membership only for an authorized active Group member.
     ///
     /// # Errors
-    /// Returns authorization or durable-store failures; inactive callers cannot use membership lookup as an existence oracle.
+    /// Returns authorization or durable-store failures; membership authorization and the target read share one storage snapshot.
     pub fn group_membership(
         &self,
         subject: &ScopedPrincipal,
@@ -1250,22 +1250,15 @@ where
         member: &ucr_model::PrincipalRef,
     ) -> Result<Option<GroupMembership>, AuthorizedMutationError> {
         self.require(subject, scope, GROUP_READ_PERMISSION)?;
-        let caller = self
-            .store
-            .group_membership(scope, group_id, &subject.principal)
-            .map_err(AuthorizedMutationError::Store)?;
-        if !caller.is_some_and(|value| value.state == GroupMemberState::Active) {
-            return Ok(None);
-        }
         self.store
-            .group_membership(scope, group_id, member)
+            .group_membership_for_active_member(subject, scope, group_id, member)
             .map_err(AuthorizedMutationError::Store)
     }
 
     /// Reads one bounded canonical membership set for an authorized active Group member.
     ///
     /// # Errors
-    /// Returns authorization, membership, invalid-bound, or durable-store failures.
+    /// Returns authorization, membership, invalid-bound, or durable-store failures; membership authorization and the list read share one storage snapshot.
     pub fn group_memberships(
         &self,
         subject: &ScopedPrincipal,
@@ -1274,17 +1267,8 @@ where
         max_items: usize,
     ) -> Result<Vec<GroupMembership>, AuthorizedMutationError> {
         self.require(subject, scope, GROUP_READ_PERMISSION)?;
-        let caller = self
-            .store
-            .group_membership(scope, group_id, &subject.principal)
-            .map_err(AuthorizedMutationError::Store)?;
-        if !caller.is_some_and(|value| value.state == GroupMemberState::Active) {
-            return Err(AuthorizedMutationError::Store(
-                DurableStoreError::PermissionDenied,
-            ));
-        }
         self.store
-            .group_memberships(scope, group_id, max_items)
+            .group_memberships_for_active_member(subject, scope, group_id, max_items)
             .map_err(AuthorizedMutationError::Store)
     }
 

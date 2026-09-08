@@ -35,6 +35,10 @@ fn phase18_groups_reuse_canonical_owners_and_are_restart_safe() {
     assert!(core.contains("pub trait GroupStore"));
     assert!(core.contains("pub trait GroupMessageStore: GroupStore + MessageStore"));
     assert!(runtime.contains("persist_group_message"));
+    assert!(core.contains("fn group_membership_for_active_member("));
+    assert!(core.contains("fn group_memberships_for_active_member("));
+    assert!(runtime.contains(".group_membership_for_active_member("));
+    assert!(runtime.contains(".group_memberships_for_active_member("));
     assert!(protocol.contains("group_change_fingerprint"));
     assert!(protocol.contains("WouldOrphanGroup"));
     assert!(memory.contains("persist_message_in_state"));
@@ -64,6 +68,8 @@ fn phase18_groups_reuse_canonical_owners_and_are_restart_safe() {
     ));
     assert!(adr.contains("second communication brain"));
     assert!(adr.contains("membership could race removal"));
+    assert!(spec.contains("same storage snapshot"));
+    assert!(adr.contains("same storage snapshot"));
 }
 
 #[test]

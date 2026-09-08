@@ -64,6 +64,32 @@ pub trait GroupStore: StorageProvider {
         max_items: usize,
     ) -> Result<Vec<GroupMembership>, DurableStoreError>;
 
+    /// Atomically verifies the subject is an active Group member and loads one membership from the same storage snapshot.
+    ///
+    /// Inactive/missing callers return non-disclosing absence rather than allowing Core to compose a racy pre-check plus read.
+    ///
+    /// # Errors
+    /// Rejects scope mismatches and returns explicit durable-store failures.
+    fn group_membership_for_active_member(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        member: &ucr_model::PrincipalRef,
+    ) -> Result<Option<GroupMembership>, DurableStoreError>;
+
+    /// Atomically verifies the subject is an active Group member and loads the bounded membership set from the same storage snapshot.
+    ///
+    /// # Errors
+    /// Rejects scope mismatches, inactive callers, invalid bounds, and explicit durable-store failures.
+    fn group_memberships_for_active_member(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<GroupMembership>, DurableStoreError>;
+
     /// Applies one idempotent security-sensitive Group change with optimistic revision checking.
     /// The authenticated actor is supplied by the Core authorization façade and must be checked
     /// against durable active membership inside the same atomic storage action before duplicate/conflict

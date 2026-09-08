@@ -25,6 +25,7 @@ Group crypto state remains an opaque capability/state reference owned by the sta
 
 - Exact `TenantScope` remains mandatory.
 - Group existence/membership must not become an authorization oracle through generic Message or Group reads.
+- Membership metadata authorization and the returned membership row/list are one membership-gated storage operation over the same storage snapshot; Core must not compose them as separate calls.
 - Generic Message paths cannot be used to bypass Group membership checks.
 - Service Account Message provenance remains Core-owned and applies to Group writes too.
 - Add/remove/role/ownership changes and their idempotency record are atomic.
