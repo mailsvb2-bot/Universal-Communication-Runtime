@@ -2928,7 +2928,6 @@ fn integration_api_reuses_canonical_command_and_service_principal_owners() {
     ))
     .expect("adr 0040");
     let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
-    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
 
     assert!(proto.contains("service IntegrationService"));
     assert!(proto.contains("rpc SubmitCommand(IntegrationCommandRequest)"));
@@ -3862,7 +3861,6 @@ fn phase14_public_event_binding_governance_and_backpressure_are_locked() {
         "docs/adr/0052-phase14-event-api-reuses-append-only-journal-with-durable-consumer-state.md",
     ))
     .expect("ADR 0052");
-    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
     let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
 
     for rpc in [
@@ -4094,7 +4092,6 @@ fn phase13_grpc_complete_surface_reuses_conversation_message_and_intent_owners()
             "docs/adr/0051-phase13-grpc-completes-integration-service-over-canonical-owners.md",
         ))
         .expect("adr 0051");
-    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
     let spec =
         fs::read_to_string(workspace.join("spec/integration-api.md")).expect("integration spec");
     let architecture = fs::read_to_string(workspace.join("docs/architecture/ARCHITECTURE.md"))
@@ -4181,7 +4178,6 @@ fn phase15_internet_transport_is_prepared_bounded_and_reuses_canonical_owners() 
         .expect("architecture");
     let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
         .expect("threat model");
-    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
     let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
 
     assert!(root.contains("\"crates/ucr-transport-internet\""));
