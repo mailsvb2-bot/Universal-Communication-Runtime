@@ -1,5 +1,18 @@
 use std::{fs, path::Path};
 
+fn current_sqlite_schema_version(source: &str) -> u32 {
+    const PREFIX: &str = "pub const SQLITE_SCHEMA_VERSION: u32 = ";
+    source
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix(PREFIX)
+                .and_then(|value| value.strip_suffix(';'))
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+        .expect("current SQLite schema version declaration")
+}
+
 const FORBIDDEN_CORE_TERMS: &[&str] = &[
     "telegram",
     "vk_message",
@@ -1128,7 +1141,7 @@ fn message_intent_and_error_wire_parity_survives_v10_storage() {
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V11: u32 = 11;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite_root) >= 20);
     assert!(sqlite_root.contains("fn migrate_v9_to_v10"));
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
@@ -1639,7 +1652,7 @@ fn trusted_signing_key_lifecycle_is_scoped_restart_safe_and_runtime_integrated()
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20"));
+    assert!(current_sqlite_schema_version(&sqlite_root) >= 20);
     assert!(sqlite_root.contains("fn migrate_v10_to_v11"));
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
@@ -1805,7 +1818,7 @@ fn permission_grants_are_durable_and_enforce_trusted_key_mutations_without_overc
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V12: u32 = 12;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite_root) >= 20);
     assert!(sqlite_root.contains("fn migrate_v11_to_v12"));
     assert!(sqlite_root.contains("fn migrate_v12_to_v13"));
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
@@ -1846,6 +1859,13 @@ const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
     "conversation",
     "persist_message",
     "message",
+    "create_group",
+    "group",
+    "group_membership",
+    "group_memberships",
+    "apply_group_change",
+    "persist_group_message",
+    "group_message",
     "persist_communication_intent",
     "communication_intent",
     "create_delivery_attempt",
@@ -1903,6 +1923,9 @@ const AUTHORIZED_RUNTIME_PERMISSIONS: &[&str] = &[
     "CONVERSATION_WRITE_PERMISSION",
     "MESSAGE_READ_PERMISSION",
     "MESSAGE_WRITE_PERMISSION",
+    "GROUP_CREATE_PERMISSION",
+    "GROUP_READ_PERMISSION",
+    "GROUP_MANAGE_PERMISSION",
     "COMMUNICATION_INTENT_READ_PERMISSION",
     "COMMUNICATION_INTENT_WRITE_PERMISSION",
     "DELIVERY_READ_PERMISSION",
@@ -1941,19 +1964,32 @@ fn tenant_scoped_durable_runtime_authorization_covers_every_current_method() {
     let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
 
     for method in AUTHORIZED_DURABLE_METHODS {
+        let marker = format!("pub fn {method}(");
+        let start = runtime
+            .find(&marker)
+            .unwrap_or_else(|| panic!("authorized runtime method missing: {method}"));
+        let tail = &runtime[start + marker.len()..];
+        let end = tail.find("\n    pub fn ").unwrap_or(tail.len());
         assert!(
-            runtime.contains(&format!("pub fn {method}(")),
-            "authorized runtime method missing: {method}"
+            tail[..end].contains("self.require("),
+            "authorized runtime method lacks an explicit permission check: {method}"
         );
     }
-    assert_eq!(
-        runtime.matches("pub fn ").count(),
-        AUTHORIZED_DURABLE_METHODS.len()
-    );
-    assert_eq!(
-        runtime.matches("self.require(").count(),
-        AUTHORIZED_DURABLE_METHODS.len()
-    );
+    let public_methods = runtime
+        .lines()
+        .filter_map(|line| {
+            line.trim_start()
+                .strip_prefix("pub fn ")
+                .and_then(|rest| rest.split_once('(').map(|(name, _)| name))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(public_methods.len(), AUTHORIZED_DURABLE_METHODS.len());
+    for method in public_methods {
+        assert!(
+            AUTHORIZED_DURABLE_METHODS.contains(&method),
+            "untracked authorized runtime method: {method}"
+        );
+    }
 
     for permission in AUTHORIZED_RUNTIME_PERMISSIONS {
         assert!(
@@ -1979,7 +2015,7 @@ fn tenant_scoped_durable_runtime_authorization_covers_every_current_method() {
     assert!(spec.contains(
         "every currently implemented **permission-authorized** tenant-scoped durable capability"
     ));
-    assert!(adr.contains("mirrors all 32 methods"));
+    assert!(adr.contains("every currently implemented tenant-scoped durable capability"));
     assert!(adr.contains("cannot grant itself grant-management authority"));
     assert!(ci.contains(
         "docs/adr/0028-tenant-scoped-durable-runtime-operations-require-explicit-permissions.md"
@@ -2080,7 +2116,7 @@ fn device_lifecycle_is_durable_and_gates_protected_key_access() {
     }
     assert!(sqlite_device.contains("CREATE TABLE devices"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite_root) >= 20);
     assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
     assert!(storage_spec.contains("migration does not invent an Identity binding"));
     assert!(spec.contains("one exact-scope durable `DeviceLifecycleStore`"));
@@ -2233,7 +2269,7 @@ fn service_principal_authentication_resolves_canonical_identity_before_least_pri
         "credential_authentication_is_non_disclosing_revocable_and_raw_runtime_cannot_bypass_gate"
     ));
     assert!(sqlite.contains("const SQLITE_SCHEMA_V13: u32 = 13"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20"));
+    assert!(current_sqlite_schema_version(&sqlite) >= 20);
     assert!(sqlite.contains("SQLITE_SCHEMA_V12 => migrate_v12_to_v13(connection)?"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V13 => migrate_v13_to_v14(connection)?"));
     assert!(sqlite.contains("SQLITE_SCHEMA_V14 => migrate_v14_to_v15(connection)?"));
@@ -2389,7 +2425,7 @@ fn service_principal_audit_storage_and_governance_close_only_the_evidenced_block
     assert!(sqlite.contains("verify_audit_chain"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V13: u32 = 13;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V14: u32 = 14;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite_root) >= 20);
     assert!(sqlite_root.contains("fn migrate_v13_to_v14"));
     assert!(sqlite_root.contains("fn migrate_v14_to_v15"));
     assert!(spec.contains("single-use"));
@@ -2779,7 +2815,7 @@ fn communication_intent_storage_is_durable_scoped_and_has_one_owner() {
     assert!(sqlite.contains("CREATE TABLE communication_intent_extensions"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V15: u32 = 15;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V16: u32 = 16;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite_root) >= 20);
     assert!(sqlite_root.contains("fn migrate_v15_to_v16"));
 
     for evidence in [
@@ -3099,7 +3135,7 @@ fn service_principal_audit_operation_binding_has_v17_migration_and_governance() 
     assert!(sqlite.contains("CREATE TRIGGER service_audit_operation_no_delete"));
     assert!(sqlite.contains("LEFT JOIN service_audit_operations"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V16: u32 = 16;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite_root) >= 20);
     assert!(sqlite_root.contains("fn migrate_v16_to_v17"));
     for evidence in [
         "operation_bound_audit_survives_restart_and_exact_lookup",
@@ -3239,7 +3275,7 @@ fn external_identity_binding_v18_is_exact_scoped_migrated_and_governed() {
     assert!(sqlite.contains("external_namespace, external_entity_id"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V17: u32 = 17;"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V18: u32 = 18;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite_root) >= 20);
     assert!(sqlite_root.contains("fn migrate_v17_to_v18("));
     assert!(sqlite_root.contains("identity_binding_store::create_v18_objects"));
     assert!(sqlite_root.contains("identity_binding_store::verify_schema_v18"));
@@ -3263,8 +3299,8 @@ fn external_identity_binding_v18_is_exact_scoped_migrated_and_governed() {
     assert!(storage_spec.contains("External Identity Binding scope + integration namespace + opaque external entity ID + Identity target"));
     assert!(storage_spec.contains("identity-binding lifecycle retention"));
     assert!(storage_spec.contains("PRIVATE / identity and provider metadata"));
-    assert!(permission_spec.contains("54 externally callable tenant-scoped durable methods"));
-    assert!(permission_spec.contains("43 unique permission IDs"));
+    assert!(permission_spec.contains("Phase 18 contributes seven Group façade methods"));
+    assert!(permission_spec.contains("three protocol-owned Group permissions"));
     assert!(threat.contains("SQLite v18 adds the single durable `ExternalIdentityBinding` owner"));
     assert!(adr.contains("No implicit relink or unlink operation is defined"));
     assert!(adr.contains("Direct integration database access was rejected"));
@@ -3350,7 +3386,7 @@ fn root_identity_v19_model_and_storage_have_one_accountless_owner() {
     assert!(sqlite.contains("impl IdentityStore for SqliteLocalStore"));
     assert!(sqlite.contains("CREATE TABLE identities"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V18: u32 = 18;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite_root) >= 20);
     assert!(sqlite_root.contains("fn migrate_v18_to_v19("));
     assert!(sqlite_root.contains("identity_store::create_v19_objects"));
     assert!(sqlite_root.contains("identity_store::verify_schema_v19"));
@@ -3503,7 +3539,7 @@ fn integration_conversation_api_reuses_canonical_owner_and_hides_existence_until
             "integration_conversation_api_survives_sqlite_restart_through_canonical_owner"
         )
     );
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite) >= 20);
     assert!(
         conversation_spec
             .contains("A Conversation is a canonical UCR entity and outlives any provider")
@@ -3613,7 +3649,7 @@ fn integration_message_api_reuses_canonical_owner_ack_and_authenticated_origin()
     assert!(
         sqlite.contains("integration_message_api_survives_sqlite_restart_through_canonical_owner")
     );
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite) >= 20);
     assert!(spec.contains("single existing `MessageStore`"));
     assert!(spec.contains("ACK confirms only durable Message persistence/deduplication"));
     assert!(spec.contains("must equal `Message.origin.principal_id`"));
@@ -3702,7 +3738,7 @@ fn integration_communication_intent_api_reuses_canonical_owner_without_routing_b
     assert!(sqlite.contains(
         "integration_communication_intent_api_survives_sqlite_restart_through_canonical_owner"
     ));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite) >= 20);
     assert!(spec.contains("single existing `CommunicationIntentStore`"));
     assert!(spec.contains("ACK confirms only durable Intent persistence/deduplication"));
     assert!(spec.contains("does not expose or accept an internal route"));
@@ -3825,7 +3861,7 @@ fn phase14_event_api_reuses_one_event_journal_and_durable_consumer_state() {
         memory.contains("event_ingress_denials_leave_no_ghosts_and_authorized_retries_deduplicate")
     );
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V19: u32 = 19;"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite_root) >= 20);
     assert!(sqlite_root.contains("fn migrate_v19_to_v20"));
     assert!(sqlite_root.contains("event_subscription_store::create_v20_objects"));
     for evidence in [
@@ -4292,7 +4328,7 @@ fn integration_identity_read_side_reuses_canonical_owners_and_hides_existence_un
     assert!(sqlite_root.contains(
         "integration_identity_read_side_survives_sqlite_restart_through_canonical_owners"
     ));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 20;"));
+    assert!(current_sqlite_schema_version(&sqlite_root) >= 20);
     assert!(spec.contains("Read-side absence is canonical non-retryable `NOT_FOUND`"));
     assert!(spec.contains("External namespace/entity bytes are not copied, encoded, or hashed"));
     assert!(adr.contains("returning `NOT_FOUND` before authentication and"));

@@ -330,6 +330,31 @@ fn insert_extensions(
     Ok(())
 }
 
+fn group_change_reserves_event_id(
+    connection: &Connection,
+    scope: &TenantScope,
+    event_id: &EventId,
+) -> Result<bool, DurableStoreError> {
+    let table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='group_changes')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if !table_exists {
+        return Ok(false);
+    }
+    let namespace = namespace_storage_key(scope);
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM group_changes WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND event_id=?4)",
+            params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, event_id.as_opaque().as_str()],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))
+}
+
 pub(super) fn append_event_in_transaction(
     transaction: &Transaction<'_>,
     event: &EventEnvelope,
@@ -341,6 +366,9 @@ pub(super) fn append_event_in_transaction(
         } else {
             Err(DurableStoreError::Conflict)
         };
+    }
+    if group_change_reserves_event_id(transaction, &event.scope, &event.event_id)? {
+        return Err(DurableStoreError::Conflict);
     }
     let namespace = namespace_storage_key(&event.scope);
     transaction

@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod group_store;
+
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -27,12 +29,12 @@ use ucr_model::{
     EventConsumerCursor, EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind,
     EventEnvelope, EventId, EventPollResult, EventReconciliation, EventReplicaState,
     EventSubscription, EventSubscriptionId, EventSubscriptionStart, EventSummary,
-    ExternalIdentityBinding, IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId,
-    MessageEnvelope, MessageId, OpaqueId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan,
-    RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
-    ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy,
-    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
-    TrustedSigningKeyState,
+    ExternalIdentityBinding, GroupMembership, GroupRecord, IdentityId, IdentityRecord,
+    IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, OpaqueId, PermissionGrant,
+    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
+    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
+    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord, TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -53,7 +55,7 @@ use ucr_protocol::{
     validate_sync_transition, validate_trusted_signing_key_descriptor,
 };
 
-const SCHEMA_VERSION: u32 = 10;
+const SCHEMA_VERSION: u32 = 11;
 type ScopeKey = (String, Option<String>);
 type CommandKey = (ScopeKey, String);
 type CommandRefKey = (ScopeKey, String);
@@ -62,6 +64,9 @@ type EventSubscriptionKey = (ScopeKey, String);
 type ReplayKey = ([u8; 32], [u8; 32]);
 type RecoveryIdentityKey = (ScopeKey, String);
 type ConversationKey = (ScopeKey, String);
+type GroupKey = (ScopeKey, String);
+type GroupMembershipKey = (ScopeKey, String, ucr_model::PrincipalRef);
+type GroupChangeKey = (ScopeKey, String);
 type MessageKey = (ScopeKey, String);
 type IntentKey = (ScopeKey, String);
 type IdentityKey = (ScopeKey, String);
@@ -117,6 +122,9 @@ struct MemoryState {
     recovery_plans: HashMap<String, RecoveryPlan>,
     active_recovery_plans: HashMap<RecoveryIdentityKey, String>,
     conversations: HashMap<ConversationKey, ConversationRecord>,
+    groups: HashMap<GroupKey, GroupRecord>,
+    group_memberships: HashMap<GroupMembershipKey, GroupMembership>,
+    group_changes: HashMap<GroupChangeKey, (ucr_model::PrincipalRef, [u8; 32])>,
     messages: HashMap<MessageKey, MessageEnvelope>,
     intents: HashMap<IntentKey, CommunicationIntent>,
     identities: HashMap<IdentityKey, IdentityRecord>,
@@ -1134,40 +1142,46 @@ impl CommunicationIntentStore for MemoryLocalStore {
     }
 }
 
+fn persist_message_in_state(
+    state: &mut MemoryState,
+    message: &MessageEnvelope,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+    let mut persisted = canonical_message(message).map_err(|_| DurableStoreError::InvalidRecord)?;
+    if !matches!(
+        persisted.delivery_state,
+        DeliveryState::Created | DeliveryState::Persisted
+    ) {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    let conversation_key =
+        conversation_key(&persisted.scope, &persisted.conversation.conversation_id);
+    let conversation = state
+        .conversations
+        .get(&conversation_key)
+        .ok_or(DurableStoreError::InvalidRecord)?;
+    if conversation.conversation != persisted.conversation {
+        return Err(DurableStoreError::Conflict);
+    }
+    let key = message_key(&persisted.scope, &persisted.message_id);
+    persisted.delivery_state = DeliveryState::Persisted;
+    if let Some(existing) = state.messages.get(&key) {
+        return if existing == &persisted {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    state.messages.insert(key, persisted);
+    Ok(DurableRecordStatus::Persisted)
+}
+
 impl MessageStore for MemoryLocalStore {
     fn persist_message(
         &self,
         message: &MessageEnvelope,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        let mut persisted =
-            canonical_message(message).map_err(|_| DurableStoreError::InvalidRecord)?;
-        if !matches!(
-            message.delivery_state,
-            DeliveryState::Created | DeliveryState::Persisted
-        ) {
-            return Err(DurableStoreError::InvalidRecord);
-        }
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        let conversation_key =
-            conversation_key(&message.scope, &message.conversation.conversation_id);
-        let conversation = state
-            .conversations
-            .get(&conversation_key)
-            .ok_or(DurableStoreError::InvalidRecord)?;
-        if conversation.conversation != message.conversation {
-            return Err(DurableStoreError::Conflict);
-        }
-        let key = message_key(&message.scope, &message.message_id);
-        persisted.delivery_state = DeliveryState::Persisted;
-        if let Some(existing) = state.messages.get(&key) {
-            return if existing == &persisted {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        state.messages.insert(key, persisted);
-        Ok(DurableRecordStatus::Persisted)
+        persist_message_in_state(&mut state, message)
     }
 
     fn message(
@@ -1688,6 +1702,9 @@ impl EventJournalStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        if state.group_changes.contains_key(&key) {
+            return Err(DurableStoreError::Conflict);
+        }
         state.events.insert(key.clone(), event);
         state.event_order.push(key);
         Ok(EventAppendStatus::Appended)
@@ -2169,6 +2186,9 @@ impl AntiEntropyStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        if state.group_changes.contains_key(&key) {
+            return Err(DurableStoreError::Conflict);
+        }
         state.events.insert(key.clone(), event);
         state.event_order.push(key);
         Ok(EventAppendStatus::Appended)
@@ -2202,6 +2222,9 @@ impl CommandOutcomeStore for MemoryLocalStore {
                 Some(original) if original == &event => Ok(EventAppendStatus::Duplicate),
                 _ => Err(DurableStoreError::Conflict),
             };
+        }
+        if state.group_changes.contains_key(&event_key) {
+            return Err(DurableStoreError::Conflict);
         }
         if let Some(original) = state.events.get(&event_key) {
             if original != &event {

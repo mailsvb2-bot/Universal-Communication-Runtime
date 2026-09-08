@@ -2,6 +2,7 @@
 
 mod authorized_runtime;
 mod event_api;
+mod group;
 mod id;
 mod integration_api;
 mod recovery_workflow;
@@ -28,6 +29,7 @@ pub use event_api::{
     EventWebhookDeliveryError, EventWebhookDispatcher, EventWebhookSink, SystemEventDeliveryClock,
     WebhookDispatchOutcome,
 };
+pub use group::{GroupMessageStore, GroupStore};
 pub use id::{IdGenerationError, generate_opaque_id};
 pub use integration_api::{
     ExternalIdentityBindingLookup, IntegrationCommandIngress, IntegrationIngress,

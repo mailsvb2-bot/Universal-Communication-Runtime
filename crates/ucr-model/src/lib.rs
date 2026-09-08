@@ -2,6 +2,13 @@
 
 use core::fmt;
 
+mod group;
+pub use group::{
+    GroupBridgeMapping, GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy,
+    GroupMediaState, GroupMemberState, GroupMembership, GroupOwnership, GroupPermission,
+    GroupRecord, GroupRole, PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,
+};
+
 /// Opaque canonical identifier value.
 ///
 /// Native offline generation is specified by UCR Protocol ADR-0023; this model
@@ -127,7 +134,7 @@ id_type!(RecoveryPlanId);
 id_type!(ServiceCredentialId);
 id_type!(AuditRecordId);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrincipalKind {
     Person,
     Device,
@@ -515,7 +522,7 @@ pub struct TenantScope {
     pub namespace_id: Option<NamespaceId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PrincipalRef {
     pub principal_id: PrincipalId,
     pub kind: PrincipalKind,

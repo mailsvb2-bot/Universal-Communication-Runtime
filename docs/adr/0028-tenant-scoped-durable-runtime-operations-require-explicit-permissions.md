@@ -10,7 +10,7 @@ Authentication remains a separate trust boundary. This ADR assumes the caller su
 
 ## Decision
 
-`AuthorizedDurableRuntime` is the authorization-enforcing runtime façade for every currently implemented tenant-scoped durable capability. It mirrors all 32 methods owned by `PermissionGrantStore`, `TrustedSigningKeyStore`, `RecoveryPlanStore`, `CommandAcceptanceStore`, `ConversationStore`, `MessageStore`, `DeliveryStore`, `SyncStore`, `EventJournalStore`, `AntiEntropyStore`, and `CommandOutcomeStore`.
+`AuthorizedDurableRuntime` is the authorization-enforcing runtime façade for every currently implemented tenant-scoped durable capability. Architecture tests enumerate the complete façade method set and require it to stay aligned as canonical owners grow. The covered durable owners include permission/service administration, Identity/Device, trusted keys, recovery, Commands, Conversation, Message, Communication Intent, Delivery, Sync, Event/Anti-Entropy, and Phase 18 `GroupStore` / `GroupMessageStore`; Group authorization reuses this same boundary rather than creating a second policy brain.
 
 Every façade method performs an explicit permission check against the operation's exact resource `TenantScope` before calling the raw persistence capability. Reads and writes use distinct permission IDs where their authority differs. Trusted signing-key provision/rotate/revoke remain distinct operations. The protocol crate owns the complete current permission vocabulary in `RUNTIME_PERMISSION_IDS`; every ID is namespaced and unique.
 
