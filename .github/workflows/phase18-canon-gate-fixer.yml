@@ -1,4 +1,4 @@
-name: Phase18 Canon Gate Fixer
+name: Phase18 Review Fix Verifier
 
 on:
   push:
@@ -12,12 +12,14 @@ permissions:
 jobs:
   fix-and-verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: phase18-groups
-      - name: Apply canon gate fix
+      - name: Apply Codex security fixes
+        run: python3 .github/phase18_security_review_fix.py
+      - name: Apply future-proof canon gate fix
         run: python3 .github/phase18_canon_gate_fix.py
       - name: Install pinned Rust toolchain
         run: rustup show
@@ -33,10 +35,21 @@ jobs:
         run: cargo test --workspace --all-targets --locked
       - name: Release architecture tests
         run: cargo test -p ucr-architecture-tests --release --locked
-      - name: Commit verified source fix
+      - name: Commit verified source fixes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/ucr-architecture-tests/tests/canon_gates.rs docs/adr/0028-tenant-scoped-durable-runtime-operations-require-explicit-permissions.md spec/permissions.md
-          git commit -m "Future-proof Phase 18 architecture gates"
+          git add \
+            crates/ucr-architecture-tests/tests/canon_gates.rs \
+            crates/ucr-architecture-tests/tests/phase18_groups.rs \
+            crates/ucr-model/src/group.rs \
+            crates/ucr-storage-memory/src/group_store.rs \
+            crates/ucr-storage-memory/src/lib.rs \
+            crates/ucr-storage-sqlite/src/group_store.rs \
+            crates/ucr-storage-sqlite/src/event_journal.rs \
+            docs/adr/0028-tenant-scoped-durable-runtime-operations-require-explicit-permissions.md \
+            docs/adr/0056-phase18-groups-reuse-canonical-conversation-message-and-authorization-owners.md \
+            spec/groups.md \
+            spec/permissions.md
+          git commit -m "Resolve Phase 18 security review findings"
           git push origin HEAD:phase18-groups
