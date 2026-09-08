@@ -389,8 +389,21 @@ where
 }
 
 fn transcript_message_semantic_bytes(message: &MessageEnvelope) -> usize {
-    let mut bytes = TRANSCRIPT_MESSAGE_FIXED_OVERHEAD_BYTES
-        .saturating_add(message.message_id.as_opaque().as_wire_bytes().len())
+    TRANSCRIPT_MESSAGE_FIXED_OVERHEAD_BYTES
+        .saturating_add(transcript_message_identity_bytes(message))
+        .saturating_add(message.content.len())
+        .saturating_add(transcript_message_relation_bytes(message))
+        .saturating_add(transcript_message_crypto_origin_bytes(message))
+        .saturating_add(transcript_message_correlation_extension_bytes(message))
+        .saturating_add(transcript_message_signature_bytes(message))
+}
+
+fn transcript_message_identity_bytes(message: &MessageEnvelope) -> usize {
+    message
+        .message_id
+        .as_opaque()
+        .as_wire_bytes()
+        .len()
         .saturating_add(message.scope.tenant_id.as_opaque().as_wire_bytes().len())
         .saturating_add(
             message
@@ -431,14 +444,14 @@ fn transcript_message_semantic_bytes(message: &MessageEnvelope) -> usize {
                 .as_wire_bytes()
                 .len(),
         )
-        .saturating_add(message.content.len())
-        .saturating_add(
-            message
-                .attachment_ids
-                .iter()
-                .map(|id| id.as_opaque().as_wire_bytes().len())
-                .sum::<usize>(),
-        )
+}
+
+fn transcript_message_relation_bytes(message: &MessageEnvelope) -> usize {
+    message
+        .attachment_ids
+        .iter()
+        .map(|id| id.as_opaque().as_wire_bytes().len())
+        .sum::<usize>()
         .saturating_add(
             message
                 .reply_to
@@ -451,20 +464,19 @@ fn transcript_message_semantic_bytes(message: &MessageEnvelope) -> usize {
                 .iter()
                 .map(|relation| relation.target_message_id.as_opaque().as_wire_bytes().len())
                 .sum::<usize>(),
-        );
+        )
+}
 
-    if let Some(metadata) = &message.crypto_metadata {
-        bytes = bytes
-            .saturating_add(
-                metadata
-                    .key_id
-                    .as_ref()
-                    .map_or(0, |id| id.as_opaque().as_wire_bytes().len()),
-            )
-            .saturating_add(metadata.opaque_metadata.len());
-    }
+fn transcript_message_crypto_origin_bytes(message: &MessageEnvelope) -> usize {
+    let crypto_bytes = message.crypto_metadata.as_ref().map_or(0, |metadata| {
+        metadata
+            .key_id
+            .as_ref()
+            .map_or(0, |id| id.as_opaque().as_wire_bytes().len())
+            .saturating_add(metadata.opaque_metadata.len())
+    });
 
-    bytes = bytes
+    crypto_bytes
         .saturating_add(
             message
                 .origin
@@ -486,7 +498,14 @@ fn transcript_message_semantic_bytes(message: &MessageEnvelope) -> usize {
                 .as_ref()
                 .map_or(0, |id| id.as_opaque().as_wire_bytes().len()),
         )
-        .saturating_add(message.correlation.correlation_id.as_wire_bytes().len())
+}
+
+fn transcript_message_correlation_extension_bytes(message: &MessageEnvelope) -> usize {
+    message
+        .correlation
+        .correlation_id
+        .as_wire_bytes()
+        .len()
         .saturating_add(
             message
                 .correlation
@@ -521,16 +540,19 @@ fn transcript_message_semantic_bytes(message: &MessageEnvelope) -> usize {
                         .saturating_add(mapping.external_message_id.len())
                 })
                 .sum::<usize>(),
-        );
+        )
+}
 
-    if let Some(signature) = &message.signature {
-        bytes = bytes
-            .saturating_add(signature.key_id.as_opaque().as_wire_bytes().len())
+fn transcript_message_signature_bytes(message: &MessageEnvelope) -> usize {
+    message.signature.as_ref().map_or(0, |signature| {
+        signature
+            .key_id
+            .as_opaque()
+            .as_wire_bytes()
+            .len()
             .saturating_add(signature.algorithm_id.len())
-            .saturating_add(signature.signature.len());
-    }
-
-    bytes
+            .saturating_add(signature.signature.len())
+    })
 }
 
 fn require_exact_subject_scope(
