@@ -8,8 +8,7 @@ use ucr_crypto::{
     begin_session_with_trusted_peer, bind_handshake_transcript, generate_handshake_nonce,
 };
 use ucr_model::{
-    CapabilityMaturity, DeviceId, EndpointId, KeyId, ProtocolExtension, PublicKeyDescriptor,
-    TenantScope,
+    CapabilityMaturity, EndpointId, ProtocolExtension, PublicKeyDescriptor, TenantScope,
 };
 use ucr_protocol::{
     CapabilityRequirement, HandshakeError, NegotiationPolicy, PeerHello,
