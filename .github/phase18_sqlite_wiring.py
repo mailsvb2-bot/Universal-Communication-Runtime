@@ -51,6 +51,28 @@ once(
     "    transaction\n        .pragma_update(None, \"user_version\", SQLITE_SCHEMA_V20)\n        .map_err(|error| map_sqlite_error(&error))?;\n    transaction\n        .commit()\n        .map_err(|error| map_sqlite_error(&error))?;\n    event_subscription_store::verify_schema_v20(connection)\n}\n\nfn migrate_v20_to_v21(connection: &mut Connection) -> Result<(), DurableStoreError> {\n    event_subscription_store::verify_schema_v20(connection)?;\n    let transaction = connection\n        .transaction_with_behavior(TransactionBehavior::Immediate)\n        .map_err(|error| map_sqlite_error(&error))?;\n    group_store::create_v21_objects(&transaction)?;\n    transaction\n        .pragma_update(None, \"user_version\", SQLITE_SCHEMA_VERSION)\n        .map_err(|error| map_sqlite_error(&error))?;\n    transaction\n        .commit()\n        .map_err(|error| map_sqlite_error(&error))?;\n    group_store::verify_schema_v21(connection)\n}\n\nfn verify_schema_v2",
 )
 
+# Historical migration tests simulate old schemas by starting from the current schema and
+# dropping all newer objects. Phase 18 adds four v21 tables, so every such fixture must remove
+# those tables too; otherwise the later v20->v21 migration correctly rejects duplicate tables.
+fixture_marker = 'PRAGMA foreign_keys=OFF; '
+fixture_cleanup = (
+    'DROP TABLE IF EXISTS group_changes; '
+    'DROP TABLE IF EXISTS group_bridge_mappings; '
+    'DROP TABLE IF EXISTS group_memberships; '
+    'DROP TABLE IF EXISTS groups; '
+)
+patched_fixtures = 0
+for fixture_path in Path("crates/ucr-storage-sqlite/src").glob("*.rs"):
+    fixture_text = fixture_path.read_text()
+    if "PRAGMA user_version=" not in fixture_text or fixture_marker not in fixture_text:
+        continue
+    count = fixture_text.count(fixture_marker)
+    fixture_text = fixture_text.replace(fixture_marker, fixture_marker + fixture_cleanup)
+    fixture_path.write_text(fixture_text)
+    patched_fixtures += count
+if patched_fixtures < 18:
+    raise SystemExit(f"expected at least 18 historical migration fixtures, patched {patched_fixtures}")
+
 # Keep the SQLite decoder below strict Clippy's argument ceiling without suppressions.
 p = Path("crates/ucr-storage-sqlite/src/group_store.rs")
 text = p.read_text()
@@ -107,4 +129,47 @@ if new_fn not in text:
     if old_fn not in text:
         raise SystemExit("decode_membership marker missing")
     text = text.replace(old_fn, new_fn, 1)
+
+# Direct v20->v21 evidence: the migration creates an empty Group owner without inventing state.
+if "fn v20_store_migrates_to_v21_without_inventing_groups" not in text:
+    text += r'''
+
+#[cfg(test)]
+mod phase18_migration_tests {
+    use ucr_core::StorageProvider;
+
+    use super::SqliteLocalStore;
+    use crate::{SQLITE_SCHEMA_VERSION, message_store::tests::TestDb};
+
+    #[test]
+    fn v20_store_migrates_to_v21_without_inventing_groups() {
+        let db = TestDb::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open current store");
+            let connection = store.lock_connection().expect("lock current store");
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys=OFF; \
+                     DROP TABLE group_changes; \
+                     DROP TABLE group_bridge_mappings; \
+                     DROP TABLE group_memberships; \
+                     DROP TABLE groups; \
+                     PRAGMA user_version=20;",
+                )
+                .expect("simulate exact v20 shape");
+        }
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v20 to v21");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        let connection = migrated.lock_connection().expect("lock migrated store");
+        let groups: i64 = connection
+            .query_row("SELECT COUNT(*) FROM groups", [], |row| row.get(0))
+            .expect("count groups");
+        let memberships: i64 = connection
+            .query_row("SELECT COUNT(*) FROM group_memberships", [], |row| row.get(0))
+            .expect("count memberships");
+        assert_eq!(groups, 0);
+        assert_eq!(memberships, 0);
+    }
+}
+'''
 p.write_text(text)
