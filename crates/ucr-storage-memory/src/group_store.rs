@@ -1,15 +1,13 @@
-use ucr_core::{
-    DurableRecordStatus, DurableStoreError, GroupMessageStore, GroupStore,
-};
+use ucr_core::{DurableRecordStatus, DurableStoreError, GroupMessageStore, GroupStore};
 use ucr_model::{
-    ConversationId, ConversationKind, ConversationRecord, DeliveryState, GroupChange, GroupHistoryPolicy,
-    GroupId, GroupMemberState, GroupMembership, GroupPermission, GroupRecord, MessageEnvelope,
-    MessageId, PrincipalRef, ScopedPrincipal, TenantScope,
+    ConversationId, ConversationRecord, DeliveryState, GroupChange, GroupHistoryPolicy, GroupId,
+    GroupMemberState, GroupMembership, GroupPermission, GroupRecord, MessageEnvelope, MessageId,
+    PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
-    apply_group_change, canonical_group_creation, canonical_group_memberships,
-    canonical_group_record, canonical_message, group_change_fingerprint,
-    is_group_conversation_kind, validate_conversation, validate_group_member_list_limit,
+    apply_group_change, canonical_group_creation, canonical_group_memberships, canonical_message,
+    group_change_fingerprint, is_group_conversation_kind, validate_conversation,
+    validate_group_member_list_limit,
 };
 
 use super::{
@@ -32,12 +30,9 @@ impl GroupStore for MemoryLocalStore {
         {
             return Err(DurableStoreError::InvalidRecord);
         }
-        let (group, creator_membership) = canonical_group_creation(
-            group,
-            &creator.scope,
-            &creator.principal,
-        )
-        .map_err(map_group_error)?;
+        let (group, creator_membership) =
+            canonical_group_creation(group, &creator.scope, &creator.principal)
+                .map_err(map_group_error)?;
         let group_key = group_key(&group.scope, &group.group_id);
         let creator_key = membership_key(&group.scope, &group.group_id, &creator.principal);
         let conversation_key = conversation_key(
@@ -63,7 +58,9 @@ impl GroupStore for MemoryLocalStore {
                 return Err(DurableStoreError::Conflict);
             }
         } else {
-            state.conversations.insert(conversation_key, conversation.clone());
+            state
+                .conversations
+                .insert(conversation_key, conversation.clone());
         }
         state.groups.insert(group_key, group);
         state
@@ -91,8 +88,7 @@ impl GroupStore for MemoryLocalStore {
             .groups
             .values()
             .find(|group| {
-                group.scope == *scope
-                    && group.conversation.conversation_id == *conversation_id
+                group.scope == *scope && group.conversation.conversation_id == *conversation_id
             })
             .cloned())
     }
@@ -142,7 +138,11 @@ impl GroupStore for MemoryLocalStore {
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let fingerprint = group_change_fingerprint(change).map_err(map_group_error)?;
         let group_key = group_key(&change.scope, &change.group_id);
-        let change_key = change_key(&change.scope, &change.group_id, change.event_id.as_opaque().as_str());
+        let change_key = change_key(
+            &change.scope,
+            &change.group_id,
+            change.event_id.as_opaque().as_str(),
+        );
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.group_changes.get(&change_key) {
             return if existing == &fingerprint {
@@ -201,7 +201,10 @@ impl GroupMessageStore for MemoryLocalStore {
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let canonical = canonical_message(message).map_err(|_| DurableStoreError::InvalidRecord)?;
         if !is_group_conversation_kind(canonical.conversation.kind)
-            || !matches!(canonical.delivery_state, DeliveryState::Created | DeliveryState::Persisted)
+            || !matches!(
+                canonical.delivery_state,
+                DeliveryState::Created | DeliveryState::Persisted
+            )
         {
             return Err(DurableStoreError::InvalidRecord);
         }
@@ -224,10 +227,16 @@ impl GroupMessageStore for MemoryLocalStore {
         }
         let membership = state
             .group_memberships
-            .get(&membership_key(&group.scope, &group.group_id, &subject.principal))
+            .get(&membership_key(
+                &group.scope,
+                &group.group_id,
+                &subject.principal,
+            ))
             .ok_or(DurableStoreError::PermissionDenied)?;
         if membership.state != GroupMemberState::Active
-            || !membership.permissions.contains(&GroupPermission::SendMessage)
+            || !membership
+                .permissions
+                .contains(&GroupPermission::SendMessage)
         {
             return Err(DurableStoreError::PermissionDenied);
         }
@@ -260,7 +269,9 @@ impl GroupMessageStore for MemoryLocalStore {
             .get(&membership_key(scope, &group.group_id, &subject.principal))
             .ok_or(DurableStoreError::PermissionDenied)?;
         if membership.state != GroupMemberState::Active
-            || !membership.permissions.contains(&GroupPermission::ReadHistory)
+            || !membership
+                .permissions
+                .contains(&GroupPermission::ReadHistory)
             || !history_allows(group, membership, &message)
         {
             return Ok(None);
@@ -293,11 +304,16 @@ fn change_key(scope: &TenantScope, group_id: &GroupId, event_id: &str) -> GroupC
     )
 }
 
-fn history_floor_for_add(state: &MemoryState, group: &GroupRecord) -> Result<u64, DurableStoreError> {
+fn history_floor_for_add(
+    state: &MemoryState,
+    group: &GroupRecord,
+) -> Result<u64, DurableStoreError> {
     let mut orders = state
         .messages
         .values()
-        .filter(|message| message.scope == group.scope && message.conversation == group.conversation)
+        .filter(|message| {
+            message.scope == group.scope && message.conversation == group.conversation
+        })
         .map(|message| message.logical_order)
         .collect::<Vec<_>>();
     orders.sort_unstable();

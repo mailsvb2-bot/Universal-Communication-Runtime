@@ -70,9 +70,16 @@ pub fn group_permissions_for_role(role: GroupRole) -> Vec<GroupPermission> {
 
 #[must_use]
 pub const fn is_group_conversation_kind(kind: ConversationKind) -> bool {
-    matches!(kind, ConversationKind::PrivateGroup | ConversationKind::PublicGroup)
+    matches!(
+        kind,
+        ConversationKind::PrivateGroup | ConversationKind::PublicGroup
+    )
 }
 
+/// Validates and canonicalizes one Group aggregate.
+///
+/// # Errors
+/// Returns an explicit Group error for invalid kind, ownership, policy, crypto, or bridge state.
 pub fn canonical_group_record(group: &GroupRecord) -> Result<GroupRecord, GroupError> {
     if !is_group_conversation_kind(group.conversation.kind) {
         return Err(GroupError::InvalidKind);
@@ -111,6 +118,10 @@ pub fn canonical_group_record(group: &GroupRecord) -> Result<GroupRecord, GroupE
     Ok(canonical)
 }
 
+/// Validates one membership against its owning Group revision and scope.
+///
+/// # Errors
+/// Returns an explicit Group error for scope/group mismatch, invalid role permissions, or invalid lifecycle revision.
 pub fn canonical_group_membership(
     group: &GroupRecord,
     membership: &GroupMembership,
@@ -132,7 +143,9 @@ pub fn canonical_group_membership(
             return Err(GroupError::InvalidMembership);
         }
         GroupMemberState::Removed => {
-            let removed = membership.removed_revision.ok_or(GroupError::InvalidMembership)?;
+            let removed = membership
+                .removed_revision
+                .ok_or(GroupError::InvalidMembership)?;
             if removed < membership.joined_revision || removed > group.revision {
                 return Err(GroupError::InvalidMembership);
             }
@@ -142,6 +155,10 @@ pub fn canonical_group_membership(
     Ok(membership.clone())
 }
 
+/// Canonicalizes initial Group state and derives the creator membership.
+///
+/// # Errors
+/// Returns an explicit Group error for invalid ownership, scope, or non-zero initial revision/generation.
 pub fn canonical_group_creation(
     group: &GroupRecord,
     creator_scope: &TenantScope,
@@ -193,6 +210,10 @@ pub fn canonical_group_creation(
     Ok((group, membership))
 }
 
+/// Canonicalizes, bounds, sorts, and deduplicates the Group membership set.
+///
+/// # Errors
+/// Returns an explicit Group error for invalid, duplicate, or over-capacity membership state.
 pub fn canonical_group_memberships(
     group: &GroupRecord,
     memberships: &[GroupMembership],
@@ -208,7 +229,9 @@ pub fn canonical_group_memberships(
         left.member
             .principal_id
             .cmp(&right.member.principal_id)
-            .then_with(|| principal_kind_code(left.member.kind).cmp(&principal_kind_code(right.member.kind)))
+            .then_with(|| {
+                principal_kind_code(left.member.kind).cmp(&principal_kind_code(right.member.kind))
+            })
     });
     if canonical
         .windows(2)
@@ -219,6 +242,11 @@ pub fn canonical_group_memberships(
     Ok(canonical)
 }
 
+/// Applies one optimistic-concurrency Group mutation through the canonical transition owner.
+///
+/// # Errors
+/// Returns an explicit Group error for stale revision, unauthorized role, invalid policy/crypto
+/// transition, membership conflict, or an ownership change that would orphan the Group.
 pub fn apply_group_change(
     group: &GroupRecord,
     memberships: &[GroupMembership],
@@ -229,6 +257,39 @@ pub fn apply_group_change(
 ) -> Result<GroupTransition, GroupError> {
     let mut group = canonical_group_record(group)?;
     let mut memberships = canonical_group_memberships(&group, memberships)?;
+    validate_change_binding(&group, actor_scope, change)?;
+    let actor_index =
+        active_member_index(&memberships, actor).ok_or(GroupError::PermissionDenied)?;
+    let actor_role = memberships[actor_index].role;
+    let next_revision = group
+        .revision
+        .checked_add(1)
+        .ok_or(GroupError::RevisionMismatch)?;
+    let next_generation = group
+        .replication_generation
+        .checked_add(1)
+        .ok_or(GroupError::RevisionMismatch)?;
+    apply_change_crypto(&mut group, change)?;
+    let context = GroupChangeContext {
+        actor,
+        actor_index,
+        actor_role,
+        next_revision,
+        history_floor: add_history_floor_logical_order,
+    };
+    apply_change_kind(&mut group, &mut memberships, change, &context)?;
+    group.revision = next_revision;
+    group.replication_generation = next_generation;
+    let memberships = canonical_group_memberships(&group, &memberships)?;
+    require_group_admin_continuity(&memberships)?;
+    Ok(GroupTransition { group, memberships })
+}
+
+fn validate_change_binding(
+    group: &GroupRecord,
+    actor_scope: &TenantScope,
+    change: &GroupChange,
+) -> Result<(), GroupError> {
     if actor_scope != &group.scope || change.scope != group.scope {
         return Err(GroupError::ScopeMismatch);
     }
@@ -238,13 +299,10 @@ pub fn apply_group_change(
     if change.expected_revision != group.revision {
         return Err(GroupError::RevisionMismatch);
     }
-    let actor_index = active_member_index(&memberships, actor).ok_or(GroupError::PermissionDenied)?;
-    let actor_role = memberships[actor_index].role;
-    let next_revision = group.revision.checked_add(1).ok_or(GroupError::RevisionMismatch)?;
-    let next_generation = group
-        .replication_generation
-        .checked_add(1)
-        .ok_or(GroupError::RevisionMismatch)?;
+    Ok(())
+}
+
+fn apply_change_crypto(group: &mut GroupRecord, change: &GroupChange) -> Result<(), GroupError> {
     let security_sensitive = matches!(
         change.kind,
         GroupChangeKind::AddMember { .. }
@@ -253,133 +311,243 @@ pub fn apply_group_change(
             | GroupChangeKind::TransferOwnership { .. }
     );
     if security_sensitive {
-        advance_crypto_state(&mut group, change.next_crypto_state.as_ref())?;
+        advance_crypto_state(group, change.next_crypto_state.as_ref())
     } else if change.next_crypto_state.is_some() {
-        return Err(GroupError::InvalidCryptoState);
+        Err(GroupError::InvalidCryptoState)
+    } else {
+        Ok(())
     }
+}
 
+struct GroupChangeContext<'a> {
+    actor: &'a PrincipalRef,
+    actor_index: usize,
+    actor_role: GroupRole,
+    next_revision: u64,
+    history_floor: Option<u64>,
+}
+
+fn apply_change_kind(
+    group: &mut GroupRecord,
+    memberships: &mut Vec<GroupMembership>,
+    change: &GroupChange,
+    context: &GroupChangeContext<'_>,
+) -> Result<(), GroupError> {
     match &change.kind {
-        GroupChangeKind::AddMember { member, role } => {
-            require_manage_members(actor_role)?;
-            if *role == GroupRole::Owner || (*role == GroupRole::Admin && actor_role != GroupRole::Owner) {
-                return Err(GroupError::InvalidRoleTransition);
-            }
-            let history_floor = add_history_floor_logical_order.ok_or(GroupError::InvalidHistoryFloor)?;
-            if let Some(index) = member_index(&memberships, member) {
-                if memberships[index].state == GroupMemberState::Active {
-                    return Err(GroupError::MemberAlreadyActive);
-                }
-                memberships[index].role = *role;
-                memberships[index].permissions = group_permissions_for_role(*role);
-                memberships[index].state = GroupMemberState::Active;
-                memberships[index].joined_revision = next_revision;
-                memberships[index].removed_revision = None;
-                memberships[index].history_floor_logical_order = history_floor;
-            } else {
-                if memberships.len() >= MAX_GROUP_MEMBERS {
-                    return Err(GroupError::TooManyMembers);
-                }
-                memberships.push(GroupMembership {
-                    scope: group.scope.clone(),
-                    group_id: group.group_id.clone(),
-                    member: member.clone(),
-                    role: *role,
-                    permissions: group_permissions_for_role(*role),
-                    state: GroupMemberState::Active,
-                    joined_revision: next_revision,
-                    removed_revision: None,
-                    history_floor_logical_order: history_floor,
-                });
-            }
-        }
-        GroupChangeKind::RemoveMember { member } => {
-            let target = member_index(&memberships, member).ok_or(GroupError::MemberNotActive)?;
-            if memberships[target].state != GroupMemberState::Active {
-                return Err(GroupError::MemberNotActive);
-            }
-            if memberships[target].role == GroupRole::Owner {
-                return Err(GroupError::WouldOrphanGroup);
-            }
-            if member != actor {
-                require_manage_members(actor_role)?;
-                if memberships[target].role == GroupRole::Admin && actor_role != GroupRole::Owner {
-                    return Err(GroupError::PermissionDenied);
-                }
-            }
-            memberships[target].state = GroupMemberState::Removed;
-            memberships[target].removed_revision = Some(next_revision);
-        }
+        GroupChangeKind::AddMember { member, role } => apply_add_member(
+            group,
+            memberships,
+            context.actor_role,
+            member,
+            *role,
+            context.next_revision,
+            context.history_floor,
+        ),
+        GroupChangeKind::RemoveMember { member } => apply_remove_member(
+            memberships,
+            context.actor,
+            context.actor_role,
+            member,
+            context.next_revision,
+        ),
         GroupChangeKind::ChangeRole { member, role } => {
-            if actor_role != GroupRole::Owner || *role == GroupRole::Owner {
-                return Err(GroupError::InvalidRoleTransition);
-            }
-            let target = active_member_index(&memberships, member).ok_or(GroupError::MemberNotActive)?;
-            if memberships[target].role == GroupRole::Owner {
-                return Err(GroupError::InvalidRoleTransition);
-            }
-            memberships[target].role = *role;
-            memberships[target].permissions = group_permissions_for_role(*role);
+            apply_role_change(memberships, context.actor_role, member, *role)
         }
-        GroupChangeKind::TransferOwnership { new_owner } => {
-            if actor_role != GroupRole::Owner {
-                return Err(GroupError::PermissionDenied);
-            }
-            let target = active_member_index(&memberships, new_owner).ok_or(GroupError::MemberNotActive)?;
-            if new_owner == actor {
-                return Err(GroupError::InvalidRoleTransition);
-            }
-            match &mut group.ownership {
-                GroupOwnership::PersonOwned(owner) => {
-                    if new_owner.kind != PrincipalKind::Person {
-                        return Err(GroupError::InvalidOwnership);
-                    }
-                    *owner = new_owner.clone();
-                }
-                GroupOwnership::OrganizationOwned(owner) => {
-                    if new_owner.kind != PrincipalKind::Organization {
-                        return Err(GroupError::InvalidOwnership);
-                    }
-                    *owner = new_owner.clone();
-                }
-                GroupOwnership::Temporary { owner, .. } => *owner = Some(new_owner.clone()),
-                GroupOwnership::SharedAdmin | GroupOwnership::OwnerlessFederated => {
-                    return Err(GroupError::OwnershipTransferNotSupported);
-                }
-            }
-            memberships[actor_index].role = GroupRole::Admin;
-            memberships[actor_index].permissions = group_permissions_for_role(GroupRole::Admin);
-            memberships[target].role = GroupRole::Owner;
-            memberships[target].permissions = group_permissions_for_role(GroupRole::Owner);
-        }
+        GroupChangeKind::TransferOwnership { new_owner } => apply_ownership_transfer(
+            group,
+            memberships,
+            context.actor,
+            context.actor_index,
+            context.actor_role,
+            new_owner,
+        ),
         GroupChangeKind::SetHistoryPolicy { policy } => {
-            require_manage_group(actor_role)?;
-            validate_history_policy(policy)?;
-            group.history_policy = policy.clone();
+            apply_history_policy(group, context.actor_role, policy)
         }
         GroupChangeKind::SetPublicPolicy { policy } => {
-            require_manage_group(actor_role)?;
-            if group.conversation.kind != ConversationKind::PublicGroup {
-                return Err(GroupError::InvalidPublicPolicy);
-            }
-            group.public_policy = Some(policy.clone());
+            apply_public_policy(group, context.actor_role, policy)
         }
         GroupChangeKind::SetDeliveryPolicy { policy } => {
-            require_manage_group(actor_role)?;
+            require_manage_group(context.actor_role)?;
             group.delivery_policy = *policy;
+            Ok(())
         }
     }
-    group.revision = next_revision;
-    group.replication_generation = next_generation;
-    let memberships = canonical_group_memberships(&group, &memberships)?;
-    if !memberships.iter().any(|membership| {
+}
+
+fn apply_add_member(
+    group: &GroupRecord,
+    memberships: &mut Vec<GroupMembership>,
+    actor_role: GroupRole,
+    member: &PrincipalRef,
+    role: GroupRole,
+    next_revision: u64,
+    history_floor: Option<u64>,
+) -> Result<(), GroupError> {
+    require_manage_members(actor_role)?;
+    if role == GroupRole::Owner || (role == GroupRole::Admin && actor_role != GroupRole::Owner) {
+        return Err(GroupError::InvalidRoleTransition);
+    }
+    let history_floor = history_floor.ok_or(GroupError::InvalidHistoryFloor)?;
+    if let Some(index) = member_index(memberships, member) {
+        if memberships[index].state == GroupMemberState::Active {
+            return Err(GroupError::MemberAlreadyActive);
+        }
+        memberships[index].role = role;
+        memberships[index].permissions = group_permissions_for_role(role);
+        memberships[index].state = GroupMemberState::Active;
+        memberships[index].joined_revision = next_revision;
+        memberships[index].removed_revision = None;
+        memberships[index].history_floor_logical_order = history_floor;
+        return Ok(());
+    }
+    if memberships.len() >= MAX_GROUP_MEMBERS {
+        return Err(GroupError::TooManyMembers);
+    }
+    memberships.push(GroupMembership {
+        scope: group.scope.clone(),
+        group_id: group.group_id.clone(),
+        member: member.clone(),
+        role,
+        permissions: group_permissions_for_role(role),
+        state: GroupMemberState::Active,
+        joined_revision: next_revision,
+        removed_revision: None,
+        history_floor_logical_order: history_floor,
+    });
+    Ok(())
+}
+
+fn apply_remove_member(
+    memberships: &mut [GroupMembership],
+    actor: &PrincipalRef,
+    actor_role: GroupRole,
+    member: &PrincipalRef,
+    next_revision: u64,
+) -> Result<(), GroupError> {
+    let target = member_index(memberships, member).ok_or(GroupError::MemberNotActive)?;
+    if memberships[target].state != GroupMemberState::Active {
+        return Err(GroupError::MemberNotActive);
+    }
+    if memberships[target].role == GroupRole::Owner {
+        return Err(GroupError::WouldOrphanGroup);
+    }
+    if member != actor {
+        require_manage_members(actor_role)?;
+        if memberships[target].role == GroupRole::Admin && actor_role != GroupRole::Owner {
+            return Err(GroupError::PermissionDenied);
+        }
+    }
+    memberships[target].state = GroupMemberState::Removed;
+    memberships[target].removed_revision = Some(next_revision);
+    Ok(())
+}
+
+fn apply_role_change(
+    memberships: &mut [GroupMembership],
+    actor_role: GroupRole,
+    member: &PrincipalRef,
+    role: GroupRole,
+) -> Result<(), GroupError> {
+    if actor_role != GroupRole::Owner || role == GroupRole::Owner {
+        return Err(GroupError::InvalidRoleTransition);
+    }
+    let target = active_member_index(memberships, member).ok_or(GroupError::MemberNotActive)?;
+    if memberships[target].role == GroupRole::Owner {
+        return Err(GroupError::InvalidRoleTransition);
+    }
+    memberships[target].role = role;
+    memberships[target].permissions = group_permissions_for_role(role);
+    Ok(())
+}
+
+fn apply_ownership_transfer(
+    group: &mut GroupRecord,
+    memberships: &mut [GroupMembership],
+    actor: &PrincipalRef,
+    actor_index: usize,
+    actor_role: GroupRole,
+    new_owner: &PrincipalRef,
+) -> Result<(), GroupError> {
+    if actor_role != GroupRole::Owner {
+        return Err(GroupError::PermissionDenied);
+    }
+    let target = active_member_index(memberships, new_owner).ok_or(GroupError::MemberNotActive)?;
+    if new_owner == actor {
+        return Err(GroupError::InvalidRoleTransition);
+    }
+    update_ownership(&mut group.ownership, new_owner)?;
+    memberships[actor_index].role = GroupRole::Admin;
+    memberships[actor_index].permissions = group_permissions_for_role(GroupRole::Admin);
+    memberships[target].role = GroupRole::Owner;
+    memberships[target].permissions = group_permissions_for_role(GroupRole::Owner);
+    Ok(())
+}
+
+fn update_ownership(
+    ownership: &mut GroupOwnership,
+    new_owner: &PrincipalRef,
+) -> Result<(), GroupError> {
+    match ownership {
+        GroupOwnership::PersonOwned(owner) => {
+            if new_owner.kind != PrincipalKind::Person {
+                return Err(GroupError::InvalidOwnership);
+            }
+            *owner = new_owner.clone();
+        }
+        GroupOwnership::OrganizationOwned(owner) => {
+            if new_owner.kind != PrincipalKind::Organization {
+                return Err(GroupError::InvalidOwnership);
+            }
+            *owner = new_owner.clone();
+        }
+        GroupOwnership::Temporary { owner, .. } => *owner = Some(new_owner.clone()),
+        GroupOwnership::SharedAdmin | GroupOwnership::OwnerlessFederated => {
+            return Err(GroupError::OwnershipTransferNotSupported);
+        }
+    }
+    Ok(())
+}
+
+fn apply_history_policy(
+    group: &mut GroupRecord,
+    actor_role: GroupRole,
+    policy: &GroupHistoryPolicy,
+) -> Result<(), GroupError> {
+    require_manage_group(actor_role)?;
+    validate_history_policy(policy)?;
+    group.history_policy = policy.clone();
+    Ok(())
+}
+
+fn apply_public_policy(
+    group: &mut GroupRecord,
+    actor_role: GroupRole,
+    policy: &PublicGroupPolicy,
+) -> Result<(), GroupError> {
+    require_manage_group(actor_role)?;
+    if group.conversation.kind != ConversationKind::PublicGroup {
+        return Err(GroupError::InvalidPublicPolicy);
+    }
+    group.public_policy = Some(policy.clone());
+    Ok(())
+}
+
+fn require_group_admin_continuity(memberships: &[GroupMembership]) -> Result<(), GroupError> {
+    if memberships.iter().any(|membership| {
         membership.state == GroupMemberState::Active
             && matches!(membership.role, GroupRole::Owner | GroupRole::Admin)
     }) {
-        return Err(GroupError::WouldOrphanGroup);
+        Ok(())
+    } else {
+        Err(GroupError::WouldOrphanGroup)
     }
-    Ok(GroupTransition { group, memberships })
 }
 
+/// Validates a bounded Group membership-list request size.
+///
+/// # Errors
+/// Returns `InvalidListLimit` for zero or above-limit requests.
 pub fn validate_group_member_list_limit(max_items: usize) -> Result<(), GroupError> {
     if max_items == 0 || max_items > MAX_GROUP_MEMBER_LIST {
         Err(GroupError::InvalidListLimit)
@@ -388,6 +556,10 @@ pub fn validate_group_member_list_limit(max_items: usize) -> Result<(), GroupErr
     }
 }
 
+/// Produces the versioned deterministic fingerprint for one Group change.
+///
+/// # Errors
+/// Returns an explicit Group error if one encoded Group policy component is invalid.
 pub fn group_change_fingerprint(change: &GroupChange) -> Result<[u8; 32], GroupError> {
     let mut bytes = Vec::new();
     push_bytes(&mut bytes, change.event_id.as_opaque().as_wire_bytes());
@@ -439,6 +611,7 @@ pub fn group_change_fingerprint(change: &GroupChange) -> Result<[u8; 32], GroupE
     Ok(hasher.finalize().into())
 }
 
+#[must_use]
 pub fn group_change_event_type(change: &GroupChange) -> &'static str {
     match change.kind {
         GroupChangeKind::AddMember { .. } => "ucr.group.member_added",
@@ -452,7 +625,9 @@ pub fn group_change_event_type(change: &GroupChange) -> &'static str {
 }
 
 fn validate_bridge_mapping(mapping: &GroupBridgeMapping) -> Result<(), GroupError> {
-    if mapping.external_group_id.is_empty() || mapping.external_group_id.len() > MAX_EXTERNAL_GROUP_ID_LEN {
+    if mapping.external_group_id.is_empty()
+        || mapping.external_group_id.len() > MAX_EXTERNAL_GROUP_ID_LEN
+    {
         return Err(GroupError::InvalidBridgeMapping);
     }
     Ok(())
@@ -466,20 +641,23 @@ fn validate_ownership(ownership: &GroupOwnership) -> Result<(), GroupError> {
         GroupOwnership::OrganizationOwned(owner) if owner.kind != PrincipalKind::Organization => {
             Err(GroupError::InvalidOwnership)
         }
-        GroupOwnership::Temporary { expires_at_unix_ms, .. } if *expires_at_unix_ms <= 0 => {
-            Err(GroupError::InvalidOwnership)
-        }
+        GroupOwnership::Temporary {
+            expires_at_unix_ms, ..
+        } if *expires_at_unix_ms <= 0 => Err(GroupError::InvalidOwnership),
         _ => Ok(()),
     }
 }
 
 fn validate_history_policy(policy: &GroupHistoryPolicy) -> Result<(), GroupError> {
     match policy {
-        GroupHistoryPolicy::LastNMessages(count) if *count == 0 || *count > MAX_GROUP_HISTORY_MESSAGES => {
+        GroupHistoryPolicy::LastNMessages(count)
+            if *count == 0 || *count > MAX_GROUP_HISTORY_MESSAGES =>
+        {
             Err(GroupError::InvalidHistoryPolicy)
         }
-        GroupHistoryPolicy::CustomPolicy(identifier) => validate_namespaced_identifier(identifier)
-            .map_err(|_| GroupError::InvalidHistoryPolicy),
+        GroupHistoryPolicy::CustomPolicy(identifier) => {
+            validate_namespaced_identifier(identifier).map_err(|_| GroupError::InvalidHistoryPolicy)
+        }
         _ => Ok(()),
     }
 }
@@ -487,7 +665,9 @@ fn validate_history_policy(policy: &GroupHistoryPolicy) -> Result<(), GroupError
 fn validate_crypto_state(state: &GroupCryptoState) -> Result<(), GroupError> {
     match (&state.capability_id, state.epoch, &state.state_ref) {
         (None, 0, None) => Ok(()),
-        (Some(capability), epoch, Some(_)) if capability == GROUP_MLS_CAPABILITY && epoch > 0 => Ok(()),
+        (Some(capability), epoch, Some(_)) if capability == GROUP_MLS_CAPABILITY && epoch > 0 => {
+            Ok(())
+        }
         _ => Err(GroupError::InvalidCryptoState),
     }
 }
@@ -501,7 +681,11 @@ fn advance_crypto_state(
         (None, Some(_)) | (Some(_), None) => Err(GroupError::InvalidCryptoState),
         (Some(current_capability), Some(next)) => {
             validate_crypto_state(next)?;
-            let expected_epoch = group.crypto_state.epoch.checked_add(1).ok_or(GroupError::InvalidCryptoState)?;
+            let expected_epoch = group
+                .crypto_state
+                .epoch
+                .checked_add(1)
+                .ok_or(GroupError::InvalidCryptoState)?;
             if next.capability_id.as_deref() != Some(current_capability.as_str())
                 || next.epoch != expected_epoch
                 || next.state_ref == group.crypto_state.state_ref
@@ -515,7 +699,9 @@ fn advance_crypto_state(
 }
 
 fn member_index(memberships: &[GroupMembership], principal: &PrincipalRef) -> Option<usize> {
-    memberships.iter().position(|membership| membership.member == *principal)
+    memberships
+        .iter()
+        .position(|membership| membership.member == *principal)
 }
 
 fn active_member_index(memberships: &[GroupMembership], principal: &PrincipalRef) -> Option<usize> {

@@ -2,6 +2,13 @@
 
 use core::fmt;
 
+mod group;
+pub use group::{
+    GroupBridgeMapping, GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy,
+    GroupMediaState, GroupMemberState, GroupMembership, GroupOwnership, GroupPermission,
+    GroupRecord, GroupRole, PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,
+};
+
 /// Opaque canonical identifier value.
 ///
 /// Native offline generation is specified by UCR Protocol ADR-0023; this model

@@ -1,14 +1,15 @@
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
-    ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
-    DeliveryState, DeviceDescriptor, DeviceId, EventConsumerCursor, EventDeadLetter,
+    ConversationId, ConversationKind, ConversationRecord, DeliveryAttempt, DeliveryEvidence,
+    DeliveryId, DeliveryState, DeviceDescriptor, DeviceId, EventConsumerCursor, EventDeadLetter,
     EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult, EventReconciliation,
-    EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding, IdentityId,
-    IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
-    PermissionScope, PrincipalKind, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
-    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
-    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
-    TenantScope, TrustedSigningKeyRecord,
+    EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding, GroupChange,
+    GroupId, GroupMemberState, GroupMembership, GroupRecord, IdentityId, IdentityRecord,
+    IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PermissionScope,
+    PrincipalKind, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
+    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
+    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord,
 };
 use ucr_protocol::{
     ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, COMMAND_ACCEPT_PERMISSION,
@@ -19,6 +20,7 @@ use ucr_protocol::{
     DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION, EVENT_CONSUME_PERMISSION,
     EVENT_DEAD_LETTER_READ_PERMISSION, EVENT_REPLAY_PERMISSION, EVENT_SUBSCRIBE_PERMISSION,
     EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+    GROUP_CREATE_PERMISSION, GROUP_MANAGE_PERMISSION, GROUP_READ_PERMISSION,
     IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,
     MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
     PERMISSION_GRANT_REVOKE_PERMISSION, RECOVERY_PLAN_INSTALL_PERMISSION,
@@ -35,9 +37,10 @@ use crate::{
     AntiEntropyStore, AuthorizationEvaluator, AuthorizedMutationError, CommandAcceptanceStore,
     CommandOutcomeStore, CommunicationIntentStore, ConversationStore, DeliveryStore,
     DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, IdentityStore,
-    MessageStore, PermissionGrantStore, RecoveryPlanStore, ServiceAuditStore,
-    ServiceCredentialStore, ServiceQuotaStore, SyncStore, TrustedSigningKeyStore,
+    EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, GroupMessageStore,
+    GroupStore, IdentityStore, MessageStore, PermissionGrantStore, RecoveryPlanStore,
+    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaStore, SyncStore,
+    TrustedSigningKeyStore,
 };
 
 /// Authorization-enforcing runtime boundary over tenant-scoped durable capabilities.
@@ -690,11 +693,11 @@ where
     A: AuthorizationEvaluator,
     S: MessageStore,
 {
-    /// Executes this tenant-scoped durable operation only after authorization.
+    /// Persists a non-group Message through the generic durable boundary.
+    /// Group Messages are deliberately denied here and must use the membership-gated Group path.
     ///
     /// # Errors
-    /// Returns an authorization failure before storage access, an invalid-record failure
-    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    /// Returns authorization failure before persistence, rejects the generic path for Group messages, and propagates durable-store failures.
     pub fn persist_message(
         &self,
         subject: &ScopedPrincipal,
@@ -710,16 +713,24 @@ where
                 ),
             ));
         }
+        if matches!(
+            message.conversation.kind,
+            ConversationKind::PrivateGroup | ConversationKind::PublicGroup
+        ) {
+            return Err(AuthorizedMutationError::Store(
+                DurableStoreError::PermissionDenied,
+            ));
+        }
         self.store
             .persist_message(message)
             .map_err(AuthorizedMutationError::Store)
     }
 
-    /// Executes this tenant-scoped durable operation only after authorization.
+    /// Reads a non-group Message through the generic durable boundary.
+    /// Existing group Messages are hidden from this path to avoid membership/existence bypass.
     ///
     /// # Errors
-    /// Returns an authorization failure before storage access, an invalid-record failure
-    /// for contradictory scoped inputs, or the underlying durable-store failure.
+    /// Returns authorization or durable-store failures; Group messages are deliberately hidden from this generic path.
     pub fn message(
         &self,
         subject: &ScopedPrincipal,
@@ -727,12 +738,18 @@ where
         message_id: &MessageId,
     ) -> Result<Option<MessageEnvelope>, AuthorizedMutationError> {
         self.require(subject, scope, MESSAGE_READ_PERMISSION)?;
-        self.store
+        let message = self
+            .store
             .message(scope, message_id)
-            .map_err(AuthorizedMutationError::Store)
+            .map_err(AuthorizedMutationError::Store)?;
+        Ok(message.filter(|value| {
+            !matches!(
+                value.conversation.kind,
+                ConversationKind::PrivateGroup | ConversationKind::PublicGroup
+            )
+        }))
     }
 }
-
 impl<A, S> AuthorizedDurableRuntime<'_, A, S>
 where
     A: AuthorizationEvaluator,
@@ -1165,6 +1182,170 @@ where
         self.require(subject, scope, COMMAND_OUTCOME_READ_PERMISSION)?;
         self.store
             .terminal_event(scope, command_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: GroupStore,
+{
+    /// Creates one canonical Group through the authorization-enforcing durable owner.
+    ///
+    /// # Errors
+    /// Returns authorization failure before storage, or an explicit invalid/conflict/storage failure from atomic Group creation.
+    pub fn create_group(
+        &self,
+        subject: &ScopedPrincipal,
+        conversation: &ConversationRecord,
+        group: &GroupRecord,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &group.scope, CONVERSATION_WRITE_PERMISSION)?;
+        self.require(subject, &group.scope, GROUP_CREATE_PERMISSION)?;
+        self.store
+            .create_group(conversation, group, subject)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Reads one Group subject to authorization and private-membership visibility.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures. Private non-members receive no Group existence disclosure.
+    pub fn group(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+    ) -> Result<Option<GroupRecord>, AuthorizedMutationError> {
+        self.require(subject, scope, GROUP_READ_PERMISSION)?;
+        let Some(group) = self
+            .store
+            .group(scope, group_id)
+            .map_err(AuthorizedMutationError::Store)?
+        else {
+            return Ok(None);
+        };
+        if group.conversation.kind == ConversationKind::PrivateGroup {
+            let membership = self
+                .store
+                .group_membership(scope, group_id, &subject.principal)
+                .map_err(AuthorizedMutationError::Store)?;
+            if !membership.is_some_and(|value| value.state == GroupMemberState::Active) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(group))
+    }
+
+    /// Reads one membership only for an authorized active Group member.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures; inactive callers cannot use membership lookup as an existence oracle.
+    pub fn group_membership(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        member: &ucr_model::PrincipalRef,
+    ) -> Result<Option<GroupMembership>, AuthorizedMutationError> {
+        self.require(subject, scope, GROUP_READ_PERMISSION)?;
+        let caller = self
+            .store
+            .group_membership(scope, group_id, &subject.principal)
+            .map_err(AuthorizedMutationError::Store)?;
+        if !caller.is_some_and(|value| value.state == GroupMemberState::Active) {
+            return Ok(None);
+        }
+        self.store
+            .group_membership(scope, group_id, member)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Reads one bounded canonical membership set for an authorized active Group member.
+    ///
+    /// # Errors
+    /// Returns authorization, membership, invalid-bound, or durable-store failures.
+    pub fn group_memberships(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<GroupMembership>, AuthorizedMutationError> {
+        self.require(subject, scope, GROUP_READ_PERMISSION)?;
+        let caller = self
+            .store
+            .group_membership(scope, group_id, &subject.principal)
+            .map_err(AuthorizedMutationError::Store)?;
+        if !caller.is_some_and(|value| value.state == GroupMemberState::Active) {
+            return Err(AuthorizedMutationError::Store(
+                DurableStoreError::PermissionDenied,
+            ));
+        }
+        self.store
+            .group_memberships(scope, group_id, max_items)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Applies one authenticated Group mutation through the atomic canonical Group owner.
+    ///
+    /// # Errors
+    /// Returns authorization, role/membership, stale-revision, conflict, validation, or durable-store failures.
+    pub fn apply_group_change(
+        &self,
+        subject: &ScopedPrincipal,
+        change: &GroupChange,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &change.scope, GROUP_MANAGE_PERMISSION)?;
+        self.store
+            .apply_group_change(subject, change)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: GroupMessageStore,
+{
+    /// Persists one Group Message through the membership-gated canonical Message owner.
+    ///
+    /// # Errors
+    /// Returns authorization, inactive-membership, validation, conflict, or durable-store failures.
+    pub fn persist_group_message(
+        &self,
+        subject: &ScopedPrincipal,
+        message: &MessageEnvelope,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &message.scope, MESSAGE_WRITE_PERMISSION)?;
+        if subject.principal.kind == PrincipalKind::ServiceAccount
+            && message.origin.principal_id.as_ref() != Some(&subject.principal.principal_id)
+        {
+            return Err(AuthorizedMutationError::Authorization(
+                ucr_protocol::CanonicalError::new(
+                    ucr_protocol::CanonicalErrorCode::PermissionDenied,
+                ),
+            ));
+        }
+        self.store
+            .persist_group_message(subject, message)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Reads one Group Message through the membership/history-gated canonical Message owner.
+    ///
+    /// # Errors
+    /// Returns authorization, inactive-membership, history-policy, or durable-store failures.
+    pub fn group_message(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        message_id: &MessageId,
+    ) -> Result<Option<MessageEnvelope>, AuthorizedMutationError> {
+        self.require(subject, scope, MESSAGE_READ_PERMISSION)?;
+        self.store
+            .group_message(subject, scope, message_id)
             .map_err(AuthorizedMutationError::Store)
     }
 }
