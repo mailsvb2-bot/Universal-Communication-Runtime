@@ -32,7 +32,9 @@ jobs:
           exec(compile(code, 'phase18-foundation-builder', 'exec'), {})
           PY2
       - name: Apply strict-lint refactor
-        run: python3 .github/phase18_clippy_fix.py
+        run: |
+          python3 .github/phase18_clippy_fix.py
+          python3 .github/phase18_clippy_fix2.py
       - name: Install pinned Rust toolchain
         run: rustup show
       - name: Format
@@ -47,7 +49,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/phase18_clippy_fix.py .github/workflows/phase18-foundation-builder.yml .github/workflows/phase18-foundation-builder-v2.yml .github/workflows/phase18-foundation-builder-v3.yml .github/workflows/phase18-foundation-builder-v4.yml .github/workflows/phase18-foundation-builder-v5.yml
+          git rm .github/phase18_clippy_fix.py .github/phase18_clippy_fix2.py .github/workflows/phase18-foundation-builder.yml .github/workflows/phase18-foundation-builder-v2.yml .github/workflows/phase18-foundation-builder-v3.yml .github/workflows/phase18-foundation-builder-v4.yml .github/workflows/phase18-foundation-builder-v5.yml
           git add crates/ucr-model crates/ucr-protocol crates/ucr-core crates/ucr-storage-memory Cargo.lock
           git commit -m "Wire Phase 18 canonical group foundation [phase18-foundation-built]"
           git push origin HEAD:phase18-groups
