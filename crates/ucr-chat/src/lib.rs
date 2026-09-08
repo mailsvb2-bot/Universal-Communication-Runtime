@@ -387,7 +387,9 @@ fn require_direct_message(message: &MessageEnvelope) -> Result<(), ChatError> {
     if message.relations.iter().any(|relation| {
         !matches!(
             relation.kind,
-            MessageRelationKind::Reply | MessageRelationKind::Quote | MessageRelationKind::Reference
+            MessageRelationKind::Reply
+                | MessageRelationKind::Quote
+                | MessageRelationKind::Reference
         )
     }) {
         return Err(ChatError::UnsupportedMessageRelation);

@@ -140,7 +140,10 @@ fn direct_chat_send_and_bounded_transcript_reuse_canonical_message_store() {
     );
     let later = message("message-later", 20, b"later");
     let earlier = message("message-earlier", 10, b"earlier");
-    assert_eq!(chat.send_text(&subject(), &later), Ok(DurableRecordStatus::Persisted));
+    assert_eq!(
+        chat.send_text(&subject(), &later),
+        Ok(DurableRecordStatus::Persisted)
+    );
     assert_eq!(
         chat.send_text(&subject(), &earlier),
         Ok(DurableRecordStatus::Persisted)
@@ -151,16 +154,22 @@ fn direct_chat_send_and_bounded_transcript_reuse_canonical_message_store() {
             &subject(),
             &scope(),
             &direct.conversation.conversation_id,
-            &[later.message_id.clone(), earlier.message_id.clone(), later.message_id.clone()],
+            &[
+                later.message_id.clone(),
+                earlier.message_id.clone(),
+                later.message_id.clone(),
+            ],
         )
         .expect("load transcript");
     assert_eq!(transcript.len(), 2);
     assert_eq!(transcript[0].message_id, earlier.message_id);
     assert_eq!(transcript[1].message_id, later.message_id);
-    assert!(store
-        .message(&scope(), &transcript[0].message_id)
-        .expect("canonical message read")
-        .is_some());
+    assert!(
+        store
+            .message(&scope(), &transcript[0].message_id)
+            .expect("canonical message read")
+            .is_some()
+    );
 }
 
 #[test]
@@ -175,10 +184,17 @@ fn phase17_rejects_group_conversation_instead_of_implementing_phase18_implicitly
         chat.open_direct_chat(&subject(), &conversation(ConversationKind::PrivateGroup)),
         Err(ChatError::NonDirectConversation)
     );
-    assert!(store
-        .conversation(&scope(), &conversation(ConversationKind::PrivateGroup).conversation.conversation_id)
-        .expect("conversation lookup")
-        .is_none());
+    assert!(
+        store
+            .conversation(
+                &scope(),
+                &conversation(ConversationKind::PrivateGroup)
+                    .conversation
+                    .conversation_id
+            )
+            .expect("conversation lookup")
+            .is_none()
+    );
 }
 
 #[test]
@@ -189,9 +205,11 @@ fn read_requires_delivered_state_and_records_read_by_user_through_delivery_owner
     let clock = FixedClock(10_000);
     let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
     let direct = conversation(ConversationKind::Direct);
-    chat.open_direct_chat(&subject(), &direct).expect("open direct chat");
+    chat.open_direct_chat(&subject(), &direct)
+        .expect("open direct chat");
     let chat_message = message("message-read", 10, b"read me");
-    chat.send_text(&subject(), &chat_message).expect("send message");
+    chat.send_text(&subject(), &chat_message)
+        .expect("send message");
 
     let delivery_id = DeliveryId::from_opaque(oid("delivery-read"));
     let attempt = DeliveryAttempt {
@@ -211,7 +229,13 @@ fn read_requires_delivered_state_and_records_read_by_user_through_delivery_owner
         .create_delivery_attempt(&attempt, &persisted)
         .expect("create delivery");
     assert_eq!(
-        chat.mark_read(&subject(), &scope(), &delivery_id, &chat_message.message_id, 4),
+        chat.mark_read(
+            &subject(),
+            &scope(),
+            &delivery_id,
+            &chat_message.message_id,
+            4
+        ),
         Err(ChatError::ReadRequiresDelivered)
     );
 
@@ -259,11 +283,23 @@ fn read_requires_delivered_state_and_records_read_by_user_through_delivery_owner
         .expect("deliver message");
 
     assert_eq!(
-        chat.mark_read(&subject(), &scope(), &delivery_id, &chat_message.message_id, 4),
+        chat.mark_read(
+            &subject(),
+            &scope(),
+            &delivery_id,
+            &chat_message.message_id,
+            4
+        ),
         Ok(DurableRecordStatus::Persisted)
     );
     assert_eq!(
-        chat.mark_read(&subject(), &scope(), &delivery_id, &chat_message.message_id, 5),
+        chat.mark_read(
+            &subject(),
+            &scope(),
+            &delivery_id,
+            &chat_message.message_id,
+            5
+        ),
         Ok(DurableRecordStatus::Duplicate)
     );
     assert_eq!(
@@ -284,7 +320,8 @@ fn typing_is_ttl_bounded_and_only_published_to_ephemeral_sink() {
     let clock = FixedClock(10_000);
     let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
     let direct = conversation(ConversationKind::Direct);
-    chat.open_direct_chat(&subject(), &direct).expect("open direct chat");
+    chat.open_direct_chat(&subject(), &direct)
+        .expect("open direct chat");
 
     let update = TypingUpdate {
         scope: scope(),
@@ -292,7 +329,8 @@ fn typing_is_ttl_bounded_and_only_published_to_ephemeral_sink() {
         state: TypingState::Started,
         expires_at_unix_ms: 11_000,
     };
-    chat.publish_typing(&subject(), &update).expect("publish typing");
+    chat.publish_typing(&subject(), &update)
+        .expect("publish typing");
     assert_eq!(sink.updates.lock().expect("typing lock").len(), 1);
 
     let stale = TypingUpdate {
@@ -313,7 +351,8 @@ fn service_account_typing_fails_closed_without_ephemeral_admission_gate() {
     let clock = FixedClock(10_000);
     let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
     let direct = conversation(ConversationKind::Direct);
-    chat.open_direct_chat(&subject(), &direct).expect("open direct chat");
+    chat.open_direct_chat(&subject(), &direct)
+        .expect("open direct chat");
     let mut service = subject();
     service.principal.kind = PrincipalKind::ServiceAccount;
     let update = TypingUpdate {

@@ -65,7 +65,8 @@ fn typing_above_ttl_ceiling_is_rejected() {
         },
         parent_conversation_id: None,
     };
-    chat.open_direct_chat(&subject(), &conversation).expect("chat");
+    chat.open_direct_chat(&subject(), &conversation)
+        .expect("chat");
     let update = TypingUpdate {
         scope: scope(),
         conversation_id: conversation.conversation.conversation_id,

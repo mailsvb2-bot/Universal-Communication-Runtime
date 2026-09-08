@@ -13,8 +13,8 @@ fn phase17_chat_is_thin_prepared_layer_over_canonical_owners() {
     let workspace = workspace();
     let root = fs::read_to_string(workspace.join("Cargo.toml")).expect("workspace manifest");
     let chat = fs::read_to_string(workspace.join("crates/ucr-chat/src/lib.rs")).expect("chat");
-    let manifest = fs::read_to_string(workspace.join("crates/ucr-chat/Cargo.toml"))
-        .expect("chat manifest");
+    let manifest =
+        fs::read_to_string(workspace.join("crates/ucr-chat/Cargo.toml")).expect("chat manifest");
     let spec = fs::read_to_string(workspace.join("spec/chat.md")).expect("chat spec");
     let adr = fs::read_to_string(workspace.join(
         "docs/adr/0055-phase17-chat-reuses-canonical-conversation-message-and-delivery-owners.md",
@@ -60,7 +60,10 @@ fn phase17_chat_creates_no_second_message_conversation_delivery_or_route_brain()
         "RoutePlanner",
         "TransportOrchestrator",
     ] {
-        assert!(!chat.contains(forbidden), "Phase 17 leaked second owner: {forbidden}");
+        assert!(
+            !chat.contains(forbidden),
+            "Phase 17 leaked second owner: {forbidden}"
+        );
     }
     assert!(chat.contains("load_transcript_batch"));
     assert!(chat.contains(".message(subject, scope"));

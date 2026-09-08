@@ -1,4 +1,6 @@
-use ucr_chat::{ChatClock, ChatClockError, ChatError, ChatRuntime, EphemeralChatError, EphemeralChatSink};
+use ucr_chat::{
+    ChatClock, ChatClockError, ChatError, ChatRuntime, EphemeralChatError, EphemeralChatSink,
+};
 use ucr_core::AuthorizationEvaluator;
 use ucr_model::{
     AuthorizationRequest, ConversationId, ConversationKind, ConversationRecord, ConversationRef,

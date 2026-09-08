@@ -1,10 +1,12 @@
-use ucr_chat::{ChatClock, ChatClockError, ChatError, ChatRuntime, EphemeralChatError, EphemeralChatSink};
+use ucr_chat::{
+    ChatClock, ChatClockError, ChatError, ChatRuntime, EphemeralChatError, EphemeralChatSink,
+};
 use ucr_core::AuthorizationEvaluator;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AttachmentId, AuthorizationRequest, ConversationId,
     ConversationKind, ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy,
-    DeliveryState, DeviceId, DeviceRef, IdentityId, MessageEnvelope, MessageId, OpaqueId, OriginRef,
-    PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantId, TenantScope,
+    DeliveryState, DeviceId, DeviceRef, IdentityId, MessageEnvelope, MessageId, OpaqueId,
+    OriginRef, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_protocol::CanonicalError;
 use ucr_storage_memory::MemoryLocalStore;
@@ -96,7 +98,8 @@ fn attachment_is_not_silently_claimed_as_phase17_text_chat() {
     };
     let store = MemoryLocalStore::default();
     let chat = ChatRuntime::new(&Clock, &Allow, &store, &Sink);
-    chat.open_direct_chat(&subject, &conversation).expect("open chat");
+    chat.open_direct_chat(&subject, &conversation)
+        .expect("open chat");
     assert_eq!(
         chat.send_text(&subject, &message),
         Err(ChatError::AttachmentsOutsidePhase17)
