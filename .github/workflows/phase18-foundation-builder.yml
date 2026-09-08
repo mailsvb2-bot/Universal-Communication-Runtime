@@ -1,0 +1,373 @@
+name: Phase18 Foundation Builder
+
+on:
+  push:
+    branches: [phase18-groups]
+
+permissions:
+  contents: write
+
+jobs:
+  build-foundation:
+    if: ${{ !contains(github.event.head_commit.message, '[phase18-foundation-built]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: phase18-groups
+      - name: Patch canonical owners
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if new in text:
+                  return
+              if old not in text:
+                  raise SystemExit(f'marker missing in {path}: {old[:100]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          # Model exports.
+          once('crates/ucr-model/src/lib.rs',
+               'use core::fmt;\n',
+               'use core::fmt;\n\nmod group;\npub use group::{\n    GroupBridgeMapping, GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy,\n    GroupMediaState, GroupMemberState, GroupMembership, GroupOwnership, GroupPermission,\n    GroupRecord, GroupRole, PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,\n};\n')
+
+          # Protocol module + exports.
+          once('crates/ucr-protocol/src/lib.rs', 'mod framing;\n', 'mod framing;\nmod group;\n')
+          once('crates/ucr-protocol/src/lib.rs',
+               'pub use framing::{\n',
+               'pub use group::{\n    GROUP_CHANGE_FINGERPRINT_V1_DOMAIN, GROUP_MLS_CAPABILITY, GroupError, GroupTransition,\n    MAX_EXTERNAL_GROUP_ID_LEN, MAX_GROUP_BRIDGE_MAPPINGS, MAX_GROUP_HISTORY_MESSAGES,\n    MAX_GROUP_MEMBER_LIST, MAX_GROUP_MEMBERS, apply_group_change, canonical_group_creation,\n    canonical_group_membership, canonical_group_memberships, canonical_group_record,\n    group_change_event_type, group_change_fingerprint, group_permissions_for_role,\n    is_group_conversation_kind, validate_group_member_list_limit,\n};\npub use framing::{\n')
+
+          # Core module + exports.
+          once('crates/ucr-core/src/lib.rs', 'mod id;\n', 'mod group;\nmod id;\n')
+          once('crates/ucr-core/src/lib.rs',
+               'pub use event_api::{\n',
+               'pub use group::{GroupMessageStore, GroupStore};\npub use event_api::{\n')
+
+          # Permission registry.
+          p = Path('crates/ucr-protocol/src/authorization.rs')
+          text = p.read_text()
+          marker = 'pub const MESSAGE_WRITE_PERMISSION: &str = "ucr.message.write";\n'
+          addition = marker + 'pub const GROUP_CREATE_PERMISSION: &str = "ucr.group.create";\npub const GROUP_READ_PERMISSION: &str = "ucr.group.read";\npub const GROUP_MANAGE_PERMISSION: &str = "ucr.group.manage";\n'
+          if 'GROUP_CREATE_PERMISSION' not in text:
+              if marker not in text: raise SystemExit('permission marker missing')
+              text = text.replace(marker, addition, 1)
+          registry_marker = '    MESSAGE_WRITE_PERMISSION,\n'
+          registry_add = registry_marker + '    GROUP_CREATE_PERMISSION,\n    GROUP_READ_PERMISSION,\n    GROUP_MANAGE_PERMISSION,\n'
+          if registry_add not in text:
+              if registry_marker not in text: raise SystemExit('registry marker missing')
+              text = text.replace(registry_marker, registry_add, 1)
+          p.write_text(text)
+
+          # Protocol re-export permission constants.
+          p = Path('crates/ucr-protocol/src/lib.rs')
+          text = p.read_text()
+          old = '    GrantValidationError, IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION,\n'
+          new = '    GROUP_CREATE_PERMISSION, GROUP_MANAGE_PERMISSION, GROUP_READ_PERMISSION,\n    GrantValidationError, IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION,\n'
+          if new not in text:
+              if old not in text: raise SystemExit('protocol auth export marker missing')
+              text = text.replace(old, new, 1)
+          p.write_text(text)
+
+          # Authorized runtime imports.
+          p = Path('crates/ucr-core/src/authorized_runtime.rs')
+          text = p.read_text()
+          text = text.replace(
+              '    ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,\n',
+              '    ConversationId, ConversationKind, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,\n', 1)
+          text = text.replace(
+              '    EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding, IdentityId,\n',
+              '    EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding, GroupChange,\n    GroupId, GroupMemberState, GroupMembership, GroupRecord, IdentityId,\n', 1)
+          text = text.replace(
+              '    IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,\n',
+              '    GROUP_CREATE_PERMISSION, GROUP_MANAGE_PERMISSION, GROUP_READ_PERMISSION,\n    IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,\n', 1)
+          text = text.replace(
+              '    EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, IdentityStore,\n',
+              '    EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, GroupMessageStore,\n    GroupStore, IdentityStore,\n', 1)
+
+          # Replace generic Message runtime block so group data cannot bypass membership.
+          start_marker = "impl<A, S> AuthorizedDurableRuntime<'_, A, S>\nwhere\n    A: AuthorizationEvaluator,\n    S: MessageStore,\n{"
+          start = text.find(start_marker)
+          if start < 0: raise SystemExit('message runtime block start missing')
+          next_block = text.find("\n}\n\nimpl<A, S> AuthorizedDurableRuntime<'_, A, S>", start)
+          if next_block < 0: raise SystemExit('message runtime block end missing')
+          end = next_block + 3
+          replacement = r'''impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: MessageStore,
+{
+    /// Persists a non-group Message through the generic durable boundary.
+    /// Group Messages are deliberately denied here and must use the membership-gated Group path.
+    pub fn persist_message(
+        &self,
+        subject: &ScopedPrincipal,
+        message: &MessageEnvelope,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &message.scope, MESSAGE_WRITE_PERMISSION)?;
+        if matches!(
+            message.conversation.kind,
+            ConversationKind::PrivateGroup | ConversationKind::PublicGroup
+        ) {
+            return Err(AuthorizedMutationError::Store(DurableStoreError::PermissionDenied));
+        }
+        self.store
+            .persist_message(message)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Reads a non-group Message through the generic durable boundary.
+    /// Existing group Messages are hidden from this path to avoid membership/existence bypass.
+    pub fn message(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        message_id: &MessageId,
+    ) -> Result<Option<MessageEnvelope>, AuthorizedMutationError> {
+        self.require(subject, scope, MESSAGE_READ_PERMISSION)?;
+        let message = self
+            .store
+            .message(scope, message_id)
+            .map_err(AuthorizedMutationError::Store)?;
+        Ok(message.filter(|value| {
+            !matches!(
+                value.conversation.kind,
+                ConversationKind::PrivateGroup | ConversationKind::PublicGroup
+            )
+        }))
+    }
+}'''
+          text = text[:start] + replacement + text[end:]
+
+          # Add Group façade before tests.
+          if 'pub fn create_group(' not in text:
+              insert_at = text.find('\n#[cfg(test)]\nmod tests')
+              if insert_at < 0: raise SystemExit('authorized runtime tests marker missing')
+              group_impl = r'''
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: GroupStore,
+{
+    pub fn create_group(
+        &self,
+        subject: &ScopedPrincipal,
+        conversation: &ConversationRecord,
+        group: &GroupRecord,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &group.scope, CONVERSATION_WRITE_PERMISSION)?;
+        self.require(subject, &group.scope, GROUP_CREATE_PERMISSION)?;
+        self.store
+            .create_group(conversation, group, subject)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    pub fn group(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+    ) -> Result<Option<GroupRecord>, AuthorizedMutationError> {
+        self.require(subject, scope, GROUP_READ_PERMISSION)?;
+        let Some(group) = self
+            .store
+            .group(scope, group_id)
+            .map_err(AuthorizedMutationError::Store)?
+        else {
+            return Ok(None);
+        };
+        if group.conversation.kind == ConversationKind::PrivateGroup {
+            let membership = self
+                .store
+                .group_membership(scope, group_id, &subject.principal)
+                .map_err(AuthorizedMutationError::Store)?;
+            if !membership.is_some_and(|value| value.state == GroupMemberState::Active) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(group))
+    }
+
+    pub fn group_membership(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        member: &ucr_model::PrincipalRef,
+    ) -> Result<Option<GroupMembership>, AuthorizedMutationError> {
+        self.require(subject, scope, GROUP_READ_PERMISSION)?;
+        let caller = self
+            .store
+            .group_membership(scope, group_id, &subject.principal)
+            .map_err(AuthorizedMutationError::Store)?;
+        if !caller.is_some_and(|value| value.state == GroupMemberState::Active) {
+            return Ok(None);
+        }
+        self.store
+            .group_membership(scope, group_id, member)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    pub fn group_memberships(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<GroupMembership>, AuthorizedMutationError> {
+        self.require(subject, scope, GROUP_READ_PERMISSION)?;
+        let caller = self
+            .store
+            .group_membership(scope, group_id, &subject.principal)
+            .map_err(AuthorizedMutationError::Store)?;
+        if !caller.is_some_and(|value| value.state == GroupMemberState::Active) {
+            return Err(AuthorizedMutationError::Store(DurableStoreError::PermissionDenied));
+        }
+        self.store
+            .group_memberships(scope, group_id, max_items)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    pub fn apply_group_change(
+        &self,
+        subject: &ScopedPrincipal,
+        change: &GroupChange,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &change.scope, GROUP_MANAGE_PERMISSION)?;
+        self.store
+            .apply_group_change(subject, change)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: GroupMessageStore,
+{
+    pub fn persist_group_message(
+        &self,
+        subject: &ScopedPrincipal,
+        message: &MessageEnvelope,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &message.scope, MESSAGE_WRITE_PERMISSION)?;
+        self.store
+            .persist_group_message(subject, message)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    pub fn group_message(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        message_id: &MessageId,
+    ) -> Result<Option<MessageEnvelope>, AuthorizedMutationError> {
+        self.require(subject, scope, MESSAGE_READ_PERMISSION)?;
+        self.store
+            .group_message(subject, scope, message_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+'''
+              text = text[:insert_at] + group_impl + text[insert_at:]
+          p.write_text(text)
+
+          # Memory store wiring + shared Message helper.
+          p = Path('crates/ucr-storage-memory/src/lib.rs')
+          text = p.read_text()
+          if 'mod group_store;' not in text:
+              text = text.replace('#![forbid(unsafe_code)]\n', '#![forbid(unsafe_code)]\n\nmod group_store;\n', 1)
+          text = text.replace('const SCHEMA_VERSION: u32 = 10;', 'const SCHEMA_VERSION: u32 = 11;')
+          text = text.replace(
+              '    ExternalIdentityBinding, IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId,\n',
+              '    ExternalIdentityBinding, GroupMembership, GroupRecord, IdentityId, IdentityRecord,\n    IntegrationId, IntentId, KeyId,\n', 1)
+          type_marker = 'type ConversationKey = (ScopeKey, String);\n'
+          type_add = type_marker + 'type GroupKey = (ScopeKey, String);\ntype GroupMembershipKey = (ScopeKey, String, String);\ntype GroupChangeKey = (ScopeKey, String, String);\n'
+          if 'type GroupMembershipKey' not in text:
+              if type_marker not in text: raise SystemExit('memory type marker missing')
+              text = text.replace(type_marker, type_add, 1)
+          state_marker = '    conversations: HashMap<ConversationKey, ConversationRecord>,\n'
+          state_add = state_marker + '    groups: HashMap<GroupKey, GroupRecord>,\n    group_memberships: HashMap<GroupMembershipKey, GroupMembership>,\n    group_changes: HashMap<GroupChangeKey, [u8; 32]>,\n'
+          if 'group_memberships: HashMap' not in text:
+              if state_marker not in text: raise SystemExit('memory state marker missing')
+              text = text.replace(state_marker, state_add, 1)
+
+          mstart = text.find('impl MessageStore for MemoryLocalStore {')
+          mend = text.find('\nimpl DeliveryStore for MemoryLocalStore {', mstart)
+          if mstart < 0 or mend < 0: raise SystemExit('memory MessageStore block missing')
+          message_block = r'''fn persist_message_in_state(
+    state: &mut MemoryState,
+    message: &MessageEnvelope,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+    let mut persisted = canonical_message(message).map_err(|_| DurableStoreError::InvalidRecord)?;
+    if !matches!(
+        persisted.delivery_state,
+        DeliveryState::Created | DeliveryState::Persisted
+    ) {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    let conversation_key =
+        conversation_key(&persisted.scope, &persisted.conversation.conversation_id);
+    let conversation = state
+        .conversations
+        .get(&conversation_key)
+        .ok_or(DurableStoreError::InvalidRecord)?;
+    if conversation.conversation != persisted.conversation {
+        return Err(DurableStoreError::Conflict);
+    }
+    let key = message_key(&persisted.scope, &persisted.message_id);
+    persisted.delivery_state = DeliveryState::Persisted;
+    if let Some(existing) = state.messages.get(&key) {
+        return if existing == &persisted {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    state.messages.insert(key, persisted);
+    Ok(DurableRecordStatus::Persisted)
+}
+
+impl MessageStore for MemoryLocalStore {
+    fn persist_message(
+        &self,
+        message: &MessageEnvelope,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        persist_message_in_state(&mut state, message)
+    }
+
+    fn message(
+        &self,
+        scope: &TenantScope,
+        message_id: &MessageId,
+    ) -> Result<Option<MessageEnvelope>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state.messages.get(&message_key(scope, message_id)).cloned())
+    }
+}
+'''
+          text = text[:mstart] + message_block + text[mend:]
+          p.write_text(text)
+          PY
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Format
+        run: cargo fmt --all
+      - name: Check foundation
+        run: cargo check -p ucr-model -p ucr-protocol -p ucr-core -p ucr-storage-memory
+      - name: Clippy foundation
+        run: cargo clippy -p ucr-model -p ucr-protocol -p ucr-core -p ucr-storage-memory --all-targets -- -D warnings
+      - name: Test foundation
+        run: cargo test -p ucr-protocol -p ucr-storage-memory
+      - name: Commit verified foundation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/ucr-model crates/ucr-protocol crates/ucr-core crates/ucr-storage-memory Cargo.lock
+          git commit -m "Wire Phase 18 canonical group foundation [phase18-foundation-built]"
+          git push origin HEAD:phase18-groups
