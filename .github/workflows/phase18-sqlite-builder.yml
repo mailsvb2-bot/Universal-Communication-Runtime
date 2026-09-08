@@ -1,0 +1,39 @@
+name: Phase18 SQLite Builder
+
+on:
+  push:
+    branches: [phase18-groups]
+    paths:
+      - .github/workflows/phase18-sqlite-builder.yml
+
+permissions:
+  contents: write
+
+jobs:
+  sqlite-v21:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: phase18-groups
+      - name: Apply SQLite v21 wiring
+        run: python3 .github/phase18_sqlite_wiring.py
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Format
+        run: cargo fmt --all
+      - name: Check SQLite Group owner
+        run: cargo check -p ucr-storage-sqlite --all-targets
+      - name: Clippy SQLite Group owner
+        run: cargo clippy -p ucr-storage-sqlite --all-targets -- -D warnings
+      - name: Test SQLite Group owner
+        run: cargo test -p ucr-storage-sqlite
+      - name: Commit verified SQLite v21
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/phase18_sqlite_wiring.py .github/workflows/phase18-sqlite-builder.yml
+          git add crates/ucr-storage-sqlite Cargo.lock
+          git commit -m "Add restart-safe Phase 18 SQLite Group owner"
+          git push origin HEAD:phase18-groups
