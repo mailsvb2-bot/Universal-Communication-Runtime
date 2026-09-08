@@ -50,3 +50,61 @@ once(
     "    transaction\n        .pragma_update(None, \"user_version\", SQLITE_SCHEMA_VERSION)\n        .map_err(|error| map_sqlite_error(&error))?;\n    transaction\n        .commit()\n        .map_err(|error| map_sqlite_error(&error))?;\n    event_subscription_store::verify_schema_v20(connection)\n}\n\nfn verify_schema_v2",
     "    transaction\n        .pragma_update(None, \"user_version\", SQLITE_SCHEMA_V20)\n        .map_err(|error| map_sqlite_error(&error))?;\n    transaction\n        .commit()\n        .map_err(|error| map_sqlite_error(&error))?;\n    event_subscription_store::verify_schema_v20(connection)\n}\n\nfn migrate_v20_to_v21(connection: &mut Connection) -> Result<(), DurableStoreError> {\n    event_subscription_store::verify_schema_v20(connection)?;\n    let transaction = connection\n        .transaction_with_behavior(TransactionBehavior::Immediate)\n        .map_err(|error| map_sqlite_error(&error))?;\n    group_store::create_v21_objects(&transaction)?;\n    transaction\n        .pragma_update(None, \"user_version\", SQLITE_SCHEMA_VERSION)\n        .map_err(|error| map_sqlite_error(&error))?;\n    transaction\n        .commit()\n        .map_err(|error| map_sqlite_error(&error))?;\n    group_store::verify_schema_v21(connection)\n}\n\nfn verify_schema_v2",
 )
+
+# Keep the SQLite decoder below strict Clippy's argument ceiling without suppressions.
+p = Path("crates/ucr-storage-sqlite/src/group_store.rs")
+text = p.read_text()
+old_call_one = '''    decode_membership(&group, member.principal_id.clone(), stored_kind, &row.1, &row.2, &row.3, row.4.as_deref(), &row.5).map(Some)'''
+new_call_one = '''    let fields = StoredMembershipFields { role: &row.1, state: &row.2, joined: &row.3, removed: row.4.as_deref(), floor: &row.5 };
+    decode_membership(&group, member.principal_id.clone(), stored_kind, &fields).map(Some)'''
+if old_call_one in text:
+    text = text.replace(old_call_one, new_call_one, 1)
+old_call_two = '''        result.push(decode_membership(group, PrincipalId::from_opaque(parse_id(&row.0)?), kind, &row.2, &row.3, &row.4, row.5.as_deref(), &row.6)?);'''
+new_call_two = '''        let fields = StoredMembershipFields { role: &row.2, state: &row.3, joined: &row.4, removed: row.5.as_deref(), floor: &row.6 };
+        result.push(decode_membership(group, PrincipalId::from_opaque(parse_id(&row.0)?), kind, &fields)?);'''
+if old_call_two in text:
+    text = text.replace(old_call_two, new_call_two, 1)
+old_fn = '''fn decode_membership(group: &GroupRecord, principal_id: PrincipalId, kind: PrincipalKind, role: &str, state: &str, joined: &[u8], removed: Option<&[u8]>, floor: &[u8]) -> Result<GroupMembership, DurableStoreError> {
+    let role = parse_role(role)?;
+    let membership = GroupMembership {
+        scope: group.scope.clone(), group_id: group.group_id.clone(),
+        member: PrincipalRef { principal_id, kind }, role,
+        permissions: group_permissions_for_role(role), state: parse_member_state(state)?,
+        joined_revision: decode_u64(joined)?,
+        removed_revision: removed.map(decode_u64).transpose()?,
+        history_floor_logical_order: decode_u64(floor)?,
+    };
+    ucr_protocol::canonical_group_membership(group, &membership).map_err(map_group_error)
+}
+'''
+new_fn = '''struct StoredMembershipFields<'a> {
+    role: &'a str,
+    state: &'a str,
+    joined: &'a [u8],
+    removed: Option<&'a [u8]>,
+    floor: &'a [u8],
+}
+
+fn decode_membership(
+    group: &GroupRecord,
+    principal_id: PrincipalId,
+    kind: PrincipalKind,
+    fields: &StoredMembershipFields<'_>,
+) -> Result<GroupMembership, DurableStoreError> {
+    let role = parse_role(fields.role)?;
+    let membership = GroupMembership {
+        scope: group.scope.clone(), group_id: group.group_id.clone(),
+        member: PrincipalRef { principal_id, kind }, role,
+        permissions: group_permissions_for_role(role), state: parse_member_state(fields.state)?,
+        joined_revision: decode_u64(fields.joined)?,
+        removed_revision: fields.removed.map(decode_u64).transpose()?,
+        history_floor_logical_order: decode_u64(fields.floor)?,
+    };
+    ucr_protocol::canonical_group_membership(group, &membership).map_err(map_group_error)
+}
+'''
+if new_fn not in text:
+    if old_fn not in text:
+        raise SystemExit("decode_membership marker missing")
+    text = text.replace(old_fn, new_fn, 1)
+p.write_text(text)
