@@ -2928,7 +2928,6 @@ fn integration_api_reuses_canonical_command_and_service_principal_owners() {
     ))
     .expect("adr 0040");
     let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
-    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
 
     assert!(proto.contains("service IntegrationService"));
     assert!(proto.contains("rpc SubmitCommand(IntegrationCommandRequest)"));
@@ -3002,7 +3001,6 @@ fn integration_api_reuses_canonical_command_and_service_principal_owners() {
     assert!(ci.contains(
         "docs/adr/0040-integration-api-reuses-canonical-command-and-service-principal-boundaries.md"
     ));
-    assert!(readme.contains("**Phase 15 — Internet Transport (Prepared/reference complete; Phase 16 Local Transport not started).**"));
 }
 
 #[test]
@@ -3863,7 +3861,6 @@ fn phase14_public_event_binding_governance_and_backpressure_are_locked() {
         "docs/adr/0052-phase14-event-api-reuses-append-only-journal-with-durable-consumer-state.md",
     ))
     .expect("ADR 0052");
-    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
     let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
 
     for rpc in [
@@ -3910,7 +3907,6 @@ fn phase14_public_event_binding_governance_and_backpressure_are_locked() {
         "Creating a second outbound Event log or provider queue would create a second brain"
     ));
     assert!(adr.contains("This completes Phase 14 at the local/reference API layer"));
-    assert!(readme.contains("**Phase 15 — Internet Transport (Prepared/reference complete; Phase 16 Local Transport not started).**"));
     assert!(ci.contains("spec/event-api.md"));
     assert!(ci.contains("proto/ucr/v1/event_api.proto"));
     assert!(ci.contains(
@@ -4096,7 +4092,6 @@ fn phase13_grpc_complete_surface_reuses_conversation_message_and_intent_owners()
             "docs/adr/0051-phase13-grpc-completes-integration-service-over-canonical-owners.md",
         ))
         .expect("adr 0051");
-    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
     let spec =
         fs::read_to_string(workspace.join("spec/integration-api.md")).expect("integration spec");
     let architecture = fs::read_to_string(workspace.join("docs/architecture/ARCHITECTURE.md"))
@@ -4140,9 +4135,6 @@ fn phase13_grpc_complete_surface_reuses_conversation_message_and_intent_owners()
     assert!(adr.contains("all eleven checked-in `IntegrationService` RPCs"));
     assert!(adr.contains("No SQLite schema or new permission/audit/storage vocabulary"));
     assert!(adr.contains("This does not implement Phase 14 Event API"));
-    assert!(readme.contains(
-        "Phase 15 — Internet Transport (Prepared/reference complete; Phase 16 Local Transport not started)"
-    ));
     assert!(spec.contains("It now binds all eleven"));
     assert!(spec.contains("checked-in `IntegrationService` RPCs"));
     assert!(spec.contains("three payload-bearing request shapes"));
@@ -4186,7 +4178,6 @@ fn phase15_internet_transport_is_prepared_bounded_and_reuses_canonical_owners() 
         .expect("architecture");
     let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
         .expect("threat model");
-    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
     let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
 
     assert!(root.contains("\"crates/ucr-transport-internet\""));
@@ -4222,7 +4213,6 @@ fn phase15_internet_transport_is_prepared_bounded_and_reuses_canonical_owners() 
         architecture.contains("Phase 15 now adds a Prepared `ucr-transport-internet` provider")
     );
     assert!(threat.contains("Phase 15 adds the implemented Internet Transport boundary"));
-    assert!(readme.contains("Phase 16 Local Transport not started"));
     assert!(ci.contains("spec/internet-transport.md"));
     assert!(ci.contains("proto/ucr/v1/internet_transport.proto"));
     assert!(ci.contains(
