@@ -28,8 +28,8 @@ for marker, doc in docs.items():
     pos = text.find(marker)
     if pos < 0:
         raise SystemExit(f"authorized runtime marker missing: {marker.strip()}")
-    prefix = text[max(0, pos - 500):pos]
-    if "# Errors" not in prefix:
+    prefix = text[max(0, pos - 700):pos]
+    if doc.strip() not in prefix:
         text = text[:pos] + doc + text[pos:]
 
 path.write_text(text)
