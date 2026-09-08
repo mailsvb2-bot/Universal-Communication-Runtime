@@ -27,7 +27,7 @@ Transport or Relay acknowledgement is never promoted to `READ`. Phase 17 advance
 
 ## Transcript projection
 
-Phase 17 does not add a parallel timeline index. `load_transcript_batch` accepts a bounded list of canonical Message IDs, reads those Messages through the existing authorized Message owner, rejects cross-conversation material, and produces a deterministic projection. Message IDs may come from existing Event, Sync, integration, or future canonical query surfaces.
+Phase 17 does not add a parallel timeline index. `load_transcript_batch` accepts a bounded list of canonical Message IDs, reads those Messages through the existing authorized Message owner, rejects cross-conversation material, and produces a deterministic projection. The projection is bounded both by `MAX_TRANSCRIPT_BATCH_ITEMS` and by `MAX_TRANSCRIPT_BATCH_BYTES`; the aggregate byte budget counts Message content plus variable envelope material such as IDs, relations, crypto metadata, extensions, external mappings, correlation data, and signatures so item-count limits cannot be bypassed through large canonical Messages. Message IDs may come from existing Event, Sync, integration, or future canonical query surfaces.
 
 ## Security and scope
 

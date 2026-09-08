@@ -15,9 +15,17 @@ use ucr_model::{
     DeliveryEvidenceKind, DeliveryId, DeliveryState, MessageEnvelope, MessageId,
     MessageRelationKind, PrincipalKind, ScopedPrincipal, TenantScope,
 };
-use ucr_protocol::{CanonicalError, CanonicalErrorCode, MESSAGE_WRITE_PERMISSION};
+use ucr_protocol::{
+    CanonicalError, CanonicalErrorCode, DEFAULT_MAX_PAYLOAD_LEN, MESSAGE_WRITE_PERMISSION,
+};
 
 pub const MAX_TRANSCRIPT_BATCH_ITEMS: usize = 256;
+/// Aggregate semantic-memory budget for one transcript projection.
+///
+/// The budget is intentionally independent from item count: two maximum-size canonical text
+/// payloads already consume the full payload allowance before envelope metadata is counted.
+pub const MAX_TRANSCRIPT_BATCH_BYTES: usize = 2 * DEFAULT_MAX_PAYLOAD_LEN as usize;
+const TRANSCRIPT_MESSAGE_FIXED_OVERHEAD_BYTES: usize = 64;
 pub const MAX_TYPING_TTL_MS: i64 = 15_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +107,7 @@ pub enum ChatError {
     AttachmentsOutsidePhase17,
     UnsupportedMessageRelation,
     TranscriptBatchSize,
+    TranscriptBatchBytes,
     NotFound,
     MessageOutsideConversation,
     DeliveryMessageMismatch,
@@ -214,7 +223,8 @@ where
     /// logical order and then Message ID for deterministic ties.
     ///
     /// # Errors
-    /// Rejects empty/oversized batches, cross-scope/cross-conversation Messages, or read failures.
+    /// Rejects empty/oversized item batches, aggregate semantic-byte budget exhaustion,
+    /// cross-scope/cross-conversation Messages, or read failures.
     pub fn load_transcript_batch(
         &self,
         subject: &ScopedPrincipal,
@@ -230,6 +240,7 @@ where
         let unique_ids = message_ids.iter().cloned().collect::<BTreeSet<_>>();
         let runtime = AuthorizedDurableRuntime::new(self.authorization, self.store);
         let mut messages = Vec::with_capacity(unique_ids.len());
+        let mut transcript_bytes = 0_usize;
         for message_id in unique_ids {
             let message = runtime
                 .message(subject, scope, &message_id)?
@@ -237,6 +248,12 @@ where
             require_direct_message(&message)?;
             if message.conversation.conversation_id != *conversation_id {
                 return Err(ChatError::MessageOutsideConversation);
+            }
+            transcript_bytes = transcript_bytes
+                .checked_add(transcript_message_semantic_bytes(&message))
+                .ok_or(ChatError::TranscriptBatchBytes)?;
+            if transcript_bytes > MAX_TRANSCRIPT_BATCH_BYTES {
+                return Err(ChatError::TranscriptBatchBytes);
             }
             messages.push(message);
         }
@@ -369,6 +386,151 @@ where
             .authorize(&request)
             .map_err(ChatError::Authorization)
     }
+}
+
+fn transcript_message_semantic_bytes(message: &MessageEnvelope) -> usize {
+    let mut bytes = TRANSCRIPT_MESSAGE_FIXED_OVERHEAD_BYTES
+        .saturating_add(message.message_id.as_opaque().as_wire_bytes().len())
+        .saturating_add(message.scope.tenant_id.as_opaque().as_wire_bytes().len())
+        .saturating_add(
+            message
+                .scope
+                .namespace_id
+                .as_ref()
+                .map_or(0, |id| id.as_opaque().as_wire_bytes().len()),
+        )
+        .saturating_add(
+            message
+                .conversation
+                .conversation_id
+                .as_opaque()
+                .as_wire_bytes()
+                .len(),
+        )
+        .saturating_add(message.author.actor_id.as_opaque().as_wire_bytes().len())
+        .saturating_add(
+            message
+                .author
+                .on_behalf_of
+                .as_ref()
+                .map_or(0, |id| id.as_opaque().as_wire_bytes().len()),
+        )
+        .saturating_add(
+            message
+                .author_device
+                .device_id
+                .as_opaque()
+                .as_wire_bytes()
+                .len(),
+        )
+        .saturating_add(
+            message
+                .author_device
+                .identity_id
+                .as_opaque()
+                .as_wire_bytes()
+                .len(),
+        )
+        .saturating_add(message.content.len())
+        .saturating_add(
+            message
+                .attachment_ids
+                .iter()
+                .map(|id| id.as_opaque().as_wire_bytes().len())
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            message
+                .reply_to
+                .as_ref()
+                .map_or(0, |id| id.as_opaque().as_wire_bytes().len()),
+        )
+        .saturating_add(
+            message
+                .relations
+                .iter()
+                .map(|relation| relation.target_message_id.as_opaque().as_wire_bytes().len())
+                .sum::<usize>(),
+        );
+
+    if let Some(metadata) = &message.crypto_metadata {
+        bytes = bytes
+            .saturating_add(
+                metadata
+                    .key_id
+                    .as_ref()
+                    .map_or(0, |id| id.as_opaque().as_wire_bytes().len()),
+            )
+            .saturating_add(metadata.opaque_metadata.len());
+    }
+
+    bytes = bytes
+        .saturating_add(
+            message
+                .origin
+                .principal_id
+                .as_ref()
+                .map_or(0, |id| id.as_opaque().as_wire_bytes().len()),
+        )
+        .saturating_add(
+            message
+                .origin
+                .endpoint_id
+                .as_ref()
+                .map_or(0, |id| id.as_opaque().as_wire_bytes().len()),
+        )
+        .saturating_add(
+            message
+                .origin
+                .integration_id
+                .as_ref()
+                .map_or(0, |id| id.as_opaque().as_wire_bytes().len()),
+        )
+        .saturating_add(message.correlation.correlation_id.as_wire_bytes().len())
+        .saturating_add(
+            message
+                .correlation
+                .causation_id
+                .as_ref()
+                .map_or(0, |id| id.as_wire_bytes().len()),
+        )
+        .saturating_add(
+            message
+                .correlation
+                .idempotency_key
+                .as_ref()
+                .map_or(0, String::len),
+        )
+        .saturating_add(
+            message
+                .extensions
+                .iter()
+                .map(|extension| extension.name.len().saturating_add(extension.payload.len()))
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            message
+                .external_mappings
+                .iter()
+                .map(|mapping| {
+                    mapping
+                        .integration_id
+                        .as_opaque()
+                        .as_wire_bytes()
+                        .len()
+                        .saturating_add(mapping.external_message_id.len())
+                })
+                .sum::<usize>(),
+        );
+
+    if let Some(signature) = &message.signature {
+        bytes = bytes
+            .saturating_add(signature.key_id.as_opaque().as_wire_bytes().len())
+            .saturating_add(signature.algorithm_id.len())
+            .saturating_add(signature.signature.len());
+    }
+
+    bytes
 }
 
 fn require_exact_subject_scope(

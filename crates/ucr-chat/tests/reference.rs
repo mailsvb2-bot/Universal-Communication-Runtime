@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use ucr_chat::{
     ChatClock, ChatClockError, ChatError, ChatRuntime, EphemeralChatError, EphemeralChatSink,
-    TypingState, TypingUpdate,
+    MAX_TRANSCRIPT_BATCH_BYTES, TypingState, TypingUpdate,
 };
 use ucr_core::{
     AuthorizationEvaluator, AuthorizedMutationError, ConversationStore, DeliveryStore,
@@ -15,7 +15,9 @@ use ucr_model::{
     MessageId, NamespaceId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, PrincipalRef,
     ScopedPrincipal, TenantId, TenantScope,
 };
-use ucr_protocol::{CanonicalError, CanonicalErrorCode, DELIVERY_WRITE_PERMISSION};
+use ucr_protocol::{
+    CanonicalError, CanonicalErrorCode, DEFAULT_MAX_PAYLOAD_LEN, DELIVERY_WRITE_PERMISSION,
+};
 use ucr_storage_memory::MemoryLocalStore;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -290,6 +292,45 @@ fn direct_chat_send_and_bounded_transcript_reuse_canonical_message_store() {
             .message(&scope(), &transcript[0].message_id)
             .expect("canonical message read")
             .is_some()
+    );
+}
+
+#[test]
+fn transcript_enforces_aggregate_semantic_byte_budget() {
+    let store = MemoryLocalStore::default();
+    let authorization = AllowAll;
+    let sink = RecordingSink::default();
+    let clock = FixedClock(10_000);
+    let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
+    let direct = conversation(ConversationKind::Direct);
+    chat.open_direct_chat(&subject(), &direct)
+        .expect("open direct chat");
+
+    assert_eq!(
+        MAX_TRANSCRIPT_BATCH_BYTES,
+        2 * DEFAULT_MAX_PAYLOAD_LEN as usize
+    );
+    let first = message(
+        "message-byte-budget-a",
+        10,
+        &vec![b'a'; DEFAULT_MAX_PAYLOAD_LEN as usize],
+    );
+    let second = message(
+        "message-byte-budget-b",
+        20,
+        &vec![b'b'; DEFAULT_MAX_PAYLOAD_LEN as usize],
+    );
+    chat.send_text(&subject(), &first).expect("persist first");
+    chat.send_text(&subject(), &second).expect("persist second");
+
+    assert_eq!(
+        chat.load_transcript_batch(
+            &subject(),
+            &scope(),
+            &direct.conversation.conversation_id,
+            &[first.message_id.clone(), second.message_id.clone()],
+        ),
+        Err(ChatError::TranscriptBatchBytes)
     );
 }
 
