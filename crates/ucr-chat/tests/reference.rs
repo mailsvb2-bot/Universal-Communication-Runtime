@@ -5,7 +5,8 @@ use ucr_chat::{
     TypingState, TypingUpdate,
 };
 use ucr_core::{
-    AuthorizationEvaluator, ConversationStore, DeliveryStore, DurableRecordStatus, MessageStore,
+    AuthorizationEvaluator, AuthorizedMutationError, ConversationStore, DeliveryStore,
+    DurableRecordStatus, MessageStore,
 };
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AuthorizationRequest, ConversationKind, ConversationRecord,
@@ -14,7 +15,7 @@ use ucr_model::{
     MessageId, NamespaceId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, PrincipalRef,
     ScopedPrincipal, TenantId, TenantScope,
 };
-use ucr_protocol::{CanonicalError, CanonicalErrorCode};
+use ucr_protocol::{CanonicalError, CanonicalErrorCode, DELIVERY_WRITE_PERMISSION};
 use ucr_storage_memory::MemoryLocalStore;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -23,6 +24,19 @@ struct AllowAll;
 impl AuthorizationEvaluator for AllowAll {
     fn authorize(&self, _request: &AuthorizationRequest) -> Result<(), CanonicalError> {
         Ok(())
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct DenyDeliveryWrite;
+
+impl AuthorizationEvaluator for DenyDeliveryWrite {
+    fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError> {
+        if request.permission == DELIVERY_WRITE_PERMISSION {
+            Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -195,6 +209,43 @@ fn advance_delivery_to_delivered(
         .expect("deliver message");
 }
 
+fn advance_delivery_to_read(
+    store: &MemoryLocalStore,
+    delivery_id: &DeliveryId,
+    message_id: &MessageId,
+) {
+    advance_delivery_to_delivered(store, delivery_id, message_id);
+    let read = DeliveryEvidence {
+        delivery_id: delivery_id.clone(),
+        scope: scope(),
+        message_id: message_id.clone(),
+        kind: DeliveryEvidenceKind::ReadByUser,
+        logical_order: 4,
+    };
+    store
+        .transition_delivery(
+            &scope(),
+            delivery_id,
+            DeliveryState::Delivered,
+            DeliveryState::Read,
+            Some(&read),
+        )
+        .expect("read message");
+}
+
+fn setup_chat_message(store: &MemoryLocalStore) -> MessageEnvelope {
+    let authorization = AllowAll;
+    let sink = RecordingSink::default();
+    let clock = FixedClock(10_000);
+    let chat = ChatRuntime::new(&clock, &authorization, store, &sink);
+    chat.open_direct_chat(&subject(), &conversation(ConversationKind::Direct))
+        .expect("open direct chat");
+    let chat_message = message("message-read", 10, b"read me");
+    chat.send_text(&subject(), &chat_message)
+        .expect("send message");
+    chat_message
+}
+
 #[test]
 fn direct_chat_send_and_bounded_transcript_reuse_canonical_message_store() {
     let store = MemoryLocalStore::default();
@@ -274,11 +325,7 @@ fn read_requires_delivered_state_and_records_read_by_user_through_delivery_owner
     let sink = RecordingSink::default();
     let clock = FixedClock(10_000);
     let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
-    chat.open_direct_chat(&subject(), &conversation(ConversationKind::Direct))
-        .expect("open direct chat");
-    let chat_message = message("message-read", 10, b"read me");
-    chat.send_text(&subject(), &chat_message)
-        .expect("send message");
+    let chat_message = setup_chat_message(&store);
     let delivery_id = create_persisted_delivery(&store, &chat_message);
 
     assert_eq!(
@@ -319,6 +366,56 @@ fn read_requires_delivered_state_and_records_read_by_user_through_delivery_owner
             .expect("delivery exists")
             .state,
         DeliveryState::Read
+    );
+}
+
+#[test]
+fn already_read_retry_still_requires_delivery_write_permission() {
+    let store = MemoryLocalStore::default();
+    let chat_message = setup_chat_message(&store);
+    let delivery_id = create_persisted_delivery(&store, &chat_message);
+    advance_delivery_to_read(&store, &delivery_id, &chat_message.message_id);
+
+    let authorization = DenyDeliveryWrite;
+    let sink = RecordingSink::default();
+    let clock = FixedClock(10_000);
+    let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
+    assert_eq!(
+        chat.mark_read(
+            &subject(),
+            &scope(),
+            &delivery_id,
+            &chat_message.message_id,
+            5
+        ),
+        Err(ChatError::Authorized(
+            AuthorizedMutationError::Authorization(CanonicalError::new(
+                CanonicalErrorCode::PermissionDenied
+            ))
+        ))
+    );
+}
+
+#[test]
+fn already_read_retry_recovers_cas_conflict_as_duplicate() {
+    let store = MemoryLocalStore::default();
+    let chat_message = setup_chat_message(&store);
+    let delivery_id = create_persisted_delivery(&store, &chat_message);
+    advance_delivery_to_read(&store, &delivery_id, &chat_message.message_id);
+
+    let authorization = AllowAll;
+    let sink = RecordingSink::default();
+    let clock = FixedClock(10_000);
+    let chat = ChatRuntime::new(&clock, &authorization, &store, &sink);
+    assert_eq!(
+        chat.mark_read(
+            &subject(),
+            &scope(),
+            &delivery_id,
+            &chat_message.message_id,
+            5
+        ),
+        Ok(DurableRecordStatus::Duplicate)
     );
 }
 
