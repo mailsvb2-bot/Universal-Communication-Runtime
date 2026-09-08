@@ -1,0 +1,53 @@
+name: Phase18 Foundation Builder V5
+
+on:
+  push:
+    branches: [phase18-groups]
+    paths:
+      - .github/workflows/phase18-foundation-builder-v5.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build-foundation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: phase18-groups
+      - name: Apply canonical foundation patch
+        run: |
+          python3 - <<'PY2'
+          from pathlib import Path
+          source = Path('.github/workflows/phase18-foundation-builder.yml').read_text().splitlines()
+          start = source.index("          python3 - <<'PY'") + 1
+          end = source.index('          PY', start)
+          code = '\n'.join(line[10:] if line.startswith('          ') else line for line in source[start:end]) + '\n'
+          old = "    insert_at = text.find('\\n#[cfg(test)]\\nmod tests')\n    if insert_at < 0: raise SystemExit('authorized runtime tests marker missing')"
+          if old not in code:
+              raise SystemExit('foundation insertion source marker missing')
+          code = code.replace(old, '    insert_at = len(text)', 1)
+          exec(compile(code, 'phase18-foundation-builder', 'exec'), {})
+          PY2
+      - name: Apply strict-lint refactor
+        run: python3 .github/phase18_clippy_fix.py
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Format
+        run: cargo fmt --all
+      - name: Check foundation
+        run: cargo check -p ucr-model -p ucr-protocol -p ucr-core -p ucr-storage-memory
+      - name: Clippy foundation
+        run: cargo clippy -p ucr-model -p ucr-protocol -p ucr-core -p ucr-storage-memory --all-targets -- -D warnings
+      - name: Test foundation
+        run: cargo test -p ucr-protocol -p ucr-storage-memory
+      - name: Commit verified foundation
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/phase18_clippy_fix.py .github/workflows/phase18-foundation-builder.yml .github/workflows/phase18-foundation-builder-v2.yml .github/workflows/phase18-foundation-builder-v3.yml .github/workflows/phase18-foundation-builder-v4.yml .github/workflows/phase18-foundation-builder-v5.yml
+          git add crates/ucr-model crates/ucr-protocol crates/ucr-core crates/ucr-storage-memory Cargo.lock
+          git commit -m "Wire Phase 18 canonical group foundation [phase18-foundation-built]"
+          git push origin HEAD:phase18-groups
