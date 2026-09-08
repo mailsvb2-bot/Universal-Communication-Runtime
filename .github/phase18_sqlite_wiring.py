@@ -52,9 +52,9 @@ once(
 )
 
 # Historical migration tests simulate old schemas by starting from the current schema and
-# dropping all newer objects. Phase 18 adds four v21 tables, so every such fixture must remove
-# those tables too; otherwise the later v20->v21 migration correctly rejects duplicate tables.
-fixture_marker = 'PRAGMA foreign_keys=OFF; '
+# setting PRAGMA user_version back after dropping newer objects. Phase 18 adds four v21 tables;
+# remove them immediately before every fixture version marker so every simulated schema is exact.
+fixture_version_marker = 'PRAGMA user_version='
 fixture_cleanup = (
     'DROP TABLE IF EXISTS group_changes; '
     'DROP TABLE IF EXISTS group_bridge_mappings; '
@@ -64,10 +64,13 @@ fixture_cleanup = (
 patched_fixtures = 0
 for fixture_path in Path("crates/ucr-storage-sqlite/src").glob("*.rs"):
     fixture_text = fixture_path.read_text()
-    if "PRAGMA user_version=" not in fixture_text or fixture_marker not in fixture_text:
+    if fixture_version_marker not in fixture_text:
         continue
-    count = fixture_text.count(fixture_marker)
-    fixture_text = fixture_text.replace(fixture_marker, fixture_marker + fixture_cleanup)
+    count = fixture_text.count(fixture_version_marker)
+    fixture_text = fixture_text.replace(
+        fixture_version_marker,
+        fixture_cleanup + fixture_version_marker,
+    )
     fixture_path.write_text(fixture_text)
     patched_fixtures += count
 if patched_fixtures < 18:
