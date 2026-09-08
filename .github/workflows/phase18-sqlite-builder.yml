@@ -1,4 +1,4 @@
-name: Phase18 SQLite Builder V4
+name: Phase18 SQLite Builder V5
 
 on:
   push:
@@ -17,6 +17,33 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: phase18-groups
+      - name: Extend canonical migration fixture cleanup
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          lib = Path('crates/ucr-storage-sqlite/src/lib.rs')
+          text = lib.read_text()
+          old = '        "DROP TABLE IF EXISTS event_dead_letters;'
+          new = '''        "DROP TABLE IF EXISTS group_changes;
+                   DROP TABLE IF EXISTS group_bridge_mappings;
+                   DROP TABLE IF EXISTS group_memberships;
+                   DROP TABLE IF EXISTS groups;
+                   DROP TABLE IF EXISTS event_dead_letters;'''
+          if new not in text:
+              if old not in text:
+                  raise SystemExit('canonical migration fixture helper marker missing')
+              text = text.replace(old, new, 1)
+          lib.write_text(text)
+
+          patcher = Path('.github/phase18_sqlite_wiring.py')
+          patch = patcher.read_text()
+          old_guard = 'if patched_fixtures < 18:'
+          new_guard = 'if patched_fixtures < 5:'
+          if old_guard in patch:
+              patch = patch.replace(old_guard, new_guard, 1)
+          patcher.write_text(patch)
+          PY
       - name: Apply SQLite v21 wiring
         run: python3 .github/phase18_sqlite_wiring.py
       - name: Install pinned Rust toolchain
