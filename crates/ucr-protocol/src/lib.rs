@@ -117,10 +117,10 @@ pub use framing::{
 pub use group::{
     GROUP_CHANGE_FINGERPRINT_V1_DOMAIN, GROUP_MLS_CAPABILITY, GroupError, GroupTransition,
     MAX_EXTERNAL_GROUP_ID_LEN, MAX_GROUP_BRIDGE_MAPPINGS, MAX_GROUP_HISTORY_MESSAGES,
-    MAX_GROUP_MEMBER_LIST, MAX_GROUP_MEMBERS, apply_group_change, canonical_group_creation,
-    canonical_group_membership, canonical_group_memberships, canonical_group_record,
-    group_change_event_type, group_change_fingerprint, group_permissions_for_role,
-    is_group_conversation_kind, validate_group_member_list_limit,
+    MAX_GROUP_MEMBER_LIST, MAX_GROUP_MEMBERS, active_group_actor_role, apply_group_change,
+    canonical_group_creation, canonical_group_membership, canonical_group_memberships,
+    canonical_group_record, group_change_event_type, group_change_fingerprint,
+    group_permissions_for_role, is_group_conversation_kind, validate_group_member_list_limit,
 };
 pub use handshake::{
     HandshakeError, NegotiatedSession, NegotiationPolicy, NegotiationResultEnvelope,

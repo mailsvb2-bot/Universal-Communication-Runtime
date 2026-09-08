@@ -5,9 +5,9 @@ use ucr_model::{
     PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
-    apply_group_change, canonical_group_creation, canonical_group_memberships, canonical_message,
-    group_change_fingerprint, is_group_conversation_kind, validate_conversation,
-    validate_group_member_list_limit,
+    active_group_actor_role, apply_group_change, canonical_group_creation,
+    canonical_group_memberships, canonical_message, group_change_fingerprint,
+    is_group_conversation_kind, validate_conversation, validate_group_member_list_limit,
 };
 
 use super::{
@@ -150,19 +150,6 @@ impl GroupStore for MemoryLocalStore {
         let group_key = group_key(&change.scope, &change.group_id);
         let change_key = change_key(&change.scope, change.event_id.as_opaque().as_str());
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        if let Some((recorded_actor, existing)) = state.group_changes.get(&change_key) {
-            if recorded_actor != &actor.principal {
-                return Err(DurableStoreError::PermissionDenied);
-            }
-            return if existing == &fingerprint {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        if state.events.contains_key(&change_key) {
-            return Err(DurableStoreError::Conflict);
-        }
         let group = state
             .groups
             .get(&group_key)
@@ -176,6 +163,18 @@ impl GroupStore for MemoryLocalStore {
             })
             .cloned()
             .collect::<Vec<_>>();
+        active_group_actor_role(&group, &memberships, &actor.scope, &actor.principal)
+            .map_err(map_group_error)?;
+        if let Some((recorded_actor, existing)) = state.group_changes.get(&change_key) {
+            if recorded_actor != &actor.principal {
+                return Err(DurableStoreError::PermissionDenied);
+            }
+            return if existing == &fingerprint {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
         let history_floor = if matches!(change.kind, ucr_model::GroupChangeKind::AddMember { .. }) {
             Some(history_floor_for_add(&state, &group)?)
         } else {
@@ -190,6 +189,9 @@ impl GroupStore for MemoryLocalStore {
             history_floor,
         )
         .map_err(map_group_error)?;
+        if state.events.contains_key(&change_key) {
+            return Err(DurableStoreError::Conflict);
+        }
         state.groups.insert(group_key, transition.group.clone());
         state.group_memberships.retain(|_, membership| {
             membership.scope != change.scope || membership.group_id != change.group_id
@@ -895,6 +897,67 @@ mod phase18_memory_security_tests {
                 .expect("members")
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn removed_original_actor_cannot_replay_duplicate_group_change() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("removed-dup-owner", PrincipalKind::Person);
+        let admin = subject("removed-dup-admin", PrincipalKind::Person);
+        let (conversation, group) = group_fixture("removed-dup", &owner);
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        let add_admin = GroupChange {
+            event_id: EventId::from_opaque(oid("removed-dup-add-admin")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: admin.principal.clone(),
+                role: GroupRole::Admin,
+            },
+            next_crypto_state: None,
+        };
+        store
+            .apply_group_change(&owner, &add_admin)
+            .expect("add admin");
+        let admin_change = GroupChange {
+            event_id: EventId::from_opaque(oid("removed-dup-admin-change")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 1,
+            kind: GroupChangeKind::AddMember {
+                member: subject("removed-dup-member", PrincipalKind::Person).principal,
+                role: GroupRole::Member,
+            },
+            next_crypto_state: None,
+        };
+        assert_eq!(
+            store.apply_group_change(&admin, &admin_change),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.apply_group_change(&admin, &admin_change),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        let remove_admin = GroupChange {
+            event_id: EventId::from_opaque(oid("removed-dup-remove-admin")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 2,
+            kind: GroupChangeKind::RemoveMember {
+                member: admin.principal.clone(),
+            },
+            next_crypto_state: None,
+        };
+        store
+            .apply_group_change(&owner, &remove_admin)
+            .expect("remove admin");
+        assert_eq!(
+            store.apply_group_change(&admin, &admin_change),
+            Err(DurableStoreError::PermissionDenied)
         );
     }
 }

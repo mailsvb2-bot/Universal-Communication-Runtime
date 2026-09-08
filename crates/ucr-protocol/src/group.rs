@@ -242,6 +242,31 @@ pub fn canonical_group_memberships(
     Ok(canonical)
 }
 
+/// Returns the current active role for one exact Group actor.
+///
+/// This is intentionally narrower than change authorization: idempotent retries may remain valid
+/// after the original transition changed the actor's role (for example ownership transfer), but a
+/// removed actor must not receive duplicate/conflict existence evidence.
+///
+/// # Errors
+/// Returns an explicit Group error for invalid aggregate/membership state, cross-scope actors, or
+/// an actor without an active exact-PrincipalRef membership.
+pub fn active_group_actor_role(
+    group: &GroupRecord,
+    memberships: &[GroupMembership],
+    actor_scope: &TenantScope,
+    actor: &PrincipalRef,
+) -> Result<GroupRole, GroupError> {
+    let group = canonical_group_record(group)?;
+    let memberships = canonical_group_memberships(&group, memberships)?;
+    if actor_scope != &group.scope {
+        return Err(GroupError::ScopeMismatch);
+    }
+    let actor_index =
+        active_member_index(&memberships, actor).ok_or(GroupError::PermissionDenied)?;
+    Ok(memberships[actor_index].role)
+}
+
 /// Applies one optimistic-concurrency Group mutation through the canonical transition owner.
 ///
 /// # Errors

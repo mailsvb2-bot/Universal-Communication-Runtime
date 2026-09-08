@@ -9,10 +9,10 @@ use ucr_model::{
     TenantId, TenantScope,
 };
 use ucr_protocol::{
-    MAX_EXTERNAL_GROUP_ID_LEN, apply_group_change, canonical_group_creation,
-    canonical_group_memberships, canonical_group_record, canonical_message,
-    group_change_fingerprint, group_permissions_for_role, is_group_conversation_kind,
-    validate_conversation, validate_group_member_list_limit,
+    MAX_EXTERNAL_GROUP_ID_LEN, active_group_actor_role, apply_group_change,
+    canonical_group_creation, canonical_group_memberships, canonical_group_record,
+    canonical_message, group_change_fingerprint, group_permissions_for_role,
+    is_group_conversation_kind, validate_conversation, validate_group_member_list_limit,
 };
 
 use super::{
@@ -353,6 +353,11 @@ impl GroupStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
+        let group = load_group_from(&transaction, &change.scope, &change.group_id)?
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        let memberships = load_memberships_from(&transaction, &group, usize::MAX)?;
+        active_group_actor_role(&group, &memberships, &actor.scope, &actor.principal)
+            .map_err(map_group_error)?;
         if let Some((recorded_actor, existing)) = load_change_record(
             &transaction,
             &change.scope,
@@ -367,14 +372,6 @@ impl GroupStore for SqliteLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
-        if super::event_journal::load_event_by_id(&transaction, &change.scope, &change.event_id)?
-            .is_some()
-        {
-            return Err(DurableStoreError::Conflict);
-        }
-        let group = load_group_from(&transaction, &change.scope, &change.group_id)?
-            .ok_or(DurableStoreError::InvalidRecord)?;
-        let memberships = load_memberships_from(&transaction, &group, usize::MAX)?;
         let history_floor = if matches!(change.kind, ucr_model::GroupChangeKind::AddMember { .. }) {
             Some(history_floor_for_add(&transaction, &group)?)
         } else {
@@ -389,6 +386,11 @@ impl GroupStore for SqliteLocalStore {
             history_floor,
         )
         .map_err(map_group_error)?;
+        if super::event_journal::load_event_by_id(&transaction, &change.scope, &change.event_id)?
+            .is_some()
+        {
+            return Err(DurableStoreError::Conflict);
+        }
         update_group(&transaction, &transition.group)?;
         replace_memberships(&transaction, &transition.group, &transition.memberships)?;
         insert_change_fingerprint(&transaction, actor, change, &fingerprint)?;
@@ -1775,6 +1777,67 @@ mod phase18_restart_security_tests {
                 .expect("members")
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn sqlite_removed_original_actor_cannot_replay_duplicate_group_change() {
+        let db = TestDb::new();
+        let (conversation, group, owner) = group_fixture();
+        let admin = subject("sqlite-removed-dup-admin");
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        let add_admin = GroupChange {
+            event_id: EventId::from_opaque(oid("sqlite-removed-dup-add-admin")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: admin.principal.clone(),
+                role: GroupRole::Admin,
+            },
+            next_crypto_state: None,
+        };
+        store
+            .apply_group_change(&owner, &add_admin)
+            .expect("add admin");
+        let admin_change = GroupChange {
+            event_id: EventId::from_opaque(oid("sqlite-removed-dup-admin-change")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 1,
+            kind: GroupChangeKind::AddMember {
+                member: subject("sqlite-removed-dup-member").principal,
+                role: GroupRole::Member,
+            },
+            next_crypto_state: None,
+        };
+        assert_eq!(
+            store.apply_group_change(&admin, &admin_change),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.apply_group_change(&admin, &admin_change),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        let remove_admin = GroupChange {
+            event_id: EventId::from_opaque(oid("sqlite-removed-dup-remove-admin")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 2,
+            kind: GroupChangeKind::RemoveMember {
+                member: admin.principal.clone(),
+            },
+            next_crypto_state: None,
+        };
+        store
+            .apply_group_change(&owner, &remove_admin)
+            .expect("remove admin");
+        assert_eq!(
+            store.apply_group_change(&admin, &admin_change),
+            Err(DurableStoreError::PermissionDenied)
         );
     }
 }

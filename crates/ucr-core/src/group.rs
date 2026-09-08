@@ -66,7 +66,10 @@ pub trait GroupStore: StorageProvider {
 
     /// Applies one idempotent security-sensitive Group change with optimistic revision checking.
     /// The authenticated actor is supplied by the Core authorization façade and must be checked
-    /// against the durable active membership/role inside the same atomic storage action.
+    /// against durable active membership inside the same atomic storage action before duplicate/conflict
+    /// evidence is returned; new transitions additionally enforce the canonical current-role rules. An
+    /// idempotent retry by the original still-active actor remains valid when the original transition itself
+    /// changed that actor's role.
     ///
     /// # Errors
     /// Rejects unauthorized, stale, conflicting, cross-scope, or invalid transitions and storage failures.
