@@ -4,14 +4,17 @@ use std::{fmt, sync::Arc};
 
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_core::{
-    AuthorizationEvaluator, CommandAcceptanceStore, CommunicationIntentStore, ConversationStore,
-    EventApiIngress, EventAppendStatus, EventCursorRejection, EventDeliveryClock,
-    EventSubscriptionStore, ExternalIdentityBindingLookup, ExternalIdentityBindingStore,
-    IdentityStore, IntegrationIngress, MessageStore, ServiceAuditStore, ServiceCredentialSecret,
-    ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
+    AuthorizationEvaluator, CallStore, CommandAcceptanceStore, CommunicationIntentStore,
+    ConversationStore, EventApiIngress, EventAppendStatus, EventCursorRejection,
+    EventDeliveryClock, EventSubscriptionStore, ExternalIdentityBindingLookup,
+    ExternalIdentityBindingStore, IdentityStore, IntegrationIngress, MessageStore,
+    ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore, ServiceQuotaClock,
+    ServiceQuotaStore,
 };
 use ucr_model::{
-    ActorId, ActorKind, AttachmentId, CommandEnvelope, CommandId, CommunicationIntent,
+    ActorId, ActorKind, AttachmentId, CallId, CallParticipant, CallParticipantState,
+    CallParticipantUpdateKind, CallReconnectPhase, CallSession, CallSignal, CallSignalKind,
+    CallSignallingState, CallTerminationReason, CommandEnvelope, CommandId, CommunicationIntent,
     ConversationId, ConversationKind, ConversationRecord, ConversationRef, CorrelationContext,
     CryptoSuite, DeliveryPolicy, DeliveryState, DeviceId, DeviceRef, EndpointId,
     EventConsumerCursor, EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind,
@@ -19,8 +22,8 @@ use ucr_model::{
     EventSubscriptionStart, ExternalIdentityBinding, ExternalMessageMapping, IdentityEvidence,
     IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, IntentConstraints, IntentId,
     KeyId, MessageCryptoMetadata, MessageEnvelope, MessageId, MessageRelation, MessageRelationKind,
-    MessageSignature, NamespaceId, OpaqueId, OriginRef, PrincipalId, ProtocolExtension,
-    ProtocolVersion, ServiceCredentialId, TenantId, TenantScope,
+    MessageSignature, NamespaceId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, PrincipalRef,
+    ProtocolExtension, ProtocolVersion, ServiceCredentialId, TenantId, TenantScope,
 };
 use ucr_protocol::{
     AcknowledgementEnvelope, CanonicalError, CanonicalErrorCode, CommandReceipt,
@@ -679,6 +682,142 @@ where
                 }),
             },
         ))
+    }
+}
+
+/// Thin Phase-19 gRPC binding over the existing `ServicePrincipal` request gate and `CallStore` owner.
+pub struct GrpcCallService<C, A, S> {
+    clock: Arc<C>,
+    authorization: Arc<A>,
+    store: Arc<S>,
+}
+
+impl<C, A, S> GrpcCallService<C, A, S> {
+    #[must_use]
+    pub const fn new(clock: Arc<C>, authorization: Arc<A>, store: Arc<S>) -> Self {
+        Self {
+            clock,
+            authorization,
+            store,
+        }
+    }
+}
+
+impl<C, A, S> Clone for GrpcCallService<C, A, S> {
+    fn clone(&self) -> Self {
+        Self {
+            clock: Arc::clone(&self.clock),
+            authorization: Arc::clone(&self.authorization),
+            store: Arc::clone(&self.store),
+        }
+    }
+}
+
+impl<C, A, S> fmt::Debug for GrpcCallService<C, A, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrpcCallService")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Builds the generated Phase-19 Call signalling gRPC server. The shared request budget is larger
+/// than the bounded Call contract. Listener/TLS/media transport remain outside this binding.
+#[must_use]
+pub fn call_service_server<C, A, S>(
+    service: GrpcCallService<C, A, S>,
+) -> pb::call_service_server::CallServiceServer<GrpcCallService<C, A, S>>
+where
+    C: ServiceQuotaClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + CallStore + 'static,
+{
+    pb::call_service_server::CallServiceServer::new(service)
+        .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
+        .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE)
+}
+
+#[tonic::async_trait]
+impl<C, A, S> pb::call_service_server::CallService for GrpcCallService<C, A, S>
+where
+    C: ServiceQuotaClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + CallStore + 'static,
+{
+    async fn start_call(
+        &self,
+        request: Request<pb::CallStartRequest>,
+    ) -> Result<Response<pb::CallStartResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let session = request
+            .into_inner()
+            .session
+            .ok_or_else(invalid_argument)
+            .and_then(decode_call_session);
+        let result = match (credentials, session) {
+            (Ok((credential_id, secret)), Ok(session)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .start_call(&session.scope, &credential_id, &secret, &session)
+                    .map(|call| pb_call_session(&call))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::CallStartResponse {
+            result: Some(match result {
+                Ok(call) => pb::call_start_response::Result::Call(call),
+                Err(error) => pb::call_start_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn get_call(
+        &self,
+        request: Request<pb::CallGetRequest>,
+    ) -> Result<Response<pb::CallGetResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_call_lookup(request.into_inner());
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, call_id))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_call(&scope, &credential_id, &secret, &scope, &call_id)
+                    .map(|call| pb_call_session(&call))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::CallGetResponse {
+            result: Some(match result {
+                Ok(call) => pb::call_get_response::Result::Call(call),
+                Err(error) => pb::call_get_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn signal_call(
+        &self,
+        request: Request<pb::CallSignalRequest>,
+    ) -> Result<Response<pb::CallSignalResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let signal = request
+            .into_inner()
+            .signal
+            .ok_or_else(invalid_argument)
+            .and_then(decode_call_signal);
+        let result = match (credentials, signal) {
+            (Ok((credential_id, secret)), Ok(signal)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .signal_call(&signal.scope, &credential_id, &secret, &signal)
+                    .map(pb_acknowledgement)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::CallSignalResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::call_signal_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::call_signal_response::Result::Error(pb_error(error)),
+            }),
+        }))
     }
 }
 
@@ -1381,6 +1520,143 @@ fn decode_external_identity_binding_lookup(
     ))
 }
 
+fn decode_principal_ref(value: pb::PrincipalRef) -> Result<PrincipalRef, CanonicalError> {
+    Ok(PrincipalRef {
+        principal_id: PrincipalId::from_opaque(decode_opaque(value.principal_id)?),
+        kind: match pb::PrincipalKind::try_from(value.kind).map_err(|_| invalid_argument())? {
+            pb::PrincipalKind::Unspecified => return Err(invalid_argument()),
+            pb::PrincipalKind::Person => PrincipalKind::Person,
+            pb::PrincipalKind::Device => PrincipalKind::Device,
+            pb::PrincipalKind::ServiceAccount => PrincipalKind::ServiceAccount,
+            pb::PrincipalKind::AiAgent => PrincipalKind::AiAgent,
+            pb::PrincipalKind::Bot => PrincipalKind::Bot,
+            pb::PrincipalKind::Organization => PrincipalKind::Organization,
+            pb::PrincipalKind::Automation => PrincipalKind::Automation,
+            pb::PrincipalKind::ExternalPlatform => PrincipalKind::ExternalPlatform,
+        },
+    })
+}
+
+fn decode_call_session(value: pb::CallSession) -> Result<CallSession, CanonicalError> {
+    Ok(CallSession {
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        call_id: CallId::from_opaque(decode_opaque(value.call_id)?),
+        conversation: decode_conversation_ref(value.conversation.ok_or_else(invalid_argument)?)?,
+        initiated_by: decode_principal_ref(value.initiated_by.ok_or_else(invalid_argument)?)?,
+        participants: value
+            .participants
+            .into_iter()
+            .map(decode_call_participant)
+            .collect::<Result<Vec<_>, _>>()?,
+        signalling_state: decode_call_signalling_state(value.signalling_state)?,
+        media_negotiation_ref: value
+            .media_negotiation_ref
+            .map(|value| decode_opaque(Some(value)))
+            .transpose()?,
+        media_negotiation_generation: value.media_negotiation_generation,
+        replication_generation: value.replication_generation,
+        revision: value.revision,
+        termination_reason: value
+            .termination_reason
+            .map(decode_call_termination_reason)
+            .transpose()?,
+    })
+}
+
+fn decode_call_participant(value: pb::CallParticipant) -> Result<CallParticipant, CanonicalError> {
+    Ok(CallParticipant {
+        principal: decode_principal_ref(value.principal.ok_or_else(invalid_argument)?)?,
+        state: match pb::CallParticipantState::try_from(value.state)
+            .map_err(|_| invalid_argument())?
+        {
+            pb::CallParticipantState::Unspecified => return Err(invalid_argument()),
+            pb::CallParticipantState::Invited => CallParticipantState::Invited,
+            pb::CallParticipantState::Ringing => CallParticipantState::Ringing,
+            pb::CallParticipantState::Accepted => CallParticipantState::Accepted,
+            pb::CallParticipantState::Rejected => CallParticipantState::Rejected,
+            pb::CallParticipantState::Busy => CallParticipantState::Busy,
+            pb::CallParticipantState::Left => CallParticipantState::Left,
+        },
+        joined_revision: value.joined_revision,
+        left_revision: value.left_revision,
+    })
+}
+
+fn decode_call_signalling_state(value: i32) -> Result<CallSignallingState, CanonicalError> {
+    match pb::CallSignallingState::try_from(value).map_err(|_| invalid_argument())? {
+        pb::CallSignallingState::Unspecified => Err(invalid_argument()),
+        pb::CallSignallingState::Inviting => Ok(CallSignallingState::Inviting),
+        pb::CallSignallingState::Ringing => Ok(CallSignallingState::Ringing),
+        pb::CallSignallingState::Active => Ok(CallSignallingState::Active),
+        pb::CallSignallingState::Reconnecting => Ok(CallSignallingState::Reconnecting),
+        pb::CallSignallingState::Terminated => Ok(CallSignallingState::Terminated),
+    }
+}
+
+fn decode_call_termination_reason(value: i32) -> Result<CallTerminationReason, CanonicalError> {
+    match pb::CallTerminationReason::try_from(value).map_err(|_| invalid_argument())? {
+        pb::CallTerminationReason::Unspecified => Err(invalid_argument()),
+        pb::CallTerminationReason::Rejected => Ok(CallTerminationReason::Rejected),
+        pb::CallTerminationReason::Busy => Ok(CallTerminationReason::Busy),
+        pb::CallTerminationReason::Cancelled => Ok(CallTerminationReason::Cancelled),
+        pb::CallTerminationReason::TimedOut => Ok(CallTerminationReason::TimedOut),
+        pb::CallTerminationReason::Completed => Ok(CallTerminationReason::Completed),
+        pb::CallTerminationReason::Failed => Ok(CallTerminationReason::Failed),
+    }
+}
+
+fn decode_call_lookup(value: pb::CallGetRequest) -> Result<(TenantScope, CallId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        CallId::from_opaque(decode_opaque(value.call_id)?),
+    ))
+}
+
+fn decode_call_signal(value: pb::CallSignal) -> Result<CallSignal, CanonicalError> {
+    let kind = value.kind.ok_or_else(invalid_argument)?;
+    Ok(CallSignal {
+        event_id: ucr_model::EventId::from_opaque(decode_opaque(value.event_id)?),
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        call_id: CallId::from_opaque(decode_opaque(value.call_id)?),
+        expected_revision: value.expected_revision,
+        kind: match kind {
+            pb::call_signal::Kind::Ringing(_) => CallSignalKind::Ringing,
+            pb::call_signal::Kind::Accept(_) => CallSignalKind::Accept,
+            pb::call_signal::Kind::Reject(_) => CallSignalKind::Reject,
+            pb::call_signal::Kind::Busy(_) => CallSignalKind::Busy,
+            pb::call_signal::Kind::Cancel(_) => CallSignalKind::Cancel,
+            pb::call_signal::Kind::Timeout(_) => CallSignalKind::Timeout,
+            pb::call_signal::Kind::Reconnect(value) => CallSignalKind::Reconnect {
+                phase: match pb::CallReconnectPhase::try_from(value.phase)
+                    .map_err(|_| invalid_argument())?
+                {
+                    pb::CallReconnectPhase::Unspecified => return Err(invalid_argument()),
+                    pb::CallReconnectPhase::Started => CallReconnectPhase::Started,
+                    pb::CallReconnectPhase::Restored => CallReconnectPhase::Restored,
+                },
+            },
+            pb::call_signal::Kind::ParticipantUpdate(value) => CallSignalKind::ParticipantUpdate {
+                participant: decode_principal_ref(value.participant.ok_or_else(invalid_argument)?)?,
+                kind: match pb::CallParticipantUpdateKind::try_from(value.kind)
+                    .map_err(|_| invalid_argument())?
+                {
+                    pb::CallParticipantUpdateKind::Unspecified => return Err(invalid_argument()),
+                    pb::CallParticipantUpdateKind::Add => CallParticipantUpdateKind::Add,
+                    pb::CallParticipantUpdateKind::Remove => CallParticipantUpdateKind::Remove,
+                },
+            },
+            pb::call_signal::Kind::MediaRenegotiation(value) => {
+                CallSignalKind::MediaRenegotiation {
+                    negotiation_ref: decode_opaque(value.negotiation_ref)?,
+                }
+            }
+            pb::call_signal::Kind::Terminate(value) => CallSignalKind::Terminate {
+                reason: decode_call_termination_reason(value.reason)?,
+            },
+        },
+    })
+}
+
 fn decode_conversation_record(
     value: pb::ConversationRecord,
 ) -> Result<ConversationRecord, CanonicalError> {
@@ -1733,6 +2009,69 @@ fn pb_external_identity_binding(value: ExternalIdentityBinding) -> pb::ExternalI
     }
 }
 
+fn pb_principal_ref(value: &PrincipalRef) -> pb::PrincipalRef {
+    pb::PrincipalRef {
+        principal_id: Some(pb_opaque(value.principal_id.as_opaque())),
+        kind: (match value.kind {
+            PrincipalKind::Person => pb::PrincipalKind::Person,
+            PrincipalKind::Device => pb::PrincipalKind::Device,
+            PrincipalKind::ServiceAccount => pb::PrincipalKind::ServiceAccount,
+            PrincipalKind::AiAgent => pb::PrincipalKind::AiAgent,
+            PrincipalKind::Bot => pb::PrincipalKind::Bot,
+            PrincipalKind::Organization => pb::PrincipalKind::Organization,
+            PrincipalKind::Automation => pb::PrincipalKind::Automation,
+            PrincipalKind::ExternalPlatform => pb::PrincipalKind::ExternalPlatform,
+        }) as i32,
+    }
+}
+
+fn pb_call_session(value: &CallSession) -> pb::CallSession {
+    pb::CallSession {
+        scope: Some(pb_scope(&value.scope)),
+        call_id: Some(pb_opaque(value.call_id.as_opaque())),
+        conversation: Some(pb_conversation_ref(&value.conversation)),
+        initiated_by: Some(pb_principal_ref(&value.initiated_by)),
+        participants: value
+            .participants
+            .iter()
+            .map(|participant| pb::CallParticipant {
+                principal: Some(pb_principal_ref(&participant.principal)),
+                state: (match participant.state {
+                    CallParticipantState::Invited => pb::CallParticipantState::Invited,
+                    CallParticipantState::Ringing => pb::CallParticipantState::Ringing,
+                    CallParticipantState::Accepted => pb::CallParticipantState::Accepted,
+                    CallParticipantState::Rejected => pb::CallParticipantState::Rejected,
+                    CallParticipantState::Busy => pb::CallParticipantState::Busy,
+                    CallParticipantState::Left => pb::CallParticipantState::Left,
+                }) as i32,
+                joined_revision: participant.joined_revision,
+                left_revision: participant.left_revision,
+            })
+            .collect(),
+        signalling_state: (match value.signalling_state {
+            CallSignallingState::Inviting => pb::CallSignallingState::Inviting,
+            CallSignallingState::Ringing => pb::CallSignallingState::Ringing,
+            CallSignallingState::Active => pb::CallSignallingState::Active,
+            CallSignallingState::Reconnecting => pb::CallSignallingState::Reconnecting,
+            CallSignallingState::Terminated => pb::CallSignallingState::Terminated,
+        }) as i32,
+        media_negotiation_ref: value.media_negotiation_ref.as_ref().map(pb_opaque),
+        media_negotiation_generation: value.media_negotiation_generation,
+        replication_generation: value.replication_generation,
+        revision: value.revision,
+        termination_reason: value.termination_reason.map(|reason| {
+            (match reason {
+                CallTerminationReason::Rejected => pb::CallTerminationReason::Rejected,
+                CallTerminationReason::Busy => pb::CallTerminationReason::Busy,
+                CallTerminationReason::Cancelled => pb::CallTerminationReason::Cancelled,
+                CallTerminationReason::TimedOut => pb::CallTerminationReason::TimedOut,
+                CallTerminationReason::Completed => pb::CallTerminationReason::Completed,
+                CallTerminationReason::Failed => pb::CallTerminationReason::Failed,
+            }) as i32
+        }),
+    }
+}
+
 fn pb_conversation_kind(value: ConversationKind) -> i32 {
     (match value {
         ConversationKind::Direct => pb::ConversationKind::Direct,
@@ -2018,7 +2357,8 @@ mod tests {
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{
-        ALGORITHM_VERSION, COMMAND_ACCEPT_PERMISSION, COMMUNICATION_INTENT_READ_PERMISSION,
+        ALGORITHM_VERSION, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION, CALL_START_PERMISSION,
+        COMMAND_ACCEPT_PERMISSION, COMMUNICATION_INTENT_READ_PERMISSION,
         COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
         CONVERSATION_WRITE_PERMISSION, DEFAULT_MAX_PAYLOAD_LEN, EVENT_APPEND_PERMISSION,
         EVENT_CONSUME_PERMISSION, EVENT_DEAD_LETTER_READ_PERMISSION, EVENT_REPLAY_PERMISSION,
@@ -2035,11 +2375,12 @@ mod tests {
     use ucr_storage_memory::MemoryLocalStore;
 
     use super::{
-        GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, GrpcEventService,
-        GrpcIntegrationService, SERVICE_CREDENTIAL_ID_METADATA_KEY,
-        SERVICE_CREDENTIAL_SECRET_METADATA_KEY, attach_service_credential, decode_command,
-        decode_communication_intent, decode_event_envelope, decode_message_envelope,
-        event_service_server, integration_service_server, pb,
+        GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, GrpcCallService,
+        GrpcEventService, GrpcIntegrationService, SERVICE_CREDENTIAL_ID_METADATA_KEY,
+        SERVICE_CREDENTIAL_SECRET_METADATA_KEY, attach_service_credential, call_service_server,
+        decode_command, decode_communication_intent, decode_conversation_record,
+        decode_event_envelope, decode_message_envelope, event_service_server,
+        integration_service_server, pb,
     };
 
     fn oid(value: &str) -> OpaqueId {
@@ -2262,6 +2603,57 @@ mod tests {
         }
     }
 
+    fn call_session(id: &str, conversation_id: &str) -> pb::CallSession {
+        pb::CallSession {
+            scope: Some(wire_scope()),
+            call_id: Some(pb_id(id)),
+            conversation: Some(pb::ConversationRef {
+                conversation_id: Some(pb_id(conversation_id)),
+                kind: pb::ConversationKind::Direct as i32,
+            }),
+            initiated_by: Some(pb::PrincipalRef {
+                principal_id: Some(pb_id("service-grpc")),
+                kind: pb::PrincipalKind::ServiceAccount as i32,
+            }),
+            participants: vec![
+                pb::CallParticipant {
+                    principal: Some(pb::PrincipalRef {
+                        principal_id: Some(pb_id("service-grpc")),
+                        kind: pb::PrincipalKind::ServiceAccount as i32,
+                    }),
+                    state: pb::CallParticipantState::Accepted as i32,
+                    joined_revision: 0,
+                    left_revision: None,
+                },
+                pb::CallParticipant {
+                    principal: Some(pb::PrincipalRef {
+                        principal_id: Some(pb_id("remote-person")),
+                        kind: pb::PrincipalKind::Person as i32,
+                    }),
+                    state: pb::CallParticipantState::Invited as i32,
+                    joined_revision: 0,
+                    left_revision: None,
+                },
+            ],
+            signalling_state: pb::CallSignallingState::Inviting as i32,
+            media_negotiation_ref: None,
+            media_negotiation_generation: 0,
+            replication_generation: 0,
+            revision: 0,
+            termination_reason: None,
+        }
+    }
+
+    fn cancel_call_signal(id: &str, call_id: &str) -> pb::CallSignal {
+        pb::CallSignal {
+            event_id: Some(pb_id(id)),
+            scope: Some(wire_scope()),
+            call_id: Some(pb_id(call_id)),
+            expected_revision: 0,
+            kind: Some(pb::call_signal::Kind::Cancel(pb::CallEmptySignal {})),
+        }
+    }
+
     fn message(
         id: &str,
         conversation_id: &str,
@@ -2435,6 +2827,34 @@ mod tests {
         (record.credential_id, secret)
     }
 
+    fn seed_subject_with_permissions(
+        store: &MemoryLocalStore,
+        subject: ScopedPrincipal,
+        permissions: &[&str],
+    ) -> (ucr_model::ServiceCredentialId, ServiceCredentialSecret) {
+        let (record, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&record)
+            .expect("persist credential");
+        for permission in permissions {
+            store
+                .grant_permission(&PermissionGrant {
+                    grantee: subject.clone(),
+                    permission: (*permission).to_owned(),
+                    scope: PermissionScope::Exact(scope()),
+                })
+                .expect("grant permission");
+        }
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject,
+                max_requests: 64,
+                window_ms: 60_000,
+            })
+            .expect("install quota");
+        (record.credential_id, secret)
+    }
+
     fn seed(store: &MemoryLocalStore) -> (ucr_model::ServiceCredentialId, ServiceCredentialSecret) {
         seed_with_permissions(store, &[COMMAND_ACCEPT_PERMISSION])
     }
@@ -2470,6 +2890,33 @@ mod tests {
         (client, server)
     }
 
+    async fn call_client_and_server(
+        store: Arc<MemoryLocalStore>,
+    ) -> (
+        pb::call_service_client::CallServiceClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Call loopback listener");
+        let address = listener.local_addr().expect("Call listener address");
+        let incoming = TcpListenerStream::new(listener);
+        let service =
+            GrpcCallService::new(Arc::new(SystemServiceQuotaClock), Arc::clone(&store), store);
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(call_service_server(service))
+                .serve_with_incoming(incoming)
+                .await
+        });
+        let client =
+            pb::call_service_client::CallServiceClient::connect(format!("http://{address}"))
+                .await
+                .expect("connect Call loopback client")
+                .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
+        (client, server)
+    }
+
     async fn event_client_and_server(
         store: Arc<MemoryLocalStore>,
     ) -> (
@@ -2499,6 +2946,167 @@ mod tests {
                 .expect("connect Event loopback client")
                 .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
         (client, server)
+    }
+
+    type TestCallClient = pb::call_service_client::CallServiceClient<tonic::transport::Channel>;
+
+    async fn start_cancel_get_call(
+        client: &mut TestCallClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        call_id: &str,
+    ) {
+        let mut start = Request::new(pb::CallStartRequest {
+            session: Some(call_session(call_id, "call-conversation-grpc")),
+        });
+        attach_service_credential(&mut start, credential_id, secret);
+        let response = client
+            .start_call(start)
+            .await
+            .expect("start call application response")
+            .into_inner();
+        let started = match response.result.expect("start result") {
+            pb::call_start_response::Result::Call(call) => call,
+            pb::call_start_response::Result::Error(error) => {
+                panic!("start call failed: {}", error.code)
+            }
+        };
+        assert_eq!(
+            started.signalling_state,
+            pb::CallSignallingState::Inviting as i32
+        );
+        assert_eq!(started.revision, 0);
+
+        let cancel = cancel_call_signal("call-cancel-grpc", call_id);
+        for expected_duplicate in [false, true] {
+            let mut request = Request::new(pb::CallSignalRequest {
+                signal: Some(cancel.clone()),
+            });
+            attach_service_credential(&mut request, credential_id, secret);
+            let response = client
+                .signal_call(request)
+                .await
+                .expect("signal application response")
+                .into_inner();
+            let acknowledgement = match response.result.expect("signal result") {
+                pb::call_signal_response::Result::Acknowledgement(value) => value,
+                pb::call_signal_response::Result::Error(error) => {
+                    panic!(
+                        "signal failed duplicate={expected_duplicate}: {}",
+                        error.code
+                    )
+                }
+            };
+            assert_eq!(
+                acknowledgement
+                    .acknowledged_id
+                    .expect("acknowledged id")
+                    .value,
+                b"call-cancel-grpc"
+            );
+        }
+
+        let mut lookup = Request::new(pb::CallGetRequest {
+            scope: Some(wire_scope()),
+            call_id: Some(pb_id(call_id)),
+        });
+        attach_service_credential(&mut lookup, credential_id, secret);
+        let response = client
+            .get_call(lookup)
+            .await
+            .expect("get call response")
+            .into_inner();
+        let ended = match response.result.expect("get result") {
+            pb::call_get_response::Result::Call(call) => call,
+            pb::call_get_response::Result::Error(error) => {
+                panic!("get call failed: {}", error.code)
+            }
+        };
+        assert_eq!(
+            ended.signalling_state,
+            pb::CallSignallingState::Terminated as i32
+        );
+        assert_eq!(
+            ended.termination_reason,
+            Some(pb::CallTerminationReason::Cancelled as i32)
+        );
+        assert_eq!(ended.revision, 1);
+    }
+
+    async fn assert_call_non_disclosure(
+        store: &MemoryLocalStore,
+        client: &mut TestCallClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        call_id: &str,
+    ) {
+        let attacker = ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("service-grpc-attacker")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
+        let (attacker_id, attacker_secret) =
+            seed_subject_with_permissions(store, attacker, &[CALL_OBSERVE_PERMISSION]);
+        let mut attacker_lookup = Request::new(pb::CallGetRequest {
+            scope: Some(wire_scope()),
+            call_id: Some(pb_id(call_id)),
+        });
+        attach_service_credential(&mut attacker_lookup, &attacker_id, &attacker_secret);
+        let response = client
+            .get_call(attacker_lookup)
+            .await
+            .expect("non-participant response")
+            .into_inner();
+        let error = match response.result.expect("non-participant result") {
+            pb::call_get_response::Result::Error(error) => error,
+            pb::call_get_response::Result::Call(_) => {
+                panic!("non-participant disclosed call existence")
+            }
+        };
+        assert_eq!(error.code, pb::ErrorCode::NotFound as i32);
+
+        let mut bad_secret = Request::new(pb::CallGetRequest {
+            scope: Some(wire_scope()),
+            call_id: Some(pb_id(call_id)),
+        });
+        attach_service_credential(
+            &mut bad_secret,
+            credential_id,
+            &ServiceCredentialSecret::from_bytes([0x44; 32]),
+        );
+        let response = client
+            .get_call(bad_secret)
+            .await
+            .expect("bad credential response")
+            .into_inner();
+        let error = match response.result.expect("bad credential result") {
+            pb::call_get_response::Result::Error(error) => error,
+            pb::call_get_response::Result::Call(_) => panic!("bad credential disclosed call"),
+        };
+        assert_eq!(error.code, pb::ErrorCode::Unauthenticated as i32);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn call_start_cancel_duplicate_get_and_non_disclosure_round_trip_over_grpc() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let permissions = [
+            CALL_START_PERMISSION,
+            CALL_OBSERVE_PERMISSION,
+            CALL_SIGNAL_PERMISSION,
+        ];
+        let (credential_id, secret) = seed_with_permissions(&store, &permissions);
+        let conversation = conversation("call-conversation-grpc", pb::ConversationKind::Direct);
+        store
+            .persist_conversation(
+                &decode_conversation_record(conversation).expect("decode conversation"),
+            )
+            .expect("persist conversation");
+        let (mut client, server) = call_client_and_server(Arc::clone(&store)).await;
+        let call_id = "call-session-grpc";
+        start_cancel_get_call(&mut client, &credential_id, &secret, call_id).await;
+        assert_call_non_disclosure(&store, &mut client, &credential_id, call_id).await;
+        server.abort();
     }
 
     #[test]

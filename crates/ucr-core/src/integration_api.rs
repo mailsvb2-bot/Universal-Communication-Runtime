@@ -1,18 +1,21 @@
 use core::fmt;
 
 use ucr_model::{
-    CommandEnvelope, CommunicationIntent, ConversationId, ConversationRecord,
-    ExternalIdentityBinding, IdentityId, IdentityRecord, IntegrationId, IntentId, MessageEnvelope,
-    MessageId, ServiceAuditOperationRef, ServiceCredentialId, TenantScope,
+    CallId, CallSession, CallSignal, CommandEnvelope, CommunicationIntent, ConversationId,
+    ConversationRecord, ExternalIdentityBinding, IdentityId, IdentityRecord, IntegrationId,
+    IntentId, MessageEnvelope, MessageId, ServiceAuditOperationRef, ServiceCredentialId,
+    TenantScope,
 };
 use ucr_protocol::{
-    AcknowledgementEnvelope, COMMAND_ACCEPT_PERMISSION, COMMUNICATION_INTENT_READ_PERMISSION,
+    AcknowledgementEnvelope, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION,
+    CALL_START_PERMISSION, COMMAND_ACCEPT_PERMISSION, COMMUNICATION_INTENT_READ_PERMISSION,
     COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
     CONVERSATION_WRITE_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceipt,
     EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
     IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,
-    MESSAGE_WRITE_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
-    SERVICE_AUDIT_COMMUNICATION_INTENT_CREATE_OPERATION_KIND,
+    MESSAGE_WRITE_PERMISSION, SERVICE_AUDIT_CALL_OBSERVE_OPERATION_KIND,
+    SERVICE_AUDIT_CALL_SIGNAL_OPERATION_KIND, SERVICE_AUDIT_CALL_START_OPERATION_KIND,
+    SERVICE_AUDIT_COMMAND_OPERATION_KIND, SERVICE_AUDIT_COMMUNICATION_INTENT_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_COMMUNICATION_INTENT_READ_OPERATION_KIND,
     SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND,
@@ -24,7 +27,7 @@ use ucr_protocol::{
 };
 
 use crate::{
-    AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError,
+    AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError, CallStore,
     CommandAcceptanceStore, CommunicationIntentStore, ConversationStore, DurableStoreError,
     ExternalIdentityBindingStore, IdentityStore, MessageStore, ServiceAuditStore,
     ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
@@ -559,6 +562,114 @@ where
             )
             .map_err(map_authorized_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+}
+
+impl<C, A, S> IntegrationIngress<'_, C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + CallStore,
+{
+    /// Authenticates, rate-limits, audits and starts one canonical `CallSession`.
+    /// The credential-bound Service Principal is the creator; caller-supplied actor authority is
+    /// never accepted by this ingress.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, participant, validation, conflict and storage failures
+    /// map to stable canonical errors.
+    pub fn start_call(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        session: &CallSession,
+    ) -> Result<CallSession, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_CALL_START_OPERATION_KIND.to_owned(),
+            operation_id: session.call_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                CALL_START_PERMISSION,
+                &session.scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .create_call(&subject, session)
+            .map_err(map_authorized_error)?;
+        Ok(session.clone())
+    }
+
+    /// Authenticates, rate-limits and audits an exact participant-gated `CallSession` read.
+    /// Absence is reported only after admission so unauthorized callers cannot probe call IDs.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, not-found and storage failures map to canonical errors.
+    pub fn get_call(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<CallSession, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_CALL_OBSERVE_OPERATION_KIND.to_owned(),
+            operation_id: call_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                CALL_OBSERVE_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .call(&subject, scope, call_id)
+            .map_err(map_authorized_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+
+    /// Authenticates, rate-limits, audits and commits one idempotent signalling fact.
+    /// The acknowledgement proves durable signalling persistence/deduplication only. It does not
+    /// prove audio/video/media establishment or delivery to another participant.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, stale revision, conflict, validation and storage
+    /// failures map to stable canonical errors.
+    pub fn signal_call(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        signal: &CallSignal,
+    ) -> Result<AcknowledgementEnvelope, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_CALL_SIGNAL_OPERATION_KIND.to_owned(),
+            operation_id: signal.event_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                CALL_SIGNAL_PERMISSION,
+                &signal.scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .apply_call_signal(&subject, signal)
+            .map_err(map_authorized_error)?;
+        Ok(acknowledgement_for(signal.event_id.as_opaque().clone()))
     }
 }
 

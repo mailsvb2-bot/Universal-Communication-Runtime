@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod call_store;
 mod group_store;
 
 use std::{
@@ -23,9 +24,9 @@ use ucr_crypto::{
     TrustedSigningKeyResolver, VerifyingKeyBytes,
 };
 use ucr_model::{
-    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
-    CommunicationIntent, ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence,
-    DeliveryId, DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState,
+    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CallSession, CommandEnvelope,
+    CommandId, CommunicationIntent, ConversationId, ConversationRecord, DeliveryAttempt,
+    DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState,
     EventConsumerCursor, EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind,
     EventEnvelope, EventId, EventPollResult, EventReconciliation, EventReplicaState,
     EventSubscription, EventSubscriptionId, EventSubscriptionStart, EventSummary,
@@ -64,6 +65,8 @@ type EventSubscriptionKey = (ScopeKey, String);
 type ReplayKey = ([u8; 32], [u8; 32]);
 type RecoveryIdentityKey = (ScopeKey, String);
 type ConversationKey = (ScopeKey, String);
+type CallKey = (ScopeKey, String);
+type CallSignalKey = (ScopeKey, String);
 type GroupKey = (ScopeKey, String);
 type GroupMembershipKey = (ScopeKey, String, ucr_model::PrincipalRef);
 type GroupChangeKey = (ScopeKey, String);
@@ -122,6 +125,8 @@ struct MemoryState {
     recovery_plans: HashMap<String, RecoveryPlan>,
     active_recovery_plans: HashMap<RecoveryIdentityKey, String>,
     conversations: HashMap<ConversationKey, ConversationRecord>,
+    calls: HashMap<CallKey, CallSession>,
+    call_signals: HashMap<CallSignalKey, (ucr_model::PrincipalRef, [u8; 32], u64)>,
     groups: HashMap<GroupKey, GroupRecord>,
     group_memberships: HashMap<GroupMembershipKey, GroupMembership>,
     group_changes: HashMap<GroupChangeKey, (ucr_model::PrincipalRef, [u8; 32])>,
@@ -932,6 +937,18 @@ fn recovery_identity_key(scope: &TenantScope, identity_id: &IdentityId) -> Recov
     )
 }
 
+fn call_key(scope: &TenantScope, call_id: &ucr_model::CallId) -> CallKey {
+    (scope_key(scope), call_id.as_opaque().as_str().to_owned())
+}
+
+fn call_signal_key(scope: &TenantScope, event_id: &str) -> CallSignalKey {
+    (scope_key(scope), event_id.to_owned())
+}
+
+fn event_key_from_parts(scope: &TenantScope, event_id: &str) -> EventKey {
+    (scope_key(scope), event_id.to_owned())
+}
+
 fn conversation_key(scope: &TenantScope, conversation_id: &ConversationId) -> ConversationKey {
     (
         scope_key(scope),
@@ -1702,7 +1719,7 @@ impl EventJournalStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
-        if state.group_changes.contains_key(&key) {
+        if state.group_changes.contains_key(&key) || state.call_signals.contains_key(&key) {
             return Err(DurableStoreError::Conflict);
         }
         state.events.insert(key.clone(), event);
@@ -2186,7 +2203,7 @@ impl AntiEntropyStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
-        if state.group_changes.contains_key(&key) {
+        if state.group_changes.contains_key(&key) || state.call_signals.contains_key(&key) {
             return Err(DurableStoreError::Conflict);
         }
         state.events.insert(key.clone(), event);
@@ -2223,7 +2240,9 @@ impl CommandOutcomeStore for MemoryLocalStore {
                 _ => Err(DurableStoreError::Conflict),
             };
         }
-        if state.group_changes.contains_key(&event_key) {
+        if state.group_changes.contains_key(&event_key)
+            || state.call_signals.contains_key(&event_key)
+        {
             return Err(DurableStoreError::Conflict);
         }
         if let Some(original) = state.events.get(&event_key) {

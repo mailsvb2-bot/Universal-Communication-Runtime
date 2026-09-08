@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/communication.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/identity.proto";
+import "ucr/v1/runtime.proto";
+
+enum CallSignallingState {
+  CALL_SIGNALLING_STATE_UNSPECIFIED = 0;
+  CALL_SIGNALLING_STATE_INVITING = 1;
+  CALL_SIGNALLING_STATE_RINGING = 2;
+  CALL_SIGNALLING_STATE_ACTIVE = 3;
+  CALL_SIGNALLING_STATE_RECONNECTING = 4;
+  CALL_SIGNALLING_STATE_TERMINATED = 5;
+}
+
+enum CallParticipantState {
+  CALL_PARTICIPANT_STATE_UNSPECIFIED = 0;
+  CALL_PARTICIPANT_STATE_INVITED = 1;
+  CALL_PARTICIPANT_STATE_RINGING = 2;
+  CALL_PARTICIPANT_STATE_ACCEPTED = 3;
+  CALL_PARTICIPANT_STATE_REJECTED = 4;
+  CALL_PARTICIPANT_STATE_BUSY = 5;
+  CALL_PARTICIPANT_STATE_LEFT = 6;
+}
+
+enum CallTerminationReason {
+  CALL_TERMINATION_REASON_UNSPECIFIED = 0;
+  CALL_TERMINATION_REASON_REJECTED = 1;
+  CALL_TERMINATION_REASON_BUSY = 2;
+  CALL_TERMINATION_REASON_CANCELLED = 3;
+  CALL_TERMINATION_REASON_TIMED_OUT = 4;
+  CALL_TERMINATION_REASON_COMPLETED = 5;
+  CALL_TERMINATION_REASON_FAILED = 6;
+}
+
+enum CallReconnectPhase {
+  CALL_RECONNECT_PHASE_UNSPECIFIED = 0;
+  CALL_RECONNECT_PHASE_STARTED = 1;
+  CALL_RECONNECT_PHASE_RESTORED = 2;
+}
+
+enum CallParticipantUpdateKind {
+  CALL_PARTICIPANT_UPDATE_KIND_UNSPECIFIED = 0;
+  CALL_PARTICIPANT_UPDATE_KIND_ADD = 1;
+  CALL_PARTICIPANT_UPDATE_KIND_REMOVE = 2;
+}
+
+message CallParticipant {
+  PrincipalRef principal = 1;
+  CallParticipantState state = 2;
+  uint64 joined_revision = 3;
+  optional uint64 left_revision = 4;
+}
+
+message CallSession {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  ConversationRef conversation = 3;
+  PrincipalRef initiated_by = 4;
+  repeated CallParticipant participants = 5;
+  CallSignallingState signalling_state = 6;
+  optional OpaqueId media_negotiation_ref = 7;
+  uint64 media_negotiation_generation = 8;
+  uint64 replication_generation = 9;
+  uint64 revision = 10;
+  optional CallTerminationReason termination_reason = 11;
+}
+
+message CallEmptySignal {}
+message CallReconnectSignal { CallReconnectPhase phase = 1; }
+message CallParticipantUpdateSignal {
+  PrincipalRef participant = 1;
+  CallParticipantUpdateKind kind = 2;
+}
+message CallMediaRenegotiationSignal { OpaqueId negotiation_ref = 1; }
+message CallTerminateSignal { CallTerminationReason reason = 1; }
+
+message CallSignal {
+  OpaqueId event_id = 1;
+  TenantScope scope = 2;
+  OpaqueId call_id = 3;
+  uint64 expected_revision = 4;
+  oneof kind {
+    CallEmptySignal ringing = 10;
+    CallEmptySignal accept = 11;
+    CallEmptySignal reject = 12;
+    CallEmptySignal busy = 13;
+    CallEmptySignal cancel = 14;
+    CallEmptySignal timeout = 15;
+    CallReconnectSignal reconnect = 16;
+    CallParticipantUpdateSignal participant_update = 17;
+    CallMediaRenegotiationSignal media_renegotiation = 18;
+    CallTerminateSignal terminate = 19;
+  }
+}
+
+message CallStartRequest { CallSession session = 1; }
+message CallStartResponse {
+  oneof result {
+    CallSession call = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+message CallGetRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+}
+message CallGetResponse {
+  oneof result {
+    CallSession call = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+message CallSignalRequest { CallSignal signal = 1; }
+message CallSignalResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Phase-19 signalling only. Audio/video/media transport and media E2EE are later phases.
+service CallService {
+  rpc StartCall(CallStartRequest) returns (CallStartResponse);
+  rpc GetCall(CallGetRequest) returns (CallGetResponse);
+  rpc SignalCall(CallSignalRequest) returns (CallSignalResponse);
+}

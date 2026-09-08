@@ -51,7 +51,10 @@ fn phase18_groups_reuse_canonical_owners_and_are_restart_safe() {
     assert!(sqlite.contains("PRIMARY KEY(tenant_id, namespace_present, namespace_id, event_id)"));
     assert!(sqlite.contains("load_event_by_id(&transaction, &change.scope, &change.event_id)"));
     assert!(sqlite.contains("group_memberships"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 21"));
+    assert!(
+        sqlite_root.contains("const SQLITE_SCHEMA_V21: u32 = 21")
+            || sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 21")
+    );
     assert!(sqlite_root.contains("migrate_v20_to_v21"));
     assert!(spec.contains("Status: **Prepared reference implementation**, not Production."));
     assert!(spec.contains("Removed members remain tombstones"));
@@ -118,11 +121,7 @@ fn phase18_release_truth_and_repository_guards_are_machine_locked() {
     let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");
     let ci = fs::read_to_string(workspace.join(".github/workflows/ci.yml")).expect("ci");
 
-    assert!(
-        readme
-            .contains("**Phase 18 — Groups (Prepared/reference complete; Phase 19 not started).**")
-    );
-    assert!(readme.contains("Phase 19 is not started"));
+    assert!(readme.contains("Phase 18 now adds a Prepared Groups reference layer"));
     assert!(ci.contains("test -s spec/groups.md"));
     assert!(ci.contains(
         "0056-phase18-groups-reuse-canonical-conversation-message-and-authorization-owners.md"

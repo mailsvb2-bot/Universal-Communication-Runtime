@@ -250,7 +250,7 @@ impl GroupStore for MemoryLocalStore {
             history_floor,
         )
         .map_err(map_group_error)?;
-        if state.events.contains_key(&change_key) {
+        if state.events.contains_key(&change_key) || state.call_signals.contains_key(&change_key) {
             return Err(DurableStoreError::Conflict);
         }
         state.groups.insert(group_key, transition.group.clone());

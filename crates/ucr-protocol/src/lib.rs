@@ -4,6 +4,7 @@ mod acknowledgement;
 mod addressing;
 mod anti_entropy;
 mod authorization;
+mod call;
 mod capability;
 mod commands;
 mod crypto_contract;
@@ -46,6 +47,7 @@ pub use anti_entropy::{
 };
 pub use authorization::{
     ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, AuthorizationError,
+    CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION, CALL_START_PERMISSION,
     COMMAND_ACCEPT_PERMISSION, COMMAND_OUTCOME_READ_PERMISSION, COMMAND_OUTCOME_WRITE_PERMISSION,
     COMMUNICATION_INTENT_READ_PERMISSION, COMMUNICATION_INTENT_WRITE_PERMISSION,
     CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION, DELIVERY_READ_PERMISSION,
@@ -65,6 +67,11 @@ pub use authorization::{
     TRUSTED_SIGNING_KEY_READ_PERMISSION, TRUSTED_SIGNING_KEY_REVOKE_PERMISSION,
     TRUSTED_SIGNING_KEY_ROTATE_PERMISSION, authorize, is_service_principal,
     validate_permission_grant,
+};
+pub use call::{
+    CALL_SIGNAL_FINGERPRINT_V1_DOMAIN, CallSignallingError, MAX_CALL_PARTICIPANTS,
+    active_call_participant, apply_call_signal, call_signal_event_type, call_signal_fingerprint,
+    canonical_call_creation, canonical_call_session, is_call_conversation_kind,
 };
 pub use capability::{
     CapabilityDescriptor, CapabilityError, CapabilityMaturity, CapabilityRequirement,
@@ -153,8 +160,9 @@ pub use recovery::{
 pub use scope::{ScopeError, ScopeRelation, require_exact_scope, scope_relation};
 pub use service_control::{
     MAX_SERVICE_AUDIT_OPERATION_KIND_LEN, MAX_SERVICE_AUDIT_READ_ITEMS,
-    MAX_SERVICE_REQUEST_PERMISSION_LEN, SERVICE_AUDIT_COMMAND_OPERATION_KIND,
-    SERVICE_AUDIT_COMMUNICATION_INTENT_CREATE_OPERATION_KIND,
+    MAX_SERVICE_REQUEST_PERMISSION_LEN, SERVICE_AUDIT_CALL_OBSERVE_OPERATION_KIND,
+    SERVICE_AUDIT_CALL_SIGNAL_OPERATION_KIND, SERVICE_AUDIT_CALL_START_OPERATION_KIND,
+    SERVICE_AUDIT_COMMAND_OPERATION_KIND, SERVICE_AUDIT_COMMUNICATION_INTENT_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_COMMUNICATION_INTENT_READ_OPERATION_KIND,
     SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND, SERVICE_AUDIT_EVENT_ACK_OPERATION_KIND,

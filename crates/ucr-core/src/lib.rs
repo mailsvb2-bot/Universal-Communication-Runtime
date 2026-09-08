@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod authorized_runtime;
+mod call;
 mod event_api;
 mod group;
 mod id;
@@ -24,6 +25,7 @@ use ucr_model::{
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
 pub use authorized_runtime::AuthorizedDurableRuntime;
+pub use call::CallStore;
 pub use event_api::{
     EventApiIngress, EventCursorRejection, EventDeliveryClock, EventDeliveryClockError,
     EventWebhookDeliveryError, EventWebhookDispatcher, EventWebhookSink, SystemEventDeliveryClock,

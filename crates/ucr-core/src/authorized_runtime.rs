@@ -1,18 +1,19 @@
 use ucr_model::{
-    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CommandEnvelope, CommandId,
-    ConversationId, ConversationKind, ConversationRecord, DeliveryAttempt, DeliveryEvidence,
-    DeliveryId, DeliveryState, DeviceDescriptor, DeviceId, EventConsumerCursor, EventDeadLetter,
-    EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult, EventReconciliation,
-    EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding, GroupChange,
-    GroupId, GroupMemberState, GroupMembership, GroupRecord, IdentityId, IdentityRecord,
-    IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PermissionScope,
-    PrincipalKind, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
-    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
-    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord,
+    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CallId, CallSession, CallSignal,
+    CommandEnvelope, CommandId, ConversationId, ConversationKind, ConversationRecord,
+    DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
+    EventConsumerCursor, EventDeadLetter, EventDeliveryFailureKind, EventEnvelope, EventId,
+    EventPollResult, EventReconciliation, EventSubscription, EventSubscriptionId, EventSummary,
+    ExternalIdentityBinding, GroupChange, GroupId, GroupMemberState, GroupMembership, GroupRecord,
+    IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId,
+    PermissionGrant, PermissionScope, PrincipalKind, PublicKeyDescriptor, RecoveryPlan,
+    RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
+    ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint,
+    SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{
-    ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, COMMAND_ACCEPT_PERMISSION,
+    ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, CALL_OBSERVE_PERMISSION,
+    CALL_SIGNAL_PERMISSION, CALL_START_PERMISSION, COMMAND_ACCEPT_PERMISSION,
     COMMAND_OUTCOME_READ_PERMISSION, COMMAND_OUTCOME_WRITE_PERMISSION,
     COMMUNICATION_INTENT_READ_PERMISSION, COMMUNICATION_INTENT_WRITE_PERMISSION,
     CONVERSATION_READ_PERMISSION, CONVERSATION_WRITE_PERMISSION, DELIVERY_READ_PERMISSION,
@@ -34,9 +35,9 @@ use ucr_protocol::{
 };
 
 use crate::{
-    AntiEntropyStore, AuthorizationEvaluator, AuthorizedMutationError, CommandAcceptanceStore,
-    CommandOutcomeStore, CommunicationIntentStore, ConversationStore, DeliveryStore,
-    DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
+    AntiEntropyStore, AuthorizationEvaluator, AuthorizedMutationError, CallStore,
+    CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore, ConversationStore,
+    DeliveryStore, DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, GroupMessageStore,
     GroupStore, IdentityStore, MessageStore, PermissionGrantStore, RecoveryPlanStore,
     ServiceAuditStore, ServiceCredentialStore, ServiceQuotaStore, SyncStore,
@@ -1330,6 +1331,60 @@ where
         self.require(subject, scope, MESSAGE_READ_PERMISSION)?;
         self.store
             .group_message(subject, scope, message_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+}
+
+impl<A, S> AuthorizedDurableRuntime<'_, A, S>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore,
+{
+    /// Starts one canonical signalling session after scoped authorization.
+    ///
+    /// # Errors
+    /// Returns authorization before storage, or explicit call/store validation failures.
+    pub fn create_call(
+        &self,
+        subject: &ScopedPrincipal,
+        session: &CallSession,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &session.scope, CALL_START_PERMISSION)?;
+        self.store
+            .create_call(subject, session)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Reads a `CallSession` only for an exact active participant. Non-participants receive no
+    /// existence disclosure from the store boundary.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn call(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<Option<CallSession>, AuthorizedMutationError> {
+        self.require(subject, scope, CALL_OBSERVE_PERMISSION)?;
+        self.store
+            .call_for_participant(subject, scope, call_id)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Applies one idempotent Call signalling fact through the atomic canonical owner.
+    ///
+    /// # Errors
+    /// Returns authorization, participant authority, stale revision, conflict, validation or
+    /// durable-store failures.
+    pub fn apply_call_signal(
+        &self,
+        subject: &ScopedPrincipal,
+        signal: &CallSignal,
+    ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
+        self.require(subject, &signal.scope, CALL_SIGNAL_PERMISSION)?;
+        self.store
+            .apply_call_signal(subject, signal)
             .map_err(AuthorizedMutationError::Store)
     }
 }

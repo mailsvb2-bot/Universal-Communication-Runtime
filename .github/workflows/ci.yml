@@ -127,7 +127,8 @@ jobs:
           test -s spec/internet-transport.md &&
           test -s spec/local-transport.md &&
           test -s spec/chat.md &&
-          test -s spec/groups.md
+          test -s spec/groups.md &&
+          test -s spec/call-signalling.md
       - name: Public contract exists
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
@@ -140,7 +141,8 @@ jobs:
           test -s proto/ucr/v1/sync.proto &&
           test -s proto/ucr/v1/integration.proto &&
           test -s proto/ucr/v1/event_api.proto &&
-          test -s proto/ucr/v1/internet_transport.proto
+          test -s proto/ucr/v1/internet_transport.proto &&
+          test -s proto/ucr/v1/call.proto
       - name: ADR governance exists
         run: >-
           test -s docs/adr/0000-template.md &&
@@ -198,4 +200,5 @@ jobs:
           test -s docs/adr/0053-phase15-internet-transport-reuses-canonical-transport-and-crypto-owners.md &&
           test -s docs/adr/0054-phase16-local-direct-transport-reuses-canonical-transport-and-crypto-owners.md &&
           test -s docs/adr/0055-phase17-chat-reuses-canonical-conversation-message-and-delivery-owners.md &&
-          test -s docs/adr/0056-phase18-groups-reuse-canonical-conversation-message-and-authorization-owners.md
+          test -s docs/adr/0056-phase18-groups-reuse-canonical-conversation-message-and-authorization-owners.md &&
+          test -s docs/adr/0057-phase19-call-signalling-reuses-canonical-conversation-identity-and-authorization-owners.md

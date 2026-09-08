@@ -441,6 +441,11 @@ impl GroupStore for SqliteLocalStore {
         .map_err(map_group_error)?;
         if super::event_journal::load_event_by_id(&transaction, &change.scope, &change.event_id)?
             .is_some()
+            || super::call_store::call_signal_reserves_event_id(
+                &transaction,
+                &change.scope,
+                change.event_id.as_opaque().as_str(),
+            )?
         {
             return Err(DurableStoreError::Conflict);
         }
@@ -767,7 +772,7 @@ fn load_group_from(
         .map_err(map_group_error)
 }
 
-fn load_group_for_conversation_from(
+pub(super) fn load_group_for_conversation_from(
     connection: &Connection,
     scope: &TenantScope,
     conversation_id: &ConversationId,
@@ -818,7 +823,7 @@ fn load_bridges(
     Ok(result)
 }
 
-fn load_membership_from(
+pub(super) fn load_membership_from(
     connection: &Connection,
     scope: &TenantScope,
     group_id: &GroupId,
@@ -1209,7 +1214,7 @@ fn decode_u64(value: &[u8]) -> Result<u64, DurableStoreError> {
     ))
 }
 
-const fn principal_kind_name(value: PrincipalKind) -> &'static str {
+pub(super) const fn principal_kind_name(value: PrincipalKind) -> &'static str {
     match value {
         PrincipalKind::Person => "person",
         PrincipalKind::Device => "device",
@@ -1221,7 +1226,7 @@ const fn principal_kind_name(value: PrincipalKind) -> &'static str {
         PrincipalKind::ExternalPlatform => "external_platform",
     }
 }
-fn parse_principal_kind(value: &str) -> Result<PrincipalKind, DurableStoreError> {
+pub(super) fn parse_principal_kind(value: &str) -> Result<PrincipalKind, DurableStoreError> {
     match value {
         "person" => Ok(PrincipalKind::Person),
         "device" => Ok(PrincipalKind::Device),
@@ -1363,6 +1368,12 @@ mod phase18_migration_tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF; \
+                     DROP TRIGGER IF EXISTS event_id_owner_events; \
+                     DROP TRIGGER IF EXISTS event_id_owner_group_changes; \
+                     DROP TRIGGER IF EXISTS event_id_owner_call_signals; \
+                     DROP TABLE call_signals; \
+                     DROP TABLE call_participants; \
+                     DROP TABLE calls; \
                      DROP TABLE group_changes; \
                      DROP TABLE group_bridge_mappings; \
                      DROP TABLE group_memberships; \

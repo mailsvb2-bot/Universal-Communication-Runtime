@@ -32,6 +32,9 @@ pub const SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND: &str =
     "ucr.identity.external_binding.link";
 pub const SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND: &str =
     "ucr.identity.external_binding.read";
+pub const SERVICE_AUDIT_CALL_START_OPERATION_KIND: &str = "ucr.call.start";
+pub const SERVICE_AUDIT_CALL_OBSERVE_OPERATION_KIND: &str = "ucr.call.observe";
+pub const SERVICE_AUDIT_CALL_SIGNAL_OPERATION_KIND: &str = "ucr.call.signal";
 pub const MAX_SERVICE_AUDIT_OPERATION_KIND_LEN: usize = 256;
 pub const MAX_SERVICE_AUDIT_READ_ITEMS: usize = 1024;
 pub const MAX_SERVICE_REQUEST_PERMISSION_LEN: usize = 256;

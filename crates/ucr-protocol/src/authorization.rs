@@ -40,6 +40,9 @@ pub const MESSAGE_WRITE_PERMISSION: &str = "ucr.message.write";
 pub const GROUP_CREATE_PERMISSION: &str = "ucr.group.create";
 pub const GROUP_READ_PERMISSION: &str = "ucr.group.read";
 pub const GROUP_MANAGE_PERMISSION: &str = "ucr.group.manage";
+pub const CALL_START_PERMISSION: &str = "ucr.call.start";
+pub const CALL_OBSERVE_PERMISSION: &str = "ucr.call.observe";
+pub const CALL_SIGNAL_PERMISSION: &str = "ucr.call.signal";
 pub const COMMUNICATION_INTENT_READ_PERMISSION: &str = "ucr.intent.read";
 pub const COMMUNICATION_INTENT_WRITE_PERMISSION: &str = "ucr.intent.write";
 pub const DELIVERY_READ_PERMISSION: &str = "ucr.delivery.read";
@@ -88,6 +91,9 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     GROUP_CREATE_PERMISSION,
     GROUP_READ_PERMISSION,
     GROUP_MANAGE_PERMISSION,
+    CALL_START_PERMISSION,
+    CALL_OBSERVE_PERMISSION,
+    CALL_SIGNAL_PERMISSION,
     COMMUNICATION_INTENT_READ_PERMISSION,
     COMMUNICATION_INTENT_WRITE_PERMISSION,
     DELIVERY_READ_PERMISSION,
