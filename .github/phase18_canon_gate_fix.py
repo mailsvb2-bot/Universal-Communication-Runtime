@@ -116,6 +116,11 @@ text = text.replace(
     'assert!(permission_spec.contains("Phase 18 contributes seven Group façade methods"));',
     1,
 )
+text = text.replace(
+    'assert!(permission_spec.contains("43 unique permission IDs"));',
+    'assert!(permission_spec.contains("three protocol-owned Group permissions"));',
+    1,
+)
 canon.write_text(text)
 
 adr = Path("docs/adr/0028-tenant-scoped-durable-runtime-operations-require-explicit-permissions.md")
