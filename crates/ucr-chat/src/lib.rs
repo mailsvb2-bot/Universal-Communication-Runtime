@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
-use std::{collections::BTreeSet, fmt, time::SystemTime};
+use std::{
+    collections::BTreeSet,
+    fmt,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use ucr_core::{
     AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError, DeliveryStore,
@@ -36,7 +40,7 @@ pub struct SystemChatClock;
 impl ChatClock for SystemChatClock {
     fn now_unix_ms(&self) -> Result<i64, ChatClockError> {
         let elapsed = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
             .map_err(|_| ChatClockError::BeforeUnixEpoch)?;
         i64::try_from(elapsed.as_millis()).map_err(|_| ChatClockError::Overflow)
     }
@@ -298,6 +302,10 @@ where
 
     /// Publishes a bounded-TTL best-effort typing hint without persisting it.
     ///
+    /// Service Accounts are fail-closed here because this local reference API has no
+    /// Service-Principal request gate for ephemeral operations. External Service Accounts retain
+    /// the existing Integration API boundary rather than receiving an admission-proof bypass.
+    ///
     /// # Errors
     /// Rejects stale/oversized TTL, non-direct conversations, insufficient permission, or sink errors.
     pub fn publish_typing(
@@ -329,21 +337,16 @@ where
         subject: &ScopedPrincipal,
         scope: &TenantScope,
     ) -> Result<(), ChatError> {
+        if subject.principal.kind == PrincipalKind::ServiceAccount {
+            return Err(ChatError::Authorization(CanonicalError::new(
+                CanonicalErrorCode::PermissionDenied,
+            )));
+        }
         let request = AuthorizationRequest {
             subject: subject.clone(),
             permission: MESSAGE_WRITE_PERMISSION.to_owned(),
             resource_scope: scope.clone(),
         };
-        if subject.principal.kind == PrincipalKind::ServiceAccount
-            && !self
-                .authorization
-                .service_principal_admission_proof()
-                .is_some_and(|proof| proof.matches(&request))
-        {
-            return Err(ChatError::Authorization(CanonicalError::new(
-                CanonicalErrorCode::PermissionDenied,
-            )));
-        }
         self.authorization
             .authorize(&request)
             .map_err(ChatError::Authorization)
