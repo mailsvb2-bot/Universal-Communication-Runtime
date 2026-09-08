@@ -1,18 +1,18 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{DurableRecordStatus, DurableStoreError, GroupMessageStore, GroupStore};
 use ucr_model::{
-    ConversationId, ConversationKind, ConversationRecord, ConversationRef, DeliveryPolicy, DeliveryState,
-    GroupBridgeMapping, GroupChange, GroupHistoryPolicy, GroupId, GroupMediaState, GroupMemberState,
-    GroupMembership, GroupOwnership, GroupPermission, GroupRecord, GroupRole, IntegrationId,
-    MessageEnvelope, MessageId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
-    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, ScopedPrincipal, TenantId,
-    TenantScope,
+    ConversationId, ConversationKind, ConversationRecord, ConversationRef, DeliveryPolicy,
+    DeliveryState, GroupBridgeMapping, GroupChange, GroupHistoryPolicy, GroupId, GroupMediaState,
+    GroupMemberState, GroupMembership, GroupOwnership, GroupPermission, GroupRecord, GroupRole,
+    IntegrationId, MessageEnvelope, MessageId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind,
+    PrincipalRef, PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, ScopedPrincipal,
+    TenantId, TenantScope,
 };
 use ucr_protocol::{
     MAX_EXTERNAL_GROUP_ID_LEN, apply_group_change, canonical_group_creation,
-    canonical_group_memberships, canonical_group_record, canonical_message, group_change_fingerprint,
-    group_permissions_for_role, is_group_conversation_kind, validate_conversation,
-    validate_group_member_list_limit,
+    canonical_group_memberships, canonical_group_record, canonical_message,
+    group_change_fingerprint, group_permissions_for_role, is_group_conversation_kind,
+    validate_conversation, validate_group_member_list_limit,
 };
 
 use super::{
@@ -125,38 +125,76 @@ pub(super) fn verify_schema_v21(connection: &Connection) -> Result<(), DurableSt
 }
 
 fn verify_group_table_shapes(connection: &Connection) -> Result<(), DurableStoreError> {
-    verify_table_columns(connection, "groups", &[
-        ("tenant_id","TEXT",1,1), ("namespace_present","INTEGER",1,2),
-        ("namespace_id","TEXT",1,3), ("group_id","TEXT",1,4),
-        ("conversation_id","TEXT",1,0), ("conversation_kind","TEXT",1,0),
-        ("ownership_kind","TEXT",1,0), ("owner_principal_id","TEXT",0,0),
-        ("owner_principal_kind","TEXT",0,0), ("ownership_expires_at_unix_ms","INTEGER",0,0),
-        ("history_kind","TEXT",1,0), ("history_value","INTEGER",0,0),
-        ("history_custom","TEXT",0,0), ("delivery_policy","TEXT",1,0),
-        ("crypto_capability_id","TEXT",0,0), ("crypto_epoch","BLOB",1,0),
-        ("crypto_state_ref","TEXT",0,0), ("public_join_policy","TEXT",0,0),
-        ("public_discovery","TEXT",0,0), ("public_indexed","INTEGER",0,0),
-        ("media_state","TEXT",1,0), ("replication_generation","BLOB",1,0),
-        ("revision","BLOB",1,0),
-    ])?;
-    verify_table_columns(connection, "group_memberships", &[
-        ("tenant_id","TEXT",1,1), ("namespace_present","INTEGER",1,2),
-        ("namespace_id","TEXT",1,3), ("group_id","TEXT",1,4),
-        ("principal_id","TEXT",1,5), ("principal_kind","TEXT",1,0),
-        ("role","TEXT",1,0), ("state","TEXT",1,0),
-        ("joined_revision","BLOB",1,0), ("removed_revision","BLOB",0,0),
-        ("history_floor_logical_order","BLOB",1,0),
-    ])?;
-    verify_table_columns(connection, "group_bridge_mappings", &[
-        ("tenant_id","TEXT",1,1), ("namespace_present","INTEGER",1,2),
-        ("namespace_id","TEXT",1,3), ("group_id","TEXT",1,4),
-        ("integration_id","TEXT",1,5), ("external_group_id","BLOB",1,0),
-    ])?;
-    verify_table_columns(connection, "group_changes", &[
-        ("tenant_id","TEXT",1,1), ("namespace_present","INTEGER",1,2),
-        ("namespace_id","TEXT",1,3), ("group_id","TEXT",1,4),
-        ("event_id","TEXT",1,5), ("fingerprint","BLOB",1,0),
-    ])
+    verify_table_columns(
+        connection,
+        "groups",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("group_id", "TEXT", 1, 4),
+            ("conversation_id", "TEXT", 1, 0),
+            ("conversation_kind", "TEXT", 1, 0),
+            ("ownership_kind", "TEXT", 1, 0),
+            ("owner_principal_id", "TEXT", 0, 0),
+            ("owner_principal_kind", "TEXT", 0, 0),
+            ("ownership_expires_at_unix_ms", "INTEGER", 0, 0),
+            ("history_kind", "TEXT", 1, 0),
+            ("history_value", "INTEGER", 0, 0),
+            ("history_custom", "TEXT", 0, 0),
+            ("delivery_policy", "TEXT", 1, 0),
+            ("crypto_capability_id", "TEXT", 0, 0),
+            ("crypto_epoch", "BLOB", 1, 0),
+            ("crypto_state_ref", "TEXT", 0, 0),
+            ("public_join_policy", "TEXT", 0, 0),
+            ("public_discovery", "TEXT", 0, 0),
+            ("public_indexed", "INTEGER", 0, 0),
+            ("media_state", "TEXT", 1, 0),
+            ("replication_generation", "BLOB", 1, 0),
+            ("revision", "BLOB", 1, 0),
+        ],
+    )?;
+    verify_table_columns(
+        connection,
+        "group_memberships",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("group_id", "TEXT", 1, 4),
+            ("principal_id", "TEXT", 1, 5),
+            ("principal_kind", "TEXT", 1, 0),
+            ("role", "TEXT", 1, 0),
+            ("state", "TEXT", 1, 0),
+            ("joined_revision", "BLOB", 1, 0),
+            ("removed_revision", "BLOB", 0, 0),
+            ("history_floor_logical_order", "BLOB", 1, 0),
+        ],
+    )?;
+    verify_table_columns(
+        connection,
+        "group_bridge_mappings",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("group_id", "TEXT", 1, 4),
+            ("integration_id", "TEXT", 1, 5),
+            ("external_group_id", "BLOB", 1, 0),
+        ],
+    )?;
+    verify_table_columns(
+        connection,
+        "group_changes",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("group_id", "TEXT", 1, 4),
+            ("event_id", "TEXT", 1, 5),
+            ("fingerprint", "BLOB", 1, 0),
+        ],
+    )
 }
 
 fn verify_group_rows(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -164,7 +202,14 @@ fn verify_group_rows(connection: &Connection) -> Result<(), DurableStoreError> {
         .prepare("SELECT tenant_id, namespace_present, namespace_id, group_id FROM groups")
         .map_err(|error| map_sqlite_error(&error))?;
     let rows = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
         .map_err(|error| map_sqlite_error(&error))?;
     let mut keys = Vec::new();
     for row in rows {
@@ -174,7 +219,8 @@ fn verify_group_rows(connection: &Connection) -> Result<(), DurableStoreError> {
     for (tenant, present, namespace, group_id) in keys {
         let scope = parse_scope(&tenant, present, &namespace)?;
         let group_id = GroupId::from_opaque(parse_id(&group_id)?);
-        let group = load_group_from(connection, &scope, &group_id)?.ok_or(DurableStoreError::Corrupt)?;
+        let group =
+            load_group_from(connection, &scope, &group_id)?.ok_or(DurableStoreError::Corrupt)?;
         let memberships = load_memberships_from(connection, &group, usize::MAX)?;
         canonical_group_memberships(&group, &memberships).map_err(map_group_error)?;
     }
@@ -196,35 +242,57 @@ impl GroupStore for SqliteLocalStore {
         {
             return Err(DurableStoreError::InvalidRecord);
         }
-        let (group, creator_membership) = canonical_group_creation(group, &creator.scope, &creator.principal)
-            .map_err(map_group_error)?;
+        let (group, creator_membership) =
+            canonical_group_creation(group, &creator.scope, &creator.principal)
+                .map_err(map_group_error)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
         if let Some(existing) = load_group_from(&transaction, &group.scope, &group.group_id)? {
-            let existing_creator = load_membership_from(&transaction, &group.scope, &group.group_id, &creator.principal)?;
+            let existing_creator = load_membership_from(
+                &transaction,
+                &group.scope,
+                &group.group_id,
+                &creator.principal,
+            )?;
             return if existing == group && existing_creator == Some(creator_membership) {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
                 Err(DurableStoreError::Conflict)
             };
         }
-        if load_group_for_conversation_from(&transaction, &group.scope, &group.conversation.conversation_id)?.is_some() {
+        if load_group_for_conversation_from(
+            &transaction,
+            &group.scope,
+            &group.conversation.conversation_id,
+        )?
+        .is_some()
+        {
             return Err(DurableStoreError::Conflict);
         }
-        match message_store::load_conversation_from(&transaction, &conversation.scope, &conversation.conversation.conversation_id)? {
+        match message_store::load_conversation_from(
+            &transaction,
+            &conversation.scope,
+            &conversation.conversation.conversation_id,
+        )? {
             Some(existing) if existing != *conversation => return Err(DurableStoreError::Conflict),
             Some(_) => {}
             None => insert_group_conversation(&transaction, conversation)?,
         }
         insert_group(&transaction, &group)?;
         insert_membership(&transaction, &creator_membership)?;
-        transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
         Ok(DurableRecordStatus::Persisted)
     }
 
-    fn group(&self, scope: &TenantScope, group_id: &GroupId) -> Result<Option<GroupRecord>, DurableStoreError> {
+    fn group(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+    ) -> Result<Option<GroupRecord>, DurableStoreError> {
         let connection = self.lock_connection()?;
         load_group_from(&connection, scope, group_id)
     }
@@ -256,7 +324,8 @@ impl GroupStore for SqliteLocalStore {
     ) -> Result<Vec<GroupMembership>, DurableStoreError> {
         validate_group_member_list_limit(max_items).map_err(map_group_error)?;
         let connection = self.lock_connection()?;
-        let group = load_group_from(&connection, scope, group_id)?.ok_or(DurableStoreError::InvalidRecord)?;
+        let group = load_group_from(&connection, scope, group_id)?
+            .ok_or(DurableStoreError::InvalidRecord)?;
         load_memberships_from(&connection, &group, max_items)
     }
 
@@ -270,7 +339,12 @@ impl GroupStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
-        if let Some(existing) = load_change_fingerprint(&transaction, &change.scope, &change.group_id, change.event_id.as_opaque().as_str())? {
+        if let Some(existing) = load_change_fingerprint(
+            &transaction,
+            &change.scope,
+            &change.group_id,
+            change.event_id.as_opaque().as_str(),
+        )? {
             return if existing == fingerprint {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
@@ -286,12 +360,20 @@ impl GroupStore for SqliteLocalStore {
             None
         };
         let transition = apply_group_change(
-            &group, &memberships, &actor.scope, &actor.principal, change, history_floor,
-        ).map_err(map_group_error)?;
+            &group,
+            &memberships,
+            &actor.scope,
+            &actor.principal,
+            change,
+            history_floor,
+        )
+        .map_err(map_group_error)?;
         update_group(&transaction, &transition.group)?;
         replace_memberships(&transaction, &transition.group, &transition.memberships)?;
         insert_change_fingerprint(&transaction, change, &fingerprint)?;
-        transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
         Ok(DurableRecordStatus::Persisted)
     }
 }
@@ -302,9 +384,13 @@ impl GroupMessageStore for SqliteLocalStore {
         subject: &ScopedPrincipal,
         message: &MessageEnvelope,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        let mut persisted = canonical_message(message).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut persisted =
+            canonical_message(message).map_err(|_| DurableStoreError::InvalidRecord)?;
         if !is_group_conversation_kind(persisted.conversation.kind)
-            || !matches!(persisted.delivery_state, DeliveryState::Created | DeliveryState::Persisted)
+            || !matches!(
+                persisted.delivery_state,
+                DeliveryState::Created | DeliveryState::Persisted
+            )
         {
             return Err(DurableStoreError::InvalidRecord);
         }
@@ -318,19 +404,34 @@ impl GroupMessageStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
-        let group = load_group_for_conversation_from(&transaction, &persisted.scope, &persisted.conversation.conversation_id)?
-            .ok_or(DurableStoreError::PermissionDenied)?;
-        if group.conversation != persisted.conversation || group.delivery_policy != persisted.delivery_policy {
+        let group = load_group_for_conversation_from(
+            &transaction,
+            &persisted.scope,
+            &persisted.conversation.conversation_id,
+        )?
+        .ok_or(DurableStoreError::PermissionDenied)?;
+        if group.conversation != persisted.conversation
+            || group.delivery_policy != persisted.delivery_policy
+        {
             return Err(DurableStoreError::InvalidRecord);
         }
-        let membership = load_membership_from(&transaction, &group.scope, &group.group_id, &subject.principal)?
-            .ok_or(DurableStoreError::PermissionDenied)?;
+        let membership = load_membership_from(
+            &transaction,
+            &group.scope,
+            &group.group_id,
+            &subject.principal,
+        )?
+        .ok_or(DurableStoreError::PermissionDenied)?;
         if membership.state != GroupMemberState::Active
-            || !membership.permissions.contains(&GroupPermission::SendMessage)
+            || !membership
+                .permissions
+                .contains(&GroupPermission::SendMessage)
         {
             return Err(DurableStoreError::PermissionDenied);
         }
-        if let Some(existing) = message_store::load_message_from(&transaction, &persisted.scope, &persisted.message_id)? {
+        if let Some(existing) =
+            message_store::load_message_from(&transaction, &persisted.scope, &persisted.message_id)?
+        {
             return if existing == persisted {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
@@ -339,7 +440,9 @@ impl GroupMessageStore for SqliteLocalStore {
         }
         message_store::insert_message_row(&transaction, &persisted)?;
         message_store::insert_message_children(&transaction, &persisted)?;
-        transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
         Ok(DurableRecordStatus::Persisted)
     }
 
@@ -356,28 +459,41 @@ impl GroupMessageStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(|error| map_sqlite_error(&error))?;
-        let Some(message) = message_store::load_message_from(&transaction, scope, message_id)? else {
+        let Some(message) = message_store::load_message_from(&transaction, scope, message_id)?
+        else {
             return Ok(None);
         };
         if !is_group_conversation_kind(message.conversation.kind) {
             return Ok(None);
         }
-        let group = load_group_for_conversation_from(&transaction, scope, &message.conversation.conversation_id)?
-            .ok_or(DurableStoreError::Corrupt)?;
-        let membership = load_membership_from(&transaction, scope, &group.group_id, &subject.principal)?
-            .ok_or(DurableStoreError::PermissionDenied)?;
+        let group = load_group_for_conversation_from(
+            &transaction,
+            scope,
+            &message.conversation.conversation_id,
+        )?
+        .ok_or(DurableStoreError::Corrupt)?;
+        let membership =
+            load_membership_from(&transaction, scope, &group.group_id, &subject.principal)?
+                .ok_or(DurableStoreError::PermissionDenied)?;
         if membership.state != GroupMemberState::Active
-            || !membership.permissions.contains(&GroupPermission::ReadHistory)
+            || !membership
+                .permissions
+                .contains(&GroupPermission::ReadHistory)
             || !history_allows(&group, &membership, &message)
         {
             return Ok(None);
         }
-        transaction.commit().map_err(|error| map_sqlite_error(&error))?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
         Ok(Some(message))
     }
 }
 
-fn insert_group_conversation(transaction: &Transaction<'_>, conversation: &ConversationRecord) -> Result<(), DurableStoreError> {
+fn insert_group_conversation(
+    transaction: &Transaction<'_>,
+    conversation: &ConversationRecord,
+) -> Result<(), DurableStoreError> {
     let namespace = namespace_storage_key(&conversation.scope);
     transaction.execute(
         "INSERT INTO conversations (tenant_id, namespace_present, namespace_id, conversation_id, kind, parent_conversation_id) VALUES (?1,?2,?3,?4,?5,NULL)",
@@ -390,7 +506,10 @@ fn insert_group_conversation(transaction: &Transaction<'_>, conversation: &Conve
     Ok(())
 }
 
-fn insert_group(transaction: &Transaction<'_>, group: &GroupRecord) -> Result<(), DurableStoreError> {
+fn insert_group(
+    transaction: &Transaction<'_>,
+    group: &GroupRecord,
+) -> Result<(), DurableStoreError> {
     let group = canonical_group_record(group).map_err(map_group_error)?;
     let namespace = namespace_storage_key(&group.scope);
     let ownership = encode_ownership(&group.ownership);
@@ -412,7 +531,10 @@ fn insert_group(transaction: &Transaction<'_>, group: &GroupRecord) -> Result<()
     Ok(())
 }
 
-fn update_group(transaction: &Transaction<'_>, group: &GroupRecord) -> Result<(), DurableStoreError> {
+fn update_group(
+    transaction: &Transaction<'_>,
+    group: &GroupRecord,
+) -> Result<(), DurableStoreError> {
     let group = canonical_group_record(group).map_err(map_group_error)?;
     let namespace = namespace_storage_key(&group.scope);
     let ownership = encode_ownership(&group.ownership);
@@ -430,7 +552,9 @@ fn update_group(transaction: &Transaction<'_>, group: &GroupRecord) -> Result<()
             group.replication_generation.to_be_bytes().as_slice(), group.revision.to_be_bytes().as_slice(),
         ],
     ).map_err(|error| map_sqlite_error(&error))?;
-    if changed != 1 { return Err(DurableStoreError::Corrupt); }
+    if changed != 1 {
+        return Err(DurableStoreError::Corrupt);
+    }
     transaction.execute(
         "DELETE FROM group_bridge_mappings WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4",
         params![group.scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group.group_id.as_opaque().as_str()],
@@ -438,31 +562,59 @@ fn update_group(transaction: &Transaction<'_>, group: &GroupRecord) -> Result<()
     insert_bridges(transaction, &group)
 }
 
-fn insert_bridges(transaction: &Transaction<'_>, group: &GroupRecord) -> Result<(), DurableStoreError> {
+fn insert_bridges(
+    transaction: &Transaction<'_>,
+    group: &GroupRecord,
+) -> Result<(), DurableStoreError> {
     let namespace = namespace_storage_key(&group.scope);
     for mapping in &group.bridge_mappings {
-        transaction.execute(
-            "INSERT INTO group_bridge_mappings VALUES (?1,?2,?3,?4,?5,?6)",
-            params![group.scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value,
-                group.group_id.as_opaque().as_str(), mapping.integration_id.as_opaque().as_str(), mapping.external_group_id],
-        ).map_err(|error| map_sqlite_error(&error))?;
+        transaction
+            .execute(
+                "INSERT INTO group_bridge_mappings VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    group.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    group.group_id.as_opaque().as_str(),
+                    mapping.integration_id.as_opaque().as_str(),
+                    mapping.external_group_id
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
     }
     Ok(())
 }
 
-fn insert_membership(transaction: &Transaction<'_>, membership: &GroupMembership) -> Result<(), DurableStoreError> {
+fn insert_membership(
+    transaction: &Transaction<'_>,
+    membership: &GroupMembership,
+) -> Result<(), DurableStoreError> {
     let namespace = namespace_storage_key(&membership.scope);
-    transaction.execute(
-        "INSERT INTO group_memberships VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-        params![
-            membership.scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value,
-            membership.group_id.as_opaque().as_str(), membership.member.principal_id.as_opaque().as_str(),
-            principal_kind_name(membership.member.kind), role_name(membership.role), member_state_name(membership.state),
-            membership.joined_revision.to_be_bytes().as_slice(),
-            membership.removed_revision.map(u64::to_be_bytes).as_ref().map(<[u8;8]>::as_slice),
-            membership.history_floor_logical_order.to_be_bytes().as_slice(),
-        ],
-    ).map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .execute(
+            "INSERT INTO group_memberships VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                membership.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                membership.group_id.as_opaque().as_str(),
+                membership.member.principal_id.as_opaque().as_str(),
+                principal_kind_name(membership.member.kind),
+                role_name(membership.role),
+                member_state_name(membership.state),
+                membership.joined_revision.to_be_bytes().as_slice(),
+                membership
+                    .removed_revision
+                    .map(u64::to_be_bytes)
+                    .as_ref()
+                    .map(<[u8; 8]>::as_slice),
+                membership
+                    .history_floor_logical_order
+                    .to_be_bytes()
+                    .as_slice(),
+            ],
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
     Ok(())
 }
 
@@ -477,11 +629,17 @@ fn replace_memberships(
         "DELETE FROM group_memberships WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4",
         params![group.scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group.group_id.as_opaque().as_str()],
     ).map_err(|error| map_sqlite_error(&error))?;
-    for membership in &canonical { insert_membership(transaction, membership)?; }
+    for membership in &canonical {
+        insert_membership(transaction, membership)?;
+    }
     Ok(())
 }
 
-fn load_group_from(connection: &Connection, scope: &TenantScope, group_id: &GroupId) -> Result<Option<GroupRecord>, DurableStoreError> {
+fn load_group_from(
+    connection: &Connection,
+    scope: &TenantScope,
+    group_id: &GroupId,
+) -> Result<Option<GroupRecord>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let row = connection.query_row(
         "SELECT conversation_id, conversation_kind, ownership_kind, owner_principal_id, owner_principal_kind, ownership_expires_at_unix_ms, history_kind, history_value, history_custom, delivery_policy, crypto_capability_id, crypto_epoch, crypto_state_ref, public_join_policy, public_discovery, public_indexed, media_state, replication_generation, revision FROM groups WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4",
@@ -495,12 +653,21 @@ fn load_group_from(connection: &Connection, scope: &TenantScope, group_id: &Grou
             row.get::<_,Option<i64>>(15)?, row.get::<_,String>(16)?, row.get::<_,Vec<u8>>(17)?, row.get::<_,Vec<u8>>(18)?
         )),
     ).optional().map_err(|error| map_sqlite_error(&error))?;
-    let Some(row) = row else { return Ok(None); };
-    if row.16 != "idle" { return Err(DurableStoreError::Corrupt); }
-    let conversation = ConversationRef { conversation_id: ConversationId::from_opaque(parse_id(&row.0)?), kind: parse_conversation_kind(&row.1)? };
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if row.16 != "idle" {
+        return Err(DurableStoreError::Corrupt);
+    }
+    let conversation = ConversationRef {
+        conversation_id: ConversationId::from_opaque(parse_id(&row.0)?),
+        kind: parse_conversation_kind(&row.1)?,
+    };
     let bridges = load_bridges(connection, scope, group_id)?;
     let group = GroupRecord {
-        scope: scope.clone(), group_id: group_id.clone(), conversation,
+        scope: scope.clone(),
+        group_id: group_id.clone(),
+        conversation,
         ownership: decode_ownership(&row.2, row.3, row.4, row.5)?,
         history_policy: decode_history(&row.6, row.7, row.8)?,
         delivery_policy: parse_delivery_policy(&row.9)?,
@@ -512,110 +679,231 @@ fn load_group_from(connection: &Connection, scope: &TenantScope, group_id: &Grou
         public_policy: decode_public_policy(row.13, row.14, row.15)?,
         media_state: GroupMediaState::Idle,
         bridge_mappings: bridges,
-        replication_generation: decode_u64(&row.17)?, revision: decode_u64(&row.18)?,
+        replication_generation: decode_u64(&row.17)?,
+        revision: decode_u64(&row.18)?,
     };
-    canonical_group_record(&group).map(Some).map_err(map_group_error)
+    canonical_group_record(&group)
+        .map(Some)
+        .map_err(map_group_error)
 }
 
-fn load_group_for_conversation_from(connection: &Connection, scope: &TenantScope, conversation_id: &ConversationId) -> Result<Option<GroupRecord>, DurableStoreError> {
+fn load_group_for_conversation_from(
+    connection: &Connection,
+    scope: &TenantScope,
+    conversation_id: &ConversationId,
+) -> Result<Option<GroupRecord>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let group_id = connection.query_row(
         "SELECT group_id FROM groups WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND conversation_id=?4",
         params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, conversation_id.as_opaque().as_str()],
         |row| row.get::<_,String>(0),
     ).optional().map_err(|error| map_sqlite_error(&error))?;
-    group_id.map(|value| load_group_from(connection, scope, &GroupId::from_opaque(parse_id(&value)?)))
-        .transpose().map(Option::flatten)
+    group_id
+        .map(|value| load_group_from(connection, scope, &GroupId::from_opaque(parse_id(&value)?)))
+        .transpose()
+        .map(Option::flatten)
 }
 
-fn load_bridges(connection: &Connection, scope: &TenantScope, group_id: &GroupId) -> Result<Vec<GroupBridgeMapping>, DurableStoreError> {
+fn load_bridges(
+    connection: &Connection,
+    scope: &TenantScope,
+    group_id: &GroupId,
+) -> Result<Vec<GroupBridgeMapping>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let mut statement = connection.prepare(
         "SELECT integration_id, external_group_id FROM group_bridge_mappings WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4 ORDER BY integration_id"
     ).map_err(|error| map_sqlite_error(&error))?;
-    let rows = statement.query_map(
-        params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group_id.as_opaque().as_str()],
-        |row| Ok((row.get::<_,String>(0)?, row.get::<_,Vec<u8>>(1)?)),
-    ).map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map(
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                group_id.as_opaque().as_str()
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
     let mut result = Vec::new();
     for row in rows {
         let (integration, external) = row.map_err(|error| map_sqlite_error(&error))?;
-        if external.is_empty() || external.len() > MAX_EXTERNAL_GROUP_ID_LEN { return Err(DurableStoreError::Corrupt); }
-        result.push(GroupBridgeMapping { integration_id: IntegrationId::from_opaque(parse_id(&integration)?), external_group_id: external });
+        if external.is_empty() || external.len() > MAX_EXTERNAL_GROUP_ID_LEN {
+            return Err(DurableStoreError::Corrupt);
+        }
+        result.push(GroupBridgeMapping {
+            integration_id: IntegrationId::from_opaque(parse_id(&integration)?),
+            external_group_id: external,
+        });
     }
     Ok(result)
 }
 
-fn load_membership_from(connection: &Connection, scope: &TenantScope, group_id: &GroupId, member: &PrincipalRef) -> Result<Option<GroupMembership>, DurableStoreError> {
+fn load_membership_from(
+    connection: &Connection,
+    scope: &TenantScope,
+    group_id: &GroupId,
+    member: &PrincipalRef,
+) -> Result<Option<GroupMembership>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let row = connection.query_row(
         "SELECT principal_kind, role, state, joined_revision, removed_revision, history_floor_logical_order FROM group_memberships WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4 AND principal_id=?5",
         params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group_id.as_opaque().as_str(), member.principal_id.as_opaque().as_str()],
         |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,Vec<u8>>(3)?, row.get::<_,Option<Vec<u8>>>(4)?, row.get::<_,Vec<u8>>(5)?)),
     ).optional().map_err(|error| map_sqlite_error(&error))?;
-    let Some(row) = row else { return Ok(None); };
+    let Some(row) = row else {
+        return Ok(None);
+    };
     let stored_kind = parse_principal_kind(&row.0)?;
-    if stored_kind != member.kind { return Err(DurableStoreError::PermissionDenied); }
+    if stored_kind != member.kind {
+        return Err(DurableStoreError::PermissionDenied);
+    }
     let group = load_group_from(connection, scope, group_id)?.ok_or(DurableStoreError::Corrupt)?;
-    decode_membership(&group, member.principal_id.clone(), stored_kind, &row.1, &row.2, &row.3, row.4.as_deref(), &row.5).map(Some)
+    let fields = StoredMembershipFields {
+        role: &row.1,
+        state: &row.2,
+        joined: &row.3,
+        removed: row.4.as_deref(),
+        floor: &row.5,
+    };
+    decode_membership(&group, member.principal_id.clone(), stored_kind, &fields).map(Some)
 }
 
-fn load_memberships_from(connection: &Connection, group: &GroupRecord, max_items: usize) -> Result<Vec<GroupMembership>, DurableStoreError> {
+fn load_memberships_from(
+    connection: &Connection,
+    group: &GroupRecord,
+    max_items: usize,
+) -> Result<Vec<GroupMembership>, DurableStoreError> {
     let namespace = namespace_storage_key(&group.scope);
     let limit = max_items.saturating_add(1);
     let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
     let mut statement = connection.prepare(
         "SELECT principal_id, principal_kind, role, state, joined_revision, removed_revision, history_floor_logical_order FROM group_memberships WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4 ORDER BY principal_id LIMIT ?5"
     ).map_err(|error| map_sqlite_error(&error))?;
-    let rows = statement.query_map(
-        params![group.scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group.group_id.as_opaque().as_str(), sql_limit],
-        |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,Vec<u8>>(4)?, row.get::<_,Option<Vec<u8>>>(5)?, row.get::<_,Vec<u8>>(6)?)),
-    ).map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map(
+            params![
+                group.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                group.group_id.as_opaque().as_str(),
+                sql_limit
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                ))
+            },
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
     let mut result = Vec::new();
     for row in rows {
         let row = row.map_err(|error| map_sqlite_error(&error))?;
         let kind = parse_principal_kind(&row.1)?;
-        result.push(decode_membership(group, PrincipalId::from_opaque(parse_id(&row.0)?), kind, &row.2, &row.3, &row.4, row.5.as_deref(), &row.6)?);
+        let fields = StoredMembershipFields {
+            role: &row.2,
+            state: &row.3,
+            joined: &row.4,
+            removed: row.5.as_deref(),
+            floor: &row.6,
+        };
+        result.push(decode_membership(
+            group,
+            PrincipalId::from_opaque(parse_id(&row.0)?),
+            kind,
+            &fields,
+        )?);
     }
-    if result.len() > max_items { return Err(DurableStoreError::Full); }
+    if result.len() > max_items {
+        return Err(DurableStoreError::Full);
+    }
     canonical_group_memberships(group, &result).map_err(map_group_error)
 }
 
-fn decode_membership(group: &GroupRecord, principal_id: PrincipalId, kind: PrincipalKind, role: &str, state: &str, joined: &[u8], removed: Option<&[u8]>, floor: &[u8]) -> Result<GroupMembership, DurableStoreError> {
-    let role = parse_role(role)?;
+struct StoredMembershipFields<'a> {
+    role: &'a str,
+    state: &'a str,
+    joined: &'a [u8],
+    removed: Option<&'a [u8]>,
+    floor: &'a [u8],
+}
+
+fn decode_membership(
+    group: &GroupRecord,
+    principal_id: PrincipalId,
+    kind: PrincipalKind,
+    fields: &StoredMembershipFields<'_>,
+) -> Result<GroupMembership, DurableStoreError> {
+    let role = parse_role(fields.role)?;
     let membership = GroupMembership {
-        scope: group.scope.clone(), group_id: group.group_id.clone(),
-        member: PrincipalRef { principal_id, kind }, role,
-        permissions: group_permissions_for_role(role), state: parse_member_state(state)?,
-        joined_revision: decode_u64(joined)?,
-        removed_revision: removed.map(decode_u64).transpose()?,
-        history_floor_logical_order: decode_u64(floor)?,
+        scope: group.scope.clone(),
+        group_id: group.group_id.clone(),
+        member: PrincipalRef { principal_id, kind },
+        role,
+        permissions: group_permissions_for_role(role),
+        state: parse_member_state(fields.state)?,
+        joined_revision: decode_u64(fields.joined)?,
+        removed_revision: fields.removed.map(decode_u64).transpose()?,
+        history_floor_logical_order: decode_u64(fields.floor)?,
     };
     ucr_protocol::canonical_group_membership(group, &membership).map_err(map_group_error)
 }
 
-fn load_change_fingerprint(connection: &Connection, scope: &TenantScope, group_id: &GroupId, event_id: &str) -> Result<Option<[u8;32]>, DurableStoreError> {
+fn load_change_fingerprint(
+    connection: &Connection,
+    scope: &TenantScope,
+    group_id: &GroupId,
+    event_id: &str,
+) -> Result<Option<[u8; 32]>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let value = connection.query_row(
         "SELECT fingerprint FROM group_changes WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4 AND event_id=?5",
         params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group_id.as_opaque().as_str(), event_id],
         |row| row.get::<_,Vec<u8>>(0),
     ).optional().map_err(|error| map_sqlite_error(&error))?;
-    value.map(|bytes| bytes.try_into().map_err(|_| DurableStoreError::Corrupt)).transpose()
+    value
+        .map(|bytes| bytes.try_into().map_err(|_| DurableStoreError::Corrupt))
+        .transpose()
 }
 
-fn insert_change_fingerprint(transaction: &Transaction<'_>, change: &GroupChange, fingerprint: &[u8;32]) -> Result<(), DurableStoreError> {
+fn insert_change_fingerprint(
+    transaction: &Transaction<'_>,
+    change: &GroupChange,
+    fingerprint: &[u8; 32],
+) -> Result<(), DurableStoreError> {
     let namespace = namespace_storage_key(&change.scope);
-    transaction.execute(
-        "INSERT INTO group_changes VALUES (?1,?2,?3,?4,?5,?6)",
-        params![change.scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, change.group_id.as_opaque().as_str(), change.event_id.as_opaque().as_str(), fingerprint.as_slice()],
-    ).map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .execute(
+            "INSERT INTO group_changes VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                change.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                change.group_id.as_opaque().as_str(),
+                change.event_id.as_opaque().as_str(),
+                fingerprint.as_slice()
+            ],
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
     Ok(())
 }
 
-fn history_floor_for_add(connection: &Connection, group: &GroupRecord) -> Result<u64, DurableStoreError> {
+fn history_floor_for_add(
+    connection: &Connection,
+    group: &GroupRecord,
+) -> Result<u64, DurableStoreError> {
     let namespace = namespace_storage_key(&group.scope);
-    let base = params![group.scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group.conversation.conversation_id.as_opaque().as_str()];
+    let base = params![
+        group.scope.tenant_id.as_opaque().as_str(),
+        namespace.present,
+        namespace.value,
+        group.conversation.conversation_id.as_opaque().as_str()
+    ];
     match &group.history_policy {
         GroupHistoryPolicy::FullHistory | GroupHistoryPolicy::FromTimestamp(_) => Ok(0),
         GroupHistoryPolicy::NoHistory | GroupHistoryPolicy::FromJoin => {
@@ -623,7 +911,11 @@ fn history_floor_for_add(connection: &Connection, group: &GroupRecord) -> Result
                 "SELECT logical_order FROM messages WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND conversation_id=?4 ORDER BY logical_order DESC LIMIT 1",
                 base, |row| row.get::<_,Vec<u8>>(0),
             ).optional().map_err(|error| map_sqlite_error(&error))?;
-            last.map_or(Ok(0), |bytes| decode_u64(&bytes)?.checked_add(1).ok_or(DurableStoreError::InvalidRecord))
+            last.map_or(Ok(0), |bytes| {
+                decode_u64(&bytes)?
+                    .checked_add(1)
+                    .ok_or(DurableStoreError::InvalidRecord)
+            })
         }
         GroupHistoryPolicy::LastNMessages(count) => {
             let offset = i64::from(count.saturating_sub(1));
@@ -638,111 +930,355 @@ fn history_floor_for_add(connection: &Connection, group: &GroupRecord) -> Result
     }
 }
 
-fn history_allows(group: &GroupRecord, membership: &GroupMembership, message: &MessageEnvelope) -> bool {
-    if message.logical_order < membership.history_floor_logical_order { return false; }
+fn history_allows(
+    group: &GroupRecord,
+    membership: &GroupMembership,
+    message: &MessageEnvelope,
+) -> bool {
+    if message.logical_order < membership.history_floor_logical_order {
+        return false;
+    }
     match group.history_policy {
         GroupHistoryPolicy::FromTimestamp(timestamp) => message.created_at_unix_ms >= timestamp,
         GroupHistoryPolicy::CustomPolicy(_) => false,
-        GroupHistoryPolicy::NoHistory | GroupHistoryPolicy::FromJoin | GroupHistoryPolicy::LastNMessages(_) | GroupHistoryPolicy::FullHistory => true,
+        GroupHistoryPolicy::NoHistory
+        | GroupHistoryPolicy::FromJoin
+        | GroupHistoryPolicy::LastNMessages(_)
+        | GroupHistoryPolicy::FullHistory => true,
     }
 }
 
-fn encode_ownership(value: &GroupOwnership) -> (&'static str, Option<&str>, Option<&'static str>, Option<i64>) {
+fn encode_ownership(
+    value: &GroupOwnership,
+) -> (
+    &'static str,
+    Option<&str>,
+    Option<&'static str>,
+    Option<i64>,
+) {
     match value {
-        GroupOwnership::PersonOwned(owner) => ("person", Some(owner.principal_id.as_opaque().as_str()), Some(principal_kind_name(owner.kind)), None),
-        GroupOwnership::OrganizationOwned(owner) => ("organization", Some(owner.principal_id.as_opaque().as_str()), Some(principal_kind_name(owner.kind)), None),
+        GroupOwnership::PersonOwned(owner) => (
+            "person",
+            Some(owner.principal_id.as_opaque().as_str()),
+            Some(principal_kind_name(owner.kind)),
+            None,
+        ),
+        GroupOwnership::OrganizationOwned(owner) => (
+            "organization",
+            Some(owner.principal_id.as_opaque().as_str()),
+            Some(principal_kind_name(owner.kind)),
+            None,
+        ),
         GroupOwnership::SharedAdmin => ("shared_admin", None, None, None),
         GroupOwnership::OwnerlessFederated => ("ownerless_federated", None, None, None),
-        GroupOwnership::Temporary { owner, expires_at_unix_ms } => ("temporary", owner.as_ref().map(|v| v.principal_id.as_opaque().as_str()), owner.as_ref().map(|v| principal_kind_name(v.kind)), Some(*expires_at_unix_ms)),
+        GroupOwnership::Temporary {
+            owner,
+            expires_at_unix_ms,
+        } => (
+            "temporary",
+            owner.as_ref().map(|v| v.principal_id.as_opaque().as_str()),
+            owner.as_ref().map(|v| principal_kind_name(v.kind)),
+            Some(*expires_at_unix_ms),
+        ),
     }
 }
 
-fn decode_ownership(kind: &str, id: Option<String>, principal_kind: Option<String>, expires: Option<i64>) -> Result<GroupOwnership, DurableStoreError> {
+fn decode_ownership(
+    kind: &str,
+    id: Option<String>,
+    principal_kind: Option<String>,
+    expires: Option<i64>,
+) -> Result<GroupOwnership, DurableStoreError> {
     let owner = match (id, principal_kind) {
         (None, None) => None,
-        (Some(id), Some(kind)) => Some(PrincipalRef { principal_id: PrincipalId::from_opaque(parse_id(&id)?), kind: parse_principal_kind(&kind)? }),
+        (Some(id), Some(kind)) => Some(PrincipalRef {
+            principal_id: PrincipalId::from_opaque(parse_id(&id)?),
+            kind: parse_principal_kind(&kind)?,
+        }),
         _ => return Err(DurableStoreError::Corrupt),
     };
     match kind {
-        "person" => Ok(GroupOwnership::PersonOwned(owner.ok_or(DurableStoreError::Corrupt)?)),
-        "organization" => Ok(GroupOwnership::OrganizationOwned(owner.ok_or(DurableStoreError::Corrupt)?)),
+        "person" => Ok(GroupOwnership::PersonOwned(
+            owner.ok_or(DurableStoreError::Corrupt)?,
+        )),
+        "organization" => Ok(GroupOwnership::OrganizationOwned(
+            owner.ok_or(DurableStoreError::Corrupt)?,
+        )),
         "shared_admin" if owner.is_none() && expires.is_none() => Ok(GroupOwnership::SharedAdmin),
-        "ownerless_federated" if owner.is_none() && expires.is_none() => Ok(GroupOwnership::OwnerlessFederated),
-        "temporary" => Ok(GroupOwnership::Temporary { owner, expires_at_unix_ms: expires.ok_or(DurableStoreError::Corrupt)? }),
+        "ownerless_federated" if owner.is_none() && expires.is_none() => {
+            Ok(GroupOwnership::OwnerlessFederated)
+        }
+        "temporary" => Ok(GroupOwnership::Temporary {
+            owner,
+            expires_at_unix_ms: expires.ok_or(DurableStoreError::Corrupt)?,
+        }),
         _ => Err(DurableStoreError::Corrupt),
     }
 }
 
 fn encode_history(value: &GroupHistoryPolicy) -> (&'static str, Option<i64>, Option<&str>) {
     match value {
-        GroupHistoryPolicy::NoHistory => ("none",None,None),
-        GroupHistoryPolicy::FromJoin => ("from_join",None,None),
-        GroupHistoryPolicy::LastNMessages(count) => ("last_n",Some(i64::from(*count)),None),
-        GroupHistoryPolicy::FromTimestamp(value) => ("from_timestamp",Some(*value),None),
-        GroupHistoryPolicy::FullHistory => ("full",None,None),
-        GroupHistoryPolicy::CustomPolicy(value) => ("custom",None,Some(value.as_str())),
+        GroupHistoryPolicy::NoHistory => ("none", None, None),
+        GroupHistoryPolicy::FromJoin => ("from_join", None, None),
+        GroupHistoryPolicy::LastNMessages(count) => ("last_n", Some(i64::from(*count)), None),
+        GroupHistoryPolicy::FromTimestamp(value) => ("from_timestamp", Some(*value), None),
+        GroupHistoryPolicy::FullHistory => ("full", None, None),
+        GroupHistoryPolicy::CustomPolicy(value) => ("custom", None, Some(value.as_str())),
     }
 }
 
-fn decode_history(kind: &str, value: Option<i64>, custom: Option<String>) -> Result<GroupHistoryPolicy, DurableStoreError> {
+fn decode_history(
+    kind: &str,
+    value: Option<i64>,
+    custom: Option<String>,
+) -> Result<GroupHistoryPolicy, DurableStoreError> {
     match kind {
         "none" if value.is_none() && custom.is_none() => Ok(GroupHistoryPolicy::NoHistory),
         "from_join" if value.is_none() && custom.is_none() => Ok(GroupHistoryPolicy::FromJoin),
-        "last_n" if custom.is_none() => Ok(GroupHistoryPolicy::LastNMessages(u32::try_from(value.ok_or(DurableStoreError::Corrupt)?).map_err(|_| DurableStoreError::Corrupt)?)),
-        "from_timestamp" if custom.is_none() => Ok(GroupHistoryPolicy::FromTimestamp(value.ok_or(DurableStoreError::Corrupt)?)),
+        "last_n" if custom.is_none() => Ok(GroupHistoryPolicy::LastNMessages(
+            u32::try_from(value.ok_or(DurableStoreError::Corrupt)?)
+                .map_err(|_| DurableStoreError::Corrupt)?,
+        )),
+        "from_timestamp" if custom.is_none() => Ok(GroupHistoryPolicy::FromTimestamp(
+            value.ok_or(DurableStoreError::Corrupt)?,
+        )),
         "full" if value.is_none() && custom.is_none() => Ok(GroupHistoryPolicy::FullHistory),
-        "custom" if value.is_none() => Ok(GroupHistoryPolicy::CustomPolicy(custom.ok_or(DurableStoreError::Corrupt)?)),
+        "custom" if value.is_none() => Ok(GroupHistoryPolicy::CustomPolicy(
+            custom.ok_or(DurableStoreError::Corrupt)?,
+        )),
         _ => Err(DurableStoreError::Corrupt),
     }
 }
 
-fn encode_public_policy(value: Option<&PublicGroupPolicy>) -> (Option<&'static str>, Option<&'static str>, Option<i64>) {
-    value.map_or((None,None,None), |policy| (Some(join_policy_name(policy.join_policy)), Some(discovery_name(policy.discovery)), Some(i64::from(policy.indexed))))
+fn encode_public_policy(
+    value: Option<&PublicGroupPolicy>,
+) -> (Option<&'static str>, Option<&'static str>, Option<i64>) {
+    value.map_or((None, None, None), |policy| {
+        (
+            Some(join_policy_name(policy.join_policy)),
+            Some(discovery_name(policy.discovery)),
+            Some(i64::from(policy.indexed)),
+        )
+    })
 }
 
-fn decode_public_policy(join: Option<String>, discovery: Option<String>, indexed: Option<i64>) -> Result<Option<PublicGroupPolicy>, DurableStoreError> {
+fn decode_public_policy(
+    join: Option<String>,
+    discovery: Option<String>,
+    indexed: Option<i64>,
+) -> Result<Option<PublicGroupPolicy>, DurableStoreError> {
     match (join, discovery, indexed) {
-        (None,None,None) => Ok(None),
-        (Some(join),Some(discovery),Some(indexed)) if matches!(indexed,0|1) => Ok(Some(PublicGroupPolicy { join_policy: parse_join_policy(&join)?, discovery: parse_discovery(&discovery)?, indexed: indexed == 1 })),
+        (None, None, None) => Ok(None),
+        (Some(join), Some(discovery), Some(indexed)) if matches!(indexed, 0 | 1) => {
+            Ok(Some(PublicGroupPolicy {
+                join_policy: parse_join_policy(&join)?,
+                discovery: parse_discovery(&discovery)?,
+                indexed: indexed == 1,
+            }))
+        }
         _ => Err(DurableStoreError::Corrupt),
     }
 }
 
-fn parse_scope(tenant: &str, present: i64, namespace: &str) -> Result<TenantScope, DurableStoreError> {
+fn parse_scope(
+    tenant: &str,
+    present: i64,
+    namespace: &str,
+) -> Result<TenantScope, DurableStoreError> {
     let namespace_id = match (present, namespace.is_empty()) {
-        (0,true) => None,
-        (1,false) => Some(NamespaceId::from_opaque(parse_id(namespace)?)),
+        (0, true) => None,
+        (1, false) => Some(NamespaceId::from_opaque(parse_id(namespace)?)),
         _ => return Err(DurableStoreError::Corrupt),
     };
-    Ok(TenantScope { tenant_id: TenantId::from_opaque(parse_id(tenant)?), namespace_id })
+    Ok(TenantScope {
+        tenant_id: TenantId::from_opaque(parse_id(tenant)?),
+        namespace_id,
+    })
 }
 
-fn parse_id(value: &str) -> Result<OpaqueId, DurableStoreError> { OpaqueId::new(value).map_err(|_| DurableStoreError::Corrupt) }
-fn decode_u64(value: &[u8]) -> Result<u64, DurableStoreError> { Ok(u64::from_be_bytes(value.try_into().map_err(|_| DurableStoreError::Corrupt)?)) }
+fn parse_id(value: &str) -> Result<OpaqueId, DurableStoreError> {
+    OpaqueId::new(value).map_err(|_| DurableStoreError::Corrupt)
+}
+fn decode_u64(value: &[u8]) -> Result<u64, DurableStoreError> {
+    Ok(u64::from_be_bytes(
+        value.try_into().map_err(|_| DurableStoreError::Corrupt)?,
+    ))
+}
 
-const fn principal_kind_name(value: PrincipalKind) -> &'static str { match value { PrincipalKind::Person=>"person", PrincipalKind::Device=>"device", PrincipalKind::ServiceAccount=>"service_account", PrincipalKind::AiAgent=>"ai_agent", PrincipalKind::Bot=>"bot", PrincipalKind::Organization=>"organization", PrincipalKind::Automation=>"automation", PrincipalKind::ExternalPlatform=>"external_platform" } }
-fn parse_principal_kind(value: &str) -> Result<PrincipalKind, DurableStoreError> { match value { "person"=>Ok(PrincipalKind::Person), "device"=>Ok(PrincipalKind::Device), "service_account"=>Ok(PrincipalKind::ServiceAccount), "ai_agent"=>Ok(PrincipalKind::AiAgent), "bot"=>Ok(PrincipalKind::Bot), "organization"=>Ok(PrincipalKind::Organization), "automation"=>Ok(PrincipalKind::Automation), "external_platform"=>Ok(PrincipalKind::ExternalPlatform), _=>Err(DurableStoreError::Corrupt) } }
-const fn role_name(value: GroupRole) -> &'static str { match value { GroupRole::Owner=>"owner", GroupRole::Admin=>"admin", GroupRole::Member=>"member" } }
-fn parse_role(value: &str) -> Result<GroupRole, DurableStoreError> { match value { "owner"=>Ok(GroupRole::Owner), "admin"=>Ok(GroupRole::Admin), "member"=>Ok(GroupRole::Member), _=>Err(DurableStoreError::Corrupt) } }
-const fn member_state_name(value: GroupMemberState) -> &'static str { match value { GroupMemberState::Active=>"active", GroupMemberState::Removed=>"removed" } }
-fn parse_member_state(value: &str) -> Result<GroupMemberState, DurableStoreError> { match value { "active"=>Ok(GroupMemberState::Active), "removed"=>Ok(GroupMemberState::Removed), _=>Err(DurableStoreError::Corrupt) } }
-const fn conversation_kind_name(value: ConversationKind) -> &'static str { match value { ConversationKind::PrivateGroup=>"private_group", ConversationKind::PublicGroup=>"public_group", _=>"invalid" } }
-fn parse_conversation_kind(value: &str) -> Result<ConversationKind, DurableStoreError> { match value { "private_group"=>Ok(ConversationKind::PrivateGroup), "public_group"=>Ok(ConversationKind::PublicGroup), _=>Err(DurableStoreError::Corrupt) } }
-const fn delivery_policy_name(value: DeliveryPolicy) -> &'static str { match value { DeliveryPolicy::BestEffort=>"best_effort", DeliveryPolicy::Durable=>"durable", DeliveryPolicy::Urgent=>"urgent", DeliveryPolicy::Expiring=>"expiring", DeliveryPolicy::LocalOnly=>"local_only", DeliveryPolicy::DirectOnly=>"direct_only", DeliveryPolicy::NoRelay=>"no_relay", DeliveryPolicy::NoExternalBridge=>"no_external_bridge", DeliveryPolicy::PrivateNetworkOnly=>"private_network_only" } }
-fn parse_delivery_policy(value: &str) -> Result<DeliveryPolicy, DurableStoreError> { match value { "best_effort"=>Ok(DeliveryPolicy::BestEffort), "durable"=>Ok(DeliveryPolicy::Durable), "urgent"=>Ok(DeliveryPolicy::Urgent), "expiring"=>Ok(DeliveryPolicy::Expiring), "local_only"=>Ok(DeliveryPolicy::LocalOnly), "direct_only"=>Ok(DeliveryPolicy::DirectOnly), "no_relay"=>Ok(DeliveryPolicy::NoRelay), "no_external_bridge"=>Ok(DeliveryPolicy::NoExternalBridge), "private_network_only"=>Ok(DeliveryPolicy::PrivateNetworkOnly), _=>Err(DurableStoreError::Corrupt) } }
-const fn join_policy_name(value: PublicGroupJoinPolicy) -> &'static str { match value { PublicGroupJoinPolicy::Open=>"open", PublicGroupJoinPolicy::ApprovalRequired=>"approval_required", PublicGroupJoinPolicy::InviteOnly=>"invite_only" } }
-fn parse_join_policy(value: &str) -> Result<PublicGroupJoinPolicy, DurableStoreError> { match value { "open"=>Ok(PublicGroupJoinPolicy::Open), "approval_required"=>Ok(PublicGroupJoinPolicy::ApprovalRequired), "invite_only"=>Ok(PublicGroupJoinPolicy::InviteOnly), _=>Err(DurableStoreError::Corrupt) } }
-const fn discovery_name(value: PublicGroupDiscovery) -> &'static str { match value { PublicGroupDiscovery::Unlisted=>"unlisted", PublicGroupDiscovery::Discoverable=>"discoverable" } }
-fn parse_discovery(value: &str) -> Result<PublicGroupDiscovery, DurableStoreError> { match value { "unlisted"=>Ok(PublicGroupDiscovery::Unlisted), "discoverable"=>Ok(PublicGroupDiscovery::Discoverable), _=>Err(DurableStoreError::Corrupt) } }
+const fn principal_kind_name(value: PrincipalKind) -> &'static str {
+    match value {
+        PrincipalKind::Person => "person",
+        PrincipalKind::Device => "device",
+        PrincipalKind::ServiceAccount => "service_account",
+        PrincipalKind::AiAgent => "ai_agent",
+        PrincipalKind::Bot => "bot",
+        PrincipalKind::Organization => "organization",
+        PrincipalKind::Automation => "automation",
+        PrincipalKind::ExternalPlatform => "external_platform",
+    }
+}
+fn parse_principal_kind(value: &str) -> Result<PrincipalKind, DurableStoreError> {
+    match value {
+        "person" => Ok(PrincipalKind::Person),
+        "device" => Ok(PrincipalKind::Device),
+        "service_account" => Ok(PrincipalKind::ServiceAccount),
+        "ai_agent" => Ok(PrincipalKind::AiAgent),
+        "bot" => Ok(PrincipalKind::Bot),
+        "organization" => Ok(PrincipalKind::Organization),
+        "automation" => Ok(PrincipalKind::Automation),
+        "external_platform" => Ok(PrincipalKind::ExternalPlatform),
+        _ => Err(DurableStoreError::Corrupt),
+    }
+}
+const fn role_name(value: GroupRole) -> &'static str {
+    match value {
+        GroupRole::Owner => "owner",
+        GroupRole::Admin => "admin",
+        GroupRole::Member => "member",
+    }
+}
+fn parse_role(value: &str) -> Result<GroupRole, DurableStoreError> {
+    match value {
+        "owner" => Ok(GroupRole::Owner),
+        "admin" => Ok(GroupRole::Admin),
+        "member" => Ok(GroupRole::Member),
+        _ => Err(DurableStoreError::Corrupt),
+    }
+}
+const fn member_state_name(value: GroupMemberState) -> &'static str {
+    match value {
+        GroupMemberState::Active => "active",
+        GroupMemberState::Removed => "removed",
+    }
+}
+fn parse_member_state(value: &str) -> Result<GroupMemberState, DurableStoreError> {
+    match value {
+        "active" => Ok(GroupMemberState::Active),
+        "removed" => Ok(GroupMemberState::Removed),
+        _ => Err(DurableStoreError::Corrupt),
+    }
+}
+const fn conversation_kind_name(value: ConversationKind) -> &'static str {
+    match value {
+        ConversationKind::PrivateGroup => "private_group",
+        ConversationKind::PublicGroup => "public_group",
+        _ => "invalid",
+    }
+}
+fn parse_conversation_kind(value: &str) -> Result<ConversationKind, DurableStoreError> {
+    match value {
+        "private_group" => Ok(ConversationKind::PrivateGroup),
+        "public_group" => Ok(ConversationKind::PublicGroup),
+        _ => Err(DurableStoreError::Corrupt),
+    }
+}
+const fn delivery_policy_name(value: DeliveryPolicy) -> &'static str {
+    match value {
+        DeliveryPolicy::BestEffort => "best_effort",
+        DeliveryPolicy::Durable => "durable",
+        DeliveryPolicy::Urgent => "urgent",
+        DeliveryPolicy::Expiring => "expiring",
+        DeliveryPolicy::LocalOnly => "local_only",
+        DeliveryPolicy::DirectOnly => "direct_only",
+        DeliveryPolicy::NoRelay => "no_relay",
+        DeliveryPolicy::NoExternalBridge => "no_external_bridge",
+        DeliveryPolicy::PrivateNetworkOnly => "private_network_only",
+    }
+}
+fn parse_delivery_policy(value: &str) -> Result<DeliveryPolicy, DurableStoreError> {
+    match value {
+        "best_effort" => Ok(DeliveryPolicy::BestEffort),
+        "durable" => Ok(DeliveryPolicy::Durable),
+        "urgent" => Ok(DeliveryPolicy::Urgent),
+        "expiring" => Ok(DeliveryPolicy::Expiring),
+        "local_only" => Ok(DeliveryPolicy::LocalOnly),
+        "direct_only" => Ok(DeliveryPolicy::DirectOnly),
+        "no_relay" => Ok(DeliveryPolicy::NoRelay),
+        "no_external_bridge" => Ok(DeliveryPolicy::NoExternalBridge),
+        "private_network_only" => Ok(DeliveryPolicy::PrivateNetworkOnly),
+        _ => Err(DurableStoreError::Corrupt),
+    }
+}
+const fn join_policy_name(value: PublicGroupJoinPolicy) -> &'static str {
+    match value {
+        PublicGroupJoinPolicy::Open => "open",
+        PublicGroupJoinPolicy::ApprovalRequired => "approval_required",
+        PublicGroupJoinPolicy::InviteOnly => "invite_only",
+    }
+}
+fn parse_join_policy(value: &str) -> Result<PublicGroupJoinPolicy, DurableStoreError> {
+    match value {
+        "open" => Ok(PublicGroupJoinPolicy::Open),
+        "approval_required" => Ok(PublicGroupJoinPolicy::ApprovalRequired),
+        "invite_only" => Ok(PublicGroupJoinPolicy::InviteOnly),
+        _ => Err(DurableStoreError::Corrupt),
+    }
+}
+const fn discovery_name(value: PublicGroupDiscovery) -> &'static str {
+    match value {
+        PublicGroupDiscovery::Unlisted => "unlisted",
+        PublicGroupDiscovery::Discoverable => "discoverable",
+    }
+}
+fn parse_discovery(value: &str) -> Result<PublicGroupDiscovery, DurableStoreError> {
+    match value {
+        "unlisted" => Ok(PublicGroupDiscovery::Unlisted),
+        "discoverable" => Ok(PublicGroupDiscovery::Discoverable),
+        _ => Err(DurableStoreError::Corrupt),
+    }
+}
 
 fn map_group_error(error: ucr_protocol::GroupError) -> DurableStoreError {
     use ucr_protocol::GroupError;
     match error {
         GroupError::PermissionDenied => DurableStoreError::PermissionDenied,
-        GroupError::RevisionMismatch | GroupError::MemberAlreadyActive | GroupError::MemberNotActive
-        | GroupError::InvalidRoleTransition | GroupError::OwnershipTransferNotSupported
+        GroupError::RevisionMismatch
+        | GroupError::MemberAlreadyActive
+        | GroupError::MemberNotActive
+        | GroupError::InvalidRoleTransition
+        | GroupError::OwnershipTransferNotSupported
         | GroupError::WouldOrphanGroup => DurableStoreError::Conflict,
         GroupError::TooManyMembers => DurableStoreError::Full,
         _ => DurableStoreError::InvalidRecord,
+    }
+}
+
+#[cfg(test)]
+mod phase18_migration_tests {
+    use ucr_core::StorageProvider;
+
+    use super::SqliteLocalStore;
+    use crate::{SQLITE_SCHEMA_VERSION, message_store::tests::TestDb};
+
+    #[test]
+    fn v20_store_migrates_to_v21_without_inventing_groups() {
+        let db = TestDb::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open current store");
+            let connection = store.lock_connection().expect("lock current store");
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys=OFF; \
+                     DROP TABLE group_changes; \
+                     DROP TABLE group_bridge_mappings; \
+                     DROP TABLE group_memberships; \
+                     DROP TABLE groups; \
+                     PRAGMA user_version=20;",
+                )
+                .expect("simulate exact v20 shape");
+        }
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v20 to v21");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        let connection = migrated.lock_connection().expect("lock migrated store");
+        let groups: i64 = connection
+            .query_row("SELECT COUNT(*) FROM groups", [], |row| row.get(0))
+            .expect("count groups");
+        let memberships: i64 = connection
+            .query_row("SELECT COUNT(*) FROM group_memberships", [], |row| {
+                row.get(0)
+            })
+            .expect("count memberships");
+        assert_eq!(groups, 0);
+        assert_eq!(memberships, 0);
     }
 }

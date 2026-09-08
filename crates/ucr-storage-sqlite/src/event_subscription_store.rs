@@ -1388,7 +1388,7 @@ mod tests {
                      DROP TABLE event_subscription_active_batches;
                      DROP TABLE event_subscription_filters;
                      DROP TABLE event_subscriptions;
-                     PRAGMA user_version=19;",
+                     DROP TABLE IF EXISTS group_changes; DROP TABLE IF EXISTS group_bridge_mappings; DROP TABLE IF EXISTS group_memberships; DROP TABLE IF EXISTS groups; PRAGMA user_version=19;",
                 )
                 .expect("construct exact v19 fixture");
         }

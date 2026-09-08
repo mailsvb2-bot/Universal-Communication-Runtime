@@ -840,7 +840,7 @@ mod tests {
                      DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions;
                      DROP TABLE communication_intent_transports;
                      DROP TABLE communication_intents;
-                     PRAGMA user_version=15;",
+                     DROP TABLE IF EXISTS group_changes; DROP TABLE IF EXISTS group_bridge_mappings; DROP TABLE IF EXISTS group_memberships; DROP TABLE IF EXISTS groups; PRAGMA user_version=15;",
                 )
                 .expect("simulate v15");
         }

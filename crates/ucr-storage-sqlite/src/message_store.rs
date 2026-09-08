@@ -445,7 +445,7 @@ impl ConversationStore for SqliteLocalStore {
     }
 }
 
-fn load_conversation_from(
+pub(super) fn load_conversation_from(
     connection: &Connection,
     scope: &TenantScope,
     conversation_id: &ConversationId,
@@ -566,7 +566,7 @@ impl MessageStore for SqliteLocalStore {
     }
 }
 
-fn insert_message_row(
+pub(super) fn insert_message_row(
     transaction: &Transaction<'_>,
     message: &MessageEnvelope,
 ) -> Result<(), DurableStoreError> {
@@ -654,7 +654,7 @@ fn insert_message_row(
     Ok(())
 }
 
-fn insert_message_children(
+pub(super) fn insert_message_children(
     transaction: &Transaction<'_>,
     message: &MessageEnvelope,
 ) -> Result<(), DurableStoreError> {
@@ -834,7 +834,7 @@ struct StoredMessageRow {
     signature: Option<Vec<u8>>,
 }
 
-fn load_message_from(
+pub(super) fn load_message_from(
     connection: &Connection,
     scope: &TenantScope,
     message_id: &MessageId,
@@ -1617,7 +1617,7 @@ pub(crate) mod tests {
                     "PRAGMA foreign_keys=OFF;
                      DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices; DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;
                      DROP TABLE message_extensions;
-                     PRAGMA user_version=9;",
+                     DROP TABLE IF EXISTS group_changes; DROP TABLE IF EXISTS group_bridge_mappings; DROP TABLE IF EXISTS group_memberships; DROP TABLE IF EXISTS groups; PRAGMA user_version=9;",
                 )
                 .expect("simulate exact v9 shape");
         }
