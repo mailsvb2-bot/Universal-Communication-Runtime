@@ -50,3 +50,5 @@ This ADR does not claim production directory/search, invitation/approval deliver
 3. **Treat transport/provider group IDs as canonical Group identity.** Rejected because provider bindings are mappings, not canonical identity.
 4. **Delete membership rows on removal.** Rejected because tombstones are required for restart-safe authority history and stale-retry safety.
 5. **Persist an independent permission list as mutable truth.** Rejected because role permissions are canonical derivations and must not drift.
+
+Duplicate Group mutations are bound to the exact original PrincipalRef in the durable idempotency reservation. Membership keys use the full PrincipalRef rather than only the opaque ID. Group creation over a pre-existing group-kind Conversation derives the creator history floor from the canonical Message transcript inside the same storage transaction/critical section, and Group reads return non-disclosing absence when a migrated group-kind Conversation has no inferred Group aggregate.

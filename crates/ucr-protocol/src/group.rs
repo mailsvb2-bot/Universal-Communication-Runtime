@@ -235,7 +235,7 @@ pub fn canonical_group_memberships(
     });
     if canonical
         .windows(2)
-        .any(|pair| pair[0].member.principal_id == pair[1].member.principal_id)
+        .any(|pair| pair[0].member == pair[1].member)
     {
         return Err(GroupError::DuplicateMembership);
     }

@@ -65,7 +65,7 @@ type ReplayKey = ([u8; 32], [u8; 32]);
 type RecoveryIdentityKey = (ScopeKey, String);
 type ConversationKey = (ScopeKey, String);
 type GroupKey = (ScopeKey, String);
-type GroupMembershipKey = (ScopeKey, String, String);
+type GroupMembershipKey = (ScopeKey, String, ucr_model::PrincipalRef);
 type GroupChangeKey = (ScopeKey, String);
 type MessageKey = (ScopeKey, String);
 type IntentKey = (ScopeKey, String);
@@ -124,7 +124,7 @@ struct MemoryState {
     conversations: HashMap<ConversationKey, ConversationRecord>,
     groups: HashMap<GroupKey, GroupRecord>,
     group_memberships: HashMap<GroupMembershipKey, GroupMembership>,
-    group_changes: HashMap<GroupChangeKey, [u8; 32]>,
+    group_changes: HashMap<GroupChangeKey, (ucr_model::PrincipalRef, [u8; 32])>,
     messages: HashMap<MessageKey, MessageEnvelope>,
     intents: HashMap<IntentKey, CommunicationIntent>,
     identities: HashMap<IdentityKey, IdentityRecord>,

@@ -64,7 +64,7 @@ CREATE TABLE group_memberships (
     joined_revision BLOB NOT NULL CHECK(length(joined_revision)=8),
     removed_revision BLOB CHECK(removed_revision IS NULL OR length(removed_revision)=8),
     history_floor_logical_order BLOB NOT NULL CHECK(length(history_floor_logical_order)=8),
-    PRIMARY KEY(tenant_id, namespace_present, namespace_id, group_id, principal_id),
+    PRIMARY KEY(tenant_id, namespace_present, namespace_id, group_id, principal_id, principal_kind),
     FOREIGN KEY(tenant_id, namespace_present, namespace_id, group_id)
       REFERENCES groups(tenant_id, namespace_present, namespace_id, group_id) ON DELETE CASCADE,
     CHECK((state='active' AND removed_revision IS NULL) OR
@@ -91,6 +91,8 @@ CREATE TABLE group_changes (
     namespace_id TEXT NOT NULL,
     group_id TEXT NOT NULL,
     event_id TEXT NOT NULL,
+    actor_principal_id TEXT NOT NULL,
+    actor_principal_kind TEXT NOT NULL,
     fingerprint BLOB NOT NULL CHECK(length(fingerprint)=32),
     PRIMARY KEY(tenant_id, namespace_present, namespace_id, event_id),
     FOREIGN KEY(tenant_id, namespace_present, namespace_id, group_id)
@@ -163,7 +165,7 @@ fn verify_group_table_shapes(connection: &Connection) -> Result<(), DurableStore
             ("namespace_id", "TEXT", 1, 3),
             ("group_id", "TEXT", 1, 4),
             ("principal_id", "TEXT", 1, 5),
-            ("principal_kind", "TEXT", 1, 0),
+            ("principal_kind", "TEXT", 1, 6),
             ("role", "TEXT", 1, 0),
             ("state", "TEXT", 1, 0),
             ("joined_revision", "BLOB", 1, 0),
@@ -192,6 +194,8 @@ fn verify_group_table_shapes(connection: &Connection) -> Result<(), DurableStore
             ("namespace_id", "TEXT", 1, 3),
             ("group_id", "TEXT", 1, 0),
             ("event_id", "TEXT", 1, 4),
+            ("actor_principal_id", "TEXT", 1, 0),
+            ("actor_principal_kind", "TEXT", 1, 0),
             ("fingerprint", "BLOB", 1, 0),
         ],
     )
@@ -242,7 +246,7 @@ impl GroupStore for SqliteLocalStore {
         {
             return Err(DurableStoreError::InvalidRecord);
         }
-        let (group, creator_membership) =
+        let (group, mut creator_membership) =
             canonical_group_creation(group, &creator.scope, &creator.principal)
                 .map_err(map_group_error)?;
         let mut connection = self.lock_connection()?;
@@ -256,7 +260,12 @@ impl GroupStore for SqliteLocalStore {
                 &group.group_id,
                 &creator.principal,
             )?;
-            return if existing == group && existing_creator == Some(creator_membership) {
+            let duplicate = existing_creator.is_some_and(|persisted| {
+                let mut expected = creator_membership.clone();
+                expected.history_floor_logical_order = persisted.history_floor_logical_order;
+                existing == group && persisted == expected
+            });
+            return if duplicate {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
                 Err(DurableStoreError::Conflict)
@@ -280,6 +289,8 @@ impl GroupStore for SqliteLocalStore {
             Some(_) => {}
             None => insert_group_conversation(&transaction, conversation)?,
         }
+        creator_membership.history_floor_logical_order =
+            history_floor_for_add(&transaction, &group)?;
         insert_group(&transaction, &group)?;
         insert_membership(&transaction, &creator_membership)?;
         transaction
@@ -334,16 +345,22 @@ impl GroupStore for SqliteLocalStore {
         actor: &ScopedPrincipal,
         change: &GroupChange,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
+        if actor.scope != change.scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
         let fingerprint = group_change_fingerprint(change).map_err(map_group_error)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
-        if let Some(existing) = load_change_fingerprint(
+        if let Some((recorded_actor, existing)) = load_change_record(
             &transaction,
             &change.scope,
             change.event_id.as_opaque().as_str(),
         )? {
+            if recorded_actor != actor.principal {
+                return Err(DurableStoreError::PermissionDenied);
+            }
             return if existing == fingerprint {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
@@ -374,7 +391,7 @@ impl GroupStore for SqliteLocalStore {
         .map_err(map_group_error)?;
         update_group(&transaction, &transition.group)?;
         replace_memberships(&transaction, &transition.group, &transition.memberships)?;
-        insert_change_fingerprint(&transaction, change, &fingerprint)?;
+        insert_change_fingerprint(&transaction, actor, change, &fingerprint)?;
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
@@ -470,12 +487,14 @@ impl GroupMessageStore for SqliteLocalStore {
         if !is_group_conversation_kind(message.conversation.kind) {
             return Ok(None);
         }
-        let group = load_group_for_conversation_from(
+        let Some(group) = load_group_for_conversation_from(
             &transaction,
             scope,
             &message.conversation.conversation_id,
         )?
-        .ok_or(DurableStoreError::Corrupt)?;
+        else {
+            return Ok(None);
+        };
         let Some(membership) =
             load_membership_from(&transaction, scope, &group.group_id, &subject.principal)?
         else {
@@ -752,8 +771,8 @@ fn load_membership_from(
 ) -> Result<Option<GroupMembership>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let row = connection.query_row(
-        "SELECT principal_kind, role, state, joined_revision, removed_revision, history_floor_logical_order FROM group_memberships WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4 AND principal_id=?5",
-        params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group_id.as_opaque().as_str(), member.principal_id.as_opaque().as_str()],
+        "SELECT principal_kind, role, state, joined_revision, removed_revision, history_floor_logical_order FROM group_memberships WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4 AND principal_id=?5 AND principal_kind=?6",
+        params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, group_id.as_opaque().as_str(), member.principal_id.as_opaque().as_str(), principal_kind_name(member.kind)],
         |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,Vec<u8>>(3)?, row.get::<_,Option<Vec<u8>>>(4)?, row.get::<_,Vec<u8>>(5)?)),
     ).optional().map_err(|error| map_sqlite_error(&error))?;
     let Some(row) = row else {
@@ -783,7 +802,7 @@ fn load_memberships_from(
     let limit = max_items.saturating_add(1);
     let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
     let mut statement = connection.prepare(
-        "SELECT principal_id, principal_kind, role, state, joined_revision, removed_revision, history_floor_logical_order FROM group_memberships WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4 ORDER BY principal_id LIMIT ?5"
+        "SELECT principal_id, principal_kind, role, state, joined_revision, removed_revision, history_floor_logical_order FROM group_memberships WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4 ORDER BY principal_id, principal_kind LIMIT ?5"
     ).map_err(|error| map_sqlite_error(&error))?;
     let rows = statement
         .query_map(
@@ -860,37 +879,48 @@ fn decode_membership(
     ucr_protocol::canonical_group_membership(group, &membership).map_err(map_group_error)
 }
 
-fn load_change_fingerprint(
+fn load_change_record(
     connection: &Connection,
     scope: &TenantScope,
     event_id: &str,
-) -> Result<Option<[u8; 32]>, DurableStoreError> {
+) -> Result<Option<(PrincipalRef, [u8; 32])>, DurableStoreError> {
     let namespace = namespace_storage_key(scope);
     let value = connection.query_row(
-        "SELECT fingerprint FROM group_changes WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND event_id=?4",
+        "SELECT actor_principal_id, actor_principal_kind, fingerprint FROM group_changes WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND event_id=?4",
         params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, event_id],
-        |row| row.get::<_,Vec<u8>>(0),
+        |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,Vec<u8>>(2)?)),
     ).optional().map_err(|error| map_sqlite_error(&error))?;
     value
-        .map(|bytes| bytes.try_into().map_err(|_| DurableStoreError::Corrupt))
+        .map(|(principal_id, kind, bytes)| {
+            Ok((
+                PrincipalRef {
+                    principal_id: PrincipalId::from_opaque(parse_id(&principal_id)?),
+                    kind: parse_principal_kind(&kind)?,
+                },
+                bytes.try_into().map_err(|_| DurableStoreError::Corrupt)?,
+            ))
+        })
         .transpose()
 }
 
 fn insert_change_fingerprint(
     transaction: &Transaction<'_>,
+    actor: &ScopedPrincipal,
     change: &GroupChange,
     fingerprint: &[u8; 32],
 ) -> Result<(), DurableStoreError> {
     let namespace = namespace_storage_key(&change.scope);
     transaction
         .execute(
-            "INSERT INTO group_changes VALUES (?1,?2,?3,?4,?5,?6)",
+            "INSERT INTO group_changes VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![
                 change.scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
                 namespace.value,
                 change.group_id.as_opaque().as_str(),
                 change.event_id.as_opaque().as_str(),
+                actor.principal.principal_id.as_opaque().as_str(),
+                principal_kind_name(actor.principal.kind),
                 fingerprint.as_slice()
             ],
         )
@@ -1304,7 +1334,10 @@ mod phase18_migration_tests {
 
 #[cfg(test)]
 mod phase18_restart_security_tests {
-    use ucr_core::{DurableRecordStatus, DurableStoreError, GroupMessageStore, GroupStore};
+    use ucr_core::{
+        ConversationStore, DurableRecordStatus, DurableStoreError, GroupMessageStore, GroupStore,
+        MessageStore,
+    };
     use ucr_model::*;
 
     use super::SqliteLocalStore;
@@ -1582,6 +1615,166 @@ mod phase18_restart_security_tests {
                 .group_message(&member, &scope(), &future.message_id)
                 .expect("read")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn sqlite_creator_history_floor_is_derived_from_preexisting_transcript() {
+        let db = TestDb::new();
+        let (conversation, mut group, owner) = group_fixture();
+        group.history_policy = GroupHistoryPolicy::LastNMessages(1);
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        assert_eq!(
+            store.persist_conversation(&conversation),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        let mut first = member_message(&conversation.conversation, &owner.principal, "pre-first");
+        first.logical_order = 4;
+        let mut last = member_message(&conversation.conversation, &owner.principal, "pre-last");
+        last.logical_order = 5;
+        assert_eq!(
+            store.persist_message(&first),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.persist_message(&last),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.create_group(&conversation, &group, &owner),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        let membership = store
+            .group_membership(&scope(), &group.group_id, &owner.principal)
+            .expect("membership read")
+            .expect("creator membership");
+        assert_eq!(membership.history_floor_logical_order, 5);
+        assert_eq!(
+            store.group_message(&owner, &scope(), &first.message_id),
+            Ok(None)
+        );
+        assert!(
+            store
+                .group_message(&owner, &scope(), &last.message_id)
+                .expect("last read")
+                .is_some()
+        );
+        assert_eq!(
+            store.create_group(&conversation, &group, &owner),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+    }
+
+    #[test]
+    fn sqlite_group_message_without_group_aggregate_is_non_oracular() {
+        let db = TestDb::new();
+        let (conversation, _, owner) = group_fixture();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        store
+            .persist_conversation(&conversation)
+            .expect("conversation");
+        let orphan = member_message(
+            &conversation.conversation,
+            &owner.principal,
+            "aggregate-gap",
+        );
+        store.persist_message(&orphan).expect("message");
+        assert_eq!(
+            store.group_message(&owner, &scope(), &orphan.message_id),
+            Ok(None)
+        );
+        assert_eq!(
+            store.group_message(
+                &owner,
+                &scope(),
+                &MessageId::from_opaque(oid("sqlite-aggregate-gap-unknown"))
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn sqlite_duplicate_group_change_is_bound_to_original_actor() {
+        let db = TestDb::new();
+        let (conversation, group, owner) = group_fixture();
+        let intruder = subject("duplicate-intruder");
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        let change = GroupChange {
+            event_id: EventId::from_opaque(oid("sqlite-duplicate-actor-event")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: subject("duplicate-member").principal,
+                role: GroupRole::Member,
+            },
+            next_crypto_state: None,
+        };
+        assert_eq!(
+            store.apply_group_change(&owner, &change),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.apply_group_change(&owner, &change),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        assert_eq!(
+            store.apply_group_change(&intruder, &change),
+            Err(DurableStoreError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn sqlite_same_opaque_id_different_principal_kinds_are_distinct_memberships() {
+        let db = TestDb::new();
+        let (conversation, group, owner) = group_fixture();
+        let alias = ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: owner.principal.principal_id.clone(),
+                kind: PrincipalKind::Organization,
+            },
+        };
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        let change = GroupChange {
+            event_id: EventId::from_opaque(oid("sqlite-dual-kind-add")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: alias.principal.clone(),
+                role: GroupRole::Member,
+            },
+            next_crypto_state: None,
+        };
+        assert_eq!(
+            store.apply_group_change(&owner, &change),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert!(
+            store
+                .group_membership(&scope(), &group.group_id, &owner.principal)
+                .expect("owner lookup")
+                .is_some()
+        );
+        assert!(
+            store
+                .group_membership(&scope(), &group.group_id, &alias.principal)
+                .expect("alias lookup")
+                .is_some()
+        );
+        assert_eq!(
+            store
+                .group_memberships(&scope(), &group.group_id, 8)
+                .expect("members")
+                .len(),
+            2
         );
     }
 }

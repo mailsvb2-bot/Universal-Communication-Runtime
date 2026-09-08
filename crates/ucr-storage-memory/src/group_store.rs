@@ -30,7 +30,7 @@ impl GroupStore for MemoryLocalStore {
         {
             return Err(DurableStoreError::InvalidRecord);
         }
-        let (group, creator_membership) =
+        let (group, mut creator_membership) =
             canonical_group_creation(group, &creator.scope, &creator.principal)
                 .map_err(map_group_error)?;
         let group_key = group_key(&group.scope, &group.group_id);
@@ -42,7 +42,12 @@ impl GroupStore for MemoryLocalStore {
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.groups.get(&group_key) {
             let existing_creator = state.group_memberships.get(&creator_key);
-            return if existing == &group && existing_creator == Some(&creator_membership) {
+            let duplicate = existing_creator.is_some_and(|persisted| {
+                let mut expected = creator_membership.clone();
+                expected.history_floor_logical_order = persisted.history_floor_logical_order;
+                existing == &group && persisted == &expected
+            });
+            return if duplicate {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
                 Err(DurableStoreError::Conflict)
@@ -62,6 +67,7 @@ impl GroupStore for MemoryLocalStore {
                 .conversations
                 .insert(conversation_key, conversation.clone());
         }
+        creator_membership.history_floor_logical_order = history_floor_for_add(&state, &group)?;
         state.groups.insert(group_key, group);
         state
             .group_memberships
@@ -137,11 +143,17 @@ impl GroupStore for MemoryLocalStore {
         actor: &ScopedPrincipal,
         change: &GroupChange,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
+        if actor.scope != change.scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
         let fingerprint = group_change_fingerprint(change).map_err(map_group_error)?;
         let group_key = group_key(&change.scope, &change.group_id);
         let change_key = change_key(&change.scope, change.event_id.as_opaque().as_str());
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        if let Some(existing) = state.group_changes.get(&change_key) {
+        if let Some((recorded_actor, existing)) = state.group_changes.get(&change_key) {
+            if recorded_actor != &actor.principal {
+                return Err(DurableStoreError::PermissionDenied);
+            }
             return if existing == &fingerprint {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
@@ -188,7 +200,9 @@ impl GroupStore for MemoryLocalStore {
                 membership,
             );
         }
-        state.group_changes.insert(change_key, fingerprint);
+        state
+            .group_changes
+            .insert(change_key, (actor.principal.clone(), fingerprint));
         Ok(DurableRecordStatus::Persisted)
     }
 }
@@ -260,11 +274,13 @@ impl GroupMessageStore for MemoryLocalStore {
         if !is_group_conversation_kind(message.conversation.kind) {
             return Ok(None);
         }
-        let group = state
+        let Some(group) = state
             .groups
             .values()
             .find(|group| group.scope == *scope && group.conversation == message.conversation)
-            .ok_or(DurableStoreError::Corrupt)?;
+        else {
+            return Ok(None);
+        };
         let Some(membership) = state
             .group_memberships
             .get(&membership_key(scope, &group.group_id, &subject.principal))
@@ -296,7 +312,7 @@ fn membership_key(
     (
         scope_key(scope),
         group_id.as_opaque().as_str().to_owned(),
-        member.principal_id.as_opaque().as_str().to_owned(),
+        member.clone(),
     )
 }
 
@@ -379,8 +395,8 @@ fn map_group_error(error: ucr_protocol::GroupError) -> DurableStoreError {
 #[cfg(test)]
 mod phase18_memory_security_tests {
     use ucr_core::{
-        DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore,
-        GroupMessageStore, GroupStore,
+        ConversationStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
+        EventJournalStore, GroupMessageStore, GroupStore, MessageStore,
     };
     use ucr_model::*;
 
@@ -717,6 +733,168 @@ mod phase18_memory_security_tests {
                 .group_message(&member, &scope(), &future.message_id)
                 .expect("read")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn creator_history_floor_is_derived_from_preexisting_transcript() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("creator-floor-owner", PrincipalKind::Person);
+        let (conversation, mut group) = group_fixture("creator-floor", &owner);
+        group.history_policy = GroupHistoryPolicy::LastNMessages(1);
+        assert_eq!(
+            store.persist_conversation(&conversation),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        let mut first = message(
+            &conversation.conversation,
+            &owner.principal.principal_id,
+            "pre-first",
+        );
+        first.logical_order = 4;
+        let mut last = message(
+            &conversation.conversation,
+            &owner.principal.principal_id,
+            "pre-last",
+        );
+        last.logical_order = 5;
+        assert_eq!(
+            store.persist_message(&first),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.persist_message(&last),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.create_group(&conversation, &group, &owner),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        let membership = store
+            .group_membership(&scope(), &group.group_id, &owner.principal)
+            .expect("membership read")
+            .expect("creator membership");
+        assert_eq!(membership.history_floor_logical_order, 5);
+        assert_eq!(
+            store.group_message(&owner, &scope(), &first.message_id),
+            Ok(None)
+        );
+        assert!(
+            store
+                .group_message(&owner, &scope(), &last.message_id)
+                .expect("last read")
+                .is_some()
+        );
+        assert_eq!(
+            store.create_group(&conversation, &group, &owner),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+    }
+
+    #[test]
+    fn group_message_without_group_aggregate_is_non_oracular() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("aggregate-gap-owner", PrincipalKind::Person);
+        let (conversation, _) = group_fixture("aggregate-gap", &owner);
+        store
+            .persist_conversation(&conversation)
+            .expect("conversation");
+        let orphan = message(
+            &conversation.conversation,
+            &owner.principal.principal_id,
+            "aggregate-gap",
+        );
+        store.persist_message(&orphan).expect("message");
+        assert_eq!(
+            store.group_message(&owner, &scope(), &orphan.message_id),
+            Ok(None)
+        );
+        assert_eq!(
+            store.group_message(
+                &owner,
+                &scope(),
+                &MessageId::from_opaque(oid("aggregate-gap-unknown"))
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn duplicate_group_change_is_bound_to_original_actor() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("duplicate-owner", PrincipalKind::Person);
+        let intruder = subject("duplicate-intruder", PrincipalKind::Person);
+        let (conversation, group) = group_fixture("duplicate-actor", &owner);
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        let change = GroupChange {
+            event_id: EventId::from_opaque(oid("duplicate-actor-event")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: subject("duplicate-member", PrincipalKind::Person).principal,
+                role: GroupRole::Member,
+            },
+            next_crypto_state: None,
+        };
+        assert_eq!(
+            store.apply_group_change(&owner, &change),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.apply_group_change(&owner, &change),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        assert_eq!(
+            store.apply_group_change(&intruder, &change),
+            Err(DurableStoreError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn same_opaque_id_different_principal_kinds_are_distinct_memberships() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("dual-kind", PrincipalKind::Person);
+        let alias = subject("dual-kind", PrincipalKind::Organization);
+        let (conversation, group) = group_fixture("dual-kind", &owner);
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        let change = GroupChange {
+            event_id: EventId::from_opaque(oid("dual-kind-add")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: alias.principal.clone(),
+                role: GroupRole::Member,
+            },
+            next_crypto_state: None,
+        };
+        assert_eq!(
+            store.apply_group_change(&owner, &change),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert!(
+            store
+                .group_membership(&scope(), &group.group_id, &owner.principal)
+                .expect("owner lookup")
+                .is_some()
+        );
+        assert!(
+            store
+                .group_membership(&scope(), &group.group_id, &alias.principal)
+                .expect("alias lookup")
+                .is_some()
+        );
+        assert_eq!(
+            store
+                .group_memberships(&scope(), &group.group_id, 8)
+                .expect("members")
+                .len(),
+            2
         );
     }
 }

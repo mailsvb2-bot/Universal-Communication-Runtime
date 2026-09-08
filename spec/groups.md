@@ -59,3 +59,7 @@ Phase 18 does **not** claim:
 - production listener hardening or Production maturity.
 
 Later phases may add those capabilities, but they must reuse the canonical Group, Conversation, Message, Delivery, Identity and authorization owners rather than create parallel sources of truth.
+- Group-change duplicate recognition is actor-bound: an identical `EventId`/fingerprint replay is a duplicate only for the exact original `PrincipalRef`; another principal is denied.
+- Group membership identity is the complete `PrincipalRef` (`principal_id` plus `PrincipalKind`), including durable tombstones and storage keys.
+- When a Group aggregate is attached to an already-existing group-kind Conversation, the creator history floor is derived atomically from the canonical pre-existing Message transcript using the same history-policy logic as later joins.
+- A group-kind Message whose Conversation has no Group aggregate is non-disclosing through Group reads and returns absence rather than a corruption/existence oracle.
