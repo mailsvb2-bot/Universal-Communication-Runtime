@@ -1,0 +1,50 @@
+name: Phase17 Cleanup Clippy Verifier
+
+on:
+  push:
+    branches: [phase17-release-truth-cleanup]
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: ${{ !contains(github.event.head_commit.message, '[phase17-cleanup-clippy-finalized]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: phase17-release-truth-cleanup
+      - name: Remove dead README reads from legacy gates
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/ucr-architecture-tests/tests/canon_gates.rs')
+          lines = path.read_text().splitlines(keepends=True)
+          expected = '    let readme = fs::read_to_string(workspace.join("README.md")).expect("readme");\n'
+          targets = [2931, 3865, 4097, 4184]
+          for line_no in targets:
+              actual = lines[line_no - 1]
+              if actual != expected:
+                  raise SystemExit(f'line {line_no} mismatch: {actual!r}')
+          for line_no in reversed(targets):
+              del lines[line_no - 1]
+          path.write_text(''.join(lines))
+          PY
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Canonical formatting check
+        run: cargo fmt --all -- --check
+      - name: Strict architecture Clippy
+        run: cargo clippy -p ucr-architecture-tests --test canon_gates --locked -- -D warnings
+      - name: Architecture gate regression
+        run: cargo test -p ucr-architecture-tests --test canon_gates --locked
+      - name: Commit verified lint cleanup
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/ucr-architecture-tests/tests/canon_gates.rs
+          git commit -m "Remove dead README reads from legacy gates [phase17-cleanup-clippy-finalized]"
+          git push origin HEAD:phase17-release-truth-cleanup
