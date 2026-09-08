@@ -1,4 +1,4 @@
-name: Phase18 SQLite Builder
+name: Phase18 SQLite Builder V2
 
 on:
   push:
