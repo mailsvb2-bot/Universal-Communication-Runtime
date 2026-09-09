@@ -2,7 +2,12 @@
 
 use core::fmt;
 
+mod call;
 mod group;
+pub use call::{
+    CallParticipant, CallParticipantState, CallParticipantUpdateKind, CallReconnectPhase,
+    CallSession, CallSignal, CallSignalKind, CallSignallingState, CallTerminationReason,
+};
 pub use group::{
     GroupBridgeMapping, GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy,
     GroupMediaState, GroupMemberState, GroupMembership, GroupOwnership, GroupPermission,

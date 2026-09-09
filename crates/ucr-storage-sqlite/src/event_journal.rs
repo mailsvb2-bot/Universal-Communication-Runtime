@@ -367,7 +367,13 @@ pub(super) fn append_event_in_transaction(
             Err(DurableStoreError::Conflict)
         };
     }
-    if group_change_reserves_event_id(transaction, &event.scope, &event.event_id)? {
+    if group_change_reserves_event_id(transaction, &event.scope, &event.event_id)?
+        || super::call_store::call_signal_reserves_event_id(
+            transaction,
+            &event.scope,
+            event.event_id.as_opaque().as_str(),
+        )?
+    {
         return Err(DurableStoreError::Conflict);
     }
     let namespace = namespace_storage_key(&event.scope);
