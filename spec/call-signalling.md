@@ -28,7 +28,7 @@ Durable stores apply participant authority, transition validation, `EventId` res
 
 `GetCall` is a participant-gated read over the same storage snapshot used to verify current authority. Missing calls and existing calls for which the authenticated principal has no current signalling authority both return non-disclosing absence at the store boundary. The public binding maps authorized absence to canonical `NOT_FOUND` only after Service Principal admission and `ucr.call.observe` authorization succeed.
 
-For group-backed calls, current Group membership is also rechecked inside the same store operation. Removal from the canonical Group therefore removes call-read/signal authority without requiring a second membership database.
+For group-backed calls, current Group membership is also rechecked inside the same store operation. Removal from the canonical Group therefore removes call-read/signal authority without requiring a second membership database. The same committed `GroupChange` also reconciles every linked CallSession atomically: a removed active participant becomes `Left`; if that participant owned `Reconnecting`, ownership is cleared and the remaining viable call settles; if the removed member is the immutable call initiator, the session terminates because Phase 19 never invents a replacement initiator.
 
 ## Durability
 

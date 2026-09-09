@@ -72,7 +72,7 @@ pub use call::{
     CALL_CREATION_FINGERPRINT_V1_DOMAIN, CALL_SIGNAL_FINGERPRINT_V1_DOMAIN, CallSignallingError,
     MAX_CALL_PARTICIPANTS, active_call_participant, apply_call_signal, call_creation_fingerprint,
     call_signal_event_type, call_signal_fingerprint, canonical_call_creation,
-    canonical_call_session, is_call_conversation_kind,
+    canonical_call_session, is_call_conversation_kind, reconcile_group_call_membership,
 };
 pub use capability::{
     CapabilityDescriptor, CapabilityError, CapabilityMaturity, CapabilityRequirement,

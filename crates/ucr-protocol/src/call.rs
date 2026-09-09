@@ -316,6 +316,89 @@ pub fn apply_call_signal(
     canonical_call_session(&next)
 }
 
+/// Reconciles a Group-backed call with the canonical active Group membership set.
+///
+/// Group membership remains the authority owner. This transition only projects membership revocation
+/// into signalling state so a removed reconnect owner cannot leave the `CallSession` permanently stuck.
+/// The projection advances the Call revision/generation when it changes signalling state.
+///
+/// # Errors
+/// Rejects non-Group calls, malformed current sessions, or revision/generation overflow.
+pub fn reconcile_group_call_membership(
+    current: &CallSession,
+    active_members: &[PrincipalRef],
+) -> Result<CallSession, CallSignallingError> {
+    let mut next = canonical_call_session(current)?;
+    if !matches!(
+        next.conversation.kind,
+        ConversationKind::PrivateGroup | ConversationKind::PublicGroup
+    ) {
+        return Err(CallSignallingError::InvalidConversationKind);
+    }
+    if next.signalling_state == CallSignallingState::Terminated {
+        return Ok(next);
+    }
+
+    let is_current_member =
+        |principal: &PrincipalRef| active_members.iter().any(|member| member == principal);
+    let initiator_revoked = !is_current_member(&next.initiated_by);
+    let has_revoked_active_participant = next.participants.iter().any(|participant| {
+        participant.principal != next.initiated_by
+            && matches!(
+                participant.state,
+                CallParticipantState::Invited
+                    | CallParticipantState::Ringing
+                    | CallParticipantState::Accepted
+            )
+            && participant.left_revision.is_none()
+            && !is_current_member(&participant.principal)
+    });
+    if !initiator_revoked && !has_revoked_active_participant {
+        return Ok(next);
+    }
+
+    let revision = next
+        .revision
+        .checked_add(1)
+        .ok_or(CallSignallingError::Overflow)?;
+    let generation = next
+        .replication_generation
+        .checked_add(1)
+        .ok_or(CallSignallingError::Overflow)?;
+
+    if initiator_revoked {
+        terminate(&mut next, CallTerminationReason::Completed);
+    } else {
+        let reconnect_owner_revoked = next
+            .reconnecting_participant
+            .as_ref()
+            .is_some_and(|owner| !is_current_member(owner));
+        for participant in &mut next.participants {
+            if participant.principal != next.initiated_by
+                && matches!(
+                    participant.state,
+                    CallParticipantState::Invited
+                        | CallParticipantState::Ringing
+                        | CallParticipantState::Accepted
+                )
+                && participant.left_revision.is_none()
+                && !is_current_member(&participant.principal)
+            {
+                participant.state = CallParticipantState::Left;
+                participant.left_revision = Some(revision);
+            }
+        }
+        if reconnect_owner_revoked {
+            next.reconnecting_participant = None;
+            next.signalling_state = CallSignallingState::Active;
+        }
+        settle_if_no_viable_remote(&mut next, CallTerminationReason::Completed);
+    }
+    next.revision = revision;
+    next.replication_generation = generation;
+    canonical_call_session(&next)
+}
+
 /// Stable exact-fact fingerprint used by durable stores for duplicate-or-conflict signalling.
 ///
 /// # Errors
@@ -686,8 +769,10 @@ fn settle_if_no_viable_remote(session: &mut CallSession, reason: CallTermination
         .iter()
         .any(|value| value.state == CallParticipantState::Ringing)
     {
+        session.reconnecting_participant = None;
         session.signalling_state = CallSignallingState::Ringing;
     } else {
+        session.reconnecting_participant = None;
         session.signalling_state = CallSignallingState::Inviting;
     }
 }
@@ -1091,6 +1176,130 @@ mod tests {
         assert_eq!(
             participant(&removed, &charlie).unwrap().state,
             CallParticipantState::Accepted
+        );
+    }
+
+    #[test]
+    fn canonical_group_membership_revocation_reconciles_reconnect_owner() {
+        let mut initial = session();
+        initial.conversation.kind = ConversationKind::PrivateGroup;
+        let alice = initial.initiated_by.clone();
+        let bob = principal("bob", PrincipalKind::Person);
+        let charlie = principal("charlie", PrincipalKind::Person);
+        initial.participants.push(CallParticipant {
+            principal: charlie.clone(),
+            state: CallParticipantState::Invited,
+            joined_revision: 0,
+            left_revision: None,
+        });
+
+        let active = apply_call_signal(
+            &initial,
+            &scope(),
+            &bob,
+            &signal(&initial, "membership-bob-accept", CallSignalKind::Accept),
+        )
+        .unwrap();
+        let active = apply_call_signal(
+            &active,
+            &scope(),
+            &charlie,
+            &signal(&active, "membership-charlie-accept", CallSignalKind::Accept),
+        )
+        .unwrap();
+        let bob_reconnecting = apply_call_signal(
+            &active,
+            &scope(),
+            &bob,
+            &signal(
+                &active,
+                "membership-bob-reconnect",
+                CallSignalKind::Reconnect {
+                    phase: CallReconnectPhase::Started,
+                },
+            ),
+        )
+        .unwrap();
+        let reconciled =
+            reconcile_group_call_membership(&bob_reconnecting, &[alice.clone(), charlie.clone()])
+                .unwrap();
+        assert_eq!(reconciled.signalling_state, CallSignallingState::Active);
+        assert_eq!(reconciled.reconnecting_participant, None);
+        assert_eq!(
+            participant(&reconciled, &bob).unwrap().state,
+            CallParticipantState::Left
+        );
+        assert_eq!(
+            participant(&reconciled, &charlie).unwrap().state,
+            CallParticipantState::Accepted
+        );
+        assert_eq!(reconciled.revision, bob_reconnecting.revision + 1);
+
+        let alice_reconnecting = apply_call_signal(
+            &active,
+            &scope(),
+            &alice,
+            &signal(
+                &active,
+                "membership-alice-reconnect",
+                CallSignalKind::Reconnect {
+                    phase: CallReconnectPhase::Started,
+                },
+            ),
+        )
+        .unwrap();
+        let ended =
+            reconcile_group_call_membership(&alice_reconnecting, &[bob.clone(), charlie.clone()])
+                .unwrap();
+        assert_eq!(ended.signalling_state, CallSignallingState::Terminated);
+        assert_eq!(ended.reconnecting_participant, None);
+        assert_eq!(
+            ended.termination_reason,
+            Some(CallTerminationReason::Completed)
+        );
+        assert_eq!(ended.revision, alice_reconnecting.revision + 1);
+    }
+
+    #[test]
+    fn reconnect_exits_when_last_accepted_remote_is_removed_but_owner_remains() {
+        let mut initial = session();
+        initial.conversation.kind = ConversationKind::PrivateGroup;
+        let alice = initial.initiated_by.clone();
+        let bob = principal("bob", PrincipalKind::Person);
+        let charlie = principal("charlie", PrincipalKind::Person);
+        initial.participants.push(CallParticipant {
+            principal: charlie.clone(),
+            state: CallParticipantState::Invited,
+            joined_revision: 0,
+            left_revision: None,
+        });
+        let active = apply_call_signal(
+            &initial,
+            &scope(),
+            &bob,
+            &signal(&initial, "last-accepted-bob", CallSignalKind::Accept),
+        )
+        .unwrap();
+        let reconnecting = apply_call_signal(
+            &active,
+            &scope(),
+            &alice,
+            &signal(
+                &active,
+                "last-accepted-owner-reconnect",
+                CallSignalKind::Reconnect {
+                    phase: CallReconnectPhase::Started,
+                },
+            ),
+        )
+        .unwrap();
+        let reconciled =
+            reconcile_group_call_membership(&reconnecting, &[alice.clone(), charlie]).unwrap();
+        assert_eq!(reconciled.signalling_state, CallSignallingState::Inviting);
+        assert_eq!(reconciled.reconnecting_participant, None);
+        assert_eq!(
+            participant(&reconciled, &bob).unwrap().state,
+            CallParticipantState::Left
         );
     }
 

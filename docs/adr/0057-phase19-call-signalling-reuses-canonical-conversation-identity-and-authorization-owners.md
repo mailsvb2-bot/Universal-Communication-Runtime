@@ -28,7 +28,7 @@ Reconnect state records the exact `PrincipalRef` that opened the reconnect cycle
 - Exact TenantScope is mandatory.
 - Full PrincipalRef identity prevents principal-kind aliasing.
 - Non-participants cannot distinguish a missing CallSession from an existing unauthorized one through the CallStore read boundary.
-- Group removal immediately removes group-backed call authority because the existing Group owner is consulted in the same storage operation.
+- Group removal immediately removes group-backed call authority because the existing Group owner is consulted in the same storage operation. The Group mutation and linked CallSession reconciliation share the same Memory critical section / SQLite transaction, so a revoked reconnect owner cannot strand a session in `Reconnecting`; removal of the immutable call initiator terminates that session instead of inventing replacement authority.
 - Stale revisions, invalid transitions, forged actors and cross-scope calls fail closed.
 - `Reconnecting` cannot be cleared as a side effect of unrelated participant progress while accepted remote signalling authority remains; an explicit restore fact is required.
 - A non-initiator in a Group call cannot globally terminate the CallSession; it may leave itself through the participant-update path. Direct accepted peers retain hang-up authority.

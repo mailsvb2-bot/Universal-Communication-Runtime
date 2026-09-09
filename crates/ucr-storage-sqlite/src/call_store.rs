@@ -3,12 +3,12 @@ use ucr_core::{CallStore, DurableRecordStatus, DurableStoreError};
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallParticipantUpdateKind, CallSession,
     CallSignal, CallSignalKind, CallSignallingState, CallTerminationReason, ConversationId,
-    ConversationKind, ConversationRef, GroupMemberState, NamespaceId, OpaqueId, PrincipalId,
-    PrincipalRef, ScopedPrincipal, TenantId, TenantScope,
+    ConversationKind, ConversationRef, GroupMemberState, GroupMembership, GroupRecord, NamespaceId,
+    OpaqueId, PrincipalId, PrincipalRef, ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_protocol::{
     active_call_participant, apply_call_signal, call_creation_fingerprint, call_signal_fingerprint,
-    canonical_call_creation, canonical_call_session,
+    canonical_call_creation, canonical_call_session, reconcile_group_call_membership,
 };
 
 use super::{
@@ -388,6 +388,54 @@ impl CallStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         Ok(DurableRecordStatus::Persisted)
     }
+}
+
+pub(super) fn reconcile_group_calls_after_membership_change(
+    transaction: &Transaction<'_>,
+    group: &GroupRecord,
+    memberships: &[GroupMembership],
+) -> Result<(), DurableStoreError> {
+    let active_members = memberships
+        .iter()
+        .filter(|membership| membership.state == GroupMemberState::Active)
+        .map(|membership| membership.member.clone())
+        .collect::<Vec<_>>();
+    let namespace = namespace_storage_key(&group.scope);
+    let mut statement = transaction
+        .prepare(
+            "SELECT call_id FROM calls
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+               AND conversation_id=?4 AND conversation_kind=?5",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let call_ids = statement
+        .query_map(
+            params![
+                group.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                group.conversation.conversation_id.as_opaque().as_str(),
+                call_conversation_kind_name(group.conversation.kind),
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| map_sqlite_error(&error))?;
+    drop(statement);
+
+    for raw_call_id in call_ids {
+        let call_id = CallId::from_opaque(parse_id(&raw_call_id)?);
+        let current = load_call_from(transaction, &group.scope, &call_id)?
+            .ok_or(DurableStoreError::Corrupt)?;
+        let next =
+            reconcile_group_call_membership(&current, &active_members).map_err(map_call_error)?;
+        if next != current {
+            update_call(transaction, &next)?;
+            replace_participants(transaction, &next)?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn call_signal_reserves_event_id(

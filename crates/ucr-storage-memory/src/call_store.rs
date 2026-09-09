@@ -1,12 +1,12 @@
 use ucr_core::{CallStore, DurableRecordStatus, DurableStoreError};
 use ucr_model::{
     CallId, CallParticipantState, CallParticipantUpdateKind, CallSession, CallSignal,
-    CallSignalKind, CallSignallingState, ConversationKind, GroupMemberState, PrincipalRef,
-    ScopedPrincipal, TenantScope,
+    CallSignalKind, CallSignallingState, ConversationKind, GroupMemberState, GroupMembership,
+    GroupRecord, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
     active_call_participant, apply_call_signal, call_creation_fingerprint, call_signal_fingerprint,
-    canonical_call_creation, canonical_call_session,
+    canonical_call_creation, canonical_call_session, reconcile_group_call_membership,
 };
 
 use super::{
@@ -163,6 +163,33 @@ fn validated_call_from_state(
         return Err(DurableStoreError::Corrupt);
     }
     Ok(Some(canonical))
+}
+
+pub(super) fn reconcile_group_calls_after_membership_change(
+    state: &mut MemoryState,
+    group: &GroupRecord,
+    memberships: &[GroupMembership],
+) -> Result<(), DurableStoreError> {
+    let active_members = memberships
+        .iter()
+        .filter(|membership| membership.state == GroupMemberState::Active)
+        .map(|membership| membership.member.clone())
+        .collect::<Vec<_>>();
+    let mut updates = Vec::new();
+    for (key, current) in &state.calls {
+        if current.scope != group.scope || current.conversation != group.conversation {
+            continue;
+        }
+        let next =
+            reconcile_group_call_membership(current, &active_members).map_err(map_call_error)?;
+        if next != *current {
+            updates.push((key.clone(), next));
+        }
+    }
+    for (key, next) in updates {
+        state.calls.insert(key, next);
+    }
+    Ok(())
 }
 
 fn require_group_participants_if_needed(
