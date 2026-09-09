@@ -253,6 +253,11 @@ impl GroupStore for MemoryLocalStore {
         if state.events.contains_key(&change_key) || state.call_signals.contains_key(&change_key) {
             return Err(DurableStoreError::Conflict);
         }
+        super::call_store::reconcile_group_calls_after_membership_change(
+            &mut state,
+            &transition.group,
+            &transition.memberships,
+        )?;
         state.groups.insert(group_key, transition.group.clone());
         state.group_memberships.retain(|_, membership| {
             membership.scope != change.scope || membership.group_id != change.group_id
@@ -458,7 +463,7 @@ fn map_group_error(error: ucr_protocol::GroupError) -> DurableStoreError {
 #[cfg(test)]
 mod phase18_memory_security_tests {
     use ucr_core::{
-        ConversationStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
+        CallStore, ConversationStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
         EventJournalStore, GroupMessageStore, GroupStore, MessageStore,
     };
     use ucr_model::*;
@@ -1099,6 +1104,180 @@ mod phase18_memory_security_tests {
         assert_eq!(
             store.apply_group_change(&admin, &admin_change),
             Err(DurableStoreError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn group_removal_reconciles_all_linked_reconnect_owners_atomically() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("phase19-owner", PrincipalKind::Person);
+        let bob = subject("phase19-bob", PrincipalKind::Person);
+        let charlie = subject("phase19-charlie", PrincipalKind::Person);
+        let (conversation, group) = group_fixture("phase19-call-reconcile", &owner);
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        for (revision, event_id, member) in [
+            (0, "phase19-add-bob", bob.principal.clone()),
+            (1, "phase19-add-charlie", charlie.principal.clone()),
+        ] {
+            store
+                .apply_group_change(
+                    &owner,
+                    &GroupChange {
+                        event_id: EventId::from_opaque(oid(event_id)),
+                        scope: scope(),
+                        group_id: group.group_id.clone(),
+                        expected_revision: revision,
+                        kind: GroupChangeKind::AddMember {
+                            member,
+                            role: GroupRole::Member,
+                        },
+                        next_crypto_state: None,
+                    },
+                )
+                .expect("add member");
+        }
+
+        let make_call = |id: &str, initiator: &ScopedPrincipal, remotes: &[&ScopedPrincipal]| {
+            let mut participants = vec![CallParticipant {
+                principal: initiator.principal.clone(),
+                state: CallParticipantState::Accepted,
+                joined_revision: 0,
+                left_revision: None,
+            }];
+            participants.extend(remotes.iter().map(|remote| CallParticipant {
+                principal: remote.principal.clone(),
+                state: CallParticipantState::Invited,
+                joined_revision: 0,
+                left_revision: None,
+            }));
+            CallSession {
+                scope: scope(),
+                call_id: CallId::from_opaque(oid(id)),
+                conversation: conversation.conversation.clone(),
+                initiated_by: initiator.principal.clone(),
+                participants,
+                signalling_state: CallSignallingState::Inviting,
+                reconnecting_participant: None,
+                media_negotiation_ref: None,
+                media_negotiation_generation: 0,
+                replication_generation: 0,
+                revision: 0,
+                termination_reason: None,
+            }
+        };
+        let signal = |session: &CallSession, id: &str, kind: CallSignalKind| CallSignal {
+            event_id: EventId::from_opaque(oid(id)),
+            scope: session.scope.clone(),
+            call_id: session.call_id.clone(),
+            expected_revision: session.revision,
+            kind,
+        };
+
+        let bob_call = make_call("phase19-bob-call", &bob, &[&charlie]);
+        store.create_call(&bob, &bob_call).expect("bob call");
+        store
+            .apply_call_signal(
+                &charlie,
+                &signal(&bob_call, "phase19-bob-call-accept", CallSignalKind::Accept),
+            )
+            .expect("accept bob call");
+        let bob_active = store.call(&scope(), &bob_call.call_id).unwrap().unwrap();
+        store
+            .apply_call_signal(
+                &bob,
+                &signal(
+                    &bob_active,
+                    "phase19-bob-call-reconnect",
+                    CallSignalKind::Reconnect {
+                        phase: CallReconnectPhase::Started,
+                    },
+                ),
+            )
+            .expect("bob reconnect");
+        let bob_reconnecting = store.call(&scope(), &bob_call.call_id).unwrap().unwrap();
+
+        let owner_call = make_call("phase19-owner-call", &owner, &[&bob, &charlie]);
+        store.create_call(&owner, &owner_call).expect("owner call");
+        store
+            .apply_call_signal(
+                &bob,
+                &signal(
+                    &owner_call,
+                    "phase19-owner-call-bob-accept",
+                    CallSignalKind::Accept,
+                ),
+            )
+            .expect("bob accept owner call");
+        let owner_active = store.call(&scope(), &owner_call.call_id).unwrap().unwrap();
+        store
+            .apply_call_signal(
+                &charlie,
+                &signal(
+                    &owner_active,
+                    "phase19-owner-call-charlie-accept",
+                    CallSignalKind::Accept,
+                ),
+            )
+            .expect("charlie accept owner call");
+        let owner_active = store.call(&scope(), &owner_call.call_id).unwrap().unwrap();
+        store
+            .apply_call_signal(
+                &bob,
+                &signal(
+                    &owner_active,
+                    "phase19-owner-call-bob-reconnect",
+                    CallSignalKind::Reconnect {
+                        phase: CallReconnectPhase::Started,
+                    },
+                ),
+            )
+            .expect("bob reconnect owner call");
+        let owner_reconnecting = store.call(&scope(), &owner_call.call_id).unwrap().unwrap();
+
+        store
+            .apply_group_change(
+                &owner,
+                &GroupChange {
+                    event_id: EventId::from_opaque(oid("phase19-remove-bob")),
+                    scope: scope(),
+                    group_id: group.group_id.clone(),
+                    expected_revision: 2,
+                    kind: GroupChangeKind::RemoveMember {
+                        member: bob.principal.clone(),
+                    },
+                    next_crypto_state: None,
+                },
+            )
+            .expect("remove reconnect owner");
+
+        let ended = store.call(&scope(), &bob_call.call_id).unwrap().unwrap();
+        assert_eq!(ended.signalling_state, CallSignallingState::Terminated);
+        assert_eq!(ended.reconnecting_participant, None);
+        assert_eq!(
+            ended.termination_reason,
+            Some(CallTerminationReason::Completed)
+        );
+        assert_eq!(ended.revision, bob_reconnecting.revision + 1);
+
+        let surviving = store.call(&scope(), &owner_call.call_id).unwrap().unwrap();
+        assert_eq!(surviving.signalling_state, CallSignallingState::Active);
+        assert_eq!(surviving.reconnecting_participant, None);
+        assert_eq!(surviving.revision, owner_reconnecting.revision + 1);
+        assert_eq!(
+            surviving
+                .participants
+                .iter()
+                .find(|participant| participant.principal == bob.principal)
+                .unwrap()
+                .state,
+            CallParticipantState::Left
+        );
+        assert_eq!(
+            store.call_for_participant(&bob, &scope(), &owner_call.call_id),
+            Ok(None)
         );
     }
 }
