@@ -4,6 +4,7 @@ package ucr.v1;
 
 import "ucr/v1/common.proto";
 import "ucr/v1/identity.proto";
+import "ucr/v1/runtime.proto";
 
 enum AudioChannelLayout {
   AUDIO_CHANNEL_LAYOUT_UNSPECIFIED = 0;
@@ -36,6 +37,7 @@ message AudioStreamDescriptor {
   PrincipalRef source = 4;
   AudioCodecConfig codec = 5;
   uint64 negotiation_generation = 6;
+  OpaqueId negotiation_ref = 7;
 }
 
 // Encoded realtime codec payload. Phase 20 does not claim that payload is E2EE media ciphertext.
@@ -48,6 +50,19 @@ message EncodedAudioFrame {
   uint64 sequence = 6;
   uint64 media_timestamp_samples = 7;
   bytes payload = 8;
+  OpaqueId negotiation_ref = 9;
+}
+
+
+// Read-only binding returned by the canonical media-negotiation resolver for one Call generation.
+// The resolver does not negotiate; it resolves the exact result referenced by CallSession.
+message AudioNegotiationBinding {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId negotiation_ref = 3;
+  uint64 negotiation_generation = 4;
+  NegotiationResult result = 5;
+  AudioCodecConfig selected_codec = 6;
 }
 
 // Phase 20 defines the language-independent audio media shape. A network data-plane service is not

@@ -109,6 +109,7 @@ pub fn validate_audio_frame_for_stream(
         || frame.call_id != stream.call_id
         || frame.stream_id != stream.stream_id
         || frame.source != stream.source
+        || frame.negotiation_ref != stream.negotiation_ref
         || frame.negotiation_generation != stream.negotiation_generation
     {
         return Err(AudioProtocolError::FrameBindingMismatch);

@@ -5,14 +5,16 @@ use core::fmt;
 use opus::{Application, Channels, Decoder, Encoder};
 use ucr_core::{AuthorizationEvaluator, CallStore, DurableStoreError};
 use ucr_model::{
-    AudioChannelLayout, AudioStreamDescriptor, AuthorizationRequest, CallParticipantState,
-    CallSession, CallSignallingState, CapabilityDescriptor, CapabilityMaturity, EncodedAudioFrame,
-    ScopedPrincipal,
+    AudioChannelLayout, AudioCodecConfig, AudioStreamDescriptor, AuthorizationRequest, CallId,
+    CallParticipantState, CallSession, CallSignallingState, CapabilityDescriptor,
+    CapabilityMaturity, EncodedAudioFrame, OpaqueId, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
     AUDIO_MEDIA_CAPABILITY, AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, AudioProtocolError,
-    MAX_ENCODED_AUDIO_FRAME_BYTES, audio_samples_per_channel, canonical_audio_stream_descriptor,
-    canonical_capabilities, phase20_audio_capabilities, validate_audio_frame_for_stream,
+    CanonicalError, MAX_ENCODED_AUDIO_FRAME_BYTES, NegotiationResultEnvelope,
+    audio_samples_per_channel, canonical_audio_codec_config, canonical_audio_stream_descriptor,
+    canonical_capabilities, canonical_negotiation_result, phase20_audio_capabilities,
+    require_supported_extensions, validate_audio_frame_for_stream,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +29,13 @@ pub enum AudioError {
     SubjectNotAccepted,
     SourceNotAccepted,
     NegotiationGenerationMismatch,
+    MissingNegotiation,
+    NegotiationBindingMismatch,
+    NegotiationResolve(CanonicalError),
+    NegotiationResultInvalid,
+    NegotiatedCapabilityUnavailable,
+    NegotiatedCodecMismatch,
+    UnsupportedNegotiationExtension,
     CapabilityUnavailable,
     PcmFrameLength,
     Codec,
@@ -64,33 +73,69 @@ impl AudioCapabilityProvider for PreparedAudioCapabilities {
     }
 }
 
+/// Read-only resolution of the canonical media-negotiation result referenced by one Call generation.
+///
+/// The resolver does not negotiate capabilities and owns no parallel Call/media state. It only
+/// resolves the exact opaque reference already committed into `CallSession`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAudioNegotiation {
+    pub scope: TenantScope,
+    pub call_id: CallId,
+    pub negotiation_ref: OpaqueId,
+    pub negotiation_generation: u64,
+    pub result: NegotiationResultEnvelope,
+    pub selected_codec: AudioCodecConfig,
+}
+
+pub trait AudioNegotiationResolver: fmt::Debug + Send + Sync {
+    /// Resolves one exact canonical media-negotiation result. Absence fails Audio closed.
+    ///
+    /// # Errors
+    /// Returns a canonical resolver failure without authorizing fallback or renegotiation.
+    fn resolve_audio_negotiation(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        negotiation_ref: &OpaqueId,
+        negotiation_generation: u64,
+    ) -> Result<Option<ResolvedAudioNegotiation>, CanonicalError>;
+}
+
 /// Prepared Phase-20 Audio entry point over the one canonical Call and authorization owners.
 ///
 /// It owns no durable media table, route graph, peer identity, E2EE state, video state, or adaptive
 /// policy. Sender/receiver objects re-check current Call authority for every realtime frame.
 #[derive(Debug)]
-pub struct AudioRuntime<'a, A, S, C> {
+pub struct AudioRuntime<'a, A, S, C, N> {
     authorization: &'a A,
     store: &'a S,
     capabilities: &'a C,
+    negotiations: &'a N,
 }
 
-impl<'a, A, S, C> AudioRuntime<'a, A, S, C> {
+impl<'a, A, S, C, N> AudioRuntime<'a, A, S, C, N> {
     #[must_use]
-    pub const fn new(authorization: &'a A, store: &'a S, capabilities: &'a C) -> Self {
+    pub const fn new(
+        authorization: &'a A,
+        store: &'a S,
+        capabilities: &'a C,
+        negotiations: &'a N,
+    ) -> Self {
         Self {
             authorization,
             store,
             capabilities,
+            negotiations,
         }
     }
 }
 
-impl<'a, A, S, C> AudioRuntime<'a, A, S, C>
+impl<'a, A, S, C, N> AudioRuntime<'a, A, S, C, N>
 where
     A: AuthorizationEvaluator,
     S: CallStore,
     C: AudioCapabilityProvider,
+    N: AudioNegotiationResolver,
 {
     /// Opens a stateful Opus encoder for the authenticated source participant.
     ///
@@ -101,7 +146,7 @@ where
         &self,
         subject: &ScopedPrincipal,
         descriptor: &AudioStreamDescriptor,
-    ) -> Result<OpusAudioSender<'a, A, S, C>, AudioError> {
+    ) -> Result<OpusAudioSender<'a, A, S, C, N>, AudioError> {
         let descriptor = canonical_audio_stream_descriptor(descriptor)?;
         if descriptor.source != subject.principal {
             return Err(AudioError::SourceMismatch);
@@ -110,6 +155,7 @@ where
             self.authorization,
             self.store,
             self.capabilities,
+            self.negotiations,
             subject,
             &descriptor,
             AUDIO_SEND_PERMISSION,
@@ -124,6 +170,7 @@ where
             authorization: self.authorization,
             store: self.store,
             capabilities: self.capabilities,
+            negotiations: self.negotiations,
             subject: subject.clone(),
             descriptor,
             encoder,
@@ -142,12 +189,13 @@ where
         &self,
         subject: &ScopedPrincipal,
         descriptor: &AudioStreamDescriptor,
-    ) -> Result<OpusAudioReceiver<'a, A, S, C>, AudioError> {
+    ) -> Result<OpusAudioReceiver<'a, A, S, C, N>, AudioError> {
         let descriptor = canonical_audio_stream_descriptor(descriptor)?;
         require_audio_authority(
             self.authorization,
             self.store,
             self.capabilities,
+            self.negotiations,
             subject,
             &descriptor,
             AUDIO_RECEIVE_PERMISSION,
@@ -161,6 +209,7 @@ where
             authorization: self.authorization,
             store: self.store,
             capabilities: self.capabilities,
+            negotiations: self.negotiations,
             subject: subject.clone(),
             descriptor,
             decoder,
@@ -169,10 +218,11 @@ where
     }
 }
 
-pub struct OpusAudioSender<'a, A, S, C> {
+pub struct OpusAudioSender<'a, A, S, C, N> {
     authorization: &'a A,
     store: &'a S,
     capabilities: &'a C,
+    negotiations: &'a N,
     subject: ScopedPrincipal,
     descriptor: AudioStreamDescriptor,
     encoder: Encoder,
@@ -180,7 +230,7 @@ pub struct OpusAudioSender<'a, A, S, C> {
     next_timestamp_samples: u64,
 }
 
-impl<A, S, C> fmt::Debug for OpusAudioSender<'_, A, S, C> {
+impl<A, S, C, N> fmt::Debug for OpusAudioSender<'_, A, S, C, N> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OpusAudioSender")
@@ -192,11 +242,12 @@ impl<A, S, C> fmt::Debug for OpusAudioSender<'_, A, S, C> {
     }
 }
 
-impl<A, S, C> OpusAudioSender<'_, A, S, C>
+impl<A, S, C, N> OpusAudioSender<'_, A, S, C, N>
 where
     A: AuthorizationEvaluator,
     S: CallStore,
     C: AudioCapabilityProvider,
+    N: AudioNegotiationResolver,
 {
     #[must_use]
     pub const fn descriptor(&self) -> &AudioStreamDescriptor {
@@ -215,6 +266,7 @@ where
             self.authorization,
             self.store,
             self.capabilities,
+            self.negotiations,
             &self.subject,
             &self.descriptor,
             AUDIO_SEND_PERMISSION,
@@ -245,6 +297,7 @@ where
             call_id: self.descriptor.call_id.clone(),
             stream_id: self.descriptor.stream_id.clone(),
             source: self.descriptor.source.clone(),
+            negotiation_ref: self.descriptor.negotiation_ref.clone(),
             negotiation_generation: self.descriptor.negotiation_generation,
             sequence: self.next_sequence,
             media_timestamp_samples: self.next_timestamp_samples,
@@ -257,17 +310,18 @@ where
     }
 }
 
-pub struct OpusAudioReceiver<'a, A, S, C> {
+pub struct OpusAudioReceiver<'a, A, S, C, N> {
     authorization: &'a A,
     store: &'a S,
     capabilities: &'a C,
+    negotiations: &'a N,
     subject: ScopedPrincipal,
     descriptor: AudioStreamDescriptor,
     decoder: Decoder,
     last_sequence: Option<u64>,
 }
 
-impl<A, S, C> fmt::Debug for OpusAudioReceiver<'_, A, S, C> {
+impl<A, S, C, N> fmt::Debug for OpusAudioReceiver<'_, A, S, C, N> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OpusAudioReceiver")
@@ -278,11 +332,12 @@ impl<A, S, C> fmt::Debug for OpusAudioReceiver<'_, A, S, C> {
     }
 }
 
-impl<A, S, C> OpusAudioReceiver<'_, A, S, C>
+impl<A, S, C, N> OpusAudioReceiver<'_, A, S, C, N>
 where
     A: AuthorizationEvaluator,
     S: CallStore,
     C: AudioCapabilityProvider,
+    N: AudioNegotiationResolver,
 {
     #[must_use]
     pub const fn descriptor(&self) -> &AudioStreamDescriptor {
@@ -302,6 +357,7 @@ where
             self.authorization,
             self.store,
             self.capabilities,
+            self.negotiations,
             &self.subject,
             &self.descriptor,
             AUDIO_RECEIVE_PERMISSION,
@@ -337,10 +393,11 @@ where
     }
 }
 
-fn require_audio_authority<A, S, C>(
+fn require_audio_authority<A, S, C, N>(
     authorization: &A,
     store: &S,
     capabilities: &C,
+    negotiations: &N,
     subject: &ScopedPrincipal,
     descriptor: &AudioStreamDescriptor,
     permission: &str,
@@ -349,6 +406,7 @@ where
     A: AuthorizationEvaluator,
     S: CallStore,
     C: AudioCapabilityProvider,
+    N: AudioNegotiationResolver,
 {
     if subject.scope != descriptor.scope {
         return Err(AudioError::ScopeMismatch);
@@ -370,13 +428,63 @@ where
     if call.media_negotiation_generation != descriptor.negotiation_generation {
         return Err(AudioError::NegotiationGenerationMismatch);
     }
+    let Some(call_negotiation_ref) = call.media_negotiation_ref.as_ref() else {
+        return Err(AudioError::MissingNegotiation);
+    };
+    if call_negotiation_ref != &descriptor.negotiation_ref {
+        return Err(AudioError::NegotiationBindingMismatch);
+    }
     if !accepted_participant(&call, &subject.principal) {
         return Err(AudioError::SubjectNotAccepted);
     }
     if !accepted_participant(&call, &descriptor.source) {
         return Err(AudioError::SourceNotAccepted);
     }
+    require_negotiated_audio(negotiations, descriptor)?;
     Ok(call)
+}
+
+fn require_negotiated_audio<N: AudioNegotiationResolver>(
+    negotiation_resolver: &N,
+    descriptor: &AudioStreamDescriptor,
+) -> Result<(), AudioError> {
+    let binding = negotiation_resolver
+        .resolve_audio_negotiation(
+            &descriptor.scope,
+            &descriptor.call_id,
+            &descriptor.negotiation_ref,
+            descriptor.negotiation_generation,
+        )
+        .map_err(AudioError::NegotiationResolve)?
+        .ok_or(AudioError::MissingNegotiation)?;
+    if binding.scope != descriptor.scope
+        || binding.call_id != descriptor.call_id
+        || binding.negotiation_ref != descriptor.negotiation_ref
+        || binding.negotiation_generation != descriptor.negotiation_generation
+    {
+        return Err(AudioError::NegotiationBindingMismatch);
+    }
+    let result = canonical_negotiation_result(&binding.result)
+        .map_err(|_| AudioError::NegotiationResultInvalid)?;
+    require_supported_extensions(&result.extensions, core::iter::empty::<&str>())
+        .map_err(|_| AudioError::UnsupportedNegotiationExtension)?;
+    for capability in &result.capabilities {
+        require_supported_extensions(&capability.extensions, core::iter::empty::<&str>())
+            .map_err(|_| AudioError::UnsupportedNegotiationExtension)?;
+    }
+    for required in [
+        AUDIO_MEDIA_CAPABILITY,
+        descriptor.codec.codec_capability_id.as_str(),
+    ] {
+        if !capability_is_usable(&result.capabilities, required) {
+            return Err(AudioError::NegotiatedCapabilityUnavailable);
+        }
+    }
+    let selected_codec = canonical_audio_codec_config(&binding.selected_codec)?;
+    if selected_codec != descriptor.codec {
+        return Err(AudioError::NegotiatedCodecMismatch);
+    }
+    Ok(())
 }
 
 fn accepted_participant(call: &CallSession, principal: &ucr_model::PrincipalRef) -> bool {
@@ -397,24 +505,27 @@ fn require_current_capabilities<C: AudioCapabilityProvider>(
         AUDIO_MEDIA_CAPABILITY,
         descriptor.codec.codec_capability_id.as_str(),
     ] {
-        let usable = capabilities.iter().any(|capability| {
-            capability.id == required
-                && matches!(
-                    capability.maturity,
-                    CapabilityMaturity::Prepared
-                        | CapabilityMaturity::Beta
-                        | CapabilityMaturity::Production
-                )
-                && capability
-                    .extensions
-                    .iter()
-                    .all(|extension| !extension.critical)
-        });
-        if !usable {
+        if !capability_is_usable(&capabilities, required) {
             return Err(AudioError::CapabilityUnavailable);
         }
     }
     Ok(())
+}
+
+fn capability_is_usable(capabilities: &[CapabilityDescriptor], required: &str) -> bool {
+    capabilities.iter().any(|capability| {
+        capability.id == required
+            && matches!(
+                capability.maturity,
+                CapabilityMaturity::Prepared
+                    | CapabilityMaturity::Beta
+                    | CapabilityMaturity::Production
+            )
+            && capability
+                .extensions
+                .iter()
+                .all(|extension| !extension.critical)
+    })
 }
 
 const fn opus_channels(layout: AudioChannelLayout) -> Channels {

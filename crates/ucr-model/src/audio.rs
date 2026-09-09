@@ -1,6 +1,6 @@
 use core::fmt;
 
-use crate::{AudioStreamId, CallId, PrincipalRef, TenantScope};
+use crate::{AudioStreamId, CallId, OpaqueId, PrincipalRef, TenantScope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioChannelLayout {
@@ -50,6 +50,8 @@ pub struct AudioStreamDescriptor {
     pub stream_id: AudioStreamId,
     pub source: PrincipalRef,
     pub codec: AudioCodecConfig,
+    /// Exact canonical media-negotiation result referenced by the owning `CallSession`.
+    pub negotiation_ref: OpaqueId,
     /// Must equal the canonical `CallSession` media-negotiation generation when the stream is used.
     pub negotiation_generation: u64,
 }
@@ -61,6 +63,7 @@ pub struct EncodedAudioFrame {
     pub call_id: CallId,
     pub stream_id: AudioStreamId,
     pub source: PrincipalRef,
+    pub negotiation_ref: OpaqueId,
     pub negotiation_generation: u64,
     pub sequence: u64,
     pub media_timestamp_samples: u64,
@@ -75,6 +78,7 @@ impl fmt::Debug for EncodedAudioFrame {
             .field("call_id", &self.call_id)
             .field("stream_id", &self.stream_id)
             .field("source", &self.source)
+            .field("negotiation_ref", &self.negotiation_ref)
             .field("negotiation_generation", &self.negotiation_generation)
             .field("sequence", &self.sequence)
             .field("media_timestamp_samples", &self.media_timestamp_samples)

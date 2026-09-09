@@ -40,14 +40,21 @@ fn phase20_audio_reuses_call_capability_and_authorization_owners() {
     assert!(audio.contains("Encoder::new"));
     assert!(audio.contains("Decoder::new"));
     assert!(audio.contains("media_negotiation_generation != descriptor.negotiation_generation"));
+    assert!(audio.contains("pub trait AudioNegotiationResolver"));
+    assert!(audio.contains("canonical_negotiation_result"));
+    assert!(audio.contains("call.media_negotiation_ref.as_ref()"));
+    assert!(audio.contains("NegotiatedCodecMismatch"));
     assert!(call.contains("pub trait CallStore"));
     assert!(authorization.contains("ucr.call.audio.send"));
     assert!(authorization.contains("ucr.call.audio.receive"));
     assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 22"));
     assert!(proto.contains("message AudioStreamDescriptor"));
     assert!(proto.contains("message EncodedAudioFrame"));
+    assert!(proto.contains("message AudioNegotiationBinding"));
+    assert!(proto.contains("NegotiationResult result = 5"));
     assert!(spec.contains("Status: **Prepared reference implementation**, not Production."));
     assert!(spec.contains("mandatory Phase-20 interoperable audio codec is **Opus**"));
+    assert!(spec.contains("Audio MUST NOT start when that reference is absent"));
     assert!(adr.contains("owns no durable state"));
 }
 
@@ -71,6 +78,7 @@ fn phase20_audio_creates_no_second_call_transport_video_or_e2ee_brain() {
         "struct Srtp",
         "struct IceCandidate",
         "struct MediaKey",
+        "fn negotiate_session(",
     ] {
         assert!(
             sources.iter().all(|content| !content.contains(forbidden)),

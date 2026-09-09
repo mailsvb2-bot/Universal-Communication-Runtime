@@ -4,13 +4,13 @@ Status: **Prepared reference implementation**, not Production.
 
 ## Scope and canonical ownership
 
-Phase 20 adds realtime audio as an ephemeral media capability over the existing canonical `CallSession`. It does not create a second Call, Conversation, Group, Principal, authorization, transport, routing, or durable media owner. Every stream is bound to exact `TenantScope`, `CallId`, source `PrincipalRef`, `AudioStreamId`, and the current Call media-negotiation generation.
+Phase 20 adds realtime audio as an ephemeral media capability over the existing canonical `CallSession`. It does not create a second Call, Conversation, Group, Principal, authorization, transport, routing, or durable media owner. Every stream is bound to exact `TenantScope`, `CallId`, source `PrincipalRef`, `AudioStreamId`, the exact canonical `media_negotiation_ref`, and the current Call media-negotiation generation.
 
 `CallSession` remains the authority owner. A sender or receiver must be an `Accepted` current participant, the stream source must also be an accepted current participant, and signalling must be `Active`. An invited/ringing participant cannot receive media merely because another participant already made the group Call active. The reference runtime re-checks these facts and `ucr.call.audio.send` / `ucr.call.audio.receive` permission before every encoded/decoded frame. Group-backed Calls therefore inherit the existing canonical Group-membership revocation boundary; Audio does not copy membership.
 
-A media-renegotiation signal increments the existing Call media-negotiation generation. An open Audio sender/receiver using an older descriptor fails closed before processing another frame. Termination, participant removal, or Group membership revocation likewise removes media authority through the existing Call owner.
+A media-renegotiation signal increments the existing Call media-negotiation generation and installs an opaque canonical `media_negotiation_ref`. Audio MUST NOT start when that reference is absent. The Audio layer resolves the exact reference through a read-only `AudioNegotiationResolver`, validates the canonical `NegotiationResult`, requires the negotiated `ucr.media.audio` and selected codec capability, and requires the exact selected `AudioCodecConfig` to match the stream descriptor. The resolver does not perform negotiation and owns no parallel Call/media state. An open sender/receiver using an older reference/generation fails closed before processing another frame. Termination, participant removal, or Group membership revocation likewise removes media authority through the existing Call owner.
 
-The reference runtime also consumes the existing canonical `CapabilityDescriptor` vocabulary through an availability adapter and re-checks both `ucr.media.audio` and the selected codec capability per frame. Runtime capability loss therefore stops an already-open stream instead of assuming that a startup-time capability remains true forever. Phase 20 understands no capability extensions yet, so an unknown critical extension on a required audio capability fails closed rather than being ignored.
+The reference runtime separately consumes the existing canonical `CapabilityDescriptor` vocabulary through a local availability adapter and re-checks both `ucr.media.audio` and the selected codec capability per frame. Local runtime capability loss therefore stops an already-open stream instead of assuming that a startup-time capability remains true forever. Local availability is never treated as proof of peer negotiation. Phase 20 understands no negotiation/capability extensions yet, so unknown critical extensions in the resolved negotiated result fail closed rather than being ignored.
 
 ## Codec strategy
 
@@ -22,7 +22,7 @@ The Rust reference uses the maintained `opus` safe binding over libopus. libopus
 
 ## Realtime frame semantics
 
-`EncodedAudioFrame` carries exact stream/call/source/generation binding, a stream-local sequence, media timestamp in samples, and encoded bytes. Debug output must never print encoded payload bytes. The reference sender generates monotonically increasing sequence/timestamps; the receiver rejects duplicate or non-increasing sequences before decode.
+`EncodedAudioFrame` carries exact stream/call/source/negotiation-ref/generation binding, a stream-local sequence, media timestamp in samples, and encoded bytes. Debug output must never print encoded payload bytes. The reference sender generates monotonically increasing sequence/timestamps; the receiver rejects duplicate or non-increasing sequences before decode.
 
 That duplicate suppression is realtime hygiene only. It is **not** a claim of cryptographic replay protection. Phase 22 owns E2EE Media and its cryptographic replay/key lifecycle semantics.
 
@@ -34,7 +34,7 @@ The stream model is participant-based rather than hard-coded to 1:1, so private/
 
 ## Public contract
 
-`proto/ucr/v1/audio.proto` is the language-independent Phase-20 media shape. Rust structs/codecs are reference implementation mappings, not the protocol definition. Phase 20 intentionally does not define a unary gRPC media transport and does not smuggle realtime media through the durable Message transport. The future transport/orchestration layer consumes these canonical media frames.
+`proto/ucr/v1/audio.proto` is the language-independent Phase-20 media shape, including the read-only `AudioNegotiationBinding` that carries the exact referenced canonical `NegotiationResult` and selected codec configuration. Rust structs/codecs are reference implementation mappings, not the protocol definition. Phase 20 intentionally does not define a unary gRPC media transport and does not smuggle realtime media through the durable Message transport. The future transport/orchestration layer consumes these canonical media frames.
 
 ## Nonclaims
 
