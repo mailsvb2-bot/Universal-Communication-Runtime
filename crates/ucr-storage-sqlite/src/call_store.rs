@@ -28,6 +28,8 @@ CREATE TABLE calls (
     initiated_by_principal_kind TEXT NOT NULL,
     creation_fingerprint BLOB NOT NULL CHECK(length(creation_fingerprint)=32),
     signalling_state TEXT NOT NULL CHECK(signalling_state IN ('inviting','ringing','active','reconnecting','terminated')),
+    reconnecting_principal_id TEXT,
+    reconnecting_principal_kind TEXT,
     media_negotiation_ref TEXT,
     media_negotiation_generation BLOB NOT NULL CHECK(length(media_negotiation_generation)=8),
     replication_generation BLOB NOT NULL CHECK(length(replication_generation)=8),
@@ -36,7 +38,9 @@ CREATE TABLE calls (
     PRIMARY KEY(tenant_id, namespace_present, namespace_id, call_id),
     FOREIGN KEY(tenant_id, namespace_present, namespace_id, conversation_id)
       REFERENCES conversations(tenant_id, namespace_present, namespace_id, conversation_id),
-    CHECK((namespace_present=0 AND namespace_id='') OR (namespace_present=1 AND namespace_id<>''))
+    CHECK((namespace_present=0 AND namespace_id='') OR (namespace_present=1 AND namespace_id<>'')),
+    CHECK((reconnecting_principal_id IS NULL AND reconnecting_principal_kind IS NULL)
+       OR (reconnecting_principal_id IS NOT NULL AND reconnecting_principal_kind IS NOT NULL))
 ) WITHOUT ROWID;
 
 CREATE TABLE call_participants (
@@ -130,6 +134,8 @@ fn verify_call_table_shapes(connection: &Connection) -> Result<(), DurableStoreE
             ("initiated_by_principal_kind", "TEXT", 1, 0),
             ("creation_fingerprint", "BLOB", 1, 0),
             ("signalling_state", "TEXT", 1, 0),
+            ("reconnecting_principal_id", "TEXT", 0, 0),
+            ("reconnecting_principal_kind", "TEXT", 0, 0),
             ("media_negotiation_ref", "TEXT", 0, 0),
             ("media_negotiation_generation", "BLOB", 1, 0),
             ("replication_generation", "BLOB", 1, 0),
@@ -518,17 +524,18 @@ fn load_call_from(
     let row = connection
         .query_row(
             "SELECT conversation_id, conversation_kind, initiated_by_principal_id,
-                    initiated_by_principal_kind, signalling_state, media_negotiation_ref,
-                    media_negotiation_generation, replication_generation, revision,
-                    termination_reason
+                    initiated_by_principal_kind, signalling_state, reconnecting_principal_id,
+                    reconnecting_principal_kind, media_negotiation_ref, media_negotiation_generation,
+                    replication_generation, revision, termination_reason
              FROM calls WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND call_id=?4",
             params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, call_id.as_opaque().as_str()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Vec<u8>>(6)?, row.get::<_, Vec<u8>>(7)?, row.get::<_, Vec<u8>>(8)?,
-                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Vec<u8>>(8)?, row.get::<_, Vec<u8>>(9)?, row.get::<_, Vec<u8>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             },
         )
@@ -557,11 +564,23 @@ fn load_call_from(
         },
         participants: load_participants(connection, scope, call_id)?,
         signalling_state: parse_signalling_state(&row.4)?,
-        media_negotiation_ref: row.5.map(|value| parse_id(&value)).transpose()?,
-        media_negotiation_generation: decode_u64(&row.6)?,
-        replication_generation: decode_u64(&row.7)?,
-        revision: decode_u64(&row.8)?,
-        termination_reason: row.9.as_deref().map(parse_termination_reason).transpose()?,
+        reconnecting_participant: match (&row.5, &row.6) {
+            (None, None) => None,
+            (Some(principal_id), Some(principal_kind)) => Some(PrincipalRef {
+                principal_id: PrincipalId::from_opaque(parse_id(principal_id)?),
+                kind: group_store::parse_principal_kind(principal_kind)?,
+            }),
+            _ => return Err(DurableStoreError::Corrupt),
+        },
+        media_negotiation_ref: row.7.map(|value| parse_id(&value)).transpose()?,
+        media_negotiation_generation: decode_u64(&row.8)?,
+        replication_generation: decode_u64(&row.9)?,
+        revision: decode_u64(&row.10)?,
+        termination_reason: row
+            .11
+            .as_deref()
+            .map(parse_termination_reason)
+            .transpose()?,
     };
     let canonical = canonical_call_session(&session).map_err(map_call_error)?;
     let recorded =
@@ -655,7 +674,7 @@ fn insert_call(
     let namespace = namespace_storage_key(&session.scope);
     transaction
         .execute(
-            "INSERT INTO calls VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            "INSERT INTO calls VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             params![
                 session.scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
@@ -667,6 +686,14 @@ fn insert_call(
                 group_store::principal_kind_name(session.initiated_by.kind),
                 creation_fingerprint.as_slice(),
                 signalling_state_name(session.signalling_state),
+                session
+                    .reconnecting_participant
+                    .as_ref()
+                    .map(|value| value.principal_id.as_opaque().as_str()),
+                session
+                    .reconnecting_participant
+                    .as_ref()
+                    .map(|value| group_store::principal_kind_name(value.kind)),
                 session.media_negotiation_ref.as_ref().map(OpaqueId::as_str),
                 encode_u64(session.media_negotiation_generation).as_slice(),
                 encode_u64(session.replication_generation).as_slice(),
@@ -685,9 +712,10 @@ fn update_call(
     let namespace = namespace_storage_key(&session.scope);
     let changed = transaction
         .execute(
-            "UPDATE calls SET signalling_state=?5, media_negotiation_ref=?6,
-                    media_negotiation_generation=?7, replication_generation=?8, revision=?9,
-                    termination_reason=?10
+            "UPDATE calls SET signalling_state=?5, reconnecting_principal_id=?6,
+                    reconnecting_principal_kind=?7, media_negotiation_ref=?8,
+                    media_negotiation_generation=?9, replication_generation=?10, revision=?11,
+                    termination_reason=?12
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND call_id=?4",
             params![
                 session.scope.tenant_id.as_opaque().as_str(),
@@ -695,6 +723,14 @@ fn update_call(
                 namespace.value,
                 session.call_id.as_opaque().as_str(),
                 signalling_state_name(session.signalling_state),
+                session
+                    .reconnecting_participant
+                    .as_ref()
+                    .map(|value| value.principal_id.as_opaque().as_str()),
+                session
+                    .reconnecting_participant
+                    .as_ref()
+                    .map(|value| group_store::principal_kind_name(value.kind)),
                 session.media_negotiation_ref.as_ref().map(OpaqueId::as_str),
                 encode_u64(session.media_negotiation_generation).as_slice(),
                 encode_u64(session.replication_generation).as_slice(),
@@ -809,6 +845,9 @@ fn duplicate_actor_allowed(
     else {
         return false;
     };
+    if session.signalling_state == CallSignallingState::Terminated {
+        return session.revision == applied_revision;
+    }
     if active_call_participant(session, actor) {
         return true;
     }
@@ -1023,6 +1062,7 @@ mod tests {
                 },
             ],
             signalling_state: CallSignallingState::Inviting,
+            reconnecting_participant: None,
             media_negotiation_ref: None,
             media_negotiation_generation: 0,
             replication_generation: 0,
@@ -1113,6 +1153,109 @@ mod tests {
                 Err(DurableStoreError::Conflict)
             );
         }
+    }
+
+    #[test]
+    fn independent_termination_revokes_old_duplicate_access_after_reopen() {
+        let db = TestDb::new();
+        let (session, alice, bob) = session();
+        let ringing = signal(
+            &session,
+            "sqlite-ring-before-cancel",
+            CallSignalKind::Ringing,
+        );
+        let cancel;
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open");
+            store
+                .persist_conversation(&conversation())
+                .expect("conversation");
+            store.create_call(&alice, &session).expect("create");
+            assert_eq!(
+                store.apply_call_signal(&bob, &ringing),
+                Ok(DurableRecordStatus::Persisted)
+            );
+            let ringing_state = store.call(&scope(), &session.call_id).unwrap().unwrap();
+            cancel = signal(
+                &ringing_state,
+                "sqlite-cancel-after-ring",
+                CallSignalKind::Cancel,
+            );
+            assert_eq!(
+                store.apply_call_signal(&alice, &cancel),
+                Ok(DurableRecordStatus::Persisted)
+            );
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert_eq!(
+            reopened.apply_call_signal(&bob, &ringing),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        assert_eq!(
+            reopened.apply_call_signal(&alice, &cancel),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+    }
+
+    #[test]
+    fn reconnect_owner_survives_reopen_and_only_owner_can_restore() {
+        let db = TestDb::new();
+        let (session, alice, bob) = session();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open");
+            store
+                .persist_conversation(&conversation())
+                .expect("conversation");
+            store.create_call(&alice, &session).expect("create");
+            let accept = signal(&session, "sqlite-reconnect-accept", CallSignalKind::Accept);
+            store.apply_call_signal(&bob, &accept).expect("accept");
+            let active = store.call(&scope(), &session.call_id).unwrap().unwrap();
+            let started = signal(
+                &active,
+                "sqlite-reconnect-start",
+                CallSignalKind::Reconnect {
+                    phase: ucr_model::CallReconnectPhase::Started,
+                },
+            );
+            store
+                .apply_call_signal(&bob, &started)
+                .expect("start reconnect");
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        let reconnecting = reopened.call(&scope(), &session.call_id).unwrap().unwrap();
+        assert_eq!(
+            reconnecting.signalling_state,
+            CallSignallingState::Reconnecting
+        );
+        assert_eq!(
+            reconnecting.reconnecting_participant,
+            Some(bob.principal.clone())
+        );
+        let wrong_restore = signal(
+            &reconnecting,
+            "sqlite-wrong-restore",
+            CallSignalKind::Reconnect {
+                phase: ucr_model::CallReconnectPhase::Restored,
+            },
+        );
+        assert_eq!(
+            reopened.apply_call_signal(&alice, &wrong_restore),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        let restore = signal(
+            &reconnecting,
+            "sqlite-owner-restore",
+            CallSignalKind::Reconnect {
+                phase: ucr_model::CallReconnectPhase::Restored,
+            },
+        );
+        assert_eq!(
+            reopened.apply_call_signal(&bob, &restore),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        let active = reopened.call(&scope(), &session.call_id).unwrap().unwrap();
+        assert_eq!(active.signalling_state, CallSignallingState::Active);
+        assert_eq!(active.reconnecting_participant, None);
     }
 
     #[test]

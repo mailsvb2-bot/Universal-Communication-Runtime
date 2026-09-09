@@ -68,6 +68,7 @@ message CallSession {
   uint64 replication_generation = 9;
   uint64 revision = 10;
   optional CallTerminationReason termination_reason = 11;
+  PrincipalRef reconnecting_participant = 12;
 }
 
 message CallEmptySignal {}

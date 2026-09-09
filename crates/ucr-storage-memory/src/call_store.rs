@@ -1,7 +1,8 @@
 use ucr_core::{CallStore, DurableRecordStatus, DurableStoreError};
 use ucr_model::{
     CallId, CallParticipantState, CallParticipantUpdateKind, CallSession, CallSignal,
-    CallSignalKind, ConversationKind, GroupMemberState, PrincipalRef, ScopedPrincipal, TenantScope,
+    CallSignalKind, CallSignallingState, ConversationKind, GroupMemberState, PrincipalRef,
+    ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
     active_call_participant, apply_call_signal, call_creation_fingerprint, call_signal_fingerprint,
@@ -267,6 +268,9 @@ fn duplicate_actor_allowed(
     else {
         return false;
     };
+    if session.signalling_state == CallSignallingState::Terminated {
+        return session.revision == applied_revision;
+    }
     if active_call_participant(session, actor) {
         return true;
     }
@@ -361,6 +365,7 @@ mod tests {
                 },
             ],
             signalling_state: CallSignallingState::Inviting,
+            reconnecting_participant: None,
             media_negotiation_ref: None,
             media_negotiation_generation: 0,
             replication_generation: 0,
@@ -422,6 +427,34 @@ mod tests {
         assert_eq!(
             store.create_call(&alice, &conflicting),
             Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn independent_termination_revokes_old_duplicate_ledger_access() {
+        let store = MemoryLocalStore::default();
+        let (conversation, session, alice, bob) = fixture();
+        store.persist_conversation(&conversation).unwrap();
+        store.create_call(&alice, &session).unwrap();
+
+        let ringing = signal(&session, "ring-before-cancel", CallSignalKind::Ringing);
+        assert_eq!(
+            store.apply_call_signal(&bob, &ringing),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        let ringing_state = store.call(&scope(), &session.call_id).unwrap().unwrap();
+        let cancel = signal(&ringing_state, "cancel-after-ring", CallSignalKind::Cancel);
+        assert_eq!(
+            store.apply_call_signal(&alice, &cancel),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.apply_call_signal(&bob, &ringing),
+            Err(DurableStoreError::PermissionDenied)
+        );
+        assert_eq!(
+            store.apply_call_signal(&alice, &cancel),
+            Ok(DurableRecordStatus::Duplicate)
         );
     }
 

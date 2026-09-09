@@ -74,6 +74,28 @@ pub fn canonical_call_session(session: &CallSession) -> Result<CallSession, Call
         (0, false) | (1.., true) => {}
         _ => return Err(CallSignallingError::InvalidSession),
     }
+    match canonical.signalling_state {
+        CallSignallingState::Reconnecting => {
+            let reconnecting = canonical
+                .reconnecting_participant
+                .as_ref()
+                .ok_or(CallSignallingError::InvalidSession)?;
+            let value =
+                participant(&canonical, reconnecting).ok_or(CallSignallingError::InvalidSession)?;
+            if value.state != CallParticipantState::Accepted || value.left_revision.is_some() {
+                return Err(CallSignallingError::InvalidSession);
+            }
+        }
+        CallSignallingState::Inviting
+        | CallSignallingState::Ringing
+        | CallSignallingState::Active
+        | CallSignallingState::Terminated
+            if canonical.reconnecting_participant.is_some() =>
+        {
+            return Err(CallSignallingError::InvalidSession);
+        }
+        _ => {}
+    }
     let remote = canonical
         .participants
         .iter()
@@ -140,6 +162,7 @@ pub fn canonical_call_creation(
         || session.replication_generation != 0
         || session.media_negotiation_generation != 0
         || session.media_negotiation_ref.is_some()
+        || session.reconnecting_participant.is_some()
         || session.termination_reason.is_some()
         || session.signalling_state != CallSignallingState::Inviting
     {
@@ -433,9 +456,14 @@ fn apply_reconnect(
     }
     match (phase, session.signalling_state) {
         (CallReconnectPhase::Started, CallSignallingState::Active) => {
+            session.reconnecting_participant = Some(actor.clone());
             session.signalling_state = CallSignallingState::Reconnecting;
         }
         (CallReconnectPhase::Restored, CallSignallingState::Reconnecting) => {
+            if session.reconnecting_participant.as_ref() != Some(actor) {
+                return Err(CallSignallingError::PermissionDenied);
+            }
+            session.reconnecting_participant = None;
             session.signalling_state = CallSignallingState::Active;
         }
         _ => return Err(CallSignallingError::InvalidTransition),
@@ -501,6 +529,9 @@ fn remove_participant(
     }
     value.state = CallParticipantState::Left;
     value.left_revision = Some(revision);
+    if session.reconnecting_participant.as_ref() == Some(target) {
+        session.reconnecting_participant = None;
+    }
     settle_if_no_viable_remote(session, CallTerminationReason::Completed);
     Ok(())
 }
@@ -675,6 +706,7 @@ fn require_initiator_without_remote_accept(
 }
 
 fn terminate(session: &mut CallSession, reason: CallTerminationReason) {
+    session.reconnecting_participant = None;
     session.signalling_state = CallSignallingState::Terminated;
     session.termination_reason = Some(reason);
 }
@@ -787,6 +819,7 @@ mod tests {
                 },
             ],
             signalling_state: CallSignallingState::Inviting,
+            reconnecting_participant: None,
             media_negotiation_ref: None,
             media_negotiation_generation: 0,
             replication_generation: 0,
@@ -912,6 +945,18 @@ mod tests {
             ),
         )
         .unwrap();
+        assert_eq!(reconnecting.reconnecting_participant, Some(alice.clone()));
+        let wrong_restore = signal(
+            &reconnecting,
+            "restore-by-bob",
+            CallSignalKind::Reconnect {
+                phase: CallReconnectPhase::Restored,
+            },
+        );
+        assert_eq!(
+            apply_call_signal(&reconnecting, &scope(), &bob, &wrong_restore),
+            Err(CallSignallingError::PermissionDenied)
+        );
         let rejected = apply_call_signal(
             &reconnecting,
             &scope(),
@@ -942,6 +987,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(restored.signalling_state, CallSignallingState::Active);
+        assert_eq!(restored.reconnecting_participant, None);
     }
 
     #[test]

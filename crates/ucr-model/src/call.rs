@@ -63,6 +63,9 @@ pub struct CallSession {
     pub initiated_by: PrincipalRef,
     pub participants: Vec<CallParticipant>,
     pub signalling_state: CallSignallingState,
+    /// Exact participant that owns the currently open reconnect cycle. This is mutable signalling
+    /// state, not identity evidence, and is present only while `signalling_state` is `Reconnecting`.
+    pub reconnecting_participant: Option<PrincipalRef>,
     /// Opaque reference to signalling-owned negotiation metadata. Phase 19 never interprets media
     /// descriptions/codecs/keys; later media owners may resolve this reference.
     pub media_negotiation_ref: Option<OpaqueId>,

@@ -15,13 +15,13 @@ Phase 19 introduces one canonical `CallSession` aggregate for signalling-specifi
 
 `CallStore` composes `ConversationStore` and `GroupStore`. Creation and mutations run in one storage critical section/SQLite transaction. Signal application combines current participant/Group authority, optimistic revision, canonical transition, EventId reservation and idempotency ledger atomically.
 
-Signal duplicate records are actor-bound and include the applied revision. This permits an exact retry when the committed signal itself made the actor terminal while denying old retries after an independent later loss of authority. Call creation has a separate immutable fingerprint over scope, CallId, Conversation, initiator and revision-zero participant identities, so an exact `StartCall` retry remains Duplicate after later lifecycle changes/restart while a different origin conflicts. `EventId` remains a single exact-scope identity namespace across Event, GroupChange and CallSignal facts.
+Signal duplicate records are actor-bound and include the applied revision. A terminated session exposes duplicate/conflict evidence only for the signal applied at the terminal revision; older signal records lose retry-ledger visibility after independent termination. This permits an exact retry when the committed signal itself made the actor terminal while denying old retries after an independent later loss of authority. Call creation has a separate immutable fingerprint over scope, CallId, Conversation, initiator and revision-zero participant identities, so an exact `StartCall` retry remains Duplicate after later lifecycle changes/restart while a different origin conflicts. `EventId` remains a single exact-scope identity namespace across Event, GroupChange and CallSignal facts.
 
 SQLite v22 adds `calls`, `call_participants`, and `call_signals`. It references existing Conversations and invents no calls during v21 migration. Memory and SQLite expose participant-gated reads that verify authority and return state from the same snapshot, preventing TOCTOU existence disclosure.
 
 The public `CallService` is a thin Tonic binding. It reuses the existing binary Service Principal credential metadata, quota/audit admission, protocol permissions, `IntegrationIngress`, and `AuthorizedDurableRuntime`. Signal actor identity is never caller-controlled protobuf data.
 
-Media renegotiation is represented only as an opaque signalling reference and monotonically increasing generation. Phase 19 does not parse codecs, candidates, media keys, RTP parameters, or transport descriptions.
+Reconnect state records the exact `PrincipalRef` that opened the reconnect cycle; only that participant can restore it, and the marker is persisted in SQLite v22. Media renegotiation is represented only as an opaque signalling reference and monotonically increasing generation. Phase 19 does not parse codecs, candidates, media keys, RTP parameters, or transport descriptions.
 
 ## Security consequences
 

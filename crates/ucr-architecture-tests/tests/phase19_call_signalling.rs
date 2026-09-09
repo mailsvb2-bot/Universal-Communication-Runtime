@@ -29,6 +29,7 @@ fn phase19_call_signalling_reuses_canonical_owners_and_is_restart_safe() {
     let adr = fs::read_to_string(root.join("docs/adr/0057-phase19-call-signalling-reuses-canonical-conversation-identity-and-authorization-owners.md")).expect("adr");
 
     assert!(model.contains("pub struct CallSession"));
+    assert!(model.contains("pub reconnecting_participant: Option<PrincipalRef>"));
     assert!(model.contains("pub enum CallSignalKind"));
     assert!(protocol.contains("pub fn apply_call_signal("));
     assert!(protocol.contains("pub fn call_signal_fingerprint("));
@@ -38,10 +39,13 @@ fn phase19_call_signalling_reuses_canonical_owners_and_is_restart_safe() {
     assert!(runtime.contains("CALL_OBSERVE_PERMISSION"));
     assert!(runtime.contains("CALL_SIGNAL_PERMISSION"));
     assert!(memory.contains("state.call_signals"));
+    assert!(memory.contains("session.signalling_state == CallSignallingState::Terminated"));
     assert!(memory.contains("group_actor_current_if_needed"));
     assert!(sqlite.contains("CREATE TABLE calls"));
     assert!(sqlite.contains("CREATE TABLE call_participants"));
     assert!(sqlite.contains("CREATE TABLE call_signals"));
+    assert!(sqlite.contains("reconnecting_principal_id"));
+    assert!(sqlite.contains("reconnecting_principal_kind"));
     assert!(sqlite.contains("call_signal_reserves_event_id"));
     assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 22"));
     assert!(sqlite_root.contains("migrate_v21_to_v22"));
@@ -49,12 +53,14 @@ fn phase19_call_signalling_reuses_canonical_owners_and_is_restart_safe() {
     assert!(proto.contains("rpc StartCall"));
     assert!(proto.contains("rpc GetCall"));
     assert!(proto.contains("rpc SignalCall"));
+    assert!(proto.contains("PrincipalRef reconnecting_participant = 12"));
     assert!(grpc.contains("ServicePrincipalRequestGate") || grpc.contains("IntegrationIngress"));
     assert!(
         grpc.contains("call_start_cancel_duplicate_get_and_non_disclosure_round_trip_over_grpc")
     );
     assert!(spec.contains("Status: **Prepared reference implementation**, not Production."));
     assert!(spec.contains("`Active` means only that signalling acceptance has completed"));
+    assert!(spec.contains("same exact `PrincipalRef` that opened the reconnect cycle"));
     assert!(adr.contains("second communication brain"));
 }
 

@@ -1549,6 +1549,10 @@ fn decode_call_session(value: pb::CallSession) -> Result<CallSession, CanonicalE
             .map(decode_call_participant)
             .collect::<Result<Vec<_>, _>>()?,
         signalling_state: decode_call_signalling_state(value.signalling_state)?,
+        reconnecting_participant: value
+            .reconnecting_participant
+            .map(decode_principal_ref)
+            .transpose()?,
         media_negotiation_ref: value
             .media_negotiation_ref
             .map(|value| decode_opaque(Some(value)))
@@ -2055,6 +2059,10 @@ fn pb_call_session(value: &CallSession) -> pb::CallSession {
             CallSignallingState::Reconnecting => pb::CallSignallingState::Reconnecting,
             CallSignallingState::Terminated => pb::CallSignallingState::Terminated,
         }) as i32,
+        reconnecting_participant: value
+            .reconnecting_participant
+            .as_ref()
+            .map(pb_principal_ref),
         media_negotiation_ref: value.media_negotiation_ref.as_ref().map(pb_opaque),
         media_negotiation_generation: value.media_negotiation_generation,
         replication_generation: value.replication_generation,
@@ -2378,9 +2386,10 @@ mod tests {
         GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, GrpcCallService,
         GrpcEventService, GrpcIntegrationService, SERVICE_CREDENTIAL_ID_METADATA_KEY,
         SERVICE_CREDENTIAL_SECRET_METADATA_KEY, attach_service_credential, call_service_server,
-        decode_command, decode_communication_intent, decode_conversation_record,
-        decode_event_envelope, decode_message_envelope, event_service_server,
-        integration_service_server, pb,
+        decode_call_session, decode_command, decode_communication_intent,
+        decode_conversation_record, decode_event_envelope, decode_message_envelope,
+        decode_principal_ref, event_service_server, integration_service_server, pb,
+        pb_call_session,
     };
 
     fn oid(value: &str) -> OpaqueId {
@@ -2636,12 +2645,33 @@ mod tests {
                 },
             ],
             signalling_state: pb::CallSignallingState::Inviting as i32,
+            reconnecting_participant: None,
             media_negotiation_ref: None,
             media_negotiation_generation: 0,
             replication_generation: 0,
             revision: 0,
             termination_reason: None,
         }
+    }
+
+    #[test]
+    fn reconnect_owner_round_trips_public_call_wire_shape() {
+        let mut wire = call_session("wire-reconnect-call", "wire-reconnect-conversation");
+        wire.participants[1].state = pb::CallParticipantState::Accepted as i32;
+        wire.signalling_state = pb::CallSignallingState::Reconnecting as i32;
+        let reconnecting = wire.participants[1].principal.clone();
+        wire.reconnecting_participant = reconnecting.clone();
+
+        let decoded = decode_call_session(wire).expect("decode");
+        let canonical = ucr_protocol::canonical_call_session(&decoded).expect("canonical");
+        assert_eq!(
+            canonical.reconnecting_participant,
+            Some(
+                decode_principal_ref(reconnecting.clone().expect("principal")).expect("principal")
+            )
+        );
+        let encoded = pb_call_session(&canonical);
+        assert_eq!(encoded.reconnecting_participant, reconnecting);
     }
 
     fn cancel_call_signal(id: &str, call_id: &str) -> pb::CallSignal {
