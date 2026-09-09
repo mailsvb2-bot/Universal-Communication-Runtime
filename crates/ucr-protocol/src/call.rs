@@ -531,6 +531,7 @@ fn remove_participant(
     value.left_revision = Some(revision);
     if session.reconnecting_participant.as_ref() == Some(target) {
         session.reconnecting_participant = None;
+        session.signalling_state = CallSignallingState::Active;
     }
     settle_if_no_viable_remote(session, CallTerminationReason::Completed);
     Ok(())
@@ -988,6 +989,109 @@ mod tests {
         .unwrap();
         assert_eq!(restored.signalling_state, CallSignallingState::Active);
         assert_eq!(restored.reconnecting_participant, None);
+    }
+
+    #[test]
+    fn removing_reconnect_owner_exits_reconnecting_before_settle() {
+        let mut initial = session();
+        initial.conversation.kind = ConversationKind::PrivateGroup;
+        let alice = initial.initiated_by.clone();
+        let bob = principal("bob", PrincipalKind::Person);
+        let charlie = principal("charlie", PrincipalKind::Person);
+        initial.participants.push(CallParticipant {
+            principal: charlie.clone(),
+            state: CallParticipantState::Invited,
+            joined_revision: 0,
+            left_revision: None,
+        });
+
+        let bob_active = apply_call_signal(
+            &initial,
+            &scope(),
+            &bob,
+            &signal(&initial, "accept-bob-owner", CallSignalKind::Accept),
+        )
+        .unwrap();
+        let active = apply_call_signal(
+            &bob_active,
+            &scope(),
+            &charlie,
+            &signal(&bob_active, "accept-charlie-peer", CallSignalKind::Accept),
+        )
+        .unwrap();
+        let reconnecting = apply_call_signal(
+            &active,
+            &scope(),
+            &bob,
+            &signal(
+                &active,
+                "reconnect-bob-owner",
+                CallSignalKind::Reconnect {
+                    phase: CallReconnectPhase::Started,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            reconnecting.signalling_state,
+            CallSignallingState::Reconnecting
+        );
+        assert_eq!(reconnecting.reconnecting_participant, Some(bob.clone()));
+
+        let self_left = apply_call_signal(
+            &reconnecting,
+            &scope(),
+            &bob,
+            &signal(
+                &reconnecting,
+                "bob-leaves-reconnect",
+                CallSignalKind::ParticipantUpdate {
+                    participant: bob.clone(),
+                    kind: CallParticipantUpdateKind::Remove,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(self_left.signalling_state, CallSignallingState::Active);
+        assert_eq!(self_left.reconnecting_participant, None);
+        assert_eq!(
+            participant(&self_left, &charlie).unwrap().state,
+            CallParticipantState::Accepted
+        );
+
+        let reconnecting_again = apply_call_signal(
+            &active,
+            &scope(),
+            &bob,
+            &signal(
+                &active,
+                "reconnect-bob-removed",
+                CallSignalKind::Reconnect {
+                    phase: CallReconnectPhase::Started,
+                },
+            ),
+        )
+        .unwrap();
+        let removed = apply_call_signal(
+            &reconnecting_again,
+            &scope(),
+            &alice,
+            &signal(
+                &reconnecting_again,
+                "alice-removes-reconnect-owner",
+                CallSignalKind::ParticipantUpdate {
+                    participant: bob.clone(),
+                    kind: CallParticipantUpdateKind::Remove,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(removed.signalling_state, CallSignallingState::Active);
+        assert_eq!(removed.reconnecting_participant, None);
+        assert_eq!(
+            participant(&removed, &charlie).unwrap().state,
+            CallParticipantState::Accepted
+        );
     }
 
     #[test]
