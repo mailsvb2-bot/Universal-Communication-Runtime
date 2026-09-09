@@ -21,6 +21,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Install pinned Rust toolchain
         run: rustup show
+      - name: Install native audio build prerequisites
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake build-essential
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check
@@ -47,6 +49,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Install pinned Rust toolchain
         run: rustup show
+      - name: Install native audio build prerequisites
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake build-essential
       - name: Release tests
         run: cargo test --workspace --all-targets --release --locked
 
@@ -128,7 +132,8 @@ jobs:
           test -s spec/local-transport.md &&
           test -s spec/chat.md &&
           test -s spec/groups.md &&
-          test -s spec/call-signalling.md
+          test -s spec/call-signalling.md &&
+          test -s spec/audio.md
       - name: Public contract exists
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
@@ -142,7 +147,8 @@ jobs:
           test -s proto/ucr/v1/integration.proto &&
           test -s proto/ucr/v1/event_api.proto &&
           test -s proto/ucr/v1/internet_transport.proto &&
-          test -s proto/ucr/v1/call.proto
+          test -s proto/ucr/v1/call.proto &&
+          test -s proto/ucr/v1/audio.proto
       - name: ADR governance exists
         run: >-
           test -s docs/adr/0000-template.md &&
@@ -201,4 +207,5 @@ jobs:
           test -s docs/adr/0054-phase16-local-direct-transport-reuses-canonical-transport-and-crypto-owners.md &&
           test -s docs/adr/0055-phase17-chat-reuses-canonical-conversation-message-and-delivery-owners.md &&
           test -s docs/adr/0056-phase18-groups-reuse-canonical-conversation-message-and-authorization-owners.md &&
-          test -s docs/adr/0057-phase19-call-signalling-reuses-canonical-conversation-identity-and-authorization-owners.md
+          test -s docs/adr/0057-phase19-call-signalling-reuses-canonical-conversation-identity-and-authorization-owners.md &&
+          test -s docs/adr/0058-phase20-audio-reuses-canonical-call-and-capability-owners.md

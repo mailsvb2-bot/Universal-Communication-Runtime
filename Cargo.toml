@@ -12,6 +12,7 @@ members = [
     "crates/ucr-api-grpc",
     "crates/ucr-transport-internet",
     "crates/ucr-chat",
+    "crates/ucr-audio",
 ]
 
 [workspace.package]

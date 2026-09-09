@@ -2,8 +2,13 @@
 
 use core::fmt;
 
+mod audio;
 mod call;
 mod group;
+pub use audio::{
+    AudioChannelLayout, AudioCodecConfig, AudioFrameDuration, AudioStreamDescriptor,
+    EncodedAudioFrame,
+};
 pub use call::{
     CallParticipant, CallParticipantState, CallParticipantUpdateKind, CallReconnectPhase,
     CallSession, CallSignal, CallSignalKind, CallSignallingState, CallTerminationReason,
@@ -127,6 +132,7 @@ id_type!(CommunityId);
 id_type!(MessageId);
 id_type!(AttachmentId);
 id_type!(CallId);
+id_type!(AudioStreamId);
 id_type!(SessionId);
 id_type!(DeliveryId);
 id_type!(IntegrationId);

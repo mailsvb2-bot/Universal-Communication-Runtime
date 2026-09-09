@@ -103,7 +103,7 @@ fn phase19_release_truth_and_repository_guards_are_machine_locked() {
     let readme = fs::read_to_string(root.join("README.md")).expect("readme");
     let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("ci");
     assert!(readme.contains(
-        "**Phase 19 — Call Signalling (Prepared/reference complete; Phase 20 Audio not started).**"
+        "**Phase 20 — Audio (Prepared/reference complete; Phase 21 Video not started).**"
     ));
     assert!(ci.contains("test -s spec/call-signalling.md"));
     assert!(ci.contains("test -s proto/ucr/v1/call.proto"));

@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/identity.proto";
+
+enum AudioChannelLayout {
+  AUDIO_CHANNEL_LAYOUT_UNSPECIFIED = 0;
+  AUDIO_CHANNEL_LAYOUT_MONO = 1;
+  AUDIO_CHANNEL_LAYOUT_STEREO = 2;
+}
+
+enum AudioFrameDuration {
+  AUDIO_FRAME_DURATION_UNSPECIFIED = 0;
+  AUDIO_FRAME_DURATION_2_5_MS = 1;
+  AUDIO_FRAME_DURATION_5_MS = 2;
+  AUDIO_FRAME_DURATION_10_MS = 3;
+  AUDIO_FRAME_DURATION_20_MS = 4;
+  AUDIO_FRAME_DURATION_40_MS = 5;
+  AUDIO_FRAME_DURATION_60_MS = 6;
+}
+
+message AudioCodecConfig {
+  string codec_capability_id = 1;
+  uint32 sample_rate_hz = 2;
+  AudioChannelLayout channel_layout = 3;
+  AudioFrameDuration frame_duration = 4;
+}
+
+// Ephemeral audio stream bound to the canonical CallSession. It is not a second Call identity.
+message AudioStreamDescriptor {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId stream_id = 3;
+  PrincipalRef source = 4;
+  AudioCodecConfig codec = 5;
+  uint64 negotiation_generation = 6;
+}
+
+// Encoded realtime codec payload. Phase 20 does not claim that payload is E2EE media ciphertext.
+message EncodedAudioFrame {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId stream_id = 3;
+  PrincipalRef source = 4;
+  uint64 negotiation_generation = 5;
+  uint64 sequence = 6;
+  uint64 media_timestamp_samples = 7;
+  bytes payload = 8;
+}
+
+// Phase 20 defines the language-independent audio media shape. A network data-plane service is not
+// invented here: transport orchestration is Phase 24 and E2EE media is Phase 22.
