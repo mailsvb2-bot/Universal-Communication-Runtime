@@ -126,6 +126,7 @@ struct MemoryState {
     active_recovery_plans: HashMap<RecoveryIdentityKey, String>,
     conversations: HashMap<ConversationKey, ConversationRecord>,
     calls: HashMap<CallKey, CallSession>,
+    call_creation_fingerprints: HashMap<CallKey, [u8; 32]>,
     call_signals: HashMap<CallSignalKey, (ucr_model::PrincipalRef, [u8; 32], u64)>,
     groups: HashMap<GroupKey, GroupRecord>,
     group_memberships: HashMap<GroupMembershipKey, GroupMembership>,

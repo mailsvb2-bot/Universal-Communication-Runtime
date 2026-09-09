@@ -4,8 +4,8 @@ use ucr_model::{
     CallSignalKind, ConversationKind, GroupMemberState, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
-    active_call_participant, apply_call_signal, call_signal_fingerprint, canonical_call_creation,
-    canonical_call_session,
+    active_call_participant, apply_call_signal, call_creation_fingerprint, call_signal_fingerprint,
+    canonical_call_creation, canonical_call_session,
 };
 
 use super::{
@@ -21,6 +21,7 @@ impl CallStore for MemoryLocalStore {
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let session = canonical_call_creation(session, &creator.scope, &creator.principal)
             .map_err(map_call_error)?;
+        let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
         let key = call_key(&session.scope, &session.call_id);
         let conversation_key =
             conversation_key(&session.scope, &session.conversation.conversation_id);
@@ -32,14 +33,27 @@ impl CallStore for MemoryLocalStore {
         if conversation.conversation != session.conversation {
             return Err(DurableStoreError::InvalidRecord);
         }
-        require_group_participants_if_needed(state, &session)?;
-        if let Some(existing) = state.calls.get(&key) {
-            return if existing == &session && creator.principal == existing.initiated_by {
+        if let Some(existing) = validated_call_from_state(state, &session.scope, &session.call_id)?
+        {
+            if !group_actor_current_if_needed(state, &existing, &creator.principal) {
+                return Err(DurableStoreError::PermissionDenied);
+            }
+            let recorded = state
+                .call_creation_fingerprints
+                .get(&key)
+                .ok_or(DurableStoreError::Corrupt)?;
+            return if recorded == &creation_fingerprint
+                && creator.principal == existing.initiated_by
+            {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
                 Err(DurableStoreError::Conflict)
             };
         }
+        require_group_participants_if_needed(state, &session)?;
+        state
+            .call_creation_fingerprints
+            .insert(key.clone(), creation_fingerprint);
         state.calls.insert(key, session);
         Ok(DurableRecordStatus::Persisted)
     }
@@ -50,12 +64,7 @@ impl CallStore for MemoryLocalStore {
         call_id: &CallId,
     ) -> Result<Option<CallSession>, DurableStoreError> {
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        state
-            .calls
-            .get(&call_key(scope, call_id))
-            .map(canonical_call_session)
-            .transpose()
-            .map_err(map_call_error)
+        validated_call_from_state(&state, scope, call_id)
     }
 
     fn call_for_participant(
@@ -68,10 +77,9 @@ impl CallStore for MemoryLocalStore {
             return Err(DurableStoreError::PermissionDenied);
         }
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        let Some(session) = state.calls.get(&call_key(scope, call_id)) else {
+        let Some(session) = validated_call_from_state(&state, scope, call_id)? else {
             return Ok(None);
         };
-        let session = canonical_call_session(session).map_err(map_call_error)?;
         if !active_call_participant(&session, &subject.principal)
             || !group_actor_current_if_needed(&state, &session, &subject.principal)
         {
@@ -92,12 +100,8 @@ impl CallStore for MemoryLocalStore {
         let key = call_key(&signal.scope, &signal.call_id);
         let signal_key = call_signal_key(&signal.scope, signal.event_id.as_opaque().as_str());
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        let current = state
-            .calls
-            .get(&key)
-            .cloned()
+        let current = validated_call_from_state(&state, &signal.scope, &signal.call_id)?
             .ok_or(DurableStoreError::InvalidRecord)?;
-        let current = canonical_call_session(&current).map_err(map_call_error)?;
         if !group_actor_current_if_needed(&state, &current, &actor.principal) {
             return Err(DurableStoreError::PermissionDenied);
         }
@@ -133,6 +137,31 @@ impl CallStore for MemoryLocalStore {
         );
         Ok(DurableRecordStatus::Persisted)
     }
+}
+
+fn validated_call_from_state(
+    state: &MemoryState,
+    scope: &TenantScope,
+    call_id: &CallId,
+) -> Result<Option<CallSession>, DurableStoreError> {
+    let key = call_key(scope, call_id);
+    let Some(session) = state.calls.get(&key) else {
+        return if state.call_creation_fingerprints.contains_key(&key) {
+            Err(DurableStoreError::Corrupt)
+        } else {
+            Ok(None)
+        };
+    };
+    let canonical = canonical_call_session(session).map_err(map_call_error)?;
+    let recorded = state
+        .call_creation_fingerprints
+        .get(&key)
+        .ok_or(DurableStoreError::Corrupt)?;
+    let derived = call_creation_fingerprint(&canonical).map_err(map_call_error)?;
+    if recorded != &derived {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(Some(canonical))
 }
 
 fn require_group_participants_if_needed(
@@ -384,6 +413,16 @@ mod tests {
             .unwrap();
         assert_eq!(active.signalling_state, CallSignallingState::Active);
         assert_eq!(active.revision, 1);
+        assert_eq!(
+            store.create_call(&alice, &session),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        let mut conflicting = session.clone();
+        conflicting.participants[1].principal = subject("charlie", PrincipalKind::Person).principal;
+        assert_eq!(
+            store.create_call(&alice, &conflicting),
+            Err(DurableStoreError::Conflict)
+        );
     }
 
     #[test]

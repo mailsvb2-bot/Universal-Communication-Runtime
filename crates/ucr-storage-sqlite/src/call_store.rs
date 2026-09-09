@@ -7,8 +7,8 @@ use ucr_model::{
     PrincipalRef, ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_protocol::{
-    active_call_participant, apply_call_signal, call_signal_fingerprint, canonical_call_creation,
-    canonical_call_session,
+    active_call_participant, apply_call_signal, call_creation_fingerprint, call_signal_fingerprint,
+    canonical_call_creation, canonical_call_session,
 };
 
 use super::{
@@ -26,6 +26,7 @@ CREATE TABLE calls (
     conversation_kind TEXT NOT NULL CHECK(conversation_kind IN ('direct','private_group','public_group')),
     initiated_by_principal_id TEXT NOT NULL,
     initiated_by_principal_kind TEXT NOT NULL,
+    creation_fingerprint BLOB NOT NULL CHECK(length(creation_fingerprint)=32),
     signalling_state TEXT NOT NULL CHECK(signalling_state IN ('inviting','ringing','active','reconnecting','terminated')),
     media_negotiation_ref TEXT,
     media_negotiation_generation BLOB NOT NULL CHECK(length(media_negotiation_generation)=8),
@@ -127,6 +128,7 @@ fn verify_call_table_shapes(connection: &Connection) -> Result<(), DurableStoreE
             ("conversation_kind", "TEXT", 1, 0),
             ("initiated_by_principal_id", "TEXT", 1, 0),
             ("initiated_by_principal_kind", "TEXT", 1, 0),
+            ("creation_fingerprint", "BLOB", 1, 0),
             ("signalling_state", "TEXT", 1, 0),
             ("media_negotiation_ref", "TEXT", 0, 0),
             ("media_negotiation_generation", "BLOB", 1, 0),
@@ -249,6 +251,7 @@ impl CallStore for SqliteLocalStore {
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let session = canonical_call_creation(session, &creator.scope, &creator.principal)
             .map_err(map_call_error)?;
+        let creation_fingerprint = call_creation_fingerprint(&session).map_err(map_call_error)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -262,15 +265,22 @@ impl CallStore for SqliteLocalStore {
         if conversation.conversation != session.conversation {
             return Err(DurableStoreError::InvalidRecord);
         }
-        require_group_participants_if_needed(&transaction, &session)?;
         if let Some(existing) = load_call_from(&transaction, &session.scope, &session.call_id)? {
-            return if existing == session && creator.principal == existing.initiated_by {
+            if !group_actor_current_if_needed(&transaction, &existing, &creator.principal)? {
+                return Err(DurableStoreError::PermissionDenied);
+            }
+            let recorded =
+                load_creation_fingerprint(&transaction, &session.scope, &session.call_id)?
+                    .ok_or(DurableStoreError::Corrupt)?;
+            return if recorded == creation_fingerprint && creator.principal == existing.initiated_by
+            {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
                 Err(DurableStoreError::Conflict)
             };
         }
-        insert_call(&transaction, &session)?;
+        require_group_participants_if_needed(&transaction, &session)?;
+        insert_call(&transaction, &session, &creation_fingerprint)?;
         replace_participants(&transaction, &session)?;
         transaction
             .commit()
@@ -553,9 +563,39 @@ fn load_call_from(
         revision: decode_u64(&row.8)?,
         termination_reason: row.9.as_deref().map(parse_termination_reason).transpose()?,
     };
-    canonical_call_session(&session)
-        .map(Some)
-        .map_err(map_call_error)
+    let canonical = canonical_call_session(&session).map_err(map_call_error)?;
+    let recorded =
+        load_creation_fingerprint(connection, scope, call_id)?.ok_or(DurableStoreError::Corrupt)?;
+    let derived = call_creation_fingerprint(&canonical).map_err(map_call_error)?;
+    if recorded != derived {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(Some(canonical))
+}
+
+fn load_creation_fingerprint(
+    connection: &Connection,
+    scope: &TenantScope,
+    call_id: &CallId,
+) -> Result<Option<[u8; 32]>, DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let value = connection
+        .query_row(
+            "SELECT creation_fingerprint FROM calls
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND call_id=?4",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                call_id.as_opaque().as_str()
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(&error))?;
+    value
+        .map(|bytes| bytes.try_into().map_err(|_| DurableStoreError::Corrupt))
+        .transpose()
 }
 
 fn load_participants(
@@ -610,11 +650,12 @@ fn load_participants(
 fn insert_call(
     transaction: &Transaction<'_>,
     session: &CallSession,
+    creation_fingerprint: &[u8; 32],
 ) -> Result<(), DurableStoreError> {
     let namespace = namespace_storage_key(&session.scope);
     transaction
         .execute(
-            "INSERT INTO calls VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            "INSERT INTO calls VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 session.scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
@@ -624,6 +665,7 @@ fn insert_call(
                 call_conversation_kind_name(session.conversation.kind),
                 session.initiated_by.principal_id.as_opaque().as_str(),
                 group_store::principal_kind_name(session.initiated_by.kind),
+                creation_fingerprint.as_slice(),
                 signalling_state_name(session.signalling_state),
                 session.media_negotiation_ref.as_ref().map(OpaqueId::as_str),
                 encode_u64(session.media_negotiation_generation).as_slice(),
@@ -1059,6 +1101,16 @@ mod tests {
             assert_eq!(
                 reopened.apply_call_signal(&bob, &accept),
                 Ok(DurableRecordStatus::Duplicate)
+            );
+            assert_eq!(
+                reopened.create_call(&alice, &session),
+                Ok(DurableRecordStatus::Duplicate)
+            );
+            let mut conflicting = session.clone();
+            conflicting.participants[1].principal = subject("call-charlie").principal;
+            assert_eq!(
+                reopened.create_call(&alice, &conflicting),
+                Err(DurableStoreError::Conflict)
             );
         }
     }

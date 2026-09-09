@@ -69,9 +69,10 @@ pub use authorization::{
     validate_permission_grant,
 };
 pub use call::{
-    CALL_SIGNAL_FINGERPRINT_V1_DOMAIN, CallSignallingError, MAX_CALL_PARTICIPANTS,
-    active_call_participant, apply_call_signal, call_signal_event_type, call_signal_fingerprint,
-    canonical_call_creation, canonical_call_session, is_call_conversation_kind,
+    CALL_CREATION_FINGERPRINT_V1_DOMAIN, CALL_SIGNAL_FINGERPRINT_V1_DOMAIN, CallSignallingError,
+    MAX_CALL_PARTICIPANTS, active_call_participant, apply_call_signal, call_creation_fingerprint,
+    call_signal_event_type, call_signal_fingerprint, canonical_call_creation,
+    canonical_call_session, is_call_conversation_kind,
 };
 pub use capability::{
     CapabilityDescriptor, CapabilityError, CapabilityMaturity, CapabilityRequirement,

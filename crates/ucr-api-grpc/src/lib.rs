@@ -3006,6 +3006,30 @@ mod tests {
             );
         }
 
+        let mut retry_start = Request::new(pb::CallStartRequest {
+            session: Some(call_session(call_id, "call-conversation-grpc")),
+        });
+        attach_service_credential(&mut retry_start, credential_id, secret);
+        let response = client
+            .start_call(retry_start)
+            .await
+            .expect("retry StartCall application response")
+            .into_inner();
+        let accepted_origin = match response.result.expect("retry StartCall result") {
+            pb::call_start_response::Result::Call(call) => call,
+            pb::call_start_response::Result::Error(error) => {
+                panic!(
+                    "retry StartCall after lifecycle progress failed: {}",
+                    error.code
+                )
+            }
+        };
+        assert_eq!(
+            accepted_origin.signalling_state,
+            pb::CallSignallingState::Inviting as i32
+        );
+        assert_eq!(accepted_origin.revision, 0);
+
         let mut lookup = Request::new(pb::CallGetRequest {
             scope: Some(wire_scope()),
             call_id: Some(pb_id(call_id)),

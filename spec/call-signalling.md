@@ -40,7 +40,7 @@ Memory is the reference/contract store; SQLite is the restart-safe reference sto
 
 `proto/ucr/v1/call.proto` defines `CallService` with `StartCall`, `GetCall`, and `SignalCall`. Tonic/Prost generated Rust is a disposable binding. The service delegates through the existing `IntegrationIngress`/`ServicePrincipalRequestGate`/`AuthorizedDurableRuntime` path and never exposes raw stores.
 
-Reference loopback HTTP/2 evidence proves credential-bound start/signal/get, exact duplicate retry, canonical errors, bad-secret rejection, and non-participant non-disclosure. It is interoperability evidence, not a production listener.
+Reference loopback HTTP/2 evidence proves credential-bound start/signal/get, exact duplicate retry, canonical errors, bad-secret rejection, and non-participant non-disclosure. Repeating the exact original `StartCall` remains a duplicate after later signalling progress or restart because creation identity is stored separately from mutable call state. `StartCall` returns the accepted creation fact; clients use `GetCall` for the current signalling state. It is interoperability evidence, not a production listener.
 
 ## Explicit nonclaims
 

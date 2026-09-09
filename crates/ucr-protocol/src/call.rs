@@ -6,6 +6,7 @@ use ucr_model::{
 };
 
 pub const MAX_CALL_PARTICIPANTS: usize = 64;
+pub const CALL_CREATION_FINGERPRINT_V1_DOMAIN: &[u8] = b"UCR-CALL-CREATION-V1\0";
 pub const CALL_SIGNAL_FINGERPRINT_V1_DOMAIN: &[u8] = b"UCR-CALL-SIGNAL-V1\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +160,52 @@ pub fn canonical_call_creation(
         }
     }
     Ok(canonical)
+}
+
+/// Returns the immutable creation fingerprint for a canonical call. The fingerprint intentionally
+/// excludes mutable signalling state and includes only revision-zero participants, so the original
+/// `StartCall` remains exactly retryable after later signalling transitions or restart.
+///
+/// # Errors
+/// Rejects malformed current sessions or a stored session whose revision-zero origin cannot be
+/// represented as a valid initial call fact.
+pub fn call_creation_fingerprint(session: &CallSession) -> Result<[u8; 32], CallSignallingError> {
+    let canonical = canonical_call_session(session)?;
+    let origin_participants = canonical
+        .participants
+        .iter()
+        .filter(|value| value.joined_revision == 0)
+        .collect::<Vec<_>>();
+    if origin_participants.len() < 2
+        || !origin_participants
+            .iter()
+            .any(|value| value.principal == canonical.initiated_by)
+    {
+        return Err(CallSignallingError::InvalidSession);
+    }
+    let mut bytes = Vec::new();
+    push_scope(&mut bytes, &canonical.scope);
+    push_bytes(&mut bytes, canonical.call_id.as_opaque().as_wire_bytes());
+    push_bytes(
+        &mut bytes,
+        canonical
+            .conversation
+            .conversation_id
+            .as_opaque()
+            .as_wire_bytes(),
+    );
+    bytes.push(conversation_kind_code(canonical.conversation.kind));
+    push_principal(&mut bytes, &canonical.initiated_by);
+    let participant_count =
+        u32::try_from(origin_participants.len()).map_err(|_| CallSignallingError::Overflow)?;
+    bytes.extend_from_slice(&participant_count.to_be_bytes());
+    for value in origin_participants {
+        push_principal(&mut bytes, &value.principal);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(CALL_CREATION_FINGERPRINT_V1_DOMAIN);
+    hasher.update(bytes);
+    Ok(hasher.finalize().into())
 }
 
 /// Returns whether an exact `PrincipalRef` currently has signalling authority in the session.
@@ -644,6 +691,20 @@ fn push_bytes(bytes: &mut Vec<u8>, value: &[u8]) {
     bytes.extend_from_slice(value);
 }
 
+const fn conversation_kind_code(kind: ConversationKind) -> u8 {
+    match kind {
+        ConversationKind::Direct => 1,
+        ConversationKind::PrivateGroup => 2,
+        ConversationKind::PublicGroup => 3,
+        ConversationKind::Broadcast => 4,
+        ConversationKind::Community => 5,
+        ConversationKind::Room => 6,
+        ConversationKind::Topic => 7,
+        ConversationKind::Thread => 8,
+        ConversationKind::System => 9,
+    }
+}
+
 const fn principal_kind_code(kind: PrincipalKind) -> u8 {
     match kind {
         PrincipalKind::Person => 1,
@@ -803,6 +864,31 @@ mod tests {
         assert_eq!(
             renegotiated.media_negotiation_ref,
             Some(oid("opaque-negotiation"))
+        );
+    }
+
+    #[test]
+    fn creation_fingerprint_survives_lifecycle_progress_but_not_origin_change() {
+        let initial = session();
+        let bob = principal("bob", PrincipalKind::Person);
+        let initial_fingerprint = call_creation_fingerprint(&initial).unwrap();
+        let active = apply_call_signal(
+            &initial,
+            &scope(),
+            &bob,
+            &signal(&initial, "accept-origin", CallSignalKind::Accept),
+        )
+        .unwrap();
+        assert_eq!(
+            call_creation_fingerprint(&active).unwrap(),
+            initial_fingerprint
+        );
+
+        let mut conflicting = initial.clone();
+        conflicting.participants[1].principal = principal("charlie", PrincipalKind::Person);
+        assert_ne!(
+            call_creation_fingerprint(&conflicting).unwrap(),
+            initial_fingerprint
         );
     }
 
