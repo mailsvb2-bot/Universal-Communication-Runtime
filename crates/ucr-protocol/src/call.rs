@@ -395,7 +395,9 @@ fn apply_accept(
         return Err(CallSignallingError::InvalidTransition);
     }
     value.state = CallParticipantState::Accepted;
-    session.signalling_state = CallSignallingState::Active;
+    if session.signalling_state != CallSignallingState::Reconnecting {
+        session.signalling_state = CallSignallingState::Active;
+    }
     Ok(())
 }
 
@@ -638,7 +640,9 @@ fn settle_if_no_viable_remote(session: &mut CallSession, reason: CallTermination
     } else if session.participants.iter().any(|value| {
         value.principal != session.initiated_by && value.state == CallParticipantState::Accepted
     }) {
-        session.signalling_state = CallSignallingState::Active;
+        if session.signalling_state != CallSignallingState::Reconnecting {
+            session.signalling_state = CallSignallingState::Active;
+        }
     } else if session
         .participants
         .iter()
@@ -865,6 +869,73 @@ mod tests {
             renegotiated.media_negotiation_ref,
             Some(oid("opaque-negotiation"))
         );
+    }
+
+    #[test]
+    fn unrelated_participant_progress_does_not_clear_reconnecting() {
+        let mut initial = session();
+        for name in ["charlie", "dave"] {
+            initial.participants.push(CallParticipant {
+                principal: principal(name, PrincipalKind::Person),
+                state: CallParticipantState::Invited,
+                joined_revision: 0,
+                left_revision: None,
+            });
+        }
+        let alice = initial.initiated_by.clone();
+        let bob = principal("bob", PrincipalKind::Person);
+        let charlie = principal("charlie", PrincipalKind::Person);
+        let dave = principal("dave", PrincipalKind::Person);
+        let active = apply_call_signal(
+            &initial,
+            &scope(),
+            &bob,
+            &signal(&initial, "accept-bob", CallSignalKind::Accept),
+        )
+        .unwrap();
+        let reconnecting = apply_call_signal(
+            &active,
+            &scope(),
+            &alice,
+            &signal(
+                &active,
+                "reconnect-alice",
+                CallSignalKind::Reconnect {
+                    phase: CallReconnectPhase::Started,
+                },
+            ),
+        )
+        .unwrap();
+        let rejected = apply_call_signal(
+            &reconnecting,
+            &scope(),
+            &dave,
+            &signal(&reconnecting, "reject-dave", CallSignalKind::Reject),
+        )
+        .unwrap();
+        assert_eq!(rejected.signalling_state, CallSignallingState::Reconnecting);
+        let accepted = apply_call_signal(
+            &rejected,
+            &scope(),
+            &charlie,
+            &signal(&rejected, "accept-charlie", CallSignalKind::Accept),
+        )
+        .unwrap();
+        assert_eq!(accepted.signalling_state, CallSignallingState::Reconnecting);
+        let restored = apply_call_signal(
+            &accepted,
+            &scope(),
+            &alice,
+            &signal(
+                &accepted,
+                "restore-alice",
+                CallSignalKind::Reconnect {
+                    phase: CallReconnectPhase::Restored,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(restored.signalling_state, CallSignallingState::Active);
     }
 
     #[test]

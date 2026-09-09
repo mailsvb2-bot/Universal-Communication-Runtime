@@ -12,7 +12,7 @@ Initial creation starts at revision/generation zero with the initiator Accepted 
 
 ## Signalling state machine
 
-Prepared signalling supports invite creation plus `Ringing`, `Accept`, `Reject`, `Busy`, `Cancel`, `Timeout`, reconnect start/restored, participant add/remove, opaque media renegotiation signalling, and termination. Every mutation carries an exact-scope `EventId` and expected revision. Stale revisions and invalid state transitions fail closed.
+Prepared signalling supports invite creation plus `Ringing`, `Accept`, `Reject`, `Busy`, `Cancel`, `Timeout`, reconnect start/restored, participant add/remove, opaque media renegotiation signalling, and termination. Every mutation carries an exact-scope `EventId` and expected revision. Stale revisions and invalid state transitions fail closed. Once a session is `Reconnecting`, unrelated participant ringing/accept/reject/remove progress does not silently clear that state while at least one accepted remote remains; returning to `Active` requires an explicit `Reconnect::Restored` signal.
 
 `Active` means only that signalling acceptance has completed. It is not proof that RTP, audio, video, E2EE media, ICE, TURN, SFU, device capture, playback, or any real media path exists.
 

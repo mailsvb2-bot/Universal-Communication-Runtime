@@ -30,6 +30,7 @@ Media renegotiation is represented only as an opaque signalling reference and mo
 - Non-participants cannot distinguish a missing CallSession from an existing unauthorized one through the CallStore read boundary.
 - Group removal immediately removes group-backed call authority because the existing Group owner is consulted in the same storage operation.
 - Stale revisions, invalid transitions, forged actors and cross-scope calls fail closed.
+- `Reconnecting` cannot be cleared as a side effect of unrelated participant progress while accepted remote signalling authority remains; an explicit restore fact is required.
 - Duplicate/conflict evidence is actor-bound and is not an existence oracle after unrelated authority loss.
 - EventId cannot name an unrelated Event, GroupChange and CallSignal in the same exact scope.
 - Service Principal credential, quota, audit, and permission checks remain the existing single admission path.
