@@ -2950,6 +2950,19 @@ mod tests {
 
     type TestCallClient = pb::call_service_client::CallServiceClient<tonic::transport::Channel>;
 
+    fn assert_canonical_start_participant_order(started: &pb::CallSession) {
+        assert_eq!(started.participants.len(), 2);
+        let participant_id = |index: usize| {
+            started.participants[index]
+                .principal
+                .as_ref()
+                .and_then(|principal| principal.principal_id.as_ref())
+                .map(|id| id.value.as_slice())
+        };
+        assert_eq!(participant_id(0), Some(b"remote-person".as_slice()));
+        assert_eq!(participant_id(1), Some(b"service-grpc".as_slice()));
+    }
+
     async fn start_cancel_get_call(
         client: &mut TestCallClient,
         credential_id: &ucr_model::ServiceCredentialId,
@@ -2976,6 +2989,7 @@ mod tests {
             pb::CallSignallingState::Inviting as i32
         );
         assert_eq!(started.revision, 0);
+        assert_canonical_start_participant_order(&started);
 
         let cancel = cancel_call_signal("call-cancel-grpc", call_id);
         for expected_duplicate in [false, true] {

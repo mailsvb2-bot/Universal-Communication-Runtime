@@ -23,7 +23,7 @@ use ucr_protocol::{
     SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND,
     SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
     SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND, SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND,
-    acknowledgement_for,
+    acknowledgement_for, canonical_call_creation,
 };
 
 use crate::{
@@ -602,7 +602,8 @@ where
         AuthorizedDurableRuntime::new(&request, self.store)
             .create_call(&subject, session)
             .map_err(map_authorized_error)?;
-        Ok(session.clone())
+        canonical_call_creation(session, &subject.scope, &subject.principal)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
     }
 
     /// Authenticates, rate-limits and audits an exact participant-gated `CallSession` read.
