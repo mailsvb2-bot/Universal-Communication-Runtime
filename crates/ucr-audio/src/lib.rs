@@ -7,14 +7,14 @@ use ucr_core::{AuthorizationEvaluator, CallStore, DurableStoreError};
 use ucr_model::{
     AudioChannelLayout, AudioCodecConfig, AudioStreamDescriptor, AuthorizationRequest, CallId,
     CallParticipantState, CallSession, CallSignallingState, CapabilityDescriptor,
-    CapabilityMaturity, EncodedAudioFrame, OpaqueId, ScopedPrincipal, TenantScope,
+    CapabilityMaturity, EncodedAudioFrame, OpaqueId, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
     AUDIO_MEDIA_CAPABILITY, AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, AudioProtocolError,
-    CanonicalError, MAX_ENCODED_AUDIO_FRAME_BYTES, NegotiationResultEnvelope,
-    audio_samples_per_channel, canonical_audio_codec_config, canonical_audio_stream_descriptor,
-    canonical_capabilities, canonical_negotiation_result, phase20_audio_capabilities,
-    require_supported_extensions, validate_audio_frame_for_stream,
+    CanonicalError, MAX_CALL_PARTICIPANTS, MAX_ENCODED_AUDIO_FRAME_BYTES,
+    NegotiationResultEnvelope, audio_samples_per_channel, canonical_audio_codec_config,
+    canonical_audio_stream_descriptor, canonical_capabilities, canonical_negotiation_result,
+    phase20_audio_capabilities, require_supported_extensions, validate_audio_frame_for_stream,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,8 @@ pub enum AudioError {
     NegotiationResultInvalid,
     NegotiatedCapabilityUnavailable,
     NegotiatedCodecMismatch,
+    NegotiatedParticipantsInvalid,
+    NegotiatedParticipantSetMismatch,
     UnsupportedNegotiationExtension,
     CapabilityUnavailable,
     PcmFrameLength,
@@ -85,6 +87,7 @@ pub struct ResolvedAudioNegotiation {
     pub negotiation_generation: u64,
     pub result: NegotiationResultEnvelope,
     pub selected_codec: AudioCodecConfig,
+    pub negotiated_participants: Vec<PrincipalRef>,
 }
 
 pub trait AudioNegotiationResolver: fmt::Debug + Send + Sync {
@@ -440,12 +443,13 @@ where
     if !accepted_participant(&call, &descriptor.source) {
         return Err(AudioError::SourceNotAccepted);
     }
-    require_negotiated_audio(negotiations, descriptor)?;
+    require_negotiated_audio(negotiations, &call, descriptor)?;
     Ok(call)
 }
 
 fn require_negotiated_audio<N: AudioNegotiationResolver>(
     negotiation_resolver: &N,
+    call: &CallSession,
     descriptor: &AudioStreamDescriptor,
 ) -> Result<(), AudioError> {
     let binding = negotiation_resolver
@@ -483,6 +487,35 @@ fn require_negotiated_audio<N: AudioNegotiationResolver>(
     let selected_codec = canonical_audio_codec_config(&binding.selected_codec)?;
     if selected_codec != descriptor.codec {
         return Err(AudioError::NegotiatedCodecMismatch);
+    }
+    require_exact_negotiated_participants(call, &binding.negotiated_participants)?;
+    Ok(())
+}
+
+fn require_exact_negotiated_participants(
+    call: &CallSession,
+    negotiated: &[PrincipalRef],
+) -> Result<(), AudioError> {
+    if negotiated.is_empty() || negotiated.len() > MAX_CALL_PARTICIPANTS {
+        return Err(AudioError::NegotiatedParticipantsInvalid);
+    }
+    let mut unique = std::collections::HashSet::with_capacity(negotiated.len());
+    if negotiated.iter().any(|principal| !unique.insert(principal)) {
+        return Err(AudioError::NegotiatedParticipantsInvalid);
+    }
+    let accepted = call
+        .participants
+        .iter()
+        .filter(|participant| {
+            participant.state == CallParticipantState::Accepted
+                && participant.left_revision.is_none()
+        })
+        .map(|participant| &participant.principal)
+        .collect::<Vec<_>>();
+    if accepted.len() != negotiated.len()
+        || accepted.iter().any(|principal| !unique.contains(principal))
+    {
+        return Err(AudioError::NegotiatedParticipantSetMismatch);
     }
     Ok(())
 }

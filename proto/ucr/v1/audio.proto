@@ -63,6 +63,7 @@ message AudioNegotiationBinding {
   uint64 negotiation_generation = 4;
   NegotiationResult result = 5;
   AudioCodecConfig selected_codec = 6;
+  repeated PrincipalRef negotiated_participants = 7;
 }
 
 // Phase 20 defines the language-independent audio media shape. A network data-plane service is not

@@ -80,10 +80,30 @@ enum NegotiationMode {
     CriticalCapabilityExtension,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct TestNegotiations(NegotiationMode);
+#[derive(Debug, Clone)]
+struct TestNegotiations {
+    mode: NegotiationMode,
+    participants: Vec<PrincipalRef>,
+}
 
-const PREPARED_NEGOTIATIONS: TestNegotiations = TestNegotiations(NegotiationMode::Valid);
+fn negotiations_with_mode(call: &CallSession, mode: NegotiationMode) -> TestNegotiations {
+    TestNegotiations {
+        mode,
+        participants: call
+            .participants
+            .iter()
+            .filter(|participant| {
+                participant.state == CallParticipantState::Accepted
+                    && participant.left_revision.is_none()
+            })
+            .map(|participant| participant.principal.clone())
+            .collect(),
+    }
+}
+
+fn negotiations_for(call: &CallSession) -> TestNegotiations {
+    negotiations_with_mode(call, NegotiationMode::Valid)
+}
 
 impl AudioNegotiationResolver for TestNegotiations {
     fn resolve_audio_negotiation(
@@ -93,14 +113,14 @@ impl AudioNegotiationResolver for TestNegotiations {
         negotiation_ref: &OpaqueId,
         negotiation_generation: u64,
     ) -> Result<Option<ResolvedAudioNegotiation>, CanonicalError> {
-        if self.0 == NegotiationMode::Missing {
+        if self.mode == NegotiationMode::Missing {
             return Ok(None);
         }
         let mut capabilities = phase20_audio_capabilities();
-        if self.0 == NegotiationMode::MissingAudio {
+        if self.mode == NegotiationMode::MissingAudio {
             capabilities.retain(|capability| capability.id != AUDIO_MEDIA_CAPABILITY);
         }
-        if self.0 == NegotiationMode::CriticalCapabilityExtension {
+        if self.mode == NegotiationMode::CriticalCapabilityExtension {
             capabilities[0].extensions.push(ProtocolExtension {
                 name: "vendor.audio.remote-required".to_owned(),
                 critical: true,
@@ -108,7 +128,7 @@ impl AudioNegotiationResolver for TestNegotiations {
             });
         }
         let mut selected_codec = opus_codec();
-        if self.0 == NegotiationMode::WrongCodec {
+        if self.mode == NegotiationMode::WrongCodec {
             selected_codec.frame_duration = AudioFrameDuration::Ms40;
         }
         Ok(Some(ResolvedAudioNegotiation {
@@ -124,6 +144,7 @@ impl AudioNegotiationResolver for TestNegotiations {
                 crypto_suite: CryptoSuite::UcrV1,
             },
             selected_codec,
+            negotiated_participants: self.participants.clone(),
         }))
     }
 }
@@ -403,12 +424,8 @@ fn descriptor(call: &CallSession, source: &ScopedPrincipal) -> AudioStreamDescri
 #[test]
 fn direct_call_encodes_and_decodes_real_opus_without_media_brain_duplication() {
     let (store, call, alice, bob) = active_call();
-    let runtime = AudioRuntime::new(
-        &AllowAll,
-        &store,
-        &PreparedAudioCapabilities,
-        &PREPARED_NEGOTIATIONS,
-    );
+    let negotiations = negotiations_for(&call);
+    let runtime = AudioRuntime::new(&AllowAll, &store, &PreparedAudioCapabilities, &negotiations);
     let descriptor = descriptor(&call, &alice);
     let mut sender = runtime.open_sender(&alice, &descriptor).expect("sender");
     let mut receiver = runtime.open_receiver(&bob, &descriptor).expect("receiver");
@@ -427,16 +444,11 @@ fn direct_call_encodes_and_decodes_real_opus_without_media_brain_duplication() {
         Err(AudioError::DuplicateOrOutOfOrder)
     );
 }
-
 #[test]
 fn media_renegotiation_invalidates_open_audio_stream_before_next_frame() {
     let (store, call, alice, _bob) = active_call();
-    let runtime = AudioRuntime::new(
-        &AllowAll,
-        &store,
-        &PreparedAudioCapabilities,
-        &PREPARED_NEGOTIATIONS,
-    );
+    let negotiations = negotiations_for(&call);
+    let runtime = AudioRuntime::new(&AllowAll, &store, &PreparedAudioCapabilities, &negotiations);
     let descriptor = descriptor(&call, &alice);
     let mut sender = runtime.open_sender(&alice, &descriptor).expect("sender");
 
@@ -458,16 +470,11 @@ fn media_renegotiation_invalidates_open_audio_stream_before_next_frame() {
         Err(AudioError::NegotiationGenerationMismatch)
     );
 }
-
 #[test]
 fn terminated_call_revokes_open_audio_sender_before_next_frame() {
     let (store, call, alice, _bob) = active_call();
-    let runtime = AudioRuntime::new(
-        &AllowAll,
-        &store,
-        &PreparedAudioCapabilities,
-        &PREPARED_NEGOTIATIONS,
-    );
+    let negotiations = negotiations_for(&call);
+    let runtime = AudioRuntime::new(&AllowAll, &store, &PreparedAudioCapabilities, &negotiations);
     let descriptor = descriptor(&call, &alice);
     let mut sender = runtime.open_sender(&alice, &descriptor).expect("sender");
 
@@ -489,16 +496,11 @@ fn terminated_call_revokes_open_audio_sender_before_next_frame() {
         Err(AudioError::CallUnavailable | AudioError::CallNotActive)
     ));
 }
-
 #[test]
 fn group_audio_reuses_group_call_authority_and_revokes_open_sender_on_removal() {
     let (store, call, alice, _bob, charlie, group) = active_group_call();
-    let runtime = AudioRuntime::new(
-        &AllowAll,
-        &store,
-        &PreparedAudioCapabilities,
-        &PREPARED_NEGOTIATIONS,
-    );
+    let negotiations = negotiations_for(&call);
+    let runtime = AudioRuntime::new(&AllowAll, &store, &PreparedAudioCapabilities, &negotiations);
     let mut stream = descriptor(&call, &charlie);
     stream.stream_id = AudioStreamId::from_opaque(oid("group-audio-stream"));
     let mut sender = runtime
@@ -541,12 +543,12 @@ fn group_audio_reuses_group_call_authority_and_revokes_open_sender_on_removal() 
         Err(AudioError::CallUnavailable | AudioError::SourceNotAccepted)
     ));
 }
-
 #[test]
 fn runtime_capability_revocation_stops_an_already_open_sender() {
     let (store, call, alice, _bob) = active_call();
+    let negotiations = negotiations_for(&call);
     let capabilities = ToggleCapabilities(AtomicBool::new(true));
-    let runtime = AudioRuntime::new(&AllowAll, &store, &capabilities, &PREPARED_NEGOTIATIONS);
+    let runtime = AudioRuntime::new(&AllowAll, &store, &capabilities, &negotiations);
     let stream = descriptor(&call, &alice);
     let mut sender = runtime.open_sender(&alice, &stream).expect("sender");
     sender.encode_pcm(&vec![0_i16; 960]).expect("first frame");
@@ -557,10 +559,10 @@ fn runtime_capability_revocation_stops_an_already_open_sender() {
         Err(AudioError::CapabilityUnavailable)
     );
 }
-
 #[test]
 fn invited_group_participant_cannot_receive_active_call_audio_before_accepting() {
     let (store, call, alice, _bob, _charlie, group) = active_group_call();
+    let negotiations = negotiations_for(&call);
     let dave = subject("dave-group-audio");
     store
         .apply_group_change(
@@ -593,43 +595,33 @@ fn invited_group_participant_cannot_receive_active_call_audio_before_accepting()
         .expect("invite listener to active call");
     let current = store.call(&scope(), &call.call_id).unwrap().unwrap();
     let stream = descriptor(&current, &alice);
-    let runtime = AudioRuntime::new(
-        &AllowAll,
-        &store,
-        &PreparedAudioCapabilities,
-        &PREPARED_NEGOTIATIONS,
-    );
+    let runtime = AudioRuntime::new(&AllowAll, &store, &PreparedAudioCapabilities, &negotiations);
     assert_eq!(
         runtime.open_receiver(&dave, &stream).map(|_| ()),
         Err(AudioError::SubjectNotAccepted)
     );
 }
-
 #[test]
 fn unsupported_critical_audio_capability_extension_fails_closed() {
     let (store, call, alice, _bob) = active_call();
+    let negotiations = negotiations_for(&call);
     let stream = descriptor(&call, &alice);
-    let runtime = AudioRuntime::new(
-        &AllowAll,
-        &store,
-        &CriticalCapabilities,
-        &PREPARED_NEGOTIATIONS,
-    );
+    let runtime = AudioRuntime::new(&AllowAll, &store, &CriticalCapabilities, &negotiations);
     assert_eq!(
         runtime.open_sender(&alice, &stream).map(|_| ()),
         Err(AudioError::CapabilityUnavailable)
     );
 }
-
 #[test]
 fn runtime_permission_revocation_stops_an_already_open_sender() {
     let (store, call, alice, _bob) = active_call();
+    let negotiations = negotiations_for(&call);
     let authorization = ToggleAuthorization(AtomicBool::new(true));
     let runtime = AudioRuntime::new(
         &authorization,
         &store,
         &PreparedAudioCapabilities,
-        &PREPARED_NEGOTIATIONS,
+        &negotiations,
     );
     let stream = descriptor(&call, &alice);
     let mut sender = runtime.open_sender(&alice, &stream).expect("sender");
@@ -643,10 +635,10 @@ fn runtime_permission_revocation_stops_an_already_open_sender() {
         )))
     );
 }
-
 #[test]
 fn active_call_without_canonical_media_negotiation_cannot_open_audio() {
     let (store, call, alice, _bob) = direct_call(false);
+    let negotiations = negotiations_for(&call);
     assert!(call.media_negotiation_ref.is_none());
     let stream = AudioStreamDescriptor {
         scope: call.scope.clone(),
@@ -657,18 +649,12 @@ fn active_call_without_canonical_media_negotiation_cannot_open_audio() {
         negotiation_ref: oid("fabricated-negotiation-ref"),
         negotiation_generation: call.media_negotiation_generation,
     };
-    let runtime = AudioRuntime::new(
-        &AllowAll,
-        &store,
-        &PreparedAudioCapabilities,
-        &PREPARED_NEGOTIATIONS,
-    );
+    let runtime = AudioRuntime::new(&AllowAll, &store, &PreparedAudioCapabilities, &negotiations);
     assert_eq!(
         runtime.open_sender(&alice, &stream).map(|_| ()),
         Err(AudioError::MissingNegotiation)
     );
 }
-
 #[test]
 fn negotiated_result_must_include_audio_and_exact_selected_codec() {
     let (store, call, alice, _bob) = active_call();
@@ -683,7 +669,7 @@ fn negotiated_result_must_include_audio_and_exact_selected_codec() {
             AudioError::NegotiatedCodecMismatch,
         ),
     ] {
-        let negotiations = TestNegotiations(mode);
+        let negotiations = negotiations_with_mode(&call, mode);
         let runtime =
             AudioRuntime::new(&AllowAll, &store, &PreparedAudioCapabilities, &negotiations);
         assert_eq!(
@@ -697,7 +683,7 @@ fn negotiated_result_must_include_audio_and_exact_selected_codec() {
 fn remote_critical_negotiated_capability_extension_fails_closed() {
     let (store, call, alice, _bob) = active_call();
     let stream = descriptor(&call, &alice);
-    let negotiations = TestNegotiations(NegotiationMode::CriticalCapabilityExtension);
+    let negotiations = negotiations_with_mode(&call, NegotiationMode::CriticalCapabilityExtension);
     let runtime = AudioRuntime::new(&AllowAll, &store, &PreparedAudioCapabilities, &negotiations);
     assert_eq!(
         runtime.open_sender(&alice, &stream).map(|_| ()),
@@ -709,10 +695,147 @@ fn remote_critical_negotiated_capability_extension_fails_closed() {
 fn missing_resolved_negotiation_fails_closed_even_when_call_ref_exists() {
     let (store, call, alice, _bob) = active_call();
     let stream = descriptor(&call, &alice);
-    let negotiations = TestNegotiations(NegotiationMode::Missing);
+    let negotiations = negotiations_with_mode(&call, NegotiationMode::Missing);
     let runtime = AudioRuntime::new(&AllowAll, &store, &PreparedAudioCapabilities, &negotiations);
     assert_eq!(
         runtime.open_sender(&alice, &stream).map(|_| ()),
         Err(AudioError::MissingNegotiation)
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn newly_accepted_group_participant_requires_fresh_media_negotiation() {
+    let (store, call, alice, _bob, _charlie, group) = active_group_call();
+    let negotiations_v1 = negotiations_for(&call);
+    let stream_v1 = descriptor(&call, &alice);
+    let runtime_v1 = AudioRuntime::new(
+        &AllowAll,
+        &store,
+        &PreparedAudioCapabilities,
+        &negotiations_v1,
+    );
+    let mut sender_v1 = runtime_v1
+        .open_sender(&alice, &stream_v1)
+        .expect("sender before membership change");
+    sender_v1
+        .encode_pcm(&vec![0_i16; 960])
+        .expect("media before join");
+
+    let dave = subject("dave-accepted-audio");
+    store
+        .apply_group_change(
+            &alice,
+            &GroupChange {
+                event_id: EventId::from_opaque(oid("add-dave-negotiation-binding")),
+                scope: scope(),
+                group_id: group.group_id,
+                expected_revision: 2,
+                kind: GroupChangeKind::AddMember {
+                    member: dave.principal.clone(),
+                    role: GroupRole::Member,
+                },
+                next_crypto_state: None,
+            },
+        )
+        .expect("add dave to group");
+    store
+        .apply_call_signal(
+            &alice,
+            &signal(
+                &call,
+                "invite-dave-negotiation-binding",
+                CallSignalKind::ParticipantUpdate {
+                    participant: dave.principal.clone(),
+                    kind: CallParticipantUpdateKind::Add,
+                },
+            ),
+        )
+        .expect("invite dave to call");
+
+    // Inviting a participant does not alter the Accepted set, so existing media remains valid.
+    sender_v1
+        .encode_pcm(&vec![0_i16; 960])
+        .expect("media while dave remains invited");
+
+    let invited = store.call(&scope(), &call.call_id).unwrap().unwrap();
+    store
+        .apply_call_signal(
+            &dave,
+            &signal(
+                &invited,
+                "dave-accept-negotiation-binding",
+                CallSignalKind::Accept,
+            ),
+        )
+        .expect("dave accepts");
+    let accepted = store.call(&scope(), &call.call_id).unwrap().unwrap();
+    assert_eq!(
+        accepted.media_negotiation_ref, call.media_negotiation_ref,
+        "signalling participant acceptance does not itself invent media negotiation"
+    );
+
+    assert_eq!(
+        sender_v1.encode_pcm(&vec![0_i16; 960]),
+        Err(AudioError::NegotiatedParticipantSetMismatch)
+    );
+    let old_stream = descriptor(&accepted, &alice);
+    assert_eq!(
+        runtime_v1.open_receiver(&dave, &old_stream).map(|_| ()),
+        Err(AudioError::NegotiatedParticipantSetMismatch)
+    );
+
+    store
+        .apply_call_signal(
+            &alice,
+            &signal(
+                &accepted,
+                "renegotiate-after-dave-accept",
+                CallSignalKind::MediaRenegotiation {
+                    negotiation_ref: oid("audio-negotiation-with-dave"),
+                },
+            ),
+        )
+        .expect("fresh negotiation after accepted set changed");
+    let renewed = store.call(&scope(), &call.call_id).unwrap().unwrap();
+    let negotiations_v2 = negotiations_for(&renewed);
+    let stream_v2 = descriptor(&renewed, &alice);
+    let runtime_v2 = AudioRuntime::new(
+        &AllowAll,
+        &store,
+        &PreparedAudioCapabilities,
+        &negotiations_v2,
+    );
+    let mut sender_v2 = runtime_v2
+        .open_sender(&alice, &stream_v2)
+        .expect("sender after fresh negotiation");
+    let frame = sender_v2
+        .encode_pcm(&vec![0_i16; 960])
+        .expect("media after fresh negotiation");
+    let mut dave_receiver = runtime_v2
+        .open_receiver(&dave, &stream_v2)
+        .expect("new accepted participant after fresh negotiation");
+    assert_eq!(dave_receiver.decode_frame(&frame).unwrap().len(), 960);
+}
+
+#[test]
+fn duplicate_or_incomplete_negotiated_participant_set_fails_closed() {
+    let (store, call, alice, _bob) = active_call();
+    let stream = descriptor(&call, &alice);
+
+    let mut duplicate = negotiations_for(&call);
+    duplicate.participants.push(alice.principal.clone());
+    let runtime = AudioRuntime::new(&AllowAll, &store, &PreparedAudioCapabilities, &duplicate);
+    assert_eq!(
+        runtime.open_sender(&alice, &stream).map(|_| ()),
+        Err(AudioError::NegotiatedParticipantsInvalid)
+    );
+
+    let mut incomplete = negotiations_for(&call);
+    incomplete.participants.pop();
+    let runtime = AudioRuntime::new(&AllowAll, &store, &PreparedAudioCapabilities, &incomplete);
+    assert_eq!(
+        runtime.open_sender(&alice, &stream).map(|_| ()),
+        Err(AudioError::NegotiatedParticipantSetMismatch)
     );
 }

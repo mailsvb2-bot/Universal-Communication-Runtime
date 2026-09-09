@@ -44,6 +44,8 @@ fn phase20_audio_reuses_call_capability_and_authorization_owners() {
     assert!(audio.contains("canonical_negotiation_result"));
     assert!(audio.contains("call.media_negotiation_ref.as_ref()"));
     assert!(audio.contains("NegotiatedCodecMismatch"));
+    assert!(audio.contains("NegotiatedParticipantSetMismatch"));
+    assert!(audio.contains("require_exact_negotiated_participants"));
     assert!(call.contains("pub trait CallStore"));
     assert!(authorization.contains("ucr.call.audio.send"));
     assert!(authorization.contains("ucr.call.audio.receive"));
@@ -52,9 +54,11 @@ fn phase20_audio_reuses_call_capability_and_authorization_owners() {
     assert!(proto.contains("message EncodedAudioFrame"));
     assert!(proto.contains("message AudioNegotiationBinding"));
     assert!(proto.contains("NegotiationResult result = 5"));
+    assert!(proto.contains("repeated PrincipalRef negotiated_participants = 7"));
     assert!(spec.contains("Status: **Prepared reference implementation**, not Production."));
     assert!(spec.contains("mandatory Phase-20 interoperable audio codec is **Opus**"));
     assert!(spec.contains("Audio MUST NOT start when that reference is absent"));
+    assert!(spec.contains("current `Accepted` participant set"));
     assert!(adr.contains("owns no durable state"));
 }
 
