@@ -539,7 +539,13 @@ fn apply_explicit_termination(
         return Err(CallSignallingError::InvalidTransition);
     }
     let value = participant(session, actor).ok_or(CallSignallingError::PermissionDenied)?;
-    if actor != &session.initiated_by && value.state != CallParticipantState::Accepted {
+    if actor != &session.initiated_by
+        && (value.state != CallParticipantState::Accepted
+            || matches!(
+                session.conversation.kind,
+                ConversationKind::PrivateGroup | ConversationKind::PublicGroup
+            ))
+    {
         return Err(CallSignallingError::PermissionDenied);
     }
     terminate(session, reason);
@@ -936,6 +942,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(restored.signalling_state, CallSignallingState::Active);
+    }
+
+    #[test]
+    fn group_participant_cannot_terminate_everyone_but_can_leave_self() {
+        let mut initial = session();
+        initial.conversation.kind = ConversationKind::PrivateGroup;
+        let bob = principal("bob", PrincipalKind::Person);
+        let active = apply_call_signal(
+            &initial,
+            &scope(),
+            &bob,
+            &signal(&initial, "group-accept", CallSignalKind::Accept),
+        )
+        .unwrap();
+        let terminate = signal(
+            &active,
+            "group-terminate-by-member",
+            CallSignalKind::Terminate {
+                reason: CallTerminationReason::Completed,
+            },
+        );
+        assert_eq!(
+            apply_call_signal(&active, &scope(), &bob, &terminate),
+            Err(CallSignallingError::PermissionDenied)
+        );
+        let leave = signal(
+            &active,
+            "group-leave-self",
+            CallSignalKind::ParticipantUpdate {
+                participant: bob.clone(),
+                kind: CallParticipantUpdateKind::Remove,
+            },
+        );
+        let ended = apply_call_signal(&active, &scope(), &bob, &leave).unwrap();
+        assert_eq!(ended.signalling_state, CallSignallingState::Terminated);
+        assert_eq!(
+            ended.termination_reason,
+            Some(CallTerminationReason::Completed)
+        );
     }
 
     #[test]
