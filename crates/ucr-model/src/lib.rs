@@ -2,11 +2,16 @@
 
 use core::fmt;
 
+mod adaptive_media;
 mod audio;
 mod call;
 mod group;
 mod media_e2ee;
 mod video;
+pub use adaptive_media::{
+    AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage, AdaptiveMediaTelemetry,
+    DeferredMediaFallback, MediaThermalState,
+};
 pub use audio::{
     AudioChannelLayout, AudioCodecConfig, AudioFrameDuration, AudioStreamDescriptor,
     EncodedAudioFrame,

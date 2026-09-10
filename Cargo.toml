@@ -15,6 +15,7 @@ members = [
     "crates/ucr-audio",
     "crates/ucr-video",
     "crates/ucr-media-e2ee",
+    "crates/ucr-media-adaptive",
 ]
 
 [workspace.package]

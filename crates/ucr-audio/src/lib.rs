@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use opus::{Application, Channels, Decoder, Encoder};
+use opus::{Application, Bitrate, Channels, Decoder, Encoder};
 use ucr_core::{AuthorizationEvaluator, CallStore, DurableStoreError};
 use ucr_model::{
     AudioChannelLayout, AudioCodecConfig, AudioStreamDescriptor, AuthorizationRequest, CallId,
@@ -41,6 +41,7 @@ pub enum AudioError {
     CapabilityUnavailable,
     PcmFrameLength,
     Codec,
+    BitrateOutOfRange,
     DuplicateOrOutOfOrder,
     UnexpectedPacketDuration,
     SequenceOverflow,
@@ -255,6 +256,32 @@ where
     #[must_use]
     pub const fn descriptor(&self) -> &AudioStreamDescriptor {
         &self.descriptor
+    }
+
+    /// Changes the live Opus encoder target bitrate without changing codec identity or wire shape.
+    ///
+    /// Phase 23 may use this control for adaptive audio. Call/media authority is revalidated first;
+    /// bitrate policy itself remains outside the Phase-20 Audio owner.
+    ///
+    /// # Errors
+    /// Rejects lost authority, values outside the bounded Opus `VoIP` reference range, or codec CTL failure.
+    pub fn set_target_bitrate_bps(&mut self, bitrate_bps: u32) -> Result<(), AudioError> {
+        require_audio_authority(
+            self.authorization,
+            self.store,
+            self.capabilities,
+            self.negotiations,
+            &self.subject,
+            &self.descriptor,
+            AUDIO_SEND_PERMISSION,
+        )?;
+        if !(6_000..=510_000).contains(&bitrate_bps) {
+            return Err(AudioError::BitrateOutOfRange);
+        }
+        let bitrate = i32::try_from(bitrate_bps).map_err(|_| AudioError::BitrateOutOfRange)?;
+        self.encoder
+            .set_bitrate(Bitrate::Bits(bitrate))
+            .map_err(|_| AudioError::Codec)
     }
 
     /// Encodes one exact PCM frame as Opus after re-checking current Call/media authority.

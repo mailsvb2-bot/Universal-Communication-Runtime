@@ -841,10 +841,19 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "ucr-crypto",
+ "ucr-media-adaptive",
  "ucr-model",
  "ucr-protocol",
  "ucr-transport-internet",
  "ucr-video",
+]
+
+[[package]]
+name = "ucr-media-adaptive"
+version = "0.0.1"
+dependencies = [
+ "ucr-model",
+ "ucr-protocol",
 ]
 
 [[package]]

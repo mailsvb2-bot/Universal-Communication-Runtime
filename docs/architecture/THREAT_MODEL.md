@@ -144,6 +144,8 @@ Minimum disclosure rules are component-specific: Relay learns only relay-require
 Presence, display name, avatar, phone, email, or provider account ID must not become security truth merely because they are visible to infrastructure.
 
 Observability may be local, organization-hosted, or managed. The protocol must not require central telemetry upload to function.
+Phase 23 Adaptive Media treats measurements as bounded control input, not identity, authorization, security-policy, delivery, or route evidence. Peer-supplied values must not be promoted into trusted local CPU/GPU/battery/thermal truth. Malformed/extreme observations fail validation; oscillating observations are contained by bounded hysteresis. Adaptation has no plaintext-downgrade control and cannot weaken Phase-22 E2EE.
+
 ## 12. Mandatory threat tests
 
 The security test suite must eventually include explicit scenarios for:
@@ -166,7 +168,7 @@ Fuzzing targets include protocol parser, message envelope, identity parser, brid
 
 Fuzz harnesses must enforce memory/time budgets and retain minimized regression cases. Parser fuzzing is required before parser maturity can be promoted to Production.
 
-Current implemented untrusted boundaries have executable bounded fuzz targets: `framing_parser`, `opaque_id_wire`, `message_envelope`, `crypto_wrapper`, Phase-15 `internet_transport_wire`, Phase-21 `h264_sps_preflight`, and Phase-22 `media_e2ee_frame`. The required `fuzz-smoke` CI job runs the same pinned harness/budget owner as local verification. Bridge normalization, attachment file-chunk parsing, and signalling parsing are not implemented in the Rust reference runtime yet; each requires a real fuzz target when its implementation appears rather than inheriting coverage by documentation. Phase-15 generated protobuf transport messages are exercised through the transport crate semantic decoder.
+Current implemented untrusted boundaries have executable bounded fuzz targets: `framing_parser`, `opaque_id_wire`, `message_envelope`, `crypto_wrapper`, Phase-15 `internet_transport_wire`, Phase-21 `h264_sps_preflight`, Phase-22 `media_e2ee_frame`, and Phase-23 `adaptive_media_telemetry`. The required `fuzz-smoke` CI job runs the same pinned harness/budget owner as local verification. Bridge normalization, attachment file-chunk parsing, and signalling parsing are not implemented in the Rust reference runtime yet; each requires a real fuzz target when its implementation appears rather than inheriting coverage by documentation. Phase-15 generated protobuf transport messages are exercised through the transport crate semantic decoder.
 ## 14. Mandatory chaos scenarios
 
 Chaos coverage includes network loss/switch, DNS failure, relay failure, SFU failure, process kill, app restart, peer disappearance, clock drift, packet duplication/reorder/corruption, storage full, network partition/merge, old client, revoked device, and slow consumer.

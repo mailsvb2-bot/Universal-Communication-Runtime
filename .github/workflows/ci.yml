@@ -135,7 +135,8 @@ jobs:
           test -s spec/call-signalling.md &&
           test -s spec/audio.md &&
           test -s spec/video.md &&
-          test -s spec/media-e2ee.md
+          test -s spec/media-e2ee.md &&
+          test -s spec/adaptive-media.md
       - name: Public contract exists
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
@@ -152,7 +153,8 @@ jobs:
           test -s proto/ucr/v1/call.proto &&
           test -s proto/ucr/v1/audio.proto &&
           test -s proto/ucr/v1/video.proto &&
-          test -s proto/ucr/v1/media_e2ee.proto
+          test -s proto/ucr/v1/media_e2ee.proto &&
+          test -s proto/ucr/v1/adaptive_media.proto
       - name: ADR governance exists
         run: >-
           test -s docs/adr/0000-template.md &&
@@ -214,4 +216,5 @@ jobs:
           test -s docs/adr/0057-phase19-call-signalling-reuses-canonical-conversation-identity-and-authorization-owners.md &&
           test -s docs/adr/0058-phase20-audio-reuses-canonical-call-and-capability-owners.md &&
           test -s docs/adr/0059-phase21-video-reuses-canonical-call-and-capability-owners.md &&
-          test -s docs/adr/0060-phase22-e2ee-media-reuses-canonical-call-crypto-and-capability-owners.md
+          test -s docs/adr/0060-phase22-e2ee-media-reuses-canonical-call-crypto-and-capability-owners.md &&
+          test -s docs/adr/0061-phase23-adaptive-media-reuses-canonical-media-and-security-owners.md
