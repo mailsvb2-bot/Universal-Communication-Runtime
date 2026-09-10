@@ -14,6 +14,7 @@ members = [
     "crates/ucr-chat",
     "crates/ucr-audio",
     "crates/ucr-video",
+    "crates/ucr-media-e2ee",
 ]
 
 [workspace.package]

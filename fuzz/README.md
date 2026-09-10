@@ -8,6 +8,9 @@ This package is intentionally a separate Cargo workspace. The production workspa
 - `opaque_id_wire`: raw `OpaqueId` wire bytes, UTF-8/budget validation, and exact round-trip.
 - `message_envelope`: bounded adversarial Message construction, validation/canonicalization idempotence, and signing-binding eligibility.
 - `crypto_wrapper`: arbitrary Ed25519 public-key/signature/binding bytes plus public-key descriptor validation.
+- `internet_transport_wire`: bounded Phase-15 transport semantic wire decoding.
+- `h264_sps_preflight`: bounded adversarial H.264 SPS preflight before native decode.
+- `media_e2ee_frame`: bounded adversarial Phase-22 authenticated media-header/envelope validation.
 
 These are the implemented parser/wrapper boundaries that exist today. Bridge normalization, file-chunk parsing, signalling parsing, and generated protobuf Message decoding require their own fuzz targets when those implementations appear; this directory must not fake coverage for code that does not yet exist.
 

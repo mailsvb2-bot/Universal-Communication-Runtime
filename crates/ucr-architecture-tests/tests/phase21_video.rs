@@ -123,8 +123,9 @@ fn phase21_release_truth_and_repository_guards_are_machine_locked() {
     let spec_readme = fs::read_to_string(root.join("spec/README.md")).expect("spec readme");
     let fuzz_manifest = fs::read_to_string(root.join("fuzz/Cargo.toml")).expect("fuzz manifest");
     let fuzz_smoke = fs::read_to_string(root.join("fuzz/run-smoke.sh")).expect("fuzz smoke");
+    assert!(readme.contains("Phase 21 now adds Prepared realtime Video"));
     assert!(readme.contains(
-        "**Phase 21 — Video (Prepared/reference complete; Phase 22 E2EE Media not started).**"
+        "**Phase 22 — E2EE Media (Prepared/reference complete; Phase 23 Adaptive Media not started).**"
     ));
     assert!(ci.contains("test -s spec/video.md"));
     assert!(ci.contains("test -s proto/ucr/v1/video.proto"));

@@ -5,6 +5,7 @@ mod agreement;
 mod confirmation;
 mod kdf;
 mod key_provider;
+mod media_e2ee;
 mod message_signature;
 mod recovery;
 mod rng;
@@ -18,6 +19,9 @@ pub use agreement::{AgreementError, AgreementKeyPair, AgreementPublicKey};
 pub use confirmation::{ConfirmationError, ConfirmationKey, ConfirmationTag};
 pub use kdf::DerivationError;
 pub use key_provider::SigningKeyHandle;
+pub use media_e2ee::{
+    MEDIA_E2EE_HANDSHAKE_V1_DOMAIN, MediaE2eeBindingError, bind_media_e2ee_transcript,
+};
 pub use message_signature::{
     MessageSignatureVerificationError, TrustedMessageSignatureError, verify_message_signature,
     verify_message_signature_with_trust,

@@ -52,4 +52,4 @@ An external platform integrates through Service Principal authentication, quotas
 
 ## Deferred implementation
 
-Phase 0 did not claim those implementations. The current repository now has a Prepared reference Internet transport, while production-grade Internet deployment, local transport, calls/media, bridges, store-and-forward, mesh, federation and SDK language bindings remain later work.
+Phase 0 did not claim those implementations. The current repository now has Prepared Internet/local transports, Call signalling, Audio, Video, and Phase-22 direct-call E2EE media protection. Adaptive Media, media transport orchestration/failover, standardized group/SFU key management, conferences, bridges, store-and-forward, mesh, federation, SDK language bindings, and production deployment remain later work.
