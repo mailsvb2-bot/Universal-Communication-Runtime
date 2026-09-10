@@ -16,6 +16,8 @@ pub const MAX_VIDEO_HEIGHT: u32 = 1_080;
 pub const MAX_VIDEO_FRAME_RATE: u32 = 60;
 pub const H264_LEVEL_4_0_MAX_FRAME_MACROBLOCKS: u32 = 8_192;
 pub const H264_LEVEL_4_0_MAX_MACROBLOCKS_PER_SECOND: u32 = 245_760;
+pub const H264_LEVEL_4_0_MAX_DPB_MACROBLOCKS: u32 = 32_768;
+pub const H264_MAX_REFERENCE_FRAMES: u32 = 16;
 pub const MIN_VIDEO_BITRATE_BPS: u32 = 64_000;
 pub const MAX_VIDEO_BITRATE_BPS: u32 = 20_000_000;
 pub const MAX_ENCODED_VIDEO_FRAME_BYTES: usize = 2 * 1024 * 1024;
@@ -100,6 +102,20 @@ pub fn h264_reference_coded_dimensions(
     let canonical = canonical_video_codec_config(config)?;
     let (width, height, _) = h264_level_4_0_coded_shape(canonical.width, canonical.height)?;
     Ok((width, height))
+}
+
+/// Returns the maximum decoded-picture-buffer frame count allowed by H.264 Level 4.0
+/// for the canonical coded picture size.
+///
+/// # Errors
+/// Returns profile validation failures.
+pub fn h264_reference_max_dpb_frames(config: &VideoCodecConfig) -> Result<u32, VideoProtocolError> {
+    let canonical = canonical_video_codec_config(config)?;
+    let (_, _, frame_macroblocks) = h264_level_4_0_coded_shape(canonical.width, canonical.height)?;
+    let by_dpb = H264_LEVEL_4_0_MAX_DPB_MACROBLOCKS
+        .checked_div(frame_macroblocks)
+        .ok_or(VideoProtocolError::InvalidDimensions)?;
+    Ok(by_dpb.min(H264_MAX_REFERENCE_FRAMES))
 }
 
 fn h264_level_4_0_coded_shape(
@@ -192,7 +208,8 @@ mod tests {
     use super::{
         H264_VIDEO_CODEC_CAPABILITY, MANDATORY_VIDEO_FRAME_RATE, MANDATORY_VIDEO_HEIGHT,
         MANDATORY_VIDEO_WIDTH, VideoProtocolError, canonical_video_codec_config,
-        h264_reference_coded_dimensions, phase21_video_capabilities, video_rgb8_len,
+        h264_reference_coded_dimensions, h264_reference_max_dpb_frames, phase21_video_capabilities,
+        video_rgb8_len,
     };
 
     fn h264() -> VideoCodecConfig {
@@ -210,6 +227,7 @@ mod tests {
         let config = canonical_video_codec_config(&h264()).expect("h264");
         assert_eq!(video_rgb8_len(&config), Ok(320 * 240 * 3));
         assert_eq!(h264_reference_coded_dimensions(&config), Ok((320, 240)));
+        assert_eq!(h264_reference_max_dpb_frames(&config), Ok(16));
         let capabilities = phase21_video_capabilities();
         assert!(
             capabilities
@@ -254,6 +272,7 @@ mod tests {
         config.frame_rate = 30;
         assert!(canonical_video_codec_config(&config).is_ok());
         assert_eq!(h264_reference_coded_dimensions(&config), Ok((1_920, 1_088)));
+        assert_eq!(h264_reference_max_dpb_frames(&config), Ok(4));
         config = h264();
         config.target_bitrate_bps = 1;
         assert_eq!(

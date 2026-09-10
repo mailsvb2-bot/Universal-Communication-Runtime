@@ -811,7 +811,7 @@ fn rejected_parameter_only_frame_resets_decoder_and_requires_fresh_sps() {
 fn mismatched_h264_sps_dimensions_fail_before_native_decode() {
     use openh264::{
         OpenH264API,
-        encoder::{Encoder, EncoderConfig},
+        encoder::{Encoder, EncoderConfig, Level, Profile},
         formats::{RgbSliceU8, YUVBuffer},
     };
 
@@ -826,7 +826,10 @@ fn mismatched_h264_sps_dimensions_fail_before_native_decode() {
     let wrong_rgb = vec![48_u8; wrong_width * wrong_height * 3];
     let source = RgbSliceU8::new(&wrong_rgb, (wrong_width, wrong_height));
     let yuv = YUVBuffer::from_rgb8_source(source);
-    let mut encoder = Encoder::with_api_config(OpenH264API::from_source(), EncoderConfig::new())
+    let wrong_config = EncoderConfig::new()
+        .profile(Profile::Baseline)
+        .level(Level::Level_4_0);
+    let mut encoder = Encoder::with_api_config(OpenH264API::from_source(), wrong_config)
         .expect("wrong-size encoder");
     let payload = encoder.encode(&yuv).expect("wrong-size h264").to_vec();
 

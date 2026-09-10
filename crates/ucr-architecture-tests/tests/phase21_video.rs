@@ -31,6 +31,8 @@ fn phase21_video_reuses_call_capability_and_authorization_owners() {
     assert!(model.contains("pub enum VideoSourceKind"));
     assert!(model.contains("<encoded-video>"));
     assert!(protocol.contains("pub const H264_VIDEO_CODEC_CAPABILITY"));
+    assert!(protocol.contains("H264_LEVEL_4_0_MAX_DPB_MACROBLOCKS"));
+    assert!(protocol.contains("h264_reference_max_dpb_frames"));
     assert!(protocol.contains("pub const SCREEN_SHARE_VIDEO_CAPABILITY"));
     assert!(protocol.contains("H264_LEVEL_4_0_MAX_FRAME_MACROBLOCKS: u32 = 8_192"));
     assert!(protocol.contains("H264_LEVEL_4_0_MAX_MACROBLOCKS_PER_SECOND: u32 = 245_760"));
@@ -47,6 +49,11 @@ fn phase21_video_reuses_call_capability_and_authorization_owners() {
     assert!(video.contains("reset_decoder_after_rejected_frame"));
     assert!(video.contains("self.validated_parameter_set = next_validated_parameter_set"));
     assert!(video.contains("MissingValidatedParameterSet"));
+    assert!(video.contains("DecodedPictureBufferTooLarge"));
+    assert!(video.contains("ParsedH264Level::L4"));
+    assert!(video.contains("restrictions.max_dec_frame_buffering"));
+    assert!(video.contains("recover_encoder()?"));
+    assert!(video.contains("self.encoder_usable = false"));
     assert!(video.contains("pub trait VideoNegotiationResolver"));
     assert!(video.contains("canonical_negotiation_result"));
     assert!(video.contains("NegotiatedParticipantSetMismatch"));
@@ -60,6 +67,8 @@ fn phase21_video_reuses_call_capability_and_authorization_owners() {
     assert!(proto.contains("VIDEO_SOURCE_KIND_SCREEN_SHARE"));
     assert!(spec.contains("Status: **Prepared reference implementation**, not Production."));
     assert!(spec.contains("real H.264"));
+    assert!(spec.contains("decoded-picture-buffer"));
+    assert!(spec.contains("encoder is reconstructed"));
     assert!(spec.contains("245,760 coded macroblocks/second"));
     assert!(spec.contains("uncropped coded macroblock canvas"));
     assert!(spec.contains("reconstructs the decoder"));

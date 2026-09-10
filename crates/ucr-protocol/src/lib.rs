@@ -200,11 +200,11 @@ pub use version::{
     VersionRange, negotiate_version, negotiate_version_sets,
 };
 pub use video::{
-    H264_VIDEO_CODEC_CAPABILITY, MANDATORY_VIDEO_FRAME_RATE, MANDATORY_VIDEO_HEIGHT,
-    MANDATORY_VIDEO_WIDTH, MAX_ENCODED_VIDEO_FRAME_BYTES, MAX_VIDEO_BITRATE_BPS,
-    MAX_VIDEO_FRAME_RATE, MAX_VIDEO_HEIGHT, MAX_VIDEO_WIDTH, MIN_VIDEO_BITRATE_BPS,
-    SCREEN_SHARE_VIDEO_CAPABILITY, VIDEO_MEDIA_CAPABILITY, VideoProtocolError,
-    canonical_video_codec_config, canonical_video_stream_descriptor,
-    h264_reference_coded_dimensions, phase21_video_capabilities,
+    H264_LEVEL_4_0_MAX_DPB_MACROBLOCKS, H264_MAX_REFERENCE_FRAMES, H264_VIDEO_CODEC_CAPABILITY,
+    MANDATORY_VIDEO_FRAME_RATE, MANDATORY_VIDEO_HEIGHT, MANDATORY_VIDEO_WIDTH,
+    MAX_ENCODED_VIDEO_FRAME_BYTES, MAX_VIDEO_BITRATE_BPS, MAX_VIDEO_FRAME_RATE, MAX_VIDEO_HEIGHT,
+    MAX_VIDEO_WIDTH, MIN_VIDEO_BITRATE_BPS, SCREEN_SHARE_VIDEO_CAPABILITY, VIDEO_MEDIA_CAPABILITY,
+    VideoProtocolError, canonical_video_codec_config, canonical_video_stream_descriptor,
+    h264_reference_coded_dimensions, h264_reference_max_dpb_frames, phase21_video_capabilities,
     required_video_capability_for_source, validate_video_frame_for_stream, video_rgb8_len,
 };

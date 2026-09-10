@@ -4,7 +4,7 @@ use core::fmt;
 
 use h264_reader::nal::{
     Nal, RefNal, UnitType,
-    sps::{FrameMbsFlags, SeqParameterSet},
+    sps::{FrameMbsFlags, Level as ParsedH264Level, Profile as ParsedH264Profile, SeqParameterSet},
 };
 
 use openh264::{
@@ -27,8 +27,9 @@ use ucr_protocol::{
     MAX_ENCODED_VIDEO_FRAME_BYTES, NegotiationResultEnvelope, VIDEO_MEDIA_CAPABILITY,
     VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, VideoProtocolError, canonical_capabilities,
     canonical_negotiation_result, canonical_video_codec_config, canonical_video_stream_descriptor,
-    h264_reference_coded_dimensions, phase21_video_capabilities, require_supported_extensions,
-    required_video_capability_for_source, validate_video_frame_for_stream, video_rgb8_len,
+    h264_reference_coded_dimensions, h264_reference_max_dpb_frames, phase21_video_capabilities,
+    require_supported_extensions, required_video_capability_for_source,
+    validate_video_frame_for_stream, video_rgb8_len,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +60,8 @@ pub enum VideoError {
     NoDecodedFrame,
     MissingValidatedParameterSet,
     DecodedDimensionsMismatch,
+    UnsupportedH264ProfileOrLevel,
+    DecodedPictureBufferTooLarge,
     DuplicateOrOutOfOrder,
     SequenceOverflow,
     TimestampOverflow,
@@ -166,20 +169,7 @@ where
             &descriptor,
             VIDEO_SEND_PERMISSION,
         )?;
-        let frame_rate =
-            u16::try_from(descriptor.codec.frame_rate).map_err(|_| VideoError::Codec)?;
-        let config = EncoderConfig::new()
-            .profile(Profile::Baseline)
-            .level(Level::Level_4_0)
-            .bitrate(BitRate::from_bps(descriptor.codec.target_bitrate_bps))
-            .max_frame_rate(FrameRate::from_hz(f32::from(frame_rate)))
-            .usage_type(match descriptor.source_kind {
-                VideoSourceKind::Camera => UsageType::CameraVideoRealTime,
-                VideoSourceKind::ScreenShare => UsageType::ScreenContentRealTime,
-            })
-            .vui(VuiConfig::bt709());
-        let encoder = Encoder::with_api_config(OpenH264API::from_source(), config)
-            .map_err(|_| VideoError::Codec)?;
+        let encoder = build_h264_encoder(&descriptor)?;
         Ok(H264VideoSender {
             authorization: self.authorization,
             store: self.store,
@@ -188,6 +178,7 @@ where
             subject: subject.clone(),
             descriptor,
             encoder,
+            encoder_usable: true,
             next_sequence: 0,
             next_timestamp_us: 0,
         })
@@ -234,6 +225,7 @@ pub struct H264VideoSender<'a, A, S, C, N> {
     subject: ScopedPrincipal,
     descriptor: VideoStreamDescriptor,
     encoder: Encoder,
+    encoder_usable: bool,
     next_sequence: u64,
     next_timestamp_us: u64,
 }
@@ -244,6 +236,7 @@ impl<A, S, C, N> fmt::Debug for H264VideoSender<'_, A, S, C, N> {
             .debug_struct("H264VideoSender")
             .field("subject", &self.subject)
             .field("descriptor", &self.descriptor)
+            .field("encoder_usable", &self.encoder_usable)
             .field("next_sequence", &self.next_sequence)
             .field("next_timestamp_us", &self.next_timestamp_us)
             .finish_non_exhaustive()
@@ -263,7 +256,9 @@ where
     }
 
     pub fn force_keyframe(&mut self) {
-        self.encoder.force_intra_frame();
+        if self.encoder_usable {
+            self.encoder.force_intra_frame();
+        }
     }
 
     /// Encodes one exact contiguous RGB8 frame after re-checking current media authority.
@@ -280,6 +275,9 @@ where
             &self.descriptor,
             VIDEO_SEND_PERMISSION,
         )?;
+        if !self.encoder_usable {
+            return Err(VideoError::Codec);
+        }
         if rgb8.len() != video_rgb8_len(&self.descriptor.codec)? {
             return Err(VideoError::RgbFrameLength);
         }
@@ -289,10 +287,17 @@ where
             .map_err(|_| VideoError::RgbFrameLength)?;
         let source = RgbSliceU8::new(rgb8, (width, height));
         let yuv = YUVBuffer::from_rgb8_source(source);
-        let bitstream = self.encoder.encode(&yuv).map_err(|_| VideoError::Codec)?;
-        let keyframe = matches!(bitstream.frame_type(), FrameType::IDR | FrameType::I);
-        let payload = bitstream.to_vec();
+        let (keyframe, payload) = if let Ok(bitstream) = self.encoder.encode(&yuv) {
+            (
+                matches!(bitstream.frame_type(), FrameType::IDR | FrameType::I),
+                bitstream.to_vec(),
+            )
+        } else {
+            self.recover_encoder()?;
+            return Err(VideoError::Codec);
+        };
         if payload.len() > MAX_ENCODED_VIDEO_FRAME_BYTES {
+            self.recover_encoder()?;
             return Err(VideoError::EncodedFrameTooLarge);
         }
         let next_sequence = self
@@ -321,6 +326,29 @@ where
         self.next_timestamp_us = next_timestamp;
         Ok(frame)
     }
+
+    fn recover_encoder(&mut self) -> Result<(), VideoError> {
+        self.encoder_usable = false;
+        let replacement = build_h264_encoder(&self.descriptor)?;
+        self.encoder = replacement;
+        self.encoder_usable = true;
+        Ok(())
+    }
+}
+
+fn build_h264_encoder(descriptor: &VideoStreamDescriptor) -> Result<Encoder, VideoError> {
+    let frame_rate = u16::try_from(descriptor.codec.frame_rate).map_err(|_| VideoError::Codec)?;
+    let config = EncoderConfig::new()
+        .profile(Profile::Baseline)
+        .level(Level::Level_4_0)
+        .bitrate(BitRate::from_bps(descriptor.codec.target_bitrate_bps))
+        .max_frame_rate(FrameRate::from_hz(f32::from(frame_rate)))
+        .usage_type(match descriptor.source_kind {
+            VideoSourceKind::Camera => UsageType::CameraVideoRealTime,
+            VideoSourceKind::ScreenShare => UsageType::ScreenContentRealTime,
+        })
+        .vui(VuiConfig::bt709());
+    Encoder::with_api_config(OpenH264API::from_source(), config).map_err(|_| VideoError::Codec)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -508,6 +536,25 @@ fn validate_h264_sps(
 ) -> Result<(), VideoError> {
     if !matches!(sps.frame_mbs_flags, FrameMbsFlags::Frames) {
         return Err(VideoError::DecodedDimensionsMismatch);
+    }
+    if !matches!(sps.profile(), ParsedH264Profile::Baseline)
+        || sps.level() != ParsedH264Level::L4
+        || sps.constraint_flags.reserved_zero_two_bits() != 0
+    {
+        return Err(VideoError::UnsupportedH264ProfileOrLevel);
+    }
+    let max_dpb_frames = h264_reference_max_dpb_frames(negotiated_codec)?;
+    if sps.max_num_ref_frames > max_dpb_frames {
+        return Err(VideoError::DecodedPictureBufferTooLarge);
+    }
+    if let Some(restrictions) = sps
+        .vui_parameters
+        .as_ref()
+        .and_then(|vui| vui.bitstream_restrictions.as_ref())
+        && (restrictions.max_dec_frame_buffering > max_dpb_frames
+            || restrictions.max_num_reorder_frames > max_dpb_frames)
+    {
+        return Err(VideoError::DecodedPictureBufferTooLarge);
     }
     let coded_width_macroblocks = sps
         .pic_width_in_mbs_minus1
@@ -743,7 +790,7 @@ pub const fn phase21_reference_codec_id() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use h264_reader::nal::sps::FrameCropping;
+    use h264_reader::nal::sps::{BitstreamRestrictions, FrameCropping, VuiParameters};
 
     use super::*;
 
@@ -757,17 +804,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cropped_display_dimensions_cannot_hide_a_larger_coded_canvas() {
-        let codec = reference_codec();
+    fn reference_sps() -> SeqParameterSet {
         let rgb = vec![16_u8; 320 * 240 * 3];
         let source = RgbSliceU8::new(&rgb, (320, 240));
         let yuv = YUVBuffer::from_rgb8_source(source);
-        let mut encoder =
-            Encoder::with_api_config(OpenH264API::from_source(), EncoderConfig::new())
-                .expect("encoder");
+        let config = EncoderConfig::new()
+            .profile(Profile::Baseline)
+            .level(Level::Level_4_0)
+            .bitrate(BitRate::from_bps(384_000))
+            .max_frame_rate(FrameRate::from_hz(20.0));
+        let mut encoder = Encoder::with_api_config(OpenH264API::from_source(), config)
+            .expect("reference encoder");
         let payload = encoder.encode(&yuv).expect("h264").to_vec();
-        let mut sps = nal_units(&payload)
+        nal_units(&payload)
             .find_map(|packet| {
                 let bytes = strip_annex_b_start_code(packet)?;
                 let nal = RefNal::new(bytes, &[], true);
@@ -776,7 +825,15 @@ mod tests {
                     .then(|| SeqParameterSet::from_bits(nal.rbsp_bits()).ok())
                     .flatten()
             })
-            .expect("SPS");
+            .expect("SPS")
+    }
+
+    #[test]
+    fn cropped_display_dimensions_cannot_hide_a_larger_coded_canvas() {
+        let codec = reference_codec();
+        let mut sps = reference_sps();
+        assert!(matches!(sps.profile(), ParsedH264Profile::Baseline));
+        assert_eq!(sps.level(), ParsedH264Level::L4);
         sps.pic_width_in_mbs_minus1 = 39;
         sps.frame_cropping = Some(FrameCropping {
             left_offset: 0,
@@ -785,10 +842,45 @@ mod tests {
             bottom_offset: 0,
         });
         assert_eq!(sps.pixel_dimensions().expect("cropped display"), (320, 240));
-        let expected_coded = h264_reference_coded_dimensions(&codec).expect("coded shape");
+        let coded_canvas = h264_reference_coded_dimensions(&codec).expect("coded shape");
         assert_eq!(
-            validate_h264_sps(&sps, &codec, expected_coded),
+            validate_h264_sps(&sps, &codec, coded_canvas),
             Err(VideoError::DecodedDimensionsMismatch)
+        );
+    }
+
+    #[test]
+    fn level_4_dpb_limits_reference_frames_and_vui_buffering() {
+        let codec = reference_codec();
+        let coded_canvas = h264_reference_coded_dimensions(&codec).expect("coded shape");
+        let max_dpb = h264_reference_max_dpb_frames(&codec).expect("max dpb");
+        let mut sps = reference_sps();
+        sps.max_num_ref_frames = max_dpb + 1;
+        assert_eq!(
+            validate_h264_sps(&sps, &codec, coded_canvas),
+            Err(VideoError::DecodedPictureBufferTooLarge)
+        );
+
+        let mut sps = reference_sps();
+        sps.max_num_ref_frames = max_dpb.min(1);
+        let restrictions = BitstreamRestrictions {
+            max_dec_frame_buffering: max_dpb + 1,
+            ..BitstreamRestrictions::default()
+        };
+        let vui = sps
+            .vui_parameters
+            .get_or_insert_with(VuiParameters::default);
+        vui.bitstream_restrictions = Some(restrictions);
+        assert_eq!(
+            validate_h264_sps(&sps, &codec, coded_canvas),
+            Err(VideoError::DecodedPictureBufferTooLarge)
+        );
+
+        let mut sps = reference_sps();
+        sps.level_idc = 41;
+        assert_eq!(
+            validate_h264_sps(&sps, &codec, coded_canvas),
+            Err(VideoError::UnsupportedH264ProfileOrLevel)
         );
     }
 }

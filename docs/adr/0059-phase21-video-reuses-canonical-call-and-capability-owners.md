@@ -20,7 +20,7 @@ No SQLite migration is introduced; schema remains v22. No realtime network servi
 
 ## Consequences
 
-The runtime can now perform real camera/screen RGB8 -> H.264 encode and H.264 -> RGB8 decode under canonical Call authority, including direct/group participant changes and renegotiation revocation. Safe-Rust coded-canvas validation and fail-closed decoder reconstruction prevent rejected H.264 input from expanding the native allocation boundary or leaking receiver validation state into later frames. Native C/C++ is isolated inside the existing codec library/binding dependency; UCR Domain/Core stays Rust and the new crate forbids unsafe code.
+The runtime can now perform real camera/screen RGB8 -> H.264 encode and H.264 -> RGB8 decode under canonical Call authority, including direct/group participant changes and renegotiation revocation. Rejected decoder input reconstructs decoder state, and an encoded frame rejected for the 2 MiB bound reconstructs encoder state before any later accepted frame, so discarded media cannot become an implicit codec dependency. Safe-Rust coded-canvas validation and fail-closed decoder reconstruction prevent rejected H.264 input from expanding the native allocation boundary or leaking receiver validation state into later frames. Native C/C++ is isolated inside the existing codec library/binding dependency; UCR Domain/Core stays Rust and the new crate forbids unsafe code.
 
 The implementation deliberately does not own adaptive bitrate, transport selection, E2EE keys/replay, SFU/conference topology, OS capture, recording or WebRTC session machinery. Those remain Phase 22+ concerns.
 
