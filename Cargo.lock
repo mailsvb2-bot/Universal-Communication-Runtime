@@ -1588,6 +1588,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-media-e2ee"
+version = "0.0.1"
+dependencies = [
+ "ucr-audio",
+ "ucr-core",
+ "ucr-crypto",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-memory",
+ "ucr-video",
+]
+
+[[package]]
 name = "ucr-model"
 version = "0.0.1"
 

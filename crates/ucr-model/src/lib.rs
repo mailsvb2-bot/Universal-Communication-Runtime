@@ -5,6 +5,7 @@ use core::fmt;
 mod audio;
 mod call;
 mod group;
+mod media_e2ee;
 mod video;
 pub use audio::{
     AudioChannelLayout, AudioCodecConfig, AudioFrameDuration, AudioStreamDescriptor,
@@ -19,6 +20,7 @@ pub use group::{
     GroupMediaState, GroupMemberState, GroupMembership, GroupOwnership, GroupPermission,
     GroupRecord, GroupRole, PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,
 };
+pub use media_e2ee::{EncryptedMediaFrame, MediaE2eeContext, MediaE2eeFrameHeader, MediaKind};
 pub use video::{EncodedVideoFrame, VideoCodecConfig, VideoSourceKind, VideoStreamDescriptor};
 
 /// Opaque canonical identifier value.

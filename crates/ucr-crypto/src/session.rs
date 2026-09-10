@@ -5,7 +5,7 @@ use crate::{
     TranscriptBinding, TrustedKeyResolutionError, TrustedSigningKeyResolver, VerifyingKeyBytes,
     verify_transcript_signature,
 };
-use ucr_model::{CryptoSuite, PublicKeyDescriptor, TenantScope};
+use ucr_model::{CryptoSuite, DeviceId, PublicKeyDescriptor, TenantScope};
 use ucr_protocol::validate_trusted_signing_key_descriptor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +84,7 @@ pub struct PendingSession {
     inbound: TrafficKey,
     local_confirmation: ConfirmationKey,
     peer_confirmation: ConfirmationKey,
+    authenticated_peer_device_id: Option<DeviceId>,
 }
 
 impl core::fmt::Debug for PendingSession {
@@ -95,6 +96,10 @@ impl core::fmt::Debug for PendingSession {
             .field("inbound", &"<secret>")
             .field("local_confirmation", &"<secret>")
             .field("peer_confirmation", &"<secret>")
+            .field(
+                "authenticated_peer_device_id",
+                &self.authenticated_peer_device_id,
+            )
             .finish()
     }
 }
@@ -103,6 +108,7 @@ pub struct EstablishedSession {
     binding: TranscriptBinding,
     outbound: TrafficKey,
     inbound: TrafficKey,
+    authenticated_peer_device_id: Option<DeviceId>,
 }
 impl core::fmt::Debug for EstablishedSession {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -111,6 +117,10 @@ impl core::fmt::Debug for EstablishedSession {
             .field("binding", &self.binding)
             .field("outbound", &"<secret>")
             .field("inbound", &"<secret>")
+            .field(
+                "authenticated_peer_device_id",
+                &self.authenticated_peer_device_id,
+            )
             .finish()
     }
 }
@@ -178,6 +188,7 @@ pub fn begin_session<R: ReplayProtector + ?Sized>(
         inbound,
         local_confirmation,
         peer_confirmation,
+        authenticated_peer_device_id: None,
     })
 }
 
@@ -215,7 +226,7 @@ where
         .try_into()
         .map_err(|_| TrustedSessionError::Trust(TrustedKeyResolutionError::Corrupt))?;
 
-    begin_session(
+    let mut pending = begin_session(
         local_agreement,
         SessionHandshakeInput {
             suite: input.suite,
@@ -229,7 +240,9 @@ where
         },
         replay,
     )
-    .map_err(TrustedSessionError::Session)
+    .map_err(TrustedSessionError::Session)?;
+    pending.authenticated_peer_device_id = Some(claim.device_id.clone());
+    Ok(pending)
 }
 
 impl PendingSession {
@@ -255,6 +268,7 @@ impl PendingSession {
             binding: self.binding,
             outbound: self.outbound,
             inbound: self.inbound,
+            authenticated_peer_device_id: self.authenticated_peer_device_id,
         })
     }
 }
@@ -263,6 +277,13 @@ impl EstablishedSession {
     #[must_use]
     pub const fn transcript_binding(&self) -> &TranscriptBinding {
         &self.binding
+    }
+
+    /// Returns the exact peer Device proven through trusted-key resolution, when this session was
+    /// established through that boundary. Raw/test sessions deliberately return `None`.
+    #[must_use]
+    pub const fn authenticated_peer_device_id(&self) -> Option<&DeviceId> {
+        self.authenticated_peer_device_id.as_ref()
     }
 
     /// Encrypts outbound application data using the direction-specific key.

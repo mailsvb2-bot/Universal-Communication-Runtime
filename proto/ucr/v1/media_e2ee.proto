@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/crypto.proto";
+import "ucr/v1/identity.proto";
+import "ucr/v1/runtime.proto";
+
+enum MediaKind {
+  MEDIA_KIND_UNSPECIFIED = 0;
+  MEDIA_KIND_AUDIO = 1;
+  MEDIA_KIND_VIDEO = 2;
+}
+
+// Exact direct-call security context for one E2EE media key epoch.
+message MediaE2eeContext {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  PrincipalRef initiator = 3;
+  PrincipalRef responder = 4;
+  OpaqueId initiator_device_id = 5;
+  OpaqueId responder_device_id = 6;
+  OpaqueId negotiation_ref = 7;
+  uint64 negotiation_generation = 8;
+  uint64 key_epoch = 9;
+  CryptoSuite crypto_suite = 10;
+}
+
+// Clear routing/header metadata authenticated as AEAD associated data.
+message MediaE2eeFrameHeader {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId stream_id = 3;
+  PrincipalRef source = 4;
+  PrincipalRef recipient = 5;
+  OpaqueId negotiation_ref = 6;
+  uint64 negotiation_generation = 7;
+  uint64 key_epoch = 8;
+  CryptoSuite crypto_suite = 9;
+  bytes session_binding = 10;
+  MediaKind media_kind = 11;
+  uint64 sequence = 12;
+  uint64 media_timestamp = 13;
+  bool keyframe = 14;
+}
+
+message EncryptedMediaFrame {
+  MediaE2eeFrameHeader header = 1;
+  bytes nonce = 2;
+  bytes ciphertext = 3;
+}
+
+// Read-only binding to the canonical Call media negotiation. It does not negotiate or route.
+message MediaE2eeNegotiationBinding {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId negotiation_ref = 3;
+  uint64 negotiation_generation = 4;
+  NegotiationResult result = 5;
+  repeated PrincipalRef negotiated_participants = 6;
+}
+
+// Phase 22 defines E2EE media protection only. Media transport/orchestration is Phase 24.

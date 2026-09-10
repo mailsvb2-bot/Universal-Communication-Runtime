@@ -29,3 +29,4 @@ run_target crypto_wrapper 256 512
 
 run_target internet_transport_wire 131072 768
 run_target h264_sps_preflight 131072 768
+run_target media_e2ee_frame 131072 768
