@@ -32,6 +32,9 @@ fn phase21_video_reuses_call_capability_and_authorization_owners() {
     assert!(model.contains("<encoded-video>"));
     assert!(protocol.contains("pub const H264_VIDEO_CODEC_CAPABILITY"));
     assert!(protocol.contains("pub const SCREEN_SHARE_VIDEO_CAPABILITY"));
+    assert!(protocol.contains("H264_LEVEL_4_0_MAX_FRAME_MACROBLOCKS: u32 = 8_192"));
+    assert!(protocol.contains("H264_LEVEL_4_0_MAX_MACROBLOCKS_PER_SECOND: u32 = 245_760"));
+    assert!(protocol.contains("h264_reference_coded_dimensions"));
     assert!(protocol.contains("CapabilityMaturity::Prepared"));
     assert!(video.contains("S: CallStore"));
     assert!(video.contains("call_for_participant"));
@@ -40,6 +43,9 @@ fn phase21_video_reuses_call_capability_and_authorization_owners() {
     assert!(video.contains("Encoder::with_api_config"));
     assert!(video.contains("Decoder::new"));
     assert!(video.contains("SeqParameterSet::from_bits"));
+    assert!(video.contains("FrameMbsFlags::Frames"));
+    assert!(video.contains("reset_decoder_after_rejected_frame"));
+    assert!(video.contains("self.validated_parameter_set = next_validated_parameter_set"));
     assert!(video.contains("MissingValidatedParameterSet"));
     assert!(video.contains("pub trait VideoNegotiationResolver"));
     assert!(video.contains("canonical_negotiation_result"));
@@ -54,8 +60,13 @@ fn phase21_video_reuses_call_capability_and_authorization_owners() {
     assert!(proto.contains("VIDEO_SOURCE_KIND_SCREEN_SHARE"));
     assert!(spec.contains("Status: **Prepared reference implementation**, not Production."));
     assert!(spec.contains("real H.264"));
+    assert!(spec.contains("245,760 coded macroblocks/second"));
+    assert!(spec.contains("uncropped coded macroblock canvas"));
+    assert!(spec.contains("reconstructs the decoder"));
     assert!(spec.contains("does **not** claim WebRTC/RFC-7742 conformance"));
     assert!(adr.contains("No SQLite migration is introduced; schema remains v22"));
+    assert!(adr.contains("uncropped coded macroblock canvas"));
+    assert!(adr.contains("reconstructs the decoder"));
 }
 
 #[test]

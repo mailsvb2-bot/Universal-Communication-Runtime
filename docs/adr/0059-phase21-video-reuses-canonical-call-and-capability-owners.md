@@ -14,13 +14,13 @@ Require `Active` signalling, exact `Accepted` subject/source membership, `ucr.ca
 
 Keep camera/screen-share as stream source semantics, not codec semantics. Screen share additionally requires `ucr.media.video.screen_share` so generic camera agreement cannot authorize it implicitly.
 
-Use H.264 through `openh264` 0.9.8 as the real Prepared reference codec. Preflight H.264 SPS in safe Rust through `h264-reader` 0.8.0 before native decode and require exact negotiated pixel dimensions; this bounds dimension authority before codec allocation. The wrapper and OpenH264 core report BSD-2-Clause licensing. Configure the safe Rust wrapper for Baseline/realtime usage. RFC 7742 informs the 320x240/20fps reference default and interoperability direction, but Phase 21 does not claim WebRTC conformance, VP8 support, SDP or RTP/SRTP.
+Use H.264 through `openh264` 0.9.8 as the real Prepared reference codec. Configure the safe Rust wrapper for Baseline, Level 4.0 and realtime usage. Canonical configuration enforces the Level-4.0 coded-frame and macroblocks/second ceilings rather than accepting frame rate independently from resolution. Preflight H.264 SPS in safe Rust through `h264-reader` 0.8.0 before native decode and require both the cropped display dimensions and uncropped coded macroblock canvas to match the negotiated configuration; frame cropping cannot conceal a larger allocation surface. Commit SPS-validation state only after a successfully decoded frame. Any rejected native decode/no-frame/dimension result reconstructs the decoder and clears parameter-set validation before subsequent input. The wrapper and OpenH264 core report BSD-2-Clause licensing. RFC 7742 informs the 320x240/20fps reference default and interoperability direction, but Phase 21 does not claim WebRTC conformance, VP8 support, SDP or RTP/SRTP.
 
 No SQLite migration is introduced; schema remains v22. No realtime network service is added. Public `video.proto` defines media shape only.
 
 ## Consequences
 
-The runtime can now perform real camera/screen RGB8 -> H.264 encode and H.264 -> RGB8 decode under canonical Call authority, including direct/group participant changes and renegotiation revocation. Native C/C++ is isolated inside the existing codec library/binding dependency; UCR Domain/Core stays Rust and the new crate forbids unsafe code.
+The runtime can now perform real camera/screen RGB8 -> H.264 encode and H.264 -> RGB8 decode under canonical Call authority, including direct/group participant changes and renegotiation revocation. Safe-Rust coded-canvas validation and fail-closed decoder reconstruction prevent rejected H.264 input from expanding the native allocation boundary or leaking receiver validation state into later frames. Native C/C++ is isolated inside the existing codec library/binding dependency; UCR Domain/Core stays Rust and the new crate forbids unsafe code.
 
 The implementation deliberately does not own adaptive bitrate, transport selection, E2EE keys/replay, SFU/conference topology, OS capture, recording or WebRTC session machinery. Those remain Phase 22+ concerns.
 

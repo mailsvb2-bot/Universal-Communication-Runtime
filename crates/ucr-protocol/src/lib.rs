@@ -204,6 +204,7 @@ pub use video::{
     MANDATORY_VIDEO_WIDTH, MAX_ENCODED_VIDEO_FRAME_BYTES, MAX_VIDEO_BITRATE_BPS,
     MAX_VIDEO_FRAME_RATE, MAX_VIDEO_HEIGHT, MAX_VIDEO_WIDTH, MIN_VIDEO_BITRATE_BPS,
     SCREEN_SHARE_VIDEO_CAPABILITY, VIDEO_MEDIA_CAPABILITY, VideoProtocolError,
-    canonical_video_codec_config, canonical_video_stream_descriptor, phase21_video_capabilities,
+    canonical_video_codec_config, canonical_video_stream_descriptor,
+    h264_reference_coded_dimensions, phase21_video_capabilities,
     required_video_capability_for_source, validate_video_frame_for_stream, video_rgb8_len,
 };

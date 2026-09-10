@@ -14,6 +14,8 @@ pub const MANDATORY_VIDEO_FRAME_RATE: u32 = 20;
 pub const MAX_VIDEO_WIDTH: u32 = 1_920;
 pub const MAX_VIDEO_HEIGHT: u32 = 1_080;
 pub const MAX_VIDEO_FRAME_RATE: u32 = 60;
+pub const H264_LEVEL_4_0_MAX_FRAME_MACROBLOCKS: u32 = 8_192;
+pub const H264_LEVEL_4_0_MAX_MACROBLOCKS_PER_SECOND: u32 = 245_760;
 pub const MIN_VIDEO_BITRATE_BPS: u32 = 64_000;
 pub const MAX_VIDEO_BITRATE_BPS: u32 = 20_000_000;
 pub const MAX_ENCODED_VIDEO_FRAME_BYTES: usize = 2 * 1024 * 1024;
@@ -75,10 +77,50 @@ pub fn canonical_video_codec_config(
     if config.frame_rate == 0 || config.frame_rate > MAX_VIDEO_FRAME_RATE {
         return Err(VideoProtocolError::UnsupportedFrameRate);
     }
+    let (_, _, frame_macroblocks) = h264_level_4_0_coded_shape(config.width, config.height)?;
+    let macroblocks_per_second = frame_macroblocks
+        .checked_mul(config.frame_rate)
+        .ok_or(VideoProtocolError::UnsupportedFrameRate)?;
+    if macroblocks_per_second > H264_LEVEL_4_0_MAX_MACROBLOCKS_PER_SECOND {
+        return Err(VideoProtocolError::UnsupportedFrameRate);
+    }
     if !(MIN_VIDEO_BITRATE_BPS..=MAX_VIDEO_BITRATE_BPS).contains(&config.target_bitrate_bps) {
         return Err(VideoProtocolError::UnsupportedBitrate);
     }
     Ok(config.clone())
+}
+
+/// Returns the exact uncropped coded canvas expected by the fixed H.264 Level 4.0 profile.
+///
+/// # Errors
+/// Returns profile validation failures.
+pub fn h264_reference_coded_dimensions(
+    config: &VideoCodecConfig,
+) -> Result<(u32, u32), VideoProtocolError> {
+    let canonical = canonical_video_codec_config(config)?;
+    let (width, height, _) = h264_level_4_0_coded_shape(canonical.width, canonical.height)?;
+    Ok((width, height))
+}
+
+fn h264_level_4_0_coded_shape(
+    width: u32,
+    height: u32,
+) -> Result<(u32, u32, u32), VideoProtocolError> {
+    let width_macroblocks = width.div_ceil(16);
+    let height_macroblocks = height.div_ceil(16);
+    let frame_macroblocks = width_macroblocks
+        .checked_mul(height_macroblocks)
+        .ok_or(VideoProtocolError::InvalidDimensions)?;
+    if frame_macroblocks > H264_LEVEL_4_0_MAX_FRAME_MACROBLOCKS {
+        return Err(VideoProtocolError::InvalidDimensions);
+    }
+    let coded_width = width_macroblocks
+        .checked_mul(16)
+        .ok_or(VideoProtocolError::InvalidDimensions)?;
+    let coded_height = height_macroblocks
+        .checked_mul(16)
+        .ok_or(VideoProtocolError::InvalidDimensions)?;
+    Ok((coded_width, coded_height, frame_macroblocks))
 }
 
 /// # Errors
@@ -150,7 +192,7 @@ mod tests {
     use super::{
         H264_VIDEO_CODEC_CAPABILITY, MANDATORY_VIDEO_FRAME_RATE, MANDATORY_VIDEO_HEIGHT,
         MANDATORY_VIDEO_WIDTH, VideoProtocolError, canonical_video_codec_config,
-        phase21_video_capabilities, video_rgb8_len,
+        h264_reference_coded_dimensions, phase21_video_capabilities, video_rgb8_len,
     };
 
     fn h264() -> VideoCodecConfig {
@@ -167,6 +209,7 @@ mod tests {
     fn h264_prepared_profile_has_bounded_reference_shape() {
         let config = canonical_video_codec_config(&h264()).expect("h264");
         assert_eq!(video_rgb8_len(&config), Ok(320 * 240 * 3));
+        assert_eq!(h264_reference_coded_dimensions(&config), Ok((320, 240)));
         let capabilities = phase21_video_capabilities();
         assert!(
             capabilities
@@ -200,6 +243,17 @@ mod tests {
             canonical_video_codec_config(&config),
             Err(VideoProtocolError::UnsupportedFrameRate)
         );
+        config = h264();
+        config.width = 1_920;
+        config.height = 1_080;
+        config.frame_rate = 60;
+        assert_eq!(
+            canonical_video_codec_config(&config),
+            Err(VideoProtocolError::UnsupportedFrameRate)
+        );
+        config.frame_rate = 30;
+        assert!(canonical_video_codec_config(&config).is_ok());
+        assert_eq!(h264_reference_coded_dimensions(&config), Ok((1_920, 1_088)));
         config = h264();
         config.target_bitrate_bps = 1;
         assert_eq!(

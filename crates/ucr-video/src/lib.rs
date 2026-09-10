@@ -2,7 +2,10 @@
 
 use core::fmt;
 
-use h264_reader::nal::{Nal, RefNal, UnitType, sps::SeqParameterSet};
+use h264_reader::nal::{
+    Nal, RefNal, UnitType,
+    sps::{FrameMbsFlags, SeqParameterSet},
+};
 
 use openh264::{
     OpenH264API,
@@ -24,8 +27,8 @@ use ucr_protocol::{
     MAX_ENCODED_VIDEO_FRAME_BYTES, NegotiationResultEnvelope, VIDEO_MEDIA_CAPABILITY,
     VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, VideoProtocolError, canonical_capabilities,
     canonical_negotiation_result, canonical_video_codec_config, canonical_video_stream_descriptor,
-    phase21_video_capabilities, require_supported_extensions, required_video_capability_for_source,
-    validate_video_frame_for_stream, video_rgb8_len,
+    h264_reference_coded_dimensions, phase21_video_capabilities, require_supported_extensions,
+    required_video_capability_for_source, validate_video_frame_for_stream, video_rgb8_len,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +221,7 @@ where
             decoder,
             last_sequence: None,
             validated_parameter_set: false,
+            decoder_usable: true,
         })
     }
 }
@@ -352,6 +356,7 @@ pub struct H264VideoReceiver<'a, A, S, C, N> {
     decoder: Decoder,
     last_sequence: Option<u64>,
     validated_parameter_set: bool,
+    decoder_usable: bool,
 }
 
 impl<A, S, C, N> fmt::Debug for H264VideoReceiver<'_, A, S, C, N> {
@@ -362,6 +367,7 @@ impl<A, S, C, N> fmt::Debug for H264VideoReceiver<'_, A, S, C, N> {
             .field("descriptor", &self.descriptor)
             .field("last_sequence", &self.last_sequence)
             .field("validated_parameter_set", &self.validated_parameter_set)
+            .field("decoder_usable", &self.decoder_usable)
             .finish_non_exhaustive()
     }
 }
@@ -400,23 +406,34 @@ where
         {
             return Err(VideoError::DuplicateOrOutOfOrder);
         }
-        self.validated_parameter_set = preflight_h264_parameter_sets(
+        if !self.decoder_usable {
+            return Err(VideoError::Codec);
+        }
+        let next_validated_parameter_set = preflight_h264_parameter_sets(
             &frame.payload,
-            self.descriptor.codec.width,
-            self.descriptor.codec.height,
+            &self.descriptor.codec,
             self.validated_parameter_set,
         )?;
-        let mut decoded = None;
-        for packet in nal_units(&frame.payload) {
-            let maybe_yuv = self.decoder.decode(packet).map_err(|_| VideoError::Codec)?;
-            if let Some(yuv) = maybe_yuv {
-                let (width, height) = yuv.dimensions();
-                let mut rgb8 = vec![0_u8; yuv.rgb8_len()];
-                yuv.write_rgb8(&mut rgb8);
-                decoded = Some((width, height, rgb8));
+        let decode_result = (|| {
+            let mut decoded = None;
+            for packet in nal_units(&frame.payload) {
+                let maybe_yuv = self.decoder.decode(packet).map_err(|_| VideoError::Codec)?;
+                if let Some(yuv) = maybe_yuv {
+                    let (width, height) = yuv.dimensions();
+                    let mut rgb8 = vec![0_u8; yuv.rgb8_len()];
+                    yuv.write_rgb8(&mut rgb8);
+                    decoded = Some((width, height, rgb8));
+                }
             }
-        }
-        let (width, height, rgb8) = decoded.ok_or(VideoError::NoDecodedFrame)?;
+            decoded.ok_or(VideoError::NoDecodedFrame)
+        })();
+        let (width, height, rgb8) = match decode_result {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                self.reset_decoder_after_rejected_frame()?;
+                return Err(error);
+            }
+        };
         if width
             != usize::try_from(self.descriptor.codec.width)
                 .map_err(|_| VideoError::DecodedDimensionsMismatch)?
@@ -424,8 +441,10 @@ where
                 != usize::try_from(self.descriptor.codec.height)
                     .map_err(|_| VideoError::DecodedDimensionsMismatch)?
         {
+            self.reset_decoder_after_rejected_frame()?;
             return Err(VideoError::DecodedDimensionsMismatch);
         }
+        self.validated_parameter_set = next_validated_parameter_set;
         self.last_sequence = Some(frame.sequence);
         Ok(DecodedVideoFrame {
             width: self.descriptor.codec.width,
@@ -434,6 +453,18 @@ where
             media_timestamp_us: frame.media_timestamp_us,
             rgb8,
         })
+    }
+
+    fn reset_decoder_after_rejected_frame(&mut self) -> Result<(), VideoError> {
+        self.validated_parameter_set = false;
+        if let Ok(decoder) = Decoder::new() {
+            self.decoder = decoder;
+            self.decoder_usable = true;
+            Ok(())
+        } else {
+            self.decoder_usable = false;
+            Err(VideoError::Codec)
+        }
     }
 }
 
@@ -448,10 +479,11 @@ where
 /// the already negotiated video configuration.
 pub fn preflight_h264_parameter_sets(
     payload: &[u8],
-    expected_width: u32,
-    expected_height: u32,
+    negotiated_codec: &VideoCodecConfig,
     already_validated: bool,
 ) -> Result<bool, VideoError> {
+    let negotiated_codec = canonical_video_codec_config(negotiated_codec)?;
+    let coded_canvas = h264_reference_coded_dimensions(&negotiated_codec)?;
     let mut saw_valid_sps = false;
     for packet in nal_units(payload) {
         let bytes = strip_annex_b_start_code(packet).ok_or(VideoError::Codec)?;
@@ -459,10 +491,7 @@ pub fn preflight_h264_parameter_sets(
         let header = nal.header().map_err(|_| VideoError::Codec)?;
         if header.nal_unit_type() == UnitType::SeqParameterSet {
             let sps = SeqParameterSet::from_bits(nal.rbsp_bits()).map_err(|_| VideoError::Codec)?;
-            let (width, height) = sps.pixel_dimensions().map_err(|_| VideoError::Codec)?;
-            if width != expected_width || height != expected_height {
-                return Err(VideoError::DecodedDimensionsMismatch);
-            }
+            validate_h264_sps(&sps, &negotiated_codec, coded_canvas)?;
             saw_valid_sps = true;
         }
     }
@@ -470,6 +499,51 @@ pub fn preflight_h264_parameter_sets(
         return Err(VideoError::MissingValidatedParameterSet);
     }
     Ok(already_validated || saw_valid_sps)
+}
+
+fn validate_h264_sps(
+    sps: &SeqParameterSet,
+    negotiated_codec: &VideoCodecConfig,
+    coded_canvas: (u32, u32),
+) -> Result<(), VideoError> {
+    if !matches!(sps.frame_mbs_flags, FrameMbsFlags::Frames) {
+        return Err(VideoError::DecodedDimensionsMismatch);
+    }
+    let coded_width_macroblocks = sps
+        .pic_width_in_mbs_minus1
+        .checked_add(1)
+        .ok_or(VideoError::DecodedDimensionsMismatch)?;
+    let coded_height_macroblocks = sps
+        .pic_height_in_map_units_minus1
+        .checked_add(1)
+        .ok_or(VideoError::DecodedDimensionsMismatch)?;
+    let coded_width = coded_width_macroblocks
+        .checked_mul(16)
+        .ok_or(VideoError::DecodedDimensionsMismatch)?;
+    let coded_height = coded_height_macroblocks
+        .checked_mul(16)
+        .ok_or(VideoError::DecodedDimensionsMismatch)?;
+    let coded_macroblocks = coded_width_macroblocks
+        .checked_mul(coded_height_macroblocks)
+        .ok_or(VideoError::DecodedDimensionsMismatch)?;
+    let expected_macroblocks = coded_canvas
+        .0
+        .checked_div(16)
+        .and_then(|width| {
+            coded_canvas
+                .1
+                .checked_div(16)
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or(VideoError::DecodedDimensionsMismatch)?;
+    if (coded_width, coded_height) != coded_canvas || coded_macroblocks != expected_macroblocks {
+        return Err(VideoError::DecodedDimensionsMismatch);
+    }
+    let display_dimensions = sps.pixel_dimensions().map_err(|_| VideoError::Codec)?;
+    if display_dimensions != (negotiated_codec.width, negotiated_codec.height) {
+        return Err(VideoError::DecodedDimensionsMismatch);
+    }
+    Ok(())
 }
 
 fn strip_annex_b_start_code(packet: &[u8]) -> Option<&[u8]> {
@@ -665,4 +739,56 @@ fn capability_is_usable(capabilities: &[CapabilityDescriptor], required: &str) -
 #[must_use]
 pub const fn phase21_reference_codec_id() -> &'static str {
     H264_VIDEO_CODEC_CAPABILITY
+}
+
+#[cfg(test)]
+mod tests {
+    use h264_reader::nal::sps::FrameCropping;
+
+    use super::*;
+
+    fn reference_codec() -> VideoCodecConfig {
+        VideoCodecConfig {
+            codec_capability_id: H264_VIDEO_CODEC_CAPABILITY.to_owned(),
+            width: 320,
+            height: 240,
+            frame_rate: 20,
+            target_bitrate_bps: 384_000,
+        }
+    }
+
+    #[test]
+    fn cropped_display_dimensions_cannot_hide_a_larger_coded_canvas() {
+        let codec = reference_codec();
+        let rgb = vec![16_u8; 320 * 240 * 3];
+        let source = RgbSliceU8::new(&rgb, (320, 240));
+        let yuv = YUVBuffer::from_rgb8_source(source);
+        let mut encoder =
+            Encoder::with_api_config(OpenH264API::from_source(), EncoderConfig::new())
+                .expect("encoder");
+        let payload = encoder.encode(&yuv).expect("h264").to_vec();
+        let mut sps = nal_units(&payload)
+            .find_map(|packet| {
+                let bytes = strip_annex_b_start_code(packet)?;
+                let nal = RefNal::new(bytes, &[], true);
+                let header = nal.header().ok()?;
+                (header.nal_unit_type() == UnitType::SeqParameterSet)
+                    .then(|| SeqParameterSet::from_bits(nal.rbsp_bits()).ok())
+                    .flatten()
+            })
+            .expect("SPS");
+        sps.pic_width_in_mbs_minus1 = 39;
+        sps.frame_cropping = Some(FrameCropping {
+            left_offset: 0,
+            right_offset: 160,
+            top_offset: 0,
+            bottom_offset: 0,
+        });
+        assert_eq!(sps.pixel_dimensions().expect("cropped display"), (320, 240));
+        let expected_coded = h264_reference_coded_dimensions(&codec).expect("coded shape");
+        assert_eq!(
+            validate_h264_sps(&sps, &codec, expected_coded),
+            Err(VideoError::DecodedDimensionsMismatch)
+        );
+    }
 }

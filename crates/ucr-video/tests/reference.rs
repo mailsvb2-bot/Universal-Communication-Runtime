@@ -19,7 +19,7 @@ use ucr_protocol::{
 use ucr_storage_memory::MemoryLocalStore;
 use ucr_video::{
     PreparedVideoCapabilities, ResolvedVideoNegotiation, VideoCapabilityProvider, VideoError,
-    VideoNegotiationResolver, VideoRuntime,
+    VideoNegotiationResolver, VideoRuntime, preflight_h264_parameter_sets,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -760,6 +760,50 @@ fn malformed_h264_does_not_advance_receiver_sequence_state() {
     assert_eq!(
         receiver.decode_frame(&valid).expect("valid retry").sequence,
         valid.sequence
+    );
+}
+
+#[test]
+fn rejected_parameter_only_frame_resets_decoder_and_requires_fresh_sps() {
+    let (store, call, alice, bob) = active_call();
+    let negotiations = negotiations_for(&call);
+    let runtime = VideoRuntime::new(&AllowAll, &store, &PreparedVideoCapabilities, &negotiations);
+    let stream = descriptor(&call, &alice, VideoSourceKind::Camera);
+    let mut sender = runtime.open_sender(&alice, &stream).expect("sender");
+    let mut receiver = runtime.open_receiver(&bob, &stream).expect("receiver");
+
+    let keyframe = sender
+        .encode_rgb8(&solid_rgb(&stream.codec, 12))
+        .expect("keyframe");
+    let delta = sender
+        .encode_rgb8(&solid_rgb(&stream.codec, 24))
+        .expect("delta");
+    assert_eq!(
+        preflight_h264_parameter_sets(&delta.payload, &stream.codec, false),
+        Err(VideoError::MissingValidatedParameterSet)
+    );
+
+    let units = openh264::nal_units(&keyframe.payload).collect::<Vec<_>>();
+    assert!(
+        units.len() >= 3,
+        "reference keyframe must carry SPS/PPS plus picture data"
+    );
+    let mut parameter_only = keyframe.clone();
+    parameter_only.payload = units[..units.len() - 1].concat();
+    assert!(matches!(
+        receiver.decode_frame(&parameter_only),
+        Err(VideoError::Codec | VideoError::NoDecodedFrame)
+    ));
+    assert_eq!(
+        receiver.decode_frame(&delta),
+        Err(VideoError::MissingValidatedParameterSet)
+    );
+    assert_eq!(
+        receiver
+            .decode_frame(&keyframe)
+            .expect("fresh SPS retry")
+            .sequence,
+        keyframe.sequence
     );
 }
 
