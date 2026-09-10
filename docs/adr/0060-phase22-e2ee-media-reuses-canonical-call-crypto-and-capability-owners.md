@@ -47,3 +47,9 @@ Private/traffic key bytes remain non-exporting/redacted. Encrypted frame `Debug`
 ## Testing
 
 Required evidence is strict Rust quality/docs/tests in debug and release, real Opus/H.264 E2EE round trips, tamper/replay/rotation/authority negative tests, protobuf compilation, architecture ownership guards, bounded fuzz smoke, dependency audit, exact-head PR CI, review, and post-merge main CI.
+
+## Codex security hardening
+
+The Phase 22 reference path binds direct media to canonical `Device` principals rather than inferring a missing Person→Identity relationship. The exact participant Principal ID must match the declared Device ID, and the durable Device must remain `Active`. Every frame additionally re-resolves the authenticated peer's exact signing descriptor through the canonical trusted-key resolver using the Device's durable Identity, so Device or signing-key revocation invalidates an already-open media session immediately.
+
+Key rotation retains a bounded history of all role ephemerals for up to 64 media-key epochs and rejects reuse from any earlier epoch. The bound makes freshness enforceable without unbounded state; once exhausted, the session fails closed and must be re-established rather than forgetting old keys.

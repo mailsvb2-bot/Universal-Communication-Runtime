@@ -37,6 +37,13 @@ fn phase22_e2ee_reuses_call_crypto_media_and_negotiation_owners() {
     assert!(runtime.contains("S: CallStore"));
     assert!(runtime.contains("EstablishedSession"));
     assert!(runtime.contains("authenticated_peer_device_id"));
+    assert!(runtime.contains("authenticated_peer_signing_descriptor"));
+    assert!(runtime.contains("S: CallStore + DeviceLifecycleStore + TrustedSigningKeyResolver"));
+    assert!(runtime.contains("participant.kind != PrincipalKind::Device"));
+    assert!(runtime.contains("device_allows_protected_access"));
+    assert!(runtime.contains("resolve_active_signing_key"));
+    assert!(runtime.contains("self.used_ephemerals.contains"));
+    assert!(protocol.contains("MAX_MEDIA_KEY_EPOCHS_PER_SESSION: usize = 64"));
     assert!(runtime.contains("validate_audio_frame_for_stream"));
     assert!(runtime.contains("validate_video_frame_for_stream"));
     assert!(runtime.contains("self.established.decrypt_inbound"));
@@ -54,6 +61,9 @@ fn phase22_e2ee_reuses_call_crypto_media_and_negotiation_owners() {
         spec.contains("forged unauthenticated high sequence numbers cannot poison receiver state")
     );
     assert!(spec.contains("Group calls fail closed"));
+    assert!(spec.contains("cannot impersonate the accepted Call participant"));
+    assert!(spec.contains("stops an already-open session on the next frame"));
+    assert!(spec.contains("reusing either role ephemeral from any earlier epoch"));
     assert!(adr.contains("No SQLite migration is introduced; schema remains v22"));
 }
 

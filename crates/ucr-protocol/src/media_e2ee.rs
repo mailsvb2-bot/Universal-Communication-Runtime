@@ -12,6 +12,7 @@ pub const MEDIA_E2EE_NONCE_LEN: usize = 24;
 pub const MEDIA_E2EE_AEAD_TAG_LEN: usize = 16;
 pub const MAX_ENCRYPTED_MEDIA_PAYLOAD_BYTES: usize = 2 * 1024 * 1024 + MEDIA_E2EE_AEAD_TAG_LEN;
 pub const MAX_MEDIA_STREAMS_PER_EPOCH: usize = 64;
+pub const MAX_MEDIA_KEY_EPOCHS_PER_SESSION: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaE2eeProtocolError {

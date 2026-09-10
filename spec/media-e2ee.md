@@ -12,7 +12,7 @@ The context fingerprint uses the domain `UCR-MEDIA-E2EE-CONTEXT-V1`. A media han
 
 ## Authenticated peer requirement
 
-E2EE Media accepts only an already-established UCR Crypto session whose peer was independently resolved through the trusted signing-key/Active Device boundary. A raw crypto session that verified a caller-supplied public key but has no trusted Device provenance is insufficient. The proven peer Device must exactly match the Device declared for the opposite media participant.
+E2EE Media accepts only an already-established UCR Crypto session whose peer was independently resolved through the trusted signing-key/Active Device boundary. A raw crypto session that verified a caller-supplied public key but has no trusted Device provenance is insufficient. In the Phase 22 reference path, direct-call media participants are exact `Device` principals: the participant Principal ID must equal the declared canonical Device ID, and that Device must exist as an `Active` durable `DeviceDescriptor`. This deliberately avoids guessing an unimplemented Person→Identity association. A different trusted Device, even one with a valid signature and another durable Identity, cannot impersonate the accepted Call participant.
 
 Peer signature verification, handshake replay protection, contributory X25519 agreement, directional HKDF keys, and key confirmation remain owned by `ucr-crypto`; Phase 22 does not reimplement them.
 
@@ -32,13 +32,13 @@ Outbound sequence reuse/regression within one key epoch is rejected before encry
 
 ## Key lifecycle and rotation
 
-Key epoch starts at 1. Explicit rotation requires exactly `epoch + 1`, identical Call/participants/Devices/negotiation/suite context, a newly authenticated peer session, and fresh role-specific X25519 ephemeral keys. Successful rotation clears per-stream replay/sequence cursors for the new epoch. Skipping epochs, changing the bound context, or reusing either role ephemeral fails closed.
+Key epoch starts at 1. Explicit rotation requires exactly `epoch + 1`, identical Call/participants/Devices/negotiation/suite context, a newly authenticated peer session, and fresh role-specific X25519 ephemeral keys. Successful rotation clears per-stream replay/sequence cursors for the new epoch. Skipping epochs, changing the bound context, or reusing either role ephemeral from any earlier epoch in the same session lifecycle fails closed. Ephemeral-history state is bounded to 64 key epochs; further rotation fails closed instead of forgetting older keys.
 
 A Call media renegotiation changes the canonical negotiation generation/ref and therefore invalidates an open E2EE media session until a fresh E2EE context/session is established.
 
 ## Runtime authority and downgrade behavior
 
-Every seal/open operation rechecks current Call participant authority, exact direct-call participant set, current media-negotiation ref/generation, negotiated `ucr.media.e2ee`, runtime E2EE capability availability, and the existing Audio/Video send/receive permission. Removing E2EE capability or authority stops an already-open session. No code path silently converts E2EE media to plaintext for availability.
+Every seal/open operation rechecks current Call participant authority, exact direct-call participant set, current media-negotiation ref/generation, negotiated `ucr.media.e2ee`, runtime E2EE capability availability, and the existing Audio/Video send/receive permission. It also re-resolves both bound Devices through the canonical `DeviceLifecycleStore` and re-validates the exact peer signing descriptor through the canonical `TrustedSigningKeyResolver` using the Device's durable Identity. Revoking a bound Device, revoking/rotating its authenticated signing key, removing E2EE capability, or removing authority therefore stops an already-open session on the next frame. No code path silently converts E2EE media to plaintext for availability.
 
 Unsupported critical negotiation extensions fail closed.
 
@@ -54,4 +54,4 @@ Phase 22 does not implement OS microphone/camera capture, speaker/display output
 
 ## Evidence
 
-Reference tests cover real Opus and H.264 encode → E2EE seal → authenticated open → decode; ciphertext/nonce/AAD tamper; trusted-peer Device binding; raw-session rejection; cryptographic replay; forged-high-sequence non-poisoning; outbound sequence regression; media-renegotiation invalidation; permission/capability revocation; bounded stream state; explicit epoch rotation and ephemeral reuse rejection; unsupported/missing negotiation state; and fail-closed group calls. Public protocol validation has a bounded fuzz target.
+Reference tests cover real Opus and H.264 encode → E2EE seal → authenticated open → decode; ciphertext/nonce/AAD tamper; exact Call-participant↔Device binding including a foreign trusted-Device impersonation attempt; raw-session rejection; post-open Device and signing-key revocation; cryptographic replay; forged-high-sequence non-poisoning; outbound sequence regression; media-renegotiation invalidation; permission/capability revocation; bounded stream state; explicit epoch rotation including non-adjacent historical ephemeral reuse rejection; unsupported/missing negotiation state; and fail-closed group calls. Public protocol validation has a bounded fuzz target.

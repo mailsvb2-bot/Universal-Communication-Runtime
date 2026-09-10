@@ -85,6 +85,7 @@ pub struct PendingSession {
     local_confirmation: ConfirmationKey,
     peer_confirmation: ConfirmationKey,
     authenticated_peer_device_id: Option<DeviceId>,
+    authenticated_peer_signing_descriptor: Option<PublicKeyDescriptor>,
 }
 
 impl core::fmt::Debug for PendingSession {
@@ -100,6 +101,13 @@ impl core::fmt::Debug for PendingSession {
                 "authenticated_peer_device_id",
                 &self.authenticated_peer_device_id,
             )
+            .field(
+                "authenticated_peer_signing_descriptor",
+                &self
+                    .authenticated_peer_signing_descriptor
+                    .as_ref()
+                    .map(|_| "<trusted-signing-descriptor>"),
+            )
             .finish()
     }
 }
@@ -109,6 +117,7 @@ pub struct EstablishedSession {
     outbound: TrafficKey,
     inbound: TrafficKey,
     authenticated_peer_device_id: Option<DeviceId>,
+    authenticated_peer_signing_descriptor: Option<PublicKeyDescriptor>,
 }
 impl core::fmt::Debug for EstablishedSession {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -120,6 +129,13 @@ impl core::fmt::Debug for EstablishedSession {
             .field(
                 "authenticated_peer_device_id",
                 &self.authenticated_peer_device_id,
+            )
+            .field(
+                "authenticated_peer_signing_descriptor",
+                &self
+                    .authenticated_peer_signing_descriptor
+                    .as_ref()
+                    .map(|_| "<trusted-signing-descriptor>"),
             )
             .finish()
     }
@@ -189,6 +205,7 @@ pub fn begin_session<R: ReplayProtector + ?Sized>(
         local_confirmation,
         peer_confirmation,
         authenticated_peer_device_id: None,
+        authenticated_peer_signing_descriptor: None,
     })
 }
 
@@ -242,6 +259,7 @@ where
     )
     .map_err(TrustedSessionError::Session)?;
     pending.authenticated_peer_device_id = Some(claim.device_id.clone());
+    pending.authenticated_peer_signing_descriptor = Some(trusted);
     Ok(pending)
 }
 
@@ -269,6 +287,7 @@ impl PendingSession {
             outbound: self.outbound,
             inbound: self.inbound,
             authenticated_peer_device_id: self.authenticated_peer_device_id,
+            authenticated_peer_signing_descriptor: self.authenticated_peer_signing_descriptor,
         })
     }
 }
@@ -284,6 +303,13 @@ impl EstablishedSession {
     #[must_use]
     pub const fn authenticated_peer_device_id(&self) -> Option<&DeviceId> {
         self.authenticated_peer_device_id.as_ref()
+    }
+
+    /// Returns the exact active trusted signing descriptor that authenticated the peer, when the
+    /// session was established through trusted-key resolution. Raw/test sessions return `None`.
+    #[must_use]
+    pub const fn authenticated_peer_signing_descriptor(&self) -> Option<&PublicKeyDescriptor> {
+        self.authenticated_peer_signing_descriptor.as_ref()
     }
 
     /// Encrypts outbound application data using the direction-specific key.

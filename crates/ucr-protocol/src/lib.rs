@@ -156,11 +156,12 @@ pub use intent::{
     validate_communication_intent,
 };
 pub use media_e2ee::{
-    MAX_ENCRYPTED_MEDIA_PAYLOAD_BYTES, MAX_MEDIA_STREAMS_PER_EPOCH, MEDIA_E2EE_AEAD_TAG_LEN,
-    MEDIA_E2EE_CAPABILITY, MEDIA_E2EE_CONTEXT_V1_DOMAIN, MEDIA_E2EE_FRAME_AAD_V1_DOMAIN,
-    MEDIA_E2EE_NONCE_LEN, MEDIA_E2EE_SESSION_BINDING_LEN, MediaE2eeProtocolError,
-    canonical_media_e2ee_context, media_e2ee_context_binding, media_e2ee_frame_aad,
-    phase22_media_e2ee_capabilities, validate_encrypted_media_frame,
+    MAX_ENCRYPTED_MEDIA_PAYLOAD_BYTES, MAX_MEDIA_KEY_EPOCHS_PER_SESSION,
+    MAX_MEDIA_STREAMS_PER_EPOCH, MEDIA_E2EE_AEAD_TAG_LEN, MEDIA_E2EE_CAPABILITY,
+    MEDIA_E2EE_CONTEXT_V1_DOMAIN, MEDIA_E2EE_FRAME_AAD_V1_DOMAIN, MEDIA_E2EE_NONCE_LEN,
+    MEDIA_E2EE_SESSION_BINDING_LEN, MediaE2eeProtocolError, canonical_media_e2ee_context,
+    media_e2ee_context_binding, media_e2ee_frame_aad, phase22_media_e2ee_capabilities,
+    validate_encrypted_media_frame,
 };
 pub use message::{
     ConversationError, EXTERNAL_MESSAGE_ID_LIMIT, EXTERNAL_MESSAGE_MAPPING_LIMIT,

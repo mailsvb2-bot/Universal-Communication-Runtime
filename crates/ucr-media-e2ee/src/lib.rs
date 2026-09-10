@@ -3,26 +3,26 @@
 use core::fmt;
 use std::collections::HashMap;
 
-use ucr_core::{AuthorizationEvaluator, CallStore, DurableStoreError};
+use ucr_core::{AuthorizationEvaluator, CallStore, DeviceLifecycleStore, DurableStoreError};
 use ucr_crypto::{
     AeadError, AgreementPublicKey, Ciphertext, EstablishedSession, MediaE2eeBindingError,
-    bind_media_e2ee_transcript,
+    TrustedKeyResolutionError, TrustedSigningKeyResolver, bind_media_e2ee_transcript,
 };
 use ucr_model::{
     AudioStreamDescriptor, AuthorizationRequest, CallId, CallParticipantState, CallSession,
     CallSignallingState, CapabilityDescriptor, CapabilityMaturity, ConversationKind, DeviceId,
     EncodedAudioFrame, EncodedVideoFrame, EncryptedMediaFrame, MediaE2eeContext,
-    MediaE2eeFrameHeader, MediaKind, OpaqueId, PrincipalRef, ScopedPrincipal, TenantScope,
-    VideoStreamDescriptor,
+    MediaE2eeFrameHeader, MediaKind, OpaqueId, PrincipalKind, PrincipalRef, ScopedPrincipal,
+    TenantScope, VideoStreamDescriptor,
 };
 use ucr_protocol::{
     AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CanonicalError, MAX_CALL_PARTICIPANTS,
-    MAX_MEDIA_STREAMS_PER_EPOCH, MEDIA_E2EE_CAPABILITY, MediaE2eeProtocolError,
-    NegotiationResultEnvelope, VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
-    canonical_capabilities, canonical_media_e2ee_context, canonical_negotiation_result,
-    media_e2ee_frame_aad, phase22_media_e2ee_capabilities, require_supported_extensions,
-    validate_audio_frame_for_stream, validate_encrypted_media_frame,
-    validate_video_frame_for_stream,
+    MAX_MEDIA_KEY_EPOCHS_PER_SESSION, MAX_MEDIA_STREAMS_PER_EPOCH, MEDIA_E2EE_CAPABILITY,
+    MediaE2eeProtocolError, NegotiationResultEnvelope, VIDEO_RECEIVE_PERMISSION,
+    VIDEO_SEND_PERMISSION, canonical_capabilities, canonical_media_e2ee_context,
+    canonical_negotiation_result, device_allows_protected_access, media_e2ee_frame_aad,
+    phase22_media_e2ee_capabilities, require_supported_extensions, validate_audio_frame_for_stream,
+    validate_encrypted_media_frame, validate_video_frame_for_stream,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,9 @@ pub enum MediaE2eeError {
     ScopeMismatch,
     ParticipantMismatch,
     DeviceMismatch,
+    DeviceParticipantMismatch,
+    DeviceUnavailable,
+    DeviceInactive,
     CallUnavailable,
     CallNotActive,
     DirectCallRequired,
@@ -49,6 +52,7 @@ pub enum MediaE2eeError {
     UnsupportedNegotiationExtension,
     CapabilityUnavailable,
     UnauthenticatedPeerSession,
+    PeerTrust(TrustedKeyResolutionError),
     SessionBindingMismatch,
     DirectionMismatch,
     MediaKindMismatch,
@@ -59,6 +63,7 @@ pub enum MediaE2eeError {
     StreamCapacityExceeded,
     EpochRotationInvalid,
     EphemeralReuse,
+    KeyEpochCapacityExceeded,
     GroupCryptoUnavailable,
 }
 
@@ -151,7 +156,7 @@ impl<'a, A, S, C, N> MediaE2eeRuntime<'a, A, S, C, N> {
 impl<'a, A, S, C, N> MediaE2eeRuntime<'a, A, S, C, N>
 where
     A: AuthorizationEvaluator,
-    S: CallStore,
+    S: CallStore + DeviceLifecycleStore + TrustedSigningKeyResolver,
     C: MediaE2eeCapabilityProvider,
     N: MediaE2eeNegotiationResolver,
 {
@@ -184,6 +189,7 @@ where
         if established.authenticated_peer_device_id() != Some(peer_device) {
             return Err(MediaE2eeError::UnauthenticatedPeerSession);
         }
+        require_current_authenticated_peer(self.store, &context, role, &established)?;
         let binding =
             bind_media_e2ee_transcript(&context, initiator_ephemeral, responder_ephemeral)?;
         if established.transcript_binding() != &binding {
@@ -198,8 +204,7 @@ where
             local_device_id: local_device_id.clone(),
             context,
             established,
-            initiator_ephemeral,
-            responder_ephemeral,
+            used_ephemerals: vec![initiator_ephemeral, responder_ephemeral],
             outbound_sequences: HashMap::new(),
             inbound_sequences: HashMap::new(),
         })
@@ -243,8 +248,7 @@ pub struct MediaE2eeSession<'a, A, S, C, N> {
     local_device_id: DeviceId,
     context: MediaE2eeContext,
     established: EstablishedSession,
-    initiator_ephemeral: AgreementPublicKey,
-    responder_ephemeral: AgreementPublicKey,
+    used_ephemerals: Vec<AgreementPublicKey>,
     outbound_sequences: HashMap<StreamCursorKey, u64>,
     inbound_sequences: HashMap<StreamCursorKey, u64>,
 }
@@ -266,7 +270,7 @@ impl<A, S, C, N> fmt::Debug for MediaE2eeSession<'_, A, S, C, N> {
 impl<A, S, C, N> MediaE2eeSession<'_, A, S, C, N>
 where
     A: AuthorizationEvaluator,
-    S: CallStore,
+    S: CallStore + DeviceLifecycleStore + TrustedSigningKeyResolver,
     C: MediaE2eeCapabilityProvider,
     N: MediaE2eeNegotiationResolver,
 {
@@ -435,8 +439,12 @@ where
         {
             return Err(MediaE2eeError::EpochRotationInvalid);
         }
-        if initiator_ephemeral == self.initiator_ephemeral
-            || responder_ephemeral == self.responder_ephemeral
+        if self.used_ephemerals.len() / 2 >= MAX_MEDIA_KEY_EPOCHS_PER_SESSION {
+            return Err(MediaE2eeError::KeyEpochCapacityExceeded);
+        }
+        if initiator_ephemeral == responder_ephemeral
+            || self.used_ephemerals.contains(&initiator_ephemeral)
+            || self.used_ephemerals.contains(&responder_ephemeral)
         {
             return Err(MediaE2eeError::EphemeralReuse);
         }
@@ -452,6 +460,7 @@ where
         if next_session.authenticated_peer_device_id() != Some(role.peer_device(&next_context)) {
             return Err(MediaE2eeError::UnauthenticatedPeerSession);
         }
+        require_current_authenticated_peer(self.store, &next_context, role, &next_session)?;
         let binding =
             bind_media_e2ee_transcript(&next_context, initiator_ephemeral, responder_ephemeral)?;
         if next_session.transcript_binding() != &binding {
@@ -459,8 +468,8 @@ where
         }
         self.context = next_context;
         self.established = next_session;
-        self.initiator_ephemeral = initiator_ephemeral;
-        self.responder_ephemeral = responder_ephemeral;
+        self.used_ephemerals.push(initiator_ephemeral);
+        self.used_ephemerals.push(responder_ephemeral);
         self.outbound_sequences.clear();
         self.inbound_sequences.clear();
         Ok(())
@@ -506,6 +515,7 @@ where
             &self.local,
             &self.context,
         )?;
+        require_current_authenticated_peer(self.store, &self.context, role, &self.established)?;
         self.authorization
             .authorize(&AuthorizationRequest {
                 subject: self.local.clone(),
@@ -637,7 +647,7 @@ fn require_e2ee_authority<A, S, C, N>(
 ) -> Result<CallSession, MediaE2eeError>
 where
     A: AuthorizationEvaluator,
-    S: CallStore,
+    S: CallStore + DeviceLifecycleStore + TrustedSigningKeyResolver,
     C: MediaE2eeCapabilityProvider,
     N: MediaE2eeNegotiationResolver,
 {
@@ -662,8 +672,82 @@ where
         return Err(MediaE2eeError::NegotiationBindingMismatch);
     }
     require_exact_call_participants(&call, context)?;
+    require_active_bound_device(
+        store,
+        &context.scope,
+        &context.initiator,
+        &context.initiator_device_id,
+    )?;
+    require_active_bound_device(
+        store,
+        &context.scope,
+        &context.responder,
+        &context.responder_device_id,
+    )?;
     require_negotiated_e2ee(negotiations, &call, context)?;
     Ok(call)
+}
+
+fn require_active_bound_device<S: DeviceLifecycleStore>(
+    store: &S,
+    scope: &TenantScope,
+    participant: &PrincipalRef,
+    device_id: &DeviceId,
+) -> Result<(), MediaE2eeError> {
+    if participant.kind != PrincipalKind::Device
+        || participant.principal_id.as_opaque().as_wire_bytes()
+            != device_id.as_opaque().as_wire_bytes()
+    {
+        return Err(MediaE2eeError::DeviceParticipantMismatch);
+    }
+    let device = store
+        .device(scope, device_id)?
+        .ok_or(MediaE2eeError::DeviceUnavailable)?;
+    if device.device_id != *device_id {
+        return Err(MediaE2eeError::DeviceParticipantMismatch);
+    }
+    if !device_allows_protected_access(&device) {
+        return Err(MediaE2eeError::DeviceInactive);
+    }
+    Ok(())
+}
+
+fn require_current_authenticated_peer<S>(
+    store: &S,
+    context: &MediaE2eeContext,
+    role: DirectRole,
+    established: &EstablishedSession,
+) -> Result<(), MediaE2eeError>
+where
+    S: DeviceLifecycleStore + TrustedSigningKeyResolver,
+{
+    let claim = established
+        .authenticated_peer_signing_descriptor()
+        .ok_or(MediaE2eeError::UnauthenticatedPeerSession)?;
+    let expected_device = role.peer_device(context);
+    if claim.device_id != *expected_device {
+        return Err(MediaE2eeError::UnauthenticatedPeerSession);
+    }
+    let device = store
+        .device(&context.scope, expected_device)?
+        .ok_or(MediaE2eeError::DeviceUnavailable)?;
+    if !device_allows_protected_access(&device) {
+        return Err(MediaE2eeError::DeviceInactive);
+    }
+    let trusted = store
+        .resolve_active_signing_key(
+            &context.scope,
+            expected_device,
+            Some(&device.identity_id),
+            &claim.key_id,
+        )
+        .map_err(MediaE2eeError::PeerTrust)?;
+    if trusted != *claim {
+        return Err(MediaE2eeError::PeerTrust(
+            TrustedKeyResolutionError::NotTrusted,
+        ));
+    }
+    Ok(())
 }
 
 fn require_negotiated_e2ee<N: MediaE2eeNegotiationResolver>(

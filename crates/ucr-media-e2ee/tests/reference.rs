@@ -9,12 +9,15 @@ use std::{
 use ucr_audio::{
     AudioNegotiationResolver, AudioRuntime, PreparedAudioCapabilities, ResolvedAudioNegotiation,
 };
-use ucr_core::{AuthorizationEvaluator, CallStore, ConversationStore, GroupStore};
+use ucr_core::{
+    AuthorizationEvaluator, CallStore, ConversationStore, DeviceLifecycleStore, GroupStore,
+    TrustedSigningKeyStore,
+};
 use ucr_crypto::{
     AgreementKeyPair, AgreementPublicKey, EstablishedSession, ReplayError, ReplayProtector,
     SessionHandshakeInput, SessionRole, SigningKeyMaterial, TranscriptBinding,
-    TrustedKeyResolutionError, TrustedSessionHandshakeInput, TrustedSigningKeyResolver,
-    VerifyingKeyBytes, begin_session, begin_session_with_trusted_peer, bind_media_e2ee_transcript,
+    TrustedSessionHandshakeInput, VerifyingKeyBytes, begin_session,
+    begin_session_with_trusted_peer, bind_media_e2ee_transcript,
 };
 use ucr_media_e2ee::{
     MediaE2eeCapabilityProvider, MediaE2eeError, MediaE2eeNegotiationResolver, MediaE2eeRuntime,
@@ -24,12 +27,12 @@ use ucr_model::{
     AudioChannelLayout, AudioCodecConfig, AudioFrameDuration, AudioStreamDescriptor, AudioStreamId,
     AuthorizationRequest, CallId, CallParticipant, CallParticipantState, CallSession, CallSignal,
     CallSignalKind, CallSignallingState, CapabilityDescriptor, ConversationId, ConversationKind,
-    ConversationRecord, ConversationRef, CryptoSuite, DeliveryPolicy, DeviceId, EventId,
-    GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState,
-    GroupOwnership, GroupRecord, GroupRole, KeyId, KeyPurpose, MediaE2eeContext, OpaqueId,
-    PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension, ProtocolVersion,
-    PublicKeyDescriptor, ScopedPrincipal, TenantId, TenantScope, VideoCodecConfig, VideoSourceKind,
-    VideoStreamDescriptor, VideoStreamId,
+    ConversationRecord, ConversationRef, CryptoSuite, DeliveryPolicy, DeviceDescriptor, DeviceId,
+    DeviceLifecycleState, EventId, GroupChange, GroupChangeKind, GroupCryptoState,
+    GroupHistoryPolicy, GroupId, GroupMediaState, GroupOwnership, GroupRecord, GroupRole,
+    IdentityId, KeyId, KeyPurpose, MediaE2eeContext, OpaqueId, PrincipalId, PrincipalKind,
+    PrincipalRef, ProtocolExtension, ProtocolVersion, PublicKeyDescriptor, ScopedPrincipal,
+    TenantId, TenantScope, VideoCodecConfig, VideoSourceKind, VideoStreamDescriptor, VideoStreamId,
 };
 use ucr_protocol::{
     ALGORITHM_VERSION, H264_VIDEO_CODEC_CAPABILITY, KEY_FORMAT_VERSION, MANDATORY_VIDEO_FRAME_RATE,
@@ -221,25 +224,6 @@ impl ReplayProtector for TestReplay {
     }
 }
 
-#[derive(Debug, Clone)]
-struct TestTrust(PublicKeyDescriptor);
-
-impl TrustedSigningKeyResolver for TestTrust {
-    fn resolve_active_signing_key(
-        &self,
-        _scope: &TenantScope,
-        device_id: &DeviceId,
-        _identity_id: Option<&ucr_model::IdentityId>,
-        key_id: &KeyId,
-    ) -> Result<PublicKeyDescriptor, TrustedKeyResolutionError> {
-        if &self.0.device_id == device_id && &self.0.key_id == key_id {
-            Ok(self.0.clone())
-        } else {
-            Err(TrustedKeyResolutionError::NotTrusted)
-        }
-    }
-}
-
 fn oid(value: &str) -> OpaqueId {
     OpaqueId::new(value).expect("test id")
 }
@@ -252,6 +236,16 @@ fn scope() -> TenantScope {
 }
 
 fn principal(value: &str) -> ScopedPrincipal {
+    ScopedPrincipal {
+        scope: scope(),
+        principal: PrincipalRef {
+            principal_id: PrincipalId::from_opaque(oid(&format!("device-{value}"))),
+            kind: PrincipalKind::Device,
+        },
+    }
+}
+
+fn person_principal(value: &str) -> ScopedPrincipal {
     ScopedPrincipal {
         scope: scope(),
         principal: PrincipalRef {
@@ -269,6 +263,27 @@ fn bob_device() -> DeviceId {
     DeviceId::from_opaque(oid("device-bob-media"))
 }
 
+fn alice_identity() -> IdentityId {
+    IdentityId::from_opaque(oid("identity-alice-media"))
+}
+
+fn bob_identity() -> IdentityId {
+    IdentityId::from_opaque(oid("identity-bob-media"))
+}
+
+fn register_active_device(store: &MemoryLocalStore, device_id: DeviceId, identity_id: IdentityId) {
+    store
+        .register_device(
+            &scope(),
+            &DeviceDescriptor {
+                device_id,
+                identity_id,
+                state: DeviceLifecycleState::Active,
+            },
+        )
+        .expect("register active device");
+}
+
 fn signal(session: &CallSession, id: &str, kind: CallSignalKind) -> CallSignal {
     CallSignal {
         event_id: EventId::from_opaque(oid(id)),
@@ -279,15 +294,35 @@ fn signal(session: &CallSession, id: &str, kind: CallSignalKind) -> CallSignal {
     }
 }
 
+struct DirectCryptoFixture {
+    alice_signing: SigningKeyMaterial,
+    bob_signing: SigningKeyMaterial,
+    alice_descriptor: PublicKeyDescriptor,
+    bob_descriptor: PublicKeyDescriptor,
+}
+
 fn active_direct_call() -> (
     MemoryLocalStore,
     CallSession,
     ScopedPrincipal,
     ScopedPrincipal,
+    DirectCryptoFixture,
 ) {
     let store = MemoryLocalStore::default();
     let alice = principal("alice-media");
     let bob = principal("bob-media");
+    register_active_device(&store, alice_device(), alice_identity());
+    register_active_device(&store, bob_device(), bob_identity());
+    let alice_signing = SigningKeyMaterial::generate().expect("alice signing");
+    let bob_signing = SigningKeyMaterial::generate().expect("bob signing");
+    let alice_descriptor = signing_descriptor("alice-signing", alice_device(), &alice_signing);
+    let bob_descriptor = signing_descriptor("bob-signing", bob_device(), &bob_signing);
+    store
+        .provision_trusted_signing_key(&scope(), &alice_descriptor)
+        .expect("trust alice device");
+    store
+        .provision_trusted_signing_key(&scope(), &bob_descriptor)
+        .expect("trust bob device");
     let conversation = ConversationRecord {
         scope: scope(),
         conversation: ConversationRef {
@@ -347,7 +382,13 @@ fn active_direct_call() -> (
         )
         .expect("media negotiation");
     let active = store.call(&scope(), &initial.call_id).unwrap().unwrap();
-    (store, active, alice, bob)
+    let crypto = DirectCryptoFixture {
+        alice_signing,
+        bob_signing,
+        alice_descriptor,
+        bob_descriptor,
+    };
+    (store, active, alice, bob, crypto)
 }
 
 fn accepted(call: &CallSession) -> Vec<PrincipalRef> {
@@ -404,17 +445,17 @@ struct SessionPair {
     responder_ephemeral: AgreementPublicKey,
 }
 
-fn established_pair(context: &MediaE2eeContext) -> SessionPair {
-    let alice_signing = SigningKeyMaterial::generate().expect("alice signing");
-    let bob_signing = SigningKeyMaterial::generate().expect("bob signing");
+fn established_pair(
+    context: &MediaE2eeContext,
+    crypto: &DirectCryptoFixture,
+    store: &MemoryLocalStore,
+) -> SessionPair {
     let alice_agreement = AgreementKeyPair::generate().expect("alice agreement");
     let bob_agreement = AgreementKeyPair::generate().expect("bob agreement");
     let initiator_ephemeral = alice_agreement.public_key();
     let responder_ephemeral = bob_agreement.public_key();
     let binding = bind_media_e2ee_transcript(context, initiator_ephemeral, responder_ephemeral)
         .expect("media binding");
-    let alice_descriptor = signing_descriptor("alice-signing", alice_device(), &alice_signing);
-    let bob_descriptor = signing_descriptor("bob-signing", bob_device(), &bob_signing);
     let alice_pending = begin_session_with_trusted_peer(
         alice_agreement,
         &TrustedSessionHandshakeInput {
@@ -424,12 +465,12 @@ fn established_pair(context: &MediaE2eeContext) -> SessionPair {
             peer_agreement: responder_ephemeral,
             initiator_public: initiator_ephemeral,
             responder_public: responder_ephemeral,
-            peer_signing_descriptor: bob_descriptor.clone(),
-            peer_signature: bob_signing.sign_transcript(&binding),
+            peer_signing_descriptor: crypto.bob_descriptor.clone(),
+            peer_signature: crypto.bob_signing.sign_transcript(&binding),
             binding,
         },
         &TestReplay::default(),
-        &TestTrust(bob_descriptor),
+        store,
     )
     .expect("alice pending");
     let bob_pending = begin_session_with_trusted_peer(
@@ -441,12 +482,12 @@ fn established_pair(context: &MediaE2eeContext) -> SessionPair {
             peer_agreement: initiator_ephemeral,
             initiator_public: initiator_ephemeral,
             responder_public: responder_ephemeral,
-            peer_signing_descriptor: alice_descriptor.clone(),
-            peer_signature: alice_signing.sign_transcript(&binding),
+            peer_signing_descriptor: crypto.alice_descriptor.clone(),
+            peer_signature: crypto.alice_signing.sign_transcript(&binding),
             binding,
         },
         &TestReplay::default(),
-        &TestTrust(alice_descriptor),
+        store,
     )
     .expect("bob pending");
     let alice_tag = alice_pending.local_confirmation_tag().expect("alice tag");
@@ -575,9 +616,9 @@ fn video_descriptor(call: &CallSession, source: &ScopedPrincipal) -> VideoStream
 
 #[test]
 fn direct_audio_uses_real_opus_then_authenticated_media_ciphertext() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, crypto) = active_direct_call();
     let context = context(&call, &alice, &bob, 1);
-    let pair = established_pair(&context);
+    let pair = established_pair(&context, &crypto, &store);
     let media_negotiations = media_negotiations(&call);
     let e2ee = MediaE2eeRuntime::new(
         &AllowAll,
@@ -639,9 +680,9 @@ fn direct_audio_uses_real_opus_then_authenticated_media_ciphertext() {
 
 #[test]
 fn direct_video_uses_real_h264_then_authenticated_media_ciphertext() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, crypto) = active_direct_call();
     let context = context(&call, &alice, &bob, 1);
-    let pair = established_pair(&context);
+    let pair = established_pair(&context, &crypto, &store);
     let media_negotiations = media_negotiations(&call);
     let e2ee = MediaE2eeRuntime::new(
         &AllowAll,
@@ -703,9 +744,9 @@ fn direct_video_uses_real_h264_then_authenticated_media_ciphertext() {
 
 #[test]
 fn forged_high_sequence_cannot_poison_cryptographic_replay_state() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, crypto) = active_direct_call();
     let context = context(&call, &alice, &bob, 1);
-    let pair = established_pair(&context);
+    let pair = established_pair(&context, &crypto, &store);
     let negotiations = media_negotiations(&call);
     let runtime = MediaE2eeRuntime::new(
         &AllowAll,
@@ -768,7 +809,7 @@ fn forged_high_sequence_cannot_poison_cryptographic_replay_state() {
 
 #[test]
 fn ciphertext_nonce_and_authenticated_header_tampering_fail_closed() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, crypto) = active_direct_call();
     let context = context(&call, &alice, &bob, 1);
     let negotiations = media_negotiations(&call);
     let runtime = MediaE2eeRuntime::new(
@@ -790,7 +831,7 @@ fn ciphertext_nonce_and_authenticated_header_tampering_fail_closed() {
         payload: vec![9, 8, 7],
     };
     // Dedicated paired sessions make each failure independent and prove no partial plaintext.
-    let pair = established_pair(&context);
+    let pair = established_pair(&context, &crypto, &store);
     let mut sender = runtime
         .open_direct_session(
             &alice,
@@ -840,7 +881,7 @@ fn ciphertext_nonce_and_authenticated_header_tampering_fail_closed() {
 
 #[test]
 fn raw_authenticated_crypto_session_without_trusted_device_provenance_is_rejected() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, _crypto) = active_direct_call();
     let context = context(&call, &alice, &bob, 1);
     let ((raw, initiator_ephemeral, responder_ephemeral), _peer) = raw_established_pair(&context);
     assert!(raw.authenticated_peer_device_id().is_none());
@@ -868,7 +909,7 @@ fn raw_authenticated_crypto_session_without_trusted_device_provenance_is_rejecte
 
 #[test]
 fn missing_e2ee_negotiation_critical_extension_and_incomplete_participants_fail_closed() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, crypto) = active_direct_call();
     let context = context(&call, &alice, &bob, 1);
     for (mode, expected) in [
         (
@@ -884,7 +925,7 @@ fn missing_e2ee_negotiation_critical_extension_and_incomplete_participants_fail_
             MediaE2eeError::NegotiatedParticipantSetMismatch,
         ),
     ] {
-        let pair = established_pair(&context);
+        let pair = established_pair(&context, &crypto, &store);
         let negotiations = TestMediaNegotiations {
             participants: accepted(&call),
             mode,
@@ -913,9 +954,9 @@ fn missing_e2ee_negotiation_critical_extension_and_incomplete_participants_fail_
 
 #[test]
 fn media_renegotiation_invalidates_open_e2ee_session() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, crypto) = active_direct_call();
     let context = context(&call, &alice, &bob, 1);
-    let pair = established_pair(&context);
+    let pair = established_pair(&context, &crypto, &store);
     let negotiations = media_negotiations(&call);
     let runtime = MediaE2eeRuntime::new(
         &AllowAll,
@@ -965,7 +1006,7 @@ fn media_renegotiation_invalidates_open_e2ee_session() {
 
 #[test]
 fn runtime_permission_and_local_e2ee_capability_revocation_stop_media() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, crypto) = active_direct_call();
     let context = context(&call, &alice, &bob, 1);
     let descriptor = audio_descriptor(&call, &alice, "revocation-stream");
     let frame = ucr_model::EncodedAudioFrame {
@@ -988,7 +1029,7 @@ fn runtime_permission_and_local_e2ee_capability_revocation_stop_media() {
         &PreparedMediaE2eeCapabilities,
         &negotiations,
     );
-    let pair = established_pair(&context);
+    let pair = established_pair(&context, &crypto, &store);
     let mut session = runtime
         .open_direct_session(
             &alice,
@@ -1007,7 +1048,7 @@ fn runtime_permission_and_local_e2ee_capability_revocation_stop_media() {
 
     let capabilities = ToggleCapabilities(AtomicBool::new(true));
     let runtime = MediaE2eeRuntime::new(&AllowAll, &store, &capabilities, &negotiations);
-    let pair = established_pair(&context);
+    let pair = established_pair(&context, &crypto, &store);
     let mut session = runtime
         .open_direct_session(
             &alice,
@@ -1027,9 +1068,9 @@ fn runtime_permission_and_local_e2ee_capability_revocation_stop_media() {
 
 #[test]
 fn explicit_key_rotation_requires_epoch_plus_one_and_fresh_ephemerals() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, crypto) = active_direct_call();
     let context1 = context(&call, &alice, &bob, 1);
-    let pair1 = established_pair(&context1);
+    let pair1 = established_pair(&context1, &crypto, &store);
     let negotiations = media_negotiations(&call);
     let runtime = MediaE2eeRuntime::new(
         &AllowAll,
@@ -1080,7 +1121,7 @@ fn explicit_key_rotation_requires_epoch_plus_one_and_fresh_ephemerals() {
     );
 
     let context2 = context(&call, &alice, &bob, 2);
-    let pair2 = established_pair(&context2);
+    let pair2 = established_pair(&context2, &crypto, &store);
     let pair2_i = pair2.initiator_ephemeral;
     let pair2_r = pair2.responder_ephemeral;
     alice_session
@@ -1105,7 +1146,7 @@ fn explicit_key_rotation_requires_epoch_plus_one_and_fresh_ephemerals() {
         frame
     );
 
-    let pair3 = established_pair(&context2);
+    let pair3 = established_pair(&context2, &crypto, &store);
     assert_eq!(
         alice_session.rotate(
             &context2,
@@ -1119,9 +1160,9 @@ fn explicit_key_rotation_requires_epoch_plus_one_and_fresh_ephemerals() {
 
 #[test]
 fn outbound_stream_cursor_budget_is_bounded() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, crypto) = active_direct_call();
     let context = context(&call, &alice, &bob, 1);
-    let pair = established_pair(&context);
+    let pair = established_pair(&context, &crypto, &store);
     let negotiations = media_negotiations(&call);
     let runtime = MediaE2eeRuntime::new(
         &AllowAll,
@@ -1202,8 +1243,8 @@ fn active_group_e2ee_call() -> (
     ScopedPrincipal,
 ) {
     let store = MemoryLocalStore::default();
-    let alice = principal("alice-group-e2ee");
-    let bob = principal("bob-group-e2ee");
+    let alice = person_principal("alice-group-e2ee");
+    let bob = person_principal("bob-group-e2ee");
     let conversation = ConversationRecord {
         scope: scope(),
         conversation: ConversationRef {
@@ -1287,7 +1328,7 @@ fn active_group_e2ee_call() -> (
 fn group_calls_fail_closed_without_standardized_group_media_crypto_owner() {
     let (store, active, alice, bob) = active_group_e2ee_call();
     let context = context(&active, &alice, &bob, 1);
-    let pair = established_pair(&context);
+    let ((raw, initiator_ephemeral, responder_ephemeral), _peer) = raw_established_pair(&context);
     let negotiations = media_negotiations(&active);
     let runtime = MediaE2eeRuntime::new(
         &AllowAll,
@@ -1301,9 +1342,9 @@ fn group_calls_fail_closed_without_standardized_group_media_crypto_owner() {
                 &alice,
                 &alice_device(),
                 &context,
-                pair.alice,
-                pair.initiator_ephemeral,
-                pair.responder_ephemeral,
+                raw,
+                initiator_ephemeral,
+                responder_ephemeral,
             )
             .map(|_| ()),
         Err(MediaE2eeError::GroupCryptoUnavailable)
@@ -1312,9 +1353,9 @@ fn group_calls_fail_closed_without_standardized_group_media_crypto_owner() {
 
 #[test]
 fn wrong_peer_device_is_rejected_even_with_valid_trusted_session() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, crypto) = active_direct_call();
     let original = context(&call, &alice, &bob, 1);
-    let pair = established_pair(&original);
+    let pair = established_pair(&original, &crypto, &store);
     let mut wrong = original.clone();
     wrong.responder_device_id = DeviceId::from_opaque(oid("other-bob-device"));
     let negotiations = media_negotiations(&call);
@@ -1335,15 +1376,15 @@ fn wrong_peer_device_is_rejected_even_with_valid_trusted_session() {
                 pair.responder_ephemeral,
             )
             .map(|_| ()),
-        Err(MediaE2eeError::UnauthenticatedPeerSession)
+        Err(MediaE2eeError::DeviceParticipantMismatch)
     );
 }
 
 #[test]
 fn outbound_sequence_must_increase_within_one_key_epoch() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, crypto) = active_direct_call();
     let context = context(&call, &alice, &bob, 1);
-    let pair = established_pair(&context);
+    let pair = established_pair(&context, &crypto, &store);
     let negotiations = media_negotiations(&call);
     let runtime = MediaE2eeRuntime::new(
         &AllowAll,
@@ -1382,9 +1423,9 @@ fn outbound_sequence_must_increase_within_one_key_epoch() {
 
 #[test]
 fn rotation_rejects_reused_role_ephemeral_before_accepting_new_keys() {
-    let (store, call, alice, bob) = active_direct_call();
+    let (store, call, alice, bob, crypto) = active_direct_call();
     let context1 = context(&call, &alice, &bob, 1);
-    let pair1 = established_pair(&context1);
+    let pair1 = established_pair(&context1, &crypto, &store);
     let old_i = pair1.initiator_ephemeral;
     let old_r = pair1.responder_ephemeral;
     let negotiations = media_negotiations(&call);
@@ -1405,9 +1446,187 @@ fn rotation_rejects_reused_role_ephemeral_before_accepting_new_keys() {
         )
         .expect("session");
     let context2 = context(&call, &alice, &bob, 2);
-    let pair2 = established_pair(&context2);
+    let pair2 = established_pair(&context2, &crypto, &store);
     assert_eq!(
         session.rotate(&context2, pair2.alice, old_i, pair2.responder_ephemeral),
+        Err(MediaE2eeError::EphemeralReuse)
+    );
+}
+
+#[test]
+fn foreign_trusted_device_cannot_impersonate_accepted_call_participant() {
+    let (store, call, alice, bob, crypto) = active_direct_call();
+    let foreign_device = DeviceId::from_opaque(oid("device-mallory-media"));
+    let foreign_identity = IdentityId::from_opaque(oid("identity-mallory-media"));
+    register_active_device(&store, foreign_device.clone(), foreign_identity);
+    let foreign_signing = SigningKeyMaterial::generate().expect("foreign signing");
+    let foreign_descriptor =
+        signing_descriptor("mallory-signing", foreign_device.clone(), &foreign_signing);
+    store
+        .provision_trusted_signing_key(&scope(), &foreign_descriptor)
+        .expect("trust foreign device");
+
+    let mut forged_context = context(&call, &alice, &bob, 1);
+    forged_context.responder_device_id = foreign_device;
+    let forged_crypto = DirectCryptoFixture {
+        alice_signing: crypto.alice_signing,
+        bob_signing: foreign_signing,
+        alice_descriptor: crypto.alice_descriptor,
+        bob_descriptor: foreign_descriptor,
+    };
+    let pair = established_pair(&forged_context, &forged_crypto, &store);
+    let negotiations = media_negotiations(&call);
+    let runtime = MediaE2eeRuntime::new(
+        &AllowAll,
+        &store,
+        &PreparedMediaE2eeCapabilities,
+        &negotiations,
+    );
+    assert_eq!(
+        runtime
+            .open_direct_session(
+                &alice,
+                &alice_device(),
+                &forged_context,
+                pair.alice,
+                pair.initiator_ephemeral,
+                pair.responder_ephemeral,
+            )
+            .map(|_| ()),
+        Err(MediaE2eeError::DeviceParticipantMismatch)
+    );
+}
+
+#[test]
+fn post_open_peer_device_revocation_stops_next_media_frame() {
+    let (store, call, alice, bob, crypto) = active_direct_call();
+    let context = context(&call, &alice, &bob, 1);
+    let pair = established_pair(&context, &crypto, &store);
+    let negotiations = media_negotiations(&call);
+    let runtime = MediaE2eeRuntime::new(
+        &AllowAll,
+        &store,
+        &PreparedMediaE2eeCapabilities,
+        &negotiations,
+    );
+    let mut session = runtime
+        .open_direct_session(
+            &alice,
+            &alice_device(),
+            &context,
+            pair.alice,
+            pair.initiator_ephemeral,
+            pair.responder_ephemeral,
+        )
+        .expect("session");
+    store
+        .revoke_device(&scope(), &bob_device(), &bob_identity())
+        .expect("revoke peer device");
+    let descriptor = audio_descriptor(&call, &alice, "device-revoked-stream");
+    let frame = ucr_model::EncodedAudioFrame {
+        scope: descriptor.scope.clone(),
+        call_id: descriptor.call_id.clone(),
+        stream_id: descriptor.stream_id.clone(),
+        source: descriptor.source.clone(),
+        negotiation_ref: descriptor.negotiation_ref.clone(),
+        negotiation_generation: descriptor.negotiation_generation,
+        sequence: 0,
+        media_timestamp_samples: 0,
+        payload: vec![1],
+    };
+    assert_eq!(
+        session.seal_audio(&descriptor, &frame),
+        Err(MediaE2eeError::DeviceInactive)
+    );
+}
+
+#[test]
+fn post_open_peer_signing_key_revocation_stops_next_media_frame() {
+    let (store, call, alice, bob, crypto) = active_direct_call();
+    let context = context(&call, &alice, &bob, 1);
+    let pair = established_pair(&context, &crypto, &store);
+    let negotiations = media_negotiations(&call);
+    let runtime = MediaE2eeRuntime::new(
+        &AllowAll,
+        &store,
+        &PreparedMediaE2eeCapabilities,
+        &negotiations,
+    );
+    let mut session = runtime
+        .open_direct_session(
+            &alice,
+            &alice_device(),
+            &context,
+            pair.alice,
+            pair.initiator_ephemeral,
+            pair.responder_ephemeral,
+        )
+        .expect("session");
+    store
+        .revoke_trusted_signing_key(&scope(), &bob_device(), &crypto.bob_descriptor.key_id)
+        .expect("revoke peer signing key");
+    let descriptor = audio_descriptor(&call, &alice, "key-revoked-stream");
+    let frame = ucr_model::EncodedAudioFrame {
+        scope: descriptor.scope.clone(),
+        call_id: descriptor.call_id.clone(),
+        stream_id: descriptor.stream_id.clone(),
+        source: descriptor.source.clone(),
+        negotiation_ref: descriptor.negotiation_ref.clone(),
+        negotiation_generation: descriptor.negotiation_generation,
+        sequence: 0,
+        media_timestamp_samples: 0,
+        payload: vec![1],
+    };
+    assert!(matches!(
+        session.seal_audio(&descriptor, &frame),
+        Err(MediaE2eeError::PeerTrust(_))
+    ));
+}
+
+#[test]
+fn rotation_rejects_ephemeral_reused_from_non_adjacent_earlier_epoch() {
+    let (store, call, alice, bob, crypto) = active_direct_call();
+    let context1 = context(&call, &alice, &bob, 1);
+    let pair1 = established_pair(&context1, &crypto, &store);
+    let old_initiator = pair1.initiator_ephemeral;
+    let negotiations = media_negotiations(&call);
+    let runtime = MediaE2eeRuntime::new(
+        &AllowAll,
+        &store,
+        &PreparedMediaE2eeCapabilities,
+        &negotiations,
+    );
+    let mut session = runtime
+        .open_direct_session(
+            &alice,
+            &alice_device(),
+            &context1,
+            pair1.alice,
+            pair1.initiator_ephemeral,
+            pair1.responder_ephemeral,
+        )
+        .expect("epoch1");
+
+    let context2 = context(&call, &alice, &bob, 2);
+    let pair2 = established_pair(&context2, &crypto, &store);
+    session
+        .rotate(
+            &context2,
+            pair2.alice,
+            pair2.initiator_ephemeral,
+            pair2.responder_ephemeral,
+        )
+        .expect("epoch2");
+
+    let context3 = context(&call, &alice, &bob, 3);
+    let pair3 = established_pair(&context3, &crypto, &store);
+    assert_eq!(
+        session.rotate(
+            &context3,
+            pair3.alice,
+            old_initiator,
+            pair3.responder_ephemeral,
+        ),
         Err(MediaE2eeError::EphemeralReuse)
     );
 }
