@@ -29,3 +29,5 @@ Install `nightly-2026-09-02` with `rust-src`, then install `cargo-fuzz 0.13.2 --
 Crash artifacts are written under `fuzz/artifacts/<target>/` and uploaded by CI on failure. A discovered crash is not considered resolved by deleting the artifact: minimize it, promote the minimized input into the committed corpus, add a deterministic regression test when practical, and only then fix/close the finding.
 
 The required CI fuzz job is a bounded smoke/release gate, not a substitute for longer campaigns. Longer scheduled/manual campaigns may extend runtime, corpus, and sanitizers, but must use the same target owners and must not weaken the bounded required gate.
+
+- `adaptive_media_telemetry`: Phase-23 bounded telemetry canonicalization, quality policy, and hysteresis state machine.

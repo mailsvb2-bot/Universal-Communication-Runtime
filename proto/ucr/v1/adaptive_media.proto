@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/video.proto";
+
+enum MediaThermalState {
+  MEDIA_THERMAL_STATE_UNSPECIFIED = 0;
+  MEDIA_THERMAL_STATE_NOMINAL = 1;
+  MEDIA_THERMAL_STATE_ELEVATED = 2;
+  MEDIA_THERMAL_STATE_SERIOUS = 3;
+  MEDIA_THERMAL_STATE_CRITICAL = 4;
+}
+
+// One ephemeral observation. It is neither routing evidence nor durable analytics state.
+message AdaptiveMediaTelemetry {
+  uint64 estimated_bandwidth_bps = 1;
+  uint32 packet_loss_basis_points = 2;
+  uint32 jitter_ms = 3;
+  uint32 rtt_ms = 4;
+  uint32 cpu_utilization_percent = 5;
+  optional uint32 gpu_utilization_percent = 6;
+  uint32 battery_percent = 7;
+  bool external_power = 8;
+  MediaThermalState thermal_state = 9;
+}
+
+enum AdaptiveMediaStage {
+  ADAPTIVE_MEDIA_STAGE_UNSPECIFIED = 0;
+  ADAPTIVE_MEDIA_STAGE_VIDEO_1080P = 1;
+  ADAPTIVE_MEDIA_STAGE_VIDEO_720P = 2;
+  ADAPTIVE_MEDIA_STAGE_VIDEO_480P = 3;
+  ADAPTIVE_MEDIA_STAGE_VIDEO_LOW_FPS = 4;
+  ADAPTIVE_MEDIA_STAGE_AUDIO = 5;
+  ADAPTIVE_MEDIA_STAGE_AUDIO_LOW_BITRATE = 6;
+  ADAPTIVE_MEDIA_STAGE_EVENTUAL_FALLBACK_REQUIRED = 7;
+}
+
+enum AdaptiveMediaPressure {
+  ADAPTIVE_MEDIA_PRESSURE_UNSPECIFIED = 0;
+  ADAPTIVE_MEDIA_PRESSURE_BANDWIDTH = 1;
+  ADAPTIVE_MEDIA_PRESSURE_PACKET_LOSS = 2;
+  ADAPTIVE_MEDIA_PRESSURE_JITTER = 3;
+  ADAPTIVE_MEDIA_PRESSURE_RTT = 4;
+  ADAPTIVE_MEDIA_PRESSURE_CPU = 5;
+  ADAPTIVE_MEDIA_PRESSURE_GPU = 6;
+  ADAPTIVE_MEDIA_PRESSURE_BATTERY = 7;
+  ADAPTIVE_MEDIA_PRESSURE_THERMAL = 8;
+}
+
+enum DeferredMediaFallback {
+  DEFERRED_MEDIA_FALLBACK_UNSPECIFIED = 0;
+  DEFERRED_MEDIA_FALLBACK_VOICE_MESSAGE = 1;
+  DEFERRED_MEDIA_FALLBACK_TEXT = 2;
+  DEFERRED_MEDIA_FALLBACK_STORE_AND_FORWARD = 3;
+}
+
+// Actionable target from the Phase-23 policy engine. Absence of video/Opus fields means that media
+// family is not the current target. Deferred fallbacks are recommendations only, not execution.
+message AdaptiveMediaDecision {
+  AdaptiveMediaStage stage = 1;
+  bool changed = 2;
+  bool requires_media_renegotiation = 3;
+  VideoCodecConfig video = 4;
+  optional uint32 opus_target_bitrate_bps = 5;
+  repeated DeferredMediaFallback deferred_fallbacks = 6;
+  repeated AdaptiveMediaPressure pressures = 7;
+}
+
+// Phase 23 defines policy data only. It intentionally defines no route, transport, delivery, Call,
+// crypto, or network service; those remain owned by their canonical subsystems.

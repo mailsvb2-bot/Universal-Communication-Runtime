@@ -445,6 +445,40 @@ fn direct_call_encodes_and_decodes_real_opus_without_media_brain_duplication() {
     );
 }
 #[test]
+fn live_opus_sender_accepts_bounded_adaptive_bitrate_changes_without_wire_redefinition() {
+    let (store, call, alice, bob) = active_call();
+    let negotiations = negotiations_for(&call);
+    let runtime = AudioRuntime::new(&AllowAll, &store, &PreparedAudioCapabilities, &negotiations);
+    let descriptor = descriptor(&call, &alice);
+    let mut sender = runtime.open_sender(&alice, &descriptor).expect("sender");
+    let mut receiver = runtime.open_receiver(&bob, &descriptor).expect("receiver");
+    let pcm = vec![0_i16; 960];
+
+    sender
+        .set_target_bitrate_bps(48_000)
+        .expect("normal adaptive bitrate");
+    let normal = sender.encode_pcm(&pcm).expect("normal frame");
+    assert_eq!(
+        receiver.decode_frame(&normal).expect("decode normal").len(),
+        pcm.len()
+    );
+
+    sender
+        .set_target_bitrate_bps(16_000)
+        .expect("low adaptive bitrate");
+    let low = sender.encode_pcm(&pcm).expect("low frame");
+    assert_eq!(low.sequence, normal.sequence + 1);
+    assert_eq!(
+        receiver.decode_frame(&low).expect("decode low").len(),
+        pcm.len()
+    );
+    assert_eq!(
+        sender.set_target_bitrate_bps(5_999),
+        Err(AudioError::BitrateOutOfRange)
+    );
+}
+
+#[test]
 fn media_renegotiation_invalidates_open_audio_stream_before_next_frame() {
     let (store, call, alice, _bob) = active_call();
     let negotiations = negotiations_for(&call);

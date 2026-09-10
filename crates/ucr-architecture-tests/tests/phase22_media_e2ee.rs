@@ -112,7 +112,7 @@ fn phase22_release_truth_and_fuzz_gate_are_machine_locked() {
     let fuzz_smoke = fs::read_to_string(root.join("fuzz/run-smoke.sh")).expect("fuzz smoke");
     let threat =
         fs::read_to_string(root.join("docs/architecture/THREAT_MODEL.md")).expect("threat");
-    assert!(readme.contains("**Phase 22 — E2EE Media (Prepared/reference complete; Phase 23 Adaptive Media not started).**"));
+    assert!(readme.contains("Phase 22 now adds Prepared direct-call E2EE Media"));
     assert!(ci.contains("test -s spec/media-e2ee.md"));
     assert!(ci.contains("test -s proto/ucr/v1/media_e2ee.proto"));
     assert!(
