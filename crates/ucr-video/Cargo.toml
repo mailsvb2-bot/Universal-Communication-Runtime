@@ -1,0 +1,21 @@
+[package]
+name = "ucr-video"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+openh264 = "0.9.8"
+h264-reader = "0.8.0"
+ucr-core = { path = "../ucr-core" }
+ucr-model = { path = "../ucr-model" }
+ucr-protocol = { path = "../ucr-protocol" }
+
+[dev-dependencies]
+ucr-storage-memory = { path = "../ucr-storage-memory" }
+
+[lints]
+workspace = true

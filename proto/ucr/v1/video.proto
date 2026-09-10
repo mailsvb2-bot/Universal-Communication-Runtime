@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/identity.proto";
+import "ucr/v1/runtime.proto";
+
+enum VideoSourceKind {
+  VIDEO_SOURCE_KIND_UNSPECIFIED = 0;
+  VIDEO_SOURCE_KIND_CAMERA = 1;
+  VIDEO_SOURCE_KIND_SCREEN_SHARE = 2;
+}
+
+message VideoCodecConfig {
+  string codec_capability_id = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  uint32 frame_rate = 4;
+  uint32 target_bitrate_bps = 5;
+}
+
+// Ephemeral video stream bound to the canonical CallSession. It is not a second Call identity.
+message VideoStreamDescriptor {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId stream_id = 3;
+  PrincipalRef source = 4;
+  VideoSourceKind source_kind = 5;
+  VideoCodecConfig codec = 6;
+  OpaqueId negotiation_ref = 7;
+  uint64 negotiation_generation = 8;
+}
+
+// Encoded realtime codec payload. Phase 21 does not claim E2EE media ciphertext or RTP/SRTP.
+message EncodedVideoFrame {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId stream_id = 3;
+  PrincipalRef source = 4;
+  OpaqueId negotiation_ref = 5;
+  uint64 negotiation_generation = 6;
+  uint64 sequence = 7;
+  uint64 media_timestamp_us = 8;
+  bool keyframe = 9;
+  bytes payload = 10;
+}
+
+// Read-only binding returned by the canonical media-negotiation resolver for one Call generation.
+message VideoNegotiationBinding {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId negotiation_ref = 3;
+  uint64 negotiation_generation = 4;
+  NegotiationResult result = 5;
+  VideoCodecConfig selected_codec = 6;
+  repeated PrincipalRef negotiated_participants = 7;
+}
+
+// Phase 21 defines the language-independent video media shape. A network data-plane service is not
+// invented here: E2EE Media is Phase 22 and transport orchestration is Phase 24.

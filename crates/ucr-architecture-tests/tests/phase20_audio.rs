@@ -103,9 +103,7 @@ fn phase20_release_truth_and_repository_guards_are_machine_locked() {
     let readme = fs::read_to_string(root.join("README.md")).expect("readme");
     let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("ci");
     let spec_readme = fs::read_to_string(root.join("spec/README.md")).expect("spec readme");
-    assert!(readme.contains(
-        "**Phase 20 — Audio (Prepared/reference complete; Phase 21 Video not started).**"
-    ));
+    assert!(readme.contains("Phase 20 now adds Prepared realtime Audio"));
     assert!(ci.contains("test -s spec/audio.md"));
     assert_eq!(ci.matches("cmake build-essential").count(), 2);
     assert!(ci.contains("test -s proto/ucr/v1/audio.proto"));

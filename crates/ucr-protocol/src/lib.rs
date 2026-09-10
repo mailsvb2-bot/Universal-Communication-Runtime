@@ -30,6 +30,7 @@ mod service_control;
 mod sync;
 mod trusted_key;
 mod version;
+mod video;
 
 pub use acknowledgement::{
     AcknowledgementEnvelope, AcknowledgementError, acknowledgement_for, canonical_acknowledgement,
@@ -73,8 +74,8 @@ pub use authorization::{
     SERVICE_QUOTA_READ_PERMISSION, SERVICE_QUOTA_WRITE_PERMISSION, SYNC_READ_PERMISSION,
     SYNC_WRITE_PERMISSION, TRUSTED_SIGNING_KEY_PROVISION_PERMISSION,
     TRUSTED_SIGNING_KEY_READ_PERMISSION, TRUSTED_SIGNING_KEY_REVOKE_PERMISSION,
-    TRUSTED_SIGNING_KEY_ROTATE_PERMISSION, authorize, is_service_principal,
-    validate_permission_grant,
+    TRUSTED_SIGNING_KEY_ROTATE_PERMISSION, VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
+    authorize, is_service_principal, validate_permission_grant,
 };
 pub use call::{
     CALL_CREATION_FINGERPRINT_V1_DOMAIN, CALL_SIGNAL_FINGERPRINT_V1_DOMAIN, CallSignallingError,
@@ -197,4 +198,13 @@ pub use trusted_key::{TrustedSigningKeyError, validate_trusted_signing_key_descr
 pub use version::{
     ProtocolVersion, RUNTIME_ENVELOPE_SCHEMA_V1, VersionNegotiationError, VersionPolicy,
     VersionRange, negotiate_version, negotiate_version_sets,
+};
+pub use video::{
+    H264_LEVEL_4_0_MAX_DPB_MACROBLOCKS, H264_MAX_REFERENCE_FRAMES, H264_VIDEO_CODEC_CAPABILITY,
+    MANDATORY_VIDEO_FRAME_RATE, MANDATORY_VIDEO_HEIGHT, MANDATORY_VIDEO_WIDTH,
+    MAX_ENCODED_VIDEO_FRAME_BYTES, MAX_VIDEO_BITRATE_BPS, MAX_VIDEO_FRAME_RATE, MAX_VIDEO_HEIGHT,
+    MAX_VIDEO_WIDTH, MIN_VIDEO_BITRATE_BPS, SCREEN_SHARE_VIDEO_CAPABILITY, VIDEO_MEDIA_CAPABILITY,
+    VideoProtocolError, canonical_video_codec_config, canonical_video_stream_descriptor,
+    h264_reference_coded_dimensions, h264_reference_max_dpb_frames, phase21_video_capabilities,
+    required_video_capability_for_source, validate_video_frame_for_stream, video_rgb8_len,
 };
