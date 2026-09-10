@@ -5,6 +5,7 @@ use core::fmt;
 mod audio;
 mod call;
 mod group;
+mod video;
 pub use audio::{
     AudioChannelLayout, AudioCodecConfig, AudioFrameDuration, AudioStreamDescriptor,
     EncodedAudioFrame,
@@ -18,6 +19,7 @@ pub use group::{
     GroupMediaState, GroupMemberState, GroupMembership, GroupOwnership, GroupPermission,
     GroupRecord, GroupRole, PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,
 };
+pub use video::{EncodedVideoFrame, VideoCodecConfig, VideoSourceKind, VideoStreamDescriptor};
 
 /// Opaque canonical identifier value.
 ///
@@ -133,6 +135,7 @@ id_type!(MessageId);
 id_type!(AttachmentId);
 id_type!(CallId);
 id_type!(AudioStreamId);
+id_type!(VideoStreamId);
 id_type!(SessionId);
 id_type!(DeliveryId);
 id_type!(IntegrationId);

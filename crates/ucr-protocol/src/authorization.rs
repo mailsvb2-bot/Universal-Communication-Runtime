@@ -45,6 +45,8 @@ pub const CALL_OBSERVE_PERMISSION: &str = "ucr.call.observe";
 pub const CALL_SIGNAL_PERMISSION: &str = "ucr.call.signal";
 pub const AUDIO_SEND_PERMISSION: &str = "ucr.call.audio.send";
 pub const AUDIO_RECEIVE_PERMISSION: &str = "ucr.call.audio.receive";
+pub const VIDEO_SEND_PERMISSION: &str = "ucr.call.video.send";
+pub const VIDEO_RECEIVE_PERMISSION: &str = "ucr.call.video.receive";
 pub const COMMUNICATION_INTENT_READ_PERMISSION: &str = "ucr.intent.read";
 pub const COMMUNICATION_INTENT_WRITE_PERMISSION: &str = "ucr.intent.write";
 pub const DELIVERY_READ_PERMISSION: &str = "ucr.delivery.read";
@@ -98,6 +100,8 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     CALL_SIGNAL_PERMISSION,
     AUDIO_SEND_PERMISSION,
     AUDIO_RECEIVE_PERMISSION,
+    VIDEO_SEND_PERMISSION,
+    VIDEO_RECEIVE_PERMISSION,
     COMMUNICATION_INTENT_READ_PERMISSION,
     COMMUNICATION_INTENT_WRITE_PERMISSION,
     DELIVERY_READ_PERMISSION,

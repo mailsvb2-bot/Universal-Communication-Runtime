@@ -15,6 +15,7 @@ ucr-crypto = { path = "../crates/ucr-crypto" }
 ucr-model = { path = "../crates/ucr-model" }
 ucr-protocol = { path = "../crates/ucr-protocol" }
 ucr-transport-internet = { path = "../crates/ucr-transport-internet", features = ["fuzzing"] }
+ucr-video = { path = "../crates/ucr-video" }
 
 [[bin]]
 name = "framing_parser"
@@ -47,6 +48,13 @@ bench = false
 [[bin]]
 name = "internet_transport_wire"
 path = "fuzz_targets/internet_transport_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h264_sps_preflight"
+path = "fuzz_targets/h264_sps_preflight.rs"
 test = false
 doc = false
 bench = false
