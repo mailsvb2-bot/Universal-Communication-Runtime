@@ -1673,6 +1673,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-transport-orchestrator"
+version = "0.0.1"
+dependencies = [
+ "ucr-core",
+ "ucr-model",
+ "ucr-protocol",
+]
+
+[[package]]
 name = "ucr-video"
 version = "0.0.1"
 dependencies = [

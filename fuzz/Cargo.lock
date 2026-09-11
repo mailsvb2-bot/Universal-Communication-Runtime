@@ -840,11 +840,13 @@ name = "ucr-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "ucr-core",
  "ucr-crypto",
  "ucr-media-adaptive",
  "ucr-model",
  "ucr-protocol",
  "ucr-transport-internet",
+ "ucr-transport-orchestrator",
  "ucr-video",
 ]
 
@@ -878,6 +880,15 @@ dependencies = [
  "sha2",
  "ucr-core",
  "ucr-crypto",
+ "ucr-model",
+ "ucr-protocol",
+]
+
+[[package]]
+name = "ucr-transport-orchestrator"
+version = "0.0.1"
+dependencies = [
+ "ucr-core",
  "ucr-model",
  "ucr-protocol",
 ]

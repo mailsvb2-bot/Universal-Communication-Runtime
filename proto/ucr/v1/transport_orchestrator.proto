@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/adaptive_media.proto";
+import "ucr/v1/common.proto";
+
+enum TransportRoutingHint {
+  TRANSPORT_ROUTING_HINT_UNSPECIFIED = 0;
+  TRANSPORT_ROUTING_HINT_URGENT = 1;
+  TRANSPORT_ROUTING_HINT_PREFER_LOCAL = 2;
+  TRANSPORT_ROUTING_HINT_AVOID_EXPENSIVE = 3;
+}
+
+// Ephemeral route-quality evidence. Provider availability is intentionally not caller supplied:
+// the reference runtime reads TransportProvider.health() directly.
+message TransportRouteTelemetry {
+  uint64 estimated_bandwidth_bps = 1;
+  uint32 packet_loss_basis_points = 2;
+  uint32 jitter_ms = 3;
+  uint32 rtt_ms = 4;
+  uint64 cost_microunits = 5;
+  uint32 energy_cost_percent = 6;
+  uint32 reliability_basis_points = 7;
+  bool recipient_reachable = 8;
+  optional string privacy_profile = 9;
+  optional string region = 10;
+}
+
+// Local resource pressure used for ranking; it is not peer-supplied identity or policy evidence.
+message TransportResourceSnapshot {
+  uint32 battery_percent = 1;
+  bool external_power = 2;
+  MediaThermalState thermal_state = 3;
+}
+
+// Public route decision deliberately omits EndpointAddress. Rank is derived by UCR; callers do not
+// supply manual endpoint/provider ordering.
+message TransportRouteDecision {
+  OpaqueId endpoint_id = 1;
+  string transport_capability = 2;
+  uint32 rank = 3;
+}
+
+message TransportOrchestrationDecision {
+  repeated TransportRouteDecision ranked_routes = 1;
+}
+
+// Phase 24 defines bounded planning data only. It does not define a second transport service,
+// automatic retry/failover, multipath execution, Relay, discovery, or durable routing graph.

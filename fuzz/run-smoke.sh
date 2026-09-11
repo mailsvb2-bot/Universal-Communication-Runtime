@@ -31,3 +31,4 @@ run_target internet_transport_wire 131072 768
 run_target h264_sps_preflight 131072 768
 run_target media_e2ee_frame 131072 768
 run_target adaptive_media_telemetry 64 512
+run_target transport_orchestrator_plan 128 512
