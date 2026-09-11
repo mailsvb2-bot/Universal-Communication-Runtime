@@ -95,3 +95,10 @@ path = "fuzz_targets/offline_group_replica.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "store_forward_job"
+path = "fuzz_targets/store_forward_job.rs"
+test = false
+doc = false
+bench = false

@@ -8,6 +8,7 @@ mod call;
 mod group;
 mod media_e2ee;
 mod offline_group;
+mod store_forward;
 mod transport_failover;
 mod transport_orchestrator;
 mod video;
@@ -32,6 +33,9 @@ pub use media_e2ee::{EncryptedMediaFrame, MediaE2eeContext, MediaE2eeFrameHeader
 pub use offline_group::{
     OfflineGroupChangePage, OfflineGroupChangeReplica, OfflineGroupCursor, OfflineGroupMessagePage,
     OfflineGroupMessageReplica, OfflineGroupStreamKind,
+};
+pub use store_forward::{
+    StoreForwardJob, StoreForwardLease, StoreForwardOutcome, StoreForwardPolicy,
 };
 pub use transport_failover::{
     TransportFailoverAttemptDecision, TransportFailoverAttemptOutcome, TransportFailoverDecision,
@@ -160,6 +164,8 @@ id_type!(AudioStreamId);
 id_type!(VideoStreamId);
 id_type!(SessionId);
 id_type!(DeliveryId);
+id_type!(StoreForwardId);
+id_type!(StoreForwardLeaseId);
 id_type!(IntegrationId);
 id_type!(CommandId);
 id_type!(EventId);

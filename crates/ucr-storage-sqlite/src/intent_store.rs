@@ -837,7 +837,7 @@ mod tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF;
-                     DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions;
+                     DROP TABLE IF EXISTS store_forward_jobs; DROP TABLE IF EXISTS store_forward_tombstones; DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions;
                      DROP TABLE communication_intent_transports;
                      DROP TABLE communication_intents;
                      DROP TABLE IF EXISTS group_changes; DROP TABLE IF EXISTS group_bridge_mappings; DROP TABLE IF EXISTS group_memberships; DROP TABLE IF EXISTS groups; PRAGMA user_version=15;",

@@ -54,6 +54,7 @@ fn phase18_groups_reuse_canonical_owners_and_are_restart_safe() {
     assert!(
         sqlite_root.contains("const SQLITE_SCHEMA_V21: u32 = 21")
             || sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 21")
+            || sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 24")
     );
     assert!(sqlite_root.contains("migrate_v20_to_v21"));
     assert!(spec.contains("Status: **Prepared reference implementation**, not Production."));

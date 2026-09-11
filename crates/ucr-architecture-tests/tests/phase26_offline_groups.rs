@@ -41,7 +41,7 @@ fn phase26_one_hop_and_schema_boundary_is_machine_locked() {
 
     assert!(protocol.contains("MAX_OFFLINE_GROUP_PAGE_ITEMS: usize = 256"));
     assert!(protocol.contains("UCR-OFFLINE-GROUP-CURSOR-V1"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 23"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 24"));
     assert!(sqlite_root.contains("migrate_v22_to_v23"));
     assert!(!proto.contains("service OfflineGroup"));
     assert!(!proto.contains("EndpointAddress"));
@@ -66,7 +66,7 @@ fn phase26_release_truth_contract_docs_and_fuzz_are_machine_locked() {
     .expect("ADR 0064");
 
     assert!(readme.contains(
-        "**Phase 26 — Offline Groups (Prepared/reference complete; Phase 27 Store-and-Forward not started).**"
+        "**Phase 27 — Store-and-Forward (Prepared/reference complete; Relay and multipath not started).**"
     ));
     assert!(ci.contains("test -s spec/offline-groups.md"));
     assert!(ci.contains("test -s proto/ucr/v1/offline_groups.proto"));

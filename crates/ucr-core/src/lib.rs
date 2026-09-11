@@ -9,6 +9,7 @@ mod integration_api;
 mod recovery_workflow;
 mod service_auth;
 mod service_request;
+mod store_forward;
 
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CapabilityDescriptor,
@@ -52,6 +53,7 @@ pub use service_request::{
     ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaClockError,
     SystemServiceQuotaClock,
 };
+pub use store_forward::StoreForwardStore;
 
 /// A route candidate is transient runtime state, never canonical identity.
 #[derive(Debug, Clone, PartialEq, Eq)]

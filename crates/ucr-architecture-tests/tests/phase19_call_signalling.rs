@@ -47,7 +47,7 @@ fn phase19_call_signalling_reuses_canonical_owners_and_is_restart_safe() {
     assert!(sqlite.contains("reconnecting_principal_id"));
     assert!(sqlite.contains("reconnecting_principal_kind"));
     assert!(sqlite.contains("call_signal_reserves_event_id"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 23"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 24"));
     assert!(sqlite_root.contains("migrate_v21_to_v22"));
     assert!(proto.contains("service CallService"));
     assert!(proto.contains("rpc StartCall"));

@@ -1384,7 +1384,7 @@ mod tests {
             let connection = rusqlite::Connection::open(db.path()).expect("downgrade fixture");
             connection
                 .execute_batch(
-                    "DROP TABLE IF EXISTS offline_group_messages;
+                    "DROP TABLE IF EXISTS store_forward_jobs;\n                     DROP TABLE IF EXISTS store_forward_tombstones;\n                     DROP TABLE IF EXISTS offline_group_messages;
                      DROP TABLE IF EXISTS offline_group_changes;
                      DROP TRIGGER IF EXISTS event_id_owner_events;
                      DROP TRIGGER IF EXISTS event_id_owner_group_changes;

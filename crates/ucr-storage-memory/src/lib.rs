@@ -2,6 +2,7 @@
 
 mod call_store;
 mod group_store;
+mod store_forward_store;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -35,8 +36,8 @@ use ucr_model::{
     OfflineGroupMessageReplica, OpaqueId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan,
     RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
     ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy,
-    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
-    TrustedSigningKeyState,
+    SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId, SyncCheckpoint, SyncSession,
+    SyncState, TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -76,6 +77,7 @@ type IntentKey = (ScopeKey, String);
 type IdentityKey = (ScopeKey, String);
 type ExternalIdentityBindingKey = (ScopeKey, String, String, Vec<u8>);
 type DeliveryKey = (ScopeKey, String);
+type StoreForwardKey = (ScopeKey, String);
 type SyncKey = (ScopeKey, String);
 type TrustedSigningKeyRef = (ScopeKey, String);
 type TrustedSigningDeviceRef = (ScopeKey, String);
@@ -114,6 +116,13 @@ struct MemoryEventSubscriptionState {
     dead_letters: Vec<EventDeadLetter>,
 }
 
+#[derive(Debug, Clone)]
+struct MemoryStoreForwardState {
+    job: StoreForwardJob,
+    fingerprint: [u8; 32],
+    lease: Option<(StoreForwardLeaseId, i64)>,
+}
+
 #[derive(Default)]
 struct MemoryState {
     accepted: HashMap<CommandKey, CommandEnvelope>,
@@ -141,6 +150,8 @@ struct MemoryState {
     external_identity_bindings: HashMap<ExternalIdentityBindingKey, ExternalIdentityBinding>,
     deliveries: HashMap<DeliveryKey, DeliveryAttempt>,
     delivery_evidence: HashMap<DeliveryKey, Vec<DeliveryEvidence>>,
+    store_forward_jobs: HashMap<StoreForwardKey, MemoryStoreForwardState>,
+    store_forward_tombstones: HashMap<StoreForwardKey, [u8; 32]>,
     sync_sessions: HashMap<SyncKey, SyncSession>,
     sync_checkpoints: HashMap<SyncKey, Vec<SyncCheckpoint>>,
     trusted_signing_keys: HashMap<TrustedSigningKeyRef, TrustedSigningKeyRecord>,
@@ -994,6 +1005,13 @@ fn delivery_key(scope: &TenantScope, delivery_id: &DeliveryId) -> DeliveryKey {
     (
         scope_key(scope),
         delivery_id.as_opaque().as_str().to_owned(),
+    )
+}
+
+fn store_forward_key(scope: &TenantScope, store_forward_id: &StoreForwardId) -> StoreForwardKey {
+    (
+        scope_key(scope),
+        store_forward_id.as_opaque().as_str().to_owned(),
     )
 }
 

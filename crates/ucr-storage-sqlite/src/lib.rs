@@ -18,6 +18,7 @@ mod recovery_plan;
 mod replay;
 mod service_control_store;
 mod service_credential_store;
+mod store_forward_store;
 mod sync_store;
 mod trusted_key_store;
 
@@ -55,7 +56,8 @@ const SQLITE_SCHEMA_V19: u32 = 19;
 const SQLITE_SCHEMA_V20: u32 = 20;
 const SQLITE_SCHEMA_V21: u32 = 21;
 const SQLITE_SCHEMA_V22: u32 = 22;
-pub const SQLITE_SCHEMA_VERSION: u32 = 23;
+const SQLITE_SCHEMA_V23: u32 = 23;
+pub const SQLITE_SCHEMA_VERSION: u32 = 24;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -407,7 +409,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return offline_group_store::verify_schema_v23(connection);
+        return store_forward_store::verify_schema_v24(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -440,11 +442,12 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V20 => migrate_v20_to_v21(connection)?,
             SQLITE_SCHEMA_V21 => migrate_v21_to_v22(connection)?,
             SQLITE_SCHEMA_V22 => migrate_v22_to_v23(connection)?,
+            SQLITE_SCHEMA_V23 => migrate_v23_to_v24(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    offline_group_store::verify_schema_v23(connection)
+    store_forward_store::verify_schema_v24(connection)
 }
 
 fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -495,6 +498,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     group_store::create_v21_objects(&transaction)?;
     call_store::create_v22_objects(&transaction)?;
     offline_group_store::create_v23_objects(&transaction)?;
+    store_forward_store::create_v24_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -835,12 +839,27 @@ fn migrate_v22_to_v23(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     offline_group_store::create_v23_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V23)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     offline_group_store::verify_schema_v23(connection)
+}
+
+fn migrate_v23_to_v24(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    offline_group_store::verify_schema_v23(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    store_forward_store::create_v24_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    store_forward_store::verify_schema_v24(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1137,7 +1156,9 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 #[cfg(test)]
 fn test_remove_v20_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
     connection.execute_batch(
-        "DROP TABLE IF EXISTS offline_group_messages;
+        "DROP TABLE IF EXISTS store_forward_jobs;
+         DROP TABLE IF EXISTS store_forward_tombstones;
+         DROP TABLE IF EXISTS offline_group_messages;
          DROP TABLE IF EXISTS offline_group_changes;
          DROP TRIGGER IF EXISTS event_id_owner_events;
          DROP TRIGGER IF EXISTS event_id_owner_group_changes;
@@ -1764,7 +1785,7 @@ mod tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF;
-                     DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices; DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;
+                     DROP TABLE IF EXISTS store_forward_jobs; DROP TABLE IF EXISTS store_forward_tombstones; DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices; DROP TRIGGER service_audit_no_update; DROP TRIGGER service_audit_no_delete; DROP INDEX service_audit_scope_sequence; DROP TABLE service_audit_records; DROP TABLE service_quota_usage; DROP TABLE service_quota_policies; DROP TABLE service_credentials; DROP TABLE permission_grants; DROP TABLE trusted_signing_keys;
                      DROP TABLE message_extensions;
                      DROP TABLE command_extensions;
                      DROP TABLE command_protocol_metadata;

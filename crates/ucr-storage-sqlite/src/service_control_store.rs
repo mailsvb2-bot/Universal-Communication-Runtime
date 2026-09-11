@@ -1354,7 +1354,7 @@ mod tests {
                 "DROP TRIGGER service_audit_operation_no_update;
                  DROP TRIGGER service_audit_operation_no_delete;
                  DROP INDEX service_audit_operation_lookup;
-                 DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations;",
+                 DROP TABLE IF EXISTS store_forward_jobs; DROP TABLE IF EXISTS store_forward_tombstones; DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations;",
             )
             .expect("restore exact v16 shape");
         crate::test_remove_v20_objects(&connection).expect("remove future v20 objects");
@@ -1413,7 +1413,7 @@ mod tests {
         let connection = Connection::open(db.path()).expect("raw connection");
         connection
             .execute_batch(
-                "DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices;
+                "DROP TABLE IF EXISTS store_forward_jobs; DROP TABLE IF EXISTS store_forward_tombstones; DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices;
                  DROP TRIGGER service_audit_no_update;
                  DROP TRIGGER service_audit_no_delete;
                  DROP INDEX service_audit_scope_sequence;

@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+
+// Phase 27 Store-and-Forward describes bounded sender-side durable scheduling data.
+// It is not a Relay, Mesh, route graph, transport service, or second Delivery state machine.
+message StoreForwardPolicy {
+  uint32 max_delivery_attempts = 1;
+  uint64 base_retry_delay_ms = 2;
+  uint64 max_retry_delay_ms = 3;
+  uint64 lease_duration_ms = 4;
+  optional int64 expires_at_unix_ms = 5;
+}
+
+message StoreForwardJob {
+  OpaqueId store_forward_id = 1;
+  TenantScope scope = 2;
+  OpaqueId intent_id = 3;
+  OpaqueId message_id = 4;
+  bytes encrypted_envelope = 5;
+  StoreForwardPolicy policy = 6;
+  uint32 attempts_used = 7;
+  int64 next_attempt_at_unix_ms = 8;
+  optional OpaqueId last_delivery_id = 9;
+}
+
+enum StoreForwardOutcome {
+  STORE_FORWARD_OUTCOME_UNSPECIFIED = 0;
+  STORE_FORWARD_OUTCOME_ACCEPTED_BY_TRANSPORT = 1;
+  STORE_FORWARD_OUTCOME_RESCHEDULED_NO_ROUTE = 2;
+  STORE_FORWARD_OUTCOME_RESCHEDULED_AFTER_FAILURE = 3;
+  STORE_FORWARD_OUTCOME_ACCEPTANCE_UNKNOWN = 4;
+  STORE_FORWARD_OUTCOME_ATTEMPTS_EXHAUSTED = 5;
+  STORE_FORWARD_OUTCOME_EXPIRED = 6;
+  STORE_FORWARD_OUTCOME_NOT_DUE = 7;
+  STORE_FORWARD_OUTCOME_BUSY = 8;
+}
+
+// No service and no public lease message are defined here. Scheduling leases are store-private
+// concurrency metadata; transport execution continues to use the canonical Transport owners.

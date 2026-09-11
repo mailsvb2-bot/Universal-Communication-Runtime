@@ -99,7 +99,7 @@ fn phase22_does_not_create_second_call_group_transport_adaptive_or_sfu_brain() {
     assert!(!manifest.contains("openssl"));
     let sqlite =
         fs::read_to_string(root.join("crates/ucr-storage-sqlite/src/lib.rs")).expect("sqlite");
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 23"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 24"));
 }
 
 #[test]
