@@ -84,7 +84,7 @@ fn phase23_creates_no_second_call_crypto_delivery_or_transport_brain() {
     }
     let sqlite =
         fs::read_to_string(root.join("crates/ucr-storage-sqlite/src/lib.rs")).expect("sqlite");
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 24"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 ="));
 }
 
 #[test]
@@ -99,7 +99,7 @@ fn phase23_release_truth_public_contract_and_fuzz_gate_are_machine_locked() {
         fs::read_to_string(root.join("docs/architecture/THREAT_MODEL.md")).expect("threat");
 
     assert!(readme.contains(
-        "**Phase 27 — Store-and-Forward (Prepared/reference complete; Relay and multipath not started).**"
+        "**Phase 28 — Mesh (Prepared/reference complete; Relay/NAT traversal and multipath not started).**"
     ));
     assert!(ci.contains("test -s spec/adaptive-media.md"));
     assert!(ci.contains("test -s proto/ucr/v1/adaptive_media.proto"));

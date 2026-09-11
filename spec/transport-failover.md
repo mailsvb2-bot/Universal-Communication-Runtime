@@ -46,5 +46,5 @@ payload bytes, or receipt material. Route telemetry remains non-authoritative ra
 ## Persistence and later phases
 
 Failover policy and decision state are ephemeral in Phase 25. No SQLite migration is introduced;
-schema remains v22. Phase 26 Offline Groups, Phase 27 Store-and-Forward, Phase 28 Mesh, Relay/NAT
-traversal, durable retry scheduling, and multipath execution remain later owners.
+schema remains v22. Phase 26 Offline Groups, Phase 27 Store-and-Forward and Phase 28 Mesh remain separate owners; Relay/NAT
+traversal and multipath execution remain later owners.

@@ -7,6 +7,7 @@ mod audio;
 mod call;
 mod group;
 mod media_e2ee;
+mod mesh;
 mod offline_group;
 mod store_forward;
 mod transport_failover;
@@ -1605,3 +1606,4 @@ impl fmt::Debug for ExternalIdentityBinding {
             .finish()
     }
 }
+pub use mesh::{MeshCursor, MeshGroupMessagePage, MeshGroupMessageReplica};

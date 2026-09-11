@@ -8,7 +8,7 @@ Phase 27 adds restart-safe sender-side durable scheduling over the existing cano
 
 The Prepared reference runtime accepts an already-encrypted opaque envelope associated with one existing canonical `CommunicationIntent` and one existing persisted canonical `MessageEnvelope`. `DeliveryPolicy::BestEffort` is excluded. Expiring jobs require an explicit expiry.
 
-The capability is `ucr.delivery.store_forward`. The current Phase-27 execution path intentionally admits only the already-implemented direct `ucr.transport.internet.tcp` and `ucr.transport.local.tcp` capabilities. Relay, intermediary nodes, discovery and mesh remain later work.
+The capability is `ucr.delivery.store_forward`. The current Phase-27 execution path intentionally admits only the already-implemented direct `ucr.transport.internet.tcp` and `ucr.transport.local.tcp` capabilities. Phase 28 Mesh is a separate signed-Group-Message peer layer; Relay, intermediary infrastructure and discovery remain later work.
 
 ## Durable scheduling owner
 
@@ -20,7 +20,7 @@ Jobs are bounded to at most 64 provider-bearing Delivery attempts, pages are bou
 
 ## Attempt identity and duplicate safety
 
-No-route planning does not consume a Delivery attempt. Only after route planning succeeds does the scheduler create or resume a canonical `DeliveryAttempt`, move it through `Persisted -> Encrypted -> Queued -> RoutePlanned -> InFlight`, and invoke a provider.
+No-route planning does not consume a Delivery attempt. Route planning receives the current caller-supplied resource snapshot and bounded routing hints on every processing iteration; Store-and-Forward never fabricates battery, power, or thermal state. Only after route planning succeeds does the scheduler create or resume a canonical `DeliveryAttempt`, move it through `Persisted -> Encrypted -> Queued -> RoutePlanned -> InFlight`, and invoke a provider.
 
 Each real provider invocation is bound to exactly one canonical `DeliveryId`. Phase 27 invokes the existing Phase-25 failover engine with `max_route_attempts = 1`; a later proven retry receives a new deterministic `DeliveryId`. A terminal Delivery attempt is never rewound in place.
 
@@ -52,4 +52,4 @@ The tombstone prevents a caller from resurrecting a successfully completed or ex
 
 ## Non-claims
 
-Phase 27 does not claim exactly-once delivery, recipient delivery/read evidence, Relay, multi-hop forwarding, mesh, multipath simultaneous execution, NAT traversal, discovery, Bridge forwarding, SFU/conferencing, production worker deployment, or automatic resolution of ambiguous `InFlight` attempts. A later phase must add any intermediary node as an explicit trust boundary rather than widening this sender-side scheduler silently.
+Phase 27 does not itself claim exactly-once delivery, recipient delivery/read evidence, Relay, multi-hop forwarding, mesh, multipath simultaneous execution, NAT traversal, discovery, Bridge forwarding, SFU/conferencing, production worker deployment, or automatic resolution of ambiguous `InFlight` attempts. A later phase must add any intermediary node as an explicit trust boundary rather than widening this sender-side scheduler silently.

@@ -11,6 +11,7 @@ mod group_store;
 mod identity_binding_store;
 mod identity_store;
 mod intent_store;
+mod mesh_store;
 mod message_store;
 mod offline_group_store;
 mod permission_store;
@@ -57,7 +58,8 @@ const SQLITE_SCHEMA_V20: u32 = 20;
 const SQLITE_SCHEMA_V21: u32 = 21;
 const SQLITE_SCHEMA_V22: u32 = 22;
 const SQLITE_SCHEMA_V23: u32 = 23;
-pub const SQLITE_SCHEMA_VERSION: u32 = 24;
+const SQLITE_SCHEMA_V24: u32 = 24;
+pub const SQLITE_SCHEMA_VERSION: u32 = 25;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -409,7 +411,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return store_forward_store::verify_schema_v24(connection);
+        return mesh_store::verify_schema_v25(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -443,11 +445,12 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V21 => migrate_v21_to_v22(connection)?,
             SQLITE_SCHEMA_V22 => migrate_v22_to_v23(connection)?,
             SQLITE_SCHEMA_V23 => migrate_v23_to_v24(connection)?,
+            SQLITE_SCHEMA_V24 => migrate_v24_to_v25(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    store_forward_store::verify_schema_v24(connection)
+    mesh_store::verify_schema_v25(connection)
 }
 
 fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -499,6 +502,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     call_store::create_v22_objects(&transaction)?;
     offline_group_store::create_v23_objects(&transaction)?;
     store_forward_store::create_v24_objects(&transaction)?;
+    mesh_store::create_v25_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -854,12 +858,27 @@ fn migrate_v23_to_v24(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     store_forward_store::create_v24_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V24)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     store_forward_store::verify_schema_v24(connection)
+}
+
+fn migrate_v24_to_v25(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    store_forward_store::verify_schema_v24(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    mesh_store::create_v25_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    mesh_store::verify_schema_v25(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1156,7 +1175,8 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 #[cfg(test)]
 fn test_remove_v20_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
     connection.execute_batch(
-        "DROP TABLE IF EXISTS store_forward_jobs;
+        "DROP TABLE IF EXISTS mesh_group_message_hops;
+         DROP TABLE IF EXISTS store_forward_jobs;
          DROP TABLE IF EXISTS store_forward_tombstones;
          DROP TABLE IF EXISTS offline_group_messages;
          DROP TABLE IF EXISTS offline_group_changes;

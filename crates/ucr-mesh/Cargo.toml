@@ -1,0 +1,20 @@
+[package]
+name = "ucr-mesh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ucr-core = { path = "../ucr-core" }
+ucr-crypto = { path = "../ucr-crypto" }
+ucr-model = { path = "../ucr-model" }
+ucr-offline-groups = { path = "../ucr-offline-groups" }
+ucr-protocol = { path = "../ucr-protocol" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+ucr-storage-memory = { path = "../ucr-storage-memory" }

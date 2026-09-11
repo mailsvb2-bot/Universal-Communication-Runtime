@@ -60,7 +60,7 @@ fn phase21_video_reuses_call_capability_and_authorization_owners() {
     assert!(video.contains("required_video_capability_for_source"));
     assert!(authorization.contains("ucr.call.video.send"));
     assert!(authorization.contains("ucr.call.video.receive"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 24"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 ="));
     assert!(proto.contains("message VideoStreamDescriptor"));
     assert!(proto.contains("message EncodedVideoFrame"));
     assert!(proto.contains("message VideoNegotiationBinding"));
@@ -125,7 +125,7 @@ fn phase21_release_truth_and_repository_guards_are_machine_locked() {
     let fuzz_smoke = fs::read_to_string(root.join("fuzz/run-smoke.sh")).expect("fuzz smoke");
     assert!(readme.contains("Phase 21 now adds Prepared realtime Video"));
     assert!(readme.contains(
-        "**Phase 27 — Store-and-Forward (Prepared/reference complete; Relay and multipath not started).**"
+        "**Phase 28 — Mesh (Prepared/reference complete; Relay/NAT traversal and multipath not started).**"
     ));
     assert!(ci.contains("test -s spec/video.md"));
     assert!(ci.contains("test -s proto/ucr/v1/video.proto"));

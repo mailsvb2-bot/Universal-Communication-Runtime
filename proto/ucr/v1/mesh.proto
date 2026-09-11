@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/offline_groups.proto";
+
+// Opaque source-sequence cursor bound to one exact scope and Group.
+message MeshCursor {
+  bytes token = 1;
+}
+
+// One signed canonical Group Message plus the bounded Device path that has already carried it.
+// Device IDs are routing metadata for loop prevention, not Identity or Delivery evidence.
+message MeshGroupMessageReplica {
+  OfflineGroupMessageReplica record = 1;
+  repeated OpaqueId forward_device_ids = 2;
+}
+
+message MeshGroupMessagePage {
+  TenantScope scope = 1;
+  OpaqueId group_id = 2;
+  repeated MeshGroupMessageReplica records = 3;
+  optional MeshCursor next_cursor = 4;
+}
+
+// Phase 28 defines data parity only. Existing Sync/Crypto/Transport owners carry peer sessions.
+// No Relay, discovery, topology service, NAT traversal, or multipath service is introduced here.

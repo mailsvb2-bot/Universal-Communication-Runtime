@@ -58,4 +58,4 @@ Migration v22→v23 creates both sidecars empty. It never invents replication ge
 
 ## Non-claims
 
-Phase 26 does not claim discovery, mesh routing, intermediary relay, Store-and-Forward, exactly-once delivery, group E2EE/MLS, automatic conflict repair, SFU, conferencing, or production listener lifecycle. Phase 27 Store-and-Forward remains not started.
+Phase 26 itself does not claim discovery, mesh routing, intermediary relay, Store-and-Forward, exactly-once delivery, group E2EE/MLS, automatic conflict repair, SFU, conferencing, or production listener lifecycle. Phase 27 Store-and-Forward and Phase 28 signed-Group-Message Mesh are separate later layers and do not widen this one-hop contract.

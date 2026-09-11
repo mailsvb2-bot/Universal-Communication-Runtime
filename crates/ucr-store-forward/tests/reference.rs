@@ -13,9 +13,10 @@ use ucr_model::{
     ActorId, ActorKind, ActorRef, CapabilityDescriptor, CapabilityMaturity, CommunicationIntent,
     ConversationKind, ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy,
     DeliveryState, DeviceId, DeviceRef, EndpointAddress, EndpointDescriptor, EndpointId,
-    EndpointKind, IdentityId, IntentConstraints, IntentId, MessageEnvelope, MessageId, OpaqueId,
-    OriginRef, PrincipalId, StoreForwardId, StoreForwardJob, StoreForwardOutcome,
-    StoreForwardPolicy, TenantId, TenantScope, TransportRouteTelemetry,
+    EndpointKind, IdentityId, IntentConstraints, IntentId, MediaThermalState, MessageEnvelope,
+    MessageId, OpaqueId, OriginRef, PrincipalId, StoreForwardId, StoreForwardJob,
+    StoreForwardOutcome, StoreForwardPolicy, TenantId, TenantScope, TransportResourceSnapshot,
+    TransportRouteTelemetry,
 };
 use ucr_storage_memory::MemoryLocalStore;
 use ucr_store_forward::{
@@ -137,6 +138,14 @@ fn scope() -> TenantScope {
 
 fn target_identity() -> IdentityId {
     IdentityId::from_opaque(oid("sf-target"))
+}
+
+fn resources() -> TransportResourceSnapshot {
+    TransportResourceSnapshot {
+        battery_percent: 80,
+        external_power: false,
+        thermal_state: MediaThermalState::Nominal,
+    }
 }
 
 fn conversation() -> ConversationRecord {
@@ -289,7 +298,13 @@ fn no_route_reschedules_without_consuming_delivery_attempt() {
     runtime.enqueue(&initial).expect("enqueue");
 
     assert_eq!(
-        runtime.process_one(&scope(), &initial.store_forward_id, Vec::new()),
+        runtime.process_one(
+            &scope(),
+            &initial.store_forward_id,
+            resources(),
+            &[],
+            Vec::new()
+        ),
         Ok(StoreForwardOutcome::RescheduledNoRoute)
     );
     let loaded = store
@@ -316,6 +331,8 @@ fn proven_failure_gets_new_delivery_id_and_later_success_tombstones_job() {
         runtime.process_one(
             &scope(),
             &initial.store_forward_id,
+            resources(),
+            &[],
             vec![option(&failing, "sf-endpoint-fail")],
         ),
         Ok(StoreForwardOutcome::RescheduledAfterFailure)
@@ -344,6 +361,8 @@ fn proven_failure_gets_new_delivery_id_and_later_success_tombstones_job() {
         runtime.process_one(
             &scope(),
             &initial.store_forward_id,
+            resources(),
+            &[],
             vec![option(&accepted, "sf-endpoint-ok")],
         ),
         Ok(StoreForwardOutcome::AcceptedByTransport)
@@ -377,6 +396,8 @@ fn ambiguous_acceptance_blocks_automatic_replay_even_after_lease_expiry() {
         runtime.process_one(
             &scope(),
             &initial.store_forward_id,
+            resources(),
+            &[],
             vec![option(&provider, "sf-endpoint-unknown")],
         ),
         Ok(StoreForwardOutcome::AcceptanceUnknown)
@@ -402,6 +423,8 @@ fn ambiguous_acceptance_blocks_automatic_replay_even_after_lease_expiry() {
         runtime.process_one(
             &scope(),
             &initial.store_forward_id,
+            resources(),
+            &[],
             vec![option(&provider, "sf-endpoint-unknown-2")],
         ),
         Ok(StoreForwardOutcome::AcceptanceUnknown)

@@ -24,8 +24,7 @@ route graph, transport service, or exactly-once claim is introduced.
 ## Consequences
 Failover is deliberately unavailable when a provider cannot prove non-acceptance. This may reduce
 availability but preserves the Canon's duplicate-safety requirement. Public decisions remain
-address-redacted. State is ephemeral and SQLite stays at schema v22. Phase 26 Offline Groups and
-Phase 27 Store-and-Forward are not started.
+address-redacted. State is ephemeral and SQLite stays at schema v22. Phase 26 Offline Groups, Phase 27 Store-and-Forward, and Phase 28 Mesh are separate later owners and are not implemented by Phase 25.
 
 ## Rejected alternatives
 1. Fail over on Timeout/Unavailable alone: rejected because acceptance can be ambiguous.

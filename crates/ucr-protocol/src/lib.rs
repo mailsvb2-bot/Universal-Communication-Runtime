@@ -23,6 +23,7 @@ mod id;
 mod identity;
 mod intent;
 mod media_e2ee;
+mod mesh;
 mod message;
 mod message_signature;
 mod offline_group;
@@ -176,6 +177,12 @@ pub use media_e2ee::{
     MEDIA_E2EE_SESSION_BINDING_LEN, MediaE2eeProtocolError, canonical_media_e2ee_context,
     media_e2ee_context_binding, media_e2ee_frame_aad, phase22_media_e2ee_capabilities,
     validate_encrypted_media_frame,
+};
+pub use mesh::{
+    MAX_MESH_GROUP_PAGE_ITEMS, MAX_MESH_PATH_DEVICES, MESH_CURSOR_LEN, MESH_GROUPS_CAPABILITY,
+    MeshError, append_mesh_recipient, canonical_mesh_group_message_replica, mesh_group_cursor,
+    mesh_group_cursor_sequence, phase28_mesh_capabilities, validate_mesh_group_page_size,
+    validate_mesh_source,
 };
 pub use message::{
     ConversationError, EXTERNAL_MESSAGE_ID_LIMIT, EXTERNAL_MESSAGE_MAPPING_LIMIT,

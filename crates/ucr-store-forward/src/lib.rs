@@ -9,7 +9,7 @@ use ucr_core::{
 use ucr_model::{
     DeliveryAttempt, DeliveryEvidence, DeliveryEvidenceKind, DeliveryPolicy, DeliveryState,
     MessageEnvelope, StoreForwardId, StoreForwardJob, StoreForwardLeaseId, StoreForwardOutcome,
-    TenantScope, TransportFailoverPolicy,
+    TenantScope, TransportFailoverPolicy, TransportResourceSnapshot, TransportRoutingHint,
 };
 use ucr_protocol::{
     StoreForwardError, store_forward_delivery_id, store_forward_next_attempt_at,
@@ -169,6 +169,8 @@ where
         &self,
         scope: &TenantScope,
         store_forward_id: &StoreForwardId,
+        resources: TransportResourceSnapshot,
+        hints: &[TransportRoutingHint],
         options: Vec<TransportRouteOption<'_>>,
     ) -> Result<StoreForwardOutcome, StoreForwardRuntimeError> {
         let now = self.clock.now_unix_ms();
@@ -187,7 +189,7 @@ where
         };
         let (intent, message) = self.load_job_owners(&job)?;
         let filtered = filter_direct_options(message.delivery_policy, options);
-        let plan = match self.plan_job(&intent, filtered) {
+        let plan = match self.plan_job(&intent, resources, hints, filtered) {
             Ok(plan) => plan,
             Err(
                 TransportOrchestratorError::NoEligibleRoute
@@ -260,18 +262,11 @@ where
     fn plan_job<'route>(
         &self,
         intent: &ucr_model::CommunicationIntent,
+        resources: TransportResourceSnapshot,
+        hints: &[TransportRoutingHint],
         options: Vec<TransportRouteOption<'route>>,
     ) -> Result<ucr_transport_orchestrator::TransportPlan<'route>, TransportOrchestratorError> {
-        self.orchestrator.plan(
-            intent,
-            ucr_model::TransportResourceSnapshot {
-                battery_percent: 100,
-                external_power: true,
-                thermal_state: ucr_model::MediaThermalState::Nominal,
-            },
-            &[],
-            options,
-        )
+        self.orchestrator.plan(intent, resources, hints, options)
     }
 
     fn prepare_attempt(
