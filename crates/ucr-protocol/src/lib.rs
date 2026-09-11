@@ -30,6 +30,7 @@ mod recovery;
 mod scope;
 mod service_control;
 mod sync;
+mod transport_orchestrator;
 mod trusted_key;
 mod version;
 mod video;
@@ -212,6 +213,14 @@ pub use sync::{
     MAX_PARTIAL_SYNC_CONVERSATIONS, MAX_SYNC_RESUME_TOKEN_LEN, SyncError, can_transition_sync,
     canonical_sync_session, is_terminal_sync_state, validate_sync_checkpoint,
     validate_sync_transition,
+};
+pub use transport_orchestrator::{
+    MAX_TRANSPORT_BANDWIDTH_BPS, MAX_TRANSPORT_HINTS, MAX_TRANSPORT_LATENCY_MS,
+    MAX_TRANSPORT_PRIORITY_CLASS, MAX_TRANSPORT_ROUTE_CANDIDATES,
+    TRANSPORT_ORCHESTRATOR_CAPABILITY, TransportOrchestratorProtocolError,
+    canonical_transport_routing_hints, phase24_transport_orchestrator_capabilities,
+    validate_transport_priority_class, validate_transport_resource_snapshot,
+    validate_transport_route_candidate_count, validate_transport_route_telemetry,
 };
 pub use trusted_key::{TrustedSigningKeyError, validate_trusted_signing_key_descriptor};
 pub use version::{

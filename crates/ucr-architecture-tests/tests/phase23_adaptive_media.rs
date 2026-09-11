@@ -99,7 +99,7 @@ fn phase23_release_truth_public_contract_and_fuzz_gate_are_machine_locked() {
         fs::read_to_string(root.join("docs/architecture/THREAT_MODEL.md")).expect("threat");
 
     assert!(readme.contains(
-        "**Phase 23 — Adaptive Media (Prepared/reference complete; Phase 24 Transport Orchestrator not started).**"
+        "**Phase 24 — Transport Orchestrator (Prepared/reference complete; Phase 25 Automatic Failover not started).**"
     ));
     assert!(ci.contains("test -s spec/adaptive-media.md"));
     assert!(ci.contains("test -s proto/ucr/v1/adaptive_media.proto"));

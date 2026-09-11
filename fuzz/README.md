@@ -31,3 +31,5 @@ Crash artifacts are written under `fuzz/artifacts/<target>/` and uploaded by CI 
 The required CI fuzz job is a bounded smoke/release gate, not a substitute for longer campaigns. Longer scheduled/manual campaigns may extend runtime, corpus, and sanitizers, but must use the same target owners and must not weaken the bounded required gate.
 
 - `adaptive_media_telemetry`: Phase-23 bounded telemetry canonicalization, quality policy, and hysteresis state machine.
+
+- `transport_orchestrator_plan`: Phase-24 bounded Intent/Endpoint/provider-health/telemetry/hint route planning and single-primary execution boundary.

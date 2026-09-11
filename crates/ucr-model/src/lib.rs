@@ -7,6 +7,7 @@ mod audio;
 mod call;
 mod group;
 mod media_e2ee;
+mod transport_orchestrator;
 mod video;
 pub use adaptive_media::{
     AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage, AdaptiveMediaTelemetry,
@@ -26,6 +27,10 @@ pub use group::{
     GroupRecord, GroupRole, PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,
 };
 pub use media_e2ee::{EncryptedMediaFrame, MediaE2eeContext, MediaE2eeFrameHeader, MediaKind};
+pub use transport_orchestrator::{
+    TransportOrchestrationDecision, TransportResourceSnapshot, TransportRouteDecision,
+    TransportRouteTelemetry, TransportRoutingHint,
+};
 pub use video::{EncodedVideoFrame, VideoCodecConfig, VideoSourceKind, VideoStreamDescriptor};
 
 /// Opaque canonical identifier value.

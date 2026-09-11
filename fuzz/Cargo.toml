@@ -11,11 +11,13 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.13"
+ucr-core = { path = "../crates/ucr-core" }
 ucr-crypto = { path = "../crates/ucr-crypto" }
 ucr-model = { path = "../crates/ucr-model" }
 ucr-media-adaptive = { path = "../crates/ucr-media-adaptive" }
 ucr-protocol = { path = "../crates/ucr-protocol" }
 ucr-transport-internet = { path = "../crates/ucr-transport-internet", features = ["fuzzing"] }
+ucr-transport-orchestrator = { path = "../crates/ucr-transport-orchestrator" }
 ucr-video = { path = "../crates/ucr-video" }
 
 [[bin]]
@@ -70,6 +72,13 @@ bench = false
 [[bin]]
 name = "adaptive_media_telemetry"
 path = "fuzz_targets/adaptive_media_telemetry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport_orchestrator_plan"
+path = "fuzz_targets/transport_orchestrator_plan.rs"
 test = false
 doc = false
 bench = false

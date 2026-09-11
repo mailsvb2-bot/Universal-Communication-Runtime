@@ -16,6 +16,7 @@ members = [
     "crates/ucr-video",
     "crates/ucr-media-e2ee",
     "crates/ucr-media-adaptive",
+    "crates/ucr-transport-orchestrator",
 ]
 
 [workspace.package]
