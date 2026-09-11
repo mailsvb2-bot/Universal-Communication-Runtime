@@ -1612,6 +1612,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-mesh"
+version = "0.0.1"
+dependencies = [
+ "ucr-core",
+ "ucr-crypto",
+ "ucr-model",
+ "ucr-offline-groups",
+ "ucr-protocol",
+ "ucr-storage-memory",
+]
+
+[[package]]
 name = "ucr-model"
 version = "0.0.1"
 

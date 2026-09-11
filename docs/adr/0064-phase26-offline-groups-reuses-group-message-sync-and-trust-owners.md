@@ -33,4 +33,4 @@ The public protobuf describes replica/page/change data only and defines no servi
 
 Offline synchronization is deliberately conservative. Some legitimate non-Device-principal relationships remain unsupported until a canonical authenticated Principal↔Device binding exists. This is preferred to silently inventing identity authority.
 
-Phase 27 Store-and-Forward remains separate and not started. Later phases must explicitly add intermediary semantics rather than repurposing the Phase-26 one-hop sidecar.
+Store-and-Forward and Mesh remain separate owners; later phases may build on this one-hop boundary without retroactively changing Phase-26 semantics. Later phases must explicitly add intermediary semantics rather than repurposing the Phase-26 one-hop sidecar.

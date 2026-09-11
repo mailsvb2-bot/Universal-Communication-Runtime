@@ -1,18 +1,23 @@
 use ucr_core::{
-    DurableRecordStatus, DurableStoreError, GroupMessageStore, GroupStore, OfflineGroupStore,
+    DurableRecordStatus, DurableStoreError, GroupMessageStore, GroupStore, MeshGroupStore,
+    OfflineGroupStore,
 };
 use ucr_model::{
     ConversationId, ConversationRecord, DeliveryState, GroupChange, GroupHistoryPolicy, GroupId,
-    GroupMemberState, GroupMembership, GroupPermission, GroupRecord, MessageEnvelope, MessageId,
+    GroupMemberState, GroupMembership, GroupPermission, GroupRecord, MeshCursor,
+    MeshGroupMessagePage, MeshGroupMessageReplica, MessageEnvelope, MessageId,
     OfflineGroupChangePage, OfflineGroupChangeReplica, OfflineGroupCursor, OfflineGroupMessagePage,
-    OfflineGroupMessageReplica, OfflineGroupStreamKind, PrincipalRef, ScopedPrincipal, TenantScope,
+    OfflineGroupMessageReplica, OfflineGroupStreamKind, PrincipalKind, PrincipalRef,
+    ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
-    active_group_actor_role, apply_group_change, canonical_group_creation,
-    canonical_group_memberships, canonical_message, canonical_offline_group_change_replica,
-    canonical_offline_group_message_replica, group_change_fingerprint, is_group_conversation_kind,
-    offline_group_cursor, offline_group_cursor_sequence, validate_conversation,
-    validate_group_member_list_limit, validate_offline_group_page_size,
+    MAX_MESH_PATH_DEVICES, active_group_actor_role, apply_group_change, canonical_group_creation,
+    canonical_group_memberships, canonical_mesh_group_message_replica, canonical_message,
+    canonical_offline_group_change_replica, canonical_offline_group_message_replica,
+    group_change_fingerprint, is_group_conversation_kind, mesh_group_cursor,
+    mesh_group_cursor_sequence, offline_group_cursor, offline_group_cursor_sequence,
+    validate_conversation, validate_group_member_list_limit, validate_mesh_group_page_size,
+    validate_mesh_source, validate_offline_group_page_size,
 };
 
 use super::{
@@ -694,6 +699,190 @@ impl OfflineGroupStore for MemoryLocalStore {
         }
         persist_message_in_state(&mut state, &record.message)
     }
+}
+
+impl MeshGroupStore for MemoryLocalStore {
+    fn mesh_group_message_page(
+        &self,
+        source: &ScopedPrincipal,
+        recipient: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        cursor: Option<&MeshCursor>,
+        max_items: usize,
+    ) -> Result<MeshGroupMessagePage, DurableStoreError> {
+        validate_mesh_group_page_size(max_items).map_err(|_| DurableStoreError::InvalidRecord)?;
+        if source.scope != *scope || recipient.scope != *scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let source_device = scoped_device_id(source)?;
+        let recipient_device = scoped_device_id(recipient)?;
+        let after = cursor.map_or(Ok(0), |cursor| {
+            mesh_group_cursor_sequence(scope, group_id, cursor)
+                .map_err(|_| DurableStoreError::InvalidRecord)
+        })?;
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let group = state
+            .groups
+            .get(&group_key(scope, group_id))
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        let recipient_membership = require_two_active_members(&state, group, source, recipient)?;
+
+        let mut scanned = state
+            .offline_group_message_replicas
+            .iter()
+            .filter(|(sequence, replica)| {
+                *sequence > after
+                    && replica.message.scope == *scope
+                    && replica.group_id == *group_id
+            })
+            .take(max_items.saturating_add(1))
+            .collect::<Vec<_>>();
+        let has_more = scanned.len() > max_items;
+        if has_more {
+            scanned.pop();
+        }
+        let scanned_sequence = scanned.last().map(|(sequence, _)| *sequence);
+        let mut eligible = Vec::new();
+        for (sequence, replica) in scanned {
+            if !history_allows(group, recipient_membership, &replica.message) {
+                continue;
+            }
+            let key = message_key(scope, &replica.message.message_id);
+            let path = state
+                .mesh_group_message_paths
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| vec![replica.message.author_device.device_id.clone()]);
+            if path.len() >= MAX_MESH_PATH_DEVICES || path.contains(&recipient_device) {
+                continue;
+            }
+            let mesh = MeshGroupMessageReplica {
+                record: replica.clone(),
+                forward_path: path,
+            };
+            if canonical_mesh_group_message_replica(&mesh).is_err()
+                || validate_mesh_source(&mesh, &source_device).is_err()
+            {
+                continue;
+            }
+            eligible.push((*sequence, mesh));
+        }
+        let next_cursor = if has_more {
+            Some(mesh_group_cursor(
+                scope,
+                group_id,
+                scanned_sequence.ok_or(DurableStoreError::InvalidRecord)?,
+            ))
+        } else {
+            None
+        };
+        Ok(MeshGroupMessagePage {
+            scope: scope.clone(),
+            group_id: group_id.clone(),
+            records: eligible.into_iter().map(|(_, record)| record).collect(),
+            next_cursor,
+        })
+    }
+
+    fn reconcile_mesh_group_message(
+        &self,
+        recipient: &ScopedPrincipal,
+        record: &MeshGroupMessageReplica,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let canonical = canonical_mesh_group_message_replica(record)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let recipient_device = scoped_device_id(recipient)?;
+        let extended = ucr_protocol::append_mesh_recipient(&canonical, &recipient_device)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        if recipient.scope != extended.record.message.scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let group = state
+            .groups
+            .get(&group_key(
+                &extended.record.message.scope,
+                &extended.record.group_id,
+            ))
+            .cloned()
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if extended.record.message.conversation != group.conversation
+            || extended.record.message.delivery_policy != group.delivery_policy
+            || extended.record.group_generation > group.replication_generation
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let recipient_membership = state
+            .group_memberships
+            .get(&membership_key(
+                &group.scope,
+                &group.group_id,
+                &recipient.principal,
+            ))
+            .filter(|membership| {
+                membership.member == recipient.principal
+                    && membership.state == GroupMemberState::Active
+                    && membership
+                        .permissions
+                        .contains(&GroupPermission::ReadHistory)
+            })
+            .ok_or(DurableStoreError::PermissionDenied)?;
+        if !history_allows(&group, recipient_membership, &extended.record.message) {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let author_membership = state
+            .group_memberships
+            .get(&membership_key(
+                &group.scope,
+                &group.group_id,
+                &extended.record.author.principal,
+            ))
+            .filter(|membership| membership.member == extended.record.author.principal)
+            .ok_or(DurableStoreError::PermissionDenied)?;
+        if !membership_active_at_generation(author_membership, extended.record.group_generation) {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+
+        let key = message_key(
+            &extended.record.message.scope,
+            &extended.record.message.message_id,
+        );
+        let status = match state.messages.get(&key) {
+            Some(existing) if existing == &extended.record.message => {
+                DurableRecordStatus::Duplicate
+            }
+            Some(_) => return Err(DurableStoreError::Conflict),
+            None => persist_message_in_state(&mut state, &extended.record.message)?,
+        };
+        let has_replica = state
+            .offline_group_message_replicas
+            .iter()
+            .any(|(_, replica)| {
+                replica.message.scope == extended.record.message.scope
+                    && replica.message.message_id == extended.record.message.message_id
+            });
+        if !has_replica {
+            let sequence = checked_next_offline_group_sequence(&state)?;
+            state.offline_group_next_sequence = sequence;
+            state
+                .offline_group_message_replicas
+                .push((sequence, extended.record.clone()));
+            state
+                .mesh_group_message_paths
+                .insert(key, extended.forward_path);
+        }
+        Ok(status)
+    }
+}
+
+fn scoped_device_id(principal: &ScopedPrincipal) -> Result<ucr_model::DeviceId, DurableStoreError> {
+    if principal.principal.kind != PrincipalKind::Device {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    Ok(ucr_model::DeviceId::from_opaque(
+        principal.principal.principal_id.as_opaque().clone(),
+    ))
 }
 
 fn checked_next_offline_group_sequence(state: &MemoryState) -> Result<u64, DurableStoreError> {
@@ -1575,6 +1764,196 @@ mod phase18_memory_security_tests {
         );
         assert_eq!(
             store.call_for_participant(&bob, &scope(), &owner_call.call_id),
+            Ok(None)
+        );
+    }
+}
+
+#[cfg(test)]
+mod phase28_memory_mesh_tests {
+    use super::*;
+    use ucr_core::{GroupStore, MeshGroupStore, MessageStore};
+    use ucr_model::*;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("phase28-memory-tenant")),
+            namespace_id: None,
+        }
+    }
+
+    fn device(value: &str) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid(value)),
+                kind: PrincipalKind::Device,
+            },
+        }
+    }
+
+    fn setup() -> (
+        MemoryLocalStore,
+        GroupRecord,
+        ScopedPrincipal,
+        ScopedPrincipal,
+        ScopedPrincipal,
+    ) {
+        let store = MemoryLocalStore::default();
+        let a = device("phase28-device-a");
+        let b = device("phase28-device-b");
+        let c = device("phase28-device-c");
+        let conversation = ConversationRecord {
+            scope: scope(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(oid("phase28-memory-conversation")),
+                kind: ConversationKind::PrivateGroup,
+            },
+            parent_conversation_id: None,
+        };
+        let group = GroupRecord {
+            scope: scope(),
+            group_id: GroupId::from_opaque(oid("phase28-memory-group")),
+            conversation: conversation.conversation.clone(),
+            ownership: GroupOwnership::Temporary {
+                owner: Some(b.principal.clone()),
+                expires_at_unix_ms: 9_999_999_999_999,
+            },
+            history_policy: GroupHistoryPolicy::FullHistory,
+            delivery_policy: DeliveryPolicy::Durable,
+            crypto_state: GroupCryptoState {
+                capability_id: None,
+                epoch: 0,
+                state_ref: None,
+            },
+            public_policy: None,
+            media_state: GroupMediaState::Idle,
+            bridge_mappings: vec![],
+            replication_generation: 0,
+            revision: 0,
+        };
+        store
+            .create_group(&conversation, &group, &b)
+            .expect("group");
+        for (event, expected_revision, member) in [
+            ("phase28-add-a", 0, a.principal.clone()),
+            ("phase28-add-c", 1, c.principal.clone()),
+        ] {
+            store
+                .apply_group_change(
+                    &b,
+                    &GroupChange {
+                        event_id: EventId::from_opaque(oid(event)),
+                        scope: scope(),
+                        group_id: group.group_id.clone(),
+                        expected_revision,
+                        kind: GroupChangeKind::AddMember {
+                            member,
+                            role: GroupRole::Member,
+                        },
+                        next_crypto_state: None,
+                    },
+                )
+                .expect("add member");
+        }
+        (store, group, a, b, c)
+    }
+
+    fn incoming(group: &GroupRecord, a: &ScopedPrincipal) -> MeshGroupMessageReplica {
+        MeshGroupMessageReplica {
+            record: OfflineGroupMessageReplica {
+                author: a.clone(),
+                group_id: group.group_id.clone(),
+                group_generation: 2,
+                message: MessageEnvelope {
+                    message_id: MessageId::from_opaque(oid("phase28-memory-message")),
+                    scope: scope(),
+                    conversation: group.conversation.clone(),
+                    author: ActorRef {
+                        actor_id: ActorId::from_opaque(oid("phase28-memory-actor")),
+                        kind: ActorKind::Person,
+                        on_behalf_of: None,
+                    },
+                    author_device: DeviceRef {
+                        device_id: DeviceId::from_opaque(oid("phase28-device-a")),
+                        identity_id: IdentityId::from_opaque(oid("phase28-identity-a")),
+                    },
+                    created_at_unix_ms: 1,
+                    logical_order: 1,
+                    content: b"mesh hello".to_vec(),
+                    attachment_ids: vec![],
+                    reply_to: None,
+                    relations: vec![],
+                    crypto_metadata: None,
+                    delivery_policy: DeliveryPolicy::Durable,
+                    delivery_state: DeliveryState::Persisted,
+                    origin: OriginRef {
+                        principal_id: Some(a.principal.principal_id.clone()),
+                        endpoint_id: None,
+                        integration_id: None,
+                    },
+                    correlation: CorrelationContext {
+                        correlation_id: oid("phase28-memory-correlation"),
+                        causation_id: None,
+                        idempotency_key: Some("phase28-memory-idempotency".into()),
+                    },
+                    extensions: vec![],
+                    external_mappings: vec![],
+                    signature: Some(MessageSignature {
+                        key_id: KeyId::from_opaque(oid("phase28-memory-key")),
+                        algorithm_id: "ed25519".into(),
+                        algorithm_version: 1,
+                        signature: vec![7; 64],
+                    }),
+                },
+            },
+            forward_path: vec![DeviceId::from_opaque(oid("phase28-device-a"))],
+        }
+    }
+
+    #[test]
+    fn mesh_receive_at_b_reexports_same_signed_message_to_c_with_bounded_path() {
+        let (store, group, a, b, c) = setup();
+        let record = incoming(&group, &a);
+        assert_eq!(
+            store.reconcile_mesh_group_message(&b, &record),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.reconcile_mesh_group_message(&b, &record),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        let page = store
+            .mesh_group_message_page(&b, &c, &scope(), &group.group_id, None, 8)
+            .expect("mesh page");
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].record.message, record.record.message);
+        assert_eq!(
+            page.records[0].forward_path,
+            vec![
+                DeviceId::from_opaque(oid("phase28-device-a")),
+                DeviceId::from_opaque(oid("phase28-device-b")),
+            ]
+        );
+    }
+
+    #[test]
+    fn mesh_loop_back_to_current_recipient_fails_before_storage_mutation() {
+        let (store, group, a, b, _c) = setup();
+        let mut record = incoming(&group, &a);
+        record
+            .forward_path
+            .push(DeviceId::from_opaque(oid("phase28-device-b")));
+        assert_eq!(
+            store.reconcile_mesh_group_message(&b, &record),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        assert_eq!(
+            store.message(&scope(), &record.record.message.message_id),
             Ok(None)
         );
     }

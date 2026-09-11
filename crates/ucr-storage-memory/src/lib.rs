@@ -144,6 +144,7 @@ struct MemoryState {
     offline_group_change_replicas: Vec<(u64, OfflineGroupChangeReplica)>,
     offline_group_message_replicas: Vec<(u64, OfflineGroupMessageReplica)>,
     offline_group_next_sequence: u64,
+    mesh_group_message_paths: HashMap<MessageKey, Vec<DeviceId>>,
     messages: HashMap<MessageKey, MessageEnvelope>,
     intents: HashMap<IntentKey, CommunicationIntent>,
     identities: HashMap<IdentityKey, IdentityRecord>,

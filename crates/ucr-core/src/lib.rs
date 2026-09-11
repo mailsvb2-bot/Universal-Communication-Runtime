@@ -6,6 +6,7 @@ mod event_api;
 mod group;
 mod id;
 mod integration_api;
+mod mesh;
 mod recovery_workflow;
 mod service_auth;
 mod service_request;
@@ -37,6 +38,7 @@ pub use id::{IdGenerationError, generate_opaque_id};
 pub use integration_api::{
     ExternalIdentityBindingLookup, IntegrationCommandIngress, IntegrationIngress,
 };
+pub use mesh::MeshGroupStore;
 pub use recovery_workflow::{
     DeviceReverificationGate, DeviceReverificationProof, DeviceReverificationVerificationError,
     DeviceReverificationVerifier, RecoveryAdmissionProof, RecoveryAuthorityVerificationError,

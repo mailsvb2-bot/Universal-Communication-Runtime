@@ -63,4 +63,4 @@ security evidence. Peer-supplied CPU/battery/thermal claims must not replace loc
 
 Phase 24 does not weaken E2EE, does not reinterpret transport acceptance as user delivery, and does
 not let route selection grant authorization. Phase 25 Automatic Failover, Phase 27 Store-and-Forward,
-Phase 28 Mesh, Relay/NAT traversal, provider bridges and production discovery remain later owners.
+Phase 28 Mesh is implemented separately for bounded signed Group Message propagation; Relay/NAT traversal, provider bridges and production discovery remain later owners.

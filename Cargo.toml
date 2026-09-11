@@ -19,6 +19,7 @@ members = [
     "crates/ucr-transport-orchestrator",
     "crates/ucr-offline-groups",
     "crates/ucr-store-forward",
+    "crates/ucr-mesh",
 ]
 
 [workspace.package]

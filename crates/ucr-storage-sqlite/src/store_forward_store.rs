@@ -953,6 +953,7 @@ mod tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF;
+                     DROP TABLE IF EXISTS mesh_group_message_hops;
                      DROP TABLE store_forward_jobs;
                      DROP TABLE store_forward_tombstones;
                      PRAGMA user_version=23;",

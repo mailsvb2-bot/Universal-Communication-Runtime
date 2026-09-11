@@ -59,6 +59,27 @@ impl<S> OfflineGroupsRuntime<'_, S>
 where
     S: OfflineGroupStore + DeviceLifecycleStore + TrustedSigningKeyResolver,
 {
+    /// Reuses the Phase-26 authenticated `PeerPeer` Sync admission boundary for later peer layers.
+    ///
+    /// This validates the active Sync selection and the current authenticated peer Device/key. It
+    /// does not grant Group membership or Message authority; those remain durable Group owners.
+    ///
+    /// # Errors
+    /// Fails closed for inactive/wrong Sync sessions, unauthenticated/revoked peers, or changed
+    /// trusted signing-key state.
+    pub fn authorize_peer_group_sync(
+        &self,
+        scope: &TenantScope,
+        sync_session_id: &SessionId,
+        conversation_id: &ConversationId,
+        peer: &ScopedPrincipal,
+        session: &EstablishedSession,
+        expected_identity: Option<&ucr_model::IdentityId>,
+    ) -> Result<ucr_model::DeviceId, OfflineGroupsError> {
+        self.require_active_sync(scope, sync_session_id, conversation_id)?;
+        self.require_current_peer(peer, session, expected_identity)
+    }
+
     /// Exports one bounded source-authored Group-change page over an active trusted peer sync.
     ///
     /// # Errors

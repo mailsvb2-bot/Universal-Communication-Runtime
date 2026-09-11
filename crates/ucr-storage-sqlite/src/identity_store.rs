@@ -457,7 +457,8 @@ mod tests {
         }
         let connection = Connection::open(db.path()).expect("raw v18 fixture");
         connection
-            .execute_batch("DROP TABLE IF EXISTS store_forward_jobs; DROP TABLE IF EXISTS store_forward_tombstones; DROP TABLE identities;")
+            .execute_batch("DROP TABLE IF EXISTS mesh_group_message_hops;
+         DROP TABLE IF EXISTS store_forward_jobs; DROP TABLE IF EXISTS store_forward_tombstones; DROP TABLE identities;")
             .expect("restore v18 shape");
         crate::test_remove_v20_objects(&connection).expect("remove future v20 objects");
         connection

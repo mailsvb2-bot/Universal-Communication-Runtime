@@ -33,3 +33,5 @@ This contract does **not** close the separate `secret/plaintext telemetry regres
 Architecture CI parses the numbered trust-boundary list from `THREAT_MODEL.md` and the TSV inventory. Adding or renaming a trust boundary without a visibility row fails the architecture gate. Duplicate rows, missing required fields, unknown implementation statuses, or loss of the mandatory Observability row also fail.
 
 A future transport, signalling service, store-and-forward node, discovery service, hosted key provider, backup provider, or other externally visible infrastructure role must either fit an existing declared boundary without widening visibility or add a new threat-model boundary/inventory row and reviewed ADR in the same change.
+
+Phase 28 Mesh adds no new infrastructure trust-boundary row: forwarding occurs between already-modeled authenticated User Devices. Participating peers may observe the bounded forward Device path required for loop prevention; that path is not authorization, Identity, social-graph, or Delivery evidence. A future Relay remains governed by the existing `not_implemented` Relay ceiling.

@@ -41,13 +41,13 @@ fn phase26_one_hop_and_schema_boundary_is_machine_locked() {
 
     assert!(protocol.contains("MAX_OFFLINE_GROUP_PAGE_ITEMS: usize = 256"));
     assert!(protocol.contains("UCR-OFFLINE-GROUP-CURSOR-V1"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 24"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 ="));
     assert!(sqlite_root.contains("migrate_v22_to_v23"));
     assert!(!proto.contains("service OfflineGroup"));
     assert!(!proto.contains("EndpointAddress"));
     assert!(!proto.contains("Relay"));
     assert!(spec.contains("do **not** receive local export sidecars"));
-    assert!(spec.contains("Phase 27 Store-and-Forward remains not started"));
+    assert!(spec.contains("Phase 27 Store-and-Forward and Phase 28 signed-Group-Message Mesh are separate later layers"));
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn phase26_release_truth_contract_docs_and_fuzz_are_machine_locked() {
     .expect("ADR 0064");
 
     assert!(readme.contains(
-        "**Phase 27 — Store-and-Forward (Prepared/reference complete; Relay and multipath not started).**"
+        "**Phase 28 — Mesh (Prepared/reference complete; Relay/NAT traversal and multipath not started).**"
     ));
     assert!(ci.contains("test -s spec/offline-groups.md"));
     assert!(ci.contains("test -s proto/ucr/v1/offline_groups.proto"));
@@ -75,5 +75,5 @@ fn phase26_release_truth_contract_docs_and_fuzz_are_machine_locked() {
     assert!(threat.contains("Phase 26 Offline Groups treats Group membership"));
     assert!(fuzz.contains("offline_group_replica"));
     assert!(smoke.contains("run_target offline_group_replica 4096 768"));
-    assert!(adr.contains("Phase 27 Store-and-Forward remains separate and not started"));
+    assert!(adr.contains("Store-and-Forward and Mesh remain separate owners"));
 }

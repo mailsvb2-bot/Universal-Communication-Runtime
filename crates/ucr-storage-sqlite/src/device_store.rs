@@ -630,7 +630,8 @@ mod tests {
         }
         let connection = Connection::open(db.path()).expect("raw sqlite");
         connection
-            .execute_batch("DROP TABLE IF EXISTS store_forward_jobs; DROP TABLE IF EXISTS store_forward_tombstones; DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices;")
+            .execute_batch("DROP TABLE IF EXISTS mesh_group_message_hops;
+         DROP TABLE IF EXISTS store_forward_jobs; DROP TABLE IF EXISTS store_forward_tombstones; DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices;")
             .expect("remove v15 device owner");
         connection
             .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
@@ -719,7 +720,8 @@ mod tests {
         }
         let connection = Connection::open(db.path()).expect("raw sqlite");
         connection
-            .execute_batch("DROP TABLE IF EXISTS store_forward_jobs; DROP TABLE IF EXISTS store_forward_tombstones; DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices;")
+            .execute_batch("DROP TABLE IF EXISTS mesh_group_message_hops;
+         DROP TABLE IF EXISTS store_forward_jobs; DROP TABLE IF EXISTS store_forward_tombstones; DROP TABLE identities; DROP TABLE external_identity_bindings; DROP TABLE service_audit_operations; DROP TABLE communication_intent_extensions; DROP TABLE communication_intent_transports; DROP TABLE communication_intents; DROP TABLE devices;")
             .expect("drop devices");
         connection
             .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
