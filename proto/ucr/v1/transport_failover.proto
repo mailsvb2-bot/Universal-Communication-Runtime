@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/transport_orchestrator.proto";
+
+message TransportFailoverPolicy {
+  uint32 max_route_attempts = 1;
+  optional int64 expires_at_unix_ms = 2;
+}
+
+enum TransportFailoverAttemptOutcome {
+  TRANSPORT_FAILOVER_ATTEMPT_OUTCOME_UNSPECIFIED = 0;
+  TRANSPORT_FAILOVER_ATTEMPT_OUTCOME_SKIPPED_UNAVAILABLE = 1;
+  TRANSPORT_FAILOVER_ATTEMPT_OUTCOME_SKIPPED_UNSUPPORTED_CAPABILITY = 2;
+  TRANSPORT_FAILOVER_ATTEMPT_OUTCOME_FAILED_BEFORE_ACCEPTANCE = 3;
+  TRANSPORT_FAILOVER_ATTEMPT_OUTCOME_ACCEPTANCE_UNKNOWN = 4;
+  TRANSPORT_FAILOVER_ATTEMPT_OUTCOME_ACCEPTED_BY_TRANSPORT = 5;
+  TRANSPORT_FAILOVER_ATTEMPT_OUTCOME_TERMINAL_FAILURE = 6;
+}
+
+enum TransportFailoverStopReason {
+  TRANSPORT_FAILOVER_STOP_REASON_UNSPECIFIED = 0;
+  TRANSPORT_FAILOVER_STOP_REASON_ACCEPTED_BY_TRANSPORT = 1;
+  TRANSPORT_FAILOVER_STOP_REASON_ROUTES_EXHAUSTED = 2;
+  TRANSPORT_FAILOVER_STOP_REASON_ATTEMPT_BUDGET_EXHAUSTED = 3;
+  TRANSPORT_FAILOVER_STOP_REASON_DEADLINE_EXPIRED = 4;
+  TRANSPORT_FAILOVER_STOP_REASON_POLICY_CHANGED = 5;
+  TRANSPORT_FAILOVER_STOP_REASON_ACCEPTANCE_UNKNOWN = 6;
+  TRANSPORT_FAILOVER_STOP_REASON_TERMINAL_FAILURE = 7;
+}
+
+message TransportFailoverAttemptDecision {
+  TransportRouteDecision route = 1;
+  TransportFailoverAttemptOutcome outcome = 2;
+}
+
+message TransportFailoverDecision {
+  repeated TransportFailoverAttemptDecision attempts = 1;
+  TransportFailoverStopReason stop_reason = 2;
+}
+
+// Phase 25 defines bounded failover data only. It does not define a second transport service,
+// durable queue, Offline Groups, Store-and-Forward, Mesh, Relay, or exactly-once delivery.

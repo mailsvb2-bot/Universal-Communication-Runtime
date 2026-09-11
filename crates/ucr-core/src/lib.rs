@@ -80,6 +80,40 @@ pub enum CanonicalTransportError {
     Internal,
 }
 
+/// Whether a failed transport invocation can prove that the encrypted envelope was never accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportFailureDisposition {
+    /// No application envelope could have been accepted by the peer. Cross-route failover may be safe.
+    NotAccepted,
+    /// Acceptance cannot be ruled out. Cross-route failover must stop to avoid duplicate effects.
+    AcceptanceUnknown,
+}
+
+/// Canonical transport error plus the minimum evidence needed for duplicate-safe failover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassifiedTransportFailure {
+    pub error: CanonicalTransportError,
+    pub disposition: TransportFailureDisposition,
+}
+
+impl ClassifiedTransportFailure {
+    #[must_use]
+    pub const fn not_accepted(error: CanonicalTransportError) -> Self {
+        Self {
+            error,
+            disposition: TransportFailureDisposition::NotAccepted,
+        }
+    }
+
+    #[must_use]
+    pub const fn acceptance_unknown(error: CanonicalTransportError) -> Self {
+        Self {
+            error,
+            disposition: TransportFailureDisposition::AcceptanceUnknown,
+        }
+    }
+}
+
 /// Boundary implemented by a concrete communication transport.
 ///
 /// It intentionally does not expose provider-specific canonical message or
@@ -99,6 +133,23 @@ pub trait TransportProvider: core::fmt::Debug + Send + Sync {
         route: &RouteCandidate,
         encrypted_envelope: &[u8],
     ) -> Result<(), CanonicalTransportError>;
+
+    /// Attempts transport while classifying whether peer acceptance can be ruled out on failure.
+    ///
+    /// The default is deliberately conservative: providers that cannot prove non-acceptance return
+    /// `AcceptanceUnknown`, so an orchestrator cannot safely switch to another route.
+    ///
+    /// # Errors
+    /// Returns the canonical transport error plus conservative acceptance disposition.
+    fn transmit_classified(
+        &self,
+        scope: &TenantScope,
+        route: &RouteCandidate,
+        encrypted_envelope: &[u8],
+    ) -> Result<(), ClassifiedTransportFailure> {
+        self.transmit(scope, route, encrypted_envelope)
+            .map_err(ClassifiedTransportFailure::acceptance_unknown)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

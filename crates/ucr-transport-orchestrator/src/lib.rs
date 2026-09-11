@@ -1,5 +1,10 @@
 #![forbid(unsafe_code)]
 
+mod failover;
+pub use failover::{
+    SystemTransportFailoverClock, TransportFailoverClock, TransportFailoverExecutionError,
+};
+
 use core::{cmp::Ordering, fmt};
 use std::collections::BTreeSet;
 

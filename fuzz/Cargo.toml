@@ -82,3 +82,10 @@ path = "fuzz_targets/transport_orchestrator_plan.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "transport_failover_execution"
+path = "fuzz_targets/transport_failover_execution.rs"
+test = false
+doc = false
+bench = false
