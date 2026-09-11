@@ -402,7 +402,7 @@ mod tests {
         }
         let connection = Connection::open(db.path()).expect("raw connection");
         connection
-            .execute_batch("DROP TABLE identities; DROP TABLE external_identity_bindings;")
+            .execute_batch("DROP TABLE IF EXISTS store_forward_jobs; DROP TABLE IF EXISTS store_forward_tombstones; DROP TABLE identities; DROP TABLE external_identity_bindings;")
             .expect("restore exact v17 shape");
         crate::test_remove_v20_objects(&connection).expect("remove future v20 objects");
         connection

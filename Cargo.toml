@@ -18,6 +18,7 @@ members = [
     "crates/ucr-media-adaptive",
     "crates/ucr-transport-orchestrator",
     "crates/ucr-offline-groups",
+    "crates/ucr-store-forward",
 ]
 
 [workspace.package]

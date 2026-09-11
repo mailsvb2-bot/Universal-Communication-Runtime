@@ -1669,6 +1669,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-store-forward"
+version = "0.0.1"
+dependencies = [
+ "ucr-core",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-memory",
+ "ucr-transport-orchestrator",
+]
+
+[[package]]
 name = "ucr-transport-internet"
 version = "0.0.1"
 dependencies = [

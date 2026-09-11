@@ -1397,7 +1397,7 @@ mod phase18_migration_tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF; \
-                     DROP TABLE IF EXISTS offline_group_messages; \
+                     DROP TABLE IF EXISTS store_forward_jobs;\n                     DROP TABLE IF EXISTS store_forward_tombstones;\n                     DROP TABLE IF EXISTS offline_group_messages; \
                      DROP TABLE IF EXISTS offline_group_changes; \
                      DROP TRIGGER IF EXISTS event_id_owner_events; \
                      DROP TRIGGER IF EXISTS event_id_owner_group_changes; \
@@ -2360,7 +2360,9 @@ mod phase18_restart_security_tests {
             let connection = rusqlite::Connection::open(db.path()).expect("open raw v23");
             connection
                 .execute_batch(
-                    "DROP INDEX offline_group_messages_group_seq; \
+                    "DROP TABLE IF EXISTS store_forward_jobs; \
+                 DROP TABLE IF EXISTS store_forward_tombstones; \
+                 DROP INDEX offline_group_messages_group_seq; \
                  DROP TABLE offline_group_messages; \
                  DROP INDEX offline_group_changes_group_seq; \
                  DROP TABLE offline_group_changes; \

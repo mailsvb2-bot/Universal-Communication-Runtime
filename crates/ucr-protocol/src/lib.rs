@@ -30,6 +30,7 @@ mod provenance;
 mod recovery;
 mod scope;
 mod service_control;
+mod store_forward;
 mod sync;
 mod transport_failover;
 mod transport_orchestrator;
@@ -216,6 +217,12 @@ pub use service_control::{
     SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND, SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND,
     ServiceControlValidationError, service_audit_hash, validate_service_audit_operation_ref,
     validate_service_audit_record, validate_service_quota_policy,
+};
+pub use store_forward::{
+    MAX_STORE_FORWARD_DELIVERY_ATTEMPTS, MAX_STORE_FORWARD_LEASE_MS, MAX_STORE_FORWARD_PAGE_ITEMS,
+    MAX_STORE_FORWARD_RETRY_DELAY_MS, StoreForwardError, store_forward_delivery_id,
+    store_forward_job_fingerprint, store_forward_next_attempt_at, store_forward_retry_delay_ms,
+    validate_store_forward_job, validate_store_forward_page_size, validate_store_forward_policy,
 };
 pub use sync::{
     MAX_PARTIAL_SYNC_CONVERSATIONS, MAX_SYNC_RESUME_TOKEN_LEN, SyncError, can_transition_sync,
