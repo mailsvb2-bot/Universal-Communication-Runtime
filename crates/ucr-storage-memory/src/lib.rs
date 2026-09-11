@@ -31,11 +31,12 @@ use ucr_model::{
     EventEnvelope, EventId, EventPollResult, EventReconciliation, EventReplicaState,
     EventSubscription, EventSubscriptionId, EventSubscriptionStart, EventSummary,
     ExternalIdentityBinding, GroupMembership, GroupRecord, IdentityId, IdentityRecord,
-    IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, OpaqueId, PermissionGrant,
-    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
-    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
-    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord, TrustedSigningKeyState,
+    IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, OfflineGroupChangeReplica,
+    OfflineGroupMessageReplica, OpaqueId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan,
+    RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
+    ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy,
+    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -131,6 +132,9 @@ struct MemoryState {
     groups: HashMap<GroupKey, GroupRecord>,
     group_memberships: HashMap<GroupMembershipKey, GroupMembership>,
     group_changes: HashMap<GroupChangeKey, (ucr_model::PrincipalRef, [u8; 32])>,
+    offline_group_change_replicas: Vec<(u64, OfflineGroupChangeReplica)>,
+    offline_group_message_replicas: Vec<(u64, OfflineGroupMessageReplica)>,
+    offline_group_next_sequence: u64,
     messages: HashMap<MessageKey, MessageEnvelope>,
     intents: HashMap<IntentKey, CommunicationIntent>,
     identities: HashMap<IdentityKey, IdentityRecord>,
@@ -833,7 +837,7 @@ impl RecoveryPlanStore for MemoryLocalStore {
         }
         state
             .recovery_plans
-            .insert(replacement_id.clone(), replacement.clone());
+            .insert(replacement_id.clone(), replacement);
         state
             .active_recovery_plans
             .insert(identity_key, replacement_id);
@@ -1467,11 +1471,11 @@ impl CommandAcceptanceStore for MemoryLocalStore {
 
         state.accepted.insert(key, command.clone());
         state.accepted_by_id.insert(command_ref, command.clone());
-        Ok(accepted_command_receipt(command.command_id.clone()))
+        Ok(accepted_command_receipt(command.command_id))
     }
 }
 
-fn map_command_error(error: CommandError) -> DurableStoreError {
+const fn map_command_error(error: CommandError) -> DurableStoreError {
     match error {
         CommandError::IdempotencyConflict => DurableStoreError::Conflict,
         CommandError::InvalidCommandType
@@ -1609,7 +1613,7 @@ fn event_subscription_key(
     )
 }
 
-fn map_event_api_error(_error: ucr_protocol::EventApiError) -> DurableStoreError {
+const fn map_event_api_error(_error: ucr_protocol::EventApiError) -> DurableStoreError {
     DurableStoreError::InvalidRecord
 }
 
@@ -1704,7 +1708,7 @@ fn receipt_for_existing(
     }
 }
 
-fn map_event_error(_error: EventError) -> DurableStoreError {
+const fn map_event_error(_error: EventError) -> DurableStoreError {
     DurableStoreError::InvalidRecord
 }
 
@@ -2051,7 +2055,7 @@ fn load_anti_entropy_session<'a>(
     Ok(session)
 }
 
-fn map_anti_entropy_error(_error: AntiEntropyError) -> DurableStoreError {
+const fn map_anti_entropy_error(_error: AntiEntropyError) -> DurableStoreError {
     DurableStoreError::InvalidRecord
 }
 
@@ -2254,9 +2258,7 @@ impl CommandOutcomeStore for MemoryLocalStore {
             state.events.insert(event_key.clone(), event.clone());
             state.event_order.push(event_key);
         }
-        state
-            .terminal_events
-            .insert(command_ref, event.event_id.clone());
+        state.terminal_events.insert(command_ref, event.event_id);
         Ok(EventAppendStatus::Appended)
     }
 
@@ -2387,7 +2389,7 @@ mod tests {
         );
 
         let mut reordered = command("command-ext-b", "retry-ext", b"payload");
-        reordered.extensions = first.extensions.clone();
+        reordered.extensions = first.extensions;
         reordered.extensions.reverse();
         assert_eq!(
             store
@@ -2467,7 +2469,7 @@ mod tests {
         );
         assert_eq!(
             store.terminal_event(&accepted.scope, &accepted.command_id),
-            Ok(Some(terminal.event_id.clone()))
+            Ok(Some(terminal.event_id))
         );
     }
 
@@ -3189,14 +3191,14 @@ mod intent_tests {
         OpaqueId::new(value).expect("valid id")
     }
 
-    pub(super) fn scope() -> TenantScope {
+    pub fn scope() -> TenantScope {
         TenantScope {
             tenant_id: TenantId::from_opaque(oid("tenant-intent-memory")),
             namespace_id: Some(NamespaceId::from_opaque(oid("namespace-intent-memory"))),
         }
     }
 
-    pub(super) fn intent() -> CommunicationIntent {
+    pub fn intent() -> CommunicationIntent {
         CommunicationIntent {
             intent_id: IntentId::from_opaque(oid("intent-memory")),
             scope: scope(),
@@ -3283,13 +3285,13 @@ mod message_tests {
         OpaqueId::new(value).expect("valid id")
     }
 
-    pub(super) fn scope() -> TenantScope {
+    pub fn scope() -> TenantScope {
         TenantScope {
             tenant_id: TenantId::from_opaque(id("tenant-message")),
             namespace_id: None,
         }
     }
-    pub(super) fn conversation() -> ConversationRecord {
+    pub fn conversation() -> ConversationRecord {
         ConversationRecord {
             scope: scope(),
             conversation: ConversationRef {
@@ -3300,7 +3302,7 @@ mod message_tests {
         }
     }
 
-    pub(super) fn message() -> MessageEnvelope {
+    pub fn message() -> MessageEnvelope {
         MessageEnvelope {
             message_id: MessageId::from_opaque(id("message-memory")),
             scope: scope(),
@@ -3389,7 +3391,7 @@ mod message_tests {
             Ok(DurableRecordStatus::Persisted)
         );
 
-        let mut reordered = first.clone();
+        let mut reordered = first;
         reordered.extensions.reverse();
         assert_eq!(
             store.persist_message(&reordered),
@@ -3429,7 +3431,7 @@ mod message_tests {
                 conversation_id: ConversationId::from_opaque(id("thread-memory")),
                 kind: ConversationKind::Thread,
             },
-            parent_conversation_id: Some(topic.conversation.conversation_id.clone()),
+            parent_conversation_id: Some(topic.conversation.conversation_id),
         };
         assert_eq!(
             store.persist_conversation(&thread),
@@ -3442,7 +3444,7 @@ mod message_tests {
                 conversation_id: ConversationId::from_opaque(id("thread-invalid")),
                 kind: ConversationKind::Thread,
             },
-            parent_conversation_id: Some(root.conversation.conversation_id.clone()),
+            parent_conversation_id: Some(root.conversation.conversation_id),
         };
         assert_eq!(
             store.persist_conversation(&invalid_thread),
@@ -4158,7 +4160,7 @@ mod device_lifecycle_tests {
         );
 
         let other_scope = TenantScope {
-            tenant_id: scope.tenant_id.clone(),
+            tenant_id: scope.tenant_id,
             namespace_id: Some(NamespaceId::from_opaque(oid("namespace-active"))),
         };
         let active = device(DeviceLifecycleState::Active);
@@ -4550,7 +4552,7 @@ mod trusted_signing_key_tests {
         let peer_revoked = AgreementKeyPair::generate().expect("peer revoked agreement");
         let revoked_binding = TranscriptBinding::from_bytes([13_u8; 32]);
         let revoked_input = TrustedSessionHandshakeInput {
-            scope: scope.clone(),
+            scope,
             suite: CryptoSuite::UcrV1,
             role: SessionRole::Initiator,
             peer_agreement: peer_revoked.public_key(),

@@ -35,3 +35,4 @@ The required CI fuzz job is a bounded smoke/release gate, not a substitute for l
 - `transport_orchestrator_plan`: Phase-24 bounded Intent/Endpoint/provider-health/telemetry/hint route planning and single-primary execution boundary.
 
 - `transport_failover_execution`: Phase-25 bounded cross-route execution, acceptance ambiguity, attempt budget, and duplicate-safety stop semantics.
+- `offline_group_replica`: Phase-26 Group-change/Message replica validation, opaque cursor binding, and page-budget robustness.

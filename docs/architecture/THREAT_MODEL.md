@@ -150,6 +150,8 @@ Phase 24 Transport Orchestrator treats route telemetry and routing hints as boun
 
 Phase 25 Automatic Failover treats duplicate creation as a security/correctness failure. A canonical transport error alone never authorizes a route switch: providers must prove `NotAccepted`; otherwise failure disposition is `AcceptanceUnknown` and execution stops. The default provider behavior is conservative unknown. Internet/Local providers classify only pre-envelope connect/configuration/handshake failures as proven non-acceptance, while send/receipt failures remain ambiguous. Attempt count and optional deadline are bounded, policy/health/capability are revalidated before each route, and Phase 25 neither promises exactly-once nor creates a durable retry queue.
 
+Phase 26 Offline Groups treats Group membership and source provenance as security-sensitive. A wire Principal, endpoint address, source IP or boolean is never peer-authentication evidence. The Prepared runtime accepts only a Device principal whose ID exactly matches the Device proven by a trusted established Crypto session, then revalidates current Active Device state and the exact active trusted signing key for every operation. Message reconciliation additionally re-verifies the canonical Message signature and historical author membership at the declared Group generation. Opaque cursors are bound to exact scope+Group+stream and are not authorization. Remote reconciled records never receive local export evidence, preventing Phase-26 peers from silently becoming Store-and-Forward relays. SQLite v22→v23 creates empty replication sidecars rather than fabricating historical evidence.
+
 ## 12. Mandatory threat tests
 
 The security test suite must eventually include explicit scenarios for:

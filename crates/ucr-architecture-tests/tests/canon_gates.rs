@@ -1460,7 +1460,7 @@ fn opaque_id_bytes_have_one_explicit_utf8_semantic_owner() {
     assert!(model.contains("pub const MAX_LEN: usize = 128;"));
     assert!(model.contains("InvalidUtf8"));
     assert!(model.contains("pub fn from_wire_bytes(value: &[u8])"));
-    assert!(model.contains("pub fn as_wire_bytes(&self) -> &[u8]"));
+    assert!(model.contains("pub const fn as_wire_bytes(&self) -> &[u8]"));
     assert!(model.contains("opaque_id_wire_bytes_have_explicit_utf8_and_byte_budget_semantics"));
     assert!(model.contains("opaque_id_does_not_normalize_distinct_utf8_tokens"));
 

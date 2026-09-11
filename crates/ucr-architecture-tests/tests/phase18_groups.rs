@@ -49,7 +49,7 @@ fn phase18_groups_reuse_canonical_owners_and_are_restart_safe() {
     assert!(sqlite.contains("insert_message_children"));
     assert!(sqlite.contains("group_changes"));
     assert!(sqlite.contains("PRIMARY KEY(tenant_id, namespace_present, namespace_id, event_id)"));
-    assert!(sqlite.contains("load_event_by_id(&transaction, &change.scope, &change.event_id)"));
+    assert!(sqlite.contains("load_event_by_id(transaction, &change.scope, &change.event_id)"));
     assert!(sqlite.contains("group_memberships"));
     assert!(
         sqlite_root.contains("const SQLITE_SCHEMA_V21: u32 = 21")

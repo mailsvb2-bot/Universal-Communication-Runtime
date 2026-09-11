@@ -31,7 +31,7 @@ pub use event_api::{
     EventWebhookDeliveryError, EventWebhookDispatcher, EventWebhookSink, SystemEventDeliveryClock,
     WebhookDispatchOutcome,
 };
-pub use group::{GroupMessageStore, GroupStore};
+pub use group::{GroupMessageStore, GroupStore, OfflineGroupStore};
 pub use id::{IdGenerationError, generate_opaque_id};
 pub use integration_api::{
     ExternalIdentityBindingLookup, IntegrationCommandIngress, IntegrationIngress,

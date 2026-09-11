@@ -20,7 +20,7 @@ use super::{
     namespace_storage_key, verify_table_columns,
 };
 
-pub(super) const V21_OBJECTS_SQL: &str = r"
+pub const V21_OBJECTS_SQL: &str = r"
 CREATE TABLE groups (
     tenant_id TEXT NOT NULL,
     namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
@@ -101,13 +101,13 @@ CREATE TABLE group_changes (
 ) WITHOUT ROWID;
 ";
 
-pub(super) fn create_v21_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+pub fn create_v21_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
     transaction
         .execute_batch(V21_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))
 }
 
-pub(super) fn verify_schema_v21(connection: &Connection) -> Result<(), DurableStoreError> {
+pub fn verify_schema_v21(connection: &Connection) -> Result<(), DurableStoreError> {
     super::event_subscription_store::verify_schema_v20(connection)?;
     verify_group_table_shapes(connection)?;
     let mut foreign_key_check = connection
@@ -398,70 +398,88 @@ impl GroupStore for SqliteLocalStore {
         actor: &ScopedPrincipal,
         change: &GroupChange,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        if actor.scope != change.scope {
-            return Err(DurableStoreError::PermissionDenied);
-        }
-        let fingerprint = group_change_fingerprint(change).map_err(map_group_error)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
-        let group = load_group_from(&transaction, &change.scope, &change.group_id)?
-            .ok_or(DurableStoreError::InvalidRecord)?;
-        let memberships = load_memberships_from(&transaction, &group, usize::MAX)?;
-        active_group_actor_role(&group, &memberships, &actor.scope, &actor.principal)
-            .map_err(map_group_error)?;
-        if let Some((recorded_actor, existing)) = load_change_record(
-            &transaction,
-            &change.scope,
-            change.event_id.as_opaque().as_str(),
-        )? {
-            if recorded_actor != actor.principal {
-                return Err(DurableStoreError::PermissionDenied);
-            }
-            return if existing == fingerprint {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        let history_floor = if matches!(change.kind, ucr_model::GroupChangeKind::AddMember { .. }) {
-            Some(history_floor_for_add(&transaction, &group)?)
-        } else {
-            None
-        };
-        let transition = apply_group_change(
-            &group,
-            &memberships,
-            &actor.scope,
-            &actor.principal,
-            change,
-            history_floor,
-        )
-        .map_err(map_group_error)?;
-        if super::event_journal::load_event_by_id(&transaction, &change.scope, &change.event_id)?
-            .is_some()
-            || super::call_store::call_signal_reserves_event_id(
-                &transaction,
-                &change.scope,
-                change.event_id.as_opaque().as_str(),
-            )?
-        {
-            return Err(DurableStoreError::Conflict);
-        }
-        super::call_store::reconcile_group_calls_after_membership_change(
-            &transaction,
-            &transition.group,
-            &transition.memberships,
-        )?;
-        update_group(&transaction, &transition.group)?;
-        replace_memberships(&transaction, &transition.group, &transition.memberships)?;
-        insert_change_fingerprint(&transaction, actor, change, &fingerprint)?;
+        let status = apply_group_change_in_transaction(&transaction, actor, change, true)?;
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
-        Ok(DurableRecordStatus::Persisted)
+        Ok(status)
     }
+}
+
+pub fn apply_group_change_in_transaction(
+    transaction: &Transaction<'_>,
+    actor: &ScopedPrincipal,
+    change: &GroupChange,
+    export_replica: bool,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+    if actor.scope != change.scope {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    let fingerprint = group_change_fingerprint(change).map_err(map_group_error)?;
+    let group = load_group_from(transaction, &change.scope, &change.group_id)?
+        .ok_or(DurableStoreError::InvalidRecord)?;
+    let memberships = load_memberships_from(transaction, &group, usize::MAX)?;
+    active_group_actor_role(&group, &memberships, &actor.scope, &actor.principal)
+        .map_err(map_group_error)?;
+    if let Some((recorded_actor, existing)) = load_change_record(
+        transaction,
+        &change.scope,
+        change.event_id.as_opaque().as_str(),
+    )? {
+        if recorded_actor != actor.principal {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        return if existing == fingerprint {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    let history_floor = if matches!(change.kind, ucr_model::GroupChangeKind::AddMember { .. }) {
+        Some(history_floor_for_add(transaction, &group)?)
+    } else {
+        None
+    };
+    let transition = apply_group_change(
+        &group,
+        &memberships,
+        &actor.scope,
+        &actor.principal,
+        change,
+        history_floor,
+    )
+    .map_err(map_group_error)?;
+    if super::event_journal::load_event_by_id(transaction, &change.scope, &change.event_id)?
+        .is_some()
+        || super::call_store::call_signal_reserves_event_id(
+            transaction,
+            &change.scope,
+            change.event_id.as_opaque().as_str(),
+        )?
+    {
+        return Err(DurableStoreError::Conflict);
+    }
+    super::call_store::reconcile_group_calls_after_membership_change(
+        transaction,
+        &transition.group,
+        &transition.memberships,
+    )?;
+    update_group(transaction, &transition.group)?;
+    replace_memberships(transaction, &transition.group, &transition.memberships)?;
+    insert_change_fingerprint(transaction, actor, change, &fingerprint)?;
+    if export_replica {
+        super::offline_group_store::record_change_replica(
+            transaction,
+            actor,
+            change,
+            transition.group.replication_generation,
+        )?;
+    }
+    Ok(DurableRecordStatus::Persisted)
 }
 
 impl GroupMessageStore for SqliteLocalStore {
@@ -526,6 +544,12 @@ impl GroupMessageStore for SqliteLocalStore {
         }
         message_store::insert_message_row(&transaction, &persisted)?;
         message_store::insert_message_children(&transaction, &persisted)?;
+        super::offline_group_store::record_message_replica(
+            &transaction,
+            subject,
+            &group,
+            &persisted,
+        )?;
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
@@ -725,7 +749,7 @@ fn replace_memberships(
     Ok(())
 }
 
-fn load_group_from(
+pub fn load_group_from(
     connection: &Connection,
     scope: &TenantScope,
     group_id: &GroupId,
@@ -777,7 +801,7 @@ fn load_group_from(
         .map_err(map_group_error)
 }
 
-pub(super) fn load_group_for_conversation_from(
+pub fn load_group_for_conversation_from(
     connection: &Connection,
     scope: &TenantScope,
     conversation_id: &ConversationId,
@@ -828,7 +852,7 @@ fn load_bridges(
     Ok(result)
 }
 
-pub(super) fn load_membership_from(
+pub fn load_membership_from(
     connection: &Connection,
     scope: &TenantScope,
     group_id: &GroupId,
@@ -1045,7 +1069,7 @@ fn history_floor_for_add(
     }
 }
 
-fn history_allows(
+pub const fn history_allows(
     group: &GroupRecord,
     membership: &GroupMembership,
     message: &MessageEnvelope,
@@ -1219,7 +1243,7 @@ fn decode_u64(value: &[u8]) -> Result<u64, DurableStoreError> {
     ))
 }
 
-pub(super) const fn principal_kind_name(value: PrincipalKind) -> &'static str {
+pub const fn principal_kind_name(value: PrincipalKind) -> &'static str {
     match value {
         PrincipalKind::Person => "person",
         PrincipalKind::Device => "device",
@@ -1231,7 +1255,7 @@ pub(super) const fn principal_kind_name(value: PrincipalKind) -> &'static str {
         PrincipalKind::ExternalPlatform => "external_platform",
     }
 }
-pub(super) fn parse_principal_kind(value: &str) -> Result<PrincipalKind, DurableStoreError> {
+pub fn parse_principal_kind(value: &str) -> Result<PrincipalKind, DurableStoreError> {
     match value {
         "person" => Ok(PrincipalKind::Person),
         "device" => Ok(PrincipalKind::Device),
@@ -1342,7 +1366,7 @@ fn parse_discovery(value: &str) -> Result<PublicGroupDiscovery, DurableStoreErro
     }
 }
 
-fn map_group_error(error: ucr_protocol::GroupError) -> DurableStoreError {
+const fn map_group_error(error: ucr_protocol::GroupError) -> DurableStoreError {
     use ucr_protocol::GroupError;
     match error {
         GroupError::PermissionDenied => DurableStoreError::PermissionDenied,
@@ -1373,6 +1397,8 @@ mod phase18_migration_tests {
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF; \
+                     DROP TABLE IF EXISTS offline_group_messages; \
+                     DROP TABLE IF EXISTS offline_group_changes; \
                      DROP TRIGGER IF EXISTS event_id_owner_events; \
                      DROP TRIGGER IF EXISTS event_id_owner_group_changes; \
                      DROP TRIGGER IF EXISTS event_id_owner_call_signals; \
@@ -1407,9 +1433,10 @@ mod phase18_migration_tests {
 mod phase18_restart_security_tests {
     use ucr_core::{
         CallStore, ConversationStore, DurableRecordStatus, DurableStoreError, GroupMessageStore,
-        GroupStore, MessageStore,
+        GroupStore, MessageStore, OfflineGroupStore, StorageProvider,
     };
     use ucr_model::*;
+    use ucr_protocol::{ALGORITHM_VERSION, SIGNATURE_ALGORITHM_ID};
 
     use super::SqliteLocalStore;
     use crate::message_store::tests::{TestDb, message, scope};
@@ -1475,6 +1502,21 @@ mod phase18_restart_security_tests {
         value.origin.principal_id = Some(member.principal_id.clone());
         value.correlation.correlation_id = oid(&format!("phase18-correlation-{suffix}"));
         value.correlation.idempotency_key = Some(format!("phase18-idempotency-{suffix}"));
+        value
+    }
+
+    fn signed_shape_message(
+        conversation: &ConversationRef,
+        member: &PrincipalRef,
+        suffix: &str,
+    ) -> MessageEnvelope {
+        let mut value = member_message(conversation, member, suffix);
+        value.signature = Some(MessageSignature {
+            key_id: KeyId::from_opaque(oid(&format!("phase26-key-{suffix}"))),
+            algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ALGORITHM_VERSION,
+            signature: vec![7_u8; 64],
+        });
         value
     }
 
@@ -2175,6 +2217,182 @@ mod phase18_restart_security_tests {
             reopened.call_for_participant(&bob, &scope(), &owner_call_id),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn phase26_offline_sidecars_survive_restart_and_remote_records_are_not_reexported() {
+        let db = TestDb::new();
+        let (conversation, group, owner) = group_fixture();
+        let peer = subject("phase26-peer");
+        let add_peer = GroupChange {
+            event_id: EventId::from_opaque(oid("phase26-add-peer")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::AddMember {
+                member: peer.principal.clone(),
+                role: GroupRole::Admin,
+            },
+            next_crypto_state: None,
+        };
+        let local_message = signed_shape_message(
+            &conversation.conversation,
+            &owner.principal,
+            "local-restart",
+        );
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open phase26 store");
+            store
+                .create_group(&conversation, &group, &owner)
+                .expect("group");
+            store
+                .apply_group_change(&owner, &add_peer)
+                .expect("add peer");
+            store
+                .persist_group_message(&owner, &local_message)
+                .expect("local message");
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen phase26 store");
+        let changes = reopened
+            .offline_group_change_page(&owner, &peer, &scope(), &group.group_id, None, 8)
+            .expect("restart-safe change page");
+        assert_eq!(changes.records.len(), 1);
+        assert_eq!(changes.records[0].change.event_id, add_peer.event_id);
+        let messages = reopened
+            .offline_group_message_page(&owner, &peer, &scope(), &group.group_id, None, 8)
+            .expect("restart-safe message page");
+        assert_eq!(messages.records.len(), 1);
+        assert_eq!(
+            messages.records[0].message.message_id,
+            local_message.message_id
+        );
+
+        let remote_change = OfflineGroupChangeReplica {
+            actor: peer.clone(),
+            group_generation: 2,
+            change: GroupChange {
+                event_id: EventId::from_opaque(oid("phase26-remote-policy")),
+                scope: scope(),
+                group_id: group.group_id.clone(),
+                expected_revision: 1,
+                kind: GroupChangeKind::SetHistoryPolicy {
+                    policy: GroupHistoryPolicy::FullHistory,
+                },
+                next_crypto_state: None,
+            },
+        };
+        assert_eq!(
+            reopened.reconcile_offline_group_change(&owner, &remote_change),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            reopened.reconcile_offline_group_change(&owner, &remote_change),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+        assert!(
+            reopened
+                .offline_group_change_page(&peer, &owner, &scope(), &group.group_id, None, 8)
+                .expect("peer page")
+                .records
+                .is_empty(),
+            "remote change must not become forwarding evidence"
+        );
+
+        let mut remote_message_value = signed_shape_message(
+            &conversation.conversation,
+            &peer.principal,
+            "remote-no-forward",
+        );
+        remote_message_value.delivery_state = DeliveryState::Persisted;
+        let remote_message = OfflineGroupMessageReplica {
+            author: peer.clone(),
+            group_id: group.group_id.clone(),
+            group_generation: 2,
+            message: remote_message_value,
+        };
+        assert_eq!(
+            reopened.reconcile_offline_group_message(&owner, &remote_message),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert!(
+            reopened
+                .offline_group_message_page(&peer, &owner, &scope(), &group.group_id, None, 8)
+                .expect("peer message page")
+                .records
+                .is_empty(),
+            "remote message must not become forwarding evidence"
+        );
+    }
+
+    #[test]
+    fn phase26_v22_to_v23_migration_preserves_canonical_history_without_inventing_replication_evidence()
+     {
+        let db = TestDb::new();
+        let (conversation, group, owner) = group_fixture();
+        let change = GroupChange {
+            event_id: EventId::from_opaque(oid("phase26-pre-v23-change")),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: 0,
+            kind: GroupChangeKind::SetHistoryPolicy {
+                policy: GroupHistoryPolicy::FullHistory,
+            },
+            next_crypto_state: None,
+        };
+        let historical = signed_shape_message(
+            &conversation.conversation,
+            &owner.principal,
+            "pre-v23-message",
+        );
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create current store");
+            store
+                .create_group(&conversation, &group, &owner)
+                .expect("group");
+            store
+                .apply_group_change(&owner, &change)
+                .expect("historical change");
+            store
+                .persist_group_message(&owner, &historical)
+                .expect("historical message");
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open raw v23");
+            connection
+                .execute_batch(
+                    "DROP INDEX offline_group_messages_group_seq; \
+                 DROP TABLE offline_group_messages; \
+                 DROP INDEX offline_group_changes_group_seq; \
+                 DROP TABLE offline_group_changes; \
+                 PRAGMA user_version=22;",
+                )
+                .expect("simulate exact v22 without phase26 sidecars");
+        }
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v22 to v23");
+        assert_eq!(migrated.schema_version(), Ok(crate::SQLITE_SCHEMA_VERSION));
+        assert!(
+            migrated
+                .group(&scope(), &group.group_id)
+                .expect("group read")
+                .is_some()
+        );
+        assert!(
+            migrated
+                .message(&scope(), &historical.message_id)
+                .expect("message read")
+                .is_some()
+        );
+        let connection = migrated
+            .lock_connection()
+            .expect("inspect migrated sidecars");
+        for table in ["offline_group_changes", "offline_group_messages"] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("sidecar count");
+            assert_eq!(count, 0, "v22 migration must not synthesize {table}");
+        }
     }
 }
 

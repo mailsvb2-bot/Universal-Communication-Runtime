@@ -25,6 +25,7 @@ mod intent;
 mod media_e2ee;
 mod message;
 mod message_signature;
+mod offline_group;
 mod provenance;
 mod recovery;
 mod scope;
@@ -182,6 +183,12 @@ pub use message::{
 };
 pub use message_signature::{
     MESSAGE_SIGNING_BINDING_V1_DOMAIN, MessageSigningBinding, message_signing_binding,
+};
+pub use offline_group::{
+    MAX_OFFLINE_GROUP_PAGE_ITEMS, OFFLINE_GROUP_CURSOR_LEN, OFFLINE_GROUPS_CAPABILITY,
+    OfflineGroupError, canonical_offline_group_change_replica,
+    canonical_offline_group_message_replica, offline_group_cursor, offline_group_cursor_sequence,
+    phase26_offline_group_capabilities, validate_offline_group_page_size,
 };
 pub use provenance::{ProvenanceError, validate_origin_ref};
 pub use recovery::{

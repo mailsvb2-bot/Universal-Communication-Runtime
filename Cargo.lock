@@ -1616,6 +1616,17 @@ name = "ucr-model"
 version = "0.0.1"
 
 [[package]]
+name = "ucr-offline-groups"
+version = "0.0.1"
+dependencies = [
+ "ucr-core",
+ "ucr-crypto",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-memory",
+]
+
+[[package]]
 name = "ucr-protocol"
 version = "0.0.1"
 dependencies = [

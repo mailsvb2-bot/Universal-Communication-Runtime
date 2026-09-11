@@ -33,3 +33,4 @@ run_target media_e2ee_frame 131072 768
 run_target adaptive_media_telemetry 64 512
 run_target transport_orchestrator_plan 128 512
 run_target transport_failover_execution 64 512
+run_target offline_group_replica 4096 768
