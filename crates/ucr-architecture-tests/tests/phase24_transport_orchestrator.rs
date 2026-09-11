@@ -88,7 +88,7 @@ fn phase24_does_not_create_a_second_transport_delivery_or_failover_brain() {
     assert!(adr.contains("Phase 25 owns Automatic Failover"));
     let sqlite =
         fs::read_to_string(root.join("crates/ucr-storage-sqlite/src/lib.rs")).expect("sqlite");
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 22"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 23"));
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn phase24_release_truth_public_contract_and_fuzz_gate_are_machine_locked() {
         fs::read_to_string(root.join("docs/architecture/THREAT_MODEL.md")).expect("threat");
 
     assert!(readme.contains("Phase 24"));
-    assert!(readme.contains("**Phase 25 — Automatic Failover (Prepared/reference complete; Phase 26 Offline Groups not started).**"));
+    assert!(readme.contains("**Phase 26 — Offline Groups (Prepared/reference complete; Phase 27 Store-and-Forward not started).**"));
     assert!(ci.contains("test -s spec/transport-orchestrator.md"));
     assert!(ci.contains("test -s proto/ucr/v1/transport_orchestrator.proto"));
     assert!(ci.contains("0062-phase24-transport-orchestrator-reuses-canonical-intent-endpoint-policy-and-transport-owners.md"));

@@ -1,13 +1,18 @@
-use ucr_core::{DurableRecordStatus, DurableStoreError, GroupMessageStore, GroupStore};
+use ucr_core::{
+    DurableRecordStatus, DurableStoreError, GroupMessageStore, GroupStore, OfflineGroupStore,
+};
 use ucr_model::{
     ConversationId, ConversationRecord, DeliveryState, GroupChange, GroupHistoryPolicy, GroupId,
     GroupMemberState, GroupMembership, GroupPermission, GroupRecord, MessageEnvelope, MessageId,
-    PrincipalRef, ScopedPrincipal, TenantScope,
+    OfflineGroupChangePage, OfflineGroupChangeReplica, OfflineGroupCursor, OfflineGroupMessagePage,
+    OfflineGroupMessageReplica, OfflineGroupStreamKind, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
     active_group_actor_role, apply_group_change, canonical_group_creation,
-    canonical_group_memberships, canonical_message, group_change_fingerprint,
-    is_group_conversation_kind, validate_conversation, validate_group_member_list_limit,
+    canonical_group_memberships, canonical_message, canonical_offline_group_change_replica,
+    canonical_offline_group_message_replica, group_change_fingerprint, is_group_conversation_kind,
+    offline_group_cursor, offline_group_cursor_sequence, validate_conversation,
+    validate_group_member_list_limit, validate_offline_group_page_size,
 };
 
 use super::{
@@ -204,75 +209,107 @@ impl GroupStore for MemoryLocalStore {
         actor: &ScopedPrincipal,
         change: &GroupChange,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        if actor.scope != change.scope {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        apply_group_change_in_state(&mut state, actor, change, true)
+    }
+}
+
+fn apply_group_change_in_state(
+    state: &mut MemoryState,
+    actor: &ScopedPrincipal,
+    change: &GroupChange,
+    export_replica: bool,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+    if actor.scope != change.scope {
+        return Err(DurableStoreError::PermissionDenied);
+    }
+    let fingerprint = group_change_fingerprint(change).map_err(map_group_error)?;
+    let group_key = group_key(&change.scope, &change.group_id);
+    let change_key = change_key(&change.scope, change.event_id.as_opaque().as_str());
+    let group = state
+        .groups
+        .get(&group_key)
+        .cloned()
+        .ok_or(DurableStoreError::InvalidRecord)?;
+    let memberships = state
+        .group_memberships
+        .values()
+        .filter(|membership| {
+            membership.scope == change.scope && membership.group_id == change.group_id
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    active_group_actor_role(&group, &memberships, &actor.scope, &actor.principal)
+        .map_err(map_group_error)?;
+    if let Some((recorded_actor, existing)) = state.group_changes.get(&change_key) {
+        if recorded_actor != &actor.principal {
             return Err(DurableStoreError::PermissionDenied);
         }
-        let fingerprint = group_change_fingerprint(change).map_err(map_group_error)?;
-        let group_key = group_key(&change.scope, &change.group_id);
-        let change_key = change_key(&change.scope, change.event_id.as_opaque().as_str());
-        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        let group = state
-            .groups
-            .get(&group_key)
-            .cloned()
-            .ok_or(DurableStoreError::InvalidRecord)?;
-        let memberships = state
-            .group_memberships
-            .values()
-            .filter(|membership| {
-                membership.scope == change.scope && membership.group_id == change.group_id
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        active_group_actor_role(&group, &memberships, &actor.scope, &actor.principal)
-            .map_err(map_group_error)?;
-        if let Some((recorded_actor, existing)) = state.group_changes.get(&change_key) {
-            if recorded_actor != &actor.principal {
-                return Err(DurableStoreError::PermissionDenied);
-            }
-            return if existing == &fingerprint {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        let history_floor = if matches!(change.kind, ucr_model::GroupChangeKind::AddMember { .. }) {
-            Some(history_floor_for_add(&state, &group)?)
+        return if existing == &fingerprint {
+            Ok(DurableRecordStatus::Duplicate)
         } else {
-            None
+            Err(DurableStoreError::Conflict)
         };
-        let transition = apply_group_change(
-            &group,
-            &memberships,
-            &actor.scope,
-            &actor.principal,
-            change,
-            history_floor,
-        )
-        .map_err(map_group_error)?;
-        if state.events.contains_key(&change_key) || state.call_signals.contains_key(&change_key) {
-            return Err(DurableStoreError::Conflict);
-        }
-        super::call_store::reconcile_group_calls_after_membership_change(
-            &mut state,
-            &transition.group,
-            &transition.memberships,
-        )?;
-        state.groups.insert(group_key, transition.group.clone());
-        state.group_memberships.retain(|_, membership| {
-            membership.scope != change.scope || membership.group_id != change.group_id
-        });
-        for membership in transition.memberships {
-            state.group_memberships.insert(
-                membership_key(&membership.scope, &membership.group_id, &membership.member),
-                membership,
-            );
-        }
-        state
-            .group_changes
-            .insert(change_key, (actor.principal.clone(), fingerprint));
-        Ok(DurableRecordStatus::Persisted)
     }
+    let history_floor = if matches!(change.kind, ucr_model::GroupChangeKind::AddMember { .. }) {
+        Some(history_floor_for_add(state, &group)?)
+    } else {
+        None
+    };
+    let transition = apply_group_change(
+        &group,
+        &memberships,
+        &actor.scope,
+        &actor.principal,
+        change,
+        history_floor,
+    )
+    .map_err(map_group_error)?;
+    if state.events.contains_key(&change_key) || state.call_signals.contains_key(&change_key) {
+        return Err(DurableStoreError::Conflict);
+    }
+    let replica_sequence = if export_replica {
+        Some(checked_next_offline_group_sequence(state)?)
+    } else {
+        None
+    };
+    super::call_store::reconcile_group_calls_after_membership_change(
+        state,
+        &transition.group,
+        &transition.memberships,
+    )?;
+    state.groups.insert(group_key, transition.group.clone());
+    state.group_memberships.retain(|_, membership| {
+        membership.scope != change.scope || membership.group_id != change.group_id
+    });
+    for membership in transition.memberships {
+        state.group_memberships.insert(
+            membership_key(&membership.scope, &membership.group_id, &membership.member),
+            membership,
+        );
+    }
+    state
+        .group_changes
+        .insert(change_key, (actor.principal.clone(), fingerprint));
+    if let Some(sequence) = replica_sequence {
+        state.offline_group_next_sequence = sequence;
+        state.offline_group_change_replicas.push((
+            sequence,
+            OfflineGroupChangeReplica {
+                actor: actor.clone(),
+                group_generation: transition.group.replication_generation,
+                change: change.clone(),
+            },
+        ));
+    }
+    Ok(DurableRecordStatus::Persisted)
+}
+
+fn membership_active_at_generation(membership: &GroupMembership, generation: u64) -> bool {
+    membership.joined_revision <= generation
+        && membership
+            .removed_revision
+            .is_none_or(|removed| generation < removed)
 }
 
 impl GroupMessageStore for MemoryLocalStore {
@@ -323,7 +360,25 @@ impl GroupMessageStore for MemoryLocalStore {
         {
             return Err(DurableStoreError::PermissionDenied);
         }
-        persist_message_in_state(&mut state, &canonical)
+        let replica_sequence = checked_next_offline_group_sequence(&state)?;
+        let status = persist_message_in_state(&mut state, &canonical)?;
+        if status == DurableRecordStatus::Persisted {
+            let mut replicated_message = canonical;
+            replicated_message.delivery_state = DeliveryState::Persisted;
+            let replica = OfflineGroupMessageReplica {
+                author: subject.clone(),
+                group_id: group.group_id.clone(),
+                group_generation: group.replication_generation,
+                message: replicated_message,
+            };
+            if canonical_offline_group_message_replica(&replica).is_ok() {
+                state.offline_group_next_sequence = replica_sequence;
+                state
+                    .offline_group_message_replicas
+                    .push((replica_sequence, replica));
+            }
+        }
+        Ok(status)
     }
 
     fn group_message(
@@ -428,7 +483,250 @@ fn history_floor_for_add(
     }
 }
 
-fn history_allows(
+impl OfflineGroupStore for MemoryLocalStore {
+    fn offline_group_change_page(
+        &self,
+        source: &ScopedPrincipal,
+        recipient: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        cursor: Option<&OfflineGroupCursor>,
+        max_items: usize,
+    ) -> Result<OfflineGroupChangePage, DurableStoreError> {
+        validate_offline_group_page_size(max_items)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        if source.scope != *scope || recipient.scope != *scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let after = cursor.map_or(Ok(0), |cursor| {
+            offline_group_cursor_sequence(scope, group_id, OfflineGroupStreamKind::Changes, cursor)
+                .map_err(|_| DurableStoreError::InvalidRecord)
+        })?;
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let group = state
+            .groups
+            .get(&group_key(scope, group_id))
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        require_two_active_members(&state, group, source, recipient)?;
+        let mut eligible = state
+            .offline_group_change_replicas
+            .iter()
+            .filter(|(sequence, replica)| {
+                *sequence > after
+                    && replica.change.scope == *scope
+                    && replica.change.group_id == *group_id
+                    && replica.actor == *source
+            })
+            .map(|(sequence, replica)| (*sequence, replica.clone()))
+            .take(max_items + 1)
+            .collect::<Vec<_>>();
+        let has_more = eligible.len() > max_items;
+        if has_more {
+            eligible.pop();
+        }
+        let next_cursor = has_more.then(|| {
+            offline_group_cursor(
+                scope,
+                group_id,
+                OfflineGroupStreamKind::Changes,
+                eligible.last().expect("nonempty bounded page").0,
+            )
+        });
+        Ok(OfflineGroupChangePage {
+            scope: scope.clone(),
+            group_id: group_id.clone(),
+            records: eligible.into_iter().map(|(_, record)| record).collect(),
+            next_cursor,
+        })
+    }
+
+    fn offline_group_message_page(
+        &self,
+        source: &ScopedPrincipal,
+        recipient: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        cursor: Option<&OfflineGroupCursor>,
+        max_items: usize,
+    ) -> Result<OfflineGroupMessagePage, DurableStoreError> {
+        validate_offline_group_page_size(max_items)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        if source.scope != *scope || recipient.scope != *scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let after = cursor.map_or(Ok(0), |cursor| {
+            offline_group_cursor_sequence(scope, group_id, OfflineGroupStreamKind::Messages, cursor)
+                .map_err(|_| DurableStoreError::InvalidRecord)
+        })?;
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let group = state
+            .groups
+            .get(&group_key(scope, group_id))
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        let recipient_membership = require_two_active_members(&state, group, source, recipient)?;
+        let mut eligible = state
+            .offline_group_message_replicas
+            .iter()
+            .filter(|(sequence, replica)| {
+                *sequence > after
+                    && replica.message.scope == *scope
+                    && replica.group_id == *group_id
+                    && replica.author == *source
+                    && history_allows(group, recipient_membership, &replica.message)
+            })
+            .map(|(sequence, replica)| (*sequence, replica.clone()))
+            .take(max_items + 1)
+            .collect::<Vec<_>>();
+        let has_more = eligible.len() > max_items;
+        if has_more {
+            eligible.pop();
+        }
+        let next_cursor = has_more.then(|| {
+            offline_group_cursor(
+                scope,
+                group_id,
+                OfflineGroupStreamKind::Messages,
+                eligible.last().expect("nonempty bounded page").0,
+            )
+        });
+        Ok(OfflineGroupMessagePage {
+            scope: scope.clone(),
+            group_id: group_id.clone(),
+            records: eligible.into_iter().map(|(_, record)| record).collect(),
+            next_cursor,
+        })
+    }
+
+    fn reconcile_offline_group_change(
+        &self,
+        recipient: &ScopedPrincipal,
+        record: &OfflineGroupChangeReplica,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let record = canonical_offline_group_change_replica(record)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        if recipient.scope != record.change.scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let group = state
+            .groups
+            .get(&group_key(&record.change.scope, &record.change.group_id))
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        let recipient_membership = state
+            .group_memberships
+            .get(&membership_key(
+                &group.scope,
+                &group.group_id,
+                &recipient.principal,
+            ))
+            .filter(|membership| {
+                membership.member == recipient.principal
+                    && membership.state == GroupMemberState::Active
+            })
+            .ok_or(DurableStoreError::PermissionDenied)?;
+        if !recipient_membership
+            .permissions
+            .contains(&GroupPermission::ReadHistory)
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let expected_generation = group
+            .replication_generation
+            .checked_add(1)
+            .ok_or(DurableStoreError::Full)?;
+        if record.group_generation > expected_generation {
+            return Err(DurableStoreError::Conflict);
+        }
+        apply_group_change_in_state(&mut state, &record.actor, &record.change, false)
+    }
+
+    fn reconcile_offline_group_message(
+        &self,
+        recipient: &ScopedPrincipal,
+        record: &OfflineGroupMessageReplica,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let record = canonical_offline_group_message_replica(record)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        if recipient.scope != record.message.scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let group = state
+            .groups
+            .get(&group_key(&record.message.scope, &record.group_id))
+            .cloned()
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if record.message.conversation != group.conversation
+            || record.message.delivery_policy != group.delivery_policy
+            || record.group_generation > group.replication_generation
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let recipient_membership = state
+            .group_memberships
+            .get(&membership_key(
+                &group.scope,
+                &group.group_id,
+                &recipient.principal,
+            ))
+            .filter(|membership| {
+                membership.member == recipient.principal
+                    && membership.state == GroupMemberState::Active
+                    && membership
+                        .permissions
+                        .contains(&GroupPermission::ReadHistory)
+            })
+            .ok_or(DurableStoreError::PermissionDenied)?;
+        if !history_allows(&group, recipient_membership, &record.message) {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        let author_membership = state
+            .group_memberships
+            .get(&membership_key(
+                &group.scope,
+                &group.group_id,
+                &record.author.principal,
+            ))
+            .filter(|membership| membership.member == record.author.principal)
+            .ok_or(DurableStoreError::PermissionDenied)?;
+        if !membership_active_at_generation(author_membership, record.group_generation) {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        persist_message_in_state(&mut state, &record.message)
+    }
+}
+
+fn checked_next_offline_group_sequence(state: &MemoryState) -> Result<u64, DurableStoreError> {
+    state
+        .offline_group_next_sequence
+        .checked_add(1)
+        .ok_or(DurableStoreError::Full)
+}
+
+fn require_two_active_members<'a>(
+    state: &'a MemoryState,
+    group: &GroupRecord,
+    source: &ScopedPrincipal,
+    recipient: &ScopedPrincipal,
+) -> Result<&'a GroupMembership, DurableStoreError> {
+    let active = |principal: &ScopedPrincipal| {
+        state
+            .group_memberships
+            .get(&membership_key(
+                &group.scope,
+                &group.group_id,
+                &principal.principal,
+            ))
+            .filter(|membership| {
+                membership.member == principal.principal
+                    && membership.state == GroupMemberState::Active
+            })
+    };
+    active(source).ok_or(DurableStoreError::PermissionDenied)?;
+    active(recipient).ok_or(DurableStoreError::PermissionDenied)
+}
+
+const fn history_allows(
     group: &GroupRecord,
     membership: &GroupMembership,
     message: &MessageEnvelope,
@@ -445,7 +743,7 @@ fn history_allows(
     }
 }
 
-fn map_group_error(error: ucr_protocol::GroupError) -> DurableStoreError {
+const fn map_group_error(error: ucr_protocol::GroupError) -> DurableStoreError {
     use ucr_protocol::GroupError;
     match error {
         GroupError::PermissionDenied => DurableStoreError::PermissionDenied,
@@ -739,7 +1037,7 @@ mod phase18_memory_security_tests {
         let change_a = GroupChange {
             event_id: shared_id.clone(),
             scope: scope(),
-            group_id: group_a.group_id.clone(),
+            group_id: group_a.group_id,
             expected_revision: 0,
             kind: GroupChangeKind::AddMember {
                 member: subject("memory-member-a", PrincipalKind::Person).principal,
@@ -748,7 +1046,7 @@ mod phase18_memory_security_tests {
             next_crypto_state: None,
         };
         let change_b = GroupChange {
-            event_id: shared_id.clone(),
+            event_id: shared_id,
             scope: scope(),
             group_id: group_b.group_id.clone(),
             expected_revision: 0,
@@ -782,7 +1080,7 @@ mod phase18_memory_security_tests {
         let event_first_change = GroupChange {
             event_id: EventId::from_opaque(oid("memory-event-first-id")),
             scope: scope(),
-            group_id: group_b.group_id.clone(),
+            group_id: group_b.group_id,
             expected_revision: 0,
             kind: GroupChangeKind::AddMember {
                 member: subject("memory-member-c", PrincipalKind::Person).principal,
@@ -850,7 +1148,7 @@ mod phase18_memory_security_tests {
         let add = GroupChange {
             event_id: EventId::from_opaque(oid("lastn-add")),
             scope: scope(),
-            group_id: group.group_id.clone(),
+            group_id: group.group_id,
             expected_revision: 0,
             kind: GroupChangeKind::AddMember {
                 member: member.principal.clone(),
@@ -979,7 +1277,7 @@ mod phase18_memory_security_tests {
         let change = GroupChange {
             event_id: EventId::from_opaque(oid("duplicate-actor-event")),
             scope: scope(),
-            group_id: group.group_id.clone(),
+            group_id: group.group_id,
             expected_revision: 0,
             kind: GroupChangeKind::AddMember {
                 member: subject("duplicate-member", PrincipalKind::Person).principal,
@@ -1091,7 +1389,7 @@ mod phase18_memory_security_tests {
         let remove_admin = GroupChange {
             event_id: EventId::from_opaque(oid("removed-dup-remove-admin")),
             scope: scope(),
-            group_id: group.group_id.clone(),
+            group_id: group.group_id,
             expected_revision: 2,
             kind: GroupChangeKind::RemoveMember {
                 member: admin.principal.clone(),
@@ -1243,7 +1541,7 @@ mod phase18_memory_security_tests {
                 &GroupChange {
                     event_id: EventId::from_opaque(oid("phase19-remove-bob")),
                     scope: scope(),
-                    group_id: group.group_id.clone(),
+                    group_id: group.group_id,
                     expected_revision: 2,
                     kind: GroupChangeKind::RemoveMember {
                         member: bob.principal.clone(),

@@ -89,3 +89,9 @@ path = "fuzz_targets/transport_failover_execution.rs"
 test = false
 doc = false
 bench = false
+[[bin]]
+name = "offline_group_replica"
+path = "fuzz_targets/offline_group_replica.rs"
+test = false
+doc = false
+bench = false

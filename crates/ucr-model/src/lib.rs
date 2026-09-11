@@ -7,6 +7,7 @@ mod audio;
 mod call;
 mod group;
 mod media_e2ee;
+mod offline_group;
 mod transport_failover;
 mod transport_orchestrator;
 mod video;
@@ -28,6 +29,10 @@ pub use group::{
     GroupRecord, GroupRole, PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,
 };
 pub use media_e2ee::{EncryptedMediaFrame, MediaE2eeContext, MediaE2eeFrameHeader, MediaKind};
+pub use offline_group::{
+    OfflineGroupChangePage, OfflineGroupChangeReplica, OfflineGroupCursor, OfflineGroupMessagePage,
+    OfflineGroupMessageReplica, OfflineGroupStreamKind,
+};
 pub use transport_failover::{
     TransportFailoverAttemptDecision, TransportFailoverAttemptOutcome, TransportFailoverDecision,
     TransportFailoverPolicy, TransportFailoverStopReason,
@@ -91,7 +96,7 @@ impl OpaqueId {
 
     /// Returns the exact canonical bytes carried by public `OpaqueId.value`.
     #[must_use]
-    pub fn as_wire_bytes(&self) -> &[u8] {
+    pub const fn as_wire_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
 }

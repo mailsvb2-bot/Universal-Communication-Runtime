@@ -66,7 +66,7 @@ fn phase25_does_not_create_future_or_second_owner() {
     assert!(!proto.contains("EndpointAddress"));
     assert!(spec.contains("Phase 26 Offline Groups"));
     assert!(spec.contains("Phase 27 Store-and-Forward"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 22"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 23"));
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn phase25_release_truth_contract_docs_and_fuzz_are_machine_locked() {
     .expect("ADR 0063");
 
     assert!(readme.contains(
-        "**Phase 25 — Automatic Failover (Prepared/reference complete; Phase 26 Offline Groups not started).**"
+        "**Phase 26 — Offline Groups (Prepared/reference complete; Phase 27 Store-and-Forward not started).**"
     ));
     assert!(ci.contains("test -s spec/transport-failover.md"));
     assert!(ci.contains("test -s proto/ucr/v1/transport_failover.proto"));

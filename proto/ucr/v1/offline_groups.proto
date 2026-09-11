@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/communication.proto";
+import "ucr/v1/identity.proto";
+
+// Phase 26 Offline Groups is a one-hop authenticated reconciliation contract.
+// It is not a relay, forwarding queue, discovery service, or membership authority.
+enum OfflineGroupStreamKind {
+  OFFLINE_GROUP_STREAM_KIND_UNSPECIFIED = 0;
+  OFFLINE_GROUP_STREAM_KIND_CHANGES = 1;
+  OFFLINE_GROUP_STREAM_KIND_MESSAGES = 2;
+}
+
+enum GroupRole {
+  GROUP_ROLE_UNSPECIFIED = 0;
+  GROUP_ROLE_OWNER = 1;
+  GROUP_ROLE_ADMIN = 2;
+  GROUP_ROLE_MEMBER = 3;
+}
+
+enum GroupHistoryPolicyKind {
+  GROUP_HISTORY_POLICY_KIND_UNSPECIFIED = 0;
+  GROUP_HISTORY_POLICY_KIND_NO_HISTORY = 1;
+  GROUP_HISTORY_POLICY_KIND_FROM_JOIN = 2;
+  GROUP_HISTORY_POLICY_KIND_LAST_N_MESSAGES = 3;
+  GROUP_HISTORY_POLICY_KIND_FROM_TIMESTAMP = 4;
+  GROUP_HISTORY_POLICY_KIND_FULL_HISTORY = 5;
+  GROUP_HISTORY_POLICY_KIND_CUSTOM = 6;
+}message GroupHistoryPolicy {
+  GroupHistoryPolicyKind kind = 1;
+  optional uint32 last_n_messages = 2;
+  optional int64 from_timestamp_unix_ms = 3;
+  optional string custom_policy = 4;
+}
+
+enum PublicGroupJoinPolicy {
+  PUBLIC_GROUP_JOIN_POLICY_UNSPECIFIED = 0;
+  PUBLIC_GROUP_JOIN_POLICY_OPEN = 1;
+  PUBLIC_GROUP_JOIN_POLICY_APPROVAL_REQUIRED = 2;
+  PUBLIC_GROUP_JOIN_POLICY_INVITE_ONLY = 3;
+}
+
+enum PublicGroupDiscovery {
+  PUBLIC_GROUP_DISCOVERY_UNSPECIFIED = 0;
+  PUBLIC_GROUP_DISCOVERY_UNLISTED = 1;
+  PUBLIC_GROUP_DISCOVERY_DISCOVERABLE = 2;
+}
+
+message PublicGroupPolicy {
+  PublicGroupJoinPolicy join_policy = 1;
+  PublicGroupDiscovery discovery = 2;
+  bool indexed = 3;
+}
+
+message GroupCryptoState {
+  optional string capability_id = 1;
+  uint64 epoch = 2;
+  optional OpaqueId state_ref = 3;
+}message GroupAddMemberChange {
+  PrincipalRef member = 1;
+  GroupRole role = 2;
+}
+message GroupRemoveMemberChange { PrincipalRef member = 1; }
+message GroupChangeRoleChange {
+  PrincipalRef member = 1;
+  GroupRole role = 2;
+}
+message GroupTransferOwnershipChange { PrincipalRef new_owner = 1; }
+message GroupSetHistoryPolicyChange { GroupHistoryPolicy policy = 1; }
+message GroupSetPublicPolicyChange { PublicGroupPolicy policy = 1; }
+message GroupSetDeliveryPolicyChange { DeliveryPolicy policy = 1; }
+
+message OfflineGroupChange {
+  OpaqueId event_id = 1;
+  TenantScope scope = 2;
+  OpaqueId group_id = 3;
+  uint64 expected_revision = 4;
+  oneof kind {
+    GroupAddMemberChange add_member = 5;
+    GroupRemoveMemberChange remove_member = 6;
+    GroupChangeRoleChange change_role = 7;
+    GroupTransferOwnershipChange transfer_ownership = 8;
+    GroupSetHistoryPolicyChange set_history_policy = 9;
+    GroupSetPublicPolicyChange set_public_policy = 10;
+    GroupSetDeliveryPolicyChange set_delivery_policy = 11;
+  }
+  optional GroupCryptoState next_crypto_state = 12;
+}message OfflineGroupCursor { bytes token = 1; }
+
+message OfflineGroupChangeReplica {
+  ScopedPrincipal actor = 1;
+  uint64 group_generation = 2;
+  OfflineGroupChange change = 3;
+}
+
+message OfflineGroupMessageReplica {
+  ScopedPrincipal author = 1;
+  OpaqueId group_id = 2;
+  uint64 group_generation = 3;
+  MessageEnvelope message = 4;
+}
+
+message OfflineGroupChangePage {
+  TenantScope scope = 1;
+  OpaqueId group_id = 2;
+  repeated OfflineGroupChangeReplica records = 3;
+  optional OfflineGroupCursor next_cursor = 4;
+}
+
+message OfflineGroupMessagePage {
+  TenantScope scope = 1;
+  OpaqueId group_id = 2;
+  repeated OfflineGroupMessageReplica records = 3;
+  optional OfflineGroupCursor next_cursor = 4;
+}
+
+// No service is defined here. Transport/session orchestration belongs to the
+// existing Sync/Crypto/Transport owners; this file defines public data parity only.

@@ -1,9 +1,11 @@
 use ucr_model::{
     ConversationId, ConversationRecord, GroupChange, GroupId, GroupMembership, GroupRecord,
-    MessageEnvelope, MessageId, ScopedPrincipal, TenantScope,
+    MessageEnvelope, MessageId, OfflineGroupChangePage, OfflineGroupChangeReplica,
+    OfflineGroupCursor, OfflineGroupMessagePage, OfflineGroupMessageReplica, ScopedPrincipal,
+    TenantScope,
 };
 
-use crate::{DurableRecordStatus, DurableStoreError, MessageStore, StorageProvider};
+use crate::{DurableRecordStatus, DurableStoreError, MessageStore, StorageProvider, SyncStore};
 
 /// Durable canonical Group aggregate owner.
 ///
@@ -131,4 +133,70 @@ pub trait GroupMessageStore: GroupStore + MessageStore {
         scope: &TenantScope,
         message_id: &MessageId,
     ) -> Result<Option<MessageEnvelope>, DurableStoreError>;
+}
+
+/// Durable source-enumeration sidecar for Phase-26 one-hop Group synchronization.
+///
+/// This trait reuses the canonical Group/Message/Sync owners. It does not own a second Group or
+/// Message database and it does not provide a Store-and-Forward queue. Implementations must gate
+/// both the source and intended recipient as active members from the same storage snapshot.
+pub trait OfflineGroupStore: GroupMessageStore + SyncStore {
+    /// Returns a bounded page of source-authored Group changes for one active recipient.
+    ///
+    /// Only changes whose actor is exactly `source` are exported because Phase 18 Group changes do
+    /// not carry an author-device signature that would make third-party forwarding trustworthy.
+    ///
+    /// # Errors
+    /// Rejects inactive members, cross-scope/cursor misuse, invalid bounds, corrupt state, or storage failures.
+    fn offline_group_change_page(
+        &self,
+        source: &ScopedPrincipal,
+        recipient: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        cursor: Option<&OfflineGroupCursor>,
+        max_items: usize,
+    ) -> Result<OfflineGroupChangePage, DurableStoreError>;
+
+    /// Returns a bounded page of signed Group Messages visible to one active recipient.
+    ///
+    /// Message payload remains owned by the canonical Message store; the replication sidecar keeps
+    /// only source-local enumeration metadata.
+    ///
+    /// # Errors
+    /// Rejects inactive members, history-policy denial, cross-scope/cursor misuse, invalid bounds,
+    /// corrupt state, or storage failures.
+    fn offline_group_message_page(
+        &self,
+        source: &ScopedPrincipal,
+        recipient: &ScopedPrincipal,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        cursor: Option<&OfflineGroupCursor>,
+        max_items: usize,
+    ) -> Result<OfflineGroupMessagePage, DurableStoreError>;
+
+    /// Applies one already-authenticated one-hop Group change without re-exporting it as local
+    /// source material. The intended local recipient must be an active member before the change.
+    ///
+    /// # Errors
+    /// Rejects stale/unauthorized/security-invalid changes, inactive recipients, duplicates with
+    /// conflicting semantics, or storage failures.
+    fn reconcile_offline_group_change(
+        &self,
+        recipient: &ScopedPrincipal,
+        record: &OfflineGroupChangeReplica,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Persists one authenticated signed one-hop Group Message without creating forwarding evidence.
+    /// Historical author membership is evaluated at the record's Group generation.
+    ///
+    /// # Errors
+    /// Rejects unknown/future Group generations, membership/history violations, malformed/conflicting
+    /// Messages, inactive recipients, or storage failures.
+    fn reconcile_offline_group_message(
+        &self,
+        recipient: &ScopedPrincipal,
+        record: &OfflineGroupMessageReplica,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
 }

@@ -138,7 +138,8 @@ jobs:
           test -s spec/media-e2ee.md &&
           test -s spec/adaptive-media.md &&
           test -s spec/transport-orchestrator.md &&
-          test -s spec/transport-failover.md
+          test -s spec/transport-failover.md &&
+          test -s spec/offline-groups.md
       - name: Public contract exists
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
@@ -158,7 +159,8 @@ jobs:
           test -s proto/ucr/v1/media_e2ee.proto &&
           test -s proto/ucr/v1/adaptive_media.proto &&
           test -s proto/ucr/v1/transport_orchestrator.proto &&
-          test -s proto/ucr/v1/transport_failover.proto
+          test -s proto/ucr/v1/transport_failover.proto &&
+          test -s proto/ucr/v1/offline_groups.proto
       - name: ADR governance exists
         run: >-
           test -s docs/adr/0000-template.md &&
@@ -223,4 +225,5 @@ jobs:
           test -s docs/adr/0060-phase22-e2ee-media-reuses-canonical-call-crypto-and-capability-owners.md &&
           test -s docs/adr/0061-phase23-adaptive-media-reuses-canonical-media-and-security-owners.md &&
           test -s docs/adr/0062-phase24-transport-orchestrator-reuses-canonical-intent-endpoint-policy-and-transport-owners.md &&
-          test -s docs/adr/0063-phase25-automatic-failover-reuses-transport-orchestrator-and-provider-acceptance-evidence.md
+          test -s docs/adr/0063-phase25-automatic-failover-reuses-transport-orchestrator-and-provider-acceptance-evidence.md &&
+          test -s docs/adr/0064-phase26-offline-groups-reuses-group-message-sync-and-trust-owners.md

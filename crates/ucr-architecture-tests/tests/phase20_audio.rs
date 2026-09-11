@@ -49,7 +49,7 @@ fn phase20_audio_reuses_call_capability_and_authorization_owners() {
     assert!(call.contains("pub trait CallStore"));
     assert!(authorization.contains("ucr.call.audio.send"));
     assert!(authorization.contains("ucr.call.audio.receive"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 22"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 23"));
     assert!(proto.contains("message AudioStreamDescriptor"));
     assert!(proto.contains("message EncodedAudioFrame"));
     assert!(proto.contains("message AudioNegotiationBinding"));
