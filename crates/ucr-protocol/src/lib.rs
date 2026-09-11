@@ -30,6 +30,7 @@ mod recovery;
 mod scope;
 mod service_control;
 mod sync;
+mod transport_failover;
 mod transport_orchestrator;
 mod trusted_key;
 mod version;
@@ -213,6 +214,11 @@ pub use sync::{
     MAX_PARTIAL_SYNC_CONVERSATIONS, MAX_SYNC_RESUME_TOKEN_LEN, SyncError, can_transition_sync,
     canonical_sync_session, is_terminal_sync_state, validate_sync_checkpoint,
     validate_sync_transition,
+};
+pub use transport_failover::{
+    MAX_TRANSPORT_FAILOVER_ROUTE_ATTEMPTS, TRANSPORT_FAILOVER_CAPABILITY,
+    TransportFailoverProtocolError, phase25_transport_failover_capabilities,
+    validate_transport_failover_policy,
 };
 pub use transport_orchestrator::{
     MAX_TRANSPORT_BANDWIDTH_BPS, MAX_TRANSPORT_HINTS, MAX_TRANSPORT_LATENCY_MS,

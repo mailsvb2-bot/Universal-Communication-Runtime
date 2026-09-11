@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use prost::Message;
 use sha2::{Digest, Sha256};
-use ucr_core::{CanonicalTransportError, RouteCandidate, TransportHealth, TransportProvider};
+use ucr_core::{
+    CanonicalTransportError, ClassifiedTransportFailure, RouteCandidate,
+    TransportFailureDisposition, TransportHealth, TransportProvider,
+};
 use ucr_crypto::{Ciphertext, EstablishedSession};
 use ucr_model::{CapabilityDescriptor, CapabilityMaturity, EndpointId, OpaqueId, TenantScope};
 
@@ -119,18 +122,20 @@ impl LocalTransportProvider {
         self.metrics.snapshot()
     }
 
-    fn transmit_once(
+    fn transmit_once_classified(
         &self,
         socket: SocketAddr,
         route: &RouteCandidate,
         attempt_id: &OpaqueId,
         encrypted_envelope: &[u8],
-    ) -> Result<LocalAcceptStatus, CanonicalTransportError> {
+    ) -> Result<LocalAcceptStatus, ClassifiedTransportFailure> {
         let mut stream = TcpStream::connect_timeout(&socket, self.policy.connect_timeout)
-            .map_err(|error| map_connect_error(&error))?;
-        configure_stream(&stream, self.policy.io_timeout)?;
+            .map_err(|error| ClassifiedTransportFailure::not_accepted(map_connect_error(&error)))?;
+        configure_stream(&stream, self.policy.io_timeout)
+            .map_err(ClassifiedTransportFailure::not_accepted)?;
         let session = initiate_local_handshake(&mut stream, &self.identity, &route.endpoint_id)
-            .map_err(map_handshake_error)?;
+            .map_err(map_handshake_error)
+            .map_err(ClassifiedTransportFailure::not_accepted)?;
         self.metrics
             .handshakes_established
             .fetch_add(1, Ordering::Relaxed);
@@ -141,8 +146,85 @@ impl LocalTransportProvider {
             encrypted_envelope,
             self.policy.chunk_plaintext_len,
             &self.metrics,
-        )?;
+        )
+        .map_err(ClassifiedTransportFailure::acceptance_unknown)?;
         receive_receipt(&mut stream, &session, attempt_id, &self.metrics)
+            .map_err(ClassifiedTransportFailure::acceptance_unknown)
+    }
+
+    fn transmit_classified_inner(
+        &self,
+        scope: &TenantScope,
+        route: &RouteCandidate,
+        encrypted_envelope: &[u8],
+    ) -> Result<(), ClassifiedTransportFailure> {
+        if *scope != self.identity.scope {
+            return Err(ClassifiedTransportFailure::not_accepted(
+                CanonicalTransportError::PolicyDenied,
+            ));
+        }
+        if encrypted_envelope.is_empty() || encrypted_envelope.len() > self.policy.max_envelope_len
+        {
+            return Err(ClassifiedTransportFailure::not_accepted(
+                CanonicalTransportError::Rejected,
+            ));
+        }
+        let socket = local_socket_addr(route)
+            .map_err(map_route_error)
+            .map_err(ClassifiedTransportFailure::not_accepted)?;
+        let attempt_id = transport_attempt_id(
+            scope,
+            &self.identity.endpoint_id,
+            &route.endpoint_id,
+            encrypted_envelope,
+        )
+        .map_err(|_| ClassifiedTransportFailure::not_accepted(CanonicalTransportError::Internal))?;
+        let mut last_error = CanonicalTransportError::Unavailable;
+        let mut disposition = TransportFailureDisposition::NotAccepted;
+        for attempt in 0..self.policy.max_attempts {
+            self.metrics
+                .connection_attempts
+                .fetch_add(1, Ordering::Relaxed);
+            if attempt > 0 {
+                self.metrics.reconnects.fetch_add(1, Ordering::Relaxed);
+            }
+            match self.transmit_once_classified(socket, route, &attempt_id, encrypted_envelope) {
+                Ok(LocalAcceptStatus::Accepted) => {
+                    self.metrics
+                        .accepted_receipts
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.health.store(HEALTHY, Ordering::Relaxed);
+                    return Ok(());
+                }
+                Ok(LocalAcceptStatus::Duplicate) => {
+                    self.metrics
+                        .duplicate_receipts
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.health.store(HEALTHY, Ordering::Relaxed);
+                    return Ok(());
+                }
+                Err(failure) => {
+                    last_error = failure.error;
+                    if failure.disposition == TransportFailureDisposition::AcceptanceUnknown {
+                        disposition = TransportFailureDisposition::AcceptanceUnknown;
+                    }
+                    self.metrics.failures.fetch_add(1, Ordering::Relaxed);
+                    if failure.error == CanonicalTransportError::Timeout {
+                        self.metrics.timeouts.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if !is_retryable(failure.error) || attempt + 1 == self.policy.max_attempts {
+                        break;
+                    }
+                    self.health.store(DEGRADED, Ordering::Relaxed);
+                    std::thread::sleep(retry_delay(&self.policy, &attempt_id, attempt));
+                }
+            }
+        }
+        self.health.store(UNAVAILABLE, Ordering::Relaxed);
+        Err(ClassifiedTransportFailure {
+            error: last_error,
+            disposition,
+        })
     }
 }
 
@@ -169,60 +251,17 @@ impl TransportProvider for LocalTransportProvider {
         route: &RouteCandidate,
         encrypted_envelope: &[u8],
     ) -> Result<(), CanonicalTransportError> {
-        if *scope != self.identity.scope {
-            return Err(CanonicalTransportError::PolicyDenied);
-        }
-        if encrypted_envelope.is_empty() || encrypted_envelope.len() > self.policy.max_envelope_len
-        {
-            return Err(CanonicalTransportError::Rejected);
-        }
-        let socket = local_socket_addr(route).map_err(map_route_error)?;
-        let attempt_id = transport_attempt_id(
-            scope,
-            &self.identity.endpoint_id,
-            &route.endpoint_id,
-            encrypted_envelope,
-        )
-        .map_err(|_| CanonicalTransportError::Internal)?;
-        let mut last_error = CanonicalTransportError::Unavailable;
-        for attempt in 0..self.policy.max_attempts {
-            self.metrics
-                .connection_attempts
-                .fetch_add(1, Ordering::Relaxed);
-            if attempt > 0 {
-                self.metrics.reconnects.fetch_add(1, Ordering::Relaxed);
-            }
-            match self.transmit_once(socket, route, &attempt_id, encrypted_envelope) {
-                Ok(LocalAcceptStatus::Accepted) => {
-                    self.metrics
-                        .accepted_receipts
-                        .fetch_add(1, Ordering::Relaxed);
-                    self.health.store(HEALTHY, Ordering::Relaxed);
-                    return Ok(());
-                }
-                Ok(LocalAcceptStatus::Duplicate) => {
-                    self.metrics
-                        .duplicate_receipts
-                        .fetch_add(1, Ordering::Relaxed);
-                    self.health.store(HEALTHY, Ordering::Relaxed);
-                    return Ok(());
-                }
-                Err(error) => {
-                    last_error = error;
-                    self.metrics.failures.fetch_add(1, Ordering::Relaxed);
-                    if error == CanonicalTransportError::Timeout {
-                        self.metrics.timeouts.fetch_add(1, Ordering::Relaxed);
-                    }
-                    if !is_retryable(error) || attempt + 1 == self.policy.max_attempts {
-                        break;
-                    }
-                    self.health.store(DEGRADED, Ordering::Relaxed);
-                    std::thread::sleep(retry_delay(&self.policy, &attempt_id, attempt));
-                }
-            }
-        }
-        self.health.store(UNAVAILABLE, Ordering::Relaxed);
-        Err(last_error)
+        self.transmit_classified_inner(scope, route, encrypted_envelope)
+            .map_err(|failure| failure.error)
+    }
+
+    fn transmit_classified(
+        &self,
+        scope: &TenantScope,
+        route: &RouteCandidate,
+        encrypted_envelope: &[u8],
+    ) -> Result<(), ClassifiedTransportFailure> {
+        self.transmit_classified_inner(scope, route, encrypted_envelope)
     }
 }
 

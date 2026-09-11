@@ -7,6 +7,7 @@ mod audio;
 mod call;
 mod group;
 mod media_e2ee;
+mod transport_failover;
 mod transport_orchestrator;
 mod video;
 pub use adaptive_media::{
@@ -27,6 +28,10 @@ pub use group::{
     GroupRecord, GroupRole, PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,
 };
 pub use media_e2ee::{EncryptedMediaFrame, MediaE2eeContext, MediaE2eeFrameHeader, MediaKind};
+pub use transport_failover::{
+    TransportFailoverAttemptDecision, TransportFailoverAttemptOutcome, TransportFailoverDecision,
+    TransportFailoverPolicy, TransportFailoverStopReason,
+};
 pub use transport_orchestrator::{
     TransportOrchestrationDecision, TransportResourceSnapshot, TransportRouteDecision,
     TransportRouteTelemetry, TransportRoutingHint,
