@@ -2734,6 +2734,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-conference"
+version = "0.0.1"
+dependencies = [
+ "ucr-core",
+ "ucr-crypto",
+ "ucr-media-e2ee",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-sfu",
+ "ucr-storage-memory",
+]
+
+[[package]]
 name = "ucr-core"
 version = "0.0.1"
 dependencies = [

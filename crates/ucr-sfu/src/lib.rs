@@ -74,6 +74,7 @@ pub enum SfuError {
     RecipientMembershipUnavailable,
     NoRecipients,
     TooManyRecipients,
+    InvalidRecipientSet,
     Sink {
         accepted_before_failure: usize,
         error: SfuForwardSinkError,
@@ -153,6 +154,48 @@ where
         envelope: &SfuForwardEnvelope,
         sink: &dyn SfuForwardSink,
     ) -> Result<SfuForwardOutcome, SfuError> {
+        self.forward_impl(
+            authenticated_source,
+            authenticated_source_device_id,
+            envelope,
+            None,
+            sink,
+        )
+    }
+
+    /// Fans one source-authenticated encrypted frame only to the explicitly selected current Call
+    /// recipients. This is the scalable Phase-30 integration point: recipient selection is owned by
+    /// the Conference coordinator, while SFU still revalidates canonical Call/Group/permission
+    /// authority and never trusts the selection as authorization evidence.
+    ///
+    /// # Errors
+    /// Rejects empty/duplicate/source-containing/non-participant recipient sets, stale authority,
+    /// lost permissions, malformed ciphertext, or sink failure.
+    pub fn forward_selected(
+        &self,
+        authenticated_source: &ScopedPrincipal,
+        authenticated_source_device_id: &DeviceId,
+        envelope: &SfuForwardEnvelope,
+        recipients: &[ucr_model::PrincipalRef],
+        sink: &dyn SfuForwardSink,
+    ) -> Result<SfuForwardOutcome, SfuError> {
+        self.forward_impl(
+            authenticated_source,
+            authenticated_source_device_id,
+            envelope,
+            Some(recipients),
+            sink,
+        )
+    }
+
+    fn forward_impl(
+        &self,
+        authenticated_source: &ScopedPrincipal,
+        authenticated_source_device_id: &DeviceId,
+        envelope: &SfuForwardEnvelope,
+        selected_recipients: Option<&[ucr_model::PrincipalRef]>,
+        sink: &dyn SfuForwardSink,
+    ) -> Result<SfuForwardOutcome, SfuError> {
         let (context, canonical) = canonical_sfu_forward_envelope(envelope)?;
         if authenticated_source.scope != context.scope
             || authenticated_source.principal != canonical.frame.header.source
@@ -172,20 +215,24 @@ where
             })
             .map_err(SfuError::Authorization)?;
 
-        let recipients = call
-            .participants
-            .iter()
-            .filter(|participant| {
-                participant.principal != authenticated_source.principal
-                    && participant.state == CallParticipantState::Accepted
-                    && participant.left_revision.is_none()
-            })
-            .map(|participant| participant.principal.clone())
-            .collect::<Vec<_>>();
+        let recipients = if let Some(selected) = selected_recipients {
+            validate_selected_recipients(&call, &authenticated_source.principal, selected)?;
+            selected.to_vec()
+        } else {
+            call.participants
+                .iter()
+                .filter(|participant| {
+                    participant.principal != authenticated_source.principal
+                        && participant.state == CallParticipantState::Accepted
+                        && participant.left_revision.is_none()
+                })
+                .map(|participant| participant.principal.clone())
+                .collect::<Vec<_>>()
+        };
         if recipients.is_empty() {
             return Err(SfuError::NoRecipients);
         }
-        if recipients.len() >= MAX_CALL_PARTICIPANTS {
+        if recipients.len() > MAX_CALL_PARTICIPANTS.saturating_sub(1) {
             return Err(SfuError::TooManyRecipients);
         }
 
@@ -229,6 +276,31 @@ where
             accepted_recipients: targets.len(),
         })
     }
+}
+
+fn validate_selected_recipients(
+    call: &ucr_model::CallSession,
+    source: &ucr_model::PrincipalRef,
+    recipients: &[ucr_model::PrincipalRef],
+) -> Result<(), SfuError> {
+    if recipients.is_empty() || recipients.len() > MAX_CALL_PARTICIPANTS.saturating_sub(1) {
+        return Err(SfuError::InvalidRecipientSet);
+    }
+    let mut unique = std::collections::HashSet::with_capacity(recipients.len());
+    for recipient in recipients {
+        if recipient == source || !unique.insert(recipient) {
+            return Err(SfuError::InvalidRecipientSet);
+        }
+        let accepted = call.participants.iter().any(|participant| {
+            participant.principal == *recipient
+                && participant.state == CallParticipantState::Accepted
+                && participant.left_revision.is_none()
+        });
+        if !accepted {
+            return Err(SfuError::InvalidRecipientSet);
+        }
+    }
+    Ok(())
 }
 
 fn require_sfu_capability<C: SfuCapabilityProvider>(capabilities: &C) -> Result<(), SfuError> {

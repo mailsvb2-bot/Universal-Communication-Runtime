@@ -99,7 +99,7 @@ fn phase23_release_truth_public_contract_and_fuzz_gate_are_machine_locked() {
         fs::read_to_string(root.join("docs/architecture/THREAT_MODEL.md")).expect("threat");
 
     assert!(readme.contains(
-        "**Phase 29 — SFU Routing + standardized Group Media E2EE (Prepared/reference candidate; Conference coordination not started).**"
+        "**Phase 30 — Conferences (Prepared/reference candidate; Bridge SDK not started).**"
     ));
     assert!(ci.contains("test -s spec/adaptive-media.md"));
     assert!(ci.contains("test -s proto/ucr/v1/adaptive_media.proto"));

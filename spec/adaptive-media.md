@@ -47,6 +47,6 @@ outside this adaptation engine.
 Phase 23 does not inspect interface availability, cost, privacy, recipient reachability, route
 health or transport candidates and does not invoke `TransportProvider`. Those are Transport
 Orchestrator concerns beginning in Phase 24. Automatic failover remains Phase 25. Store-and-Forward
-execution remains Phase 27. Phase 29 now provides Prepared RFC-9420/OpenMLS-backed group-media E2EE and encrypted SFU fan-out; Conference coordination remains Phase 30.
+execution remains Phase 27. Phase 29 provides Prepared RFC-9420/OpenMLS-backed group-media E2EE and encrypted SFU fan-out; Phase 30 now composes that foundation into bounded Conference coordination with selective recipient-owned subscriptions.
 
 No SQLite migration is introduced; schema remains v22. Adaptive controller state is ephemeral.

@@ -480,6 +480,62 @@ fn encrypted_group_frame_fans_out_bit_exactly_to_current_call_recipients() {
 }
 
 #[test]
+fn selected_encrypted_forwarding_reaches_only_explicit_current_recipient() {
+    let fixture = build_fixture();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&AllowAll, &fixture.store, &e2ee, &sfu);
+    let sink = CaptureSink::default();
+    assert_eq!(
+        runtime.forward_selected(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+            std::slice::from_ref(&fixture.bob.principal),
+            &sink,
+        ),
+        Ok(SfuForwardOutcome {
+            accepted_recipients: 1
+        })
+    );
+    let forwarded = sink.forwarded();
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(forwarded[0].0.recipient, fixture.bob.principal);
+    assert_eq!(forwarded[0].1, fixture.envelope);
+}
+
+#[test]
+fn selected_forwarding_rejects_nonparticipant_and_duplicate_targets_before_sink() {
+    let fixture = build_fixture();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&AllowAll, &fixture.store, &e2ee, &sfu);
+    let sink = CaptureSink::default();
+    let outsider = principal("outsider");
+    assert_eq!(
+        runtime.forward_selected(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+            std::slice::from_ref(&outsider),
+            &sink,
+        ),
+        Err(SfuError::InvalidRecipientSet)
+    );
+    assert_eq!(
+        runtime.forward_selected(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+            &[fixture.bob.principal.clone(), fixture.bob.principal.clone()],
+            &sink,
+        ),
+        Err(SfuError::InvalidRecipientSet)
+    );
+    assert!(sink.forwarded().is_empty());
+}
+
+#[test]
 fn compromised_sfu_simulation_rejects_spoof_before_sink() {
     let fixture = build_fixture();
     let e2ee = PreparedGroupMediaE2eeCapabilities;

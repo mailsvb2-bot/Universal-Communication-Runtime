@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/call.proto";
+import "ucr/v1/common.proto";
+import "ucr/v1/identity.proto";
+import "ucr/v1/media_e2ee.proto";
+
+// Phase-30 Conference is a projection/coordinator over canonical Group + CallSession + MLS + SFU.
+// It is not a second durable signalling or membership entity.
+enum ConferenceTopology {
+  CONFERENCE_TOPOLOGY_UNSPECIFIED = 0;
+  CONFERENCE_TOPOLOGY_SFU = 1;
+}
+
+// Intent to start a Conference over an existing Group. The authenticated caller is the initiator;
+// only remote invitees are carried here.
+message ConferenceStart {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId group_id = 3;
+  repeated PrincipalRef invitees = 4;
+}
+
+// Non-durable read projection. `call` remains the one canonical signalling lifecycle.
+message ConferenceSnapshot {
+  CallSession call = 1;
+  OpaqueId group_id = 2;
+  ConferenceTopology topology = 3;
+  uint64 group_crypto_epoch = 4;
+  OpaqueId group_crypto_state_ref = 5;
+}
+
+// Recipient-owned ephemeral routing preference. The coordinator bounds one set to 32 entries;
+// this is never authorization or durable Conference membership.
+message ConferenceMediaSubscription {
+  PrincipalRef source = 1;
+  MediaKind media_kind = 2;
+}
+
+message ConferenceSubscriptionSet {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  repeated ConferenceMediaSubscription subscriptions = 3;
+}
+
+// No ConferenceService is introduced in Phase 30. Start/Get/Signal lifecycle stays owned by the
+// existing CallService; embedded/reference coordinators may use the Conference projection above.

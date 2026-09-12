@@ -43,6 +43,7 @@ pub const GROUP_MANAGE_PERMISSION: &str = "ucr.group.manage";
 pub const CALL_START_PERMISSION: &str = "ucr.call.start";
 pub const CALL_OBSERVE_PERMISSION: &str = "ucr.call.observe";
 pub const CALL_SIGNAL_PERMISSION: &str = "ucr.call.signal";
+pub const CONFERENCE_SUBSCRIBE_PERMISSION: &str = "ucr.conference.subscribe";
 pub const AUDIO_SEND_PERMISSION: &str = "ucr.call.audio.send";
 pub const AUDIO_RECEIVE_PERMISSION: &str = "ucr.call.audio.receive";
 pub const VIDEO_SEND_PERMISSION: &str = "ucr.call.video.send";
@@ -98,6 +99,7 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     CALL_START_PERMISSION,
     CALL_OBSERVE_PERMISSION,
     CALL_SIGNAL_PERMISSION,
+    CONFERENCE_SUBSCRIBE_PERMISSION,
     AUDIO_SEND_PERMISSION,
     AUDIO_RECEIVE_PERMISSION,
     VIDEO_SEND_PERMISSION,
