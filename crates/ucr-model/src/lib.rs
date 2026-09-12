@@ -6,9 +6,11 @@ mod adaptive_media;
 mod audio;
 mod call;
 mod group;
+mod group_media_e2ee;
 mod media_e2ee;
 mod mesh;
 mod offline_group;
+mod sfu;
 mod store_forward;
 mod transport_failover;
 mod transport_orchestrator;
@@ -30,11 +32,16 @@ pub use group::{
     GroupMediaState, GroupMemberState, GroupMembership, GroupOwnership, GroupPermission,
     GroupRecord, GroupRole, PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,
 };
+pub use group_media_e2ee::{
+    EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader,
+    GroupMediaSourceSignature,
+};
 pub use media_e2ee::{EncryptedMediaFrame, MediaE2eeContext, MediaE2eeFrameHeader, MediaKind};
 pub use offline_group::{
     OfflineGroupChangePage, OfflineGroupChangeReplica, OfflineGroupCursor, OfflineGroupMessagePage,
     OfflineGroupMessageReplica, OfflineGroupStreamKind,
 };
+pub use sfu::{SfuForwardEnvelope, SfuForwardTarget};
 pub use store_forward::{
     StoreForwardJob, StoreForwardLease, StoreForwardOutcome, StoreForwardPolicy,
 };
@@ -1590,6 +1597,18 @@ pub struct ExternalIdentityBinding {
     pub integration_id: IntegrationId,
     pub external_namespace: String,
     pub external_entity_id: Vec<u8>,
+    pub identity_id: IdentityId,
+}
+
+/// Immutable explicit association between an authorization Principal and one canonical Root Identity.
+///
+/// This relationship is evidence only: it does not grant permissions, Group membership, Call
+/// participation, Device trust, or delegation by itself. Device→Identity remains owned by
+/// `DeviceDescriptor`; Device principals therefore do not use this binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrincipalIdentityBinding {
+    pub scope: TenantScope,
+    pub principal: PrincipalRef,
     pub identity_id: IdentityId,
 }
 

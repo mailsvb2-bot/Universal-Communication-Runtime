@@ -2,7 +2,9 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use zeroize::Zeroizing;
 
 use crate::{SigningKeyHandle, TranscriptBinding};
-use ucr_protocol::MessageSigningBinding;
+use ucr_protocol::{
+    GROUP_MEDIA_SOURCE_SIGNATURE_V1_DOMAIN, GroupMediaSigningBinding, MessageSigningBinding,
+};
 
 const SIGNATURE_DOMAIN: &[u8] = b"UCR-HANDSHAKE-SIGNATURE-V1\0";
 pub const MESSAGE_SIGNATURE_V1_DOMAIN: &[u8] = b"UCR-MESSAGE-SIGNATURE-V1\0";
@@ -61,6 +63,14 @@ impl SigningKeyMaterial {
         message.extend_from_slice(binding.as_bytes());
         SignatureBytes(self.0.sign(&message).to_bytes())
     }
+
+    #[must_use]
+    pub fn sign_group_media_binding(&self, binding: &GroupMediaSigningBinding) -> SignatureBytes {
+        let mut message = Vec::with_capacity(GROUP_MEDIA_SOURCE_SIGNATURE_V1_DOMAIN.len() + 32);
+        message.extend_from_slice(GROUP_MEDIA_SOURCE_SIGNATURE_V1_DOMAIN);
+        message.extend_from_slice(binding.as_bytes());
+        SignatureBytes(self.0.sign(&message).to_bytes())
+    }
 }
 
 /// Verifies a transcript signature against a public Ed25519 key.
@@ -77,6 +87,26 @@ pub fn verify_transcript_signature(
     let signature = Signature::from_bytes(&signature.0);
     let mut message = Vec::with_capacity(SIGNATURE_DOMAIN.len() + 32);
     message.extend_from_slice(SIGNATURE_DOMAIN);
+    message.extend_from_slice(binding.as_bytes());
+    verifying_key
+        .verify(&message, &signature)
+        .map_err(|_| SignatureError::InvalidSignature)
+}
+
+/// Verifies one group-media source signature against a public Ed25519 key.
+///
+/// # Errors
+/// Returns explicit invalid-key or invalid-signature failures.
+pub fn verify_group_media_binding_signature(
+    public_key: VerifyingKeyBytes,
+    binding: &GroupMediaSigningBinding,
+    signature: SignatureBytes,
+) -> Result<(), SignatureError> {
+    let verifying_key =
+        VerifyingKey::from_bytes(&public_key.0).map_err(|_| SignatureError::InvalidPublicKey)?;
+    let signature = Signature::from_bytes(&signature.0);
+    let mut message = Vec::with_capacity(GROUP_MEDIA_SOURCE_SIGNATURE_V1_DOMAIN.len() + 32);
+    message.extend_from_slice(GROUP_MEDIA_SOURCE_SIGNATURE_V1_DOMAIN);
     message.extend_from_slice(binding.as_bytes());
     verifying_key
         .verify(&message, &signature)

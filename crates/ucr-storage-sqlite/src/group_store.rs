@@ -238,65 +238,15 @@ impl GroupStore for SqliteLocalStore {
         group: &GroupRecord,
         creator: &ScopedPrincipal,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        validate_conversation(conversation).map_err(|_| DurableStoreError::InvalidRecord)?;
-        if conversation.parent_conversation_id.is_some()
-            || !is_group_conversation_kind(conversation.conversation.kind)
-            || conversation.scope != group.scope
-            || conversation.conversation != group.conversation
-        {
-            return Err(DurableStoreError::InvalidRecord);
-        }
-        let (group, mut creator_membership) =
-            canonical_group_creation(group, &creator.scope, &creator.principal)
-                .map_err(map_group_error)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
-        if let Some(existing) = load_group_from(&transaction, &group.scope, &group.group_id)? {
-            let existing_creator = load_membership_from(
-                &transaction,
-                &group.scope,
-                &group.group_id,
-                &creator.principal,
-            )?;
-            let duplicate = existing_creator.is_some_and(|persisted| {
-                let mut expected = creator_membership.clone();
-                expected.history_floor_logical_order = persisted.history_floor_logical_order;
-                existing == group && persisted == expected
-            });
-            return if duplicate {
-                Ok(DurableRecordStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        if load_group_for_conversation_from(
-            &transaction,
-            &group.scope,
-            &group.conversation.conversation_id,
-        )?
-        .is_some()
-        {
-            return Err(DurableStoreError::Conflict);
-        }
-        match message_store::load_conversation_from(
-            &transaction,
-            &conversation.scope,
-            &conversation.conversation.conversation_id,
-        )? {
-            Some(existing) if existing != *conversation => return Err(DurableStoreError::Conflict),
-            Some(_) => {}
-            None => insert_group_conversation(&transaction, conversation)?,
-        }
-        creator_membership.history_floor_logical_order =
-            history_floor_for_add(&transaction, &group)?;
-        insert_group(&transaction, &group)?;
-        insert_membership(&transaction, &creator_membership)?;
+        let status = create_group_in_transaction(&transaction, conversation, group, creator)?;
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
-        Ok(DurableRecordStatus::Persisted)
+        Ok(status)
     }
 
     fn group(
@@ -408,6 +358,65 @@ impl GroupStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         Ok(status)
     }
+}
+
+pub(super) fn create_group_in_transaction(
+    transaction: &Transaction<'_>,
+    conversation: &ConversationRecord,
+    group: &GroupRecord,
+    creator: &ScopedPrincipal,
+) -> Result<DurableRecordStatus, DurableStoreError> {
+    validate_conversation(conversation).map_err(|_| DurableStoreError::InvalidRecord)?;
+    if conversation.parent_conversation_id.is_some()
+        || !is_group_conversation_kind(conversation.conversation.kind)
+        || conversation.scope != group.scope
+        || conversation.conversation != group.conversation
+    {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    let (group, mut creator_membership) =
+        canonical_group_creation(group, &creator.scope, &creator.principal)
+            .map_err(map_group_error)?;
+    if let Some(existing) = load_group_from(transaction, &group.scope, &group.group_id)? {
+        let existing_creator = load_membership_from(
+            transaction,
+            &group.scope,
+            &group.group_id,
+            &creator.principal,
+        )?;
+        let duplicate = existing_creator.is_some_and(|persisted| {
+            let mut expected = creator_membership.clone();
+            expected.history_floor_logical_order = persisted.history_floor_logical_order;
+            existing == group && persisted == expected
+        });
+        return if duplicate {
+            Ok(DurableRecordStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    if load_group_for_conversation_from(
+        transaction,
+        &group.scope,
+        &group.conversation.conversation_id,
+    )?
+    .is_some()
+    {
+        return Err(DurableStoreError::Conflict);
+    }
+    match message_store::load_conversation_from(
+        transaction,
+        &conversation.scope,
+        &conversation.conversation.conversation_id,
+    )? {
+        Some(existing) if existing != *conversation => return Err(DurableStoreError::Conflict),
+        Some(_) => {}
+        None => insert_group_conversation(transaction, conversation)?,
+    }
+    creator_membership.history_floor_logical_order = history_floor_for_add(transaction, &group)?;
+    insert_group(transaction, &group)?;
+    insert_membership(transaction, &creator_membership)?;
+    Ok(DurableRecordStatus::Persisted)
 }
 
 pub fn apply_group_change_in_transaction(
@@ -968,7 +977,7 @@ fn decode_membership(
     ucr_protocol::canonical_group_membership(group, &membership).map_err(map_group_error)
 }
 
-fn load_change_record(
+pub(super) fn load_change_record(
     connection: &Connection,
     scope: &TenantScope,
     event_id: &str,
@@ -1394,6 +1403,7 @@ mod phase18_migration_tests {
         {
             let store = SqliteLocalStore::open(db.path()).expect("open current store");
             let connection = store.lock_connection().expect("lock current store");
+            crate::test_remove_v26_objects(&connection).expect("remove future v26 objects");
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF; \
@@ -2358,6 +2368,7 @@ mod phase18_restart_security_tests {
         }
         {
             let connection = rusqlite::Connection::open(db.path()).expect("open raw v23");
+            crate::test_remove_v26_objects(&connection).expect("remove future v26 objects");
             connection
                 .execute_batch(
                     "DROP TABLE IF EXISTS mesh_group_message_hops; \

@@ -36,3 +36,5 @@ run_target transport_failover_execution 64 512
 run_target offline_group_replica 4096 768
 run_target store_forward_job 4096 768
 run_target mesh_group_path 4096 768
+
+run_target sfu_forward_envelope 4096 768

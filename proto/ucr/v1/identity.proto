@@ -82,6 +82,14 @@ message ScopedPrincipal {
   PrincipalRef principal = 2;
 }
 
+// Explicit association evidence only; it is not an authorization or delegation grant.
+// Device principals use DeviceDescriptor as the single Device->Identity owner instead.
+message PrincipalIdentityBinding {
+  TenantScope scope = 1;
+  PrincipalRef principal = 2;
+  OpaqueId identity_id = 3;
+}
+
 message ActorRef {
   OpaqueId actor_id = 1;
   ActorKind kind = 2;

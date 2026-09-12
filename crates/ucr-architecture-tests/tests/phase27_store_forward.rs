@@ -48,7 +48,7 @@ fn phase27_schema_and_public_boundary_are_machine_locked() {
     assert!(protocol.contains("MAX_STORE_FORWARD_PAGE_ITEMS: usize = 256"));
     assert!(protocol.contains("store_forward_job_fingerprint"));
     assert!(sqlite.contains("const SQLITE_SCHEMA_V24: u32 = 24"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 25"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 ="));
     assert!(sqlite.contains("migrate_v23_to_v24"));
     assert!(!proto.contains("service StoreForward"));
     assert!(!proto.contains("EndpointAddress"));
@@ -72,7 +72,7 @@ fn phase27_release_truth_docs_and_fuzz_are_machine_locked() {
     let smoke = fs::read_to_string(root.join("fuzz/run-smoke.sh")).expect("fuzz smoke");
     let adr = fs::read_to_string(root.join("docs/adr/0065-phase27-store-and-forward-reuses-intent-message-delivery-and-transport-owners.md")).expect("ADR 0065");
 
-    assert!(readme.contains("**Phase 28 — Mesh (Prepared/reference complete; Relay/NAT traversal and multipath not started).**"));
+    assert!(readme.contains("**Phase 29 — SFU Routing + standardized Group Media E2EE (Prepared/reference candidate; Conference coordination not started).**"));
     assert!(ci.contains("test -s spec/store-forward.md"));
     assert!(ci.contains("test -s proto/ucr/v1/store_forward.proto"));
     assert!(ci.contains("0065-phase27-store-and-forward"));

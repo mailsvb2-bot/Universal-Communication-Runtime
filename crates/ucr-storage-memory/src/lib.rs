@@ -15,10 +15,10 @@ use ucr_core::{
     CommunicationIntentStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, IdentityStore,
-    MessageStore, PermissionGrantStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore,
-    RecoveryPlanStore, ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
-    ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth, StorageProvider, SyncStore,
-    TrustedSigningKeyStore,
+    MessageStore, PermissionGrantStore, PrincipalIdentityBindingStore, RecoveryAdmissionProof,
+    RecoveryDeviceStagingStore, RecoveryPlanStore, ReverifiedDeviceActivationStore,
+    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
+    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -33,11 +33,12 @@ use ucr_model::{
     EventSubscription, EventSubscriptionId, EventSubscriptionStart, EventSummary,
     ExternalIdentityBinding, GroupMembership, GroupRecord, IdentityId, IdentityRecord,
     IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, OfflineGroupChangeReplica,
-    OfflineGroupMessageReplica, OpaqueId, PermissionGrant, PublicKeyDescriptor, RecoveryPlan,
-    RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
-    ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy,
-    SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId, SyncCheckpoint, SyncSession,
-    SyncState, TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
+    OfflineGroupMessageReplica, OpaqueId, PermissionGrant, PrincipalIdentityBinding, PrincipalRef,
+    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
+    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
+    ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId,
+    SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -54,8 +55,9 @@ use ucr_protocol::{
     validate_delivery_evidence_order, validate_delivery_transition, validate_event_batch_size,
     validate_event_consumer_cursor, validate_external_identity_binding,
     validate_external_identity_binding_key, validate_identity_record, validate_permission_grant,
-    validate_service_audit_record, validate_service_quota_policy, validate_sync_checkpoint,
-    validate_sync_transition, validate_trusted_signing_key_descriptor,
+    validate_principal_identity_binding, validate_service_audit_record,
+    validate_service_quota_policy, validate_sync_checkpoint, validate_sync_transition,
+    validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 11;
@@ -76,6 +78,7 @@ type MessageKey = (ScopeKey, String);
 type IntentKey = (ScopeKey, String);
 type IdentityKey = (ScopeKey, String);
 type ExternalIdentityBindingKey = (ScopeKey, String, String, Vec<u8>);
+type PrincipalIdentityBindingKey = (ScopeKey, PrincipalRef);
 type DeliveryKey = (ScopeKey, String);
 type StoreForwardKey = (ScopeKey, String);
 type SyncKey = (ScopeKey, String);
@@ -149,6 +152,7 @@ struct MemoryState {
     intents: HashMap<IntentKey, CommunicationIntent>,
     identities: HashMap<IdentityKey, IdentityRecord>,
     external_identity_bindings: HashMap<ExternalIdentityBindingKey, ExternalIdentityBinding>,
+    principal_identity_bindings: HashMap<PrincipalIdentityBindingKey, PrincipalIdentityBinding>,
     deliveries: HashMap<DeliveryKey, DeliveryAttempt>,
     delivery_evidence: HashMap<DeliveryKey, Vec<DeliveryEvidence>>,
     store_forward_jobs: HashMap<StoreForwardKey, MemoryStoreForwardState>,
@@ -988,6 +992,13 @@ fn identity_key(scope: &TenantScope, identity_id: &IdentityId) -> IdentityKey {
     )
 }
 
+fn principal_identity_binding_key(
+    scope: &TenantScope,
+    principal: &PrincipalRef,
+) -> PrincipalIdentityBindingKey {
+    (scope_key(scope), principal.clone())
+}
+
 fn external_identity_binding_key(
     scope: &TenantScope,
     integration_id: &IntegrationId,
@@ -1048,6 +1059,47 @@ impl IdentityStore for MemoryLocalStore {
         Ok(state
             .identities
             .get(&identity_key(scope, identity_id))
+            .cloned())
+    }
+}
+
+impl PrincipalIdentityBindingStore for MemoryLocalStore {
+    fn persist_principal_identity_binding(
+        &self,
+        binding: &PrincipalIdentityBinding,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_principal_identity_binding(binding)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = principal_identity_binding_key(&binding.scope, &binding.principal);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.principal_identity_bindings.get(&key) {
+            return if existing == binding {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if !state
+            .identities
+            .contains_key(&identity_key(&binding.scope, &binding.identity_id))
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        state
+            .principal_identity_bindings
+            .insert(key, binding.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn principal_identity_binding(
+        &self,
+        scope: &TenantScope,
+        principal: &PrincipalRef,
+    ) -> Result<Option<PrincipalIdentityBinding>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .principal_identity_bindings
+            .get(&principal_identity_binding_key(scope, principal))
             .cloned())
     }
 }

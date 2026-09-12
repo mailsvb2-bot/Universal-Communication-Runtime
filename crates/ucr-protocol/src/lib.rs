@@ -18,6 +18,7 @@ mod event_api;
 mod extension;
 mod framing;
 mod group;
+mod group_media_e2ee;
 mod handshake;
 mod id;
 mod identity;
@@ -27,10 +28,12 @@ mod mesh;
 mod message;
 mod message_signature;
 mod offline_group;
+mod principal_identity_binding;
 mod provenance;
 mod recovery;
 mod scope;
 mod service_control;
+mod sfu;
 mod store_forward;
 mod sync;
 mod transport_failover;
@@ -155,6 +158,14 @@ pub use group::{
     canonical_group_record, group_change_event_type, group_change_fingerprint,
     group_permissions_for_role, is_group_conversation_kind, validate_group_member_list_limit,
 };
+pub use group_media_e2ee::{
+    GROUP_MEDIA_CONTEXT_V1_DOMAIN, GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MEDIA_FRAME_AAD_V1_DOMAIN,
+    GROUP_MEDIA_KEY_CONTEXT_V1_DOMAIN, GROUP_MEDIA_SOURCE_SIGNATURE_V1_DOMAIN,
+    GroupMediaE2eeProtocolError, GroupMediaSigningBinding, MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES,
+    canonical_group_media_e2ee_context, group_media_context_binding,
+    group_media_context_from_frame, group_media_frame_aad, group_media_key_context,
+    group_media_source_signing_binding, validate_encrypted_group_media_frame,
+};
 pub use handshake::{
     HandshakeError, NegotiatedSession, NegotiationPolicy, NegotiationResultEnvelope,
     NegotiationResultError, PeerHello, canonical_negotiation_result, negotiate_session,
@@ -198,6 +209,9 @@ pub use offline_group::{
     canonical_offline_group_message_replica, offline_group_cursor, offline_group_cursor_sequence,
     phase26_offline_group_capabilities, validate_offline_group_page_size,
 };
+pub use principal_identity_binding::{
+    PrincipalIdentityBindingError, validate_principal_identity_binding,
+};
 pub use provenance::{ProvenanceError, validate_origin_ref};
 pub use recovery::{
     MAX_RECOVERY_AUTHORITIES, RecoveryError, canonical_recovery_plan, recovery_plan_aad,
@@ -224,6 +238,10 @@ pub use service_control::{
     SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND, SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND,
     ServiceControlValidationError, service_audit_hash, validate_service_audit_operation_ref,
     validate_service_audit_record, validate_service_quota_policy,
+};
+pub use sfu::{
+    SFU_MEDIA_CAPABILITY, SfuProtocolError, canonical_sfu_forward_envelope,
+    phase29_sfu_capabilities,
 };
 pub use store_forward::{
     MAX_STORE_FORWARD_DELIVERY_ATTEMPTS, MAX_STORE_FORWARD_LEASE_MS, MAX_STORE_FORWARD_PAGE_ITEMS,

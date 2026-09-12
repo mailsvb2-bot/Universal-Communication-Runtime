@@ -710,16 +710,17 @@ mod tests {
         let db = TestDb::new();
         {
             let store = SqliteLocalStore::open(db.path()).expect("initialize current");
-            assert_eq!(store.schema_version(), Ok(25));
+            assert_eq!(store.schema_version(), Ok(crate::SQLITE_SCHEMA_VERSION));
         }
         {
             let connection = Connection::open(db.path()).expect("raw open");
+            crate::test_remove_v26_objects(&connection).expect("remove future v26 objects");
             connection
                 .execute_batch("DROP TABLE mesh_group_message_hops; PRAGMA user_version=24;")
                 .expect("downgrade fixture");
         }
         let migrated = SqliteLocalStore::open(db.path()).expect("migrate v24 to v25");
-        assert_eq!(migrated.schema_version(), Ok(25));
+        assert_eq!(migrated.schema_version(), Ok(crate::SQLITE_SCHEMA_VERSION));
         let connection = Connection::open(db.path()).expect("verify raw");
         let count: i64 = connection
             .query_row("SELECT COUNT(*) FROM mesh_group_message_hops", [], |row| {

@@ -7,8 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ucr-group-mls = { path = "../ucr-group-mls" }
 ucr-crypto = { path = "../ucr-crypto" }
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
+rusqlite = { version = "=0.37.0", features = ["bundled"] }
 ucr-core = { path = "../ucr-core" }
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }

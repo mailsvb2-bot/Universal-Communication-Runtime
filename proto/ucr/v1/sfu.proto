@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/group_media_e2ee.proto";
+import "ucr/v1/identity.proto";
+
+// Phase 29 forwards one already-encrypted, source-authenticated MLS group-media frame.
+// The envelope contains no plaintext, MLS exporter/traffic keys, Conference state, durable route,
+// Delivery evidence, recipient roster snapshot, or infrastructure credential.
+message SfuForwardEnvelope {
+  EncryptedGroupMediaFrame frame = 1;
+}
+
+// Ephemeral fan-out target derived by the runtime from the current canonical Call participant set.
+// It is never durable membership/subscription state.
+message SfuForwardTarget {
+  PrincipalRef recipient = 1;
+}
+
+// Phase 29 intentionally defines no public SFU service. Production listener/session lifecycle,
+// Conference coordination, mixer/compositor/recording/transcoding and Relay/NAT traversal are separate.

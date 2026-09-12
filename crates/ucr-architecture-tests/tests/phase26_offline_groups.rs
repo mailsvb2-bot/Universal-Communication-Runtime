@@ -66,7 +66,7 @@ fn phase26_release_truth_contract_docs_and_fuzz_are_machine_locked() {
     .expect("ADR 0064");
 
     assert!(readme.contains(
-        "**Phase 28 — Mesh (Prepared/reference complete; Relay/NAT traversal and multipath not started).**"
+        "**Phase 29 — SFU Routing + standardized Group Media E2EE (Prepared/reference candidate; Conference coordination not started).**"
     ));
     assert!(ci.contains("test -s spec/offline-groups.md"));
     assert!(ci.contains("test -s proto/ucr/v1/offline_groups.proto"));

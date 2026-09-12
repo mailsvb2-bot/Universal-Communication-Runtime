@@ -950,6 +950,7 @@ mod tests {
         }
         {
             let connection = rusqlite::Connection::open(db.path()).expect("raw open");
+            crate::test_remove_v26_objects(&connection).expect("remove future v26 objects");
             connection
                 .execute_batch(
                     "PRAGMA foreign_keys=OFF;
