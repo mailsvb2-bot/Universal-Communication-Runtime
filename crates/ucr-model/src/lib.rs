@@ -5,6 +5,7 @@ use core::fmt;
 mod adaptive_media;
 mod audio;
 mod call;
+mod conference;
 mod group;
 mod group_media_e2ee;
 mod media_e2ee;
@@ -26,6 +27,10 @@ pub use audio::{
 pub use call::{
     CallParticipant, CallParticipantState, CallParticipantUpdateKind, CallReconnectPhase,
     CallSession, CallSignal, CallSignalKind, CallSignallingState, CallTerminationReason,
+};
+pub use conference::{
+    ConferenceMediaSubscription, ConferenceSnapshot, ConferenceStart, ConferenceSubscriptionSet,
+    ConferenceTopology,
 };
 pub use group::{
     GroupBridgeMapping, GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy,

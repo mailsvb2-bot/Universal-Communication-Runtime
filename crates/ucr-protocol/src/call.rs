@@ -5,7 +5,9 @@ use ucr_model::{
     ConversationKind, PrincipalKind, PrincipalRef, TenantScope,
 };
 
-pub const MAX_CALL_PARTICIPANTS: usize = 64;
+/// Prepared bounded ceiling shared by direct/group Call, Conference media, and SFU fan-out.
+/// 128 intentionally contains the Canonical 100-person SFU conference example without becoming unbounded.
+pub const MAX_CALL_PARTICIPANTS: usize = 1024;
 pub const CALL_CREATION_FINGERPRINT_V1_DOMAIN: &[u8] = b"UCR-CALL-CREATION-V1\0";
 pub const CALL_SIGNAL_FINGERPRINT_V1_DOMAIN: &[u8] = b"UCR-CALL-SIGNAL-V1\0";
 

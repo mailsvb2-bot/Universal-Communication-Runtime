@@ -46,7 +46,7 @@ Unsupported critical negotiation extensions fail closed.
 
 Phase 22 deliberately did **not** invent pairwise full-mesh group crypto, a home-grown group KDF, or an SFU plaintext model. Its direct-call path still fails closed for Group calls. Phase 29 now adds a separate standardized OpenMLS/RFC-9420 group-media owner that satisfies membership-bound epoch/rekey and removed-member isolation, while preserving this Phase-22 direct-call contract unchanged.
 
-Phase 29 now adds Prepared RFC-9420/OpenMLS-backed group-media E2EE and encrypted SFU fan-out without plaintext/key access. Conference coordination remains Phase 30; an SFU never automatically gains plaintext media access.
+Phase 29 adds Prepared RFC-9420/OpenMLS-backed group-media E2EE and encrypted SFU fan-out without plaintext/key access. Phase 30 now composes that boundary into Conference coordination while retaining the same no-plaintext/no-key SFU rule; an SFU never automatically gains plaintext media access.
 
 ## Explicit nonclaims
 

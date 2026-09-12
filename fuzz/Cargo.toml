@@ -116,3 +116,10 @@ path = "fuzz_targets/sfu_forward_envelope.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "conference_start"
+path = "fuzz_targets/conference_start.rs"
+test = false
+doc = false
+bench = false

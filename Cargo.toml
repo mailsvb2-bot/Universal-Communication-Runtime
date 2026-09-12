@@ -22,6 +22,7 @@ members = [
     "crates/ucr-store-forward",
     "crates/ucr-mesh",
     "crates/ucr-sfu",
+    "crates/ucr-conference",
 ]
 
 [workspace.package]

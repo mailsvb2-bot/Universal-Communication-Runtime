@@ -85,7 +85,7 @@ fn phase25_release_truth_contract_docs_and_fuzz_are_machine_locked() {
     .expect("ADR 0063");
 
     assert!(readme.contains(
-        "**Phase 29 — SFU Routing + standardized Group Media E2EE (Prepared/reference candidate; Conference coordination not started).**"
+        "**Phase 30 — Conferences (Prepared/reference candidate; Bridge SDK not started).**"
     ));
     assert!(ci.contains("test -s spec/transport-failover.md"));
     assert!(ci.contains("test -s proto/ucr/v1/transport_failover.proto"));

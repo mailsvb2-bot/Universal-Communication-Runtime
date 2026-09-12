@@ -1,0 +1,22 @@
+[package]
+name = "ucr-conference"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ucr-core = { path = "../ucr-core" }
+ucr-crypto = { path = "../ucr-crypto" }
+ucr-media-e2ee = { path = "../ucr-media-e2ee" }
+ucr-model = { path = "../ucr-model" }
+ucr-protocol = { path = "../ucr-protocol" }
+ucr-sfu = { path = "../ucr-sfu" }
+
+[dev-dependencies]
+ucr-storage-memory = { path = "../ucr-storage-memory" }
+
+[lints]
+workspace = true

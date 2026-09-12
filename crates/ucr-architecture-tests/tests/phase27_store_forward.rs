@@ -72,7 +72,9 @@ fn phase27_release_truth_docs_and_fuzz_are_machine_locked() {
     let smoke = fs::read_to_string(root.join("fuzz/run-smoke.sh")).expect("fuzz smoke");
     let adr = fs::read_to_string(root.join("docs/adr/0065-phase27-store-and-forward-reuses-intent-message-delivery-and-transport-owners.md")).expect("ADR 0065");
 
-    assert!(readme.contains("**Phase 29 — SFU Routing + standardized Group Media E2EE (Prepared/reference candidate; Conference coordination not started).**"));
+    assert!(readme.contains(
+        "**Phase 30 — Conferences (Prepared/reference candidate; Bridge SDK not started).**"
+    ));
     assert!(ci.contains("test -s spec/store-forward.md"));
     assert!(ci.contains("test -s proto/ucr/v1/store_forward.proto"));
     assert!(ci.contains("0065-phase27-store-and-forward"));

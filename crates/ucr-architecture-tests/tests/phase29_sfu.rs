@@ -87,7 +87,12 @@ fn phase29_release_truth_security_and_fuzz_are_machine_locked() {
         "docs/adr/0067-phase29-sfu-routes-encrypted-media-without-becoming-call-or-crypto-owner.md",
     ))
     .expect("ADR 0067");
-    assert!(readme.contains("Phase 29 — SFU Routing + standardized Group Media E2EE"));
+    assert!(
+        readme.contains("Phase 29 now adds Prepared standardized group-media E2EE and SFU fan-out")
+    );
+    assert!(readme.contains(
+        "**Phase 30 — Conferences (Prepared/reference candidate; Bridge SDK not started).**"
+    ));
     assert!(ci.contains("test -s proto/ucr/v1/group_media_e2ee.proto"));
     assert!(ci.contains("test -s proto/ucr/v1/sfu.proto"));
     assert!(spec_readme.contains("RFC-9420/OpenMLS-backed group-media E2EE and SFU fan-out"));
