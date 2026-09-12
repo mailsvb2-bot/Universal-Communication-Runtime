@@ -212,6 +212,55 @@ fn install_alice_signing_key(store: &MemoryLocalStore) -> (SigningKeyMaterial, K
     (signer, key_id)
 }
 
+fn install_additional_person_device(
+    store: &MemoryLocalStore,
+    person_name: &str,
+    device_name: &str,
+    key_name: &str,
+) -> (DeviceId, SigningKeyMaterial, KeyId) {
+    let device_id = device(device_name);
+    store
+        .register_device(
+            &scope(),
+            &DeviceDescriptor {
+                device_id: device_id.clone(),
+                identity_id: identity(person_name),
+                state: DeviceLifecycleState::Active,
+            },
+        )
+        .expect("additional device");
+    let signer = SigningKeyMaterial::generate().expect("additional signing key");
+    let key_id = KeyId::from_opaque(oid(key_name));
+    store
+        .provision_trusted_signing_key(
+            &scope(),
+            &PublicKeyDescriptor {
+                key_id: key_id.clone(),
+                device_id: device_id.clone(),
+                purpose: KeyPurpose::Signing,
+                algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+                algorithm_version: ALGORITHM_VERSION,
+                key_format_version: KEY_FORMAT_VERSION,
+                public_key: signer.verifying_key().0.to_vec(),
+            },
+        )
+        .expect("additional trusted signing key");
+    (device_id, signer, key_id)
+}
+
+fn group_media_context(group: &GroupRecord, call: &CallSession) -> GroupMediaE2eeContext {
+    GroupMediaE2eeContext {
+        scope: scope(),
+        call_id: call.call_id.clone(),
+        group_id: group.group_id.clone(),
+        negotiation_ref: call.media_negotiation_ref.clone().expect("negotiation ref"),
+        negotiation_generation: call.media_negotiation_generation,
+        crypto_epoch: group.crypto_state.epoch,
+        crypto_state_ref: group.crypto_state.state_ref.clone().expect("state ref"),
+        crypto_suite: CryptoSuite::UcrV1,
+    }
+}
+
 fn build_group(
     store: &MemoryLocalStore,
     alice: &ScopedPrincipal,
@@ -346,16 +395,7 @@ fn build_envelope(
     signing_key_id: &KeyId,
     signer: &SigningKeyMaterial,
 ) -> (DeviceId, SfuForwardEnvelope) {
-    let context = GroupMediaE2eeContext {
-        scope: scope(),
-        call_id: call.call_id.clone(),
-        group_id: group.group_id.clone(),
-        negotiation_ref: call.media_negotiation_ref.clone().expect("negotiation ref"),
-        negotiation_generation: call.media_negotiation_generation,
-        crypto_epoch: group.crypto_state.epoch,
-        crypto_state_ref: group.crypto_state.state_ref.clone().expect("state ref"),
-        crypto_suite: CryptoSuite::UcrV1,
-    };
+    let context = group_media_context(group, call);
     let capabilities = PreparedGroupMediaE2eeCapabilities;
     let runtime = GroupMediaE2eeRuntime::new(&AllowAll, store, &capabilities);
     let alice_device = device("alice");
@@ -575,4 +615,82 @@ fn test_fixture_signer_and_key_id_are_bound_to_source_device() {
         fixture.alice_device
     );
     assert_eq!(fixture.signer.verifying_key().0.len(), 32);
+}
+
+#[test]
+fn same_principal_multi_device_streams_have_independent_replay_cursors() {
+    let fixture = build_fixture();
+    let (alice_device_2, signer_2, key_id_2) = install_additional_person_device(
+        &fixture.store,
+        "alice",
+        "alice-secondary",
+        "alice-secondary-signing-key",
+    );
+    let context = group_media_context(&fixture.group, &fixture.call);
+    let capabilities = PreparedGroupMediaE2eeCapabilities;
+    let runtime = GroupMediaE2eeRuntime::new(&AllowAll, &fixture.store, &capabilities);
+    let epoch_secret = [42; 32];
+    let mut alice_primary = runtime
+        .open_session(
+            &fixture.alice,
+            &fixture.alice_device,
+            &context,
+            GroupMediaEpochSecret::from_exporter_bytes(epoch_secret),
+        )
+        .expect("primary Alice session");
+    let mut alice_secondary = runtime
+        .open_session(
+            &fixture.alice,
+            &alice_device_2,
+            &context,
+            GroupMediaEpochSecret::from_exporter_bytes(epoch_secret),
+        )
+        .expect("secondary Alice session");
+    let mut bob = runtime
+        .open_session(
+            &fixture.bob,
+            &device("bob"),
+            &context,
+            GroupMediaEpochSecret::from_exporter_bytes(epoch_secret),
+        )
+        .expect("Bob session");
+    let stream_id = oid("alice-shared-device-stream");
+    let primary = alice_primary
+        .seal_payload(
+            MediaKind::Audio,
+            &stream_id,
+            1,
+            48_000,
+            false,
+            b"primary-device",
+            &fixture.signing_key_id,
+            &fixture.signer,
+        )
+        .expect("primary frame");
+    let secondary = alice_secondary
+        .seal_payload(
+            MediaKind::Audio,
+            &stream_id,
+            1,
+            48_000,
+            false,
+            b"secondary-device",
+            &key_id_2,
+            &signer_2,
+        )
+        .expect("secondary frame");
+
+    assert_eq!(bob.open_payload(&primary), Ok(b"primary-device".to_vec()));
+    assert_eq!(
+        bob.open_payload(&secondary),
+        Ok(b"secondary-device".to_vec())
+    );
+    assert!(matches!(
+        bob.open_payload(&primary),
+        Err(ucr_media_e2ee::GroupMediaE2eeError::Replay)
+    ));
+    assert!(matches!(
+        bob.open_payload(&secondary),
+        Err(ucr_media_e2ee::GroupMediaE2eeError::Replay)
+    ));
 }

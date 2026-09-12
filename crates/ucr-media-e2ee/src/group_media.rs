@@ -15,7 +15,7 @@ use ucr_model::{
     CapabilityDescriptor, CapabilityMaturity, ConversationKind, DeviceDescriptor, DeviceId,
     EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader,
     GroupMediaSourceSignature, GroupMemberState, KeyId, KeyPurpose, MediaKind, OpaqueId,
-    PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
+    PrincipalKind, PrincipalRef, ScopedPrincipal,
 };
 use ucr_protocol::{
     ALGORITHM_VERSION, AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CanonicalError,
@@ -106,7 +106,8 @@ impl GroupMediaE2eeCapabilityProvider for PreparedGroupMediaE2eeCapabilities {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct GroupStreamCursorKey {
-    source_principal_id: PrincipalId,
+    source: PrincipalRef,
+    source_device_id: DeviceId,
     media_kind: MediaKind,
     stream_id: OpaqueId,
 }
@@ -244,7 +245,8 @@ where
         )?;
         authorize_media(self.authorization, &self.local, send_permission(media_kind))?;
         let key_id = GroupStreamCursorKey {
-            source_principal_id: self.local.principal.principal_id.clone(),
+            source: self.local.principal.clone(),
+            source_device_id: self.local_device_id.clone(),
             media_kind,
             stream_id: stream_id.clone(),
         };
@@ -359,7 +361,8 @@ where
         )?;
         verify_source_signature(self.store, &source_device, frame)?;
         let key_id = GroupStreamCursorKey {
-            source_principal_id: frame.header.source.principal_id.clone(),
+            source: frame.header.source.clone(),
+            source_device_id: frame.header.source_device_id.clone(),
             media_kind: frame.header.media_kind,
             stream_id: frame.header.stream_id.clone(),
         };
