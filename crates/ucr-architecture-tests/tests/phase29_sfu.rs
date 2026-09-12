@@ -48,8 +48,9 @@ fn phase29_sqlite_public_privacy_and_atomicity_boundaries_are_machine_locked() {
     let identity_proto =
         fs::read_to_string(root.join("proto/ucr/v1/identity.proto")).expect("identity proto");
     let spec = fs::read_to_string(root.join("spec/sfu.md")).expect("spec");
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 26"));
+    assert!(sqlite.contains("const SQLITE_SCHEMA_V26: u32 = 26"));
     assert!(sqlite.contains("migrate_v25_to_v26"));
+    assert!(sqlite.contains("migrate_v26_to_v27"));
     assert!(sqlite.contains("initialize_or_validate_group_mls_storage"));
     assert!(atomic.contains("transaction_with_behavior(TransactionBehavior::Immediate)"));
     assert!(atomic.contains("group_mls_transitions"));
@@ -91,7 +92,7 @@ fn phase29_release_truth_security_and_fuzz_are_machine_locked() {
         readme.contains("Phase 29 now adds Prepared standardized group-media E2EE and SFU fan-out")
     );
     assert!(readme.contains(
-        "**Phase 30 — Conferences (Prepared/reference candidate; Bridge SDK not started).**"
+        "**Phase 31 — Bridge SDK (Prepared/reference candidate; Telegram bridge not started).**"
     ));
     assert!(ci.contains("test -s proto/ucr/v1/group_media_e2ee.proto"));
     assert!(ci.contains("test -s proto/ucr/v1/sfu.proto"));

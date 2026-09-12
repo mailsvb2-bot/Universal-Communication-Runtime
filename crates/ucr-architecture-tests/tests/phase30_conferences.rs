@@ -84,7 +84,7 @@ fn phase30_public_contract_docs_permissions_and_fuzz_are_machine_locked() {
     assert!(!adaptive_media.contains("Conference coordination remains Phase 30"));
     assert!(!media_e2ee.contains("Conference coordination remains Phase 30"));
     assert!(readme.contains(
-        "**Phase 30 — Conferences (Prepared/reference candidate; Bridge SDK not started).**"
+        "**Phase 31 — Bridge SDK (Prepared/reference candidate; Telegram bridge not started).**"
     ));
     assert!(ci.contains("test -s proto/ucr/v1/conference.proto"));
     assert!(ci.contains("test -s spec/conference.md"));

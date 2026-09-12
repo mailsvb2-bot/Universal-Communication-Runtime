@@ -6,6 +6,7 @@ mod addressing;
 mod anti_entropy;
 mod audio;
 mod authorization;
+mod bridge;
 mod call;
 mod capability;
 mod commands;
@@ -75,7 +76,9 @@ pub use audio::{
 };
 pub use authorization::{
     ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, AUDIO_RECEIVE_PERMISSION,
-    AUDIO_SEND_PERMISSION, AuthorizationError, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION,
+    AUDIO_SEND_PERMISSION, AuthorizationError, BRIDGE_EVENTS_READ_PERMISSION,
+    BRIDGE_EXECUTE_PERMISSION, BRIDGE_REGISTRATION_MANAGE_PERMISSION,
+    BRIDGE_REGISTRATION_READ_PERMISSION, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION,
     CALL_START_PERMISSION, COMMAND_ACCEPT_PERMISSION, COMMAND_OUTCOME_READ_PERMISSION,
     COMMAND_OUTCOME_WRITE_PERMISSION, COMMUNICATION_INTENT_READ_PERMISSION,
     COMMUNICATION_INTENT_WRITE_PERMISSION, CONFERENCE_SUBSCRIBE_PERMISSION,
@@ -96,6 +99,15 @@ pub use authorization::{
     TRUSTED_SIGNING_KEY_READ_PERMISSION, TRUSTED_SIGNING_KEY_REVOKE_PERMISSION,
     TRUSTED_SIGNING_KEY_ROTATE_PERMISSION, VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
     authorize, is_service_principal, validate_permission_grant,
+};
+pub use bridge::{
+    BRIDGE_SDK_VERSION, BridgeProtocolError, MAX_BRIDGE_ATTACHMENTS, MAX_BRIDGE_EVENT_CURSOR_LEN,
+    MAX_BRIDGE_EVENT_PAGE_ITEMS, MAX_BRIDGE_EXTERNAL_ID_LEN, bridge_action_fingerprint,
+    bridge_manifest_allows_data, bridge_manifest_supports, canonical_bridge_manifest,
+    canonical_bridge_registration, validate_bridge_action, validate_bridge_action_record,
+    validate_bridge_action_transition, validate_bridge_event_cursor, validate_bridge_event_page,
+    validate_bridge_inbound_event, validate_bridge_provider_acceptance,
+    validate_bridge_registration_transition,
 };
 pub use call::{
     CALL_CREATION_FINGERPRINT_V1_DOMAIN, CALL_SIGNAL_FINGERPRINT_V1_DOMAIN, CallSignallingError,

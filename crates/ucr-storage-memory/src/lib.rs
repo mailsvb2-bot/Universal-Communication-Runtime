@@ -11,56 +11,60 @@ use std::{
 };
 
 use ucr_core::{
-    AntiEntropyStore, AuthorizationEvaluator, CommandAcceptanceStore, CommandOutcomeStore,
-    CommunicationIntentStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
-    DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
-    EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, IdentityStore,
-    MessageStore, PermissionGrantStore, PrincipalIdentityBindingStore, RecoveryAdmissionProof,
-    RecoveryDeviceStagingStore, RecoveryPlanStore, ReverifiedDeviceActivationStore,
-    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
-    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore,
+    AntiEntropyStore, AuthorizationEvaluator, BridgeActionStore, BridgeRegistrationStore,
+    CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore, ConversationStore,
+    DeliveryStore, DeviceLifecycleStore, DeviceReverificationProof, DurableRecordStatus,
+    DurableStoreError, EventAppendStatus, EventJournalStore, EventSubscriptionStore,
+    ExternalIdentityBindingStore, IdentityStore, MessageStore, PermissionGrantStore,
+    PrincipalIdentityBindingStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore,
+    RecoveryPlanStore, ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
+    ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth, StorageProvider, SyncStore,
+    TrustedSigningKeyStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
     TrustedSigningKeyResolver, VerifyingKeyBytes,
 };
 use ucr_model::{
-    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CallSession, CommandEnvelope,
-    CommandId, CommunicationIntent, ConversationId, ConversationRecord, DeliveryAttempt,
-    DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState,
-    EventConsumerCursor, EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind,
-    EventEnvelope, EventId, EventPollResult, EventReconciliation, EventReplicaState,
-    EventSubscription, EventSubscriptionId, EventSubscriptionStart, EventSummary,
-    ExternalIdentityBinding, GroupMembership, GroupRecord, IdentityId, IdentityRecord,
-    IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, OfflineGroupChangeReplica,
-    OfflineGroupMessageReplica, OpaqueId, PermissionGrant, PrincipalIdentityBinding, PrincipalRef,
-    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
-    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
-    ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId,
-    SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
-    TrustedSigningKeyState,
+    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, BridgeActionId, BridgeActionRecord,
+    BridgeActionState, BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState,
+    CallSession, CommandEnvelope, CommandId, CommunicationIntent, ConversationId,
+    ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState,
+    DeviceDescriptor, DeviceId, DeviceLifecycleState, EventConsumerCursor, EventDeadLetter,
+    EventDeliveryBatch, EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult,
+    EventReconciliation, EventReplicaState, EventSubscription, EventSubscriptionId,
+    EventSubscriptionStart, EventSummary, ExternalIdentityBinding, GroupMembership, GroupRecord,
+    IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId,
+    OfflineGroupChangeReplica, OfflineGroupMessageReplica, OpaqueId, PermissionGrant,
+    PrincipalIdentityBinding, PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
+    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
+    ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy, SessionId, StoreForwardId,
+    StoreForwardJob, StoreForwardLeaseId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord, TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
     IdempotencyDecision, MAX_EVENT_DELIVERY_BATCH_BYTES, MAX_SERVICE_AUDIT_READ_ITEMS,
-    accepted_command_receipt, anti_entropy_session_binding, canonical_command,
-    canonical_communication_intent, canonical_event, canonical_event_subscription,
-    canonical_message, canonical_recovery_plan, canonical_sync_session,
-    compare_command_idempotency, device_allows_protected_access, duplicate_command_receipt,
-    event_consumer_cursor_token, event_delivery_batch_next_size, event_delivery_size,
-    event_fingerprint, event_matches_subscription, event_retry_delay_ms, service_audit_hash,
-    validate_anti_entropy_cursor, validate_anti_entropy_page_size, validate_anti_entropy_session,
-    validate_anti_entropy_summary_count, validate_conversation, validate_conversation_parent_kind,
-    validate_delivery_attempt, validate_delivery_evidence, validate_delivery_evidence_binding,
-    validate_delivery_evidence_order, validate_delivery_transition, validate_event_batch_size,
-    validate_event_consumer_cursor, validate_external_identity_binding,
-    validate_external_identity_binding_key, validate_identity_record, validate_permission_grant,
-    validate_principal_identity_binding, validate_service_audit_record,
-    validate_service_quota_policy, validate_sync_checkpoint, validate_sync_transition,
-    validate_trusted_signing_key_descriptor,
+    accepted_command_receipt, anti_entropy_session_binding, canonical_bridge_registration,
+    canonical_command, canonical_communication_intent, canonical_event,
+    canonical_event_subscription, canonical_message, canonical_recovery_plan,
+    canonical_sync_session, compare_command_idempotency, device_allows_protected_access,
+    duplicate_command_receipt, event_consumer_cursor_token, event_delivery_batch_next_size,
+    event_delivery_size, event_fingerprint, event_matches_subscription, event_retry_delay_ms,
+    service_audit_hash, validate_anti_entropy_cursor, validate_anti_entropy_page_size,
+    validate_anti_entropy_session, validate_anti_entropy_summary_count,
+    validate_bridge_action_record, validate_bridge_action_transition,
+    validate_bridge_registration_transition, validate_conversation,
+    validate_conversation_parent_kind, validate_delivery_attempt, validate_delivery_evidence,
+    validate_delivery_evidence_binding, validate_delivery_evidence_order,
+    validate_delivery_transition, validate_event_batch_size, validate_event_consumer_cursor,
+    validate_external_identity_binding, validate_external_identity_binding_key,
+    validate_identity_record, validate_permission_grant, validate_principal_identity_binding,
+    validate_service_audit_record, validate_service_quota_policy, validate_sync_checkpoint,
+    validate_sync_transition, validate_trusted_signing_key_descriptor,
 };
 
-const SCHEMA_VERSION: u32 = 11;
+const SCHEMA_VERSION: u32 = 12;
 type ScopeKey = (String, Option<String>);
 type CommandKey = (ScopeKey, String);
 type CommandRefKey = (ScopeKey, String);
@@ -76,6 +80,8 @@ type GroupMembershipKey = (ScopeKey, String, ucr_model::PrincipalRef);
 type GroupChangeKey = (ScopeKey, String);
 type MessageKey = (ScopeKey, String);
 type IntentKey = (ScopeKey, String);
+type BridgeRegistrationKey = (ScopeKey, String);
+type BridgeActionKey = (ScopeKey, String);
 type IdentityKey = (ScopeKey, String);
 type ExternalIdentityBindingKey = (ScopeKey, String, String, Vec<u8>);
 type PrincipalIdentityBindingKey = (ScopeKey, PrincipalRef);
@@ -150,6 +156,8 @@ struct MemoryState {
     mesh_group_message_paths: HashMap<MessageKey, Vec<DeviceId>>,
     messages: HashMap<MessageKey, MessageEnvelope>,
     intents: HashMap<IntentKey, CommunicationIntent>,
+    bridge_registrations: HashMap<BridgeRegistrationKey, BridgeRegistration>,
+    bridge_actions: HashMap<BridgeActionKey, BridgeActionRecord>,
     identities: HashMap<IdentityKey, IdentityRecord>,
     external_identity_bindings: HashMap<ExternalIdentityBindingKey, ExternalIdentityBinding>,
     principal_identity_bindings: HashMap<PrincipalIdentityBindingKey, PrincipalIdentityBinding>,
@@ -985,6 +993,20 @@ fn intent_key(scope: &TenantScope, intent_id: &IntentId) -> IntentKey {
     (scope_key(scope), intent_id.as_opaque().as_str().to_owned())
 }
 
+fn bridge_registration_key(
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+) -> BridgeRegistrationKey {
+    (
+        scope_key(scope),
+        integration_id.as_opaque().as_str().to_owned(),
+    )
+}
+
+fn bridge_action_key(scope: &TenantScope, action_id: &BridgeActionId) -> BridgeActionKey {
+    (scope_key(scope), action_id.as_opaque().as_str().to_owned())
+}
+
 fn identity_key(scope: &TenantScope, identity_id: &IdentityId) -> IdentityKey {
     (
         scope_key(scope),
@@ -1202,6 +1224,179 @@ impl ConversationStore for MemoryLocalStore {
             .conversations
             .get(&conversation_key(scope, conversation_id))
             .cloned())
+    }
+}
+
+impl BridgeRegistrationStore for MemoryLocalStore {
+    fn install_bridge_registration(
+        &self,
+        registration: &BridgeRegistration,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let canonical = canonical_bridge_registration(registration)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        if canonical.state != BridgeRegistrationState::Active || canonical.generation != 1 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let key = bridge_registration_key(&canonical.scope, &canonical.integration_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.bridge_registrations.get(&key) {
+            return if existing == &canonical {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.bridge_registrations.insert(key, canonical);
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn bridge_registration(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+    ) -> Result<Option<BridgeRegistration>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .bridge_registrations
+            .get(&bridge_registration_key(scope, integration_id))
+            .cloned())
+    }
+
+    fn transition_bridge_registration(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        expected_generation: u64,
+        next_state: BridgeRegistrationState,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let key = bridge_registration_key(scope, integration_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current = state
+            .bridge_registrations
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::Conflict)?;
+        let next_generation = expected_generation
+            .checked_add(1)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if current.generation == next_generation && current.state == next_state {
+            return Ok(DurableRecordStatus::Duplicate);
+        }
+        if current.generation != expected_generation {
+            return Err(DurableStoreError::Conflict);
+        }
+        validate_bridge_registration_transition(current.state, next_state)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut next = current;
+        next.state = next_state;
+        next.generation = next_generation;
+        canonical_bridge_registration(&next).map_err(|_| DurableStoreError::InvalidRecord)?;
+        state.bridge_registrations.insert(key, next);
+        Ok(DurableRecordStatus::Persisted)
+    }
+}
+
+impl BridgeActionStore for MemoryLocalStore {
+    fn prepare_bridge_action(
+        &self,
+        record: &BridgeActionRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_bridge_action_record(record).map_err(|_| DurableStoreError::InvalidRecord)?;
+        if record.state != BridgeActionState::Prepared
+            || record.generation != 1
+            || record.acceptance.is_some()
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let key = bridge_action_key(&record.scope, &record.action_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let registration = state
+            .bridge_registrations
+            .get(&bridge_registration_key(
+                &record.scope,
+                &record.integration_id,
+            ))
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if registration.state != BridgeRegistrationState::Active
+            || !ucr_protocol::bridge_manifest_supports(&registration.manifest, record.capability)
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        if let Some(existing) = state.bridge_actions.get(&key) {
+            return if existing == record {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.bridge_actions.insert(key, record.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn bridge_action(
+        &self,
+        scope: &TenantScope,
+        action_id: &BridgeActionId,
+    ) -> Result<Option<BridgeActionRecord>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .bridge_actions
+            .get(&bridge_action_key(scope, action_id))
+            .cloned())
+    }
+
+    fn transition_bridge_action(
+        &self,
+        scope: &TenantScope,
+        action_id: &BridgeActionId,
+        expected_generation: u64,
+        expected_state: BridgeActionState,
+        next_state: BridgeActionState,
+        acceptance: Option<&BridgeProviderAcceptance>,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let key = bridge_action_key(scope, action_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current = state
+            .bridge_actions
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::Conflict)?;
+        let next_generation = expected_generation
+            .checked_add(1)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        let next_acceptance = acceptance.cloned();
+        if current.generation == next_generation
+            && current.state == next_state
+            && current.acceptance == next_acceptance
+        {
+            return Ok(DurableRecordStatus::Duplicate);
+        }
+        if current.generation != expected_generation || current.state != expected_state {
+            return Err(DurableStoreError::Conflict);
+        }
+        if next_state == BridgeActionState::InFlight {
+            let registration = state
+                .bridge_registrations
+                .get(&bridge_registration_key(scope, &current.integration_id))
+                .ok_or(DurableStoreError::InvalidRecord)?;
+            if registration.state != BridgeRegistrationState::Active
+                || !ucr_protocol::bridge_manifest_supports(
+                    &registration.manifest,
+                    current.capability,
+                )
+            {
+                return Err(DurableStoreError::PermissionDenied);
+            }
+        }
+        validate_bridge_action_transition(current.state, next_state)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut next = current;
+        next.state = next_state;
+        next.acceptance = next_acceptance;
+        next.generation = next_generation;
+        validate_bridge_action_record(&next).map_err(|_| DurableStoreError::InvalidRecord)?;
+        state.bridge_actions.insert(key, next);
+        Ok(DurableRecordStatus::Persisted)
     }
 }
 

@@ -13,13 +13,14 @@ mod service_request;
 mod store_forward;
 
 use ucr_model::{
-    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, CapabilityDescriptor,
-    CommandEnvelope, CommandId, CommunicationIntent, ConversationId, ConversationRecord,
-    DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
-    EndpointAddress, EndpointId, EventConsumerCursor, EventDeadLetter, EventDeliveryFailureKind,
-    EventEnvelope, EventId, EventPollResult, EventReconciliation, EventSubscription,
-    EventSubscriptionId, EventSummary, ExternalIdentityBinding, IdentityId, IdentityRecord,
-    IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
+    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, BridgeActionId, BridgeActionRecord,
+    BridgeActionState, BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState,
+    CapabilityDescriptor, CommandEnvelope, CommandId, CommunicationIntent, ConversationId,
+    ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState,
+    DeviceDescriptor, DeviceId, EndpointAddress, EndpointId, EventConsumerCursor, EventDeadLetter,
+    EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult, EventReconciliation,
+    EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding, IdentityId,
+    IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
     PrincipalIdentityBinding, PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
     ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
     ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
@@ -527,6 +528,76 @@ where
 pub enum AuthorizedMutationError {
     Authorization(CanonicalError),
     Store(DurableStoreError),
+}
+
+/// Durable bridge registration security owner keyed by canonical `IntegrationId`.
+pub trait BridgeRegistrationStore: StorageProvider {
+    /// Installs or deduplicates one bridge registration. Changed semantics conflict.
+    ///
+    /// # Errors
+    /// Returns explicit validation, conflict, permission, corruption, or storage failures.
+    fn install_bridge_registration(
+        &self,
+        registration: &BridgeRegistration,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one exact bridge registration when present.
+    ///
+    /// # Errors
+    /// Returns explicit storage or corruption failures.
+    fn bridge_registration(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+    ) -> Result<Option<BridgeRegistration>, DurableStoreError>;
+
+    /// Advances Active/Disabled/Revoked lifecycle using optimistic generation.
+    ///
+    /// # Errors
+    /// Returns validation, conflict, permission, corruption, or storage failures.
+    fn transition_bridge_registration(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        expected_generation: u64,
+        next_state: BridgeRegistrationState,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+}
+
+/// Metadata-only crash/idempotency ledger for bridge provider side effects.
+pub trait BridgeActionStore: StorageProvider {
+    /// Persists or deduplicates a prepared action record. The record contains no provider plaintext.
+    ///
+    /// # Errors
+    /// Returns validation, conflict, permission, corruption, or storage failures.
+    fn prepare_bridge_action(
+        &self,
+        record: &BridgeActionRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one exact action ledger row.
+    ///
+    /// # Errors
+    /// Returns explicit storage or corruption failures.
+    fn bridge_action(
+        &self,
+        scope: &TenantScope,
+        action_id: &BridgeActionId,
+    ) -> Result<Option<BridgeActionRecord>, DurableStoreError>;
+
+    /// Advances the action ledger using optimistic generation and explicit provider acceptance state.
+    ///
+    /// # Errors
+    /// Returns validation, conflict, permission, corruption, or storage failures.
+    fn transition_bridge_action(
+        &self,
+        scope: &TenantScope,
+        action_id: &BridgeActionId,
+        expected_generation: u64,
+        expected_state: BridgeActionState,
+        next_state: BridgeActionState,
+        acceptance: Option<&BridgeProviderAcceptance>,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
 }
 
 pub trait StorageProvider: core::fmt::Debug + Send + Sync {
