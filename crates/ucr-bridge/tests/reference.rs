@@ -282,20 +282,22 @@ fn policy_and_payload_tampering_fail_before_provider_side_effect() {
         .register(&actor(), &integration(), &provider)
         .expect("register");
 
-    let forbidden = message(
-        "message-forbidden",
-        b"private",
-        DeliveryPolicy::NoExternalBridge,
-    );
-    setup_message(&store, &forbidden);
-    assert_eq!(
-        runtime.execute(
-            &actor(),
-            &action("action-forbidden", Some(&forbidden), b"private"),
-            &provider,
-        ),
-        Err(BridgeError::ExternalBridgeForbidden)
-    );
+    for (suffix, policy) in [
+        ("local-only", DeliveryPolicy::LocalOnly),
+        ("private-network-only", DeliveryPolicy::PrivateNetworkOnly),
+        ("no-external-bridge", DeliveryPolicy::NoExternalBridge),
+    ] {
+        let forbidden = message(&format!("message-{suffix}"), b"private", policy);
+        setup_message(&store, &forbidden);
+        assert_eq!(
+            runtime.execute(
+                &actor(),
+                &action(&format!("action-{suffix}"), Some(&forbidden), b"private"),
+                &provider,
+            ),
+            Err(BridgeError::ExternalBridgeForbidden)
+        );
+    }
 
     let allowed = message("message-tamper", b"canonical", DeliveryPolicy::Durable);
     store.persist_message(&allowed).expect("message");
@@ -334,6 +336,49 @@ fn live_capability_loss_and_permission_denial_fail_closed() {
         Err(BridgeError::Authorization(_))
     ));
     assert_eq!(provider.count(), 0);
+}
+
+#[test]
+fn live_manifest_expansion_cannot_escape_registered_degradation_ceiling() {
+    let store = MemoryLocalStore::default();
+    let provider = TestProvider::new(
+        manifest(vec![BridgeCapability::Text]),
+        vec![ExecuteStep::Accept(BridgeProviderAcceptance {
+            external_message_id: Some(b"provider-expanded-fallback".to_vec()),
+            degradation: Some(BridgeDegradation {
+                requested: BridgeCapability::Text,
+                fallback: Some(BridgeCapability::Video),
+                reason: BridgeDegradationReason::ProviderLimited,
+            }),
+        })],
+    );
+    let runtime = BridgeRuntime::new(&AllowAll, &store);
+    runtime
+        .register(&actor(), &integration(), &provider)
+        .expect("register");
+
+    provider.replace_manifest(manifest(vec![
+        BridgeCapability::Text,
+        BridgeCapability::Video,
+    ]));
+    let outbound = action("action-expanded-fallback", None, b"");
+    assert_eq!(
+        runtime.execute(&actor(), &outbound, &provider),
+        Err(BridgeError::AcceptanceUnknown)
+    );
+    assert_eq!(provider.count(), 1);
+    let record = store
+        .bridge_action(&scope(), &outbound.action_id)
+        .expect("load action")
+        .expect("action record");
+    assert_eq!(record.state, BridgeActionState::AcceptanceUnknown);
+    assert!(record.acceptance.is_none());
+
+    assert_eq!(
+        runtime.execute(&actor(), &outbound, &provider),
+        Err(BridgeError::AcceptanceUnknown)
+    );
+    assert_eq!(provider.count(), 1);
 }
 
 #[test]

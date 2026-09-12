@@ -33,6 +33,8 @@ fn phase31_restart_safety_policy_and_provider_acceptance_are_machine_locked() {
     let sqlite = read("crates/ucr-storage-sqlite/src/bridge_store.rs");
     let sqlite_root = read("crates/ucr-storage-sqlite/src/lib.rs");
     let spec = read("spec/bridge-sdk.md");
+    assert!(runtime.contains("DeliveryPolicy::LocalOnly"));
+    assert!(runtime.contains("DeliveryPolicy::PrivateNetworkOnly"));
     assert!(runtime.contains("DeliveryPolicy::NoExternalBridge"));
     assert!(runtime.contains("BridgeActionState::AcceptanceUnknown"));
     assert!(runtime.contains("validate_bridge_provider_acceptance"));
@@ -43,6 +45,7 @@ fn phase31_restart_safety_policy_and_provider_acceptance_are_machine_locked() {
         )
     );
     assert!(tests.contains("policy_and_payload_tampering_fail_before_provider_side_effect"));
+    assert!(tests.contains("live_manifest_expansion_cannot_escape_registered_degradation_ceiling"));
     assert!(sqlite.contains("CREATE TABLE bridge_registrations"));
     assert!(sqlite.contains("CREATE TABLE bridge_actions"));
     assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 27"));
@@ -50,6 +53,10 @@ fn phase31_restart_safety_policy_and_provider_acceptance_are_machine_locked() {
         "Provider acceptance/degradation is **not** canonical Delivery/Delivered/Read evidence"
     ));
     assert!(spec.contains("never provider plaintext"));
+    assert!(spec.contains("all fail closed before any external provider side effect"));
+    assert!(
+        spec.contains("live capability expansion cannot escape the registered admission ceiling")
+    );
 }
 
 #[test]

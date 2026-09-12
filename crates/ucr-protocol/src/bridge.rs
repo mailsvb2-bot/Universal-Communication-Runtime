@@ -217,10 +217,12 @@ pub fn bridge_action_fingerprint(action: &BridgeAction) -> Result<[u8; 32], Brid
 ///
 /// # Errors
 /// Returns a bridge protocol error for invalid provider identifiers or undeclared/contradictory
-/// degradation metadata.
+/// degradation metadata. Any fallback must remain inside both the durable registration ceiling and
+/// the provider's current live manifest.
 pub fn validate_bridge_provider_acceptance(
     action: &BridgeAction,
-    manifest: &BridgeProviderManifest,
+    registered_manifest: &BridgeProviderManifest,
+    current_manifest: &BridgeProviderManifest,
     acceptance: &BridgeProviderAcceptance,
 ) -> Result<(), BridgeProtocolError> {
     if acceptance
@@ -233,9 +235,10 @@ pub fn validate_bridge_provider_acceptance(
     if let Some(degradation) = &acceptance.degradation
         && (degradation.requested != action.capability
             || degradation.fallback == Some(action.capability)
-            || degradation
-                .fallback
-                .is_some_and(|fallback| !bridge_manifest_supports(manifest, fallback)))
+            || degradation.fallback.is_some_and(|fallback| {
+                !bridge_manifest_supports(registered_manifest, fallback)
+                    || !bridge_manifest_supports(current_manifest, fallback)
+            }))
     {
         return Err(BridgeProtocolError::InvalidDegradation);
     }

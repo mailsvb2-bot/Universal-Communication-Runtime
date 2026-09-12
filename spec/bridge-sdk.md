@@ -6,7 +6,7 @@ Phase 31 introduces the provider-agnostic Bridge extension boundary used by late
 
 `IntegrationId` remains the canonical identifier for one external integration. Canonical `Message`, `Conversation`, `Identity`, `Group`, `Call`, `CommunicationIntent`, Delivery and routing owners remain unchanged. A Bridge registration stores only provider manifest/security lifecycle metadata; a Bridge action ledger stores only action fingerprint/state/provider-result metadata and never provider plaintext.
 
-The Bridge host is allowed to expose provider-visible content only for the exact admitted action. If an action references a canonical Message, Core reloads that Message and requires exact payload/attachment equality before the provider is called. `DeliveryPolicy::NoExternalBridge` fails closed even when no alternative route exists. Content without a canonical Message binding is not accepted by the Prepared outbound host.
+The Bridge host is allowed to expose provider-visible content only for the exact admitted action. If an action references a canonical Message, Core reloads that Message and requires exact payload/attachment equality before the provider is called. `DeliveryPolicy::LocalOnly`, `DeliveryPolicy::PrivateNetworkOnly`, and `DeliveryPolicy::NoExternalBridge` all fail closed before any external provider side effect, even when no alternative route exists. Content without a canonical Message binding is not accepted by the Prepared outbound host.
 
 ## Manifest and capability model
 
@@ -14,7 +14,7 @@ Every provider declares an SDK/protocol compatibility range, explicit capabiliti
 
 The durable registration is an admission ceiling, while the provider's live manifest is checked again on every operation. A capability that disappears at runtime therefore immediately fails closed. Registration lifecycle is `Active`, `Disabled`, `Revoked`; revoke is terminal. Disabled/revoked integrations cannot begin new provider actions.
 
-Provider degradation is explicit `BridgeProviderAcceptance` metadata. A fallback must be declared by the current provider manifest and cannot pretend the requested capability succeeded unchanged. Provider acceptance/degradation is **not** canonical Delivery/Delivered/Read evidence.
+Provider degradation is explicit `BridgeProviderAcceptance` metadata. A fallback must be declared by both the durable registration manifest and the current provider manifest, so live capability expansion cannot escape the registered admission ceiling, and it cannot pretend the requested capability succeeded unchanged. Provider acceptance/degradation is **not** canonical Delivery/Delivered/Read evidence.
 
 ## Crash, retry and backpressure semantics
 

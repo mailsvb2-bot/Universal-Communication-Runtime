@@ -232,7 +232,13 @@ where
             BridgeActionAdmission::Replayed(outcome) => return Ok(outcome),
         };
         let in_flight_generation = self.mark_action_in_flight(action, &record)?;
-        self.complete_provider_execution(action, &provider_manifest, provider, in_flight_generation)
+        self.complete_provider_execution(
+            action,
+            &registration.manifest,
+            &provider_manifest,
+            provider,
+            in_flight_generation,
+        )
     }
 
     fn load_or_prepare_action(
@@ -300,14 +306,20 @@ where
     fn complete_provider_execution(
         &self,
         action: &BridgeAction,
+        registered_manifest: &BridgeProviderManifest,
         provider_manifest: &BridgeProviderManifest,
         provider: &dyn BridgeProvider,
         in_flight_generation: u64,
     ) -> Result<BridgeExecutionOutcome, BridgeError> {
         match provider.execute(action) {
             Ok(acceptance) => {
-                if validate_bridge_provider_acceptance(action, provider_manifest, &acceptance)
-                    .is_err()
+                if validate_bridge_provider_acceptance(
+                    action,
+                    registered_manifest,
+                    provider_manifest,
+                    &acceptance,
+                )
+                .is_err()
                 {
                     let _ = self.store.transition_bridge_action(
                         &action.scope,
@@ -476,7 +488,12 @@ where
                 .store
                 .message(&action.scope, message_id)?
                 .ok_or(BridgeError::MessageUnavailable)?;
-            if message.delivery_policy == DeliveryPolicy::NoExternalBridge {
+            if matches!(
+                message.delivery_policy,
+                DeliveryPolicy::LocalOnly
+                    | DeliveryPolicy::PrivateNetworkOnly
+                    | DeliveryPolicy::NoExternalBridge
+            ) {
                 return Err(BridgeError::ExternalBridgeForbidden);
             }
             if action.provider_payload != message.content
