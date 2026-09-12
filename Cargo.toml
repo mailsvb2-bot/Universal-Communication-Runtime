@@ -15,11 +15,13 @@ members = [
     "crates/ucr-audio",
     "crates/ucr-video",
     "crates/ucr-media-e2ee",
+    "crates/ucr-group-mls",
     "crates/ucr-media-adaptive",
     "crates/ucr-transport-orchestrator",
     "crates/ucr-offline-groups",
     "crates/ucr-store-forward",
     "crates/ucr-mesh",
+    "crates/ucr-sfu",
 ]
 
 [workspace.package]
@@ -36,3 +38,9 @@ missing_debug_implementations = "warn"
 [workspace.lints.clippy]
 all = "deny"
 pedantic = "deny"
+[patch.crates-io]
+# Phase 29: hpke-rs 0.7.0 depends unconditionally on libcrux-sha3 only for
+# SHAKE256-based PQ KEM seed derivation. The local patch preserves SHAKE256
+# semantics with RustCrypto sha3 and removes an unmaintained Hax macro dependency
+# from the audited lockfile. See third_party/hpke-rs/UCR_PATCH.md.
+hpke-rs = { path = "third_party/hpke-rs" }

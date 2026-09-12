@@ -20,9 +20,10 @@ use ucr_model::{
     EventEnvelope, EventId, EventPollResult, EventReconciliation, EventSubscription,
     EventSubscriptionId, EventSummary, ExternalIdentityBinding, IdentityId, IdentityRecord,
     IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
-    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
-    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy,
-    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    PrincipalIdentityBinding, PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
+    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
+    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
+    TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -660,6 +661,32 @@ pub trait IdentityStore: StorageProvider {
 /// The durable identity is the exact tuple `(TenantScope, IntegrationId, external_namespace,
 /// external_entity_id bytes)`. Equal retries are duplicates; changing the canonical Identity for
 /// an existing key is a conflict rather than an implicit relink.
+/// Durable immutable association owner between a canonical Principal and Root Identity.
+///
+/// This store owns association evidence only. It is not a permission, delegation, Device, Group,
+/// Call, or authentication owner. Equal retries deduplicate and conflicting relinks fail closed.
+pub trait PrincipalIdentityBindingStore: StorageProvider {
+    /// Persists one immutable explicit Principal→Identity association.
+    ///
+    /// # Errors
+    /// Rejects invalid Device-principal aliases, missing target Identity, conflicting relinks or
+    /// storage failures.
+    fn persist_principal_identity_binding(
+        &self,
+        binding: &PrincipalIdentityBinding,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one exact scoped Principal association when present.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn principal_identity_binding(
+        &self,
+        scope: &TenantScope,
+        principal: &PrincipalRef,
+    ) -> Result<Option<PrincipalIdentityBinding>, DurableStoreError>;
+}
+
 pub trait ExternalIdentityBindingStore: StorageProvider {
     /// Persists or deduplicates one canonical external Identity binding.
     ///

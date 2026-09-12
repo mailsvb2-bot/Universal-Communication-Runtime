@@ -3,6 +3,7 @@
 mod aead;
 mod agreement;
 mod confirmation;
+mod group_media;
 mod kdf;
 mod key_provider;
 mod media_e2ee;
@@ -17,6 +18,10 @@ mod trusted_key;
 pub use aead::{AeadError, Ciphertext, TrafficKey};
 pub use agreement::{AgreementError, AgreementKeyPair, AgreementPublicKey};
 pub use confirmation::{ConfirmationError, ConfirmationKey, ConfirmationTag};
+pub use group_media::{
+    GroupMediaEpochSecret, GroupMediaKeyError, GroupMediaSigningKeyHandle,
+    derive_group_media_traffic_key,
+};
 pub use kdf::DerivationError;
 pub use key_provider::SigningKeyHandle;
 pub use media_e2ee::{
@@ -39,7 +44,8 @@ pub use session::{
 };
 pub use signing::{
     MESSAGE_SIGNATURE_V1_DOMAIN, SignatureBytes, SignatureError, SigningKeyMaterial,
-    VerifyingKeyBytes, verify_message_binding_signature, verify_transcript_signature,
+    VerifyingKeyBytes, verify_group_media_binding_signature, verify_message_binding_signature,
+    verify_transcript_signature,
 };
 pub use transcript::{TranscriptBinding, TranscriptError, bind_handshake_transcript};
 pub use trusted_key::{TrustedKeyResolutionError, TrustedSigningKeyResolver};

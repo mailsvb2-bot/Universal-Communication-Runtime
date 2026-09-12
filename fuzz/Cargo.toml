@@ -109,3 +109,10 @@ path = "fuzz_targets/mesh_group_path.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sfu_forward_envelope"
+path = "fuzz_targets/sfu_forward_envelope.rs"
+test = false
+doc = false
+bench = false

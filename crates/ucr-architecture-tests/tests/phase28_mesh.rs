@@ -38,7 +38,8 @@ fn phase28_schema_and_public_boundary_are_machine_locked() {
     let spec = fs::read_to_string(root.join("spec/mesh.md")).expect("spec");
 
     assert!(sqlite.contains("const SQLITE_SCHEMA_V24: u32 = 24"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 25"));
+    assert!(sqlite.contains("const SQLITE_SCHEMA_V25: u32 = 25"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 ="));
     assert!(sqlite.contains("migrate_v24_to_v25"));
     assert!(!proto.contains("service Mesh"));
     assert!(!proto.contains("message Relay"));
@@ -64,7 +65,7 @@ fn phase28_release_truth_docs_and_fuzz_are_machine_locked() {
         ))
         .expect("ADR 0066");
 
-    assert!(readme.contains("**Phase 28 — Mesh (Prepared/reference complete; Relay/NAT traversal and multipath not started).**"));
+    assert!(readme.contains("**Phase 29 — SFU Routing + standardized Group Media E2EE (Prepared/reference candidate; Conference coordination not started).**"));
     assert!(ci.contains("test -s spec/mesh.md"));
     assert!(ci.contains("test -s proto/ucr/v1/mesh.proto"));
     assert!(ci.contains("0066-phase28-mesh"));

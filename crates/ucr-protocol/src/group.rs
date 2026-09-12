@@ -690,9 +690,7 @@ fn validate_history_policy(policy: &GroupHistoryPolicy) -> Result<(), GroupError
 fn validate_crypto_state(state: &GroupCryptoState) -> Result<(), GroupError> {
     match (&state.capability_id, state.epoch, &state.state_ref) {
         (None, 0, None) => Ok(()),
-        (Some(capability), epoch, Some(_)) if capability == GROUP_MLS_CAPABILITY && epoch > 0 => {
-            Ok(())
-        }
+        (Some(capability), _, Some(_)) if capability == GROUP_MLS_CAPABILITY => Ok(()),
         _ => Err(GroupError::InvalidCryptoState),
     }
 }

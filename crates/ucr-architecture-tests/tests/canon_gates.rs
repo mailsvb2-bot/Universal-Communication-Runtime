@@ -709,7 +709,7 @@ fn local_storage_keeps_sqlite_out_of_canonical_core() {
             .expect("read sqlite manifest");
     assert!(root.contains("crates/ucr-storage-memory"));
     assert!(root.contains("crates/ucr-storage-sqlite"));
-    assert!(sqlite_manifest.contains("version = \"=0.40.2\""));
+    assert!(sqlite_manifest.contains("version = \"=0.37.0\""));
     assert!(sqlite_manifest.contains("features = [\"bundled\"]"));
 }
 
@@ -1704,6 +1704,7 @@ fn implemented_untrusted_boundaries_have_bounded_required_fuzzing() {
         "opaque_id_wire",
         "message_envelope",
         "crypto_wrapper",
+        "sfu_forward_envelope",
     ] {
         assert!(
             workspace
@@ -2494,7 +2495,7 @@ fn metadata_visibility_rows(inventory: &str) -> std::collections::BTreeMap<Strin
         assert!(
             matches!(
                 columns[2].as_str(),
-                "implemented" | "partial" | "not_implemented" | "cross_cutting"
+                "implemented" | "prepared" | "partial" | "not_implemented" | "cross_cutting"
             ),
             "unknown implementation status: {}",
             columns[2]
@@ -2552,12 +2553,10 @@ fn every_infrastructure_boundary_has_machine_checked_metadata_visibility() {
         "only when the explicit bridge action and policy require provider-visible content"
     ));
     let sfu = rows.get("SFU").expect("sfu row");
-    assert!(sfu[3].contains("encrypted media packet size/timing"));
-    assert!(
-        sfu[4].contains(
-            "media plaintext unless an explicitly reviewed media architecture requires it"
-        )
-    );
+    assert_eq!(sfu[2], "prepared");
+    assert!(sfu[3].contains("ciphertext length and packet timing"));
+    assert!(sfu[4].contains("media plaintext; MLS exporter/traffic/private keys"));
+    assert!(sfu[4].contains("recovery/authentication keys"));
     assert!(rows["Cloud Infrastructure"][6].contains("no cloud account"));
     for forbidden in [
         "plaintext messages",
@@ -2597,6 +2596,8 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
     let simulations =
         fs::read_to_string(workspace.join("crates/ucr-security-tests/tests/threat_simulations.rs"))
             .expect("threat simulations");
+    let sfu_simulations = fs::read_to_string(workspace.join("crates/ucr-sfu/tests/reference.rs"))
+        .expect("sfu threat simulations");
     let matrix = fs::read_to_string(workspace.join("docs/architecture/THREAT_SIMULATIONS.md"))
         .expect("threat simulation matrix");
     let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
@@ -2654,6 +2655,8 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
         .filter(|line| line.trim_start().starts_with("fn ") && line.contains("_simulation_"))
         .count();
     assert_eq!(simulation_test_count, scenarios.len());
+    assert!(sfu_simulations.contains("fn compromised_sfu_simulation_rejects_spoof_before_sink()"));
+    assert!(matrix.contains("compromised_sfu_simulation_rejects_spoof_before_sink"));
 
     assert!(matrix.contains("Compromised Bridge"));
     assert!(matrix.contains(
@@ -2693,6 +2696,8 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
     let chaos =
         fs::read_to_string(workspace.join("crates/ucr-security-tests/tests/chaos_scenarios.rs"))
             .expect("chaos scenarios");
+    let sfu_chaos = fs::read_to_string(workspace.join("crates/ucr-sfu/tests/reference.rs"))
+        .expect("sfu chaos scenarios");
     let sqlite_store = fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/lib.rs"))
         .expect("sqlite provider");
     let matrix = fs::read_to_string(workspace.join("docs/architecture/CHAOS_SCENARIOS.md"))
@@ -2732,6 +2737,11 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
         .filter(|line| line.trim_start().starts_with("fn ") && line.contains("_chaos_"))
         .count();
     assert_eq!(chaos_test_count, scenarios.len());
+    assert_chaos_evidence(
+        &sfu_chaos,
+        &matrix,
+        "sfu_sink_failure_chaos_preserves_call_authority",
+    );
 
     let storage_full = "sqlite_storage_full_rolls_back_command_acceptance_atomically";
     assert_chaos_evidence(&sqlite_store, &matrix, storage_full);
@@ -2743,7 +2753,6 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
     for open_evidence in [
         "Not implemented: no production DNS-dependent path exists",
         "Not implemented: Relay does not exist yet",
-        "Not implemented: SFU does not exist yet",
     ] {
         assert!(
             matrix.contains(open_evidence),
@@ -2756,7 +2765,7 @@ fn applicable_chaos_scenarios_cross_real_boundaries_without_fake_infrastructure(
     );
     assert!(!threat.contains("deterministic process-kill fault injection for durable stores"));
     assert!(threat.contains(
-        "remaining transport/infrastructure chaos evidence for OS/interface network switching, future DNS discovery, Relay and SFU"
+        "remaining transport/infrastructure chaos evidence for OS/interface network switching, future DNS discovery and Relay"
     ));
     assert!(!threat.contains("end-to-end storage-full fault injection remain open"));
     assert!(threat.contains("eight executable cross-crate chaos scenarios"));

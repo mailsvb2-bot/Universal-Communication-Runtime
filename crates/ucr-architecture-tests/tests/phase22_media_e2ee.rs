@@ -60,7 +60,7 @@ fn phase22_e2ee_reuses_call_crypto_media_and_negotiation_owners() {
     assert!(
         spec.contains("forged unauthenticated high sequence numbers cannot poison receiver state")
     );
-    assert!(spec.contains("Group calls fail closed"));
+    assert!(spec.contains("Its direct-call path still fails closed for Group calls"));
     assert!(spec.contains("cannot impersonate the accepted Call participant"));
     assert!(spec.contains("stops an already-open session on the next frame"));
     assert!(spec.contains("reusing either role ephemeral from any earlier epoch"));
@@ -123,5 +123,5 @@ fn phase22_release_truth_and_fuzz_gate_are_machine_locked() {
     assert!(spec_readme.contains("Phase 22 adds `media-e2ee.md`"));
     assert!(fuzz_manifest.contains("media_e2ee_frame"));
     assert!(fuzz_smoke.contains("run_target media_e2ee_frame 131072 768"));
-    assert!(threat.contains("Phase 22 direct-call E2EE media"));
+    assert!(threat.contains("Phase 22 adds direct-call E2EE tamper/replay/rotation evidence"));
 }

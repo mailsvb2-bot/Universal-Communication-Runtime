@@ -7,6 +7,7 @@ mod delivery_store;
 mod device_store;
 mod event_journal;
 mod event_subscription_store;
+mod group_mls_store;
 mod group_store;
 mod identity_binding_store;
 mod identity_store;
@@ -15,6 +16,7 @@ mod mesh_store;
 mod message_store;
 mod offline_group_store;
 mod permission_store;
+mod principal_identity_binding_store;
 mod recovery_plan;
 mod replay;
 mod service_control_store;
@@ -59,7 +61,8 @@ const SQLITE_SCHEMA_V21: u32 = 21;
 const SQLITE_SCHEMA_V22: u32 = 22;
 const SQLITE_SCHEMA_V23: u32 = 23;
 const SQLITE_SCHEMA_V24: u32 = 24;
-pub const SQLITE_SCHEMA_VERSION: u32 = 25;
+const SQLITE_SCHEMA_V25: u32 = 25;
+pub const SQLITE_SCHEMA_VERSION: u32 = 26;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -179,9 +182,11 @@ impl SqliteLocalStore {
         prepare_new_store_file(path)?;
         let mut connection = Connection::open(path).map_err(|error| map_sqlite_error(&error))?;
         configure_safe_connection(&connection)?;
-        initialize_or_validate_schema(&mut connection)?;
-        harden_store_permissions(path)?;
+        preflight_store_ownership(&connection)?;
         configure_durability(&connection)?;
+        initialize_or_validate_schema(&mut connection)?;
+        initialize_or_validate_group_mls_storage(&mut connection)?;
+        harden_store_permissions(path)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -385,6 +390,34 @@ fn configure_safe_connection(connection: &Connection) -> Result<(), DurableStore
     Ok(())
 }
 
+fn preflight_store_ownership(connection: &Connection) -> Result<(), DurableStoreError> {
+    let application_id = read_application_id(connection)?;
+    let version = read_schema_version(connection)?;
+
+    if application_id == 0 && version == 0 {
+        return if count_user_tables(connection)? == 0 {
+            Ok(())
+        } else {
+            Err(DurableStoreError::ForeignStore)
+        };
+    }
+    if application_id != UCR_SQLITE_APPLICATION_ID {
+        return Err(DurableStoreError::ForeignStore);
+    }
+    if version > SQLITE_SCHEMA_VERSION {
+        return Err(DurableStoreError::UnsupportedSchemaVersion);
+    }
+    Ok(())
+}
+
+fn initialize_or_validate_group_mls_storage(
+    connection: &mut Connection,
+) -> Result<(), DurableStoreError> {
+    ucr_group_mls::initialize_sqlite_storage(connection)
+        .map_err(|_| DurableStoreError::Internal)?;
+    ucr_group_mls::verify_sqlite_storage(connection).map_err(|_| DurableStoreError::Corrupt)
+}
+
 fn configure_durability(connection: &Connection) -> Result<(), DurableStoreError> {
     connection
         .pragma_update(None, "journal_mode", "WAL")
@@ -411,7 +444,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return mesh_store::verify_schema_v25(connection);
+        return principal_identity_binding_store::verify_schema_v26(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -446,11 +479,12 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V22 => migrate_v22_to_v23(connection)?,
             SQLITE_SCHEMA_V23 => migrate_v23_to_v24(connection)?,
             SQLITE_SCHEMA_V24 => migrate_v24_to_v25(connection)?,
+            SQLITE_SCHEMA_V25 => migrate_v25_to_v26(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    mesh_store::verify_schema_v25(connection)
+    principal_identity_binding_store::verify_schema_v26(connection)
 }
 
 fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -503,6 +537,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     offline_group_store::create_v23_objects(&transaction)?;
     store_forward_store::create_v24_objects(&transaction)?;
     mesh_store::create_v25_objects(&transaction)?;
+    principal_identity_binding_store::create_v26_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -873,12 +908,27 @@ fn migrate_v24_to_v25(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     mesh_store::create_v25_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V25)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     mesh_store::verify_schema_v25(connection)
+}
+
+fn migrate_v25_to_v26(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    mesh_store::verify_schema_v25(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    principal_identity_binding_store::create_v26_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    principal_identity_binding_store::verify_schema_v26(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1173,7 +1223,31 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v26_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS group_mls_transitions;
+         DROP TABLE IF EXISTS principal_identity_bindings;
+         DROP TABLE IF EXISTS openmls_epoch_keys_pairs;
+         DROP TABLE IF EXISTS openmls_group_data;
+         DROP TABLE IF EXISTS openmls_group_data_new;
+         DROP TABLE IF EXISTS openmls_key_packages;
+         DROP TABLE IF EXISTS openmls_own_leaf_nodes;
+         DROP TABLE IF EXISTS openmls_proposals;
+         DROP TABLE IF EXISTS openmls_psks;
+         DROP TABLE IF EXISTS openmls_signature_keys;
+         DROP TABLE IF EXISTS openmls_encryption_keys;
+         DROP TABLE IF EXISTS vc_emulation_group_secrets;
+         DROP TABLE IF EXISTS vc_emulation_bindings;
+         DROP TABLE IF EXISTS registered_vc_emulation_epochs;
+         DROP TABLE IF EXISTS vc_operation_trees;
+         DROP TABLE IF EXISTS vc_retained_key_package_material;
+         DROP TABLE IF EXISTS openmls_sqlite_storage_migrations;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v20_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v26_objects(connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS mesh_group_message_hops;
          DROP TABLE IF EXISTS store_forward_jobs;

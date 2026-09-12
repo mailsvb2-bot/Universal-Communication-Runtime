@@ -44,13 +44,13 @@ Unsupported critical negotiation extensions fail closed.
 
 ## Group/SFU boundary
 
-Phase 22 deliberately does **not** invent pairwise full-mesh group crypto, a home-grown group KDF, or an SFU plaintext model. Group calls fail closed with `GroupCryptoUnavailable` until a standardized group-media crypto owner can satisfy membership-bound epoch/rekey and revoked-member isolation requirements. The existing Group model already has an opaque MLS-capability crypto-state boundary; this phase does not claim that group/SFU E2EE is implemented.
+Phase 22 deliberately did **not** invent pairwise full-mesh group crypto, a home-grown group KDF, or an SFU plaintext model. Its direct-call path still fails closed for Group calls. Phase 29 now adds a separate standardized OpenMLS/RFC-9420 group-media owner that satisfies membership-bound epoch/rekey and removed-member isolation, while preserving this Phase-22 direct-call contract unchanged.
 
-SFU routing and conferences remain Phase 29/30. An SFU must not automatically gain plaintext media access.
+Phase 29 now adds Prepared RFC-9420/OpenMLS-backed group-media E2EE and encrypted SFU fan-out without plaintext/key access. Conference coordination remains Phase 30; an SFU never automatically gains plaintext media access.
 
 ## Explicit nonclaims
 
-Phase 22 does not implement OS microphone/camera capture, speaker/display output, RTP/SRTP/WebRTC, a media network data plane, Adaptive Media, Transport Orchestrator, Automatic Failover, group MLS key establishment, SFU, conferences, production OS/hardware-backed key providers, or production deployment. Prepared is not Production.
+Phase 22 itself does not implement OS microphone/camera capture, speaker/display output, RTP/SRTP/WebRTC, a media network data plane, Adaptive Media, Transport Orchestrator, Automatic Failover, group MLS key establishment, SFU, conferences, production OS/hardware-backed key providers, or production deployment. Group MLS/SFU are implemented by the separate Phase-29 layer; they do not widen Phase-22 direct-call semantics. Prepared is not Production.
 
 ## Evidence
 

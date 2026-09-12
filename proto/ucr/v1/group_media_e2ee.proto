@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/crypto.proto";
+import "ucr/v1/identity.proto";
+import "ucr/v1/media_e2ee.proto";
+
+// Exact MLS-backed group-media security context. Contains no key material.
+message GroupMediaE2eeContext {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId group_id = 3;
+  OpaqueId negotiation_ref = 4;
+  uint64 negotiation_generation = 5;
+  uint64 crypto_epoch = 6;
+  OpaqueId crypto_state_ref = 7;
+  CryptoSuite crypto_suite = 8;
+}
+
+// Authenticated clear routing header. Principal and Device are deliberately separate identities;
+// their association is revalidated through canonical Device/PrincipalIdentityBinding state.
+message GroupMediaFrameHeader {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId group_id = 3;
+  OpaqueId stream_id = 4;
+  PrincipalRef source = 5;
+  OpaqueId source_device_id = 6;
+  OpaqueId negotiation_ref = 7;
+  uint64 negotiation_generation = 8;
+  uint64 crypto_epoch = 9;
+  OpaqueId crypto_state_ref = 10;
+  CryptoSuite crypto_suite = 11;
+  MediaKind media_kind = 12;
+  uint64 sequence = 13;
+  uint64 media_timestamp = 14;
+  bool keyframe = 15;
+}
+
+message GroupMediaSourceSignature {
+  OpaqueId key_id = 1;
+  string algorithm_id = 2;
+  uint32 algorithm_version = 3;
+  bytes signature = 4;
+}
+
+// Endpoint-encrypted MLS-epoch media. The SFU never receives exporter/traffic keys or plaintext.
+message EncryptedGroupMediaFrame {
+  GroupMediaFrameHeader header = 1;
+  bytes nonce = 2;
+  bytes ciphertext = 3;
+  GroupMediaSourceSignature source_signature = 4;
+}

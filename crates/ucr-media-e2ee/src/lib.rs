@@ -1,6 +1,13 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
+
+mod group_media;
+pub use group_media::{
+    GroupMediaE2eeCapabilityProvider, GroupMediaE2eeError, GroupMediaE2eeRuntime,
+    GroupMediaE2eeSession, PreparedGroupMediaE2eeCapabilities, validate_group_media_e2ee_authority,
+    validate_group_media_source_frame,
+};
 use std::collections::HashMap;
 
 use ucr_core::{AuthorizationEvaluator, CallStore, DeviceLifecycleStore, DurableStoreError};
@@ -177,8 +184,7 @@ where
     ) -> Result<MediaE2eeSession<'a, A, S, C, N>, MediaE2eeError> {
         let context = canonical_media_e2ee_context(context)?;
         let role = direct_role(local, local_device_id, &context)?;
-        require_e2ee_authority(
-            self.authorization,
+        validate_direct_media_e2ee_authority(
             self.store,
             self.capabilities,
             self.negotiations,
@@ -448,8 +454,7 @@ where
         {
             return Err(MediaE2eeError::EphemeralReuse);
         }
-        require_e2ee_authority(
-            self.authorization,
+        validate_direct_media_e2ee_authority(
             self.store,
             self.capabilities,
             self.negotiations,
@@ -507,8 +512,7 @@ where
         if stream_id.as_wire_bytes().is_empty() {
             return Err(MediaE2eeError::StreamMismatch);
         }
-        require_e2ee_authority(
-            self.authorization,
+        validate_direct_media_e2ee_authority(
             self.store,
             self.capabilities,
             self.negotiations,
@@ -637,8 +641,15 @@ fn direct_role(
     }
 }
 
-fn require_e2ee_authority<A, S, C, N>(
-    _authorization: &A,
+/// Revalidates the canonical direct-call E2EE authority needed by later encrypted-media routing.
+///
+/// This does not decrypt media, authenticate an infrastructure hop, or authorize Audio/Video use.
+/// It verifies the current Call, exact two-party participant set, active bound Devices, current
+/// media-negotiation reference/generation, negotiated E2EE capability and participant binding.
+///
+/// # Errors
+/// Returns the same fail-closed Phase-22 authority errors as direct endpoint media sessions.
+pub fn validate_direct_media_e2ee_authority<S, C, N>(
     store: &S,
     capabilities: &C,
     negotiations: &N,
@@ -646,7 +657,6 @@ fn require_e2ee_authority<A, S, C, N>(
     context: &MediaE2eeContext,
 ) -> Result<CallSession, MediaE2eeError>
 where
-    A: AuthorizationEvaluator,
     S: CallStore + DeviceLifecycleStore + TrustedSigningKeyResolver,
     C: MediaE2eeCapabilityProvider,
     N: MediaE2eeNegotiationResolver,

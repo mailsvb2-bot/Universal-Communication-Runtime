@@ -1382,6 +1382,7 @@ mod tests {
         }
         {
             let connection = rusqlite::Connection::open(db.path()).expect("downgrade fixture");
+            crate::test_remove_v26_objects(&connection).expect("remove future v26 objects");
             connection
                 .execute_batch(
                     "DROP TABLE IF EXISTS mesh_group_message_hops;
