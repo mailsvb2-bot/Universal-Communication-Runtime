@@ -18,9 +18,9 @@ Provider degradation is explicit `BridgeProviderAcceptance` metadata. A fallback
 
 ## Crash, retry and backpressure semantics
 
-Before an external side effect, the metadata-only action ledger moves `Prepared` or retryable `FailedNotAccepted` to `InFlight`. A provider success moves it to `Accepted`; a failure that proves non-acceptance moves it to `FailedNotAccepted`; ambiguous acceptance moves it to terminal `AcceptanceUnknown`.
+Before an external side effect, the metadata-only action ledger moves `Prepared` or retryable `FailedNotAccepted` to `InFlight`. Only the caller that actually persists that transition may invoke the provider; a duplicate compare-and-swap result is treated as already in flight and cannot execute a second provider side effect. A provider success moves it to `Accepted`; a failure that proves non-acceptance moves it to `FailedNotAccepted`; ambiguous acceptance moves it to terminal `AcceptanceUnknown`.
 
-An `Accepted` retry returns the persisted provider result without another provider call. `AcceptanceUnknown` is never automatically retried. A crash-left `InFlight` record is not replayed; an explicit recovery operation converts it to `AcceptanceUnknown` without calling the provider. This provides effectively-once user behavior where evidence permits it without claiming exactly-once provider execution.
+An `Accepted` retry returns the persisted provider result without another provider call, including after the registration is later Disabled or Revoked; inactive lifecycle blocks new execution, not retrieval of an already persisted terminal acceptance. `AcceptanceUnknown` is never automatically retried. A crash-left `InFlight` record is not replayed; an explicit recovery operation converts it to `AcceptanceUnknown` without calling the provider. This provides effectively-once user behavior where evidence permits it without claiming exactly-once provider execution.
 
 `bridge → provider` backpressure is an explicit provider failure class. Retry is allowed only when the provider proves the action was not accepted.
 
@@ -34,7 +34,7 @@ Provider events do not automatically become canonical Messages or Identities in 
 
 Bridge registration read/manage, outbound execute and inbound event read use independent permissions: `ucr.bridge.registration.read`, `ucr.bridge.registration.manage`, `ucr.bridge.execute`, and `ucr.bridge.events.read`.
 
-Bridge receives only configured provider/integration context and the content/reference material needed by the admitted action. Private/recovery keys, hidden permission grants, unrelated conversations/tenants and the general UCR database are outside the boundary. Ordinary Debug output redacts provider payload, external target/event IDs and event payload.
+Bridge receives only configured provider/integration context and the content/reference material needed by the admitted action. A non-empty `external_target` is an external identity reference and requires `ExternalIdentityReferences` in both the durable registration and current provider manifest before the provider is called. Private/recovery keys, hidden permission grants, unrelated conversations/tenants and the general UCR database are outside the boundary. Ordinary Debug output redacts provider payload, external target/event IDs and event payload.
 
 ## Explicit non-goals
 

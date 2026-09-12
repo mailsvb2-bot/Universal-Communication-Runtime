@@ -46,6 +46,9 @@ fn phase31_restart_safety_policy_and_provider_acceptance_are_machine_locked() {
     );
     assert!(tests.contains("policy_and_payload_tampering_fail_before_provider_side_effect"));
     assert!(tests.contains("live_manifest_expansion_cannot_escape_registered_degradation_ceiling"));
+    assert!(tests.contains("duplicate_inflight_transition_never_invokes_provider_twice"));
+    assert!(tests.contains("external_target_requires_explicit_identity_reference_permission"));
+    assert!(tests.contains("accepted_replay_survives_disable_and_revoke_without_provider_call"));
     assert!(sqlite.contains("CREATE TABLE bridge_registrations"));
     assert!(sqlite.contains("CREATE TABLE bridge_actions"));
     assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 27"));
@@ -57,6 +60,11 @@ fn phase31_restart_safety_policy_and_provider_acceptance_are_machine_locked() {
     assert!(
         spec.contains("live capability expansion cannot escape the registered admission ceiling")
     );
+    assert!(spec.contains(
+        "Only the caller that actually persists that transition may invoke the provider"
+    ));
+    assert!(spec.contains("including after the registration is later Disabled or Revoked"));
+    assert!(spec.contains("requires `ExternalIdentityReferences` in both the durable registration and current provider manifest"));
 }
 
 #[test]

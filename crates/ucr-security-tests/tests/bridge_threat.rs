@@ -38,6 +38,7 @@ impl BridgeProvider for CompromisedBridge {
             capabilities: vec![BridgeCapability::Text],
             permissions: vec![
                 BridgeDataPermission::MessageContent,
+                BridgeDataPermission::ExternalIdentityReferences,
                 BridgeDataPermission::InboundEvents,
             ],
             extensions: vec![],

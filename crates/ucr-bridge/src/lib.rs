@@ -217,6 +217,12 @@ where
         if action.scope != actor.scope {
             return Err(BridgeError::MessageBindingMismatch);
         }
+        let fingerprint = bridge_action_fingerprint(action)?;
+        let existing = self.load_existing_action(action, fingerprint)?;
+        if let Some(BridgeActionAdmission::Replayed(outcome)) = existing {
+            return Ok(outcome);
+        }
+
         let (registration, provider_manifest) =
             self.admit_provider(&action.scope, &action.integration_id, provider)?;
         require_capability(
@@ -226,10 +232,10 @@ where
         )?;
         self.validate_action_data(&registration, &provider_manifest, action)?;
 
-        let fingerprint = bridge_action_fingerprint(action)?;
-        let record = match self.load_or_prepare_action(action, fingerprint)? {
-            BridgeActionAdmission::Ready(record) => record,
-            BridgeActionAdmission::Replayed(outcome) => return Ok(outcome),
+        let record = match existing {
+            Some(BridgeActionAdmission::Ready(record)) => record,
+            Some(BridgeActionAdmission::Replayed(_)) => unreachable!("replay returned above"),
+            None => self.prepare_action(action, fingerprint)?,
         };
         let in_flight_generation = self.mark_action_in_flight(action, &record)?;
         self.complete_provider_execution(
@@ -241,11 +247,11 @@ where
         )
     }
 
-    fn load_or_prepare_action(
+    fn load_existing_action(
         &self,
         action: &BridgeAction,
         fingerprint: [u8; 32],
-    ) -> Result<BridgeActionAdmission, BridgeError> {
+    ) -> Result<Option<BridgeActionAdmission>, BridgeError> {
         if let Some(existing) = self.store.bridge_action(&action.scope, &action.action_id)? {
             if existing.fingerprint != fingerprint
                 || existing.integration_id != action.integration_id
@@ -254,22 +260,29 @@ where
                 return Err(BridgeError::Store(DurableStoreError::Conflict));
             }
             return match existing.state {
-                BridgeActionState::Accepted => {
-                    Ok(BridgeActionAdmission::Replayed(BridgeExecutionOutcome {
+                BridgeActionState::Accepted => Ok(Some(BridgeActionAdmission::Replayed(
+                    BridgeExecutionOutcome {
                         acceptance: existing
                             .acceptance
                             .ok_or(BridgeError::Store(DurableStoreError::Corrupt))?,
                         replayed: true,
-                    }))
-                }
+                    },
+                ))),
                 BridgeActionState::AcceptanceUnknown => Err(BridgeError::AcceptanceUnknown),
                 BridgeActionState::InFlight => Err(BridgeError::ActionInFlight),
                 BridgeActionState::Prepared | BridgeActionState::FailedNotAccepted => {
-                    Ok(BridgeActionAdmission::Ready(existing))
+                    Ok(Some(BridgeActionAdmission::Ready(existing)))
                 }
             };
         }
+        Ok(None)
+    }
 
+    fn prepare_action(
+        &self,
+        action: &BridgeAction,
+        fingerprint: [u8; 32],
+    ) -> Result<BridgeActionRecord, BridgeError> {
         let prepared = BridgeActionRecord {
             scope: action.scope.clone(),
             action_id: action.action_id.clone(),
@@ -281,7 +294,7 @@ where
             generation: 1,
         };
         self.store.prepare_bridge_action(&prepared)?;
-        Ok(BridgeActionAdmission::Ready(prepared))
+        Ok(prepared)
     }
 
     fn mark_action_in_flight(
@@ -289,7 +302,7 @@ where
         action: &BridgeAction,
         record: &BridgeActionRecord,
     ) -> Result<u64, BridgeError> {
-        self.store.transition_bridge_action(
+        let status = self.store.transition_bridge_action(
             &action.scope,
             &action.action_id,
             record.generation,
@@ -297,6 +310,9 @@ where
             BridgeActionState::InFlight,
             None,
         )?;
+        if status == DurableRecordStatus::Duplicate {
+            return Err(BridgeError::ActionInFlight);
+        }
         record
             .generation
             .checked_add(1)
@@ -469,6 +485,13 @@ where
         current: &BridgeProviderManifest,
         action: &BridgeAction,
     ) -> Result<(), BridgeError> {
+        if !action.external_target.is_empty() {
+            require_data_permission(
+                &registration.manifest,
+                current,
+                BridgeDataPermission::ExternalIdentityReferences,
+            )?;
+        }
         if !action.provider_payload.is_empty() {
             require_data_permission(
                 &registration.manifest,

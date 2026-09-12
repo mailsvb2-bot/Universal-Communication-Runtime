@@ -1,18 +1,24 @@
-use std::sync::Mutex;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use ucr_bridge::{
     BridgeError, BridgeProvider, BridgeProviderFailure, BridgeProviderFailureKind, BridgeRuntime,
 };
-use ucr_core::{AuthorizationEvaluator, BridgeActionStore, ConversationStore, MessageStore};
+use ucr_core::{
+    AuthorizationEvaluator, BridgeActionStore, BridgeRegistrationStore, ConversationStore,
+    DurableRecordStatus, DurableStoreError, MessageStore, StorageHealth, StorageProvider,
+};
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AuthorizationRequest, BridgeAction, BridgeActionId,
     BridgeActionRecord, BridgeActionState, BridgeCapability, BridgeDataPermission,
     BridgeDegradation, BridgeDegradationReason, BridgeEventCursor, BridgeEventPage,
-    BridgeInboundEvent, BridgeProviderAcceptance, BridgeProviderManifest, ConversationId,
-    ConversationKind, ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy,
-    DeliveryState, DeviceId, DeviceRef, IdentityId, IntegrationId, MessageEnvelope, MessageId,
-    NamespaceId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, PrincipalRef, ProtocolVersion,
-    ScopedPrincipal, TenantId, TenantScope,
+    BridgeInboundEvent, BridgeProviderAcceptance, BridgeProviderManifest, BridgeRegistration,
+    BridgeRegistrationState, ConversationId, ConversationKind, ConversationRecord, ConversationRef,
+    CorrelationContext, DeliveryPolicy, DeliveryState, DeviceId, DeviceRef, IdentityId,
+    IntegrationId, MessageEnvelope, MessageId, NamespaceId, OpaqueId, OriginRef, PrincipalId,
+    PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_protocol::{
     BRIDGE_EXECUTE_PERMISSION, BRIDGE_SDK_VERSION, CanonicalError, CanonicalErrorCode,
@@ -80,6 +86,138 @@ impl TestProvider {
     }
 }
 
+#[derive(Debug)]
+struct DuplicateInFlightStore {
+    inner: MemoryLocalStore,
+    duplicate_next_inflight: AtomicBool,
+}
+
+impl Default for DuplicateInFlightStore {
+    fn default() -> Self {
+        Self {
+            inner: MemoryLocalStore::default(),
+            duplicate_next_inflight: AtomicBool::new(true),
+        }
+    }
+}
+
+impl StorageProvider for DuplicateInFlightStore {
+    fn schema_version(&self) -> Result<u32, DurableStoreError> {
+        self.inner.schema_version()
+    }
+
+    fn health(&self) -> Result<StorageHealth, DurableStoreError> {
+        self.inner.health()
+    }
+}
+
+impl ConversationStore for DuplicateInFlightStore {
+    fn persist_conversation(
+        &self,
+        conversation: &ConversationRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        self.inner.persist_conversation(conversation)
+    }
+
+    fn conversation(
+        &self,
+        scope: &TenantScope,
+        conversation_id: &ConversationId,
+    ) -> Result<Option<ConversationRecord>, DurableStoreError> {
+        self.inner.conversation(scope, conversation_id)
+    }
+}
+
+impl MessageStore for DuplicateInFlightStore {
+    fn persist_message(
+        &self,
+        message: &MessageEnvelope,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        self.inner.persist_message(message)
+    }
+
+    fn message(
+        &self,
+        scope: &TenantScope,
+        message_id: &MessageId,
+    ) -> Result<Option<MessageEnvelope>, DurableStoreError> {
+        self.inner.message(scope, message_id)
+    }
+}
+
+impl BridgeRegistrationStore for DuplicateInFlightStore {
+    fn install_bridge_registration(
+        &self,
+        registration: &BridgeRegistration,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        self.inner.install_bridge_registration(registration)
+    }
+
+    fn bridge_registration(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+    ) -> Result<Option<BridgeRegistration>, DurableStoreError> {
+        self.inner.bridge_registration(scope, integration_id)
+    }
+
+    fn transition_bridge_registration(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        expected_generation: u64,
+        next_state: BridgeRegistrationState,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        self.inner.transition_bridge_registration(
+            scope,
+            integration_id,
+            expected_generation,
+            next_state,
+        )
+    }
+}
+
+impl BridgeActionStore for DuplicateInFlightStore {
+    fn prepare_bridge_action(
+        &self,
+        record: &BridgeActionRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        self.inner.prepare_bridge_action(record)
+    }
+
+    fn bridge_action(
+        &self,
+        scope: &TenantScope,
+        action_id: &BridgeActionId,
+    ) -> Result<Option<BridgeActionRecord>, DurableStoreError> {
+        self.inner.bridge_action(scope, action_id)
+    }
+
+    fn transition_bridge_action(
+        &self,
+        scope: &TenantScope,
+        action_id: &BridgeActionId,
+        expected_generation: u64,
+        expected_state: BridgeActionState,
+        next_state: BridgeActionState,
+        acceptance: Option<&BridgeProviderAcceptance>,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        if next_state == BridgeActionState::InFlight
+            && self.duplicate_next_inflight.swap(false, Ordering::SeqCst)
+        {
+            return Ok(DurableRecordStatus::Duplicate);
+        }
+        self.inner.transition_bridge_action(
+            scope,
+            action_id,
+            expected_generation,
+            expected_state,
+            next_state,
+            acceptance,
+        )
+    }
+}
+
 impl BridgeProvider for TestProvider {
     fn manifest(&self) -> BridgeProviderManifest {
         self.manifest.lock().expect("manifest").clone()
@@ -143,6 +281,7 @@ fn manifest(capabilities: Vec<BridgeCapability>) -> BridgeProviderManifest {
         capabilities,
         permissions: vec![
             BridgeDataPermission::MessageContent,
+            BridgeDataPermission::ExternalIdentityReferences,
             BridgeDataPermission::InboundEvents,
         ],
         extensions: vec![],
@@ -378,6 +517,96 @@ fn live_manifest_expansion_cannot_escape_registered_degradation_ceiling() {
         runtime.execute(&actor(), &outbound, &provider),
         Err(BridgeError::AcceptanceUnknown)
     );
+    assert_eq!(provider.count(), 1);
+}
+
+#[test]
+fn duplicate_inflight_transition_never_invokes_provider_twice() {
+    let store = DuplicateInFlightStore::default();
+    let provider = TestProvider::new(manifest(vec![BridgeCapability::Text]), vec![]);
+    let runtime = BridgeRuntime::new(&AllowAll, &store);
+    runtime
+        .register(&actor(), &integration(), &provider)
+        .expect("register");
+    let outbound = action("action-duplicate-inflight", None, b"");
+
+    assert_eq!(
+        runtime.execute(&actor(), &outbound, &provider),
+        Err(BridgeError::ActionInFlight)
+    );
+    assert_eq!(provider.count(), 0);
+}
+
+#[test]
+fn external_target_requires_explicit_identity_reference_permission() {
+    let store = MemoryLocalStore::default();
+    let mut restricted = manifest(vec![BridgeCapability::Text]);
+    restricted
+        .permissions
+        .retain(|permission| *permission != BridgeDataPermission::ExternalIdentityReferences);
+    let provider = TestProvider::new(restricted, vec![]);
+    let runtime = BridgeRuntime::new(&AllowAll, &store);
+    runtime
+        .register(&actor(), &integration(), &provider)
+        .expect("register");
+
+    assert_eq!(
+        runtime.execute(
+            &actor(),
+            &action("action-target-permission", None, b""),
+            &provider,
+        ),
+        Err(BridgeError::DataPermissionDenied)
+    );
+    assert_eq!(provider.count(), 0);
+}
+
+#[test]
+fn accepted_replay_survives_disable_and_revoke_without_provider_call() {
+    let store = MemoryLocalStore::default();
+    let provider = TestProvider::new(
+        manifest(vec![BridgeCapability::Text]),
+        vec![ExecuteStep::Accept(acceptance(b"provider-terminal"))],
+    );
+    let runtime = BridgeRuntime::new(&AllowAll, &store);
+    runtime
+        .register(&actor(), &integration(), &provider)
+        .expect("register");
+    let outbound = action("action-terminal-replay", None, b"");
+    let first = runtime
+        .execute(&actor(), &outbound, &provider)
+        .expect("first acceptance");
+    assert!(!first.replayed);
+    assert_eq!(provider.count(), 1);
+
+    runtime
+        .transition_registration(
+            &actor(),
+            &integration(),
+            1,
+            BridgeRegistrationState::Disabled,
+        )
+        .expect("disable");
+    let disabled_replay = runtime
+        .execute(&actor(), &outbound, &provider)
+        .expect("replay while disabled");
+    assert!(disabled_replay.replayed);
+    assert_eq!(disabled_replay.acceptance, first.acceptance);
+    assert_eq!(provider.count(), 1);
+
+    runtime
+        .transition_registration(
+            &actor(),
+            &integration(),
+            2,
+            BridgeRegistrationState::Revoked,
+        )
+        .expect("revoke");
+    let revoked_replay = runtime
+        .execute(&actor(), &outbound, &provider)
+        .expect("replay while revoked");
+    assert!(revoked_replay.replayed);
+    assert_eq!(revoked_replay.acceptance, first.acceptance);
     assert_eq!(provider.count(), 1);
 }
 
