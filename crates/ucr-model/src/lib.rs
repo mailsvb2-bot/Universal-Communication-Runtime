@@ -4,6 +4,7 @@ use core::fmt;
 
 mod adaptive_media;
 mod audio;
+mod bridge;
 mod call;
 mod conference;
 mod group;
@@ -23,6 +24,12 @@ pub use adaptive_media::{
 pub use audio::{
     AudioChannelLayout, AudioCodecConfig, AudioFrameDuration, AudioStreamDescriptor,
     EncodedAudioFrame,
+};
+pub use bridge::{
+    BridgeAction, BridgeActionRecord, BridgeActionState, BridgeCapability, BridgeDataPermission,
+    BridgeDegradation, BridgeDegradationReason, BridgeEventCursor, BridgeEventPage,
+    BridgeInboundEvent, BridgeProviderAcceptance, BridgeProviderManifest, BridgeRegistration,
+    BridgeRegistrationState,
 };
 pub use call::{
     CallParticipant, CallParticipantState, CallParticipantUpdateKind, CallReconnectPhase,
@@ -172,6 +179,7 @@ id_type!(GroupId);
 id_type!(CommunityId);
 id_type!(MessageId);
 id_type!(AttachmentId);
+id_type!(BridgeActionId);
 id_type!(CallId);
 id_type!(AudioStreamId);
 id_type!(VideoStreamId);

@@ -47,4 +47,4 @@ The SFU may observe only exact scope, Group/Call/stream identifiers, source/reci
 
 ## Explicit nonclaims
 
-Phase 29 does not implement Conference coordination/state/UX, mixer/compositor behavior, recording, transcoding, RTP/SRTP/WebRTC/ICE/STUN/TURN, Relay/NAT traversal, discovery, durable topology, simultaneous multipath, production listener/deployment lifecycle or Production maturity. Conference ownership and lifecycle remain Phase 30.
+Phase 29 does not implement Conference coordination/state/UX, mixer/compositor behavior, recording, transcoding, RTP/SRTP/WebRTC/ICE/STUN/TURN, Relay/NAT traversal, discovery, durable topology, simultaneous multipath, production listener/deployment lifecycle or Production maturity. Phase 30 composes this boundary into Prepared Conference coordination; Phase 31 does not change SFU ownership.

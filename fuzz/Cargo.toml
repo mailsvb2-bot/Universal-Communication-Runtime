@@ -123,3 +123,10 @@ path = "fuzz_targets/conference_start.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bridge_contract"
+path = "fuzz_targets/bridge_contract.rs"
+test = false
+doc = false
+bench = false

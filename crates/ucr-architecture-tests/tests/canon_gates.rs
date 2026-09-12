@@ -1761,7 +1761,10 @@ fn implemented_untrusted_boundaries_have_bounded_required_fuzzing() {
             "Current implemented untrusted boundaries have executable bounded fuzz targets"
         )
     );
-    assert!(threat.contains("each requires a real fuzz target when its implementation appears"));
+    assert!(threat.contains("Phase-31 `bridge_contract`"));
+    assert!(threat.contains(
+        "Bridge manifest/action/inbound-page normalization now has its own real fuzz target"
+    ));
     assert!(
         !threat.contains("- required fuzz targets for implemented parsers/wrappers;"),
         "fuzz blocker must only be removed with the positive executable evidence above"
@@ -2549,9 +2552,13 @@ fn every_infrastructure_boundary_has_machine_checked_metadata_visibility() {
     assert!(relay[3].contains("encrypted payload length and timing"));
     assert!(relay[4].contains("plaintext message or attachment content"));
     let bridge = rows.get("Bridge").expect("bridge row");
+    assert_eq!(bridge[2], "prepared");
     assert!(bridge[3].contains(
-        "only when the explicit bridge action and policy require provider-visible content"
+        "content/attachment references only when the exact canonical action and policy permit provider-visible data"
     ));
+    assert!(bridge[4].contains("private/recovery/authentication keys"));
+    assert!(bridge[5].contains("provider-visible plaintext is not archived by the Bridge ledger"));
+    assert!(bridge[6].contains("provider acceptance is not Delivery/Read evidence"));
     let sfu = rows.get("SFU").expect("sfu row");
     assert_eq!(sfu[2], "prepared");
     assert!(sfu[3].contains("ciphertext length and packet timing"));
@@ -2598,6 +2605,9 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
             .expect("threat simulations");
     let sfu_simulations = fs::read_to_string(workspace.join("crates/ucr-sfu/tests/reference.rs"))
         .expect("sfu threat simulations");
+    let bridge_simulations =
+        fs::read_to_string(workspace.join("crates/ucr-security-tests/tests/bridge_threat.rs"))
+            .expect("bridge threat simulations");
     let matrix = fs::read_to_string(workspace.join("docs/architecture/THREAT_SIMULATIONS.md"))
         .expect("threat simulation matrix");
     let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
@@ -2617,6 +2627,7 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
         "ucr-protocol",
         "ucr-storage-memory",
         "ucr-storage-sqlite",
+        "ucr-bridge",
     ] {
         assert!(
             manifest.contains(dependency),
@@ -2659,12 +2670,16 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
     assert!(matrix.contains("compromised_sfu_simulation_rejects_spoof_before_sink"));
 
     assert!(matrix.contains("Compromised Bridge"));
+    assert!(bridge_simulations.contains(
+        "fn compromised_bridge_simulation_enforces_policy_and_scope_before_canonicalization()"
+    ));
     assert!(matrix.contains(
-        "**Not implemented: Bridge does not exist yet; a mock is not accepted as evidence**"
+        "compromised_bridge_simulation_enforces_policy_and_scope_before_canonicalization"
     ));
     assert!(threat.contains(
-        "required threat simulations for not-yet-implemented Bridge and future implemented trust boundaries"
+        "Phase 31 adds compromised-Bridge evidence against the real `ucr-bridge` boundary"
     ));
+    assert!(!matrix.contains("Bridge does not exist yet"));
     assert!(!threat.contains("- required threat simulations;"));
     assert!(
         adr.contains(

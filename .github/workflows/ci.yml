@@ -143,7 +143,8 @@ jobs:
           test -s spec/store-forward.md &&
           test -s spec/mesh.md &&
           test -s spec/sfu.md &&
-          test -s spec/conference.md
+          test -s spec/conference.md &&
+          test -s spec/bridge-sdk.md
       - name: Public contract exists
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
@@ -169,7 +170,8 @@ jobs:
           test -s proto/ucr/v1/mesh.proto &&
           test -s proto/ucr/v1/group_media_e2ee.proto &&
           test -s proto/ucr/v1/sfu.proto &&
-          test -s proto/ucr/v1/conference.proto
+          test -s proto/ucr/v1/conference.proto &&
+          test -s proto/ucr/v1/bridge.proto
       - name: ADR governance exists
         run: >-
           test -s docs/adr/0000-template.md &&
@@ -239,4 +241,5 @@ jobs:
           test -s docs/adr/0065-phase27-store-and-forward-reuses-intent-message-delivery-and-transport-owners.md &&
           test -s docs/adr/0066-phase28-mesh-reuses-group-message-sync-device-and-trust-owners.md &&
           test -s docs/adr/0067-phase29-sfu-routes-encrypted-media-without-becoming-call-or-crypto-owner.md &&
-          test -s docs/adr/0068-phase30-conferences-reuse-call-group-mls-and-sfu-owners.md
+          test -s docs/adr/0068-phase30-conferences-reuse-call-group-mls-and-sfu-owners.md &&
+          test -s docs/adr/0069-phase31-bridge-sdk-is-a-provider-extension-boundary-not-a-second-communication-brain.md

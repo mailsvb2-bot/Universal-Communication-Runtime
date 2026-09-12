@@ -39,3 +39,4 @@ run_target mesh_group_path 4096 768
 
 run_target sfu_forward_envelope 4096 768
 run_target conference_start 4096 512
+run_target bridge_contract 8192 512

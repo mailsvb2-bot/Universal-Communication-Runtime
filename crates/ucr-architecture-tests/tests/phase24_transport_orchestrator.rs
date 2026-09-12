@@ -104,7 +104,7 @@ fn phase24_release_truth_public_contract_and_fuzz_gate_are_machine_locked() {
 
     assert!(readme.contains("Phase 24"));
     assert!(readme.contains(
-        "**Phase 30 — Conferences (Prepared/reference candidate; Bridge SDK not started).**"
+        "**Phase 31 — Bridge SDK (Prepared/reference candidate; Telegram bridge not started).**"
     ));
     assert!(ci.contains("test -s spec/transport-orchestrator.md"));
     assert!(ci.contains("test -s proto/ucr/v1/transport_orchestrator.proto"));

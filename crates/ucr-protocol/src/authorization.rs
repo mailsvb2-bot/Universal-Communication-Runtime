@@ -61,6 +61,10 @@ pub const EVENT_SUBSCRIBE_PERMISSION: &str = "ucr.event.subscribe";
 pub const EVENT_CONSUME_PERMISSION: &str = "ucr.event.consume";
 pub const EVENT_REPLAY_PERMISSION: &str = "ucr.event.replay";
 pub const EVENT_DEAD_LETTER_READ_PERMISSION: &str = "ucr.event.dead_letter.read";
+pub const BRIDGE_REGISTRATION_READ_PERMISSION: &str = "ucr.bridge.registration.read";
+pub const BRIDGE_REGISTRATION_MANAGE_PERMISSION: &str = "ucr.bridge.registration.manage";
+pub const BRIDGE_EXECUTE_PERMISSION: &str = "ucr.bridge.execute";
+pub const BRIDGE_EVENTS_READ_PERMISSION: &str = "ucr.bridge.events.read";
 
 pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     SERVICE_CREDENTIAL_PROVISION_PERMISSION,
@@ -117,6 +121,10 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     EVENT_CONSUME_PERMISSION,
     EVENT_REPLAY_PERMISSION,
     EVENT_DEAD_LETTER_READ_PERMISSION,
+    BRIDGE_REGISTRATION_READ_PERMISSION,
+    BRIDGE_REGISTRATION_MANAGE_PERMISSION,
+    BRIDGE_EXECUTE_PERMISSION,
+    BRIDGE_EVENTS_READ_PERMISSION,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

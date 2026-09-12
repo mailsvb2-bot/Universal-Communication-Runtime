@@ -23,6 +23,7 @@ members = [
     "crates/ucr-mesh",
     "crates/ucr-sfu",
     "crates/ucr-conference",
+    "crates/ucr-bridge",
 ]
 
 [workspace.package]

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod anti_entropy_store;
+mod bridge_store;
 mod call_store;
 mod command_store;
 mod delivery_store;
@@ -62,7 +63,8 @@ const SQLITE_SCHEMA_V22: u32 = 22;
 const SQLITE_SCHEMA_V23: u32 = 23;
 const SQLITE_SCHEMA_V24: u32 = 24;
 const SQLITE_SCHEMA_V25: u32 = 25;
-pub const SQLITE_SCHEMA_VERSION: u32 = 26;
+const SQLITE_SCHEMA_V26: u32 = 26;
+pub const SQLITE_SCHEMA_VERSION: u32 = 27;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -444,7 +446,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return principal_identity_binding_store::verify_schema_v26(connection);
+        return bridge_store::verify_schema_v27(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -480,11 +482,12 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V23 => migrate_v23_to_v24(connection)?,
             SQLITE_SCHEMA_V24 => migrate_v24_to_v25(connection)?,
             SQLITE_SCHEMA_V25 => migrate_v25_to_v26(connection)?,
+            SQLITE_SCHEMA_V26 => migrate_v26_to_v27(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    principal_identity_binding_store::verify_schema_v26(connection)
+    bridge_store::verify_schema_v27(connection)
 }
 
 fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -538,6 +541,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     store_forward_store::create_v24_objects(&transaction)?;
     mesh_store::create_v25_objects(&transaction)?;
     principal_identity_binding_store::create_v26_objects(&transaction)?;
+    bridge_store::create_v27_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -923,12 +927,27 @@ fn migrate_v25_to_v26(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     principal_identity_binding_store::create_v26_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V26)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     principal_identity_binding_store::verify_schema_v26(connection)
+}
+
+fn migrate_v26_to_v27(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    principal_identity_binding_store::verify_schema_v26(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    bridge_store::create_v27_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    bridge_store::verify_schema_v27(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1223,7 +1242,19 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v27_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS bridge_actions;
+         DROP TABLE IF EXISTS bridge_registration_extensions;
+         DROP TABLE IF EXISTS bridge_registration_permissions;
+         DROP TABLE IF EXISTS bridge_registration_capabilities;
+         DROP TABLE IF EXISTS bridge_registrations;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v26_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v27_objects(connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS group_mls_transitions;
          DROP TABLE IF EXISTS principal_identity_bindings;

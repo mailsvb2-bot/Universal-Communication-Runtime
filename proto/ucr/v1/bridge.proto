@@ -1,0 +1,144 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+
+// Phase-31 language-independent provider extension boundary. This is not a user-facing routing API.
+enum BridgeCapability {
+  BRIDGE_CAPABILITY_UNSPECIFIED = 0;
+  BRIDGE_CAPABILITY_TEXT = 1;
+  BRIDGE_CAPABILITY_EDIT = 2;
+  BRIDGE_CAPABILITY_DELETE = 3;
+  BRIDGE_CAPABILITY_REACTION = 4;
+  BRIDGE_CAPABILITY_FILES = 5;
+  BRIDGE_CAPABILITY_AUDIO = 6;
+  BRIDGE_CAPABILITY_VIDEO = 7;
+  BRIDGE_CAPABILITY_GROUP = 8;
+  BRIDGE_CAPABILITY_PRESENCE = 9;
+  BRIDGE_CAPABILITY_TYPING = 10;
+  BRIDGE_CAPABILITY_CALLS = 11;
+  BRIDGE_CAPABILITY_THREADS = 12;
+  BRIDGE_CAPABILITY_REPLY = 13;
+}
+
+enum BridgeDataPermission {
+  BRIDGE_DATA_PERMISSION_UNSPECIFIED = 0;
+  BRIDGE_DATA_PERMISSION_MESSAGE_CONTENT = 1;
+  BRIDGE_DATA_PERMISSION_ATTACHMENT_REFERENCES = 2;
+  BRIDGE_DATA_PERMISSION_EXTERNAL_IDENTITY_REFERENCES = 3;
+  BRIDGE_DATA_PERMISSION_INBOUND_EVENTS = 4;
+}
+
+enum BridgeRegistrationState {
+  BRIDGE_REGISTRATION_STATE_UNSPECIFIED = 0;
+  BRIDGE_REGISTRATION_STATE_ACTIVE = 1;
+  BRIDGE_REGISTRATION_STATE_DISABLED = 2;
+  BRIDGE_REGISTRATION_STATE_REVOKED = 3;
+}
+
+message BridgeProviderManifest {
+  string provider_id = 1;
+  VersionRange sdk_versions = 2;
+  VersionRange protocol_versions = 3;
+  repeated BridgeCapability capabilities = 4;
+  repeated BridgeDataPermission permissions = 5;
+  repeated Extension extensions = 6;
+}
+
+message BridgeRegistration {
+  TenantScope scope = 1;
+  OpaqueId integration_id = 2;
+  BridgeProviderManifest manifest = 3;
+  BridgeRegistrationState state = 4;
+  uint64 generation = 5;
+}
+
+message BridgeAction {
+  OpaqueId action_id = 1;
+  TenantScope scope = 2;
+  OpaqueId integration_id = 3;
+  BridgeCapability capability = 4;
+  bytes external_target = 5;
+  optional OpaqueId canonical_message_id = 6;
+  bytes provider_payload = 7;
+  repeated OpaqueId attachment_ids = 8;
+  Correlation correlation = 9;
+}
+
+enum BridgeDegradationReason {
+  BRIDGE_DEGRADATION_REASON_UNSPECIFIED = 0;
+  BRIDGE_DEGRADATION_REASON_UNSUPPORTED_CAPABILITY = 1;
+  BRIDGE_DEGRADATION_REASON_POLICY_RESTRICTED = 2;
+  BRIDGE_DEGRADATION_REASON_PROVIDER_LIMITED = 3;
+}
+
+message BridgeDegradation {
+  BridgeCapability requested = 1;
+  optional BridgeCapability fallback = 2;
+  BridgeDegradationReason reason = 3;
+}
+
+message BridgeProviderAcceptance {
+  optional bytes external_message_id = 1;
+  optional BridgeDegradation degradation = 2;
+}
+
+enum BridgeProviderFailureKind {
+  BRIDGE_PROVIDER_FAILURE_KIND_UNSPECIFIED = 0;
+  BRIDGE_PROVIDER_FAILURE_KIND_UNAVAILABLE = 1;
+  BRIDGE_PROVIDER_FAILURE_KIND_BACKPRESSURE = 2;
+  BRIDGE_PROVIDER_FAILURE_KIND_RATE_LIMITED = 3;
+  BRIDGE_PROVIDER_FAILURE_KIND_REJECTED = 4;
+}
+
+enum BridgeProviderAcceptanceDisposition {
+  BRIDGE_PROVIDER_ACCEPTANCE_DISPOSITION_UNSPECIFIED = 0;
+  BRIDGE_PROVIDER_ACCEPTANCE_DISPOSITION_NOT_ACCEPTED = 1;
+  BRIDGE_PROVIDER_ACCEPTANCE_DISPOSITION_UNKNOWN = 2;
+}
+
+message BridgeProviderFailure {
+  BridgeProviderFailureKind kind = 1;
+  BridgeProviderAcceptanceDisposition acceptance = 2;
+}
+
+message BridgeInboundEvent {
+  TenantScope scope = 1;
+  OpaqueId integration_id = 2;
+  bytes external_event_id = 3;
+  bytes external_conversation_id = 4;
+  optional bytes external_actor_id = 5;
+  BridgeCapability capability = 6;
+  bytes payload = 7;
+  int64 occurred_at_unix_ms = 8;
+}
+
+message BridgeEventCursor { bytes token = 1; }
+message BridgeEventPage {
+  repeated BridgeInboundEvent events = 1;
+  optional BridgeEventCursor next_cursor = 2;
+}
+
+message BridgeManifestRequest {}
+message BridgeManifestResponse { BridgeProviderManifest manifest = 1; }
+message BridgeExecuteRequest { BridgeAction action = 1; }
+message BridgeExecuteResponse {
+  oneof result {
+    BridgeProviderAcceptance accepted = 1;
+    BridgeProviderFailure failure = 2;
+  }
+}
+message BridgePollEventsRequest {
+  TenantScope scope = 1;
+  OpaqueId integration_id = 2;
+  optional BridgeEventCursor cursor = 3;
+  uint32 limit = 4;
+}
+message BridgePollEventsResponse { BridgeEventPage page = 1; }
+
+service BridgeProviderService {
+  rpc GetManifest(BridgeManifestRequest) returns (BridgeManifestResponse);
+  rpc Execute(BridgeExecuteRequest) returns (BridgeExecuteResponse);
+  rpc PollEvents(BridgePollEventsRequest) returns (BridgePollEventsResponse);
+}
