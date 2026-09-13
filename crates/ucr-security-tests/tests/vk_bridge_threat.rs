@@ -62,7 +62,7 @@ impl VkApiClient for CountingVkApi {
                 text: "provider text".to_owned(),
                 occurred_at_unix_seconds: 1_700_000_000,
             }],
-            next_ts: "92".to_owned(),
+            next_cursor: "92".to_owned(),
         })
     }
 }

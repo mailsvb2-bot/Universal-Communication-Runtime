@@ -82,7 +82,7 @@ impl VkApiClient for ScriptedClient {
             .pop()
             .unwrap_or(Ok(VkEventBatch {
                 events: vec![],
-                next_ts: cursor.unwrap_or("1").to_owned(),
+                next_cursor: cursor.unwrap_or("1").to_owned(),
             }))
     }
 }
@@ -272,7 +272,7 @@ fn vk_poll_maps_text_and_opaque_ts_cursor() {
                 text: "inbound".to_owned(),
                 occurred_at_unix_seconds: 1_700_000_000,
             }],
-            next_ts: "52".to_owned(),
+            next_cursor: "52".to_owned(),
         })],
     ));
     let page = provider

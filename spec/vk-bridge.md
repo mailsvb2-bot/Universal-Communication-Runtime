@@ -23,15 +23,15 @@ The Phase-31 durable action ledger remains the canonical retry/acceptance owner.
 
 ## Failure and retry semantics
 
-VK API rate-limit/flood errors are mapped to proven non-acceptance. Other provider rejections that prove the action was not accepted are likewise retryable only under the existing Phase-31 rules. Network/TLS/timeout failures after request execution and malformed successful responses are conservative `AcceptanceUnknown`; Core must not blindly duplicate the provider side effect.
+VK API rate-limit/flood errors are mapped to proven non-acceptance. Only provider error classes that prove rejection before acceptance are mapped as retryable rejection; VK internal/unknown errors remain conservative `AcceptanceUnknown`. Network/TLS/timeout failures after request execution and malformed successful responses are also `AcceptanceUnknown`; Core must not blindly duplicate the provider side effect.
 
 The VK adapter owns no independent retry queue and makes no exactly-once claim.
 
 ## Inbound text
 
-Inbound reference operation uses `groups.getLongPollServer` and Bots Long Poll `a_check`. The provider-local session retains the Long Poll server/key; the UCR cursor contains only bounded decimal `ts`.
+Inbound reference operation uses `groups.getLongPollServer` and Bots Long Poll `a_check`. The provider-local session retains the Long Poll server/key. The UCR cursor contains a bounded provider `ts`; when one VK response contains more supported text events than the requested UCR page size, a bounded opaque `ts:offset` continuation replays that same provider position until the full burst has been emitted, then advances to VK's next `ts` without dropping events.
 
-Only `message_new` text is projected into `BridgeInboundEvent(Text)`. `TenantScope` and `IntegrationId` are supplied by the already-authorized Core call and are never accepted from VK response data. VK supplies only bounded external event/message/peer/actor identifiers, text and provider event time.
+Only non-empty `message_new` text is projected into `BridgeInboundEvent(Text)`. Structurally valid attachment-only/sticker/photo events with empty text are intentionally skipped because Phase 33 advertises Text only, while the provider cursor is still allowed to advance. `TenantScope` and `IntegrationId` are supplied by the already-authorized Core call and are never accepted from VK response data. VK supplies only bounded external event/message/peer/actor identifiers, text and provider event time.
 
 Polling does not itself create canonical UCR Messages. Overlay Conversation normalization remains Phase 35. Phase 33 does not claim restart-gap-free or HA Long Poll ownership; provider session loss is handled conservatively rather than inventing canonical continuity.
 
@@ -50,7 +50,7 @@ The Phase-33 adapter is implemented against VK API 5.199. Provider API evolution
 
 `compromised_vk_boundary_cannot_bypass_core_policy_or_choose_ucr_scope` proves the concrete adapter cannot bypass `NoExternalBridge` and provider-controlled inbound data cannot select UCR tenant/scope/integration. Reference tests prove stable context-bound provider `random_id`, Phase-31 action-ledger replay without a second VK send, conservative ambiguous-acceptance handling, opaque cursor mapping, provider-secret redaction, form-parameter isolation and no provider acceptance → Delivery promotion.
 
-`vk_bridge_boundary` fuzzes token parsing, peer parsing, provider action projection and inbound cursor/event handling under the same bounded CI smoke budget as the existing untrusted boundaries.
+`vk_bridge_boundary` feeds raw arbitrary bytes through the actual VK API envelope decoder, Long Poll JSON decoder, dynamic server/session validation, `message_new` wire mapping and provider cursor parser, in addition to token/peer/action projection, under the same bounded CI smoke budget as the existing untrusted boundaries.
 
 ## Nonclaims
 

@@ -21,6 +21,7 @@ const VK_HTTP_TIMEOUT_SECS: u64 = 35;
 const VK_LONG_POLL_WAIT_SECS: u8 = 25;
 const VK_MAX_RESPONSE_BODY_BYTES: u64 = 4 * 1024 * 1024;
 const VK_MAX_RESPONSE_HEADER_BYTES: usize = 32 * 1024;
+const VK_MAX_CURSOR_OFFSET: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct VkAccessToken(String);
@@ -156,7 +157,7 @@ impl fmt::Debug for VkTextEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VkEventBatch {
     pub events: Vec<VkTextEvent>,
-    pub next_ts: String,
+    pub next_cursor: String,
 }
 
 pub trait VkApiClient: fmt::Debug + Send + Sync {
@@ -247,14 +248,7 @@ impl VkHttpApiClient {
             "groups.getLongPollServer",
             &[("group_id", self.group_id.get().to_string())],
         )?;
-        validate_long_poll_server(&response.server).map_err(|_| VkApiFailure::MalformedResponse)?;
-        validate_cursor_text(&response.ts).map_err(|_| VkApiFailure::MalformedResponse)?;
-        if response.key.is_empty()
-            || response.key.len() > 1_024
-            || !response.key.as_bytes().iter().all(u8::is_ascii_graphic)
-        {
-            return Err(VkApiFailure::MalformedResponse);
-        }
+        validate_long_poll_server_wire(&response)?;
         Ok(VkLongPollSession {
             server: response.server,
             key: response.key,
@@ -267,7 +261,7 @@ impl VkHttpApiClient {
         ts: &str,
     ) -> Result<VkLongPollWire, VkApiFailure> {
         validate_long_poll_server(&session.server).map_err(|_| VkApiFailure::MalformedResponse)?;
-        validate_cursor_text(ts).map_err(|_| VkApiFailure::MalformedResponse)?;
+        validate_long_poll_ts(ts).map_err(|_| VkApiFailure::MalformedResponse)?;
         let fields = [
             ("act", "a_check".to_owned()),
             ("key", session.key.clone()),
@@ -285,7 +279,7 @@ impl VkHttpApiClient {
             .map_err(|_| VkApiFailure::Ambiguous)?;
         classify_http_status(response.status_code)?;
         let bytes = read_bounded_body(&mut response)?;
-        serde_json::from_slice(&bytes).map_err(|_| VkApiFailure::MalformedResponse)
+        decode_long_poll_wire(&bytes)
     }
 }
 
@@ -318,31 +312,35 @@ impl VkApiClient for VkHttpApiClient {
         if limit == 0 || limit > MAX_BRIDGE_EVENT_PAGE_ITEMS {
             return Err(VkApiFailure::Rejected);
         }
-        if let Some(cursor) = cursor {
-            validate_cursor_text(cursor).map_err(|_| VkApiFailure::Rejected)?;
-        }
 
         let mut guard = self.long_poll.lock().map_err(|_| VkApiFailure::Ambiguous)?;
         if guard.is_none() {
             *guard = Some(self.fetch_long_poll_server()?);
         }
-        let session = guard.as_ref().ok_or(VkApiFailure::Ambiguous)?;
-        let requested_ts = cursor.unwrap_or(&session.ts).to_owned();
-        let wire = Self::check_long_poll(session, &requested_ts)?;
+        let session = guard.clone().ok_or(VkApiFailure::Ambiguous)?;
+        let poll_cursor = match cursor {
+            Some(value) => parse_poll_cursor_text(value).map_err(|_| VkApiFailure::Rejected)?,
+            None => VkPollCursor {
+                ts: session.ts.clone(),
+                offset: 0,
+            },
+        };
+        let wire = Self::check_long_poll(&session, &poll_cursor.ts)?;
 
         if let Some(failed) = wire.failed {
             match failed {
-                1 => {
+                1 if poll_cursor.offset == 0 => {
                     let ts = wire.ts.ok_or(VkApiFailure::MalformedResponse)?;
-                    validate_cursor_text(&ts).map_err(|_| VkApiFailure::MalformedResponse)?;
+                    validate_long_poll_ts(&ts).map_err(|_| VkApiFailure::MalformedResponse)?;
                     if let Some(session) = guard.as_mut() {
                         session.ts.clone_from(&ts);
                     }
                     return Ok(VkEventBatch {
                         events: vec![],
-                        next_ts: ts,
+                        next_cursor: ts,
                     });
                 }
+                1 => return Err(VkApiFailure::Ambiguous),
                 2..=4 => {
                     *guard = None;
                     return Err(VkApiFailure::Ambiguous);
@@ -352,15 +350,15 @@ impl VkApiClient for VkHttpApiClient {
         }
 
         let ts = wire.ts.ok_or(VkApiFailure::MalformedResponse)?;
-        validate_cursor_text(&ts).map_err(|_| VkApiFailure::MalformedResponse)?;
-        let events = map_long_poll_updates(wire.updates, limit)?;
-        if let Some(session) = guard.as_mut() {
+        validate_long_poll_ts(&ts).map_err(|_| VkApiFailure::MalformedResponse)?;
+        let events = map_long_poll_updates(wire.updates)?;
+        let batch = page_long_poll_events(events, &poll_cursor, limit, &ts)?;
+        if batch.next_cursor == ts
+            && let Some(session) = guard.as_mut()
+        {
             session.ts.clone_from(&ts);
         }
-        Ok(VkEventBatch {
-            events,
-            next_ts: ts,
-        })
+        Ok(batch)
     }
 }
 
@@ -451,7 +449,7 @@ where
             .client
             .poll_text_events(cursor, limit)
             .map_err(map_poll_failure)?;
-        validate_cursor_text(&batch.next_ts)
+        validate_provider_cursor_text(&batch.next_cursor)
             .map_err(|_| not_accepted(BridgeProviderFailureKind::Rejected))?;
         if batch.events.len() > limit {
             return Err(not_accepted(BridgeProviderFailureKind::Rejected));
@@ -475,7 +473,7 @@ where
         let page = BridgeEventPage {
             events,
             next_cursor: Some(BridgeEventCursor {
-                token: batch.next_ts.into_bytes(),
+                token: batch.next_cursor.into_bytes(),
             }),
         };
         validate_bridge_event_page(&page)
@@ -529,15 +527,48 @@ fn parse_cursor(cursor: Option<&BridgeEventCursor>) -> Result<Option<&str>, VkBo
         return Ok(None);
     };
     let text = std::str::from_utf8(&cursor.token).map_err(|_| VkBoundaryError::InvalidCursor)?;
-    validate_cursor_text(text)?;
+    validate_provider_cursor_text(text)?;
     Ok(Some(text))
 }
 
-fn validate_cursor_text(value: &str) -> Result<(), VkBoundaryError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VkPollCursor {
+    ts: String,
+    offset: usize,
+}
+
+fn validate_long_poll_ts(value: &str) -> Result<(), VkBoundaryError> {
     if value.is_empty() || value.len() > 64 || !value.as_bytes().iter().all(u8::is_ascii_digit) {
         return Err(VkBoundaryError::InvalidCursor);
     }
     Ok(())
+}
+
+fn parse_poll_cursor_text(value: &str) -> Result<VkPollCursor, VkBoundaryError> {
+    let (ts, offset) = if let Some((ts, offset)) = value.split_once(':') {
+        validate_long_poll_ts(ts)?;
+        if offset.is_empty() || !offset.as_bytes().iter().all(u8::is_ascii_digit) {
+            return Err(VkBoundaryError::InvalidCursor);
+        }
+        let offset = offset
+            .parse::<usize>()
+            .map_err(|_| VkBoundaryError::InvalidCursor)?;
+        if offset == 0 || offset > VK_MAX_CURSOR_OFFSET {
+            return Err(VkBoundaryError::InvalidCursor);
+        }
+        (ts, offset)
+    } else {
+        validate_long_poll_ts(value)?;
+        (value, 0)
+    };
+    Ok(VkPollCursor {
+        ts: ts.to_owned(),
+        offset,
+    })
+}
+
+fn validate_provider_cursor_text(value: &str) -> Result<(), VkBoundaryError> {
+    parse_poll_cursor_text(value).map(|_| ())
 }
 
 fn validate_long_poll_server(value: &str) -> Result<(), VkBoundaryError> {
@@ -560,10 +591,19 @@ fn validate_long_poll_server(value: &str) -> Result<(), VkBoundaryError> {
     Ok(())
 }
 
-fn map_long_poll_updates(
-    updates: Vec<VkUpdateWire>,
-    limit: usize,
-) -> Result<Vec<VkTextEvent>, VkApiFailure> {
+fn validate_long_poll_server_wire(response: &VkLongPollServerWire) -> Result<(), VkApiFailure> {
+    validate_long_poll_server(&response.server).map_err(|_| VkApiFailure::MalformedResponse)?;
+    validate_long_poll_ts(&response.ts).map_err(|_| VkApiFailure::MalformedResponse)?;
+    if response.key.is_empty()
+        || response.key.len() > 1_024
+        || !response.key.as_bytes().iter().all(u8::is_ascii_graphic)
+    {
+        return Err(VkApiFailure::MalformedResponse);
+    }
+    Ok(())
+}
+
+fn map_long_poll_updates(updates: Vec<VkUpdateWire>) -> Result<Vec<VkTextEvent>, VkApiFailure> {
     let mut seen = BTreeSet::new();
     let mut mapped = Vec::new();
     for update in updates {
@@ -572,13 +612,15 @@ fn map_long_poll_updates(
         }
         let object = update.object.ok_or(VkApiFailure::MalformedResponse)?;
         let message = object.message.ok_or(VkApiFailure::MalformedResponse)?;
-        if message.id <= 0
-            || message.peer_id == 0
-            || message.from_id == 0
-            || message.date <= 0
-            || message.text.is_empty()
-            || message.text.chars().count() > VK_MAX_TEXT_CHARS
-        {
+        if message.id <= 0 || message.peer_id == 0 || message.from_id == 0 || message.date <= 0 {
+            return Err(VkApiFailure::MalformedResponse);
+        }
+        // Empty text is a normal VK shape for sticker/photo/other attachment-only messages.
+        // Phase 33 advertises Text only, so skip that unsupported event while still advancing ts.
+        if message.text.is_empty() {
+            continue;
+        }
+        if message.text.chars().count() > VK_MAX_TEXT_CHARS {
             return Err(VkApiFailure::MalformedResponse);
         }
         let event_id = update
@@ -595,11 +637,38 @@ fn map_long_poll_updates(
             text: message.text,
             occurred_at_unix_seconds: message.date,
         });
-        if mapped.len() > limit {
-            return Err(VkApiFailure::MalformedResponse);
-        }
     }
     Ok(mapped)
+}
+
+fn page_long_poll_events(
+    events: Vec<VkTextEvent>,
+    cursor: &VkPollCursor,
+    limit: usize,
+    provider_next_ts: &str,
+) -> Result<VkEventBatch, VkApiFailure> {
+    validate_long_poll_ts(provider_next_ts).map_err(|_| VkApiFailure::MalformedResponse)?;
+    if cursor.offset > events.len() {
+        return Err(VkApiFailure::MalformedResponse);
+    }
+    let end = cursor.offset.saturating_add(limit).min(events.len());
+    let has_more = end < events.len();
+    let page = events
+        .into_iter()
+        .skip(cursor.offset)
+        .take(end - cursor.offset)
+        .collect();
+    let next_cursor = if has_more {
+        let value = format!("{}:{end}", cursor.ts);
+        validate_provider_cursor_text(&value).map_err(|_| VkApiFailure::MalformedResponse)?;
+        value
+    } else {
+        provider_next_ts.to_owned()
+    };
+    Ok(VkEventBatch {
+        events: page,
+        next_cursor,
+    })
 }
 
 fn classify_http_status(status: u16) -> Result<(), VkApiFailure> {
@@ -627,12 +696,47 @@ fn decode_api_envelope<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, VkApiFail
     let envelope = serde_json::from_slice::<VkApiEnvelope<T>>(bytes)
         .map_err(|_| VkApiFailure::MalformedResponse)?;
     if let Some(error) = envelope.error {
-        return Err(match error.error_code {
-            6 | 9 | 29 => VkApiFailure::RateLimited,
-            _ => VkApiFailure::Rejected,
-        });
+        return Err(classify_vk_api_error(error.error_code));
     }
     envelope.response.ok_or(VkApiFailure::MalformedResponse)
+}
+
+const fn classify_vk_api_error(error_code: i64) -> VkApiFailure {
+    match error_code {
+        6 | 9 | 29 => VkApiFailure::RateLimited,
+        2 | 3 | 4 | 5 | 7 | 8 | 11 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 23 | 24 | 25 | 27
+        | 28 | 30 | 33 | 34 | 35 | 37 | 38 | 39 | 40 | 41 | 42 | 100 | 101 | 113 | 125 => {
+            VkApiFailure::Rejected
+        }
+        _ => VkApiFailure::Ambiguous,
+    }
+}
+
+fn decode_long_poll_wire(bytes: &[u8]) -> Result<VkLongPollWire, VkApiFailure> {
+    serde_json::from_slice(bytes).map_err(|_| VkApiFailure::MalformedResponse)
+}
+
+/// Exercises the exact untrusted VK response parsers used by the HTTP client.
+///
+/// This is intentionally side-effect free so the fuzz workspace can feed arbitrary bytes through
+/// JSON envelope decoding, Long Poll session validation, dynamic URL validation, cursor parsing and
+/// `message_new` mapping without constructing a network client.
+#[doc(hidden)]
+pub fn fuzz_vk_wire_boundary(bytes: &[u8]) {
+    let _ = decode_api_envelope::<i64>(bytes);
+    if let Ok(response) = decode_api_envelope::<VkLongPollServerWire>(bytes) {
+        let _ = validate_long_poll_server_wire(&response);
+    }
+    if let Ok(wire) = decode_long_poll_wire(bytes) {
+        if let Some(ts) = wire.ts.as_deref() {
+            let _ = validate_long_poll_ts(ts);
+        }
+        let _ = map_long_poll_updates(wire.updates);
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        let _ = validate_long_poll_server(text);
+        let _ = parse_poll_cursor_text(text);
+    }
 }
 
 fn encode_form(fields: &[(&str, String)]) -> Vec<u8> {
@@ -810,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn api_error_classification_separates_rate_limit() {
+    fn api_error_classification_preserves_unknown_acceptance() {
         assert_eq!(
             decode_api_envelope::<i64>(br#"{"error":{"error_code":6}}"#),
             Err(VkApiFailure::RateLimited)
@@ -819,6 +923,52 @@ mod tests {
             decode_api_envelope::<i64>(br#"{"error":{"error_code":5}}"#),
             Err(VkApiFailure::Rejected)
         );
+        for code in [1, 10, 999_999] {
+            let wire = format!(r#"{{"error":{{"error_code":{code}}}}}"#);
+            assert_eq!(
+                decode_api_envelope::<i64>(wire.as_bytes()),
+                Err(VkApiFailure::Ambiguous),
+                "VK error {code} must not prove non-acceptance"
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_only_update_is_skipped_without_blocking_later_text() {
+        let wire = decode_long_poll_wire(
+            br#"{"ts":"52","updates":[
+                {"type":"message_new","event_id":"sticker","object":{"message":{"id":1,"date":1700000000,"peer_id":2000000001,"from_id":7,"text":""}}},
+                {"type":"message_new","event_id":"text","object":{"message":{"id":2,"date":1700000001,"peer_id":2000000001,"from_id":7,"text":"hello"}}}
+            ]}"#,
+        )
+        .expect("wire");
+        let events = map_long_poll_updates(wire.updates).expect("mapped");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id, "text");
+        assert_eq!(events[0].text, "hello");
+    }
+
+    #[test]
+    fn burst_pages_use_continuation_cursor_without_dropping_events() {
+        let events = (1..=3)
+            .map(|id| VkTextEvent {
+                event_id: format!("event-{id}"),
+                peer_id: 2_000_000_001,
+                actor_id: 7,
+                text: format!("text-{id}"),
+                occurred_at_unix_seconds: 1_700_000_000 + id,
+            })
+            .collect::<Vec<_>>();
+        let first_cursor = parse_poll_cursor_text("50").expect("cursor");
+        let first = page_long_poll_events(events.clone(), &first_cursor, 2, "52").expect("page");
+        assert_eq!(first.events.len(), 2);
+        assert_eq!(first.next_cursor, "50:2");
+
+        let continuation = parse_poll_cursor_text(&first.next_cursor).expect("continuation");
+        let second = page_long_poll_events(events, &continuation, 2, "52").expect("page");
+        assert_eq!(second.events.len(), 1);
+        assert_eq!(second.events[0].event_id, "event-3");
+        assert_eq!(second.next_cursor, "52");
     }
 
     #[test]

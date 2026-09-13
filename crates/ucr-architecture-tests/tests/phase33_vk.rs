@@ -47,6 +47,10 @@ fn phase33_vk_https_idempotency_and_acceptance_semantics_are_locked() {
     assert!(manifest.contains("sha2 = \"=0.11.0\""));
     assert!(source.contains("host.ends_with(\".vk.com\")"));
     assert!(source.contains("BridgeProviderFailure::AcceptanceUnknown"));
+    assert!(source.contains("classify_vk_api_error"));
+    assert!(source.contains("message.text.is_empty()"));
+    assert!(source.contains("page_long_poll_events"));
+    assert!(source.contains("format!(\"{}:{end}\", cursor.ts)"));
     assert!(manifest.contains("minreq = { version = \"=3.0.0\", default-features = false, features = [\"https-native-tls\"] }"));
     for name in [
         "vk_runtime_reuses_core_policy_and_phase31_dedup_ledger",
@@ -60,6 +64,7 @@ fn phase33_vk_https_idempotency_and_acceptance_semantics_are_locked() {
 
 #[test]
 fn phase33_security_spec_ci_and_fuzz_evidence_are_machine_locked() {
+    let source = read("crates/ucr-bridge-vk/src/lib.rs");
     let readme = read("README.md");
     let spec_index = read("spec/README.md");
     let spec = read("spec/vk-bridge.md");
@@ -84,6 +89,10 @@ fn phase33_security_spec_ci_and_fuzz_evidence_are_machine_locked() {
     assert!(threat.contains("Phase 33 adds concrete VK-adapter evidence"));
     assert!(ci.contains("test -s spec/vk-bridge.md"));
     assert!(ci.contains("0071-phase33-vk-is-a-thin-api-bridge-over-canonical-ucr.md"));
+    assert!(fuzz.contains("fuzz_vk_wire_boundary(data)"));
+    assert!(source.contains("pub fn fuzz_vk_wire_boundary(bytes: &[u8])"));
+    assert!(source.contains("decode_api_envelope::<VkLongPollServerWire>"));
+    assert!(source.contains("decode_long_poll_wire(bytes)"));
     assert!(fuzz.contains("VkAccessToken::new"));
     assert!(fuzz.contains("VkPeerTarget::parse"));
     assert!(smoke.contains("run_target vk_bridge_boundary"));

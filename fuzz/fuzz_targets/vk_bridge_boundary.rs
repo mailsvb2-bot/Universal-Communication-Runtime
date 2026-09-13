@@ -4,7 +4,7 @@ use libfuzzer_sys::fuzz_target;
 use ucr_bridge::{BridgeProvider, BridgeProviderFailure};
 use ucr_bridge_vk::{
     VkAccessToken, VkApiClient, VkApiFailure, VkEventBatch, VkPeerTarget, VkProvider,
-    VkSentMessage, VkTextEvent,
+    VkSentMessage, VkTextEvent, fuzz_vk_wire_boundary,
 };
 use ucr_model::{
     BridgeAction, BridgeActionId, BridgeCapability, BridgeEventCursor, CorrelationContext,
@@ -55,7 +55,7 @@ impl VkApiClient for FuzzClient {
         };
         Ok(VkEventBatch {
             events,
-            next_ts: cursor.unwrap_or("1").to_owned(),
+            next_cursor: cursor.unwrap_or("1").to_owned(),
         })
     }
 }
@@ -70,6 +70,8 @@ fn opaque(prefix: &str, bytes: &[u8]) -> OpaqueId {
 }
 
 fuzz_target!(|data: &[u8]| {
+    fuzz_vk_wire_boundary(data);
+
     let token_candidate = String::from_utf8_lossy(data)
         .chars()
         .take(256)
