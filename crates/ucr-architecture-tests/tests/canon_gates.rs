@@ -1763,8 +1763,17 @@ fn implemented_untrusted_boundaries_have_bounded_required_fuzzing() {
     );
     assert!(threat.contains("Phase-31 `bridge_contract`"));
     assert!(threat.contains("Phase-32 `telegram_bridge_boundary`"));
+    assert!(threat.contains("Phase-33 `vk_bridge_boundary`"));
+    assert!(
+        workspace
+            .join("fuzz/fuzz_targets/vk_bridge_boundary.rs")
+            .is_file()
+    );
+    assert!(workspace.join("fuzz/corpus/vk_bridge_boundary").is_dir());
+    assert!(manifest.contains("name = \"vk_bridge_boundary\""));
+    assert!(smoke.contains("run_target vk_bridge_boundary "));
     assert!(threat.contains(
-        "Bridge manifest/action/inbound-page normalization and Phase-32 Telegram token/target/cursor/action projection now have dedicated real fuzz targets"
+        "Phase-31 Bridge manifest/action/inbound-page normalization, Phase-32 Telegram token/target/cursor/action projection, and Phase-33 VK token/peer/cursor/action projection now have dedicated real fuzz targets"
     ));
     assert!(
         !threat.contains("- required fuzz targets for implemented parsers/wrappers;"),
@@ -2590,6 +2599,16 @@ fn every_infrastructure_boundary_has_machine_checked_metadata_visibility() {
     ));
 }
 
+fn read_bridge_provider_threat_simulations(workspace: &Path) -> (String, String, String) {
+    let read =
+        |path: &str| fs::read_to_string(workspace.join(path)).expect("bridge threat evidence");
+    (
+        read("crates/ucr-security-tests/tests/bridge_threat.rs"),
+        read("crates/ucr-security-tests/tests/telegram_bridge_threat.rs"),
+        read("crates/ucr-security-tests/tests/vk_bridge_threat.rs"),
+    )
+}
+
 #[test]
 fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2606,13 +2625,8 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
             .expect("threat simulations");
     let sfu_simulations = fs::read_to_string(workspace.join("crates/ucr-sfu/tests/reference.rs"))
         .expect("sfu threat simulations");
-    let bridge_simulations =
-        fs::read_to_string(workspace.join("crates/ucr-security-tests/tests/bridge_threat.rs"))
-            .expect("bridge threat simulations");
-    let telegram_simulations = fs::read_to_string(
-        workspace.join("crates/ucr-security-tests/tests/telegram_bridge_threat.rs"),
-    )
-    .expect("telegram bridge threat simulations");
+    let (bridge_simulations, telegram_simulations, vk_simulations) =
+        read_bridge_provider_threat_simulations(workspace);
     let matrix = fs::read_to_string(workspace.join("docs/architecture/THREAT_SIMULATIONS.md"))
         .expect("threat simulation matrix");
     let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
@@ -2634,6 +2648,7 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
         "ucr-storage-sqlite",
         "ucr-bridge",
         "ucr-bridge-telegram",
+        "ucr-bridge-vk",
     ] {
         assert!(
             manifest.contains(dependency),
@@ -2675,7 +2690,13 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
     assert!(sfu_simulations.contains("fn compromised_sfu_simulation_rejects_spoof_before_sink()"));
     assert!(matrix.contains("compromised_sfu_simulation_rejects_spoof_before_sink"));
 
-    assert_bridge_threat_evidence(&bridge_simulations, &telegram_simulations, &matrix, &threat);
+    assert_bridge_threat_evidence(
+        &bridge_simulations,
+        &telegram_simulations,
+        &vk_simulations,
+        &matrix,
+        &threat,
+    );
     assert!(!matrix.contains("Bridge does not exist yet"));
     assert!(!threat.contains("- required threat simulations;"));
     assert!(
@@ -2691,6 +2712,7 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
 fn assert_bridge_threat_evidence(
     bridge_simulations: &str,
     telegram_simulations: &str,
+    vk_simulations: &str,
     matrix: &str,
     threat: &str,
 ) {
@@ -2713,6 +2735,14 @@ fn assert_bridge_threat_evidence(
         )
     );
     assert!(threat.contains("Phase 32 adds concrete Telegram-adapter evidence"));
+    assert!(
+        vk_simulations
+            .contains("fn compromised_vk_boundary_cannot_bypass_core_policy_or_choose_ucr_scope()")
+    );
+    assert!(
+        matrix.contains("compromised_vk_boundary_cannot_bypass_core_policy_or_choose_ucr_scope")
+    );
+    assert!(threat.contains("Phase 33 adds concrete VK-adapter evidence"));
 }
 
 fn assert_chaos_evidence(source: &str, matrix: &str, scenario: &str) {

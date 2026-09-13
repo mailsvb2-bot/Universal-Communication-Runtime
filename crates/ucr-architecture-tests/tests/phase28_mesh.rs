@@ -65,9 +65,7 @@ fn phase28_release_truth_docs_and_fuzz_are_machine_locked() {
         ))
         .expect("ADR 0066");
 
-    assert!(
-        readme.contains("**Phase 32 — Telegram (Prepared text bridge; VK bridge not started).**")
-    );
+    assert!(readme.contains("**Phase 33 — VK (Prepared text bridge; MAX bridge not started).**"));
     assert!(ci.contains("test -s spec/mesh.md"));
     assert!(ci.contains("test -s proto/ucr/v1/mesh.proto"));
     assert!(ci.contains("0066-phase28-mesh"));

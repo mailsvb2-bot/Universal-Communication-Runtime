@@ -1028,6 +1028,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-bridge-vk"
+version = "0.0.1"
+dependencies = [
+ "minreq",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ucr-bridge",
+ "ucr-model",
+ "ucr-protocol",
+]
+
+[[package]]
 name = "ucr-core"
 version = "0.0.1"
 dependencies = [
@@ -1062,6 +1075,7 @@ dependencies = [
  "libfuzzer-sys",
  "ucr-bridge",
  "ucr-bridge-telegram",
+ "ucr-bridge-vk",
  "ucr-core",
  "ucr-crypto",
  "ucr-media-adaptive",
