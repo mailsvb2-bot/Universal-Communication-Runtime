@@ -13,7 +13,7 @@ use ucr_model::{
 use ucr_protocol::{BRIDGE_SDK_VERSION, MAX_BRIDGE_EVENT_PAGE_ITEMS, validate_bridge_event_page};
 
 pub const MAX_PROVIDER_ID: &str = "vendor.max.bot_api";
-pub const MAX_BOT_API_SCHEMA_VERSION: &str = "0.0.32";
+pub const MAX_BOT_API_SCHEMA_VERSION: &str = "0.0.33";
 pub const MAX_TEXT_CHARS: usize = 4_000;
 pub const MAX_UPDATES_PER_POLL: usize = 1_000;
 const MAX_API_ROOT: &str = "https://platform-api2.max.ru";

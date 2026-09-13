@@ -13,7 +13,7 @@ fn phase34_max_is_thin_text_bridge_without_second_brain() {
     let manifest = read("crates/ucr-bridge-max/Cargo.toml");
     let spec = read("spec/max-bridge.md");
     assert!(source.contains("pub const MAX_PROVIDER_ID: &str = \"vendor.max.bot_api\""));
-    assert!(source.contains("pub const MAX_BOT_API_SCHEMA_VERSION: &str = \"0.0.32\""));
+    assert!(source.contains("pub const MAX_BOT_API_SCHEMA_VERSION: &str = \"0.0.33\""));
     assert!(source.contains("capabilities: vec![BridgeCapability::Text]"));
     assert!(source.contains("BridgeDataPermission::MessageContent"));
     assert!(source.contains("BridgeDataPermission::ExternalIdentityReferences"));

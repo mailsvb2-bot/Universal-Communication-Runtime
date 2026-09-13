@@ -6,7 +6,7 @@ Prepared reference adapter over the Phase-31 Bridge boundary. It is not a second
 
 ## Provider surface
 
-The adapter targets MAX Bot API schema `0.0.32` at the fixed HTTPS origin `https://platform-api2.max.ru`; requests carry `v=0.0.32` so provider model drift is not silently accepted. Phase 34 declares only `BridgeCapability::Text`. Outbound text uses `POST /messages`; the provider token is supplied only through the `Authorization` header and is never placed in a URL, canonical object, Bridge ledger or ordinary `Debug` output. Redirects are disabled and response headers/body are bounded.
+The adapter targets MAX Bot API schema `0.0.33` at the fixed HTTPS origin `https://platform-api2.max.ru`; requests carry `v=0.0.33` so provider model drift is not silently accepted. Phase 34 declares only `BridgeCapability::Text`. Outbound text uses `POST /messages`; the provider token is supplied only through the `Authorization` header and is never placed in a URL, canonical object, Bridge ledger or ordinary `Debug` output. Redirects are disabled and response headers/body are bounded.
 
 The opaque external target is intentionally explicit: `user:<positive-id>` maps to `user_id`, while `chat:<non-zero-id>` maps to `chat_id`. A bare number is rejected. UCR therefore does not infer whether a provider identifier denotes a user, chat or channel.
 
