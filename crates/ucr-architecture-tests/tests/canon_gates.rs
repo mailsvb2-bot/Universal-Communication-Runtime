@@ -1764,6 +1764,7 @@ fn implemented_untrusted_boundaries_have_bounded_required_fuzzing() {
     assert!(threat.contains("Phase-31 `bridge_contract`"));
     assert!(threat.contains("Phase-32 `telegram_bridge_boundary`"));
     assert!(threat.contains("Phase-33 `vk_bridge_boundary`"));
+    assert!(threat.contains("Phase-34 `max_bridge_boundary`"));
     assert!(
         workspace
             .join("fuzz/fuzz_targets/vk_bridge_boundary.rs")
@@ -1772,8 +1773,16 @@ fn implemented_untrusted_boundaries_have_bounded_required_fuzzing() {
     assert!(workspace.join("fuzz/corpus/vk_bridge_boundary").is_dir());
     assert!(manifest.contains("name = \"vk_bridge_boundary\""));
     assert!(smoke.contains("run_target vk_bridge_boundary "));
+    assert!(
+        workspace
+            .join("fuzz/fuzz_targets/max_bridge_boundary.rs")
+            .is_file()
+    );
+    assert!(workspace.join("fuzz/corpus/max_bridge_boundary").is_dir());
+    assert!(manifest.contains("name = \"max_bridge_boundary\""));
+    assert!(smoke.contains("run_target max_bridge_boundary "));
     assert!(threat.contains(
-        "Phase-31 Bridge manifest/action/inbound-page normalization, Phase-32 Telegram token/target/cursor/action projection, and Phase-33 VK token/peer/cursor/action projection now have dedicated real fuzz targets"
+        "Phase-31 Bridge manifest/action/inbound-page normalization, Phase-32 Telegram token/target/cursor/action projection, Phase-33 VK token/peer/cursor/action projection, and Phase-34 MAX token/target/marker/action/wire-response projection now have dedicated real fuzz targets"
     ));
     assert!(
         !threat.contains("- required fuzz targets for implemented parsers/wrappers;"),
@@ -2599,13 +2608,14 @@ fn every_infrastructure_boundary_has_machine_checked_metadata_visibility() {
     ));
 }
 
-fn read_bridge_provider_threat_simulations(workspace: &Path) -> (String, String, String) {
+fn read_bridge_provider_threat_simulations(workspace: &Path) -> (String, String, String, String) {
     let read =
         |path: &str| fs::read_to_string(workspace.join(path)).expect("bridge threat evidence");
     (
         read("crates/ucr-security-tests/tests/bridge_threat.rs"),
         read("crates/ucr-security-tests/tests/telegram_bridge_threat.rs"),
         read("crates/ucr-security-tests/tests/vk_bridge_threat.rs"),
+        read("crates/ucr-security-tests/tests/max_bridge_threat.rs"),
     )
 }
 
@@ -2625,7 +2635,7 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
             .expect("threat simulations");
     let sfu_simulations = fs::read_to_string(workspace.join("crates/ucr-sfu/tests/reference.rs"))
         .expect("sfu threat simulations");
-    let (bridge_simulations, telegram_simulations, vk_simulations) =
+    let (bridge_simulations, telegram_simulations, vk_simulations, max_simulations) =
         read_bridge_provider_threat_simulations(workspace);
     let matrix = fs::read_to_string(workspace.join("docs/architecture/THREAT_SIMULATIONS.md"))
         .expect("threat simulation matrix");
@@ -2649,6 +2659,7 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
         "ucr-bridge",
         "ucr-bridge-telegram",
         "ucr-bridge-vk",
+        "ucr-bridge-max",
     ] {
         assert!(
             manifest.contains(dependency),
@@ -2694,6 +2705,7 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
         &bridge_simulations,
         &telegram_simulations,
         &vk_simulations,
+        &max_simulations,
         &matrix,
         &threat,
     );
@@ -2713,6 +2725,7 @@ fn assert_bridge_threat_evidence(
     bridge_simulations: &str,
     telegram_simulations: &str,
     vk_simulations: &str,
+    max_simulations: &str,
     matrix: &str,
     threat: &str,
 ) {
@@ -2743,6 +2756,15 @@ fn assert_bridge_threat_evidence(
         matrix.contains("compromised_vk_boundary_cannot_bypass_core_policy_or_choose_ucr_scope")
     );
     assert!(threat.contains("Phase 33 adds concrete VK-adapter evidence"));
+    assert!(
+        max_simulations.contains(
+            "fn compromised_max_boundary_cannot_bypass_core_policy_or_choose_ucr_scope()"
+        )
+    );
+    assert!(
+        matrix.contains("compromised_max_boundary_cannot_bypass_core_policy_or_choose_ucr_scope")
+    );
+    assert!(threat.contains("Phase 34 adds concrete MAX-adapter evidence"));
 }
 
 fn assert_chaos_evidence(source: &str, matrix: &str, scenario: &str) {

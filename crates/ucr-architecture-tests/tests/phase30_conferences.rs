@@ -83,7 +83,11 @@ fn phase30_public_contract_docs_permissions_and_fuzz_are_machine_locked() {
     assert!(media_e2ee.contains("Phase 30 now composes that boundary"));
     assert!(!adaptive_media.contains("Conference coordination remains Phase 30"));
     assert!(!media_e2ee.contains("Conference coordination remains Phase 30"));
-    assert!(readme.contains("**Phase 33 — VK (Prepared text bridge; MAX bridge not started).**"));
+    assert!(
+        readme.contains(
+            "**Phase 34 — MAX (Prepared text bridge; Overlay Conversations not started).**"
+        )
+    );
     assert!(ci.contains("test -s proto/ucr/v1/conference.proto"));
     assert!(ci.contains("test -s spec/conference.md"));
     assert!(fuzz.contains("canonical_conference_start"));

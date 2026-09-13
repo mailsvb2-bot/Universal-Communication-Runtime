@@ -14,6 +14,7 @@ workspace = true
 ucr-bridge = { path = "../ucr-bridge" }
 ucr-bridge-telegram = { path = "../ucr-bridge-telegram" }
 ucr-bridge-vk = { path = "../ucr-bridge-vk" }
+ucr-bridge-max = { path = "../ucr-bridge-max" }
 ucr-core = { path = "../ucr-core" }
 ucr-crypto = { path = "../ucr-crypto" }
 ucr-model = { path = "../ucr-model" }

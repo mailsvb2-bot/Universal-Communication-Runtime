@@ -84,7 +84,11 @@ fn phase25_release_truth_contract_docs_and_fuzz_are_machine_locked() {
     ))
     .expect("ADR 0063");
 
-    assert!(readme.contains("**Phase 33 — VK (Prepared text bridge; MAX bridge not started).**"));
+    assert!(
+        readme.contains(
+            "**Phase 34 — MAX (Prepared text bridge; Overlay Conversations not started).**"
+        )
+    );
     assert!(ci.contains("test -s spec/transport-failover.md"));
     assert!(ci.contains("test -s proto/ucr/v1/transport_failover.proto"));
     assert!(ci.contains("0063-phase25-automatic-failover"));

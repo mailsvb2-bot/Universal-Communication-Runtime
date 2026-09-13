@@ -92,7 +92,11 @@ fn phase31_public_contract_security_privacy_and_fuzz_are_machine_locked() {
         "compromised_bridge_simulation_enforces_policy_and_scope_before_canonicalization"
     ));
     assert!(inventory.contains("bridge\tBridge\tprepared\t"));
-    assert!(readme.contains("**Phase 33 — VK (Prepared text bridge; MAX bridge not started).**"));
+    assert!(
+        readme.contains(
+            "**Phase 34 — MAX (Prepared text bridge; Overlay Conversations not started).**"
+        )
+    );
     let protocol_guard = ci
         .split("- name: Protocol specification exists")
         .nth(1)
