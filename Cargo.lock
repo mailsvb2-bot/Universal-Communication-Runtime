@@ -2880,6 +2880,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-bridge-vk"
+version = "0.0.1"
+dependencies = [
+ "minreq",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "ucr-bridge",
+ "ucr-core",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-memory",
+]
+
+[[package]]
 name = "ucr-chat"
 version = "0.0.1"
 dependencies = [
@@ -3014,6 +3029,7 @@ version = "0.0.1"
 dependencies = [
  "ucr-bridge",
  "ucr-bridge-telegram",
+ "ucr-bridge-vk",
  "ucr-core",
  "ucr-crypto",
  "ucr-model",

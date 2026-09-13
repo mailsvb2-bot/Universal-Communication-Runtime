@@ -25,6 +25,7 @@ members = [
     "crates/ucr-conference",
     "crates/ucr-bridge",
     "crates/ucr-bridge-telegram",
+    "crates/ucr-bridge-vk",
 ]
 
 [workspace.package]

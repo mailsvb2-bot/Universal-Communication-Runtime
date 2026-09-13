@@ -1,0 +1,24 @@
+[package]
+name = "ucr-bridge-vk"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+minreq = { version = "=3.0.0", default-features = false, features = ["https-native-tls"] }
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"
+ucr-bridge = { path = "../ucr-bridge" }
+ucr-model = { path = "../ucr-model" }
+ucr-protocol = { path = "../ucr-protocol" }
+
+[dev-dependencies]
+ucr-core = { path = "../ucr-core" }
+ucr-storage-memory = { path = "../ucr-storage-memory" }
+
+[lints]
+workspace = true
