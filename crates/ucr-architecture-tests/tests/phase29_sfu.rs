@@ -91,9 +91,9 @@ fn phase29_release_truth_security_and_fuzz_are_machine_locked() {
     assert!(
         readme.contains("Phase 29 now adds Prepared standardized group-media E2EE and SFU fan-out")
     );
-    assert!(readme.contains(
-        "**Phase 31 — Bridge SDK (Prepared/reference candidate; Telegram bridge not started).**"
-    ));
+    assert!(
+        readme.contains("**Phase 32 — Telegram (Prepared text bridge; VK bridge not started).**")
+    );
     assert!(ci.contains("test -s proto/ucr/v1/group_media_e2ee.proto"));
     assert!(ci.contains("test -s proto/ucr/v1/sfu.proto"));
     assert!(spec_readme.contains("RFC-9420/OpenMLS-backed group-media E2EE and SFU fan-out"));

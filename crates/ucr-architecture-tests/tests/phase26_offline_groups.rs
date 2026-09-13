@@ -65,9 +65,9 @@ fn phase26_release_truth_contract_docs_and_fuzz_are_machine_locked() {
     ))
     .expect("ADR 0064");
 
-    assert!(readme.contains(
-        "**Phase 31 — Bridge SDK (Prepared/reference candidate; Telegram bridge not started).**"
-    ));
+    assert!(
+        readme.contains("**Phase 32 — Telegram (Prepared text bridge; VK bridge not started).**")
+    );
     assert!(ci.contains("test -s spec/offline-groups.md"));
     assert!(ci.contains("test -s proto/ucr/v1/offline_groups.proto"));
     assert!(ci.contains("0064-phase26-offline-groups"));
