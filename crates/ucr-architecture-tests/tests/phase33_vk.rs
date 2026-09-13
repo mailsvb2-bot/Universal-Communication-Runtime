@@ -75,7 +75,11 @@ fn phase33_security_spec_ci_and_fuzz_evidence_are_machine_locked() {
     let ci = read(".github/workflows/ci.yml");
     let fuzz = read("fuzz/fuzz_targets/vk_bridge_boundary.rs");
     let smoke = read("fuzz/run-smoke.sh");
-    assert!(readme.contains("**Phase 33 — VK (Prepared text bridge; MAX bridge not started).**"));
+    assert!(
+        readme.contains(
+            "**Phase 34 — MAX (Prepared text bridge; Overlay Conversations not started).**"
+        )
+    );
     assert!(spec_index.contains("Phase 33 adds `vk-bridge.md`"));
     assert!(spec.contains("VK API 5.199"));
     assert!(adr.contains("thin API bridge over canonical UCR"));

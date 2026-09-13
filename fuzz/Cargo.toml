@@ -15,6 +15,7 @@ ucr-core = { path = "../crates/ucr-core" }
 ucr-bridge = { path = "../crates/ucr-bridge" }
 ucr-bridge-telegram = { path = "../crates/ucr-bridge-telegram" }
 ucr-bridge-vk = { path = "../crates/ucr-bridge-vk" }
+ucr-bridge-max = { path = "../crates/ucr-bridge-max" }
 ucr-crypto = { path = "../crates/ucr-crypto" }
 ucr-model = { path = "../crates/ucr-model" }
 ucr-media-adaptive = { path = "../crates/ucr-media-adaptive" }
@@ -142,6 +143,12 @@ bench = false
 [[bin]]
 name = "vk_bridge_boundary"
 path = "fuzz_targets/vk_bridge_boundary.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "max_bridge_boundary"
+path = "fuzz_targets/max_bridge_boundary.rs"
 test = false
 doc = false
 bench = false

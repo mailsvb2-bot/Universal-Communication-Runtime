@@ -124,7 +124,11 @@ fn phase21_release_truth_and_repository_guards_are_machine_locked() {
     let fuzz_manifest = fs::read_to_string(root.join("fuzz/Cargo.toml")).expect("fuzz manifest");
     let fuzz_smoke = fs::read_to_string(root.join("fuzz/run-smoke.sh")).expect("fuzz smoke");
     assert!(readme.contains("Phase 21 now adds Prepared realtime Video"));
-    assert!(readme.contains("**Phase 33 — VK (Prepared text bridge; MAX bridge not started).**"));
+    assert!(
+        readme.contains(
+            "**Phase 34 — MAX (Prepared text bridge; Overlay Conversations not started).**"
+        )
+    );
     assert!(ci.contains("test -s spec/video.md"));
     assert!(ci.contains("test -s proto/ucr/v1/video.proto"));
     assert!(ci.contains("0059-phase21-video-reuses-canonical-call-and-capability-owners.md"));

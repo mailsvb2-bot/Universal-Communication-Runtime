@@ -2866,6 +2866,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-bridge-max"
+version = "0.0.1"
+dependencies = [
+ "minreq",
+ "serde",
+ "serde_json",
+ "ucr-bridge",
+ "ucr-core",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-memory",
+]
+
+[[package]]
 name = "ucr-bridge-telegram"
 version = "0.0.1"
 dependencies = [
@@ -3028,6 +3042,7 @@ name = "ucr-security-tests"
 version = "0.0.1"
 dependencies = [
  "ucr-bridge",
+ "ucr-bridge-max",
  "ucr-bridge-telegram",
  "ucr-bridge-vk",
  "ucr-core",
