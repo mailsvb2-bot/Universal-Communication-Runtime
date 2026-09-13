@@ -144,7 +144,8 @@ jobs:
           test -s spec/mesh.md &&
           test -s spec/sfu.md &&
           test -s spec/conference.md &&
-          test -s spec/bridge-sdk.md
+          test -s spec/bridge-sdk.md &&
+          test -s spec/telegram-bridge.md
       - name: Public contract exists
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
@@ -242,4 +243,5 @@ jobs:
           test -s docs/adr/0066-phase28-mesh-reuses-group-message-sync-device-and-trust-owners.md &&
           test -s docs/adr/0067-phase29-sfu-routes-encrypted-media-without-becoming-call-or-crypto-owner.md &&
           test -s docs/adr/0068-phase30-conferences-reuse-call-group-mls-and-sfu-owners.md &&
-          test -s docs/adr/0069-phase31-bridge-sdk-is-a-provider-extension-boundary-not-a-second-communication-brain.md
+          test -s docs/adr/0069-phase31-bridge-sdk-is-a-provider-extension-boundary-not-a-second-communication-brain.md &&
+          test -s docs/adr/0070-phase32-telegram-is-a-thin-bot-api-bridge-over-canonical-ucr.md

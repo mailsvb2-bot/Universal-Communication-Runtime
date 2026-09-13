@@ -12,6 +12,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "=0.4.13"
 ucr-core = { path = "../crates/ucr-core" }
+ucr-bridge = { path = "../crates/ucr-bridge" }
+ucr-bridge-telegram = { path = "../crates/ucr-bridge-telegram" }
 ucr-crypto = { path = "../crates/ucr-crypto" }
 ucr-model = { path = "../crates/ucr-model" }
 ucr-media-adaptive = { path = "../crates/ucr-media-adaptive" }
@@ -127,6 +129,12 @@ bench = false
 [[bin]]
 name = "bridge_contract"
 path = "fuzz_targets/bridge_contract.rs"
+test = false
+doc = false
+bench = false
+[[bin]]
+name = "telegram_bridge_boundary"
+path = "fuzz_targets/telegram_bridge_boundary.rs"
 test = false
 doc = false
 bench = false

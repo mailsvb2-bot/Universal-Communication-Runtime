@@ -1762,8 +1762,9 @@ fn implemented_untrusted_boundaries_have_bounded_required_fuzzing() {
         )
     );
     assert!(threat.contains("Phase-31 `bridge_contract`"));
+    assert!(threat.contains("Phase-32 `telegram_bridge_boundary`"));
     assert!(threat.contains(
-        "Bridge manifest/action/inbound-page normalization now has its own real fuzz target"
+        "Bridge manifest/action/inbound-page normalization and Phase-32 Telegram token/target/cursor/action projection now have dedicated real fuzz targets"
     ));
     assert!(
         !threat.contains("- required fuzz targets for implemented parsers/wrappers;"),
@@ -2608,6 +2609,10 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
     let bridge_simulations =
         fs::read_to_string(workspace.join("crates/ucr-security-tests/tests/bridge_threat.rs"))
             .expect("bridge threat simulations");
+    let telegram_simulations = fs::read_to_string(
+        workspace.join("crates/ucr-security-tests/tests/telegram_bridge_threat.rs"),
+    )
+    .expect("telegram bridge threat simulations");
     let matrix = fs::read_to_string(workspace.join("docs/architecture/THREAT_SIMULATIONS.md"))
         .expect("threat simulation matrix");
     let threat = fs::read_to_string(workspace.join("docs/architecture/THREAT_MODEL.md"))
@@ -2628,6 +2633,7 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
         "ucr-storage-memory",
         "ucr-storage-sqlite",
         "ucr-bridge",
+        "ucr-bridge-telegram",
     ] {
         assert!(
             manifest.contains(dependency),
@@ -2669,16 +2675,7 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
     assert!(sfu_simulations.contains("fn compromised_sfu_simulation_rejects_spoof_before_sink()"));
     assert!(matrix.contains("compromised_sfu_simulation_rejects_spoof_before_sink"));
 
-    assert!(matrix.contains("Compromised Bridge"));
-    assert!(bridge_simulations.contains(
-        "fn compromised_bridge_simulation_enforces_policy_and_scope_before_canonicalization()"
-    ));
-    assert!(matrix.contains(
-        "compromised_bridge_simulation_enforces_policy_and_scope_before_canonicalization"
-    ));
-    assert!(threat.contains(
-        "Phase 31 adds compromised-Bridge evidence against the real `ucr-bridge` boundary"
-    ));
+    assert_bridge_threat_evidence(&bridge_simulations, &telegram_simulations, &matrix, &threat);
     assert!(!matrix.contains("Bridge does not exist yet"));
     assert!(!threat.contains("- required threat simulations;"));
     assert!(
@@ -2689,6 +2686,33 @@ fn implemented_trust_boundaries_have_cross_crate_threat_simulations() {
     assert!(ci.contains(
         "docs/adr/0034-implemented-trust-boundaries-require-cross-crate-threat-simulations.md"
     ));
+}
+
+fn assert_bridge_threat_evidence(
+    bridge_simulations: &str,
+    telegram_simulations: &str,
+    matrix: &str,
+    threat: &str,
+) {
+    assert!(matrix.contains("Compromised Bridge"));
+    assert!(bridge_simulations.contains(
+        "fn compromised_bridge_simulation_enforces_policy_and_scope_before_canonicalization()"
+    ));
+    assert!(matrix.contains(
+        "compromised_bridge_simulation_enforces_policy_and_scope_before_canonicalization"
+    ));
+    assert!(threat.contains(
+        "Phase 31 adds compromised-Bridge evidence against the real `ucr-bridge` boundary"
+    ));
+    assert!(telegram_simulations.contains(
+        "fn compromised_telegram_boundary_cannot_bypass_core_policy_or_choose_ucr_scope()"
+    ));
+    assert!(
+        matrix.contains(
+            "compromised_telegram_boundary_cannot_bypass_core_policy_or_choose_ucr_scope"
+        )
+    );
+    assert!(threat.contains("Phase 32 adds concrete Telegram-adapter evidence"));
 }
 
 fn assert_chaos_evidence(source: &str, matrix: &str, scenario: &str) {
