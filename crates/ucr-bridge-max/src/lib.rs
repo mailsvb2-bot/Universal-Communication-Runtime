@@ -235,9 +235,14 @@ impl MaxBotApiClient {
 impl MaxApiClient for MaxBotApiClient {
     fn send_text(&self, target: MaxTarget, text: &str) -> Result<MaxSentMessage, MaxApiFailure> {
         let (kind, id) = target.query();
-        let url = format!("{MAX_API_ROOT}/messages?{kind}={id}&v={MAX_BOT_API_SCHEMA_VERSION}");
-        let response: MaxSendMessageResultWire =
-            self.post_json(&url, &MaxSendMessageRequest { text })?;
+        let url = format!("{MAX_API_ROOT}/messages?{kind}={id}");
+        let response: MaxSendMessageResultWire = self.post_json(
+            &url,
+            &MaxSendMessageRequest {
+                text,
+                attachments: Vec::new(),
+            },
+        )?;
         let body = response
             .message
             .body
@@ -257,7 +262,7 @@ impl MaxApiClient for MaxBotApiClient {
             return Err(MaxApiFailure::Rejected);
         }
         let mut url = format!(
-            "{MAX_API_ROOT}/updates?limit={limit}&timeout={MAX_LONG_POLL_TIMEOUT_SECS}&types=message_created&v={MAX_BOT_API_SCHEMA_VERSION}"
+            "{MAX_API_ROOT}/updates?limit={limit}&timeout={MAX_LONG_POLL_TIMEOUT_SECS}&types=message_created"
         );
         if let Some(marker) = marker {
             if marker <= 0 {
@@ -548,6 +553,7 @@ fn decode_json<R: DeserializeOwned>(bytes: &[u8]) -> Result<R, MaxApiFailure> {
 #[derive(Debug, Serialize)]
 struct MaxSendMessageRequest<'a> {
     text: &'a str,
+    attachments: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -557,7 +563,6 @@ struct MaxSendMessageResultWire {
 
 #[derive(Debug, Deserialize)]
 struct MaxUpdateListWire {
-    #[serde(default)]
     updates: Vec<MaxUpdateWire>,
     marker: Option<i64>,
 }
@@ -786,6 +791,25 @@ mod tests {
         assert_eq!(batch.updates[0].actor_id, Some(7));
         assert_eq!(batch.updates[0].occurred_at_unix_ms, 1_700_000_000_123);
         assert_eq!(batch.updates[0].text, "hello");
+    }
+
+    #[test]
+    fn text_send_wire_includes_empty_attachments_array() {
+        let encoded = serde_json::to_value(MaxSendMessageRequest {
+            text: "hello",
+            attachments: Vec::new(),
+        })
+        .expect("encode request");
+        assert_eq!(encoded["text"], "hello");
+        assert_eq!(encoded["attachments"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn update_wire_requires_updates_field() {
+        assert!(matches!(
+            decode_json::<MaxUpdateListWire>(br#"{"marker":52}"#),
+            Err(MaxApiFailure::MalformedResponse)
+        ));
     }
 
     #[test]

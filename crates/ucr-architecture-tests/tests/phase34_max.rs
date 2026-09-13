@@ -39,10 +39,13 @@ fn phase34_max_https_auth_marker_and_acceptance_semantics_are_locked() {
     assert!(source.contains("MaxBotToken(<redacted>)"));
     assert!(source.contains("user:<positive-id>"));
     assert!(source.contains("chat:<non-zero-id>"));
-    assert!(source.contains("types=message_created&v={MAX_BOT_API_SCHEMA_VERSION}"));
-    assert!(source.contains("{kind}={id}&v={MAX_BOT_API_SCHEMA_VERSION}"));
+    assert!(source.contains("types=message_created\""));
+    assert!(source.contains("{kind}={id}\""));
+    assert!(!source.contains("&v={MAX_BOT_API_SCHEMA_VERSION}"));
     assert!(source.contains("!response.updates.is_empty() && marker == previous"));
     assert!(source.contains("400 | 401 | 403 | 404 | 405"));
+    assert!(source.contains("attachments: Vec::new()"));
+    assert!(!source.contains("#[serde(default)]\n    updates: Vec<MaxUpdateWire>"));
     assert!(source.contains("BridgeProviderFailure::AcceptanceUnknown"));
     assert!(manifest.contains(
         "minreq = { version = \"=3.0.0\", default-features = false, features = [\"https-native-tls\"] }"
