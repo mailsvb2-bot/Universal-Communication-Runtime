@@ -95,6 +95,8 @@ fn phase34_security_spec_ci_and_fuzz_evidence_are_machine_locked() {
     assert!(ci.contains("0072-phase34-max-is-a-thin-bot-api-bridge-over-canonical-ucr.md"));
     assert!(fuzz.contains("fuzz_max_wire_boundary(data)"));
     assert!(source.contains("pub fn fuzz_max_wire_boundary(bytes: &[u8])"));
+    assert!(source.contains("let prior_marker = fuzz_prior_marker(bytes);"));
+    assert!(source.contains("let next_marker = response.marker.or(requested_marker);"));
     assert!(fuzz.contains("MaxBotToken::new"));
     assert!(fuzz.contains("MaxTarget::parse"));
     assert!(smoke.contains("run_target max_bridge_boundary"));

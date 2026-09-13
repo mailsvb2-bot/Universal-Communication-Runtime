@@ -440,6 +440,7 @@ fn map_update_batch(
         return Err(MaxBoundaryError::InvalidProviderResponse);
     }
 
+    let next_marker = response.marker.or(requested_marker);
     let mut seen = BTreeSet::new();
     let mut mapped = Vec::new();
     for update in response.updates {
@@ -491,7 +492,7 @@ fn map_update_batch(
     }
     Ok(MaxUpdateBatch {
         updates: mapped,
-        next_marker: response.marker,
+        next_marker,
     })
 }
 
@@ -600,11 +601,24 @@ struct MaxMessageBodyWire {
 ///
 /// This is side-effect free so the fuzz workspace can feed arbitrary bytes through the send
 /// response, update-list, marker, message and target boundaries without network access.
+fn fuzz_prior_marker(bytes: &[u8]) -> i64 {
+    let mut value = 0_u64;
+    for byte in bytes.iter().take(8) {
+        value = value.wrapping_mul(257).wrapping_add(u64::from(*byte) + 1);
+    }
+    let positive_range = (i64::MAX as u64) - 1;
+    i64::try_from((value % positive_range) + 1).unwrap_or(i64::MAX)
+}
+
 #[doc(hidden)]
 pub fn fuzz_max_wire_boundary(bytes: &[u8]) {
     let _ = decode_json::<MaxSendMessageResultWire>(bytes);
     if let Ok(response) = decode_json::<MaxUpdateListWire>(bytes) {
         let _ = map_update_batch(response, None, MAX_BRIDGE_EVENT_PAGE_ITEMS);
+    }
+    if let Ok(response) = decode_json::<MaxUpdateListWire>(bytes) {
+        let prior_marker = fuzz_prior_marker(bytes);
+        let _ = map_update_batch(response, Some(prior_marker), MAX_BRIDGE_EVENT_PAGE_ITEMS);
     }
     if let Ok(text) = std::str::from_utf8(bytes) {
         let _ = MaxBotToken::new(text.to_owned());
@@ -698,6 +712,32 @@ mod tests {
         .expect("batch");
         assert!(batch.updates.is_empty());
         assert_eq!(batch.next_marker, Some(52));
+    }
+
+    #[test]
+    fn empty_null_marker_preserves_requested_cursor() {
+        let batch = map_update_batch(
+            MaxUpdateListWire {
+                updates: vec![],
+                marker: None,
+            },
+            Some(50),
+            10,
+        )
+        .expect("empty page");
+        assert!(batch.updates.is_empty());
+        assert_eq!(batch.next_marker, Some(50));
+
+        let initial = map_update_batch(
+            MaxUpdateListWire {
+                updates: vec![],
+                marker: None,
+            },
+            None,
+            10,
+        )
+        .expect("initial empty page");
+        assert_eq!(initial.next_marker, None);
     }
 
     #[test]
