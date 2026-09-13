@@ -550,10 +550,21 @@ fn decode_json<R: DeserializeOwned>(bytes: &[u8]) -> Result<R, MaxApiFailure> {
     serde_json::from_slice(bytes).map_err(|_| MaxApiFailure::MalformedResponse)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct MaxSendMessageRequest<'a> {
     text: &'a str,
     attachments: Vec<serde_json::Value>,
+}
+
+impl fmt::Debug for MaxSendMessageRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MaxSendMessageRequest")
+            .field("text", &"<redacted>")
+            .field("text_chars", &self.text.chars().count())
+            .field("attachments_len", &self.attachments.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -622,8 +633,27 @@ pub fn fuzz_max_wire_boundary(bytes: &[u8]) {
         let _ = map_update_batch(response, None, MAX_BRIDGE_EVENT_PAGE_ITEMS);
     }
     if let Ok(response) = decode_json::<MaxUpdateListWire>(bytes) {
-        let prior_marker = fuzz_prior_marker(bytes);
-        let _ = map_update_batch(response, Some(prior_marker), MAX_BRIDGE_EVENT_PAGE_ITEMS);
+        let advancing_prior = response
+            .marker
+            .and_then(|marker| marker.checked_sub(1))
+            .filter(|marker| *marker > 0)
+            .unwrap_or_else(|| fuzz_prior_marker(bytes));
+        let _ = map_update_batch(response, Some(advancing_prior), MAX_BRIDGE_EVENT_PAGE_ITEMS);
+    }
+    if let Ok(response) = decode_json::<MaxUpdateListWire>(bytes) {
+        let unchanged_prior = response
+            .marker
+            .filter(|marker| *marker > 0)
+            .unwrap_or_else(|| fuzz_prior_marker(bytes));
+        let _ = map_update_batch(response, Some(unchanged_prior), MAX_BRIDGE_EVENT_PAGE_ITEMS);
+    }
+    if let Ok(response) = decode_json::<MaxUpdateListWire>(bytes) {
+        let rollback_prior = response
+            .marker
+            .and_then(|marker| marker.checked_add(1))
+            .filter(|marker| *marker > 0)
+            .unwrap_or(i64::MAX);
+        let _ = map_update_batch(response, Some(rollback_prior), MAX_BRIDGE_EVENT_PAGE_ITEMS);
     }
     if let Ok(text) = std::str::from_utf8(bytes) {
         let _ = MaxBotToken::new(text.to_owned());
@@ -791,6 +821,18 @@ mod tests {
         assert_eq!(batch.updates[0].actor_id, Some(7));
         assert_eq!(batch.updates[0].occurred_at_unix_ms, 1_700_000_000_123);
         assert_eq!(batch.updates[0].text, "hello");
+    }
+
+    #[test]
+    fn send_request_debug_redacts_plaintext() {
+        let request = MaxSendMessageRequest {
+            text: "super-secret-message",
+            attachments: Vec::new(),
+        };
+        let rendered = format!("{request:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(rendered.contains("text_chars: 20"));
+        assert!(!rendered.contains("super-secret-message"));
     }
 
     #[test]

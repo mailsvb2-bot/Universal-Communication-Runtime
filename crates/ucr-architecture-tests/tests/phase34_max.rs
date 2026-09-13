@@ -37,6 +37,9 @@ fn phase34_max_https_auth_marker_and_acceptance_semantics_are_locked() {
     assert!(source.contains("with_follow_redirects(false)"));
     assert!(source.contains("MAX_RESPONSE_BODY_BYTES + 1"));
     assert!(source.contains("MaxBotToken(<redacted>)"));
+    assert!(source.contains("impl fmt::Debug for MaxSendMessageRequest<'_>"));
+    assert!(source.contains(".field(\"text\", &\"<redacted>\")"));
+    assert!(!source.contains("#[derive(Debug, Serialize)]\nstruct MaxSendMessageRequest"));
     assert!(source.contains("user:<positive-id>"));
     assert!(source.contains("chat:<non-zero-id>"));
     assert!(source.contains("types=message_created\""));
@@ -98,8 +101,23 @@ fn phase34_security_spec_ci_and_fuzz_evidence_are_machine_locked() {
     assert!(ci.contains("0072-phase34-max-is-a-thin-bot-api-bridge-over-canonical-ucr.md"));
     assert!(fuzz.contains("fuzz_max_wire_boundary(data)"));
     assert!(source.contains("pub fn fuzz_max_wire_boundary(bytes: &[u8])"));
-    assert!(source.contains("let prior_marker = fuzz_prior_marker(bytes);"));
+    assert!(source.contains("let advancing_prior = response"));
+    assert!(source.contains("let unchanged_prior = response"));
+    assert!(source.contains("let rollback_prior = response"));
+    assert!(source.contains("unwrap_or_else(|| fuzz_prior_marker(bytes))"));
     assert!(source.contains("let next_marker = response.marker.or(requested_marker);"));
+    for seed in [
+        "seed-null-marker.json",
+        "seed-empty-advance.json",
+        "seed-message-created.json",
+    ] {
+        assert!(
+            workspace()
+                .join("fuzz/corpus/max_bridge_boundary")
+                .join(seed)
+                .is_file()
+        );
+    }
     assert!(fuzz.contains("MaxBotToken::new"));
     assert!(fuzz.contains("MaxTarget::parse"));
     assert!(smoke.contains("run_target max_bridge_boundary"));
