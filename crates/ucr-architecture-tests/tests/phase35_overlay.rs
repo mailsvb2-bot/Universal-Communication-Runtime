@@ -47,6 +47,9 @@ fn phase35_mapping_lifecycle_uniqueness_restart_and_offline_semantics_are_locked
     assert!(memory.contains("ensure_bridge_mapping_uniqueness"));
     assert!(memory.contains("BridgeRegistrationState::Active"));
     assert!(sqlite.contains("group_bridge_mappings_external_endpoint"));
+    assert!(sqlite.contains("PRAGMA index_list('group_bridge_mappings')"));
+    assert!(sqlite.contains("PRAGMA index_xinfo('group_bridge_mappings_external_endpoint')"));
+    assert!(sqlite.contains("schema_v28_rejects_same_named_unique_index_with_wrong_columns"));
     assert!(sqlite.contains("map_bridge_mapping_insert_error"));
     assert!(sqlite.contains("BridgeRegistrationState::Active"));
     assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 28"));

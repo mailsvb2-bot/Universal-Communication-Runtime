@@ -123,14 +123,66 @@ pub fn create_v28_objects(transaction: &Transaction<'_>) -> Result<(), DurableSt
 
 pub fn verify_schema_v28(connection: &Connection) -> Result<(), DurableStoreError> {
     super::bridge_store::verify_schema_v27(connection)?;
-    let index_exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name=?1)",
-            ["group_bridge_mappings_external_endpoint"],
-            |row| row.get(0),
-        )
+    verify_external_endpoint_unique_index(connection)
+}
+
+fn verify_external_endpoint_unique_index(connection: &Connection) -> Result<(), DurableStoreError> {
+    const INDEX_NAME: &str = "group_bridge_mappings_external_endpoint";
+    const EXPECTED_COLUMNS: [&str; 5] = [
+        "tenant_id",
+        "namespace_present",
+        "namespace_id",
+        "integration_id",
+        "external_group_id",
+    ];
+
+    let mut statement = connection
+        .prepare("PRAGMA index_list('group_bridge_mappings')")
         .map_err(|error| map_sqlite_error(&error))?;
-    if !index_exists {
+    let mut rows = statement
+        .query([])
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut exact_index_found = false;
+    while let Some(row) = rows.next().map_err(|error| map_sqlite_error(&error))? {
+        let name: String = row.get(1).map_err(|error| map_sqlite_error(&error))?;
+        if name != INDEX_NAME {
+            continue;
+        }
+        let unique: i64 = row.get(2).map_err(|error| map_sqlite_error(&error))?;
+        let partial: i64 = row.get(4).map_err(|error| map_sqlite_error(&error))?;
+        if unique != 1 || partial != 0 {
+            return Err(DurableStoreError::Corrupt);
+        }
+        exact_index_found = true;
+        break;
+    }
+    drop(rows);
+    drop(statement);
+    if !exact_index_found {
+        return Err(DurableStoreError::Corrupt);
+    }
+
+    let mut statement = connection
+        .prepare("PRAGMA index_xinfo('group_bridge_mappings_external_endpoint')")
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, Option<String>>(2)?, row.get::<_, i64>(5)?))
+        })
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut key_columns = Vec::new();
+    for row in rows {
+        let (name, key) = row.map_err(|error| map_sqlite_error(&error))?;
+        if key == 1 {
+            key_columns.push(name.ok_or(DurableStoreError::Corrupt)?);
+        }
+    }
+    if key_columns
+        != EXPECTED_COLUMNS
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    {
         return Err(DurableStoreError::Corrupt);
     }
     Ok(())
@@ -2867,6 +2919,27 @@ mod phase35_overlay_sqlite_tests {
             ),
             Err(DurableStoreError::Conflict)
         );
+    }
+
+    #[test]
+    fn schema_v28_rejects_same_named_unique_index_with_wrong_columns() {
+        let db = TestDb::new();
+        {
+            let _store = SqliteLocalStore::open(db.path()).expect("initialize v28");
+        }
+        let connection = rusqlite::Connection::open(db.path()).expect("tamper schema");
+        connection
+            .execute_batch(
+                "DROP INDEX group_bridge_mappings_external_endpoint;
+                 CREATE UNIQUE INDEX group_bridge_mappings_external_endpoint
+                 ON group_bridge_mappings(tenant_id, namespace_present, namespace_id, group_id, external_group_id);",
+            )
+            .expect("install same-named wrong index");
+        drop(connection);
+        assert!(matches!(
+            SqliteLocalStore::open(db.path()),
+            Err(DurableStoreError::Corrupt)
+        ));
     }
 
     #[test]
