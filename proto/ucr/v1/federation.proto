@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/identity.proto";
+
+enum FederationTrustState {
+  FEDERATION_TRUST_STATE_UNSPECIFIED = 0;
+  FEDERATION_TRUST_STATE_KNOWN = 1;
+  FEDERATION_TRUST_STATE_AUTHENTICATED = 2;
+  FEDERATION_TRUST_STATE_AUTHORIZED = 3;
+  FEDERATION_TRUST_STATE_TRUSTED = 4;
+  FEDERATION_TRUST_STATE_REVOKED = 5;
+  FEDERATION_TRUST_STATE_BLOCKED = 6;
+}
+
+message FederationPeer {
+  TenantScope local_scope = 1;
+  TenantScope remote_scope = 2;
+  OpaqueId local_endpoint_id = 3;
+  OpaqueId remote_endpoint_id = 4;
+  EndpointKind remote_endpoint_kind = 5;
+  OpaqueId expected_device_id = 6;
+  OpaqueId expected_signing_key_id = 7;
+  repeated string allowed_capabilities = 8;
+  FederationTrustState state = 9;
+  uint64 generation = 10;
+}

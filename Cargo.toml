@@ -28,6 +28,7 @@ members = [
     "crates/ucr-bridge-vk",
     "crates/ucr-bridge-max",
     "crates/ucr-overlay",
+    "crates/ucr-federation",
 ]
 
 [workspace.package]

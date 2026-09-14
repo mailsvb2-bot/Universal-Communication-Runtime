@@ -52,7 +52,8 @@ fn phase35_mapping_lifecycle_uniqueness_restart_and_offline_semantics_are_locked
     assert!(sqlite.contains("schema_v28_rejects_same_named_unique_index_with_wrong_columns"));
     assert!(sqlite.contains("map_bridge_mapping_insert_error"));
     assert!(sqlite.contains("BridgeRegistrationState::Active"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 28"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V28: u32 = 28"));
+    assert!(sqlite_root.contains("fn migrate_v27_to_v28"));
     assert!(offline.contains("offline_group_bridge_changes"));
     assert!(offline.contains("offline_group_change_sequence"));
     assert!(offline.contains("entries.sort_by_key(|(sequence, _)| *sequence)"));
@@ -84,11 +85,7 @@ fn phase35_permissions_privacy_docs_ci_and_security_evidence_are_machine_locked(
     let matrix = read("docs/architecture/THREAT_SIMULATIONS.md");
     let security = read("crates/ucr-security-tests/tests/overlay_threat.rs");
     let ci = read(".github/workflows/ci.yml");
-    assert!(
-        readme.contains(
-            "**Phase 35 — Overlay Conversations (Prepared cross-network logical groups).**"
-        )
-    );
+    assert!(readme.contains("Phase 35 adds Prepared Overlay Conversations"));
     assert!(spec_index.contains("Phase 35 adds `overlay-conversations.md`"));
     assert!(spec.contains("Provider side effects remain owned by `BridgeRuntime`"));
     assert!(adr.contains("Overlay Conversations reuse Group, Conversation and Bridge owners"));

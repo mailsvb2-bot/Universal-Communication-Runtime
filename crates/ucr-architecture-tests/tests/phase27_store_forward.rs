@@ -72,11 +72,7 @@ fn phase27_release_truth_docs_and_fuzz_are_machine_locked() {
     let smoke = fs::read_to_string(root.join("fuzz/run-smoke.sh")).expect("fuzz smoke");
     let adr = fs::read_to_string(root.join("docs/adr/0065-phase27-store-and-forward-reuses-intent-message-delivery-and-transport-owners.md")).expect("ADR 0065");
 
-    assert!(
-        readme.contains(
-            "**Phase 35 — Overlay Conversations (Prepared cross-network logical groups).**"
-        )
-    );
+    assert!(readme.contains("Phase 35 adds Prepared Overlay Conversations"));
     assert!(ci.contains("test -s spec/store-forward.md"));
     assert!(ci.contains("test -s proto/ucr/v1/store_forward.proto"));
     assert!(ci.contains("0065-phase27-store-and-forward"));

@@ -77,11 +77,7 @@ fn phase34_security_spec_ci_and_fuzz_evidence_are_machine_locked() {
     let ci = read(".github/workflows/ci.yml");
     let fuzz = read("fuzz/fuzz_targets/max_bridge_boundary.rs");
     let smoke = read("fuzz/run-smoke.sh");
-    assert!(
-        readme.contains(
-            "**Phase 35 — Overlay Conversations (Prepared cross-network logical groups).**"
-        )
-    );
+    assert!(readme.contains("Phase 35 adds Prepared Overlay Conversations"));
     assert!(spec_index.contains("Phase 34 adds `max-bridge.md`"));
     assert!(spec.contains("MAX Bot API"));
     assert!(spec.contains("Production Webhook ownership"));

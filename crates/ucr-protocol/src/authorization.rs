@@ -65,6 +65,9 @@ pub const BRIDGE_REGISTRATION_READ_PERMISSION: &str = "ucr.bridge.registration.r
 pub const BRIDGE_REGISTRATION_MANAGE_PERMISSION: &str = "ucr.bridge.registration.manage";
 pub const BRIDGE_EXECUTE_PERMISSION: &str = "ucr.bridge.execute";
 pub const BRIDGE_EVENTS_READ_PERMISSION: &str = "ucr.bridge.events.read";
+pub const FEDERATION_PEER_READ_PERMISSION: &str = "ucr.federation.peer.read";
+pub const FEDERATION_PEER_MANAGE_PERMISSION: &str = "ucr.federation.peer.manage";
+pub const FEDERATION_SYNC_PERMISSION: &str = "ucr.federation.sync";
 
 pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     SERVICE_CREDENTIAL_PROVISION_PERMISSION,
@@ -125,6 +128,9 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     BRIDGE_REGISTRATION_MANAGE_PERMISSION,
     BRIDGE_EXECUTE_PERMISSION,
     BRIDGE_EVENTS_READ_PERMISSION,
+    FEDERATION_PEER_READ_PERMISSION,
+    FEDERATION_PEER_MANAGE_PERMISSION,
+    FEDERATION_SYNC_PERMISSION,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

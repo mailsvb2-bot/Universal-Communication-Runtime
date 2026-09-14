@@ -18,6 +18,7 @@ mod device_lifecycle;
 mod error;
 mod event_api;
 mod extension;
+mod federation;
 mod framing;
 mod group;
 mod group_media_e2ee;
@@ -87,6 +88,7 @@ pub use authorization::{
     DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION, EVENT_CONSUME_PERMISSION,
     EVENT_DEAD_LETTER_READ_PERMISSION, EVENT_REPLAY_PERMISSION, EVENT_SUBSCRIBE_PERMISSION,
     EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+    FEDERATION_PEER_MANAGE_PERMISSION, FEDERATION_PEER_READ_PERMISSION, FEDERATION_SYNC_PERMISSION,
     GROUP_CREATE_PERMISSION, GROUP_MANAGE_PERMISSION, GROUP_READ_PERMISSION, GrantValidationError,
     IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,
     MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
@@ -164,6 +166,12 @@ pub use extension::{
     ExtensionError, MAX_EXTENSION_PAYLOAD_LEN, MAX_NAMESPACED_IDENTIFIER_LEN,
     MAX_PROTOCOL_EXTENSIONS, canonical_protocol_extensions, require_supported_extensions,
     validate_extension_name, validate_namespaced_identifier,
+};
+pub use federation::{
+    FEDERATION_CAPABILITY, FEDERATION_SYNC_CAPABILITY, FederationProtocolError,
+    MAX_FEDERATION_ALLOWED_CAPABILITIES, canonical_federation_peer,
+    validate_federation_credential_rotation, validate_federation_peer,
+    validate_federation_transition,
 };
 pub use framing::{
     CURRENT_FRAMING_VERSION, DEFAULT_MAX_PAYLOAD_LEN, FRAME_HEADER_LEN, FRAME_MAGIC, FrameError,

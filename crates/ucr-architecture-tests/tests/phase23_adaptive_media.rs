@@ -98,11 +98,7 @@ fn phase23_release_truth_public_contract_and_fuzz_gate_are_machine_locked() {
     let threat =
         fs::read_to_string(root.join("docs/architecture/THREAT_MODEL.md")).expect("threat");
 
-    assert!(
-        readme.contains(
-            "**Phase 35 — Overlay Conversations (Prepared cross-network logical groups).**"
-        )
-    );
+    assert!(readme.contains("Phase 35 adds Prepared Overlay Conversations"));
     assert!(ci.contains("test -s spec/adaptive-media.md"));
     assert!(ci.contains("test -s proto/ucr/v1/adaptive_media.proto"));
     assert!(
