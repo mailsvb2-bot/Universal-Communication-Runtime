@@ -85,7 +85,7 @@ fn phase30_public_contract_docs_permissions_and_fuzz_are_machine_locked() {
     assert!(!media_e2ee.contains("Conference coordination remains Phase 30"));
     assert!(
         readme.contains(
-            "**Phase 34 — MAX (Prepared text bridge; Overlay Conversations not started).**"
+            "**Phase 35 — Overlay Conversations (Prepared cross-network logical groups).**"
         )
     );
     assert!(ci.contains("test -s proto/ucr/v1/conference.proto"));

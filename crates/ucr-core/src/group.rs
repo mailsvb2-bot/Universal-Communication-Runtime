@@ -1,6 +1,6 @@
 use ucr_model::{
     ConversationId, ConversationRecord, GroupChange, GroupId, GroupMembership, GroupRecord,
-    MessageEnvelope, MessageId, OfflineGroupChangePage, OfflineGroupChangeReplica,
+    IntegrationId, MessageEnvelope, MessageId, OfflineGroupChangePage, OfflineGroupChangeReplica,
     OfflineGroupCursor, OfflineGroupMessagePage, OfflineGroupMessageReplica, ScopedPrincipal,
     TenantScope,
 };
@@ -42,6 +42,20 @@ pub trait GroupStore: StorageProvider {
         &self,
         scope: &TenantScope,
         conversation_id: &ConversationId,
+    ) -> Result<Option<GroupRecord>, DurableStoreError>;
+
+    /// Resolves one exact external bridge endpoint to its canonical Group.
+    ///
+    /// The lookup key is exact Tenant/Namespace scope + Integration + opaque provider Group ID.
+    /// Implementations must return corruption rather than guess if historical state is ambiguous.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures. Absence is not an error.
+    fn group_for_bridge_mapping(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        external_group_id: &[u8],
     ) -> Result<Option<GroupRecord>, DurableStoreError>;
 
     /// Loads one membership tombstone/active row by canonical principal.

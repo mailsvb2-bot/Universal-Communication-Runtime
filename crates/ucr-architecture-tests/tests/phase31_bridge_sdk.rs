@@ -51,7 +51,9 @@ fn phase31_restart_safety_policy_and_provider_acceptance_are_machine_locked() {
     assert!(tests.contains("accepted_replay_survives_disable_and_revoke_without_provider_call"));
     assert!(sqlite.contains("CREATE TABLE bridge_registrations"));
     assert!(sqlite.contains("CREATE TABLE bridge_actions"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 27"));
+    assert!(sqlite.contains("pub(super) fn create_v27_objects"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V27: u32 = 27"));
+    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 28"));
     assert!(spec.contains(
         "Provider acceptance/degradation is **not** canonical Delivery/Delivered/Read evidence"
     ));
@@ -94,7 +96,7 @@ fn phase31_public_contract_security_privacy_and_fuzz_are_machine_locked() {
     assert!(inventory.contains("bridge\tBridge\tprepared\t"));
     assert!(
         readme.contains(
-            "**Phase 34 — MAX (Prepared text bridge; Overlay Conversations not started).**"
+            "**Phase 35 — Overlay Conversations (Prepared cross-network logical groups).**"
         )
     );
     let protocol_guard = ci

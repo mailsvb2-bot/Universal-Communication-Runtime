@@ -357,7 +357,9 @@ fn prepare_transition_input(
         }
         GroupChangeKind::SetHistoryPolicy { .. }
         | GroupChangeKind::SetPublicPolicy { .. }
-        | GroupChangeKind::SetDeliveryPolicy { .. } => {
+        | GroupChangeKind::SetDeliveryPolicy { .. }
+        | GroupChangeKind::AddBridgeMapping { .. }
+        | GroupChangeKind::RemoveBridgeMapping { .. } => {
             Err(GroupMlsStoreError::InvalidChangeMaterial)
         }
     }

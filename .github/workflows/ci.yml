@@ -248,4 +248,6 @@ jobs:
           test -s docs/adr/0069-phase31-bridge-sdk-is-a-provider-extension-boundary-not-a-second-communication-brain.md &&
           test -s docs/adr/0070-phase32-telegram-is-a-thin-bot-api-bridge-over-canonical-ucr.md &&
           test -s docs/adr/0071-phase33-vk-is-a-thin-api-bridge-over-canonical-ucr.md &&
-          test -s docs/adr/0072-phase34-max-is-a-thin-bot-api-bridge-over-canonical-ucr.md
+          test -s docs/adr/0072-phase34-max-is-a-thin-bot-api-bridge-over-canonical-ucr.md &&
+          test -s spec/overlay-conversations.md &&
+          test -s docs/adr/0073-phase35-overlay-conversations-reuse-group-conversation-and-bridge-owners.md

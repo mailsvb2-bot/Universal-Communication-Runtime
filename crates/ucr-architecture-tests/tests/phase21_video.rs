@@ -126,7 +126,7 @@ fn phase21_release_truth_and_repository_guards_are_machine_locked() {
     assert!(readme.contains("Phase 21 now adds Prepared realtime Video"));
     assert!(
         readme.contains(
-            "**Phase 34 — MAX (Prepared text bridge; Overlay Conversations not started).**"
+            "**Phase 35 — Overlay Conversations (Prepared cross-network logical groups).**"
         )
     );
     assert!(ci.contains("test -s spec/video.md"));

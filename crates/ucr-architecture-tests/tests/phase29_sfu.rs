@@ -93,7 +93,7 @@ fn phase29_release_truth_security_and_fuzz_are_machine_locked() {
     );
     assert!(
         readme.contains(
-            "**Phase 34 — MAX (Prepared text bridge; Overlay Conversations not started).**"
+            "**Phase 35 — Overlay Conversations (Prepared cross-network logical groups).**"
         )
     );
     assert!(ci.contains("test -s proto/ucr/v1/group_media_e2ee.proto"));

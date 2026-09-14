@@ -2,8 +2,8 @@ use sha2::{Digest, Sha256};
 use ucr_model::{
     ConversationKind, DeliveryPolicy, GroupBridgeMapping, GroupChange, GroupChangeKind,
     GroupCryptoState, GroupHistoryPolicy, GroupMemberState, GroupMembership, GroupOwnership,
-    GroupPermission, GroupRecord, GroupRole, PrincipalKind, PrincipalRef, PublicGroupPolicy,
-    TenantScope,
+    GroupPermission, GroupRecord, GroupRole, IntegrationId, PrincipalKind, PrincipalRef,
+    PublicGroupPolicy, TenantScope,
 };
 
 use crate::validate_namespaced_identifier;
@@ -25,6 +25,7 @@ pub enum GroupError {
     InvalidCryptoState,
     InvalidBridgeMapping,
     DuplicateBridgeMapping,
+    BridgeMappingNotFound,
     InvalidMembership,
     DuplicateMembership,
     TooManyMembers,
@@ -397,7 +398,59 @@ fn apply_change_kind(
             group.delivery_policy = *policy;
             Ok(())
         }
+        GroupChangeKind::AddBridgeMapping { mapping } => {
+            apply_add_bridge_mapping(group, context.actor_role, mapping)
+        }
+        GroupChangeKind::RemoveBridgeMapping {
+            integration_id,
+            external_group_id,
+        } => apply_remove_bridge_mapping(
+            group,
+            context.actor_role,
+            integration_id,
+            external_group_id,
+        ),
     }
+}
+
+fn apply_add_bridge_mapping(
+    group: &mut GroupRecord,
+    actor_role: GroupRole,
+    mapping: &GroupBridgeMapping,
+) -> Result<(), GroupError> {
+    require_manage_group(actor_role)?;
+    validate_bridge_mapping(mapping)?;
+    if group.bridge_mappings.len() >= MAX_GROUP_BRIDGE_MAPPINGS {
+        return Err(GroupError::InvalidBridgeMapping);
+    }
+    if group
+        .bridge_mappings
+        .iter()
+        .any(|existing| existing.integration_id == mapping.integration_id)
+    {
+        return Err(GroupError::DuplicateBridgeMapping);
+    }
+    group.bridge_mappings.push(mapping.clone());
+    Ok(())
+}
+
+fn apply_remove_bridge_mapping(
+    group: &mut GroupRecord,
+    actor_role: GroupRole,
+    integration_id: &IntegrationId,
+    external_group_id: &[u8],
+) -> Result<(), GroupError> {
+    require_manage_group(actor_role)?;
+    let index = group
+        .bridge_mappings
+        .iter()
+        .position(|mapping| {
+            mapping.integration_id == *integration_id
+                && mapping.external_group_id.as_slice() == external_group_id
+        })
+        .ok_or(GroupError::BridgeMappingNotFound)?;
+    group.bridge_mappings.remove(index);
+    Ok(())
 }
 
 fn apply_add_member(
@@ -622,6 +675,22 @@ pub fn group_change_fingerprint(change: &GroupChange) -> Result<[u8; 32], GroupE
             bytes.push(7);
             bytes.push(delivery_policy_code(*policy));
         }
+        GroupChangeKind::AddBridgeMapping { mapping } => {
+            bytes.push(8);
+            push_bytes(
+                &mut bytes,
+                mapping.integration_id.as_opaque().as_wire_bytes(),
+            );
+            push_bytes(&mut bytes, &mapping.external_group_id);
+        }
+        GroupChangeKind::RemoveBridgeMapping {
+            integration_id,
+            external_group_id,
+        } => {
+            bytes.push(9);
+            push_bytes(&mut bytes, integration_id.as_opaque().as_wire_bytes());
+            push_bytes(&mut bytes, external_group_id);
+        }
     }
     match &change.next_crypto_state {
         Some(state) => {
@@ -646,6 +715,8 @@ pub fn group_change_event_type(change: &GroupChange) -> &'static str {
         GroupChangeKind::SetHistoryPolicy { .. } => "ucr.group.history_policy_changed",
         GroupChangeKind::SetPublicPolicy { .. } => "ucr.group.public_policy_changed",
         GroupChangeKind::SetDeliveryPolicy { .. } => "ucr.group.delivery_policy_changed",
+        GroupChangeKind::AddBridgeMapping { .. } => "ucr.group.bridge_mapping_added",
+        GroupChangeKind::RemoveBridgeMapping { .. } => "ucr.group.bridge_mapping_removed",
     }
 }
 

@@ -2,11 +2,11 @@ use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use ucr_core::{DurableRecordStatus, DurableStoreError, OfflineGroupStore};
 use ucr_model::{
     DeliveryPolicy, GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy, GroupId,
-    GroupMemberState, GroupMembership, GroupPermission, GroupRecord, GroupRole, MessageEnvelope,
-    OfflineGroupChangePage, OfflineGroupChangeReplica, OfflineGroupCursor, OfflineGroupMessagePage,
-    OfflineGroupMessageReplica, OfflineGroupStreamKind, OpaqueId, PrincipalId, PrincipalRef,
-    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, ScopedPrincipal, TenantId,
-    TenantScope,
+    GroupMemberState, GroupMembership, GroupPermission, GroupRecord, GroupRole, IntegrationId,
+    MessageEnvelope, OfflineGroupChangePage, OfflineGroupChangeReplica, OfflineGroupCursor,
+    OfflineGroupMessagePage, OfflineGroupMessageReplica, OfflineGroupStreamKind, OpaqueId,
+    PrincipalId, PrincipalRef, PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,
+    ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_protocol::{
     OfflineGroupError, canonical_offline_group_change_replica,
@@ -82,6 +82,102 @@ pub fn create_v23_objects(transaction: &Transaction<'_>) -> Result<(), DurableSt
     transaction
         .execute_batch(V23_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))
+}
+
+pub const V28_OBJECTS_SQL: &str = r"
+CREATE TABLE offline_group_change_sequence (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    last_sequence INTEGER NOT NULL CHECK(last_sequence>=0)
+);
+INSERT INTO offline_group_change_sequence(singleton, last_sequence)
+SELECT 1, COALESCE(MAX(replica_seq), 0) FROM offline_group_changes;
+
+CREATE TABLE offline_group_bridge_changes (
+    replica_seq INTEGER PRIMARY KEY CHECK(replica_seq>0),
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0,1)),
+    namespace_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    group_generation BLOB NOT NULL CHECK(length(group_generation)=8),
+    actor_principal_id TEXT NOT NULL,
+    actor_principal_kind TEXT NOT NULL,
+    expected_revision BLOB NOT NULL CHECK(length(expected_revision)=8),
+    change_kind TEXT NOT NULL CHECK(change_kind IN ('add_bridge_mapping','remove_bridge_mapping')),
+    integration_id TEXT NOT NULL,
+    external_group_id BLOB NOT NULL CHECK(length(external_group_id) BETWEEN 1 AND 4096),
+    UNIQUE(tenant_id, namespace_present, namespace_id, event_id),
+    FOREIGN KEY(tenant_id, namespace_present, namespace_id, event_id)
+      REFERENCES group_changes(tenant_id, namespace_present, namespace_id, event_id) ON DELETE CASCADE,
+    FOREIGN KEY(tenant_id, namespace_present, namespace_id, group_id)
+      REFERENCES groups(tenant_id, namespace_present, namespace_id, group_id) ON DELETE CASCADE,
+    CHECK((namespace_present=0 AND namespace_id='') OR (namespace_present=1 AND namespace_id<>''))
+);
+CREATE INDEX offline_group_bridge_changes_group_seq
+ON offline_group_bridge_changes(tenant_id, namespace_present, namespace_id, group_id, replica_seq);
+";
+
+pub fn create_v28_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(V28_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub fn verify_schema_v28(connection: &Connection) -> Result<(), DurableStoreError> {
+    super::group_store::verify_schema_v28(connection)?;
+    verify_table_columns(
+        connection,
+        "offline_group_change_sequence",
+        &[
+            ("singleton", "INTEGER", 0, 1),
+            ("last_sequence", "INTEGER", 1, 0),
+        ],
+    )?;
+    verify_table_columns(
+        connection,
+        "offline_group_bridge_changes",
+        &[
+            ("replica_seq", "INTEGER", 0, 1),
+            ("tenant_id", "TEXT", 1, 0),
+            ("namespace_present", "INTEGER", 1, 0),
+            ("namespace_id", "TEXT", 1, 0),
+            ("group_id", "TEXT", 1, 0),
+            ("event_id", "TEXT", 1, 0),
+            ("group_generation", "BLOB", 1, 0),
+            ("actor_principal_id", "TEXT", 1, 0),
+            ("actor_principal_kind", "TEXT", 1, 0),
+            ("expected_revision", "BLOB", 1, 0),
+            ("change_kind", "TEXT", 1, 0),
+            ("integration_id", "TEXT", 1, 0),
+            ("external_group_id", "BLOB", 1, 0),
+        ],
+    )?;
+    verify_bridge_change_rows(connection)?;
+    let last: i64 = connection
+        .query_row(
+            "SELECT last_sequence FROM offline_group_change_sequence WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let max_legacy: i64 = connection
+        .query_row(
+            "SELECT COALESCE(MAX(replica_seq),0) FROM offline_group_changes",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let max_bridge: i64 = connection
+        .query_row(
+            "SELECT COALESCE(MAX(replica_seq),0) FROM offline_group_bridge_changes",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if last < max_legacy.max(max_bridge) {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
 }
 
 pub fn verify_schema_v23(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -161,19 +257,33 @@ pub fn record_change_replica(
     };
     canonical_offline_group_change_replica(&replica)
         .map_err(|_| DurableStoreError::InvalidRecord)?;
-    let fields = encode_change(change);
+    let sequence = next_offline_group_change_sequence(transaction)?;
+    if matches!(
+        change.kind,
+        GroupChangeKind::AddBridgeMapping { .. } | GroupChangeKind::RemoveBridgeMapping { .. }
+    ) {
+        return insert_bridge_change_replica(
+            transaction,
+            sequence,
+            actor,
+            change,
+            group_generation,
+        );
+    }
+    let fields = encode_change(change)?;
     let namespace = namespace_storage_key(&change.scope);
     transaction
         .execute(
             "INSERT INTO offline_group_changes (
-                tenant_id, namespace_present, namespace_id, group_id, event_id,
+                replica_seq, tenant_id, namespace_present, namespace_id, group_id, event_id,
                 group_generation, actor_principal_id, actor_principal_kind, expected_revision,
                 change_kind, target_principal_id, target_principal_kind, role,
                 history_kind, history_value, history_custom, public_join_policy,
                 public_discovery, public_indexed, delivery_policy, crypto_capability_id,
                 crypto_epoch, crypto_state_ref
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
             params![
+                i64::try_from(sequence).map_err(|_| DurableStoreError::Full)?,
                 change.scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
                 namespace.value,
@@ -197,6 +307,80 @@ pub fn record_change_replica(
                 fields.crypto_capability,
                 fields.crypto_epoch.as_ref().map(<[u8; 8]>::as_slice),
                 fields.crypto_state_ref,
+            ],
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    Ok(())
+}
+
+fn next_offline_group_change_sequence(
+    transaction: &Transaction<'_>,
+) -> Result<u64, DurableStoreError> {
+    let last: i64 = transaction
+        .query_row(
+            "SELECT last_sequence FROM offline_group_change_sequence WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let next = last.checked_add(1).ok_or(DurableStoreError::Full)?;
+    let changed = transaction
+        .execute(
+            "UPDATE offline_group_change_sequence SET last_sequence=?1 WHERE singleton=1 AND last_sequence=?2",
+            params![next, last],
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if changed != 1 {
+        return Err(DurableStoreError::Conflict);
+    }
+    u64::try_from(next).map_err(|_| DurableStoreError::Full)
+}
+
+fn insert_bridge_change_replica(
+    transaction: &Transaction<'_>,
+    sequence: u64,
+    actor: &ScopedPrincipal,
+    change: &GroupChange,
+    group_generation: u64,
+) -> Result<(), DurableStoreError> {
+    let (kind, integration_id, external_group_id) = match &change.kind {
+        GroupChangeKind::AddBridgeMapping { mapping } => (
+            "add_bridge_mapping",
+            &mapping.integration_id,
+            mapping.external_group_id.as_slice(),
+        ),
+        GroupChangeKind::RemoveBridgeMapping {
+            integration_id,
+            external_group_id,
+        } => (
+            "remove_bridge_mapping",
+            integration_id,
+            external_group_id.as_slice(),
+        ),
+        _ => return Err(DurableStoreError::InvalidRecord),
+    };
+    let namespace = namespace_storage_key(&change.scope);
+    transaction
+        .execute(
+            "INSERT INTO offline_group_bridge_changes (
+                replica_seq, tenant_id, namespace_present, namespace_id, group_id, event_id,
+                group_generation, actor_principal_id, actor_principal_kind, expected_revision,
+                change_kind, integration_id, external_group_id
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![
+                i64::try_from(sequence).map_err(|_| DurableStoreError::Full)?,
+                change.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                change.group_id.as_opaque().as_str(),
+                change.event_id.as_opaque().as_str(),
+                group_generation.to_be_bytes().as_slice(),
+                actor.principal.principal_id.as_opaque().as_str(),
+                group_store::principal_kind_name(actor.principal.kind),
+                change.expected_revision.to_be_bytes().as_slice(),
+                kind,
+                integration_id.as_opaque().as_str(),
+                external_group_id,
             ],
         )
         .map_err(|error| map_sqlite_error(&error))?;
@@ -301,9 +485,18 @@ impl OfflineGroupStore for SqliteLocalStore {
             entries.push((row.sequence, decode_change_row(scope, group_id, row)?));
         }
         drop(statement);
+        entries.extend(load_bridge_change_rows(
+            &transaction,
+            source,
+            scope,
+            group_id,
+            after,
+            max_items.saturating_add(1),
+        )?);
+        entries.sort_by_key(|(sequence, _)| *sequence);
         let has_more = entries.len() > max_items;
         if has_more {
-            entries.pop();
+            entries.truncate(max_items);
         }
         let next_cursor = has_more.then(|| {
             offline_group_cursor(
@@ -654,7 +847,7 @@ struct EncodedChange {
     crypto_state_ref: Option<String>,
 }
 
-fn encode_change(change: &GroupChange) -> EncodedChange {
+fn encode_change(change: &GroupChange) -> Result<EncodedChange, DurableStoreError> {
     let mut encoded = EncodedChange {
         kind: "",
         target_id: None,
@@ -718,8 +911,11 @@ fn encode_change(change: &GroupChange) -> EncodedChange {
             encoded.kind = "set_delivery_policy";
             encoded.delivery_policy = Some(delivery_policy_name(*policy));
         }
+        GroupChangeKind::AddBridgeMapping { .. } | GroupChangeKind::RemoveBridgeMapping { .. } => {
+            return Err(DurableStoreError::InvalidRecord);
+        }
     }
-    encoded
+    Ok(encoded)
 }
 
 fn set_target(encoded: &mut EncodedChange, principal: &PrincipalRef) {
@@ -877,6 +1073,158 @@ fn decode_change_row(
         },
     };
     canonical_offline_group_change_replica(&record).map_err(|_| DurableStoreError::Corrupt)
+}
+
+#[derive(Debug)]
+struct BridgeChangeRow {
+    sequence: u64,
+    event_id: String,
+    generation: Vec<u8>,
+    actor_id: String,
+    actor_kind: String,
+    expected_revision: Vec<u8>,
+    kind: String,
+    integration_id: String,
+    external_group_id: Vec<u8>,
+}
+
+fn decode_bridge_change_row(
+    scope: &TenantScope,
+    group_id: &GroupId,
+    row: BridgeChangeRow,
+) -> Result<OfflineGroupChangeReplica, DurableStoreError> {
+    if row.sequence == 0 || row.external_group_id.is_empty() || row.external_group_id.len() > 4096 {
+        return Err(DurableStoreError::Corrupt);
+    }
+    let integration_id = IntegrationId::from_opaque(parse_id(&row.integration_id)?);
+    let kind = match row.kind.as_str() {
+        "add_bridge_mapping" => GroupChangeKind::AddBridgeMapping {
+            mapping: ucr_model::GroupBridgeMapping {
+                integration_id,
+                external_group_id: row.external_group_id,
+            },
+        },
+        "remove_bridge_mapping" => GroupChangeKind::RemoveBridgeMapping {
+            integration_id,
+            external_group_id: row.external_group_id,
+        },
+        _ => return Err(DurableStoreError::Corrupt),
+    };
+    let record = OfflineGroupChangeReplica {
+        actor: ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(parse_id(&row.actor_id)?),
+                kind: group_store::parse_principal_kind(&row.actor_kind)?,
+            },
+        },
+        group_generation: decode_u64(&row.generation)?,
+        change: GroupChange {
+            event_id: ucr_model::EventId::from_opaque(parse_id(&row.event_id)?),
+            scope: scope.clone(),
+            group_id: group_id.clone(),
+            expected_revision: decode_u64(&row.expected_revision)?,
+            kind,
+            next_crypto_state: None,
+        },
+    };
+    canonical_offline_group_change_replica(&record).map_err(|_| DurableStoreError::Corrupt)
+}
+
+fn load_bridge_change_rows(
+    connection: &Connection,
+    source: &ScopedPrincipal,
+    scope: &TenantScope,
+    group_id: &GroupId,
+    after: u64,
+    max_items: usize,
+) -> Result<Vec<(u64, OfflineGroupChangeReplica)>, DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let limit = i64::try_from(max_items).unwrap_or(i64::MAX);
+    let mut statement = connection
+        .prepare(
+            "SELECT replica_seq, event_id, group_generation, actor_principal_id, actor_principal_kind,
+                    expected_revision, change_kind, integration_id, external_group_id
+             FROM offline_group_bridge_changes
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND group_id=?4
+               AND actor_principal_id=?5 AND actor_principal_kind=?6 AND replica_seq>?7
+             ORDER BY replica_seq LIMIT ?8",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map(
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                group_id.as_opaque().as_str(),
+                source.principal.principal_id.as_opaque().as_str(),
+                group_store::principal_kind_name(source.principal.kind),
+                i64::try_from(after).unwrap_or(i64::MAX),
+                limit,
+            ],
+            |row| {
+                Ok(BridgeChangeRow {
+                    sequence: u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+                    event_id: row.get(1)?,
+                    generation: row.get(2)?,
+                    actor_id: row.get(3)?,
+                    actor_kind: row.get(4)?,
+                    expected_revision: row.get(5)?,
+                    kind: row.get(6)?,
+                    integration_id: row.get(7)?,
+                    external_group_id: row.get(8)?,
+                })
+            },
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut result = Vec::new();
+    for row in rows {
+        let row = row.map_err(|error| map_sqlite_error(&error))?;
+        let sequence = row.sequence;
+        result.push((sequence, decode_bridge_change_row(scope, group_id, row)?));
+    }
+    Ok(result)
+}
+
+fn verify_bridge_change_rows(connection: &Connection) -> Result<(), DurableStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT replica_seq, tenant_id, namespace_present, namespace_id, group_id, event_id,
+                    group_generation, actor_principal_id, actor_principal_kind, expected_revision,
+                    change_kind, integration_id, external_group_id
+             FROM offline_group_bridge_changes ORDER BY replica_seq",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                BridgeChangeRow {
+                    sequence: u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+                    event_id: row.get(5)?,
+                    generation: row.get(6)?,
+                    actor_id: row.get(7)?,
+                    actor_kind: row.get(8)?,
+                    expected_revision: row.get(9)?,
+                    kind: row.get(10)?,
+                    integration_id: row.get(11)?,
+                    external_group_id: row.get(12)?,
+                },
+            ))
+        })
+        .map_err(|error| map_sqlite_error(&error))?;
+    for row in rows {
+        let (tenant, present, namespace, group, change) =
+            row.map_err(|error| map_sqlite_error(&error))?;
+        let scope = parse_scope(&tenant, present, &namespace)?;
+        let group_id = GroupId::from_opaque(parse_id(&group)?);
+        decode_bridge_change_row(&scope, &group_id, change)?;
+    }
+    Ok(())
 }
 
 fn verify_change_rows(connection: &Connection) -> Result<(), DurableStoreError> {

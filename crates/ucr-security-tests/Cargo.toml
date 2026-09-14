@@ -18,6 +18,7 @@ ucr-bridge-max = { path = "../ucr-bridge-max" }
 ucr-core = { path = "../ucr-core" }
 ucr-crypto = { path = "../ucr-crypto" }
 ucr-model = { path = "../ucr-model" }
+ucr-overlay = { path = "../ucr-overlay" }
 ucr-protocol = { path = "../ucr-protocol" }
 ucr-storage-memory = { path = "../ucr-storage-memory" }
 ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
