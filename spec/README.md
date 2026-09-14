@@ -13,3 +13,5 @@ Phase 33 adds `vk-bridge.md`: a concrete Prepared VK API 5.199 text adapter over
 Phase 34 adds `max-bridge.md`: a concrete Prepared MAX Bot API Text adapter over the same Bridge runtime, with fixed-origin HTTPS, redacted Authorization credentials, explicit user/chat target kinds, bounded marker-based development/test update intake, conservative acceptance semantics, and no MAX-specific Message/Delivery/Identity owner.
 
 Phase 35 adds `overlay-conversations.md`: Prepared cross-network logical Groups over the existing canonical Group/Conversation and Bridge registration owners, with exact endpoint binding, reverse resolution, explicit degradation, SQLite v28 restart/offline evidence, and no second Message/Identity/Delivery brain.
+
+Phase 36 adds `federation.md`: Prepared explicit independent-node trust and cross-scope sync admission over canonical Endpoint, Device/key, authorization and Sync owners, with restart-safe SQLite v29 policy state and no second communication brain.

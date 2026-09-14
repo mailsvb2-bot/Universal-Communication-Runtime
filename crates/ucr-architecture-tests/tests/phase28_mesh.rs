@@ -65,11 +65,7 @@ fn phase28_release_truth_docs_and_fuzz_are_machine_locked() {
         ))
         .expect("ADR 0066");
 
-    assert!(
-        readme.contains(
-            "**Phase 35 — Overlay Conversations (Prepared cross-network logical groups).**"
-        )
-    );
+    assert!(readme.contains("Phase 35 adds Prepared Overlay Conversations"));
     assert!(ci.contains("test -s spec/mesh.md"));
     assert!(ci.contains("test -s proto/ucr/v1/mesh.proto"));
     assert!(ci.contains("0066-phase28-mesh"));

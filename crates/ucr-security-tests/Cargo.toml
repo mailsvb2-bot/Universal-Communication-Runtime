@@ -17,6 +17,7 @@ ucr-bridge-vk = { path = "../ucr-bridge-vk" }
 ucr-bridge-max = { path = "../ucr-bridge-max" }
 ucr-core = { path = "../ucr-core" }
 ucr-crypto = { path = "../ucr-crypto" }
+ucr-federation = { path = "../ucr-federation" }
 ucr-model = { path = "../ucr-model" }
 ucr-overlay = { path = "../ucr-overlay" }
 ucr-protocol = { path = "../ucr-protocol" }

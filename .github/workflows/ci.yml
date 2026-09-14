@@ -250,4 +250,6 @@ jobs:
           test -s docs/adr/0071-phase33-vk-is-a-thin-api-bridge-over-canonical-ucr.md &&
           test -s docs/adr/0072-phase34-max-is-a-thin-bot-api-bridge-over-canonical-ucr.md &&
           test -s spec/overlay-conversations.md &&
-          test -s docs/adr/0073-phase35-overlay-conversations-reuse-group-conversation-and-bridge-owners.md
+          test -s docs/adr/0073-phase35-overlay-conversations-reuse-group-conversation-and-bridge-owners.md &&
+          test -s spec/federation.md &&
+          test -s docs/adr/0074-phase36-federation-is-explicit-local-trust-over-endpoint-crypto-and-sync-owners.md

@@ -2961,6 +2961,7 @@ mod phase35_overlay_sqlite_tests {
                 .create_group(&conversation, &group, &owner)
                 .expect("group");
             let connection = store.lock_connection().expect("connection");
+            crate::test_remove_v29_objects(&connection).expect("remove v29 objects");
             connection
                 .execute_batch(
                     "DROP INDEX group_bridge_mappings_external_endpoint;\n\

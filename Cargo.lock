@@ -2960,6 +2960,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-federation"
+version = "0.0.1"
+dependencies = [
+ "ucr-core",
+ "ucr-crypto",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-memory",
+]
+
+[[package]]
 name = "ucr-group-mls"
 version = "0.0.1"
 dependencies = [
@@ -3057,6 +3068,7 @@ dependencies = [
  "ucr-bridge-vk",
  "ucr-core",
  "ucr-crypto",
+ "ucr-federation",
  "ucr-model",
  "ucr-overlay",
  "ucr-protocol",

@@ -70,11 +70,7 @@ fn phase32_security_spec_ci_and_fuzz_evidence_are_machine_locked() {
     let ci = read(".github/workflows/ci.yml");
     let fuzz = read("fuzz/fuzz_targets/telegram_bridge_boundary.rs");
     let smoke = read("fuzz/run-smoke.sh");
-    assert!(
-        readme.contains(
-            "**Phase 35 — Overlay Conversations (Prepared cross-network logical groups).**"
-        )
-    );
+    assert!(readme.contains("Phase 35 adds Prepared Overlay Conversations"));
     assert!(spec_index.contains("Phase 32 adds `telegram-bridge.md`"));
     assert!(spec.contains("Telegram Bot API 10.3"));
     assert!(adr.contains("thin Bot API bridge over canonical UCR"));

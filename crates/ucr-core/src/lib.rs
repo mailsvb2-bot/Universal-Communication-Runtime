@@ -19,12 +19,13 @@ use ucr_model::{
     ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState,
     DeviceDescriptor, DeviceId, EndpointAddress, EndpointId, EventConsumerCursor, EventDeadLetter,
     EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult, EventReconciliation,
-    EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding, IdentityId,
-    IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant,
-    PrincipalIdentityBinding, PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
-    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
-    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
-    TenantScope, TrustedSigningKeyRecord,
+    EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding,
+    FederationPeerRecord, FederationTrustState, IdentityId, IdentityRecord, IntegrationId,
+    IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PrincipalIdentityBinding,
+    PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
+    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
+    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -1091,6 +1092,55 @@ pub trait CommandOutcomeStore: EventJournalStore {
         scope: &TenantScope,
         command_id: &CommandId,
     ) -> Result<Option<EventId>, DurableStoreError>;
+}
+
+/// Durable local federation trust policy. This state never replaces canonical Device/key trust.
+pub trait FederationPeerStore: StorageProvider {
+    /// Installs one exact Known peer relationship or deduplicates an identical retry.
+    ///
+    /// # Errors
+    /// Returns validation, conflict, capacity, corruption, permission, or storage failures.
+    fn install_federation_peer(
+        &self,
+        record: &FederationPeerRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one exact relationship keyed by local scope, remote scope and remote Endpoint.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures; absence is not an error.
+    fn federation_peer(
+        &self,
+        local_scope: &TenantScope,
+        remote_scope: &TenantScope,
+        remote_endpoint_id: &EndpointId,
+    ) -> Result<Option<FederationPeerRecord>, DurableStoreError>;
+
+    /// Advances one trust state with optimistic generation.
+    ///
+    /// # Errors
+    /// Returns invalid-transition, stale-generation, corruption, or storage failures.
+    fn transition_federation_peer(
+        &self,
+        local_scope: &TenantScope,
+        remote_scope: &TenantScope,
+        remote_endpoint_id: &EndpointId,
+        expected_generation: u64,
+        next_state: FederationTrustState,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Replaces expected peer Device/key material and resets trust to Known.
+    ///
+    /// Rotation is explicit and compare-and-swap guarded so a compromised credential cannot silently
+    /// replace its own trust root.
+    ///
+    /// # Errors
+    /// Returns invalid rotation, stale-state conflict, corruption, or storage failures.
+    fn rotate_federation_peer_credential(
+        &self,
+        current: &FederationPeerRecord,
+        replacement: &FederationPeerRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
 }
 
 #[cfg(test)]

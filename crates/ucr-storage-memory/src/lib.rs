@@ -15,11 +15,11 @@ use ucr_core::{
     CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore, ConversationStore,
     DeliveryStore, DeviceLifecycleStore, DeviceReverificationProof, DurableRecordStatus,
     DurableStoreError, EventAppendStatus, EventJournalStore, EventSubscriptionStore,
-    ExternalIdentityBindingStore, IdentityStore, MessageStore, PermissionGrantStore,
-    PrincipalIdentityBindingStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore,
-    RecoveryPlanStore, ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
-    ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth, StorageProvider, SyncStore,
-    TrustedSigningKeyStore,
+    ExternalIdentityBindingStore, FederationPeerStore, IdentityStore, MessageStore,
+    PermissionGrantStore, PrincipalIdentityBindingStore, RecoveryAdmissionProof,
+    RecoveryDeviceStagingStore, RecoveryPlanStore, ReverifiedDeviceActivationStore,
+    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
+    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -30,11 +30,12 @@ use ucr_model::{
     BridgeActionState, BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState,
     CallSession, CommandEnvelope, CommandId, CommunicationIntent, ConversationId,
     ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState,
-    DeviceDescriptor, DeviceId, DeviceLifecycleState, EventConsumerCursor, EventDeadLetter,
-    EventDeliveryBatch, EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult,
-    EventReconciliation, EventReplicaState, EventSubscription, EventSubscriptionId,
-    EventSubscriptionStart, EventSummary, ExternalIdentityBinding, GroupMembership, GroupRecord,
-    IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId,
+    DeviceDescriptor, DeviceId, DeviceLifecycleState, EndpointId, EventConsumerCursor,
+    EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind, EventEnvelope, EventId,
+    EventPollResult, EventReconciliation, EventReplicaState, EventSubscription,
+    EventSubscriptionId, EventSubscriptionStart, EventSummary, ExternalIdentityBinding,
+    FederationPeerRecord, FederationTrustState, GroupMembership, GroupRecord, IdentityId,
+    IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId,
     OfflineGroupChangeReplica, OfflineGroupMessageReplica, OpaqueId, PermissionGrant,
     PrincipalIdentityBinding, PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
     ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
@@ -47,21 +48,23 @@ use ucr_protocol::{
     IdempotencyDecision, MAX_EVENT_DELIVERY_BATCH_BYTES, MAX_SERVICE_AUDIT_READ_ITEMS,
     accepted_command_receipt, anti_entropy_session_binding, canonical_bridge_registration,
     canonical_command, canonical_communication_intent, canonical_event,
-    canonical_event_subscription, canonical_message, canonical_recovery_plan,
-    canonical_sync_session, compare_command_idempotency, device_allows_protected_access,
-    duplicate_command_receipt, event_consumer_cursor_token, event_delivery_batch_next_size,
-    event_delivery_size, event_fingerprint, event_matches_subscription, event_retry_delay_ms,
-    service_audit_hash, validate_anti_entropy_cursor, validate_anti_entropy_page_size,
-    validate_anti_entropy_session, validate_anti_entropy_summary_count,
-    validate_bridge_action_record, validate_bridge_action_transition,
-    validate_bridge_registration_transition, validate_conversation,
-    validate_conversation_parent_kind, validate_delivery_attempt, validate_delivery_evidence,
-    validate_delivery_evidence_binding, validate_delivery_evidence_order,
-    validate_delivery_transition, validate_event_batch_size, validate_event_consumer_cursor,
-    validate_external_identity_binding, validate_external_identity_binding_key,
-    validate_identity_record, validate_permission_grant, validate_principal_identity_binding,
-    validate_service_audit_record, validate_service_quota_policy, validate_sync_checkpoint,
-    validate_sync_transition, validate_trusted_signing_key_descriptor,
+    canonical_event_subscription, canonical_federation_peer, canonical_message,
+    canonical_recovery_plan, canonical_sync_session, compare_command_idempotency,
+    device_allows_protected_access, duplicate_command_receipt, event_consumer_cursor_token,
+    event_delivery_batch_next_size, event_delivery_size, event_fingerprint,
+    event_matches_subscription, event_retry_delay_ms, service_audit_hash,
+    validate_anti_entropy_cursor, validate_anti_entropy_page_size, validate_anti_entropy_session,
+    validate_anti_entropy_summary_count, validate_bridge_action_record,
+    validate_bridge_action_transition, validate_bridge_registration_transition,
+    validate_conversation, validate_conversation_parent_kind, validate_delivery_attempt,
+    validate_delivery_evidence, validate_delivery_evidence_binding,
+    validate_delivery_evidence_order, validate_delivery_transition, validate_event_batch_size,
+    validate_event_consumer_cursor, validate_external_identity_binding,
+    validate_external_identity_binding_key, validate_federation_credential_rotation,
+    validate_federation_transition, validate_identity_record, validate_permission_grant,
+    validate_principal_identity_binding, validate_service_audit_record,
+    validate_service_quota_policy, validate_sync_checkpoint, validate_sync_transition,
+    validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 12;
@@ -85,6 +88,7 @@ type BridgeActionKey = (ScopeKey, String);
 type IdentityKey = (ScopeKey, String);
 type ExternalIdentityBindingKey = (ScopeKey, String, String, Vec<u8>);
 type PrincipalIdentityBindingKey = (ScopeKey, PrincipalRef);
+type FederationPeerKey = (ScopeKey, ScopeKey, String);
 type DeliveryKey = (ScopeKey, String);
 type StoreForwardKey = (ScopeKey, String);
 type SyncKey = (ScopeKey, String);
@@ -161,6 +165,7 @@ struct MemoryState {
     identities: HashMap<IdentityKey, IdentityRecord>,
     external_identity_bindings: HashMap<ExternalIdentityBindingKey, ExternalIdentityBinding>,
     principal_identity_bindings: HashMap<PrincipalIdentityBindingKey, PrincipalIdentityBinding>,
+    federation_peers: HashMap<FederationPeerKey, FederationPeerRecord>,
     deliveries: HashMap<DeliveryKey, DeliveryAttempt>,
     delivery_evidence: HashMap<DeliveryKey, Vec<DeliveryEvidence>>,
     store_forward_jobs: HashMap<StoreForwardKey, MemoryStoreForwardState>,
@@ -1181,6 +1186,118 @@ impl ExternalIdentityBindingStore for MemoryLocalStore {
     }
 }
 
+impl FederationPeerStore for MemoryLocalStore {
+    fn install_federation_peer(
+        &self,
+        record: &FederationPeerRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let canonical =
+            canonical_federation_peer(record).map_err(|_| DurableStoreError::InvalidRecord)?;
+        if canonical.state != FederationTrustState::Known || canonical.generation != 1 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let key = federation_peer_key(
+            &canonical.local_scope,
+            &canonical.remote_scope,
+            &canonical.remote_endpoint_id,
+        );
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.federation_peers.get(&key) {
+            return if existing == &canonical {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.federation_peers.insert(key, canonical);
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn federation_peer(
+        &self,
+        local_scope: &TenantScope,
+        remote_scope: &TenantScope,
+        remote_endpoint_id: &EndpointId,
+    ) -> Result<Option<FederationPeerRecord>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .federation_peers
+            .get(&federation_peer_key(
+                local_scope,
+                remote_scope,
+                remote_endpoint_id,
+            ))
+            .cloned())
+    }
+
+    fn transition_federation_peer(
+        &self,
+        local_scope: &TenantScope,
+        remote_scope: &TenantScope,
+        remote_endpoint_id: &EndpointId,
+        expected_generation: u64,
+        next_state: FederationTrustState,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let key = federation_peer_key(local_scope, remote_scope, remote_endpoint_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current = state
+            .federation_peers
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::Conflict)?;
+        let next_generation = expected_generation
+            .checked_add(1)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if current.generation == next_generation && current.state == next_state {
+            return Ok(DurableRecordStatus::Duplicate);
+        }
+        if current.generation != expected_generation {
+            return Err(DurableStoreError::Conflict);
+        }
+        validate_federation_transition(current.state, next_state)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut next = current;
+        next.state = next_state;
+        next.generation = next_generation;
+        let canonical =
+            canonical_federation_peer(&next).map_err(|_| DurableStoreError::InvalidRecord)?;
+        state.federation_peers.insert(key, canonical);
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn rotate_federation_peer_credential(
+        &self,
+        current: &FederationPeerRecord,
+        replacement: &FederationPeerRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let current =
+            canonical_federation_peer(current).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let replacement =
+            canonical_federation_peer(replacement).map_err(|_| DurableStoreError::InvalidRecord)?;
+        validate_federation_credential_rotation(&current, &replacement)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = federation_peer_key(
+            &current.local_scope,
+            &current.remote_scope,
+            &current.remote_endpoint_id,
+        );
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let persisted = state
+            .federation_peers
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::Conflict)?;
+        if persisted == replacement {
+            return Ok(DurableRecordStatus::Duplicate);
+        }
+        if persisted != current {
+            return Err(DurableStoreError::Conflict);
+        }
+        state.federation_peers.insert(key, replacement);
+        Ok(DurableRecordStatus::Persisted)
+    }
+}
+
 impl ConversationStore for MemoryLocalStore {
     fn persist_conversation(
         &self,
@@ -1846,6 +1963,18 @@ fn scope_key(scope: &TenantScope) -> ScopeKey {
             .namespace_id
             .as_ref()
             .map(|value| value.as_opaque().as_str().to_owned()),
+    )
+}
+
+fn federation_peer_key(
+    local_scope: &TenantScope,
+    remote_scope: &TenantScope,
+    remote_endpoint_id: &EndpointId,
+) -> FederationPeerKey {
+    (
+        scope_key(local_scope),
+        scope_key(remote_scope),
+        remote_endpoint_id.as_opaque().as_str().to_owned(),
     )
 }
 

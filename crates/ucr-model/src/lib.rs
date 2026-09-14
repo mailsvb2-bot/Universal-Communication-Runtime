@@ -7,6 +7,7 @@ mod audio;
 mod bridge;
 mod call;
 mod conference;
+mod federation;
 mod group;
 mod group_media_e2ee;
 mod media_e2ee;
@@ -39,6 +40,7 @@ pub use conference::{
     ConferenceMediaSubscription, ConferenceSnapshot, ConferenceStart, ConferenceSubscriptionSet,
     ConferenceTopology,
 };
+pub use federation::{FederationPeerRecord, FederationTrustState};
 pub use group::{
     GroupBridgeMapping, GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy,
     GroupMediaState, GroupMemberState, GroupMembership, GroupOwnership, GroupPermission,
