@@ -79,7 +79,7 @@ fn phase34_security_spec_ci_and_fuzz_evidence_are_machine_locked() {
     let smoke = read("fuzz/run-smoke.sh");
     assert!(
         readme.contains(
-            "**Phase 34 — MAX (Prepared text bridge; Overlay Conversations not started).**"
+            "**Phase 35 — Overlay Conversations (Prepared cross-network logical groups).**"
         )
     );
     assert!(spec_index.contains("Phase 34 adds `max-bridge.md`"));

@@ -541,7 +541,7 @@ fn insert_registration(
     Ok(())
 }
 
-fn load_registration_from(
+pub(super) fn load_registration_from(
     connection: &Connection,
     scope: &TenantScope,
     integration_id: &IntegrationId,

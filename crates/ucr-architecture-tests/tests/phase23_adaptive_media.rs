@@ -100,7 +100,7 @@ fn phase23_release_truth_public_contract_and_fuzz_gate_are_machine_locked() {
 
     assert!(
         readme.contains(
-            "**Phase 34 — MAX (Prepared text bridge; Overlay Conversations not started).**"
+            "**Phase 35 — Overlay Conversations (Prepared cross-network logical groups).**"
         )
     );
     assert!(ci.contains("test -s spec/adaptive-media.md"));

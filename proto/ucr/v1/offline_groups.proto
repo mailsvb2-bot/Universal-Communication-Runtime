@@ -72,6 +72,15 @@ message GroupTransferOwnershipChange { PrincipalRef new_owner = 1; }
 message GroupSetHistoryPolicyChange { GroupHistoryPolicy policy = 1; }
 message GroupSetPublicPolicyChange { PublicGroupPolicy policy = 1; }
 message GroupSetDeliveryPolicyChange { DeliveryPolicy policy = 1; }
+message GroupBridgeMapping {
+  OpaqueId integration_id = 1;
+  bytes external_group_id = 2;
+}
+message GroupAddBridgeMappingChange { GroupBridgeMapping mapping = 1; }
+message GroupRemoveBridgeMappingChange {
+  OpaqueId integration_id = 1;
+  bytes external_group_id = 2;
+}
 
 message OfflineGroupChange {
   OpaqueId event_id = 1;
@@ -86,6 +95,8 @@ message OfflineGroupChange {
     GroupSetHistoryPolicyChange set_history_policy = 9;
     GroupSetPublicPolicyChange set_public_policy = 10;
     GroupSetDeliveryPolicyChange set_delivery_policy = 11;
+    GroupAddBridgeMappingChange add_bridge_mapping = 13;
+    GroupRemoveBridgeMappingChange remove_bridge_mapping = 14;
   }
   optional GroupCryptoState next_crypto_state = 12;
 }message OfflineGroupCursor { bytes token = 1; }

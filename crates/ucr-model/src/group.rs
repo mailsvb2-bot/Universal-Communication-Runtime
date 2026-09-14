@@ -172,6 +172,13 @@ pub enum GroupChangeKind {
     SetDeliveryPolicy {
         policy: DeliveryPolicy,
     },
+    AddBridgeMapping {
+        mapping: GroupBridgeMapping,
+    },
+    RemoveBridgeMapping {
+        integration_id: IntegrationId,
+        external_group_id: Vec<u8>,
+    },
 }
 
 /// One idempotent security-sensitive Group mutation.

@@ -3,12 +3,12 @@ use ucr_core::{
     OfflineGroupStore,
 };
 use ucr_model::{
-    ConversationId, ConversationRecord, DeliveryState, GroupChange, GroupHistoryPolicy, GroupId,
-    GroupMemberState, GroupMembership, GroupPermission, GroupRecord, MeshCursor,
-    MeshGroupMessagePage, MeshGroupMessageReplica, MessageEnvelope, MessageId,
-    OfflineGroupChangePage, OfflineGroupChangeReplica, OfflineGroupCursor, OfflineGroupMessagePage,
-    OfflineGroupMessageReplica, OfflineGroupStreamKind, PrincipalKind, PrincipalRef,
-    ScopedPrincipal, TenantScope,
+    BridgeRegistrationState, ConversationId, ConversationRecord, DeliveryState, GroupChange,
+    GroupHistoryPolicy, GroupId, GroupMemberState, GroupMembership, GroupPermission, GroupRecord,
+    IntegrationId, MeshCursor, MeshGroupMessagePage, MeshGroupMessageReplica, MessageEnvelope,
+    MessageId, OfflineGroupChangePage, OfflineGroupChangeReplica, OfflineGroupCursor,
+    OfflineGroupMessagePage, OfflineGroupMessageReplica, OfflineGroupStreamKind, PrincipalKind,
+    PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
     MAX_MESH_PATH_DEVICES, active_group_actor_role, apply_group_change, canonical_group_creation,
@@ -21,8 +21,8 @@ use ucr_protocol::{
 };
 
 use super::{
-    GroupChangeKey, GroupKey, GroupMembershipKey, MemoryLocalStore, MemoryState, conversation_key,
-    message_key, persist_message_in_state, scope_key,
+    GroupChangeKey, GroupKey, GroupMembershipKey, MemoryLocalStore, MemoryState,
+    bridge_registration_key, conversation_key, message_key, persist_message_in_state, scope_key,
 };
 
 impl GroupStore for MemoryLocalStore {
@@ -68,6 +68,8 @@ impl GroupStore for MemoryLocalStore {
         }) {
             return Err(DurableStoreError::Conflict);
         }
+        ensure_initial_bridge_registrations_active(&state, &group)?;
+        ensure_bridge_mapping_uniqueness(&state, &group, None)?;
         if let Some(existing) = state.conversations.get(&conversation_key) {
             if existing != conversation {
                 return Err(DurableStoreError::Conflict);
@@ -107,6 +109,30 @@ impl GroupStore for MemoryLocalStore {
                 group.scope == *scope && group.conversation.conversation_id == *conversation_id
             })
             .cloned())
+    }
+
+    fn group_for_bridge_mapping(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        external_group_id: &[u8],
+    ) -> Result<Option<GroupRecord>, DurableStoreError> {
+        if external_group_id.is_empty() || external_group_id.len() > 4096 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut matches = state.groups.values().filter(|group| {
+            group.scope == *scope
+                && group.bridge_mappings.iter().any(|mapping| {
+                    mapping.integration_id == *integration_id
+                        && mapping.external_group_id.as_slice() == external_group_id
+                })
+        });
+        let result = matches.next().cloned();
+        if matches.next().is_some() {
+            return Err(DurableStoreError::Corrupt);
+        }
+        Ok(result)
     }
 
     fn group_membership(
@@ -256,6 +282,18 @@ fn apply_group_change_in_state(
             Err(DurableStoreError::Conflict)
         };
     }
+    if let ucr_model::GroupChangeKind::AddBridgeMapping { mapping } = &change.kind {
+        let registration = state
+            .bridge_registrations
+            .get(&super::bridge_registration_key(
+                &change.scope,
+                &mapping.integration_id,
+            ))
+            .ok_or(DurableStoreError::Conflict)?;
+        if registration.state != BridgeRegistrationState::Active {
+            return Err(DurableStoreError::Conflict);
+        }
+    }
     let history_floor = if matches!(change.kind, ucr_model::GroupChangeKind::AddMember { .. }) {
         Some(history_floor_for_add(state, &group)?)
     } else {
@@ -270,6 +308,7 @@ fn apply_group_change_in_state(
         history_floor,
     )
     .map_err(map_group_error)?;
+    ensure_bridge_mapping_uniqueness(state, &transition.group, Some(&group.group_id))?;
     if state.events.contains_key(&change_key) || state.call_signals.contains_key(&change_key) {
         return Err(DurableStoreError::Conflict);
     }
@@ -308,6 +347,46 @@ fn apply_group_change_in_state(
         ));
     }
     Ok(DurableRecordStatus::Persisted)
+}
+
+fn ensure_initial_bridge_registrations_active(
+    state: &MemoryState,
+    group: &GroupRecord,
+) -> Result<(), DurableStoreError> {
+    for mapping in &group.bridge_mappings {
+        let registration = state
+            .bridge_registrations
+            .get(&bridge_registration_key(
+                &group.scope,
+                &mapping.integration_id,
+            ))
+            .ok_or(DurableStoreError::Conflict)?;
+        if registration.state != BridgeRegistrationState::Active {
+            return Err(DurableStoreError::Conflict);
+        }
+    }
+    Ok(())
+}
+
+fn ensure_bridge_mapping_uniqueness(
+    state: &MemoryState,
+    candidate: &GroupRecord,
+    exclude_group_id: Option<&GroupId>,
+) -> Result<(), DurableStoreError> {
+    for mapping in &candidate.bridge_mappings {
+        let collision = state.groups.values().any(|existing| {
+            existing.scope == candidate.scope
+                && exclude_group_id != Some(&existing.group_id)
+                && existing.bridge_mappings.iter().any(|other| {
+                    other.integration_id == mapping.integration_id
+                        && other.external_group_id == mapping.external_group_id
+                })
+        });
+        if collision {
+            return Err(DurableStoreError::Conflict);
+        }
+    }
+    Ok(())
 }
 
 fn membership_active_at_generation(membership: &GroupMembership, generation: u64) -> bool {

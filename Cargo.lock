@@ -3030,6 +3030,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-overlay"
+version = "0.0.1"
+dependencies = [
+ "ucr-core",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-memory",
+]
+
+[[package]]
 name = "ucr-protocol"
 version = "0.0.1"
 dependencies = [
@@ -3048,6 +3058,7 @@ dependencies = [
  "ucr-core",
  "ucr-crypto",
  "ucr-model",
+ "ucr-overlay",
  "ucr-protocol",
  "ucr-storage-memory",
  "ucr-storage-sqlite",

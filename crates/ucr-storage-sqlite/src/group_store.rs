@@ -1,4 +1,7 @@
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, Error as SqliteError, ErrorCode, OptionalExtension, Transaction,
+    TransactionBehavior, params,
+};
 use ucr_core::{DurableRecordStatus, DurableStoreError, GroupMessageStore, GroupStore};
 use ucr_model::{
     ConversationId, ConversationKind, ConversationRecord, ConversationRef, DeliveryPolicy,
@@ -105,6 +108,84 @@ pub fn create_v21_objects(transaction: &Transaction<'_>) -> Result<(), DurableSt
     transaction
         .execute_batch(V21_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))
+}
+
+pub const V28_OBJECTS_SQL: &str = r"
+CREATE UNIQUE INDEX group_bridge_mappings_external_endpoint
+ON group_bridge_mappings(tenant_id, namespace_present, namespace_id, integration_id, external_group_id);
+";
+
+pub fn create_v28_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(V28_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub fn verify_schema_v28(connection: &Connection) -> Result<(), DurableStoreError> {
+    super::bridge_store::verify_schema_v27(connection)?;
+    verify_external_endpoint_unique_index(connection)
+}
+
+fn verify_external_endpoint_unique_index(connection: &Connection) -> Result<(), DurableStoreError> {
+    const INDEX_NAME: &str = "group_bridge_mappings_external_endpoint";
+    const EXPECTED_COLUMNS: [&str; 5] = [
+        "tenant_id",
+        "namespace_present",
+        "namespace_id",
+        "integration_id",
+        "external_group_id",
+    ];
+
+    let mut statement = connection
+        .prepare("PRAGMA index_list('group_bridge_mappings')")
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut exact_index_found = false;
+    while let Some(row) = rows.next().map_err(|error| map_sqlite_error(&error))? {
+        let name: String = row.get(1).map_err(|error| map_sqlite_error(&error))?;
+        if name != INDEX_NAME {
+            continue;
+        }
+        let unique: i64 = row.get(2).map_err(|error| map_sqlite_error(&error))?;
+        let partial: i64 = row.get(4).map_err(|error| map_sqlite_error(&error))?;
+        if unique != 1 || partial != 0 {
+            return Err(DurableStoreError::Corrupt);
+        }
+        exact_index_found = true;
+        break;
+    }
+    drop(rows);
+    drop(statement);
+    if !exact_index_found {
+        return Err(DurableStoreError::Corrupt);
+    }
+
+    let mut statement = connection
+        .prepare("PRAGMA index_xinfo('group_bridge_mappings_external_endpoint')")
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, Option<String>>(2)?, row.get::<_, i64>(5)?))
+        })
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut key_columns = Vec::new();
+    for row in rows {
+        let (name, key) = row.map_err(|error| map_sqlite_error(&error))?;
+        if key == 1 {
+            key_columns.push(name.ok_or(DurableStoreError::Corrupt)?);
+        }
+    }
+    if key_columns
+        != EXPECTED_COLUMNS
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
 }
 
 pub fn verify_schema_v21(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -267,6 +348,16 @@ impl GroupStore for SqliteLocalStore {
         load_group_for_conversation_from(&connection, scope, conversation_id)
     }
 
+    fn group_for_bridge_mapping(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        external_group_id: &[u8],
+    ) -> Result<Option<GroupRecord>, DurableStoreError> {
+        let connection = self.lock_connection()?;
+        load_group_for_bridge_mapping_from(&connection, scope, integration_id, external_group_id)
+    }
+
     fn group_membership(
         &self,
         scope: &TenantScope,
@@ -404,6 +495,7 @@ pub(super) fn create_group_in_transaction(
     {
         return Err(DurableStoreError::Conflict);
     }
+    ensure_initial_bridge_registrations_active(transaction, &group)?;
     match message_store::load_conversation_from(
         transaction,
         &conversation.scope,
@@ -447,6 +539,17 @@ pub fn apply_group_change_in_transaction(
         } else {
             Err(DurableStoreError::Conflict)
         };
+    }
+    if let ucr_model::GroupChangeKind::AddBridgeMapping { mapping } = &change.kind {
+        let registration = super::bridge_store::load_registration_from(
+            transaction,
+            &change.scope,
+            &mapping.integration_id,
+        )?
+        .ok_or(DurableStoreError::Conflict)?;
+        if registration.state != ucr_model::BridgeRegistrationState::Active {
+            return Err(DurableStoreError::Conflict);
+        }
     }
     let history_floor = if matches!(change.kind, ucr_model::GroupChangeKind::AddMember { .. }) {
         Some(history_floor_for_add(transaction, &group)?)
@@ -613,6 +716,24 @@ impl GroupMessageStore for SqliteLocalStore {
     }
 }
 
+fn ensure_initial_bridge_registrations_active(
+    connection: &Connection,
+    group: &GroupRecord,
+) -> Result<(), DurableStoreError> {
+    for mapping in &group.bridge_mappings {
+        let registration = super::bridge_store::load_registration_from(
+            connection,
+            &group.scope,
+            &mapping.integration_id,
+        )?
+        .ok_or(DurableStoreError::Conflict)?;
+        if registration.state != ucr_model::BridgeRegistrationState::Active {
+            return Err(DurableStoreError::Conflict);
+        }
+    }
+    Ok(())
+}
+
 fn insert_group_conversation(
     transaction: &Transaction<'_>,
     conversation: &ConversationRecord,
@@ -703,9 +824,20 @@ fn insert_bridges(
                     mapping.external_group_id
                 ],
             )
-            .map_err(|error| map_sqlite_error(&error))?;
+            .map_err(|error| map_bridge_mapping_insert_error(&error))?;
     }
     Ok(())
+}
+
+fn map_bridge_mapping_insert_error(error: &SqliteError) -> DurableStoreError {
+    match error {
+        SqliteError::SqliteFailure(details, _)
+            if details.code == ErrorCode::ConstraintViolation =>
+        {
+            DurableStoreError::Conflict
+        }
+        _ => map_sqlite_error(error),
+    }
 }
 
 fn insert_membership(
@@ -821,6 +953,38 @@ pub fn load_group_for_conversation_from(
         params![scope.tenant_id.as_opaque().as_str(), namespace.present, namespace.value, conversation_id.as_opaque().as_str()],
         |row| row.get::<_,String>(0),
     ).optional().map_err(|error| map_sqlite_error(&error))?;
+    group_id
+        .map(|value| load_group_from(connection, scope, &GroupId::from_opaque(parse_id(&value)?)))
+        .transpose()
+        .map(Option::flatten)
+}
+
+pub fn load_group_for_bridge_mapping_from(
+    connection: &Connection,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    external_group_id: &[u8],
+) -> Result<Option<GroupRecord>, DurableStoreError> {
+    if external_group_id.is_empty() || external_group_id.len() > MAX_EXTERNAL_GROUP_ID_LEN {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    let namespace = namespace_storage_key(scope);
+    let group_id = connection
+        .query_row(
+            "SELECT group_id FROM group_bridge_mappings \
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 \
+               AND integration_id=?4 AND external_group_id=?5",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                integration_id.as_opaque().as_str(),
+                external_group_id,
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(&error))?;
     group_id
         .map(|value| load_group_from(connection, scope, &GroupId::from_opaque(parse_id(&value)?)))
         .transpose()
@@ -2557,5 +2721,353 @@ mod phase18_event_identity_security_tests {
             ),
             Err(DurableStoreError::Conflict)
         );
+    }
+}
+
+#[cfg(test)]
+mod phase35_overlay_sqlite_tests {
+    use ucr_core::{
+        BridgeRegistrationStore, DurableRecordStatus, DurableStoreError, GroupStore,
+        OfflineGroupStore, StorageProvider,
+    };
+    use ucr_model::*;
+    use ucr_protocol::BRIDGE_SDK_VERSION;
+
+    use super::SqliteLocalStore;
+    use crate::{SQLITE_SCHEMA_VERSION, message_store::tests::TestDb};
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("test id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-phase35")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("ns-phase35"))),
+        }
+    }
+
+    fn subject(value: &str) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid(value)),
+                kind: PrincipalKind::Person,
+            },
+        }
+    }
+
+    fn integration(value: &str) -> IntegrationId {
+        IntegrationId::from_opaque(oid(value))
+    }
+
+    fn registration(id: IntegrationId) -> BridgeRegistration {
+        BridgeRegistration {
+            scope: scope(),
+            integration_id: id,
+            manifest: BridgeProviderManifest {
+                provider_id: "vendor.phase35.test".to_owned(),
+                sdk_min: BRIDGE_SDK_VERSION,
+                sdk_max: BRIDGE_SDK_VERSION,
+                protocol_min: ProtocolVersion::new(1, 0),
+                protocol_max: ProtocolVersion::new(1, 0),
+                capabilities: vec![BridgeCapability::Text],
+                permissions: vec![
+                    BridgeDataPermission::MessageContent,
+                    BridgeDataPermission::ExternalIdentityReferences,
+                    BridgeDataPermission::InboundEvents,
+                ],
+                extensions: vec![],
+            },
+            state: BridgeRegistrationState::Active,
+            generation: 1,
+        }
+    }
+
+    fn group_fixture(name: &str, owner: &ScopedPrincipal) -> (ConversationRecord, GroupRecord) {
+        let conversation = ConversationRef {
+            conversation_id: ConversationId::from_opaque(oid(&format!("conv-{name}"))),
+            kind: ConversationKind::PrivateGroup,
+        };
+        (
+            ConversationRecord {
+                scope: scope(),
+                conversation: conversation.clone(),
+                parent_conversation_id: None,
+            },
+            GroupRecord {
+                scope: scope(),
+                group_id: GroupId::from_opaque(oid(&format!("group-{name}"))),
+                conversation,
+                ownership: GroupOwnership::PersonOwned(owner.principal.clone()),
+                history_policy: GroupHistoryPolicy::FullHistory,
+                delivery_policy: DeliveryPolicy::Durable,
+                crypto_state: GroupCryptoState {
+                    capability_id: None,
+                    epoch: 0,
+                    state_ref: None,
+                },
+                public_policy: None,
+                media_state: GroupMediaState::Idle,
+                bridge_mappings: vec![],
+                replication_generation: 0,
+                revision: 0,
+            },
+        )
+    }
+
+    fn add_mapping_change(
+        event: &str,
+        group: &GroupRecord,
+        revision: u64,
+        integration_id: IntegrationId,
+        external: &[u8],
+    ) -> GroupChange {
+        GroupChange {
+            event_id: EventId::from_opaque(oid(event)),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: revision,
+            kind: GroupChangeKind::AddBridgeMapping {
+                mapping: GroupBridgeMapping {
+                    integration_id,
+                    external_group_id: external.to_vec(),
+                },
+            },
+            next_crypto_state: None,
+        }
+    }
+
+    #[test]
+    fn overlay_mapping_and_reverse_resolution_survive_restart() {
+        let db = TestDb::new();
+        let owner = subject("phase35-owner-restart");
+        let integration_id = integration("phase35-integration-restart");
+        let (conversation, group) = group_fixture("phase35-restart", &owner);
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open");
+            store
+                .install_bridge_registration(&registration(integration_id.clone()))
+                .expect("registration");
+            store
+                .create_group(&conversation, &group, &owner)
+                .expect("group");
+            assert_eq!(
+                store.apply_group_change(
+                    &owner,
+                    &add_mapping_change(
+                        "phase35-bind-restart",
+                        &group,
+                        0,
+                        integration_id.clone(),
+                        b"provider-room-restart",
+                    ),
+                ),
+                Ok(DurableRecordStatus::Persisted)
+            );
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        let resolved = reopened
+            .group_for_bridge_mapping(&scope(), &integration_id, b"provider-room-restart")
+            .expect("lookup")
+            .expect("mapping");
+        assert_eq!(resolved.group_id, group.group_id);
+        assert_eq!(resolved.conversation, conversation.conversation);
+        assert_eq!(resolved.revision, 1);
+    }
+
+    #[test]
+    fn sqlite_rejects_one_external_endpoint_for_two_groups() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        let owner = subject("phase35-owner-collision");
+        let integration_id = integration("phase35-integration-collision");
+        store
+            .install_bridge_registration(&registration(integration_id.clone()))
+            .expect("registration");
+        let (conversation_a, group_a) = group_fixture("phase35-collision-a", &owner);
+        let (conversation_b, group_b) = group_fixture("phase35-collision-b", &owner);
+        store
+            .create_group(&conversation_a, &group_a, &owner)
+            .expect("group a");
+        store
+            .create_group(&conversation_b, &group_b, &owner)
+            .expect("group b");
+        store
+            .apply_group_change(
+                &owner,
+                &add_mapping_change(
+                    "phase35-bind-collision-a",
+                    &group_a,
+                    0,
+                    integration_id.clone(),
+                    b"provider-room-collision",
+                ),
+            )
+            .expect("bind first");
+        assert_eq!(
+            store.apply_group_change(
+                &owner,
+                &add_mapping_change(
+                    "phase35-bind-collision-b",
+                    &group_b,
+                    0,
+                    integration_id,
+                    b"provider-room-collision",
+                ),
+            ),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn schema_v28_rejects_same_named_unique_index_with_wrong_columns() {
+        let db = TestDb::new();
+        {
+            let _store = SqliteLocalStore::open(db.path()).expect("initialize v28");
+        }
+        let connection = rusqlite::Connection::open(db.path()).expect("tamper schema");
+        connection
+            .execute_batch(
+                "DROP INDEX group_bridge_mappings_external_endpoint;
+                 CREATE UNIQUE INDEX group_bridge_mappings_external_endpoint
+                 ON group_bridge_mappings(tenant_id, namespace_present, namespace_id, group_id, external_group_id);",
+            )
+            .expect("install same-named wrong index");
+        drop(connection);
+        assert!(matches!(
+            SqliteLocalStore::open(db.path()),
+            Err(DurableStoreError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn v27_migration_preserves_existing_bridge_mapping_and_adds_overlay_sidecars() {
+        let db = TestDb::new();
+        let owner = subject("phase35-owner-migration");
+        let integration_id = integration("phase35-integration-migration");
+        let (conversation, mut group) = group_fixture("phase35-migration", &owner);
+        group.bridge_mappings.push(GroupBridgeMapping {
+            integration_id: integration_id.clone(),
+            external_group_id: b"provider-room-migration".to_vec(),
+        });
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open current");
+            store
+                .install_bridge_registration(&registration(integration_id.clone()))
+                .expect("registration");
+            store
+                .create_group(&conversation, &group, &owner)
+                .expect("group");
+            let connection = store.lock_connection().expect("connection");
+            connection
+                .execute_batch(
+                    "DROP INDEX group_bridge_mappings_external_endpoint;\n\
+                     DROP TABLE offline_group_bridge_changes;\n\
+                     DROP TABLE offline_group_change_sequence;\n\
+                     PRAGMA user_version=27;",
+                )
+                .expect("simulate v27");
+        }
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        let resolved = migrated
+            .group_for_bridge_mapping(&scope(), &integration_id, b"provider-room-migration")
+            .expect("lookup")
+            .expect("mapping");
+        assert_eq!(resolved.group_id, group.group_id);
+        let connection = migrated.lock_connection().expect("connection");
+        let sidecars: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM offline_group_bridge_changes",
+                [],
+                |row| row.get(0),
+            )
+            .expect("sidecar count");
+        assert_eq!(sidecars, 0);
+    }
+
+    #[test]
+    fn offline_group_cursor_orders_legacy_and_overlay_changes_together() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        let owner = subject("phase35-owner-offline");
+        let member = subject("phase35-member-offline");
+        let integration_id = integration("phase35-integration-offline");
+        let (conversation, group) = group_fixture("phase35-offline", &owner);
+        store
+            .install_bridge_registration(&registration(integration_id.clone()))
+            .expect("registration");
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+        store
+            .apply_group_change(
+                &owner,
+                &GroupChange {
+                    event_id: EventId::from_opaque(oid("phase35-offline-add-member")),
+                    scope: scope(),
+                    group_id: group.group_id.clone(),
+                    expected_revision: 0,
+                    kind: GroupChangeKind::AddMember {
+                        member: member.principal.clone(),
+                        role: GroupRole::Member,
+                    },
+                    next_crypto_state: None,
+                },
+            )
+            .expect("add member");
+        store
+            .apply_group_change(
+                &owner,
+                &add_mapping_change(
+                    "phase35-offline-bind",
+                    &group,
+                    1,
+                    integration_id.clone(),
+                    b"provider-room-offline",
+                ),
+            )
+            .expect("bind");
+        store
+            .apply_group_change(
+                &owner,
+                &GroupChange {
+                    event_id: EventId::from_opaque(oid("phase35-offline-unbind")),
+                    scope: scope(),
+                    group_id: group.group_id.clone(),
+                    expected_revision: 2,
+                    kind: GroupChangeKind::RemoveBridgeMapping {
+                        integration_id,
+                        external_group_id: b"provider-room-offline".to_vec(),
+                    },
+                    next_crypto_state: None,
+                },
+            )
+            .expect("unbind");
+
+        let first = store
+            .offline_group_change_page(&owner, &member, &scope(), &group.group_id, None, 2)
+            .expect("first page");
+        assert_eq!(first.records.len(), 2);
+        assert!(matches!(
+            first.records[0].change.kind,
+            GroupChangeKind::AddMember { .. }
+        ));
+        assert!(matches!(
+            first.records[1].change.kind,
+            GroupChangeKind::AddBridgeMapping { .. }
+        ));
+        let cursor = first.next_cursor.expect("more changes");
+        let second = store
+            .offline_group_change_page(&owner, &member, &scope(), &group.group_id, Some(&cursor), 2)
+            .expect("second page");
+        assert_eq!(second.records.len(), 1);
+        assert!(matches!(
+            second.records[0].change.kind,
+            GroupChangeKind::RemoveBridgeMapping { .. }
+        ));
+        assert!(second.next_cursor.is_none());
     }
 }
