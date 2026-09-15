@@ -32,6 +32,7 @@ members = [
     "crates/ucr-personal-node",
     "crates/ucr-organization-mode",
 ]
+exclude = ["crates/ucr-sdk"]
 
 [workspace.package]
 version = "0.0.1"

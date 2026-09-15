@@ -106,9 +106,10 @@ fn phase38_permissions_privacy_security_and_release_truth_are_locked() {
         security.contains("compromised_organization_node_cannot_self_authorize_or_survive_disable")
     );
     assert!(adr.contains("Phase 38 introduces one durable `OrganizationModeProfile`"));
-    assert!(readme.contains(
-        "**Phase 38 — Organization Mode (Prepared self-hosted organization composition).**"
-    ));
+    assert!(
+        readme
+            .contains("Phase 38 adds Prepared Organization Mode over exact tenant/namespace scope")
+    );
     assert!(ci.contains("test -s spec/organization-mode.md"));
     assert!(ci.contains("0076-phase38-organization-mode-composes-existing-identity-device-and-infrastructure-owners.md"));
 }

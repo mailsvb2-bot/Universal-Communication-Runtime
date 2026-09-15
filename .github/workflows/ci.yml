@@ -35,6 +35,18 @@ jobs:
         run: cargo doc --workspace --no-deps --locked
       - name: Tests
         run: cargo test --workspace --all-targets --locked
+      - name: Public SDK format
+        run: cargo fmt --manifest-path crates/ucr-sdk/Cargo.toml -- --check
+      - name: Public SDK check
+        run: cargo check --manifest-path crates/ucr-sdk/Cargo.toml --all-targets
+      - name: Public SDK clippy
+        run: cargo clippy --manifest-path crates/ucr-sdk/Cargo.toml --all-targets -- -D warnings
+      - name: Public SDK docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --manifest-path crates/ucr-sdk/Cargo.toml --no-deps
+      - name: Public SDK tests
+        run: cargo test --manifest-path crates/ucr-sdk/Cargo.toml --all-targets
       - name: Fuzz workspace format
         run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
       - name: Fuzz workspace check
@@ -53,6 +65,8 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake build-essential
       - name: Release tests
         run: cargo test --workspace --all-targets --release --locked
+      - name: Public SDK release tests
+        run: cargo test --manifest-path crates/ucr-sdk/Cargo.toml --all-targets --release
 
   security-audit:
     runs-on: ubuntu-24.04
@@ -67,6 +81,10 @@ jobs:
         run: cargo audit --deny warnings
       - name: Audit fuzz Cargo.lock
         run: cargo audit --file fuzz/Cargo.lock --deny warnings
+      - name: Resolve Prepared Public SDK lock
+        run: cargo generate-lockfile --manifest-path crates/ucr-sdk/Cargo.toml
+      - name: Audit Prepared Public SDK lock
+        run: cargo audit --file crates/ucr-sdk/Cargo.lock --deny warnings
 
   fuzz-smoke:
     runs-on: ubuntu-24.04
@@ -257,4 +275,10 @@ jobs:
           test -s spec/personal-node.md &&
           test -s docs/adr/0075-phase37-personal-node-composes-existing-communication-owners.md &&
           test -s spec/organization-mode.md &&
-          test -s docs/adr/0076-phase38-organization-mode-composes-existing-identity-device-and-infrastructure-owners.md
+          test -s docs/adr/0076-phase38-organization-mode-composes-existing-identity-device-and-infrastructure-owners.md &&
+          test -s spec/public-sdks.md &&
+          test -s docs/adr/0077-phase39-public-sdks-are-thin-clients-of-one-versioned-public-contract.md &&
+          test -s sdk/contract.json &&
+          test -s crates/ucr-sdk/src/lib.rs
+      - name: Validate public SDK boundaries
+        run: python3 sdk/validate.py
