@@ -50,7 +50,7 @@ fn phase36_restart_lifecycle_and_public_contract_are_locked() {
     assert!(core.contains("pub trait FederationPeerStore"));
     assert!(memory.contains("impl FederationPeerStore for MemoryLocalStore"));
     assert!(sqlite.contains("impl FederationPeerStore for SqliteLocalStore"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 29"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V29: u32 = 29"));
     assert!(sqlite_root.contains("fn migrate_v28_to_v29"));
     assert!(sqlite_root.contains("federation_store::create_v29_objects"));
     assert!(sqlite_tests.contains("federation_trust_lifecycle_and_rotation_survive_restart"));
@@ -93,9 +93,7 @@ fn phase36_docs_permissions_privacy_security_and_ci_are_machine_locked() {
     assert!(
         runtime_tests.contains("revoked_remote_device_invalidates_an_existing_authorized_session")
     );
-    assert!(readme.contains(
-        "**Phase 36 — Federation (Prepared explicit independent-node trust and sync admission).**"
-    ));
+    assert!(readme.contains("Phase 36 adds Prepared Federation"));
     assert!(spec_index.contains("Phase 36 adds `federation.md`"));
     assert!(spec.contains("Cross-tenant federation is explicit local policy"));
     assert!(adr.contains(

@@ -3051,6 +3051,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-personal-node"
+version = "0.0.1"
+dependencies = [
+ "sha2 0.11.0",
+ "ucr-core",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-memory",
+]
+
+[[package]]
 name = "ucr-protocol"
 version = "0.0.1"
 dependencies = [
@@ -3071,6 +3082,7 @@ dependencies = [
  "ucr-federation",
  "ucr-model",
  "ucr-overlay",
+ "ucr-personal-node",
  "ucr-protocol",
  "ucr-storage-memory",
  "ucr-storage-sqlite",
@@ -3104,6 +3116,7 @@ name = "ucr-storage-sqlite"
 version = "0.0.1"
 dependencies = [
  "rusqlite",
+ "sha2 0.11.0",
  "ucr-core",
  "ucr-crypto",
  "ucr-group-mls",

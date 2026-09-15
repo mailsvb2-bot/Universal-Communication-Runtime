@@ -174,7 +174,8 @@ jobs:
           test -s proto/ucr/v1/group_media_e2ee.proto &&
           test -s proto/ucr/v1/sfu.proto &&
           test -s proto/ucr/v1/conference.proto &&
-          test -s proto/ucr/v1/bridge.proto
+          test -s proto/ucr/v1/bridge.proto &&
+          test -s proto/ucr/v1/personal_node.proto
       - name: ADR governance exists
         run: >-
           test -s docs/adr/0000-template.md &&
@@ -252,4 +253,6 @@ jobs:
           test -s spec/overlay-conversations.md &&
           test -s docs/adr/0073-phase35-overlay-conversations-reuse-group-conversation-and-bridge-owners.md &&
           test -s spec/federation.md &&
-          test -s docs/adr/0074-phase36-federation-is-explicit-local-trust-over-endpoint-crypto-and-sync-owners.md
+          test -s docs/adr/0074-phase36-federation-is-explicit-local-trust-over-endpoint-crypto-and-sync-owners.md &&
+          test -s spec/personal-node.md &&
+          test -s docs/adr/0075-phase37-personal-node-composes-existing-communication-owners.md

@@ -15,3 +15,5 @@ Phase 34 adds `max-bridge.md`: a concrete Prepared MAX Bot API Text adapter over
 Phase 35 adds `overlay-conversations.md`: Prepared cross-network logical Groups over the existing canonical Group/Conversation and Bridge registration owners, with exact endpoint binding, reverse resolution, explicit degradation, SQLite v28 restart/offline evidence, and no second Message/Identity/Delivery brain.
 
 Phase 36 adds `federation.md`: Prepared explicit independent-node trust and cross-scope sync admission over canonical Endpoint, Device/key, authorization and Sync owners, with restart-safe SQLite v29 policy state and no second communication brain.
+
+Phase 37 adds `personal-node.md`: Prepared owner-controlled Personal Node composition over canonical Endpoint, Sync, Store-and-Forward and Bridge owners, with SQLite v30 restart-safe profile plus opaque encrypted mailbox/cache storage and no second communication brain.

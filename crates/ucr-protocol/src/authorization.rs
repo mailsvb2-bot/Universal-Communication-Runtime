@@ -68,6 +68,11 @@ pub const BRIDGE_EVENTS_READ_PERMISSION: &str = "ucr.bridge.events.read";
 pub const FEDERATION_PEER_READ_PERMISSION: &str = "ucr.federation.peer.read";
 pub const FEDERATION_PEER_MANAGE_PERMISSION: &str = "ucr.federation.peer.manage";
 pub const FEDERATION_SYNC_PERMISSION: &str = "ucr.federation.sync";
+pub const PERSONAL_NODE_READ_PERMISSION: &str = "ucr.personal_node.read";
+pub const PERSONAL_NODE_MANAGE_PERMISSION: &str = "ucr.personal_node.manage";
+pub const PERSONAL_NODE_OBJECT_READ_PERMISSION: &str = "ucr.personal_node.object.read";
+pub const PERSONAL_NODE_OBJECT_WRITE_PERMISSION: &str = "ucr.personal_node.object.write";
+pub const PERSONAL_NODE_USE_PERMISSION: &str = "ucr.personal_node.use";
 
 pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     SERVICE_CREDENTIAL_PROVISION_PERMISSION,
@@ -131,6 +136,11 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     FEDERATION_PEER_READ_PERMISSION,
     FEDERATION_PEER_MANAGE_PERMISSION,
     FEDERATION_SYNC_PERMISSION,
+    PERSONAL_NODE_READ_PERMISSION,
+    PERSONAL_NODE_MANAGE_PERMISSION,
+    PERSONAL_NODE_OBJECT_READ_PERMISSION,
+    PERSONAL_NODE_OBJECT_WRITE_PERMISSION,
+    PERSONAL_NODE_USE_PERMISSION,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

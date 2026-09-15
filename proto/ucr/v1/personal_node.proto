@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/identity.proto";
+
+enum PersonalNodeService {
+  PERSONAL_NODE_SERVICE_UNSPECIFIED = 0;
+  PERSONAL_NODE_SERVICE_SYNC = 1;
+  PERSONAL_NODE_SERVICE_ENCRYPTED_MAILBOX = 2;
+  PERSONAL_NODE_SERVICE_RELAY = 3;
+  PERSONAL_NODE_SERVICE_CACHE = 4;
+  PERSONAL_NODE_SERVICE_BRIDGE = 5;
+}
+
+enum PersonalNodeState {
+  PERSONAL_NODE_STATE_UNSPECIFIED = 0;
+  PERSONAL_NODE_STATE_ACTIVE = 1;
+  PERSONAL_NODE_STATE_DISABLED = 2;
+}
+
+enum PersonalNodeObjectKind {
+  PERSONAL_NODE_OBJECT_KIND_UNSPECIFIED = 0;
+  PERSONAL_NODE_OBJECT_KIND_MAILBOX = 1;
+  PERSONAL_NODE_OBJECT_KIND_CACHE = 2;
+}
+
+message PersonalNodeProfile {
+  TenantScope scope = 1;
+  OpaqueId endpoint_id = 2;
+  EndpointKind endpoint_kind = 3;
+  repeated PersonalNodeService services = 4;
+  PersonalNodeState state = 5;
+  uint64 generation = 6;
+  uint64 mailbox_capacity_bytes = 7;
+  uint64 cache_capacity_bytes = 8;
+}
+
+message PersonalNodeObject {
+  TenantScope scope = 1;
+  OpaqueId endpoint_id = 2;
+  OpaqueId object_id = 3;
+  PersonalNodeObjectKind kind = 4;
+  string encryption_scheme = 5;
+  bytes ciphertext = 6;
+  bytes ciphertext_sha256 = 7;
+  int64 created_at_unix_ms = 8;
+  optional int64 expires_at_unix_ms = 9;
+}
