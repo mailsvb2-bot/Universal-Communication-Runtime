@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "maturity": "prepared",
+  "protocol_package": "ucr.v1",
+  "proto_root": "proto/ucr/v1",
+  "services": ["IntegrationService", "EventService"],
+  "authentication": {
+    "kind": "service_principal_binary_metadata",
+    "credential_id_key": "ucr-service-credential-id-bin",
+    "credential_secret_key": "ucr-service-credential-secret-bin"
+  },
+  "semantics": {
+    "automatic_application_retry": false,
+    "event_cursor": "opaque",
+    "canonical_errors_preserved": true,
+    "direct_database_access": false,
+    "generated_wire_code_is_normative": false
+  },
+  "languages": ["rust", "python", "typescript", "kotlin", "swift"]
+}
