@@ -1,0 +1,18 @@
+[package]
+name = "ucr-organization-mode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ucr-core = { path = "../ucr-core" }
+ucr-model = { path = "../ucr-model" }
+ucr-protocol = { path = "../ucr-protocol" }
+
+[dev-dependencies]
+ucr-storage-memory = { path = "../ucr-storage-memory" }
+
+[lints]
+workspace = true

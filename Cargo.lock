@@ -3041,6 +3041,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-organization-mode"
+version = "0.0.1"
+dependencies = [
+ "ucr-core",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-memory",
+]
+
+[[package]]
 name = "ucr-overlay"
 version = "0.0.1"
 dependencies = [
@@ -3081,6 +3091,7 @@ dependencies = [
  "ucr-crypto",
  "ucr-federation",
  "ucr-model",
+ "ucr-organization-mode",
  "ucr-overlay",
  "ucr-personal-node",
  "ucr-protocol",

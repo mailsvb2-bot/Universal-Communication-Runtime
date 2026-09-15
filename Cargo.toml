@@ -30,6 +30,7 @@ members = [
     "crates/ucr-overlay",
     "crates/ucr-federation",
     "crates/ucr-personal-node",
+    "crates/ucr-organization-mode",
 ]
 
 [workspace.package]

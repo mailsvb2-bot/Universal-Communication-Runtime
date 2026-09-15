@@ -7,6 +7,7 @@ mod group;
 mod id;
 mod integration_api;
 mod mesh;
+mod organization;
 mod personal_node;
 mod recovery_workflow;
 mod service_auth;
@@ -43,6 +44,7 @@ pub use integration_api::{
     ExternalIdentityBindingLookup, IntegrationCommandIngress, IntegrationIngress,
 };
 pub use mesh::MeshGroupStore;
+pub use organization::OrganizationModeStore;
 pub use personal_node::PersonalNodeStore;
 pub use recovery_workflow::{
     DeviceReverificationGate, DeviceReverificationProof, DeviceReverificationVerificationError,

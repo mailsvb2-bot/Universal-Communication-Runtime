@@ -52,7 +52,7 @@ fn phase37_restart_storage_and_public_contract_are_locked() {
     assert!(memory_root.contains("mod personal_node_store;"));
     assert!(memory.contains("impl PersonalNodeStore for MemoryLocalStore"));
     assert!(sqlite.contains("impl PersonalNodeStore for SqliteLocalStore"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 30"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V30: u32 = 30"));
     assert!(sqlite_root.contains("fn migrate_v29_to_v30"));
     assert!(sqlite_root.contains("personal_node_store::create_v30_objects"));
     assert!(sqlite_tests.contains("profile_mailbox_cache_and_disable_survive_restart"));
@@ -90,9 +90,7 @@ fn phase37_docs_permissions_privacy_security_and_ci_are_machine_locked() {
     }
     assert!(runtime_tests.contains("sync_relay_and_bridge_admission_reuse_canonical_owners"));
     assert!(runtime_tests.contains("cross_scope_actor_cannot_manage_personal_node"));
-    assert!(readme.contains(
-        "**Phase 37 — Personal Node (Prepared owner-controlled self-hosted node composition).**"
-    ));
+    assert!(readme.contains("Phase 37 adds a Prepared Personal Node boundary"));
     assert!(spec_index.contains("Phase 37 adds `personal-node.md`"));
     assert!(metadata_tsv.contains("personal_node\tPersonal Node\tprepared\t"));
     assert!(metadata.contains("Phase 37 promotes the Personal Node inventory row to `prepared`"));

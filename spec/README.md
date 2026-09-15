@@ -17,3 +17,5 @@ Phase 35 adds `overlay-conversations.md`: Prepared cross-network logical Groups 
 Phase 36 adds `federation.md`: Prepared explicit independent-node trust and cross-scope sync admission over canonical Endpoint, Device/key, authorization and Sync owners, with restart-safe SQLite v29 policy state and no second communication brain.
 
 Phase 37 adds `personal-node.md`: Prepared owner-controlled Personal Node composition over canonical Endpoint, Sync, Store-and-Forward and Bridge owners, with SQLite v30 restart-safe profile plus opaque encrypted mailbox/cache storage and no second communication brain.
+
+Phase 38 adds `organization-mode.md`: Prepared exact-namespace Organization Mode over existing Identity, Device, Store-and-Forward, SFU and Bridge owners, with SQLite v31 restart-safe policy associations and no protocol fork for self-hosting.

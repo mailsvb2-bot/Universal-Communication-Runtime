@@ -2,6 +2,7 @@
 
 mod call_store;
 mod group_store;
+mod organization_store;
 mod personal_node_store;
 mod store_forward_store;
 
@@ -37,13 +38,14 @@ use ucr_model::{
     EventSubscriptionId, EventSubscriptionStart, EventSummary, ExternalIdentityBinding,
     FederationPeerRecord, FederationTrustState, GroupMembership, GroupRecord, IdentityId,
     IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId,
-    OfflineGroupChangeReplica, OfflineGroupMessageReplica, OpaqueId, PermissionGrant,
-    PersonalNodeObject, PersonalNodeProfile, PrincipalIdentityBinding, PrincipalRef,
-    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
-    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
-    ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId,
-    SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
-    TrustedSigningKeyState,
+    OfflineGroupChangeReplica, OfflineGroupMessageReplica, OpaqueId,
+    OrganizationManagedDeviceBinding, OrganizationManagedIdentityBinding, OrganizationModeProfile,
+    PermissionGrant, PersonalNodeObject, PersonalNodeProfile, PrincipalIdentityBinding,
+    PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
+    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
+    ServiceCredentialState, ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob,
+    StoreForwardLeaseId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord, TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -91,6 +93,9 @@ type IdentityKey = (ScopeKey, String);
 type ExternalIdentityBindingKey = (ScopeKey, String, String, Vec<u8>);
 type PrincipalIdentityBindingKey = (ScopeKey, PrincipalRef);
 type FederationPeerKey = (ScopeKey, ScopeKey, String);
+type OrganizationProfileKey = (ScopeKey, PrincipalRef);
+type OrganizationIdentityKey = (ScopeKey, String);
+type OrganizationDeviceKey = (ScopeKey, String);
 type PersonalNodeProfileKey = (ScopeKey, String);
 type PersonalNodeObjectKey = (ScopeKey, String, String);
 type DeliveryKey = (ScopeKey, String);
@@ -170,6 +175,9 @@ struct MemoryState {
     external_identity_bindings: HashMap<ExternalIdentityBindingKey, ExternalIdentityBinding>,
     principal_identity_bindings: HashMap<PrincipalIdentityBindingKey, PrincipalIdentityBinding>,
     federation_peers: HashMap<FederationPeerKey, FederationPeerRecord>,
+    organization_profiles: HashMap<OrganizationProfileKey, OrganizationModeProfile>,
+    organization_identities: HashMap<OrganizationIdentityKey, OrganizationManagedIdentityBinding>,
+    organization_devices: HashMap<OrganizationDeviceKey, OrganizationManagedDeviceBinding>,
     personal_node_profiles: HashMap<PersonalNodeProfileKey, PersonalNodeProfile>,
     personal_node_objects: HashMap<PersonalNodeObjectKey, PersonalNodeObject>,
     deliveries: HashMap<DeliveryKey, DeliveryAttempt>,

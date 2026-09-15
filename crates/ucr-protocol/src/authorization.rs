@@ -73,6 +73,14 @@ pub const PERSONAL_NODE_MANAGE_PERMISSION: &str = "ucr.personal_node.manage";
 pub const PERSONAL_NODE_OBJECT_READ_PERMISSION: &str = "ucr.personal_node.object.read";
 pub const PERSONAL_NODE_OBJECT_WRITE_PERMISSION: &str = "ucr.personal_node.object.write";
 pub const PERSONAL_NODE_USE_PERMISSION: &str = "ucr.personal_node.use";
+pub const ORGANIZATION_READ_PERMISSION: &str = "ucr.organization.read";
+pub const ORGANIZATION_MANAGE_PERMISSION: &str = "ucr.organization.manage";
+pub const ORGANIZATION_DISCOVERY_READ_PERMISSION: &str = "ucr.organization.discovery.read";
+pub const ORGANIZATION_IDENTITY_MANAGE_PERMISSION: &str = "ucr.organization.identity.manage";
+pub const ORGANIZATION_DEVICE_MANAGE_PERMISSION: &str = "ucr.organization.device.manage";
+pub const ORGANIZATION_RELAY_USE_PERMISSION: &str = "ucr.organization.relay.use";
+pub const ORGANIZATION_SFU_USE_PERMISSION: &str = "ucr.organization.sfu.use";
+pub const ORGANIZATION_BRIDGE_USE_PERMISSION: &str = "ucr.organization.bridge.use";
 
 pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     SERVICE_CREDENTIAL_PROVISION_PERMISSION,
@@ -141,6 +149,14 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     PERSONAL_NODE_OBJECT_READ_PERMISSION,
     PERSONAL_NODE_OBJECT_WRITE_PERMISSION,
     PERSONAL_NODE_USE_PERMISSION,
+    ORGANIZATION_READ_PERMISSION,
+    ORGANIZATION_MANAGE_PERMISSION,
+    ORGANIZATION_DISCOVERY_READ_PERMISSION,
+    ORGANIZATION_IDENTITY_MANAGE_PERMISSION,
+    ORGANIZATION_DEVICE_MANAGE_PERMISSION,
+    ORGANIZATION_RELAY_USE_PERMISSION,
+    ORGANIZATION_SFU_USE_PERMISSION,
+    ORGANIZATION_BRIDGE_USE_PERMISSION,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

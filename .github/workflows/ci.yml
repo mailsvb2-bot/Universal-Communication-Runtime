@@ -255,4 +255,6 @@ jobs:
           test -s spec/federation.md &&
           test -s docs/adr/0074-phase36-federation-is-explicit-local-trust-over-endpoint-crypto-and-sync-owners.md &&
           test -s spec/personal-node.md &&
-          test -s docs/adr/0075-phase37-personal-node-composes-existing-communication-owners.md
+          test -s docs/adr/0075-phase37-personal-node-composes-existing-communication-owners.md &&
+          test -s spec/organization-mode.md &&
+          test -s docs/adr/0076-phase38-organization-mode-composes-existing-identity-device-and-infrastructure-owners.md
