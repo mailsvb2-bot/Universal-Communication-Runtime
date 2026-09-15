@@ -155,7 +155,9 @@ fn v28_migration_adds_empty_federation_state_without_inference() {
         let connection = rusqlite::Connection::open(&path).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE federation_peer_capabilities;
+                "DROP TABLE personal_node_objects;
+                 DROP TABLE personal_node_profiles;
+                 DROP TABLE federation_peer_capabilities;
                  DROP TABLE federation_peers;
                  PRAGMA user_version=28;",
             )

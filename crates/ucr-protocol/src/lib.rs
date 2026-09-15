@@ -31,6 +31,7 @@ mod mesh;
 mod message;
 mod message_signature;
 mod offline_group;
+mod personal_node;
 mod principal_identity_binding;
 mod provenance;
 mod recovery;
@@ -92,7 +93,9 @@ pub use authorization::{
     GROUP_CREATE_PERMISSION, GROUP_MANAGE_PERMISSION, GROUP_READ_PERMISSION, GrantValidationError,
     IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,
     MESSAGE_WRITE_PERMISSION, PERMISSION_GRANT_CREATE_PERMISSION, PERMISSION_GRANT_READ_PERMISSION,
-    PERMISSION_GRANT_REVOKE_PERMISSION, RECOVERY_PLAN_INSTALL_PERMISSION,
+    PERMISSION_GRANT_REVOKE_PERMISSION, PERSONAL_NODE_MANAGE_PERMISSION,
+    PERSONAL_NODE_OBJECT_READ_PERMISSION, PERSONAL_NODE_OBJECT_WRITE_PERMISSION,
+    PERSONAL_NODE_READ_PERMISSION, PERSONAL_NODE_USE_PERMISSION, RECOVERY_PLAN_INSTALL_PERMISSION,
     RECOVERY_PLAN_READ_PERMISSION, RECOVERY_PLAN_REVOKE_PERMISSION,
     RECOVERY_PLAN_ROTATE_PERMISSION, RUNTIME_PERMISSION_IDS, SERVICE_AUDIT_READ_PERMISSION,
     SERVICE_CREDENTIAL_PROVISION_PERMISSION, SERVICE_CREDENTIAL_REVOKE_PERMISSION,
@@ -235,6 +238,13 @@ pub use offline_group::{
     OfflineGroupError, canonical_offline_group_change_replica,
     canonical_offline_group_message_replica, offline_group_cursor, offline_group_cursor_sequence,
     phase26_offline_group_capabilities, validate_offline_group_page_size,
+};
+pub use personal_node::{
+    MAX_PERSONAL_NODE_OBJECTS_PER_LIST, PERSONAL_NODE_BRIDGE_CAPABILITY,
+    PERSONAL_NODE_CACHE_CAPABILITY, PERSONAL_NODE_MAILBOX_CAPABILITY,
+    PERSONAL_NODE_RELAY_CAPABILITY, PERSONAL_NODE_SYNC_CAPABILITY, PersonalNodeProtocolError,
+    canonical_personal_node_object, canonical_personal_node_profile, validate_personal_node_object,
+    validate_personal_node_profile, validate_personal_node_transition,
 };
 pub use principal_identity_binding::{
     PrincipalIdentityBindingError, validate_principal_identity_binding,

@@ -13,6 +13,7 @@ mod group_media_e2ee;
 mod media_e2ee;
 mod mesh;
 mod offline_group;
+mod personal_node;
 mod sfu;
 mod store_forward;
 mod transport_failover;
@@ -54,6 +55,10 @@ pub use media_e2ee::{EncryptedMediaFrame, MediaE2eeContext, MediaE2eeFrameHeader
 pub use offline_group::{
     OfflineGroupChangePage, OfflineGroupChangeReplica, OfflineGroupCursor, OfflineGroupMessagePage,
     OfflineGroupMessageReplica, OfflineGroupStreamKind,
+};
+pub use personal_node::{
+    PersonalNodeObject, PersonalNodeObjectKind, PersonalNodeProfile, PersonalNodeService,
+    PersonalNodeState,
 };
 pub use sfu::{SfuForwardEnvelope, SfuForwardTarget};
 pub use store_forward::{
@@ -189,6 +194,7 @@ id_type!(SessionId);
 id_type!(DeliveryId);
 id_type!(StoreForwardId);
 id_type!(StoreForwardLeaseId);
+id_type!(PersonalNodeObjectId);
 id_type!(IntegrationId);
 id_type!(CommandId);
 id_type!(EventId);

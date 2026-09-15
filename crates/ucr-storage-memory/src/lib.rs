@@ -2,6 +2,7 @@
 
 mod call_store;
 mod group_store;
+mod personal_node_store;
 mod store_forward_store;
 
 use std::{
@@ -37,11 +38,12 @@ use ucr_model::{
     FederationPeerRecord, FederationTrustState, GroupMembership, GroupRecord, IdentityId,
     IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId,
     OfflineGroupChangeReplica, OfflineGroupMessageReplica, OpaqueId, PermissionGrant,
-    PrincipalIdentityBinding, PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
-    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
-    ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy, SessionId, StoreForwardId,
-    StoreForwardJob, StoreForwardLeaseId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord, TrustedSigningKeyState,
+    PersonalNodeObject, PersonalNodeProfile, PrincipalIdentityBinding, PrincipalRef,
+    PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
+    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
+    ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId,
+    SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    TrustedSigningKeyState,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -89,6 +91,8 @@ type IdentityKey = (ScopeKey, String);
 type ExternalIdentityBindingKey = (ScopeKey, String, String, Vec<u8>);
 type PrincipalIdentityBindingKey = (ScopeKey, PrincipalRef);
 type FederationPeerKey = (ScopeKey, ScopeKey, String);
+type PersonalNodeProfileKey = (ScopeKey, String);
+type PersonalNodeObjectKey = (ScopeKey, String, String);
 type DeliveryKey = (ScopeKey, String);
 type StoreForwardKey = (ScopeKey, String);
 type SyncKey = (ScopeKey, String);
@@ -166,6 +170,8 @@ struct MemoryState {
     external_identity_bindings: HashMap<ExternalIdentityBindingKey, ExternalIdentityBinding>,
     principal_identity_bindings: HashMap<PrincipalIdentityBindingKey, PrincipalIdentityBinding>,
     federation_peers: HashMap<FederationPeerKey, FederationPeerRecord>,
+    personal_node_profiles: HashMap<PersonalNodeProfileKey, PersonalNodeProfile>,
+    personal_node_objects: HashMap<PersonalNodeObjectKey, PersonalNodeObject>,
     deliveries: HashMap<DeliveryKey, DeliveryAttempt>,
     delivery_evidence: HashMap<DeliveryKey, Vec<DeliveryEvidence>>,
     store_forward_jobs: HashMap<StoreForwardKey, MemoryStoreForwardState>,
