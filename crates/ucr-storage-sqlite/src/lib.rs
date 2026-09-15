@@ -17,6 +17,7 @@ mod intent_store;
 mod mesh_store;
 mod message_store;
 mod offline_group_store;
+mod organization_store;
 mod permission_store;
 mod personal_node_store;
 mod principal_identity_binding_store;
@@ -69,7 +70,8 @@ const SQLITE_SCHEMA_V26: u32 = 26;
 const SQLITE_SCHEMA_V27: u32 = 27;
 const SQLITE_SCHEMA_V28: u32 = 28;
 const SQLITE_SCHEMA_V29: u32 = 29;
-pub const SQLITE_SCHEMA_VERSION: u32 = 30;
+const SQLITE_SCHEMA_V30: u32 = 30;
+pub const SQLITE_SCHEMA_VERSION: u32 = 31;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -451,7 +453,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return personal_node_store::verify_schema_v30(connection);
+        return organization_store::verify_schema_v31(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -491,11 +493,12 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V27 => migrate_v27_to_v28(connection)?,
             SQLITE_SCHEMA_V28 => migrate_v28_to_v29(connection)?,
             SQLITE_SCHEMA_V29 => migrate_v29_to_v30(connection)?,
+            SQLITE_SCHEMA_V30 => migrate_v30_to_v31(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    personal_node_store::verify_schema_v30(connection)
+    organization_store::verify_schema_v31(connection)
 }
 
 fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -554,6 +557,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     offline_group_store::create_v28_objects(&transaction)?;
     federation_store::create_v29_objects(&transaction)?;
     personal_node_store::create_v30_objects(&transaction)?;
+    organization_store::create_v31_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1000,12 +1004,27 @@ fn migrate_v29_to_v30(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     personal_node_store::create_v30_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V30)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     personal_node_store::verify_schema_v30(connection)
+}
+
+fn migrate_v30_to_v31(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    personal_node_store::verify_schema_v30(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    organization_store::create_v31_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    organization_store::verify_schema_v31(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1300,7 +1319,17 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v31_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS organization_managed_devices;
+         DROP TABLE IF EXISTS organization_managed_identities;
+         DROP TABLE IF EXISTS organization_mode_profiles;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v30_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v31_objects(connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS personal_node_objects;
          DROP TABLE IF EXISTS personal_node_profiles;",

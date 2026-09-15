@@ -13,6 +13,7 @@ mod group_media_e2ee;
 mod media_e2ee;
 mod mesh;
 mod offline_group;
+mod organization;
 mod personal_node;
 mod sfu;
 mod store_forward;
@@ -55,6 +56,10 @@ pub use media_e2ee::{EncryptedMediaFrame, MediaE2eeContext, MediaE2eeFrameHeader
 pub use offline_group::{
     OfflineGroupChangePage, OfflineGroupChangeReplica, OfflineGroupCursor, OfflineGroupMessagePage,
     OfflineGroupMessageReplica, OfflineGroupStreamKind,
+};
+pub use organization::{
+    OrganizationManagedDeviceBinding, OrganizationManagedIdentityBinding, OrganizationModeProfile,
+    OrganizationModeState, OrganizationService,
 };
 pub use personal_node::{
     PersonalNodeObject, PersonalNodeObjectKind, PersonalNodeProfile, PersonalNodeService,

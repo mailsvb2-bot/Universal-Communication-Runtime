@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/identity.proto";
+
+enum OrganizationService {
+  ORGANIZATION_SERVICE_UNSPECIFIED = 0;
+  ORGANIZATION_SERVICE_PRIVATE_DISCOVERY = 1;
+  ORGANIZATION_SERVICE_PRIVATE_RELAY = 2;
+  ORGANIZATION_SERVICE_PRIVATE_SFU = 3;
+  ORGANIZATION_SERVICE_PRIVATE_BRIDGE = 4;
+  ORGANIZATION_SERVICE_MANAGED_IDENTITIES = 5;
+  ORGANIZATION_SERVICE_MANAGED_DEVICES = 6;
+}
+
+enum OrganizationModeState {
+  ORGANIZATION_MODE_STATE_UNSPECIFIED = 0;
+  ORGANIZATION_MODE_STATE_ACTIVE = 1;
+  ORGANIZATION_MODE_STATE_DISABLED = 2;
+}
+message OrganizationModeProfile {
+  TenantScope scope = 1;
+  PrincipalRef organization = 2;
+  OpaqueId endpoint_id = 3;
+  EndpointKind endpoint_kind = 4;
+  repeated OrganizationService services = 5;
+  OrganizationModeState state = 6;
+  uint64 generation = 7;
+}
+
+message OrganizationManagedIdentityBinding {
+  TenantScope scope = 1;
+  PrincipalRef organization = 2;
+  OpaqueId identity_id = 3;
+}
+
+message OrganizationManagedDeviceBinding {
+  TenantScope scope = 1;
+  PrincipalRef organization = 2;
+  OpaqueId device_id = 3;
+}
