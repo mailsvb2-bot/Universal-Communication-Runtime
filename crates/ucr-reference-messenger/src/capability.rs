@@ -52,8 +52,8 @@ pub const fn phase40_proof_matrix() -> [ProofItem; 9] {
         },
         ProofItem {
             capability: ProofCapability::MultiDevice,
-            state: ProofState::PublicApiGap,
-            evidence: "no public Sync/Device lifecycle service",
+            state: ProofState::PublicApiAvailable,
+            evidence: "DeviceService lifecycle + SyncService session/checkpoint RPCs",
         },
         ProofItem {
             capability: ProofCapability::Local,

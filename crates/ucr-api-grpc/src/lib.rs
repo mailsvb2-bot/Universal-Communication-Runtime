@@ -5,29 +5,30 @@ use std::{fmt, sync::Arc};
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_core::{
     AuthorizationEvaluator, CallStore, CommandAcceptanceStore, CommunicationIntentStore,
-    ConversationStore, EventApiIngress, EventAppendStatus, EventCursorRejection,
-    EventDeliveryClock, EventSubscriptionStore, ExternalIdentityBindingLookup,
-    ExternalIdentityBindingStore, GroupMessageStore, IdentityStore, IntegrationIngress,
-    MessageStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
-    ServiceQuotaClock, ServiceQuotaStore,
+    ConversationStore, DeviceLifecycleStore, EventApiIngress, EventAppendStatus,
+    EventCursorRejection, EventDeliveryClock, EventSubscriptionStore,
+    ExternalIdentityBindingLookup, ExternalIdentityBindingStore, GroupMessageStore, IdentityStore,
+    IntegrationIngress, MessageStore, ServiceAuditStore, ServiceCredentialSecret,
+    ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore, SyncStore, SyncTransition,
 };
 use ucr_model::{
     ActorId, ActorKind, AttachmentId, CallId, CallParticipant, CallParticipantState,
     CallParticipantUpdateKind, CallReconnectPhase, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CallTerminationReason, CommandEnvelope, CommandId, CommunicationIntent,
     ConversationId, ConversationKind, ConversationRecord, ConversationRef, CorrelationContext,
-    CryptoSuite, DeliveryPolicy, DeliveryState, DeviceId, DeviceRef, EndpointId,
-    EventConsumerCursor, EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind,
-    EventEnvelope, EventPollResult, EventSubscription, EventSubscriptionId, EventSubscriptionMode,
-    EventSubscriptionStart, ExternalIdentityBinding, ExternalMessageMapping, GroupBridgeMapping,
-    GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState,
-    GroupMemberState, GroupMembership, GroupOwnership, GroupPermission, GroupRecord, GroupRole,
-    IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
-    IntentConstraints, IntentId, KeyId, MessageCryptoMetadata, MessageEnvelope, MessageId,
-    MessageRelation, MessageRelationKind, MessageSignature, NamespaceId, OpaqueId, OriginRef,
-    PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension, ProtocolVersion,
-    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, ServiceCredentialId, TenantId,
-    TenantScope,
+    CryptoSuite, DeliveryPolicy, DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState,
+    DeviceRef, EndpointId, EventConsumerCursor, EventDeadLetter, EventDeliveryBatch,
+    EventDeliveryFailureKind, EventEnvelope, EventPollResult, EventSubscription,
+    EventSubscriptionId, EventSubscriptionMode, EventSubscriptionStart, ExternalIdentityBinding,
+    ExternalMessageMapping, GroupBridgeMapping, GroupChange, GroupChangeKind, GroupCryptoState,
+    GroupHistoryPolicy, GroupId, GroupMediaState, GroupMemberState, GroupMembership,
+    GroupOwnership, GroupPermission, GroupRecord, GroupRole, IdentityEvidence, IdentityId,
+    IdentityOwnership, IdentityRecord, IntegrationId, IntentConstraints, IntentId, KeyId,
+    MessageCryptoMetadata, MessageEnvelope, MessageId, MessageRelation, MessageRelationKind,
+    MessageSignature, NamespaceId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, PrincipalRef,
+    ProtocolExtension, ProtocolVersion, PublicGroupDiscovery, PublicGroupJoinPolicy,
+    PublicGroupPolicy, ServiceCredentialId, SessionId, SyncCheckpoint, SyncLinkKind, SyncMode,
+    SyncSelection, SyncSession, SyncState, TenantId, TenantScope,
 };
 use ucr_protocol::{
     AcknowledgementEnvelope, CanonicalError, CanonicalErrorCode, CommandReceipt,
@@ -935,6 +936,349 @@ where
             result: Some(match result {
                 Ok(message) => pb::group_get_message_response::Result::Message(message),
                 Err(error) => pb::group_get_message_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+}
+
+/// Thin Phase-40 gRPC binding over the existing Service Principal gate and canonical Device owner.
+pub struct GrpcDeviceService<C, A, S> {
+    clock: Arc<C>,
+    authorization: Arc<A>,
+    store: Arc<S>,
+}
+
+impl<C, A, S> GrpcDeviceService<C, A, S> {
+    #[must_use]
+    pub const fn new(clock: Arc<C>, authorization: Arc<A>, store: Arc<S>) -> Self {
+        Self {
+            clock,
+            authorization,
+            store,
+        }
+    }
+}
+
+impl<C, A, S> Clone for GrpcDeviceService<C, A, S> {
+    fn clone(&self) -> Self {
+        Self {
+            clock: Arc::clone(&self.clock),
+            authorization: Arc::clone(&self.authorization),
+            store: Arc::clone(&self.store),
+        }
+    }
+}
+
+impl<C, A, S> fmt::Debug for GrpcDeviceService<C, A, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrpcDeviceService")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Builds the public Device lifecycle gRPC server over the existing canonical Device owner.
+#[must_use]
+pub fn device_service_server<C, A, S>(
+    service: GrpcDeviceService<C, A, S>,
+) -> pb::device_service_server::DeviceServiceServer<GrpcDeviceService<C, A, S>>
+where
+    C: ServiceQuotaClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: ServiceCredentialStore
+        + ServiceQuotaStore
+        + ServiceAuditStore
+        + DeviceLifecycleStore
+        + 'static,
+{
+    pb::device_service_server::DeviceServiceServer::new(service)
+        .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
+        .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE)
+}
+
+#[tonic::async_trait]
+impl<C, A, S> pb::device_service_server::DeviceService for GrpcDeviceService<C, A, S>
+where
+    C: ServiceQuotaClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: ServiceCredentialStore
+        + ServiceQuotaStore
+        + ServiceAuditStore
+        + DeviceLifecycleStore
+        + 'static,
+{
+    async fn register_device(
+        &self,
+        request: Request<pb::DeviceRegisterRequest>,
+    ) -> Result<Response<pb::DeviceRegisterResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let scope = body
+            .scope
+            .ok_or_else(invalid_argument)
+            .and_then(decode_scope);
+        let device = body
+            .device
+            .ok_or_else(invalid_argument)
+            .and_then(decode_device_descriptor);
+        let result = match (credentials, scope, device) {
+            (Ok((credential_id, secret)), Ok(scope), Ok(device)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .register_device(&scope, &credential_id, &secret, &scope, &device)
+                    .map(|device| pb_device_descriptor(&device))
+            }
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::DeviceRegisterResponse {
+            result: Some(match result {
+                Ok(device) => pb::device_register_response::Result::Device(device),
+                Err(error) => pb::device_register_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn get_device(
+        &self,
+        request: Request<pb::DeviceGetRequest>,
+    ) -> Result<Response<pb::DeviceGetResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_device_lookup(request.into_inner());
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, device_id))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_device(&scope, &credential_id, &secret, &scope, &device_id)
+                    .map(|device| pb_device_descriptor(&device))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::DeviceGetResponse {
+            result: Some(match result {
+                Ok(device) => pb::device_get_response::Result::Device(device),
+                Err(error) => pb::device_get_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn revoke_device(
+        &self,
+        request: Request<pb::DeviceRevokeRequest>,
+    ) -> Result<Response<pb::DeviceRevokeResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_device_revoke(request.into_inner());
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, device_id, identity_id))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .revoke_device(
+                        &scope,
+                        &credential_id,
+                        &secret,
+                        &scope,
+                        &device_id,
+                        &identity_id,
+                    )
+                    .map(pb_acknowledgement)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::DeviceRevokeResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::device_revoke_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::device_revoke_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+}
+
+/// Thin Phase-40 gRPC binding over the existing Service Principal gate and canonical Sync owner.
+pub struct GrpcSyncService<C, A, S> {
+    clock: Arc<C>,
+    authorization: Arc<A>,
+    store: Arc<S>,
+}
+
+impl<C, A, S> GrpcSyncService<C, A, S> {
+    #[must_use]
+    pub const fn new(clock: Arc<C>, authorization: Arc<A>, store: Arc<S>) -> Self {
+        Self {
+            clock,
+            authorization,
+            store,
+        }
+    }
+}
+
+impl<C, A, S> Clone for GrpcSyncService<C, A, S> {
+    fn clone(&self) -> Self {
+        Self {
+            clock: Arc::clone(&self.clock),
+            authorization: Arc::clone(&self.authorization),
+            store: Arc::clone(&self.store),
+        }
+    }
+}
+
+impl<C, A, S> fmt::Debug for GrpcSyncService<C, A, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrpcSyncService")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Builds the public Sync gRPC server over the existing canonical Sync owner.
+#[must_use]
+pub fn sync_service_server<C, A, S>(
+    service: GrpcSyncService<C, A, S>,
+) -> pb::sync_service_server::SyncServiceServer<GrpcSyncService<C, A, S>>
+where
+    C: ServiceQuotaClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + SyncStore + 'static,
+{
+    pb::sync_service_server::SyncServiceServer::new(service)
+        .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
+        .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE)
+}
+
+#[tonic::async_trait]
+impl<C, A, S> pb::sync_service_server::SyncService for GrpcSyncService<C, A, S>
+where
+    C: ServiceQuotaClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + SyncStore + 'static,
+{
+    async fn create_sync_session(
+        &self,
+        request: Request<pb::SyncCreateRequest>,
+    ) -> Result<Response<pb::SyncCreateResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let session = request
+            .into_inner()
+            .session
+            .ok_or_else(invalid_argument)
+            .and_then(decode_sync_session);
+        let result = match (credentials, session) {
+            (Ok((credential_id, secret)), Ok(session)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .create_sync_session(&session.scope, &credential_id, &secret, &session)
+                    .map(|session| pb_sync_session(&session))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::SyncCreateResponse {
+            result: Some(match result {
+                Ok(session) => pb::sync_create_response::Result::Session(session),
+                Err(error) => pb::sync_create_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn get_sync_session(
+        &self,
+        request: Request<pb::SyncGetRequest>,
+    ) -> Result<Response<pb::SyncGetResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_sync_lookup(request.into_inner());
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, session_id))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_sync_session(&scope, &credential_id, &secret, &scope, &session_id)
+                    .map(|session| pb_sync_session(&session))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::SyncGetResponse {
+            result: Some(match result {
+                Ok(session) => pb::sync_get_response::Result::Session(session),
+                Err(error) => pb::sync_get_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn transition_sync(
+        &self,
+        request: Request<pb::SyncTransitionRequest>,
+    ) -> Result<Response<pb::SyncTransitionResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let transition = decode_sync_transition(request.into_inner());
+        let result = match (credentials, transition) {
+            (Ok((credential_id, secret)), Ok((scope, session_id, expected_state, next_state))) => {
+                let transition =
+                    SyncTransition::new(&scope, &session_id, expected_state, next_state);
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .transition_sync(&scope, &credential_id, &secret, &transition)
+                    .map(pb_acknowledgement)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::SyncTransitionResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::sync_transition_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::sync_transition_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn record_sync_checkpoint(
+        &self,
+        request: Request<pb::SyncRecordCheckpointRequest>,
+    ) -> Result<Response<pb::SyncRecordCheckpointResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let checkpoint = request
+            .into_inner()
+            .checkpoint
+            .ok_or_else(invalid_argument)
+            .and_then(decode_sync_checkpoint);
+        let result = match (credentials, checkpoint) {
+            (Ok((credential_id, secret)), Ok(checkpoint)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .record_sync_checkpoint(&checkpoint.scope, &credential_id, &secret, &checkpoint)
+                    .map(pb_acknowledgement)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::SyncRecordCheckpointResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::sync_record_checkpoint_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::sync_record_checkpoint_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn get_latest_sync_checkpoint(
+        &self,
+        request: Request<pb::SyncGetLatestCheckpointRequest>,
+    ) -> Result<Response<pb::SyncGetLatestCheckpointResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_sync_checkpoint_lookup(request.into_inner());
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, session_id))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_latest_sync_checkpoint(
+                        &scope,
+                        &credential_id,
+                        &secret,
+                        &scope,
+                        &session_id,
+                    )
+                    .map(|checkpoint| pb_sync_checkpoint(&checkpoint))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::SyncGetLatestCheckpointResponse {
+            result: Some(match result {
+                Ok(checkpoint) => {
+                    pb::sync_get_latest_checkpoint_response::Result::Checkpoint(checkpoint)
+                }
+                Err(error) => {
+                    pb::sync_get_latest_checkpoint_response::Result::Error(pb_error(error))
+                }
             }),
         }))
     }
@@ -2210,6 +2554,140 @@ fn decode_device_ref(value: pb::DeviceRef) -> Result<DeviceRef, CanonicalError> 
     })
 }
 
+fn decode_device_descriptor(
+    value: pb::DeviceDescriptor,
+) -> Result<DeviceDescriptor, CanonicalError> {
+    Ok(DeviceDescriptor {
+        device_id: DeviceId::from_opaque(decode_opaque(value.device_id)?),
+        identity_id: IdentityId::from_opaque(decode_opaque(value.identity_id)?),
+        state: decode_device_lifecycle_state(value.state)?,
+    })
+}
+
+fn decode_device_lifecycle_state(value: i32) -> Result<DeviceLifecycleState, CanonicalError> {
+    match pb::DeviceLifecycleState::try_from(value).map_err(|_| invalid_argument())? {
+        pb::DeviceLifecycleState::Unspecified => Err(invalid_argument()),
+        pb::DeviceLifecycleState::Active => Ok(DeviceLifecycleState::Active),
+        pb::DeviceLifecycleState::Stale => Ok(DeviceLifecycleState::Stale),
+        pb::DeviceLifecycleState::ReverificationRequired => {
+            Ok(DeviceLifecycleState::ReverificationRequired)
+        }
+        pb::DeviceLifecycleState::Expired => Ok(DeviceLifecycleState::Expired),
+        pb::DeviceLifecycleState::Revoked => Ok(DeviceLifecycleState::Revoked),
+    }
+}
+
+fn decode_device_lookup(
+    value: pb::DeviceGetRequest,
+) -> Result<(TenantScope, DeviceId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        DeviceId::from_opaque(decode_opaque(value.device_id)?),
+    ))
+}
+
+fn decode_device_revoke(
+    value: pb::DeviceRevokeRequest,
+) -> Result<(TenantScope, DeviceId, IdentityId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        DeviceId::from_opaque(decode_opaque(value.device_id)?),
+        IdentityId::from_opaque(decode_opaque(value.expected_identity_id)?),
+    ))
+}
+
+fn decode_sync_session(value: pb::SyncSession) -> Result<SyncSession, CanonicalError> {
+    Ok(SyncSession {
+        session_id: SessionId::from_opaque(decode_opaque(value.session_id)?),
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        source_endpoint_id: EndpointId::from_opaque(decode_opaque(value.source_endpoint_id)?),
+        target_endpoint_id: EndpointId::from_opaque(decode_opaque(value.target_endpoint_id)?),
+        link_kind: decode_sync_link_kind(value.link_kind)?,
+        selection: decode_sync_selection(value.selection.ok_or_else(invalid_argument)?)?,
+        state: decode_sync_state(value.state)?,
+    })
+}
+
+fn decode_sync_selection(value: pb::SyncSelection) -> Result<SyncSelection, CanonicalError> {
+    Ok(SyncSelection {
+        mode: decode_sync_mode(value.mode)?,
+        conversation_ids: value
+            .conversation_ids
+            .into_iter()
+            .map(|value| decode_opaque(Some(value)).map(ConversationId::from_opaque))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn decode_sync_link_kind(value: i32) -> Result<SyncLinkKind, CanonicalError> {
+    match pb::SyncLinkKind::try_from(value).map_err(|_| invalid_argument())? {
+        pb::SyncLinkKind::Unspecified => Err(invalid_argument()),
+        pb::SyncLinkKind::DeviceDevice => Ok(SyncLinkKind::DeviceDevice),
+        pb::SyncLinkKind::DeviceNode => Ok(SyncLinkKind::DeviceNode),
+        pb::SyncLinkKind::PeerPeer => Ok(SyncLinkKind::PeerPeer),
+        pb::SyncLinkKind::DeviceCloud => Ok(SyncLinkKind::DeviceCloud),
+    }
+}
+
+fn decode_sync_mode(value: i32) -> Result<SyncMode, CanonicalError> {
+    match pb::SyncMode::try_from(value).map_err(|_| invalid_argument())? {
+        pb::SyncMode::Unspecified => Err(invalid_argument()),
+        pb::SyncMode::Full => Ok(SyncMode::Full),
+        pb::SyncMode::Partial => Ok(SyncMode::Partial),
+    }
+}
+
+fn decode_sync_state(value: i32) -> Result<SyncState, CanonicalError> {
+    match pb::SyncState::try_from(value).map_err(|_| invalid_argument())? {
+        pb::SyncState::Unspecified => Err(invalid_argument()),
+        pb::SyncState::Prepared => Ok(SyncState::Prepared),
+        pb::SyncState::Active => Ok(SyncState::Active),
+        pb::SyncState::Paused => Ok(SyncState::Paused),
+        pb::SyncState::Completed => Ok(SyncState::Completed),
+        pb::SyncState::Cancelled => Ok(SyncState::Cancelled),
+        pb::SyncState::Failed => Ok(SyncState::Failed),
+    }
+}
+
+fn decode_sync_lookup(
+    value: pb::SyncGetRequest,
+) -> Result<(TenantScope, SessionId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        SessionId::from_opaque(decode_opaque(value.session_id)?),
+    ))
+}
+
+fn decode_sync_transition(
+    value: pb::SyncTransitionRequest,
+) -> Result<(TenantScope, SessionId, SyncState, SyncState), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        SessionId::from_opaque(decode_opaque(value.session_id)?),
+        decode_sync_state(value.expected_state)?,
+        decode_sync_state(value.next_state)?,
+    ))
+}
+
+fn decode_sync_checkpoint(value: pb::SyncCheckpoint) -> Result<SyncCheckpoint, CanonicalError> {
+    Ok(SyncCheckpoint {
+        session_id: SessionId::from_opaque(decode_opaque(value.session_id)?),
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        generation: value.generation,
+        resume_token: value.resume_token,
+        applied_items: value.applied_items,
+    })
+}
+
+fn decode_sync_checkpoint_lookup(
+    value: pb::SyncGetLatestCheckpointRequest,
+) -> Result<(TenantScope, SessionId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        SessionId::from_opaque(decode_opaque(value.session_id)?),
+    ))
+}
+
 fn decode_origin_ref(value: pb::OriginRef) -> Result<OriginRef, CanonicalError> {
     Ok(OriginRef {
         principal_id: value
@@ -2786,6 +3264,86 @@ fn pb_device_ref(value: &DeviceRef) -> pb::DeviceRef {
     }
 }
 
+fn pb_device_descriptor(value: &DeviceDescriptor) -> pb::DeviceDescriptor {
+    pb::DeviceDescriptor {
+        device_id: Some(pb_opaque(value.device_id.as_opaque())),
+        identity_id: Some(pb_opaque(value.identity_id.as_opaque())),
+        state: pb_device_lifecycle_state(value.state),
+    }
+}
+
+fn pb_device_lifecycle_state(value: DeviceLifecycleState) -> i32 {
+    (match value {
+        DeviceLifecycleState::Active => pb::DeviceLifecycleState::Active,
+        DeviceLifecycleState::Stale => pb::DeviceLifecycleState::Stale,
+        DeviceLifecycleState::ReverificationRequired => {
+            pb::DeviceLifecycleState::ReverificationRequired
+        }
+        DeviceLifecycleState::Expired => pb::DeviceLifecycleState::Expired,
+        DeviceLifecycleState::Revoked => pb::DeviceLifecycleState::Revoked,
+    }) as i32
+}
+
+fn pb_sync_session(value: &SyncSession) -> pb::SyncSession {
+    pb::SyncSession {
+        session_id: Some(pb_opaque(value.session_id.as_opaque())),
+        scope: Some(pb_scope(&value.scope)),
+        source_endpoint_id: Some(pb_opaque(value.source_endpoint_id.as_opaque())),
+        target_endpoint_id: Some(pb_opaque(value.target_endpoint_id.as_opaque())),
+        link_kind: pb_sync_link_kind(value.link_kind),
+        selection: Some(pb_sync_selection(&value.selection)),
+        state: pb_sync_state(value.state),
+    }
+}
+
+fn pb_sync_selection(value: &SyncSelection) -> pb::SyncSelection {
+    pb::SyncSelection {
+        mode: pb_sync_mode(value.mode),
+        conversation_ids: value
+            .conversation_ids
+            .iter()
+            .map(|id| pb_opaque(id.as_opaque()))
+            .collect(),
+    }
+}
+
+fn pb_sync_link_kind(value: SyncLinkKind) -> i32 {
+    (match value {
+        SyncLinkKind::DeviceDevice => pb::SyncLinkKind::DeviceDevice,
+        SyncLinkKind::DeviceNode => pb::SyncLinkKind::DeviceNode,
+        SyncLinkKind::PeerPeer => pb::SyncLinkKind::PeerPeer,
+        SyncLinkKind::DeviceCloud => pb::SyncLinkKind::DeviceCloud,
+    }) as i32
+}
+
+fn pb_sync_mode(value: SyncMode) -> i32 {
+    (match value {
+        SyncMode::Full => pb::SyncMode::Full,
+        SyncMode::Partial => pb::SyncMode::Partial,
+    }) as i32
+}
+
+fn pb_sync_state(value: SyncState) -> i32 {
+    (match value {
+        SyncState::Prepared => pb::SyncState::Prepared,
+        SyncState::Active => pb::SyncState::Active,
+        SyncState::Paused => pb::SyncState::Paused,
+        SyncState::Completed => pb::SyncState::Completed,
+        SyncState::Cancelled => pb::SyncState::Cancelled,
+        SyncState::Failed => pb::SyncState::Failed,
+    }) as i32
+}
+
+fn pb_sync_checkpoint(value: &SyncCheckpoint) -> pb::SyncCheckpoint {
+    pb::SyncCheckpoint {
+        session_id: Some(pb_opaque(value.session_id.as_opaque())),
+        scope: Some(pb_scope(&value.scope)),
+        generation: value.generation,
+        resume_token: value.resume_token.clone(),
+        applied_items: value.applied_items,
+    }
+}
+
 fn pb_origin_ref(value: &OriginRef) -> pb::OriginRef {
     pb::OriginRef {
         principal_id: value
@@ -3016,7 +3574,8 @@ mod tests {
         ALGORITHM_VERSION, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION, CALL_START_PERMISSION,
         COMMAND_ACCEPT_PERMISSION, COMMUNICATION_INTENT_READ_PERMISSION,
         COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
-        CONVERSATION_WRITE_PERMISSION, DEFAULT_MAX_PAYLOAD_LEN, EVENT_APPEND_PERMISSION,
+        CONVERSATION_WRITE_PERMISSION, DEFAULT_MAX_PAYLOAD_LEN, DEVICE_READ_PERMISSION,
+        DEVICE_REGISTER_PERMISSION, DEVICE_REVOKE_PERMISSION, EVENT_APPEND_PERMISSION,
         EVENT_CONSUME_PERMISSION, EVENT_DEAD_LETTER_READ_PERMISSION, EVENT_REPLAY_PERMISSION,
         EVENT_SUBSCRIBE_PERMISSION, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
         EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, EXTERNAL_MESSAGE_ID_LIMIT,
@@ -3027,19 +3586,21 @@ mod tests {
         MAX_INTENT_TRANSPORT_CONSTRAINTS, MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS,
         MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_READ_PERMISSION,
         MESSAGE_RELATION_LIMIT, MESSAGE_WRITE_PERMISSION,
-        SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND, SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN,
+        SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND, SERVICE_AUDIT_SYNC_CREATE_OPERATION_KIND,
+        SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN, SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION,
         validate_communication_intent, validate_event, validate_message,
     };
     use ucr_storage_memory::MemoryLocalStore;
 
     use super::{
         GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, GrpcCallService,
-        GrpcEventService, GrpcGroupService, GrpcIntegrationService,
-        SERVICE_CREDENTIAL_ID_METADATA_KEY, SERVICE_CREDENTIAL_SECRET_METADATA_KEY,
-        attach_service_credential, call_service_server, decode_call_session, decode_command,
-        decode_communication_intent, decode_conversation_record, decode_event_envelope,
-        decode_message_envelope, decode_principal_ref, event_service_server, group_service_server,
-        integration_service_server, pb, pb_call_session,
+        GrpcDeviceService, GrpcEventService, GrpcGroupService, GrpcIntegrationService,
+        GrpcSyncService, SERVICE_CREDENTIAL_ID_METADATA_KEY,
+        SERVICE_CREDENTIAL_SECRET_METADATA_KEY, attach_service_credential, call_service_server,
+        decode_call_session, decode_command, decode_communication_intent,
+        decode_conversation_record, decode_event_envelope, decode_message_envelope,
+        decode_principal_ref, device_service_server, event_service_server, group_service_server,
+        integration_service_server, pb, pb_call_session, sync_service_server,
     };
 
     fn oid(value: &str) -> OpaqueId {
@@ -3066,6 +3627,29 @@ mod tests {
     fn pb_id(value: &str) -> pb::OpaqueId {
         pb::OpaqueId {
             value: value.as_bytes().to_vec(),
+        }
+    }
+
+    fn wire_device(device_id: &str, identity_id: &str) -> pb::DeviceDescriptor {
+        pb::DeviceDescriptor {
+            device_id: Some(pb_id(device_id)),
+            identity_id: Some(pb_id(identity_id)),
+            state: pb::DeviceLifecycleState::Active as i32,
+        }
+    }
+
+    fn wire_sync_session(session_id: &str) -> pb::SyncSession {
+        pb::SyncSession {
+            session_id: Some(pb_id(session_id)),
+            scope: Some(wire_scope()),
+            source_endpoint_id: Some(pb_id("endpoint-device-a")),
+            target_endpoint_id: Some(pb_id("endpoint-device-b")),
+            link_kind: pb::SyncLinkKind::DeviceDevice as i32,
+            selection: Some(pb::SyncSelection {
+                mode: pb::SyncMode::Partial as i32,
+                conversation_ids: vec![pb_id("conversation-z"), pb_id("conversation-a")],
+            }),
+            state: pb::SyncState::Prepared as i32,
         }
     }
 
@@ -3630,6 +4214,47 @@ mod tests {
         (client, server)
     }
 
+    async fn multidevice_clients_and_server(
+        store: Arc<MemoryLocalStore>,
+    ) -> (
+        pb::device_service_client::DeviceServiceClient<tonic::transport::Channel>,
+        pb::sync_service_client::SyncServiceClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind multi-device loopback listener");
+        let address = listener
+            .local_addr()
+            .expect("multi-device listener address");
+        let incoming = TcpListenerStream::new(listener);
+        let device_service = GrpcDeviceService::new(
+            Arc::new(SystemServiceQuotaClock),
+            Arc::clone(&store),
+            Arc::clone(&store),
+        );
+        let sync_service =
+            GrpcSyncService::new(Arc::new(SystemServiceQuotaClock), Arc::clone(&store), store);
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(device_service_server(device_service))
+                .add_service(sync_service_server(sync_service))
+                .serve_with_incoming(incoming)
+                .await
+        });
+        let endpoint = format!("http://{address}");
+        let device_client =
+            pb::device_service_client::DeviceServiceClient::connect(endpoint.clone())
+                .await
+                .expect("connect Device loopback client")
+                .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
+        let sync_client = pb::sync_service_client::SyncServiceClient::connect(endpoint)
+            .await
+            .expect("connect Sync loopback client")
+            .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
+        (device_client, sync_client, server)
+    }
+
     async fn call_client_and_server(
         store: Arc<MemoryLocalStore>,
     ) -> (
@@ -4056,6 +4681,245 @@ mod tests {
                 panic!("GetGroupMessage failed: {}", error.code)
             }
         }
+    }
+
+    type TestDeviceClient =
+        pb::device_service_client::DeviceServiceClient<tonic::transport::Channel>;
+    type TestSyncClient = pb::sync_service_client::SyncServiceClient<tonic::transport::Channel>;
+
+    async fn register_and_read_multidevice(
+        devices: &mut TestDeviceClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+    ) {
+        let mut register = Request::new(pb::DeviceRegisterRequest {
+            scope: Some(wire_scope()),
+            device: Some(wire_device("device-multi-grpc", "identity-multi-grpc")),
+        });
+        attach_service_credential(&mut register, credential_id, secret);
+        let response = devices
+            .register_device(register)
+            .await
+            .expect("RegisterDevice transport")
+            .into_inner();
+        let registered = match response.result.expect("RegisterDevice result") {
+            pb::device_register_response::Result::Device(device) => device,
+            pb::device_register_response::Result::Error(error) => {
+                panic!("RegisterDevice failed: {}", error.code)
+            }
+        };
+        assert_eq!(registered.state, pb::DeviceLifecycleState::Active as i32);
+
+        let mut get_device = Request::new(pb::DeviceGetRequest {
+            scope: Some(wire_scope()),
+            device_id: Some(pb_id("device-multi-grpc")),
+        });
+        attach_service_credential(&mut get_device, credential_id, secret);
+        let response = devices
+            .get_device(get_device)
+            .await
+            .expect("GetDevice transport")
+            .into_inner();
+        match response.result.expect("GetDevice result") {
+            pb::device_get_response::Result::Device(device) => assert_eq!(
+                device.identity_id.expect("device identity").value,
+                b"identity-multi-grpc"
+            ),
+            pb::device_get_response::Result::Error(error) => {
+                panic!("GetDevice failed: {}", error.code)
+            }
+        }
+    }
+
+    async fn create_and_read_sync_session(
+        sync: &mut TestSyncClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+    ) {
+        let mut create_sync = Request::new(pb::SyncCreateRequest {
+            session: Some(wire_sync_session("sync-multi-grpc")),
+        });
+        attach_service_credential(&mut create_sync, credential_id, secret);
+        let response = sync
+            .create_sync_session(create_sync)
+            .await
+            .expect("CreateSyncSession transport")
+            .into_inner();
+        let created = match response.result.expect("CreateSyncSession result") {
+            pb::sync_create_response::Result::Session(session) => session,
+            pb::sync_create_response::Result::Error(error) => {
+                panic!("CreateSyncSession failed: {}", error.code)
+            }
+        };
+        let selection = created.selection.expect("canonical selection");
+        assert_eq!(selection.conversation_ids[0].value, b"conversation-a");
+        assert_eq!(selection.conversation_ids[1].value, b"conversation-z");
+        assert_eq!(created.state, pb::SyncState::Prepared as i32);
+    }
+
+    fn assert_sync_create_audit(store: &MemoryLocalStore) {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_SYNC_CREATE_OPERATION_KIND.to_owned(),
+            operation_id: oid("sync-multi-grpc"),
+        };
+        let records = store
+            .service_audit_records_for_operation(&scope(), &operation, 8)
+            .expect("Sync create audit");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].permission, SYNC_WRITE_PERMISSION);
+        assert_eq!(records[0].outcome, ServiceAuditOutcome::Authorized);
+    }
+
+    async fn transition_checkpoint_and_read_sync(
+        sync: &mut TestSyncClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+    ) {
+        let mut transition = Request::new(pb::SyncTransitionRequest {
+            scope: Some(wire_scope()),
+            session_id: Some(pb_id("sync-multi-grpc")),
+            expected_state: pb::SyncState::Prepared as i32,
+            next_state: pb::SyncState::Active as i32,
+        });
+        attach_service_credential(&mut transition, credential_id, secret);
+        let response = sync
+            .transition_sync(transition)
+            .await
+            .expect("TransitionSync transport")
+            .into_inner();
+        match response.result.expect("TransitionSync result") {
+            pb::sync_transition_response::Result::Acknowledgement(ack) => assert_eq!(
+                ack.acknowledged_id.expect("session id").value,
+                b"sync-multi-grpc"
+            ),
+            pb::sync_transition_response::Result::Error(error) => {
+                panic!("TransitionSync failed: {}", error.code)
+            }
+        }
+
+        let token = vec![0x00, 0xff, 0x10, 0x7f];
+        let mut checkpoint = Request::new(pb::SyncRecordCheckpointRequest {
+            checkpoint: Some(pb::SyncCheckpoint {
+                session_id: Some(pb_id("sync-multi-grpc")),
+                scope: Some(wire_scope()),
+                generation: 1,
+                resume_token: token.clone(),
+                applied_items: 3,
+            }),
+        });
+        attach_service_credential(&mut checkpoint, credential_id, secret);
+        let response = sync
+            .record_sync_checkpoint(checkpoint)
+            .await
+            .expect("RecordSyncCheckpoint transport")
+            .into_inner();
+        assert!(matches!(
+            response.result.expect("RecordSyncCheckpoint result"),
+            pb::sync_record_checkpoint_response::Result::Acknowledgement(_)
+        ));
+
+        let mut get_checkpoint = Request::new(pb::SyncGetLatestCheckpointRequest {
+            scope: Some(wire_scope()),
+            session_id: Some(pb_id("sync-multi-grpc")),
+        });
+        attach_service_credential(&mut get_checkpoint, credential_id, secret);
+        let response = sync
+            .get_latest_sync_checkpoint(get_checkpoint)
+            .await
+            .expect("GetLatestSyncCheckpoint transport")
+            .into_inner();
+        match response.result.expect("GetLatestSyncCheckpoint result") {
+            pb::sync_get_latest_checkpoint_response::Result::Checkpoint(checkpoint) => {
+                assert_eq!(checkpoint.generation, 1);
+                assert_eq!(checkpoint.resume_token, token);
+                assert_eq!(checkpoint.applied_items, 3);
+            }
+            pb::sync_get_latest_checkpoint_response::Result::Error(error) => {
+                panic!("GetLatestSyncCheckpoint failed: {}", error.code)
+            }
+        }
+
+        let mut get_sync = Request::new(pb::SyncGetRequest {
+            scope: Some(wire_scope()),
+            session_id: Some(pb_id("sync-multi-grpc")),
+        });
+        attach_service_credential(&mut get_sync, credential_id, secret);
+        let response = sync
+            .get_sync_session(get_sync)
+            .await
+            .expect("GetSyncSession transport")
+            .into_inner();
+        match response.result.expect("GetSyncSession result") {
+            pb::sync_get_response::Result::Session(session) => {
+                assert_eq!(session.state, pb::SyncState::Active as i32);
+            }
+            pb::sync_get_response::Result::Error(error) => {
+                panic!("GetSyncSession failed: {}", error.code)
+            }
+        }
+    }
+
+    async fn revoke_and_read_multidevice(
+        devices: &mut TestDeviceClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+    ) {
+        let mut revoke = Request::new(pb::DeviceRevokeRequest {
+            scope: Some(wire_scope()),
+            device_id: Some(pb_id("device-multi-grpc")),
+            expected_identity_id: Some(pb_id("identity-multi-grpc")),
+        });
+        attach_service_credential(&mut revoke, credential_id, secret);
+        let response = devices
+            .revoke_device(revoke)
+            .await
+            .expect("RevokeDevice transport")
+            .into_inner();
+        assert!(matches!(
+            response.result.expect("RevokeDevice result"),
+            pb::device_revoke_response::Result::Acknowledgement(_)
+        ));
+
+        let mut revoked_lookup = Request::new(pb::DeviceGetRequest {
+            scope: Some(wire_scope()),
+            device_id: Some(pb_id("device-multi-grpc")),
+        });
+        attach_service_credential(&mut revoked_lookup, credential_id, secret);
+        let response = devices
+            .get_device(revoked_lookup)
+            .await
+            .expect("Get revoked Device transport")
+            .into_inner();
+        match response.result.expect("Get revoked Device result") {
+            pb::device_get_response::Result::Device(device) => {
+                assert_eq!(device.state, pb::DeviceLifecycleState::Revoked as i32);
+            }
+            pb::device_get_response::Result::Error(error) => {
+                panic!("Get revoked Device failed: {}", error.code)
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn multidevice_device_lifecycle_and_sync_checkpoint_round_trip_over_public_grpc() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let permissions = [
+            DEVICE_REGISTER_PERMISSION,
+            DEVICE_READ_PERMISSION,
+            DEVICE_REVOKE_PERMISSION,
+            SYNC_WRITE_PERMISSION,
+            SYNC_READ_PERMISSION,
+        ];
+        let (credential_id, secret) = seed_with_permissions(&store, &permissions);
+        let (mut devices, mut sync, server) =
+            multidevice_clients_and_server(Arc::clone(&store)).await;
+
+        register_and_read_multidevice(&mut devices, &credential_id, &secret).await;
+        create_and_read_sync_session(&mut sync, &credential_id, &secret).await;
+        assert_sync_create_audit(&store);
+        transition_checkpoint_and_read_sync(&mut sync, &credential_id, &secret).await;
+        revoke_and_read_multidevice(&mut devices, &credential_id, &secret).await;
+        server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread")]

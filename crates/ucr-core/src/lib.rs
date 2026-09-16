@@ -41,7 +41,7 @@ pub use event_api::{
 pub use group::{GroupMessageStore, GroupStore, OfflineGroupStore};
 pub use id::{IdGenerationError, generate_opaque_id};
 pub use integration_api::{
-    ExternalIdentityBindingLookup, IntegrationCommandIngress, IntegrationIngress,
+    ExternalIdentityBindingLookup, IntegrationCommandIngress, IntegrationIngress, SyncTransition,
 };
 pub use mesh::MeshGroupStore;
 pub use organization::OrganizationModeStore;

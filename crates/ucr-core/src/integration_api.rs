@@ -2,16 +2,17 @@ use core::fmt;
 
 use ucr_model::{
     AuthorizationRequest, CallId, CallSession, CallSignal, CommandEnvelope, CommunicationIntent,
-    ConversationId, ConversationRecord, ExternalIdentityBinding, GroupChange, GroupId,
-    GroupMembership, GroupRecord, IdentityId, IdentityRecord, IntegrationId, IntentId,
-    MessageEnvelope, MessageId, PrincipalRef, ServiceAuditOperationRef, ServiceCredentialId,
-    TenantScope,
+    ConversationId, ConversationRecord, DeviceDescriptor, DeviceId, ExternalIdentityBinding,
+    GroupChange, GroupId, GroupMembership, GroupRecord, IdentityId, IdentityRecord, IntegrationId,
+    IntentId, MessageEnvelope, MessageId, PrincipalRef, ServiceAuditOperationRef,
+    ServiceCredentialId, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
 };
 use ucr_protocol::{
     AcknowledgementEnvelope, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION,
     CALL_START_PERMISSION, COMMAND_ACCEPT_PERMISSION, COMMUNICATION_INTENT_READ_PERMISSION,
     COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
     CONVERSATION_WRITE_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceipt,
+    DEVICE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION, DEVICE_REVOKE_PERMISSION,
     EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
     GROUP_CREATE_PERMISSION, GROUP_MANAGE_PERMISSION, GROUP_READ_PERMISSION,
     IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,
@@ -20,7 +21,8 @@ use ucr_protocol::{
     SERVICE_AUDIT_COMMAND_OPERATION_KIND, SERVICE_AUDIT_COMMUNICATION_INTENT_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_COMMUNICATION_INTENT_READ_OPERATION_KIND,
     SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
-    SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND,
+    SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND, SERVICE_AUDIT_DEVICE_READ_OPERATION_KIND,
+    SERVICE_AUDIT_DEVICE_REGISTER_OPERATION_KIND, SERVICE_AUDIT_DEVICE_REVOKE_OPERATION_KIND,
     SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
     SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND, SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_GROUP_MANAGE_OPERATION_KIND, SERVICE_AUDIT_GROUP_MEMBERSHIP_READ_OPERATION_KIND,
@@ -28,15 +30,19 @@ use ucr_protocol::{
     SERVICE_AUDIT_GROUP_MESSAGE_SEND_OPERATION_KIND, SERVICE_AUDIT_GROUP_READ_OPERATION_KIND,
     SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
     SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND, SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND,
-    acknowledgement_for, canonical_call_creation, canonical_group_creation,
+    SERVICE_AUDIT_SYNC_CHECKPOINT_READ_OPERATION_KIND,
+    SERVICE_AUDIT_SYNC_CHECKPOINT_WRITE_OPERATION_KIND, SERVICE_AUDIT_SYNC_CREATE_OPERATION_KIND,
+    SERVICE_AUDIT_SYNC_READ_OPERATION_KIND, SERVICE_AUDIT_SYNC_TRANSITION_OPERATION_KIND,
+    SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION, acknowledgement_for, canonical_call_creation,
+    canonical_group_creation,
 };
 
 use crate::{
     AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError, CallStore,
-    CommandAcceptanceStore, CommunicationIntentStore, ConversationStore, DurableStoreError,
-    ExternalIdentityBindingStore, GroupMessageStore, GroupStore, IdentityStore, MessageStore,
-    ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
-    ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
+    CommandAcceptanceStore, CommunicationIntentStore, ConversationStore, DeviceLifecycleStore,
+    DurableStoreError, ExternalIdentityBindingStore, GroupMessageStore, GroupStore, IdentityStore,
+    MessageStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
+    ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore, SyncStore,
 };
 
 /// Transport-neutral Phase-13 ingress for external Service Principal operations.
@@ -74,6 +80,32 @@ impl<'a> ExternalIdentityBindingLookup<'a> {
             integration_id,
             external_namespace,
             external_entity_id,
+        }
+    }
+}
+
+/// Borrowed canonical Sync lifecycle transition parameters for one public ingress operation.
+#[derive(Clone, Copy, Debug)]
+pub struct SyncTransition<'a> {
+    pub scope: &'a TenantScope,
+    pub session_id: &'a SessionId,
+    pub expected_state: SyncState,
+    pub next_state: SyncState,
+}
+
+impl<'a> SyncTransition<'a> {
+    #[must_use]
+    pub const fn new(
+        scope: &'a TenantScope,
+        session_id: &'a SessionId,
+        expected_state: SyncState,
+        next_state: SyncState,
+    ) -> Self {
+        Self {
+            scope,
+            session_id,
+            expected_state,
+            next_state,
         }
     }
 }
@@ -926,6 +958,287 @@ where
         let subject = request.subject().clone();
         AuthorizedDurableRuntime::new(&request, self.store)
             .group_message(&subject, scope, message_id)
+            .map_err(map_authorized_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+}
+
+impl<C, A, S> IntegrationIngress<'_, C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + DeviceLifecycleStore,
+{
+    /// Registers one canonical Device through the existing lifecycle owner.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, validation, conflict, and store failures map to canonical errors.
+    pub fn register_device(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        descriptor: &DeviceDescriptor,
+    ) -> Result<DeviceDescriptor, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_DEVICE_REGISTER_OPERATION_KIND.to_owned(),
+            operation_id: descriptor.device_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                DEVICE_REGISTER_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .register_device(&subject, scope, descriptor)
+            .map_err(map_authorized_error)?;
+        Ok(descriptor.clone())
+    }
+
+    /// Reads one exact-scoped canonical Device.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, not-found, and store failures map to canonical errors.
+    pub fn get_device(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+    ) -> Result<DeviceDescriptor, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_DEVICE_READ_OPERATION_KIND.to_owned(),
+            operation_id: device_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                DEVICE_READ_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .device(&subject, scope, device_id)
+            .map_err(map_authorized_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+
+    /// Irreversibly revokes one exact-scoped canonical Device.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, identity-mismatch/conflict, and store failures map to canonical errors.
+    pub fn revoke_device(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        expected_identity_id: &IdentityId,
+    ) -> Result<AcknowledgementEnvelope, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_DEVICE_REVOKE_OPERATION_KIND.to_owned(),
+            operation_id: device_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                DEVICE_REVOKE_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .revoke_device(&subject, scope, device_id, expected_identity_id)
+            .map_err(map_authorized_error)?;
+        Ok(acknowledgement_for(device_id.as_opaque().clone()))
+    }
+}
+
+impl<C, A, S> IntegrationIngress<'_, C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + SyncStore,
+{
+    /// Creates or deduplicates one canonical Sync session through the existing Sync owner.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, validation, conflict, and store failures map to canonical errors.
+    pub fn create_sync_session(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        session: &SyncSession,
+    ) -> Result<SyncSession, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_SYNC_CREATE_OPERATION_KIND.to_owned(),
+            operation_id: session.session_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                SYNC_WRITE_PERMISSION,
+                &session.scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .create_sync_session(&subject, session)
+            .map_err(map_authorized_error)?;
+        self.store
+            .sync_session(&session.scope, &session.session_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
+    }
+
+    /// Reads one canonical Sync session.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, not-found, and store failures map to canonical errors.
+    pub fn get_sync_session(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<SyncSession, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_SYNC_READ_OPERATION_KIND.to_owned(),
+            operation_id: session_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                SYNC_READ_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .sync_session(&subject, scope, session_id)
+            .map_err(map_authorized_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+
+    /// Advances one canonical Sync session by expected-state compare-and-swap.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, transition conflict, and store failures map to canonical errors.
+    pub fn transition_sync(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        transition: &SyncTransition<'_>,
+    ) -> Result<AcknowledgementEnvelope, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_SYNC_TRANSITION_OPERATION_KIND.to_owned(),
+            operation_id: transition.session_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                SYNC_WRITE_PERMISSION,
+                transition.scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .transition_sync(
+                &subject,
+                transition.scope,
+                transition.session_id,
+                transition.expected_state,
+                transition.next_state,
+            )
+            .map_err(map_authorized_error)?;
+        Ok(acknowledgement_for(
+            transition.session_id.as_opaque().clone(),
+        ))
+    }
+
+    /// Appends one monotonic canonical Sync checkpoint.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, stale-generation conflict, and store failures map to canonical errors.
+    pub fn record_sync_checkpoint(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        checkpoint: &SyncCheckpoint,
+    ) -> Result<AcknowledgementEnvelope, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_SYNC_CHECKPOINT_WRITE_OPERATION_KIND.to_owned(),
+            operation_id: checkpoint.session_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                SYNC_WRITE_PERMISSION,
+                &checkpoint.scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .record_sync_checkpoint(&subject, checkpoint)
+            .map_err(map_authorized_error)?;
+        Ok(acknowledgement_for(
+            checkpoint.session_id.as_opaque().clone(),
+        ))
+    }
+
+    /// Reads the latest canonical checkpoint for one Sync session.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, not-found, and store failures map to canonical errors.
+    pub fn get_latest_sync_checkpoint(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<SyncCheckpoint, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_SYNC_CHECKPOINT_READ_OPERATION_KIND.to_owned(),
+            operation_id: session_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                SYNC_READ_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .latest_sync_checkpoint(&subject, scope, session_id)
             .map_err(map_authorized_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
     }

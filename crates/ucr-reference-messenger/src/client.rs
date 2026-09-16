@@ -151,6 +151,94 @@ impl ReferenceMessengerClient {
         self.sdk.get_group_message(request).await
     }
 
+    /// Registers one canonical Device through the public Device service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn register_device(
+        &mut self,
+        request: pb::DeviceRegisterRequest,
+    ) -> Result<pb::DeviceRegisterResponse, RpcStatus> {
+        self.sdk.register_device(request).await
+    }
+
+    /// Reads one canonical Device through the public Device service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn get_device(
+        &mut self,
+        request: pb::DeviceGetRequest,
+    ) -> Result<pb::DeviceGetResponse, RpcStatus> {
+        self.sdk.get_device(request).await
+    }
+
+    /// Revokes one canonical Device through the public Device service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn revoke_device(
+        &mut self,
+        request: pb::DeviceRevokeRequest,
+    ) -> Result<pb::DeviceRevokeResponse, RpcStatus> {
+        self.sdk.revoke_device(request).await
+    }
+
+    /// Creates or deduplicates one canonical Sync session through the public Sync service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn create_sync_session(
+        &mut self,
+        request: pb::SyncCreateRequest,
+    ) -> Result<pb::SyncCreateResponse, RpcStatus> {
+        self.sdk.create_sync_session(request).await
+    }
+
+    /// Reads one canonical Sync session through the public Sync service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn get_sync_session(
+        &mut self,
+        request: pb::SyncGetRequest,
+    ) -> Result<pb::SyncGetResponse, RpcStatus> {
+        self.sdk.get_sync_session(request).await
+    }
+
+    /// Advances one canonical Sync session by expected-state compare-and-swap.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn transition_sync(
+        &mut self,
+        request: pb::SyncTransitionRequest,
+    ) -> Result<pb::SyncTransitionResponse, RpcStatus> {
+        self.sdk.transition_sync(request).await
+    }
+
+    /// Records one canonical monotonic Sync checkpoint.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn record_sync_checkpoint(
+        &mut self,
+        request: pb::SyncRecordCheckpointRequest,
+    ) -> Result<pb::SyncRecordCheckpointResponse, RpcStatus> {
+        self.sdk.record_sync_checkpoint(request).await
+    }
+
+    /// Reads the latest canonical Sync checkpoint.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn get_latest_sync_checkpoint(
+        &mut self,
+        request: pb::SyncGetLatestCheckpointRequest,
+    ) -> Result<pb::SyncGetLatestCheckpointResponse, RpcStatus> {
+        self.sdk.get_latest_sync_checkpoint(request).await
+    }
+
     /// Starts canonical Call signalling through the public Call service.
     ///
     /// # Errors

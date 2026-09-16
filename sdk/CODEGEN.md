@@ -4,7 +4,7 @@ All language SDKs compile their wire types and service stubs from the checked-in
 Generated files are derivative artifacts and must not be edited as protocol source.
 
 The generated package/service names stay exactly under `ucr.v1`.
-The external-consumer SDK surface exposes generated clients for `IntegrationService`, `EventService`, `CallService` and `GroupService`.
+The external-consumer SDK surface exposes generated clients for `IntegrationService`, `EventService`, `CallService`, `GroupService`, `DeviceService` and `SyncService`.
 Other public protobuf services may also be generated as the contract grows; language helpers must not reinterpret their messages.
 
 ## Required generator behavior
