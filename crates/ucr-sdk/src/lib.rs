@@ -81,6 +81,7 @@ pub struct UcrSdkClient {
     integration: pb::integration_service_client::IntegrationServiceClient<Channel>,
     events: pb::event_service_client::EventServiceClient<Channel>,
     calls: pb::call_service_client::CallServiceClient<Channel>,
+    groups: pb::group_service_client::GroupServiceClient<Channel>,
 }
 
 impl fmt::Debug for UcrSdkClient {
@@ -110,7 +111,10 @@ impl UcrSdkClient {
         let events = pb::event_service_client::EventServiceClient::new(channel.clone())
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
-        let calls = pb::call_service_client::CallServiceClient::new(channel)
+        let calls = pb::call_service_client::CallServiceClient::new(channel.clone())
+            .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+            .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+        let groups = pb::group_service_client::GroupServiceClient::new(channel)
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         Ok(Self {
@@ -118,6 +122,7 @@ impl UcrSdkClient {
             integration,
             events,
             calls,
+            groups,
         })
     }
     /// Creates one authenticated request without changing its protobuf body.
@@ -400,6 +405,90 @@ impl UcrSdkClient {
     ) -> Result<pb::CallSignalResponse, tonic::Status> {
         let request = self.authenticated_request(message);
         Ok(self.calls.signal_call(request).await?.into_inner())
+    }
+
+    /// Creates one canonical Group through the public Group service.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn create_group(
+        &mut self,
+        message: pb::GroupCreateRequest,
+    ) -> Result<pb::GroupCreateResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.groups.create_group(request).await?.into_inner())
+    }
+
+    /// Reads one canonical Group through the public Group service.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_group(
+        &mut self,
+        message: pb::GroupGetRequest,
+    ) -> Result<pb::GroupGetResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.groups.get_group(request).await?.into_inner())
+    }
+
+    /// Reads one membership through the public Group service.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_group_membership(
+        &mut self,
+        message: pb::GroupGetMembershipRequest,
+    ) -> Result<pb::GroupGetMembershipResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.groups.get_membership(request).await?.into_inner())
+    }
+
+    /// Lists bounded canonical memberships through the public Group service.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn list_group_memberships(
+        &mut self,
+        message: pb::GroupListMembershipsRequest,
+    ) -> Result<pb::GroupListMembershipsResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.groups.list_memberships(request).await?.into_inner())
+    }
+
+    /// Applies one canonical Group mutation through the public Group service.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn apply_group_change(
+        &mut self,
+        message: pb::GroupApplyChangeRequest,
+    ) -> Result<pb::GroupApplyChangeResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.groups.apply_change(request).await?.into_inner())
+    }
+
+    /// Persists one membership-gated Group Message through the public Group service.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn send_group_message(
+        &mut self,
+        message: pb::GroupSendMessageRequest,
+    ) -> Result<pb::GroupSendMessageResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.groups.send_group_message(request).await?.into_inner())
+    }
+
+    /// Reads one membership/history-gated Group Message through the public Group service.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_group_message(
+        &mut self,
+        message: pb::GroupGetMessageRequest,
+    ) -> Result<pb::GroupGetMessageResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.groups.get_group_message(request).await?.into_inner())
     }
 
     /// Lists canonical dead letters for one Event subscription.

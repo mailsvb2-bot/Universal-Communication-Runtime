@@ -1,9 +1,10 @@
 use core::fmt;
 
 use ucr_model::{
-    CallId, CallSession, CallSignal, CommandEnvelope, CommunicationIntent, ConversationId,
-    ConversationRecord, ExternalIdentityBinding, IdentityId, IdentityRecord, IntegrationId,
-    IntentId, MessageEnvelope, MessageId, ServiceAuditOperationRef, ServiceCredentialId,
+    AuthorizationRequest, CallId, CallSession, CallSignal, CommandEnvelope, CommunicationIntent,
+    ConversationId, ConversationRecord, ExternalIdentityBinding, GroupChange, GroupId,
+    GroupMembership, GroupRecord, IdentityId, IdentityRecord, IntegrationId, IntentId,
+    MessageEnvelope, MessageId, PrincipalRef, ServiceAuditOperationRef, ServiceCredentialId,
     TenantScope,
 };
 use ucr_protocol::{
@@ -12,6 +13,7 @@ use ucr_protocol::{
     COMMUNICATION_INTENT_WRITE_PERMISSION, CONVERSATION_READ_PERMISSION,
     CONVERSATION_WRITE_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceipt,
     EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION, EXTERNAL_IDENTITY_BINDING_READ_PERMISSION,
+    GROUP_CREATE_PERMISSION, GROUP_MANAGE_PERMISSION, GROUP_READ_PERMISSION,
     IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION, MESSAGE_READ_PERMISSION,
     MESSAGE_WRITE_PERMISSION, SERVICE_AUDIT_CALL_OBSERVE_OPERATION_KIND,
     SERVICE_AUDIT_CALL_SIGNAL_OPERATION_KIND, SERVICE_AUDIT_CALL_START_OPERATION_KIND,
@@ -20,18 +22,21 @@ use ucr_protocol::{
     SERVICE_AUDIT_CONVERSATION_CREATE_OPERATION_KIND,
     SERVICE_AUDIT_CONVERSATION_READ_OPERATION_KIND,
     SERVICE_AUDIT_EXTERNAL_IDENTITY_LINK_OPERATION_KIND,
-    SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND,
+    SERVICE_AUDIT_EXTERNAL_IDENTITY_READ_OPERATION_KIND, SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND,
+    SERVICE_AUDIT_GROUP_MANAGE_OPERATION_KIND, SERVICE_AUDIT_GROUP_MEMBERSHIP_READ_OPERATION_KIND,
+    SERVICE_AUDIT_GROUP_MESSAGE_READ_OPERATION_KIND,
+    SERVICE_AUDIT_GROUP_MESSAGE_SEND_OPERATION_KIND, SERVICE_AUDIT_GROUP_READ_OPERATION_KIND,
     SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND, SERVICE_AUDIT_IDENTITY_READ_OPERATION_KIND,
     SERVICE_AUDIT_MESSAGE_READ_OPERATION_KIND, SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND,
-    acknowledgement_for, canonical_call_creation,
+    acknowledgement_for, canonical_call_creation, canonical_group_creation,
 };
 
 use crate::{
     AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError, CallStore,
     CommandAcceptanceStore, CommunicationIntentStore, ConversationStore, DurableStoreError,
-    ExternalIdentityBindingStore, IdentityStore, MessageStore, ServiceAuditStore,
-    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
-    ServiceQuotaClock, ServiceQuotaStore,
+    ExternalIdentityBindingStore, GroupMessageStore, GroupStore, IdentityStore, MessageStore,
+    ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
+    ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
 };
 
 /// Transport-neutral Phase-13 ingress for external Service Principal operations.
@@ -674,22 +679,278 @@ where
     }
 }
 
+impl<C, A, S> IntegrationIngress<'_, C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + GroupStore,
+{
+    /// Authenticates and authorizes the two canonical permissions required for atomic Group creation.
+    ///
+    /// Service-principal admission consumes request quota exactly once for `ucr.group.create`.
+    /// The required `ucr.conversation.write` permission is then checked for the same authenticated
+    /// subject/resource scope as an additional, separately audited permission of that same request.
+    /// Only after both checks succeed does execution enter the existing atomic Group store.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, validation, conflict, and durable-store failures map to
+    /// stable canonical errors. A failed additional permission check cannot create a Group.
+    pub fn create_group(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        conversation: &ConversationRecord,
+        group: &GroupRecord,
+    ) -> Result<GroupRecord, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND.to_owned(),
+            operation_id: group.group_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                GROUP_CREATE_PERMISSION,
+                &group.scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        request.authorize(&AuthorizationRequest {
+            subject: subject.clone(),
+            permission: GROUP_CREATE_PERMISSION.to_owned(),
+            resource_scope: group.scope.clone(),
+        })?;
+        request.authorize_additional_permission(CONVERSATION_WRITE_PERMISSION)?;
+
+        let (canonical, _) = canonical_group_creation(group, &subject.scope, &subject.principal)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+        self.store
+            .create_group(conversation, &canonical, &subject)
+            .map_err(map_store_error)?;
+        Ok(canonical)
+    }
+
+    /// Reads one canonical Group through the existing authorization and private-membership boundary.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, not-found, and durable-store failures map to canonical errors.
+    pub fn get_group(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        group_id: &GroupId,
+    ) -> Result<GroupRecord, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_GROUP_READ_OPERATION_KIND.to_owned(),
+            operation_id: group_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                GROUP_READ_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .group(&subject, scope, group_id)
+            .map_err(map_authorized_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+
+    /// Reads one membership through the active-member-gated canonical Group owner.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, not-found, and durable-store failures map to canonical errors.
+    pub fn get_group_membership(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        member: &PrincipalRef,
+    ) -> Result<GroupMembership, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_GROUP_MEMBERSHIP_READ_OPERATION_KIND.to_owned(),
+            operation_id: group_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                GROUP_READ_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .group_membership(&subject, scope, group_id, member)
+            .map_err(map_authorized_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+
+    /// Lists a bounded canonical membership set through the active-member-gated Group owner.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, invalid-bound, and durable-store failures map to canonical errors.
+    pub fn list_group_memberships(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<GroupMembership>, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_GROUP_MEMBERSHIP_READ_OPERATION_KIND.to_owned(),
+            operation_id: group_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                GROUP_READ_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .group_memberships(&subject, scope, group_id, max_items)
+            .map_err(map_authorized_error)
+    }
+
+    /// Applies one existing canonical Group mutation with optimistic revision and role checks intact.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, revision, role, validation, conflict and store failures map to canonical errors.
+    pub fn apply_group_change(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        change: &GroupChange,
+    ) -> Result<AcknowledgementEnvelope, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_GROUP_MANAGE_OPERATION_KIND.to_owned(),
+            operation_id: change.event_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                GROUP_MANAGE_PERMISSION,
+                &change.scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .apply_group_change(&subject, change)
+            .map_err(map_authorized_error)?;
+        Ok(acknowledgement_for(change.event_id.as_opaque().clone()))
+    }
+}
+
+impl<C, A, S> IntegrationIngress<'_, C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + GroupMessageStore,
+{
+    /// Persists one Group Message through the membership-gated canonical Message owner.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, membership, validation, conflict and store failures map to canonical errors.
+    pub fn send_group_message(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        message: &MessageEnvelope,
+    ) -> Result<AcknowledgementEnvelope, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_GROUP_MESSAGE_SEND_OPERATION_KIND.to_owned(),
+            operation_id: message.message_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                MESSAGE_WRITE_PERMISSION,
+                &message.scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .persist_group_message(&subject, message)
+            .map_err(map_authorized_error)?;
+        Ok(acknowledgement_for(message.message_id.as_opaque().clone()))
+    }
+
+    /// Reads one Group Message through the membership/history-gated canonical Message owner.
+    ///
+    /// # Errors
+    /// Authentication, quota, permission, history-policy, not-found and store failures map to canonical errors.
+    pub fn get_group_message(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        message_id: &MessageId,
+    ) -> Result<MessageEnvelope, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_GROUP_MESSAGE_READ_OPERATION_KIND.to_owned(),
+            operation_id: message_id.as_opaque().clone(),
+        };
+        let request = ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                MESSAGE_READ_PERMISSION,
+                scope,
+                &operation,
+            )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .group_message(&subject, scope, message_id)
+            .map_err(map_authorized_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+}
+
 /// Backward-compatible Phase-13 name retained while the public ingress grows beyond Commands.
 pub type IntegrationCommandIngress<'a, C, A, S> = IntegrationIngress<'a, C, A, S>;
+
+const fn map_store_error(error: DurableStoreError) -> CanonicalError {
+    CanonicalError::new(match error {
+        DurableStoreError::InvalidRecord => CanonicalErrorCode::InvalidArgument,
+        DurableStoreError::Conflict => CanonicalErrorCode::Conflict,
+        DurableStoreError::Full => CanonicalErrorCode::ResourceExhausted,
+        DurableStoreError::Unavailable => CanonicalErrorCode::TemporarilyUnavailable,
+        DurableStoreError::PermissionDenied => CanonicalErrorCode::PermissionDenied,
+        DurableStoreError::Corrupt
+        | DurableStoreError::UnsupportedSchemaVersion
+        | DurableStoreError::ForeignStore
+        | DurableStoreError::Internal => CanonicalErrorCode::Internal,
+    })
+}
 
 const fn map_authorized_error(error: AuthorizedMutationError) -> CanonicalError {
     match error {
         AuthorizedMutationError::Authorization(error) => error,
-        AuthorizedMutationError::Store(error) => CanonicalError::new(match error {
-            DurableStoreError::InvalidRecord => CanonicalErrorCode::InvalidArgument,
-            DurableStoreError::Conflict => CanonicalErrorCode::Conflict,
-            DurableStoreError::Full => CanonicalErrorCode::ResourceExhausted,
-            DurableStoreError::Unavailable => CanonicalErrorCode::TemporarilyUnavailable,
-            DurableStoreError::PermissionDenied => CanonicalErrorCode::PermissionDenied,
-            DurableStoreError::Corrupt
-            | DurableStoreError::UnsupportedSchemaVersion
-            | DurableStoreError::ForeignStore
-            | DurableStoreError::Internal => CanonicalErrorCode::Internal,
-        }),
+        AuthorizedMutationError::Store(error) => map_store_error(error),
     }
 }

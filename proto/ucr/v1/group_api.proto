@@ -1,0 +1,162 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/communication.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/identity.proto";
+import "ucr/v1/offline_groups.proto";
+import "ucr/v1/runtime.proto";
+
+enum GroupOwnershipKind {
+  GROUP_OWNERSHIP_KIND_UNSPECIFIED = 0;
+  GROUP_OWNERSHIP_KIND_PERSON_OWNED = 1;
+  GROUP_OWNERSHIP_KIND_ORGANIZATION_OWNED = 2;
+  GROUP_OWNERSHIP_KIND_SHARED_ADMIN = 3;
+  GROUP_OWNERSHIP_KIND_OWNERLESS_FEDERATED = 4;
+  GROUP_OWNERSHIP_KIND_TEMPORARY = 5;
+}
+
+message GroupOwnership {
+  GroupOwnershipKind kind = 1;
+  optional PrincipalRef owner = 2;
+  optional int64 expires_at_unix_ms = 3;
+}
+
+enum GroupMediaState {
+  GROUP_MEDIA_STATE_UNSPECIFIED = 0;
+  GROUP_MEDIA_STATE_IDLE = 1;
+}
+
+enum GroupPermission {
+  GROUP_PERMISSION_UNSPECIFIED = 0;
+  GROUP_PERMISSION_SEND_MESSAGE = 1;
+  GROUP_PERMISSION_READ_HISTORY = 2;
+  GROUP_PERMISSION_MANAGE_MEMBERS = 3;
+  GROUP_PERMISSION_MANAGE_ROLES = 4;
+  GROUP_PERMISSION_MANAGE_GROUP = 5;
+  GROUP_PERMISSION_TRANSFER_OWNERSHIP = 6;
+}
+
+enum GroupMemberState {
+  GROUP_MEMBER_STATE_UNSPECIFIED = 0;
+  GROUP_MEMBER_STATE_ACTIVE = 1;
+  GROUP_MEMBER_STATE_REMOVED = 2;
+}
+
+message GroupRecord {
+  TenantScope scope = 1;
+  OpaqueId group_id = 2;
+  ConversationRef conversation = 3;
+  GroupOwnership ownership = 4;
+  GroupHistoryPolicy history_policy = 5;
+  DeliveryPolicy delivery_policy = 6;
+  GroupCryptoState crypto_state = 7;
+  optional PublicGroupPolicy public_policy = 8;
+  GroupMediaState media_state = 9;
+  repeated GroupBridgeMapping bridge_mappings = 10;
+  uint64 replication_generation = 11;
+  uint64 revision = 12;
+}
+
+message GroupMembership {
+  TenantScope scope = 1;
+  OpaqueId group_id = 2;
+  PrincipalRef member = 3;
+  GroupRole role = 4;
+  repeated GroupPermission permissions = 5;
+  GroupMemberState state = 6;
+  uint64 joined_revision = 7;
+  optional uint64 removed_revision = 8;
+  uint64 history_floor_logical_order = 9;
+}
+
+message GroupCreateRequest {
+  ConversationRecord conversation = 1;
+  GroupRecord group = 2;
+}
+message GroupCreateResponse {
+  oneof result {
+    GroupRecord group = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message GroupGetRequest {
+  TenantScope scope = 1;
+  OpaqueId group_id = 2;
+}
+message GroupGetResponse {
+  oneof result {
+    GroupRecord group = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message GroupGetMembershipRequest {
+  TenantScope scope = 1;
+  OpaqueId group_id = 2;
+  PrincipalRef member = 3;
+}
+message GroupGetMembershipResponse {
+  oneof result {
+    GroupMembership membership = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message GroupListMembershipsRequest {
+  TenantScope scope = 1;
+  OpaqueId group_id = 2;
+  uint32 max_items = 3;
+}
+message GroupMembershipList {
+  repeated GroupMembership memberships = 1;
+}
+message GroupListMembershipsResponse {
+  oneof result {
+    GroupMembershipList memberships = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// `OfflineGroupChange` is the already-versioned protobuf representation of the canonical
+// GroupChange model. Reusing it here avoids a second wire mutation vocabulary.
+message GroupApplyChangeRequest { OfflineGroupChange change = 1; }
+message GroupApplyChangeResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message GroupSendMessageRequest { MessageEnvelope message = 1; }
+message GroupSendMessageResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message GroupGetMessageRequest {
+  TenantScope scope = 1;
+  OpaqueId message_id = 2;
+}
+message GroupGetMessageResponse {
+  oneof result {
+    MessageEnvelope message = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Thin Phase-40 consumer API over the existing Phase-18 Group/Message owners.
+service GroupService {
+  rpc CreateGroup(GroupCreateRequest) returns (GroupCreateResponse);
+  rpc GetGroup(GroupGetRequest) returns (GroupGetResponse);
+  rpc GetMembership(GroupGetMembershipRequest) returns (GroupGetMembershipResponse);
+  rpc ListMemberships(GroupListMembershipsRequest) returns (GroupListMembershipsResponse);
+  rpc ApplyChange(GroupApplyChangeRequest) returns (GroupApplyChangeResponse);
+  rpc SendGroupMessage(GroupSendMessageRequest) returns (GroupSendMessageResponse);
+  rpc GetGroupMessage(GroupGetMessageRequest) returns (GroupGetMessageResponse);
+}

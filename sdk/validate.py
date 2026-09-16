@@ -30,7 +30,7 @@ def main() -> None:
     require(manifest["protocol_package"] == "ucr.v1", "wrong protocol package")
     require(manifest["languages"] == LANGUAGES, "required SDK language set drifted")
     require(
-        manifest["services"] == ["IntegrationService", "EventService", "CallService"],
+        manifest["services"] == ["IntegrationService", "EventService", "CallService", "GroupService"],
         "required SDK service set drifted",
     )
     auth = manifest["authentication"]
@@ -61,6 +61,8 @@ def main() -> None:
     rust_sdk = (ROOT / "crates/ucr-sdk/src/lib.rs").read_text(encoding="utf-8")
     for method in ("start_call", "get_call", "signal_call"):
         require(f"pub async fn {method}" in rust_sdk, f"Rust SDK missing CallService method: {method}")
+    for method in ("create_group", "get_group", "get_group_membership", "list_group_memberships", "apply_group_change", "send_group_message", "get_group_message"):
+        require(f"pub async fn {method}" in rust_sdk, f"Rust SDK missing GroupService method: {method}")
 
 
 if __name__ == "__main__":

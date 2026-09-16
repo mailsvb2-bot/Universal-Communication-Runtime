@@ -7,9 +7,9 @@ use ucr_core::{
     AuthorizationEvaluator, CallStore, CommandAcceptanceStore, CommunicationIntentStore,
     ConversationStore, EventApiIngress, EventAppendStatus, EventCursorRejection,
     EventDeliveryClock, EventSubscriptionStore, ExternalIdentityBindingLookup,
-    ExternalIdentityBindingStore, IdentityStore, IntegrationIngress, MessageStore,
-    ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore, ServiceQuotaClock,
-    ServiceQuotaStore,
+    ExternalIdentityBindingStore, GroupMessageStore, IdentityStore, IntegrationIngress,
+    MessageStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
+    ServiceQuotaClock, ServiceQuotaStore,
 };
 use ucr_model::{
     ActorId, ActorKind, AttachmentId, CallId, CallParticipant, CallParticipantState,
@@ -19,11 +19,15 @@ use ucr_model::{
     CryptoSuite, DeliveryPolicy, DeliveryState, DeviceId, DeviceRef, EndpointId,
     EventConsumerCursor, EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind,
     EventEnvelope, EventPollResult, EventSubscription, EventSubscriptionId, EventSubscriptionMode,
-    EventSubscriptionStart, ExternalIdentityBinding, ExternalMessageMapping, IdentityEvidence,
-    IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, IntentConstraints, IntentId,
-    KeyId, MessageCryptoMetadata, MessageEnvelope, MessageId, MessageRelation, MessageRelationKind,
-    MessageSignature, NamespaceId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, PrincipalRef,
-    ProtocolExtension, ProtocolVersion, ServiceCredentialId, TenantId, TenantScope,
+    EventSubscriptionStart, ExternalIdentityBinding, ExternalMessageMapping, GroupBridgeMapping,
+    GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState,
+    GroupMemberState, GroupMembership, GroupOwnership, GroupPermission, GroupRecord, GroupRole,
+    IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
+    IntentConstraints, IntentId, KeyId, MessageCryptoMetadata, MessageEnvelope, MessageId,
+    MessageRelation, MessageRelationKind, MessageSignature, NamespaceId, OpaqueId, OriginRef,
+    PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension, ProtocolVersion,
+    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, ServiceCredentialId, TenantId,
+    TenantScope,
 };
 use ucr_protocol::{
     AcknowledgementEnvelope, CanonicalError, CanonicalErrorCode, CommandReceipt,
@@ -682,6 +686,257 @@ where
                 }),
             },
         ))
+    }
+}
+
+/// Thin Phase-40 gRPC binding over the existing Service Principal gate and canonical Group owners.
+pub struct GrpcGroupService<C, A, S> {
+    clock: Arc<C>,
+    authorization: Arc<A>,
+    store: Arc<S>,
+}
+
+impl<C, A, S> GrpcGroupService<C, A, S> {
+    #[must_use]
+    pub const fn new(clock: Arc<C>, authorization: Arc<A>, store: Arc<S>) -> Self {
+        Self {
+            clock,
+            authorization,
+            store,
+        }
+    }
+}
+
+impl<C, A, S> Clone for GrpcGroupService<C, A, S> {
+    fn clone(&self) -> Self {
+        Self {
+            clock: Arc::clone(&self.clock),
+            authorization: Arc::clone(&self.authorization),
+            store: Arc::clone(&self.store),
+        }
+    }
+}
+
+impl<C, A, S> fmt::Debug for GrpcGroupService<C, A, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrpcGroupService")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Builds the public Group gRPC server over the existing canonical Group/Message owners.
+#[must_use]
+pub fn group_service_server<C, A, S>(
+    service: GrpcGroupService<C, A, S>,
+) -> pb::group_service_server::GroupServiceServer<GrpcGroupService<C, A, S>>
+where
+    C: ServiceQuotaClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + GroupMessageStore + 'static,
+{
+    pb::group_service_server::GroupServiceServer::new(service)
+        .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
+        .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE)
+}
+
+#[tonic::async_trait]
+impl<C, A, S> pb::group_service_server::GroupService for GrpcGroupService<C, A, S>
+where
+    C: ServiceQuotaClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + GroupMessageStore + 'static,
+{
+    async fn create_group(
+        &self,
+        request: Request<pb::GroupCreateRequest>,
+    ) -> Result<Response<pb::GroupCreateResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let conversation = body
+            .conversation
+            .ok_or_else(invalid_argument)
+            .and_then(decode_conversation_record);
+        let group = body
+            .group
+            .ok_or_else(invalid_argument)
+            .and_then(decode_group_record);
+        let result = match (credentials, conversation, group) {
+            (Ok((credential_id, secret)), Ok(conversation), Ok(group)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .create_group(&group.scope, &credential_id, &secret, &conversation, &group)
+                    .map(|group| pb_group_record(&group))
+            }
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::GroupCreateResponse {
+            result: Some(match result {
+                Ok(group) => pb::group_create_response::Result::Group(group),
+                Err(error) => pb::group_create_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn get_group(
+        &self,
+        request: Request<pb::GroupGetRequest>,
+    ) -> Result<Response<pb::GroupGetResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_group_lookup(request.into_inner());
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, group_id))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_group(&scope, &credential_id, &secret, &scope, &group_id)
+                    .map(|group| pb_group_record(&group))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::GroupGetResponse {
+            result: Some(match result {
+                Ok(group) => pb::group_get_response::Result::Group(group),
+                Err(error) => pb::group_get_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn get_membership(
+        &self,
+        request: Request<pb::GroupGetMembershipRequest>,
+    ) -> Result<Response<pb::GroupGetMembershipResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_group_membership_lookup(request.into_inner());
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, group_id, member))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_group_membership(
+                        &scope,
+                        &credential_id,
+                        &secret,
+                        &scope,
+                        &group_id,
+                        &member,
+                    )
+                    .map(|membership| pb_group_membership(&membership))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::GroupGetMembershipResponse {
+            result: Some(match result {
+                Ok(membership) => pb::group_get_membership_response::Result::Membership(membership),
+                Err(error) => pb::group_get_membership_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn list_memberships(
+        &self,
+        request: Request<pb::GroupListMembershipsRequest>,
+    ) -> Result<Response<pb::GroupListMembershipsResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_group_memberships_lookup(request.into_inner());
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, group_id, max_items))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .list_group_memberships(
+                        &scope,
+                        &credential_id,
+                        &secret,
+                        &scope,
+                        &group_id,
+                        max_items,
+                    )
+                    .map(|memberships| pb::GroupMembershipList {
+                        memberships: memberships.iter().map(pb_group_membership).collect(),
+                    })
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::GroupListMembershipsResponse {
+            result: Some(match result {
+                Ok(memberships) => {
+                    pb::group_list_memberships_response::Result::Memberships(memberships)
+                }
+                Err(error) => pb::group_list_memberships_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn apply_change(
+        &self,
+        request: Request<pb::GroupApplyChangeRequest>,
+    ) -> Result<Response<pb::GroupApplyChangeResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let change = request
+            .into_inner()
+            .change
+            .ok_or_else(invalid_argument)
+            .and_then(decode_group_change);
+        let result = match (credentials, change) {
+            (Ok((credential_id, secret)), Ok(change)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .apply_group_change(&change.scope, &credential_id, &secret, &change)
+                    .map(pb_acknowledgement)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::GroupApplyChangeResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::group_apply_change_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::group_apply_change_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn send_group_message(
+        &self,
+        request: Request<pb::GroupSendMessageRequest>,
+    ) -> Result<Response<pb::GroupSendMessageResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let message = request
+            .into_inner()
+            .message
+            .ok_or_else(invalid_argument)
+            .and_then(decode_message_envelope);
+        let result = match (credentials, message) {
+            (Ok((credential_id, secret)), Ok(message)) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .send_group_message(&message.scope, &credential_id, &secret, &message)
+                    .map(pb_acknowledgement)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::GroupSendMessageResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::group_send_message_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::group_send_message_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn get_group_message(
+        &self,
+        request: Request<pb::GroupGetMessageRequest>,
+    ) -> Result<Response<pb::GroupGetMessageResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_group_message_lookup(request.into_inner());
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, message_id))) => {
+                IntegrationIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_group_message(&scope, &credential_id, &secret, &scope, &message_id)
+                    .map(|message| pb_message_envelope(&message))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::GroupGetMessageResponse {
+            result: Some(match result {
+                Ok(message) => pb::group_get_message_response::Result::Message(message),
+                Err(error) => pb::group_get_message_response::Result::Error(pb_error(error)),
+            }),
+        }))
     }
 }
 
@@ -1537,6 +1792,236 @@ fn decode_principal_ref(value: pb::PrincipalRef) -> Result<PrincipalRef, Canonic
     })
 }
 
+fn decode_group_role(value: i32) -> Result<GroupRole, CanonicalError> {
+    match pb::GroupRole::try_from(value).map_err(|_| invalid_argument())? {
+        pb::GroupRole::Unspecified => Err(invalid_argument()),
+        pb::GroupRole::Owner => Ok(GroupRole::Owner),
+        pb::GroupRole::Admin => Ok(GroupRole::Admin),
+        pb::GroupRole::Member => Ok(GroupRole::Member),
+    }
+}
+
+fn decode_group_history_policy(
+    value: pb::GroupHistoryPolicy,
+) -> Result<GroupHistoryPolicy, CanonicalError> {
+    match pb::GroupHistoryPolicyKind::try_from(value.kind).map_err(|_| invalid_argument())? {
+        pb::GroupHistoryPolicyKind::Unspecified => Err(invalid_argument()),
+        pb::GroupHistoryPolicyKind::NoHistory => Ok(GroupHistoryPolicy::NoHistory),
+        pb::GroupHistoryPolicyKind::FromJoin => Ok(GroupHistoryPolicy::FromJoin),
+        pb::GroupHistoryPolicyKind::LastNMessages => value
+            .last_n_messages
+            .map(GroupHistoryPolicy::LastNMessages)
+            .ok_or_else(invalid_argument),
+        pb::GroupHistoryPolicyKind::FromTimestamp => value
+            .from_timestamp_unix_ms
+            .map(GroupHistoryPolicy::FromTimestamp)
+            .ok_or_else(invalid_argument),
+        pb::GroupHistoryPolicyKind::FullHistory => Ok(GroupHistoryPolicy::FullHistory),
+        pb::GroupHistoryPolicyKind::Custom => value
+            .custom_policy
+            .map(GroupHistoryPolicy::CustomPolicy)
+            .ok_or_else(invalid_argument),
+    }
+}
+
+fn decode_public_group_policy(
+    value: pb::PublicGroupPolicy,
+) -> Result<PublicGroupPolicy, CanonicalError> {
+    let join_policy = match pb::PublicGroupJoinPolicy::try_from(value.join_policy)
+        .map_err(|_| invalid_argument())?
+    {
+        pb::PublicGroupJoinPolicy::Unspecified => return Err(invalid_argument()),
+        pb::PublicGroupJoinPolicy::Open => PublicGroupJoinPolicy::Open,
+        pb::PublicGroupJoinPolicy::ApprovalRequired => PublicGroupJoinPolicy::ApprovalRequired,
+        pb::PublicGroupJoinPolicy::InviteOnly => PublicGroupJoinPolicy::InviteOnly,
+    };
+    let discovery = match pb::PublicGroupDiscovery::try_from(value.discovery)
+        .map_err(|_| invalid_argument())?
+    {
+        pb::PublicGroupDiscovery::Unspecified => return Err(invalid_argument()),
+        pb::PublicGroupDiscovery::Unlisted => PublicGroupDiscovery::Unlisted,
+        pb::PublicGroupDiscovery::Discoverable => PublicGroupDiscovery::Discoverable,
+    };
+    Ok(PublicGroupPolicy {
+        join_policy,
+        discovery,
+        indexed: value.indexed,
+    })
+}
+
+fn decode_group_crypto_state(
+    value: pb::GroupCryptoState,
+) -> Result<GroupCryptoState, CanonicalError> {
+    Ok(GroupCryptoState {
+        capability_id: value.capability_id,
+        epoch: value.epoch,
+        state_ref: value
+            .state_ref
+            .map(|value| decode_opaque(Some(value)))
+            .transpose()?,
+    })
+}
+
+fn decode_group_bridge_mapping(
+    value: pb::GroupBridgeMapping,
+) -> Result<GroupBridgeMapping, CanonicalError> {
+    Ok(GroupBridgeMapping {
+        integration_id: IntegrationId::from_opaque(decode_opaque(value.integration_id)?),
+        external_group_id: value.external_group_id,
+    })
+}
+
+fn decode_group_ownership(value: pb::GroupOwnership) -> Result<GroupOwnership, CanonicalError> {
+    match pb::GroupOwnershipKind::try_from(value.kind).map_err(|_| invalid_argument())? {
+        pb::GroupOwnershipKind::Unspecified => Err(invalid_argument()),
+        pb::GroupOwnershipKind::PersonOwned => Ok(GroupOwnership::PersonOwned(
+            decode_principal_ref(value.owner.ok_or_else(invalid_argument)?)?,
+        )),
+        pb::GroupOwnershipKind::OrganizationOwned => Ok(GroupOwnership::OrganizationOwned(
+            decode_principal_ref(value.owner.ok_or_else(invalid_argument)?)?,
+        )),
+        pb::GroupOwnershipKind::SharedAdmin => Ok(GroupOwnership::SharedAdmin),
+        pb::GroupOwnershipKind::OwnerlessFederated => Ok(GroupOwnership::OwnerlessFederated),
+        pb::GroupOwnershipKind::Temporary => Ok(GroupOwnership::Temporary {
+            owner: value.owner.map(decode_principal_ref).transpose()?,
+            expires_at_unix_ms: value.expires_at_unix_ms.ok_or_else(invalid_argument)?,
+        }),
+    }
+}
+
+fn decode_group_record(value: pb::GroupRecord) -> Result<GroupRecord, CanonicalError> {
+    Ok(GroupRecord {
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        group_id: GroupId::from_opaque(decode_opaque(value.group_id)?),
+        conversation: decode_conversation_ref(value.conversation.ok_or_else(invalid_argument)?)?,
+        ownership: decode_group_ownership(value.ownership.ok_or_else(invalid_argument)?)?,
+        history_policy: decode_group_history_policy(
+            value.history_policy.ok_or_else(invalid_argument)?,
+        )?,
+        delivery_policy: decode_delivery_policy(value.delivery_policy)?,
+        crypto_state: decode_group_crypto_state(value.crypto_state.ok_or_else(invalid_argument)?)?,
+        public_policy: value
+            .public_policy
+            .map(decode_public_group_policy)
+            .transpose()?,
+        media_state: match pb::GroupMediaState::try_from(value.media_state)
+            .map_err(|_| invalid_argument())?
+        {
+            pb::GroupMediaState::Unspecified => return Err(invalid_argument()),
+            pb::GroupMediaState::Idle => GroupMediaState::Idle,
+        },
+        bridge_mappings: value
+            .bridge_mappings
+            .into_iter()
+            .map(decode_group_bridge_mapping)
+            .collect::<Result<_, _>>()?,
+        replication_generation: value.replication_generation,
+        revision: value.revision,
+    })
+}
+
+fn decode_group_lookup(
+    value: pb::GroupGetRequest,
+) -> Result<(TenantScope, GroupId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        GroupId::from_opaque(decode_opaque(value.group_id)?),
+    ))
+}
+
+fn decode_group_membership_lookup(
+    value: pb::GroupGetMembershipRequest,
+) -> Result<(TenantScope, GroupId, PrincipalRef), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        GroupId::from_opaque(decode_opaque(value.group_id)?),
+        decode_principal_ref(value.member.ok_or_else(invalid_argument)?)?,
+    ))
+}
+
+fn decode_group_memberships_lookup(
+    value: pb::GroupListMembershipsRequest,
+) -> Result<(TenantScope, GroupId, usize), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        GroupId::from_opaque(decode_opaque(value.group_id)?),
+        usize::try_from(value.max_items).map_err(|_| invalid_argument())?,
+    ))
+}
+
+fn decode_group_message_lookup(
+    value: pb::GroupGetMessageRequest,
+) -> Result<(TenantScope, MessageId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        MessageId::from_opaque(decode_opaque(value.message_id)?),
+    ))
+}
+
+fn decode_group_change(value: pb::OfflineGroupChange) -> Result<GroupChange, CanonicalError> {
+    let kind = value.kind.ok_or_else(invalid_argument)?;
+    Ok(GroupChange {
+        event_id: ucr_model::EventId::from_opaque(decode_opaque(value.event_id)?),
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        group_id: GroupId::from_opaque(decode_opaque(value.group_id)?),
+        expected_revision: value.expected_revision,
+        kind: match kind {
+            pb::offline_group_change::Kind::AddMember(value) => GroupChangeKind::AddMember {
+                member: decode_principal_ref(value.member.ok_or_else(invalid_argument)?)?,
+                role: decode_group_role(value.role)?,
+            },
+            pb::offline_group_change::Kind::RemoveMember(value) => GroupChangeKind::RemoveMember {
+                member: decode_principal_ref(value.member.ok_or_else(invalid_argument)?)?,
+            },
+            pb::offline_group_change::Kind::ChangeRole(value) => GroupChangeKind::ChangeRole {
+                member: decode_principal_ref(value.member.ok_or_else(invalid_argument)?)?,
+                role: decode_group_role(value.role)?,
+            },
+            pb::offline_group_change::Kind::TransferOwnership(value) => {
+                GroupChangeKind::TransferOwnership {
+                    new_owner: decode_principal_ref(value.new_owner.ok_or_else(invalid_argument)?)?,
+                }
+            }
+            pb::offline_group_change::Kind::SetHistoryPolicy(value) => {
+                GroupChangeKind::SetHistoryPolicy {
+                    policy: decode_group_history_policy(
+                        value.policy.ok_or_else(invalid_argument)?,
+                    )?,
+                }
+            }
+            pb::offline_group_change::Kind::SetPublicPolicy(value) => {
+                GroupChangeKind::SetPublicPolicy {
+                    policy: decode_public_group_policy(value.policy.ok_or_else(invalid_argument)?)?,
+                }
+            }
+            pb::offline_group_change::Kind::SetDeliveryPolicy(value) => {
+                GroupChangeKind::SetDeliveryPolicy {
+                    policy: decode_delivery_policy(value.policy)?,
+                }
+            }
+            pb::offline_group_change::Kind::AddBridgeMapping(value) => {
+                GroupChangeKind::AddBridgeMapping {
+                    mapping: decode_group_bridge_mapping(
+                        value.mapping.ok_or_else(invalid_argument)?,
+                    )?,
+                }
+            }
+            pb::offline_group_change::Kind::RemoveBridgeMapping(value) => {
+                GroupChangeKind::RemoveBridgeMapping {
+                    integration_id: IntegrationId::from_opaque(decode_opaque(
+                        value.integration_id,
+                    )?),
+                    external_group_id: value.external_group_id,
+                }
+            }
+        },
+        next_crypto_state: value
+            .next_crypto_state
+            .map(decode_group_crypto_state)
+            .transpose()?,
+    })
+}
+
 fn decode_call_session(value: pb::CallSession) -> Result<CallSession, CanonicalError> {
     Ok(CallSession {
         scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
@@ -2029,6 +2514,167 @@ fn pb_principal_ref(value: &PrincipalRef) -> pb::PrincipalRef {
     }
 }
 
+fn pb_group_role(value: GroupRole) -> i32 {
+    (match value {
+        GroupRole::Owner => pb::GroupRole::Owner,
+        GroupRole::Admin => pb::GroupRole::Admin,
+        GroupRole::Member => pb::GroupRole::Member,
+    }) as i32
+}
+
+fn pb_group_permission(value: GroupPermission) -> i32 {
+    (match value {
+        GroupPermission::SendMessage => pb::GroupPermission::SendMessage,
+        GroupPermission::ReadHistory => pb::GroupPermission::ReadHistory,
+        GroupPermission::ManageMembers => pb::GroupPermission::ManageMembers,
+        GroupPermission::ManageRoles => pb::GroupPermission::ManageRoles,
+        GroupPermission::ManageGroup => pb::GroupPermission::ManageGroup,
+        GroupPermission::TransferOwnership => pb::GroupPermission::TransferOwnership,
+    }) as i32
+}
+
+fn pb_group_history_policy(value: &GroupHistoryPolicy) -> pb::GroupHistoryPolicy {
+    let (kind, last_n_messages, from_timestamp_unix_ms, custom_policy) = match value {
+        GroupHistoryPolicy::NoHistory => (pb::GroupHistoryPolicyKind::NoHistory, None, None, None),
+        GroupHistoryPolicy::FromJoin => (pb::GroupHistoryPolicyKind::FromJoin, None, None, None),
+        GroupHistoryPolicy::LastNMessages(value) => (
+            pb::GroupHistoryPolicyKind::LastNMessages,
+            Some(*value),
+            None,
+            None,
+        ),
+        GroupHistoryPolicy::FromTimestamp(value) => (
+            pb::GroupHistoryPolicyKind::FromTimestamp,
+            None,
+            Some(*value),
+            None,
+        ),
+        GroupHistoryPolicy::FullHistory => {
+            (pb::GroupHistoryPolicyKind::FullHistory, None, None, None)
+        }
+        GroupHistoryPolicy::CustomPolicy(value) => (
+            pb::GroupHistoryPolicyKind::Custom,
+            None,
+            None,
+            Some(value.clone()),
+        ),
+    };
+    pb::GroupHistoryPolicy {
+        kind: kind as i32,
+        last_n_messages,
+        from_timestamp_unix_ms,
+        custom_policy,
+    }
+}
+
+fn pb_public_group_policy(value: &PublicGroupPolicy) -> pb::PublicGroupPolicy {
+    pb::PublicGroupPolicy {
+        join_policy: (match value.join_policy {
+            PublicGroupJoinPolicy::Open => pb::PublicGroupJoinPolicy::Open,
+            PublicGroupJoinPolicy::ApprovalRequired => pb::PublicGroupJoinPolicy::ApprovalRequired,
+            PublicGroupJoinPolicy::InviteOnly => pb::PublicGroupJoinPolicy::InviteOnly,
+        }) as i32,
+        discovery: (match value.discovery {
+            PublicGroupDiscovery::Unlisted => pb::PublicGroupDiscovery::Unlisted,
+            PublicGroupDiscovery::Discoverable => pb::PublicGroupDiscovery::Discoverable,
+        }) as i32,
+        indexed: value.indexed,
+    }
+}
+
+fn pb_group_crypto_state(value: &GroupCryptoState) -> pb::GroupCryptoState {
+    pb::GroupCryptoState {
+        capability_id: value.capability_id.clone(),
+        epoch: value.epoch,
+        state_ref: value.state_ref.as_ref().map(pb_opaque),
+    }
+}
+
+fn pb_group_bridge_mapping(value: &GroupBridgeMapping) -> pb::GroupBridgeMapping {
+    pb::GroupBridgeMapping {
+        integration_id: Some(pb_opaque(value.integration_id.as_opaque())),
+        external_group_id: value.external_group_id.clone(),
+    }
+}
+
+fn pb_group_ownership(value: &GroupOwnership) -> pb::GroupOwnership {
+    match value {
+        GroupOwnership::PersonOwned(owner) => pb::GroupOwnership {
+            kind: pb::GroupOwnershipKind::PersonOwned as i32,
+            owner: Some(pb_principal_ref(owner)),
+            expires_at_unix_ms: None,
+        },
+        GroupOwnership::OrganizationOwned(owner) => pb::GroupOwnership {
+            kind: pb::GroupOwnershipKind::OrganizationOwned as i32,
+            owner: Some(pb_principal_ref(owner)),
+            expires_at_unix_ms: None,
+        },
+        GroupOwnership::SharedAdmin => pb::GroupOwnership {
+            kind: pb::GroupOwnershipKind::SharedAdmin as i32,
+            owner: None,
+            expires_at_unix_ms: None,
+        },
+        GroupOwnership::OwnerlessFederated => pb::GroupOwnership {
+            kind: pb::GroupOwnershipKind::OwnerlessFederated as i32,
+            owner: None,
+            expires_at_unix_ms: None,
+        },
+        GroupOwnership::Temporary {
+            owner,
+            expires_at_unix_ms,
+        } => pb::GroupOwnership {
+            kind: pb::GroupOwnershipKind::Temporary as i32,
+            owner: owner.as_ref().map(pb_principal_ref),
+            expires_at_unix_ms: Some(*expires_at_unix_ms),
+        },
+    }
+}
+
+fn pb_group_record(value: &GroupRecord) -> pb::GroupRecord {
+    pb::GroupRecord {
+        scope: Some(pb_scope(&value.scope)),
+        group_id: Some(pb_opaque(value.group_id.as_opaque())),
+        conversation: Some(pb_conversation_ref(&value.conversation)),
+        ownership: Some(pb_group_ownership(&value.ownership)),
+        history_policy: Some(pb_group_history_policy(&value.history_policy)),
+        delivery_policy: pb_delivery_policy(value.delivery_policy),
+        crypto_state: Some(pb_group_crypto_state(&value.crypto_state)),
+        public_policy: value.public_policy.as_ref().map(pb_public_group_policy),
+        media_state: match value.media_state {
+            GroupMediaState::Idle => pb::GroupMediaState::Idle as i32,
+        },
+        bridge_mappings: value
+            .bridge_mappings
+            .iter()
+            .map(pb_group_bridge_mapping)
+            .collect(),
+        replication_generation: value.replication_generation,
+        revision: value.revision,
+    }
+}
+
+fn pb_group_membership(value: &GroupMembership) -> pb::GroupMembership {
+    pb::GroupMembership {
+        scope: Some(pb_scope(&value.scope)),
+        group_id: Some(pb_opaque(value.group_id.as_opaque())),
+        member: Some(pb_principal_ref(&value.member)),
+        role: pb_group_role(value.role),
+        permissions: value
+            .permissions
+            .iter()
+            .copied()
+            .map(pb_group_permission)
+            .collect(),
+        state: (match value.state {
+            GroupMemberState::Active => pb::GroupMemberState::Active,
+            GroupMemberState::Removed => pb::GroupMemberState::Removed,
+        }) as i32,
+        joined_revision: value.joined_revision,
+        removed_revision: value.removed_revision,
+        history_floor_logical_order: value.history_floor_logical_order,
+    }
+}
+
 fn pb_call_session(value: &CallSession) -> pb::CallSession {
     pb::CallSession {
         scope: Some(pb_scope(&value.scope)),
@@ -2357,12 +3003,14 @@ mod tests {
     use tonic::{Request, transport::Server};
     use ucr_core::{
         CommunicationIntentStore, ConversationStore, IdentityStore, MessageStore,
-        PermissionGrantStore, ServiceCredentialSecret, ServiceCredentialStore, ServiceQuotaStore,
-        SystemEventDeliveryClock, SystemServiceQuotaClock, issue_service_credential,
+        PermissionGrantStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
+        ServiceQuotaStore, SystemEventDeliveryClock, SystemServiceQuotaClock,
+        issue_service_credential,
     };
     use ucr_model::{
         IdentityId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
-        PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceQuotaPolicy, TenantId, TenantScope,
+        PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuditOperationRef,
+        ServiceAuditOutcome, ServiceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{
         ALGORITHM_VERSION, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION, CALL_START_PERMISSION,
@@ -2372,24 +3020,26 @@ mod tests {
         EVENT_CONSUME_PERMISSION, EVENT_DEAD_LETTER_READ_PERMISSION, EVENT_REPLAY_PERMISSION,
         EVENT_SUBSCRIBE_PERMISSION, EXTERNAL_IDENTITY_BINDING_LINK_PERMISSION,
         EXTERNAL_IDENTITY_BINDING_READ_PERMISSION, EXTERNAL_MESSAGE_ID_LIMIT,
-        EXTERNAL_MESSAGE_MAPPING_LIMIT, IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION,
+        EXTERNAL_MESSAGE_MAPPING_LIMIT, GROUP_CREATE_PERMISSION, GROUP_MANAGE_PERMISSION,
+        GROUP_READ_PERMISSION, IDENTITY_CREATE_PERMISSION, IDENTITY_READ_PERMISSION,
         MAX_COMMAND_PAYLOAD_LEN, MAX_EVENT_INTEGRITY_METADATA_LEN, MAX_EVENT_PAYLOAD_LEN,
         MAX_EXTENSION_PAYLOAD_LEN, MAX_IDEMPOTENCY_KEY_LEN, MAX_INTENT_POLICY_VALUE_LEN,
         MAX_INTENT_TRANSPORT_CONSTRAINTS, MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS,
         MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_READ_PERMISSION,
-        MESSAGE_RELATION_LIMIT, MESSAGE_WRITE_PERMISSION, SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN,
+        MESSAGE_RELATION_LIMIT, MESSAGE_WRITE_PERMISSION,
+        SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND, SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN,
         validate_communication_intent, validate_event, validate_message,
     };
     use ucr_storage_memory::MemoryLocalStore;
 
     use super::{
         GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, GrpcCallService,
-        GrpcEventService, GrpcIntegrationService, SERVICE_CREDENTIAL_ID_METADATA_KEY,
-        SERVICE_CREDENTIAL_SECRET_METADATA_KEY, attach_service_credential, call_service_server,
-        decode_call_session, decode_command, decode_communication_intent,
-        decode_conversation_record, decode_event_envelope, decode_message_envelope,
-        decode_principal_ref, event_service_server, integration_service_server, pb,
-        pb_call_session,
+        GrpcEventService, GrpcGroupService, GrpcIntegrationService,
+        SERVICE_CREDENTIAL_ID_METADATA_KEY, SERVICE_CREDENTIAL_SECRET_METADATA_KEY,
+        attach_service_credential, call_service_server, decode_call_session, decode_command,
+        decode_communication_intent, decode_conversation_record, decode_event_envelope,
+        decode_message_envelope, decode_principal_ref, event_service_server, group_service_server,
+        integration_service_server, pb, pb_call_session,
     };
 
     fn oid(value: &str) -> OpaqueId {
@@ -2609,6 +3259,39 @@ mod tests {
                 kind: kind as i32,
             }),
             parent_conversation_id: None,
+        }
+    }
+
+    fn group(id: &str, conversation_id: &str) -> pb::GroupRecord {
+        pb::GroupRecord {
+            scope: Some(wire_scope()),
+            group_id: Some(pb_id(id)),
+            conversation: Some(pb::ConversationRef {
+                conversation_id: Some(pb_id(conversation_id)),
+                kind: pb::ConversationKind::PrivateGroup as i32,
+            }),
+            ownership: Some(pb::GroupOwnership {
+                kind: pb::GroupOwnershipKind::SharedAdmin as i32,
+                owner: None,
+                expires_at_unix_ms: None,
+            }),
+            history_policy: Some(pb::GroupHistoryPolicy {
+                kind: pb::GroupHistoryPolicyKind::FullHistory as i32,
+                last_n_messages: None,
+                from_timestamp_unix_ms: None,
+                custom_policy: None,
+            }),
+            delivery_policy: pb::DeliveryPolicy::Durable as i32,
+            crypto_state: Some(pb::GroupCryptoState {
+                capability_id: None,
+                epoch: 0,
+                state_ref: None,
+            }),
+            public_policy: None,
+            media_state: pb::GroupMediaState::Idle as i32,
+            bridge_mappings: Vec::new(),
+            replication_generation: 0,
+            revision: 0,
         }
     }
 
@@ -2920,6 +3603,33 @@ mod tests {
         (client, server)
     }
 
+    async fn group_client_and_server(
+        store: Arc<MemoryLocalStore>,
+    ) -> (
+        pb::group_service_client::GroupServiceClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Group loopback listener");
+        let address = listener.local_addr().expect("Group listener address");
+        let incoming = TcpListenerStream::new(listener);
+        let service =
+            GrpcGroupService::new(Arc::new(SystemServiceQuotaClock), Arc::clone(&store), store);
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(group_service_server(service))
+                .serve_with_incoming(incoming)
+                .await
+        });
+        let client =
+            pb::group_service_client::GroupServiceClient::connect(format!("http://{address}"))
+                .await
+                .expect("connect Group loopback client")
+                .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
+        (client, server)
+    }
+
     async fn call_client_and_server(
         store: Arc<MemoryLocalStore>,
     ) -> (
@@ -3153,6 +3863,305 @@ mod tests {
             pb::call_get_response::Result::Call(_) => panic!("bad credential disclosed call"),
         };
         assert_eq!(error.code, pb::ErrorCode::Unauthenticated as i32);
+    }
+
+    type TestGroupClient = pb::group_service_client::GroupServiceClient<tonic::transport::Channel>;
+
+    async fn assert_group_create_requires_conversation_write(
+        client: &mut TestGroupClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        conversation: pb::ConversationRecord,
+        group: pb::GroupRecord,
+    ) {
+        let mut request = Request::new(pb::GroupCreateRequest {
+            conversation: Some(conversation),
+            group: Some(group),
+        });
+        attach_service_credential(&mut request, credential_id, secret);
+        let response = client
+            .create_group(request)
+            .await
+            .expect("Group create application response")
+            .into_inner();
+        let error = match response.result.expect("Group create result") {
+            pb::group_create_response::Result::Error(error) => error,
+            pb::group_create_response::Result::Group(_) => {
+                panic!("Group creation bypassed conversation.write")
+            }
+        };
+        assert_eq!(error.code, pb::ErrorCode::PermissionDenied as i32);
+    }
+
+    async fn create_read_and_list_group(
+        client: &mut TestGroupClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        conversation: pb::ConversationRecord,
+        group: pb::GroupRecord,
+    ) {
+        let mut create = Request::new(pb::GroupCreateRequest {
+            conversation: Some(conversation),
+            group: Some(group),
+        });
+        attach_service_credential(&mut create, credential_id, secret);
+        let response = client
+            .create_group(create)
+            .await
+            .expect("Group create response after permission grant")
+            .into_inner();
+        let created = match response.result.expect("Group create success result") {
+            pb::group_create_response::Result::Group(group) => group,
+            pb::group_create_response::Result::Error(error) => {
+                panic!("Group create failed after both permissions: {}", error.code)
+            }
+        };
+        assert_eq!(created.revision, 0);
+        assert_eq!(created.replication_generation, 0);
+
+        let mut get = Request::new(pb::GroupGetRequest {
+            scope: Some(wire_scope()),
+            group_id: Some(pb_id("group-grpc")),
+        });
+        attach_service_credential(&mut get, credential_id, secret);
+        let response = client
+            .get_group(get)
+            .await
+            .expect("GetGroup response")
+            .into_inner();
+        match response.result.expect("GetGroup result") {
+            pb::group_get_response::Result::Group(group) => {
+                assert_eq!(group.revision, 0);
+                assert_eq!(group.group_id.expect("group id").value, b"group-grpc");
+            }
+            pb::group_get_response::Result::Error(error) => {
+                panic!("GetGroup failed: {}", error.code)
+            }
+        }
+
+        let mut list = Request::new(pb::GroupListMembershipsRequest {
+            scope: Some(wire_scope()),
+            group_id: Some(pb_id("group-grpc")),
+            max_items: 8,
+        });
+        attach_service_credential(&mut list, credential_id, secret);
+        let response = client
+            .list_memberships(list)
+            .await
+            .expect("ListMemberships response")
+            .into_inner();
+        let memberships = match response.result.expect("ListMemberships result") {
+            pb::group_list_memberships_response::Result::Memberships(value) => value.memberships,
+            pb::group_list_memberships_response::Result::Error(error) => {
+                panic!("ListMemberships failed: {}", error.code)
+            }
+        };
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(memberships[0].role, pb::GroupRole::Admin as i32);
+        assert_eq!(
+            memberships[0]
+                .member
+                .as_ref()
+                .and_then(|member| member.principal_id.as_ref())
+                .map(|id| id.value.as_slice()),
+            Some(b"service-grpc".as_slice())
+        );
+    }
+
+    async fn change_and_round_trip_group_message(
+        client: &mut TestGroupClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+    ) {
+        let mut change = Request::new(pb::GroupApplyChangeRequest {
+            change: Some(pb::OfflineGroupChange {
+                event_id: Some(pb_id("group-change-grpc")),
+                scope: Some(wire_scope()),
+                group_id: Some(pb_id("group-grpc")),
+                expected_revision: 0,
+                kind: Some(pb::offline_group_change::Kind::SetDeliveryPolicy(
+                    pb::GroupSetDeliveryPolicyChange {
+                        policy: pb::DeliveryPolicy::BestEffort as i32,
+                    },
+                )),
+                next_crypto_state: None,
+            }),
+        });
+        attach_service_credential(&mut change, credential_id, secret);
+        let response = client
+            .apply_change(change)
+            .await
+            .expect("ApplyChange response")
+            .into_inner();
+        match response.result.expect("ApplyChange result") {
+            pb::group_apply_change_response::Result::Acknowledgement(value) => assert_eq!(
+                value.acknowledged_id.expect("change id").value,
+                b"group-change-grpc"
+            ),
+            pb::group_apply_change_response::Result::Error(error) => {
+                panic!("ApplyChange failed: {}", error.code)
+            }
+        }
+
+        let mut group_message = message(
+            "group-message-grpc",
+            "group-conversation-grpc",
+            b"group payload",
+            b"group-external".to_vec(),
+        );
+        group_message
+            .conversation
+            .as_mut()
+            .expect("conversation")
+            .kind = pb::ConversationKind::PrivateGroup as i32;
+        group_message.delivery_policy = pb::DeliveryPolicy::BestEffort as i32;
+        let mut send = Request::new(pb::GroupSendMessageRequest {
+            message: Some(group_message),
+        });
+        attach_service_credential(&mut send, credential_id, secret);
+        let response = client
+            .send_group_message(send)
+            .await
+            .expect("SendGroupMessage response")
+            .into_inner();
+        match response.result.expect("SendGroupMessage result") {
+            pb::group_send_message_response::Result::Acknowledgement(value) => assert_eq!(
+                value.acknowledged_id.expect("message id").value,
+                b"group-message-grpc"
+            ),
+            pb::group_send_message_response::Result::Error(error) => {
+                panic!("SendGroupMessage failed: {}", error.code)
+            }
+        }
+
+        let mut get_message = Request::new(pb::GroupGetMessageRequest {
+            scope: Some(wire_scope()),
+            message_id: Some(pb_id("group-message-grpc")),
+        });
+        attach_service_credential(&mut get_message, credential_id, secret);
+        let response = client
+            .get_group_message(get_message)
+            .await
+            .expect("GetGroupMessage response")
+            .into_inner();
+        match response.result.expect("GetGroupMessage result") {
+            pb::group_get_message_response::Result::Message(message) => {
+                assert_eq!(message.content, b"group payload");
+                assert_eq!(
+                    message.delivery_policy,
+                    pb::DeliveryPolicy::BestEffort as i32
+                );
+            }
+            pb::group_get_message_response::Result::Error(error) => {
+                panic!("GetGroupMessage failed: {}", error.code)
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn group_create_compound_permissions_consume_one_request_quota_and_audit_both() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[GROUP_CREATE_PERMISSION, CONVERSATION_WRITE_PERMISSION],
+        );
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject(),
+                max_requests: 1,
+                window_ms: 60_000,
+            })
+            .expect("restrict create quota to one RPC");
+        let (mut client, server) = group_client_and_server(Arc::clone(&store)).await;
+        let mut create = Request::new(pb::GroupCreateRequest {
+            conversation: Some(conversation(
+                "group-quota-conversation-grpc",
+                pb::ConversationKind::PrivateGroup,
+            )),
+            group: Some(group("group-quota-grpc", "group-quota-conversation-grpc")),
+        });
+        attach_service_credential(&mut create, &credential_id, &secret);
+        let response = client
+            .create_group(create)
+            .await
+            .expect("one-quota Group create response")
+            .into_inner();
+        match response.result.expect("one-quota Group create result") {
+            pb::group_create_response::Result::Group(group) => {
+                assert_eq!(group.group_id.expect("group id").value, b"group-quota-grpc");
+            }
+            pb::group_create_response::Result::Error(error) => {
+                panic!(
+                    "compound Group create consumed quota more than once: {}",
+                    error.code
+                )
+            }
+        }
+
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND.to_owned(),
+            operation_id: oid("group-quota-grpc"),
+        };
+        let records = store
+            .service_audit_records_for_operation(&scope(), &operation, 8)
+            .expect("Group create audit records");
+        assert_eq!(records.len(), 2);
+        let mut permissions = records
+            .iter()
+            .map(|record| (record.permission.as_str(), record.outcome))
+            .collect::<Vec<_>>();
+        permissions.sort_unstable_by_key(|(permission, _)| *permission);
+        assert_eq!(
+            permissions,
+            vec![
+                (
+                    CONVERSATION_WRITE_PERMISSION,
+                    ServiceAuditOutcome::Authorized
+                ),
+                (GROUP_CREATE_PERMISSION, ServiceAuditOutcome::Authorized),
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn group_create_requires_both_permissions_then_round_trips_over_public_grpc() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) = seed_with_permissions(
+            &store,
+            &[
+                GROUP_CREATE_PERMISSION,
+                GROUP_READ_PERMISSION,
+                GROUP_MANAGE_PERMISSION,
+                MESSAGE_WRITE_PERMISSION,
+                MESSAGE_READ_PERMISSION,
+            ],
+        );
+        let (mut client, server) = group_client_and_server(Arc::clone(&store)).await;
+        let conversation = conversation(
+            "group-conversation-grpc",
+            pb::ConversationKind::PrivateGroup,
+        );
+        let group = group("group-grpc", "group-conversation-grpc");
+
+        assert_group_create_requires_conversation_write(
+            &mut client,
+            &credential_id,
+            &secret,
+            conversation.clone(),
+            group.clone(),
+        )
+        .await;
+        store
+            .grant_permission(&PermissionGrant {
+                grantee: subject(),
+                permission: CONVERSATION_WRITE_PERMISSION.to_owned(),
+                scope: PermissionScope::Exact(scope()),
+            })
+            .expect("grant conversation.write");
+        create_read_and_list_group(&mut client, &credential_id, &secret, conversation, group).await;
+        change_and_round_trip_group_message(&mut client, &credential_id, &secret).await;
+        server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread")]

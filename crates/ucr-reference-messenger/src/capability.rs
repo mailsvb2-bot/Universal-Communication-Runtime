@@ -42,8 +42,8 @@ pub const fn phase40_proof_matrix() -> [ProofItem; 9] {
         },
         ProofItem {
             capability: ProofCapability::Groups,
-            state: ProofState::PublicApiGap,
-            evidence: "no public Group membership/lifecycle service",
+            state: ProofState::PublicApiAvailable,
+            evidence: "GroupService lifecycle/membership/message RPCs",
         },
         ProofItem {
             capability: ProofCapability::Calls,

@@ -87,7 +87,9 @@ fn phase39_spec_adr_ci_and_release_truth_are_locked() {
     assert!(spec.contains("There is no hidden automatic application retry"));
     assert!(spec.contains("Phase 41 owns the complete SDK conformance matrix"));
     assert!(adr.contains("The checked-in `.proto` files remain the source of wire truth"));
-    assert!(readme.contains("**Phase 39 — Public SDKs (Prepared public-contract clients).**"));
+    assert!(readme.contains(
+        "Phase 39 adds Prepared Public SDKs for Rust, Python, TypeScript, Kotlin and Swift"
+    ));
     assert!(spec_readme.contains("Phase 39 adds `public-sdks.md`"));
     assert!(ci.contains("python3 sdk/validate.py"));
     assert!(ci.contains("test -s spec/public-sdks.md"));

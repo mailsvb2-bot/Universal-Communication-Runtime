@@ -67,9 +67,11 @@ impl ServiceQuotaClock for SystemServiceQuotaClock {
 
 /// Entry boundary for one external Service Principal request.
 ///
-/// Authentication happens once here. The returned evaluator is single-use and bound to one
-/// permission/resource tuple; it applies quota, delegates to the existing authorization owner,
-/// and persists an audit decision before any authorized durable operation is reached.
+/// Authentication happens once here. The returned evaluator binds one primary permission/resource
+/// tuple to the external request; primary authorization consumes exactly one quota unit and persists
+/// its audit decision before any authorized durable operation is reached. Compound operations may
+/// then check additional permissions for the same authenticated subject/resource scope through the
+/// same evaluator; those checks are separately audited but do not consume request quota again.
 #[derive(Clone, Copy)]
 struct ServiceAuditRequestContext<'a> {
     credential_id: &'a ServiceCredentialId,
@@ -216,6 +218,7 @@ where
             credential_id: credential_id.clone(),
             operation: operation.cloned(),
             used: AtomicBool::new(false),
+            primary_authorized: AtomicBool::new(false),
         })
     }
 }
@@ -228,6 +231,7 @@ pub struct ServicePrincipalRequestAuthorization<'a, C, A, S> {
     credential_id: ServiceCredentialId,
     operation: Option<ServiceAuditOperationRef>,
     used: AtomicBool,
+    primary_authorized: AtomicBool,
 }
 
 impl<C, A, S> fmt::Debug for ServicePrincipalRequestAuthorization<'_, C, A, S> {
@@ -238,6 +242,10 @@ impl<C, A, S> fmt::Debug for ServicePrincipalRequestAuthorization<'_, C, A, S> {
             .field("credential_id", &self.credential_id)
             .field("has_operation", &self.operation.is_some())
             .field("used", &self.used.load(Ordering::Relaxed))
+            .field(
+                "primary_authorized",
+                &self.primary_authorized.load(Ordering::Relaxed),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -258,7 +266,8 @@ where
     fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError> {
         let now = self.clock.now_unix_ms().map_err(map_clock_error)?;
         if self.used.swap(true, Ordering::AcqRel) {
-            return self.audit_and_return(
+            return self.audit_permission_and_return(
+                &self.proof.permission,
                 ServiceAuditOutcome::PermissionDenied,
                 now,
                 Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied)),
@@ -268,11 +277,17 @@ where
         let quota_result = self.store.consume_service_request(&self.proof.subject, now);
         if let Err(error) = quota_result {
             let (outcome, canonical) = map_quota_error(error);
-            return self.audit_and_return(outcome, now, Err(canonical));
+            return self.audit_permission_and_return(
+                &self.proof.permission,
+                outcome,
+                now,
+                Err(canonical),
+            );
         }
 
         if !self.proof.matches(request) {
-            return self.audit_and_return(
+            return self.audit_permission_and_return(
+                &self.proof.permission,
                 ServiceAuditOutcome::PermissionDenied,
                 now,
                 Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied)),
@@ -280,14 +295,23 @@ where
         }
 
         match self.authorization.authorize(request) {
-            Ok(()) => self.audit_and_return(ServiceAuditOutcome::Authorized, now, Ok(())),
+            Ok(()) => {
+                self.audit_permission_and_return(
+                    &self.proof.permission,
+                    ServiceAuditOutcome::Authorized,
+                    now,
+                    Ok(()),
+                )?;
+                self.primary_authorized.store(true, Ordering::Release);
+                Ok(())
+            }
             Err(error) => {
                 let outcome = if error.code == CanonicalErrorCode::PermissionDenied {
                     ServiceAuditOutcome::PermissionDenied
                 } else {
                     ServiceAuditOutcome::AuthorizationUnavailable
                 };
-                self.audit_and_return(outcome, now, Err(error))
+                self.audit_permission_and_return(&self.proof.permission, outcome, now, Err(error))
             }
         }
     }
@@ -299,10 +323,55 @@ where
 
 impl<C, A, S> ServicePrincipalRequestAuthorization<'_, C, A, S>
 where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
     S: ServiceAuditStore,
 {
-    fn audit_and_return<T>(
+    /// Checks one additional permission for the already admitted external request.
+    ///
+    /// The check is restricted to the same authenticated subject and resource scope, is available
+    /// only after the primary permission was authorized and audited, and writes its own audit row.
+    /// It deliberately does not consume request quota again because it is part of the same RPC.
+    ///
+    /// # Errors
+    /// Returns `PermissionDenied` before evaluation if primary admission did not succeed. Invalid
+    /// permission syntax, clock/audit failures, and the underlying authorization result fail closed.
+    pub fn authorize_additional_permission(&self, permission: &str) -> Result<(), CanonicalError> {
+        if !self.primary_authorized.load(Ordering::Acquire) {
+            return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+        }
+        if permission.len() > MAX_SERVICE_REQUEST_PERMISSION_LEN {
+            return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+        }
+        validate_namespaced_identifier(permission)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+        let now = self.clock.now_unix_ms().map_err(map_clock_error)?;
+        let request = AuthorizationRequest {
+            subject: self.proof.subject.clone(),
+            permission: permission.to_owned(),
+            resource_scope: self.proof.resource_scope.clone(),
+        };
+        match self.authorization.authorize(&request) {
+            Ok(()) => self.audit_permission_and_return(
+                permission,
+                ServiceAuditOutcome::Authorized,
+                now,
+                Ok(()),
+            ),
+            Err(error) => {
+                let outcome = if error.code == CanonicalErrorCode::PermissionDenied {
+                    ServiceAuditOutcome::PermissionDenied
+                } else {
+                    ServiceAuditOutcome::AuthorizationUnavailable
+                };
+                self.audit_permission_and_return(permission, outcome, now, Err(error))
+            }
+        }
+    }
+
+    fn audit_permission_and_return<T>(
         &self,
+        permission: &str,
         outcome: ServiceAuditOutcome,
         now_unix_ms: i64,
         result: Result<T, CanonicalError>,
@@ -310,7 +379,7 @@ where
         let context = ServiceAuditRequestContext {
             credential_id: &self.credential_id,
             presented_scope: &self.proof.subject.scope,
-            permission: &self.proof.permission,
+            permission,
             resource_scope: &self.proof.resource_scope,
             operation: self.operation.as_ref(),
         };

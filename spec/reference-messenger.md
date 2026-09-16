@@ -32,7 +32,7 @@ The code-level states are `PublicApiAvailable`, `PublicApiGap` and `Presentation
 | Canon proof area | Phase-40 state | Public evidence / blocker |
 | --- | --- | --- |
 | Chat | Public API available | IntegrationService Conversation/Message RPCs |
-| Groups | Public API gap | no public Group membership/lifecycle service |
+| Groups | Public API available | GroupService lifecycle/membership/message RPCs |
 | Calls | Public API available | CallService StartCall/GetCall/SignalCall |
 | Multi-device | Public API gap | no public Sync/Device lifecycle service |
 | Local | Public API gap | no public local-route consumer service |
@@ -61,6 +61,6 @@ The checked-in Rust presentation contract records the Canon requirements, but it
 
 ## Nonclaims and next closure work
 
-Phase 40 is incomplete until public consumer surfaces and executable Reference Messenger evidence cover Groups, multi-device, local, offline, P2P, recovery and concrete accessibility. Creating those surfaces must reuse the existing canonical owners and must not add a second communication brain.
+Phase 40 is incomplete until public consumer surfaces and executable Reference Messenger evidence cover multi-device, local, offline, P2P, recovery and concrete accessibility. Creating those surfaces must reuse the existing canonical owners and must not add a second communication brain.
 
 Phase 41 remains the owner of the full cross-implementation Conformance Suite; Phase 40 may add focused evidence only for its Reference Messenger boundary.
