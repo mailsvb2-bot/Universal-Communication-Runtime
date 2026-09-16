@@ -52,6 +52,8 @@ pub const COMMUNICATION_INTENT_READ_PERMISSION: &str = "ucr.intent.read";
 pub const COMMUNICATION_INTENT_WRITE_PERMISSION: &str = "ucr.intent.write";
 pub const DELIVERY_READ_PERMISSION: &str = "ucr.delivery.read";
 pub const DELIVERY_WRITE_PERMISSION: &str = "ucr.delivery.write";
+pub const STORE_FORWARD_READ_PERMISSION: &str = "ucr.delivery.store_forward.read";
+pub const STORE_FORWARD_WRITE_PERMISSION: &str = "ucr.delivery.store_forward.write";
 pub const SYNC_READ_PERMISSION: &str = "ucr.sync.read";
 pub const SYNC_WRITE_PERMISSION: &str = "ucr.sync.write";
 pub const ANTI_ENTROPY_READ_PERMISSION: &str = "ucr.sync.anti_entropy.read";
@@ -128,6 +130,8 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     COMMUNICATION_INTENT_WRITE_PERMISSION,
     DELIVERY_READ_PERMISSION,
     DELIVERY_WRITE_PERMISSION,
+    STORE_FORWARD_READ_PERMISSION,
+    STORE_FORWARD_WRITE_PERMISSION,
     SYNC_READ_PERMISSION,
     SYNC_WRITE_PERMISSION,
     ANTI_ENTROPY_READ_PERMISSION,

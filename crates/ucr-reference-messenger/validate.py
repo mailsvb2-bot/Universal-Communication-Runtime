@@ -38,13 +38,14 @@ def main() -> None:
         require(f"pub async fn {method}" in sdk, f"public SDK missing {method}")
     require("pb::device_service_client::DeviceServiceClient<Channel>" in sdk, "public SDK missing DeviceService client")
     require("pb::sync_service_client::SyncServiceClient<Channel>" in sdk, "public SDK missing SyncService client")
+    require("pb::store_forward_service_client::StoreForwardServiceClient<Channel>" in sdk, "public SDK missing StoreForwardService client")
     for method in ("register_device", "get_device", "revoke_device", "create_sync_session", "get_sync_session", "transition_sync", "record_sync_checkpoint", "get_latest_sync_checkpoint"):
         require(f"pub async fn {method}" in sdk, f"public SDK missing {method}")
 
     capability = (CRATE / "src/capability.rs").read_text(encoding="utf-8")
     for item in ("Chat", "Groups", "Calls", "MultiDevice", "Local", "Offline", "P2p", "Recovery", "Accessibility"):
         require(item in capability, f"Phase-40 proof area missing: {item}")
-    require(capability.count("ProofState::PublicApiGap") == 4, "Phase-40 public API gap count drifted")
+    require(capability.count("ProofState::PublicApiGap") == 3, "Phase-40 public API gap count drifted")
     require("ProofState::PresentationModelOnly" in capability, "accessibility maturity gap hidden")
 
     accessibility = (CRATE / "src/accessibility.rs").read_text(encoding="utf-8")
@@ -63,6 +64,12 @@ def main() -> None:
     require("service DeviceService" in multi_proto, "public DeviceService missing")
     require("service SyncService" in multi_proto, "public SyncService missing")
     require("DeviceService lifecycle + SyncService session/checkpoint RPCs" in capability, "Multi-device not marked with public evidence")
+    store_forward_proto = (ROOT / "proto/ucr/v1/store_forward.proto").read_text(encoding="utf-8")
+    require("service StoreForwardService" in store_forward_proto, "public StoreForwardService missing")
+    require("StoreForwardService enqueue + payload-free status RPCs" in capability, "Offline not marked with public evidence")
+    client = (CRATE / "src/client.rs").read_text(encoding="utf-8")
+    require("self.sdk.enqueue_store_forward(request).await" in client, "Reference Messenger missing offline enqueue")
+    require("self.sdk.get_store_forward_status(request).await" in client, "Reference Messenger missing offline status read")
 
     spec = (ROOT / "spec/reference-messenger.md").read_text(encoding="utf-8")
     require("Phase 40 is incomplete" in spec, "Phase 40 completion is overclaimed")

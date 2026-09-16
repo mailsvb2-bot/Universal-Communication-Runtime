@@ -2835,6 +2835,7 @@ dependencies = [
  "ucr-model",
  "ucr-protocol",
  "ucr-storage-memory",
+ "ucr-store-forward",
 ]
 
 [[package]]

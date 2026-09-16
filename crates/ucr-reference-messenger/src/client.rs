@@ -239,6 +239,30 @@ impl ReferenceMessengerClient {
         self.sdk.get_latest_sync_checkpoint(request).await
     }
 
+    /// Queues one already-canonical encrypted delivery for offline Store-and-Forward handling.
+    ///
+    /// The Reference Messenger does not run leases, retries, route discovery or provider calls.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn queue_offline_delivery(
+        &mut self,
+        request: pb::StoreForwardEnqueueRequest,
+    ) -> Result<pb::StoreForwardEnqueueResponse, RpcStatus> {
+        self.sdk.enqueue_store_forward(request).await
+    }
+
+    /// Reads payload-free offline delivery scheduling status.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn get_offline_delivery_status(
+        &mut self,
+        request: pb::StoreForwardGetStatusRequest,
+    ) -> Result<pb::StoreForwardGetStatusResponse, RpcStatus> {
+        self.sdk.get_store_forward_status(request).await
+    }
+
     /// Starts canonical Call signalling through the public Call service.
     ///
     /// # Errors

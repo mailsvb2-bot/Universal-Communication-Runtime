@@ -9,25 +9,27 @@ use ucr_core::{
     EventCursorRejection, EventDeliveryClock, EventSubscriptionStore,
     ExternalIdentityBindingLookup, ExternalIdentityBindingStore, GroupMessageStore, IdentityStore,
     IntegrationIngress, MessageStore, ServiceAuditStore, ServiceCredentialSecret,
-    ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore, SyncStore, SyncTransition,
+    ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore, StoreForwardStore, SyncStore,
+    SyncTransition,
 };
 use ucr_model::{
     ActorId, ActorKind, AttachmentId, CallId, CallParticipant, CallParticipantState,
     CallParticipantUpdateKind, CallReconnectPhase, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CallTerminationReason, CommandEnvelope, CommandId, CommunicationIntent,
     ConversationId, ConversationKind, ConversationRecord, ConversationRef, CorrelationContext,
-    CryptoSuite, DeliveryPolicy, DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState,
-    DeviceRef, EndpointId, EventConsumerCursor, EventDeadLetter, EventDeliveryBatch,
-    EventDeliveryFailureKind, EventEnvelope, EventPollResult, EventSubscription,
-    EventSubscriptionId, EventSubscriptionMode, EventSubscriptionStart, ExternalIdentityBinding,
-    ExternalMessageMapping, GroupBridgeMapping, GroupChange, GroupChangeKind, GroupCryptoState,
-    GroupHistoryPolicy, GroupId, GroupMediaState, GroupMemberState, GroupMembership,
-    GroupOwnership, GroupPermission, GroupRecord, GroupRole, IdentityEvidence, IdentityId,
-    IdentityOwnership, IdentityRecord, IntegrationId, IntentConstraints, IntentId, KeyId,
-    MessageCryptoMetadata, MessageEnvelope, MessageId, MessageRelation, MessageRelationKind,
-    MessageSignature, NamespaceId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, PrincipalRef,
-    ProtocolExtension, ProtocolVersion, PublicGroupDiscovery, PublicGroupJoinPolicy,
-    PublicGroupPolicy, ServiceCredentialId, SessionId, SyncCheckpoint, SyncLinkKind, SyncMode,
+    CryptoSuite, DeliveryId, DeliveryPolicy, DeliveryState, DeviceDescriptor, DeviceId,
+    DeviceLifecycleState, DeviceRef, EndpointId, EventConsumerCursor, EventDeadLetter,
+    EventDeliveryBatch, EventDeliveryFailureKind, EventEnvelope, EventPollResult,
+    EventSubscription, EventSubscriptionId, EventSubscriptionMode, EventSubscriptionStart,
+    ExternalIdentityBinding, ExternalMessageMapping, GroupBridgeMapping, GroupChange,
+    GroupChangeKind, GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState,
+    GroupMemberState, GroupMembership, GroupOwnership, GroupPermission, GroupRecord, GroupRole,
+    IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
+    IntentConstraints, IntentId, KeyId, MessageCryptoMetadata, MessageEnvelope, MessageId,
+    MessageRelation, MessageRelationKind, MessageSignature, NamespaceId, OpaqueId, OriginRef,
+    PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension, ProtocolVersion,
+    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, ServiceCredentialId, SessionId,
+    StoreForwardId, StoreForwardJob, StoreForwardPolicy, SyncCheckpoint, SyncLinkKind, SyncMode,
     SyncSelection, SyncSession, SyncState, TenantId, TenantScope,
 };
 use ucr_protocol::{
@@ -40,6 +42,7 @@ use ucr_protocol::{
     MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_RELATION_LIMIT,
     SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN, acknowledgement_for, error_envelope_from_canonical,
 };
+use ucr_store_forward::StoreForwardIngress;
 
 /// Generated Rust mapping of the versioned public `ucr.v1` protobuf/gRPC contract.
 #[allow(clippy::all, clippy::pedantic)]
@@ -1279,6 +1282,116 @@ where
                 Err(error) => {
                     pb::sync_get_latest_checkpoint_response::Result::Error(pb_error(error))
                 }
+            }),
+        }))
+    }
+}
+
+/// Thin Phase-40 gRPC binding over the existing Store-and-Forward owner.
+pub struct GrpcStoreForwardService<C, A, S> {
+    clock: Arc<C>,
+    authorization: Arc<A>,
+    store: Arc<S>,
+}
+
+impl<C, A, S> GrpcStoreForwardService<C, A, S> {
+    #[must_use]
+    pub const fn new(clock: Arc<C>, authorization: Arc<A>, store: Arc<S>) -> Self {
+        Self {
+            clock,
+            authorization,
+            store,
+        }
+    }
+}
+
+impl<C, A, S> Clone for GrpcStoreForwardService<C, A, S> {
+    fn clone(&self) -> Self {
+        Self {
+            clock: Arc::clone(&self.clock),
+            authorization: Arc::clone(&self.authorization),
+            store: Arc::clone(&self.store),
+        }
+    }
+}
+
+impl<C, A, S> fmt::Debug for GrpcStoreForwardService<C, A, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrpcStoreForwardService")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Builds the public Store-and-Forward gRPC server over the canonical scheduler owner.
+#[must_use]
+pub fn store_forward_service_server<C, A, S>(
+    service: GrpcStoreForwardService<C, A, S>,
+) -> pb::store_forward_service_server::StoreForwardServiceServer<GrpcStoreForwardService<C, A, S>>
+where
+    C: ServiceQuotaClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: StoreForwardStore + ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + 'static,
+{
+    pb::store_forward_service_server::StoreForwardServiceServer::new(service)
+        .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
+        .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE)
+}
+
+#[tonic::async_trait]
+impl<C, A, S> pb::store_forward_service_server::StoreForwardService
+    for GrpcStoreForwardService<C, A, S>
+where
+    C: ServiceQuotaClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: StoreForwardStore + ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + 'static,
+{
+    async fn enqueue(
+        &self,
+        request: Request<pb::StoreForwardEnqueueRequest>,
+    ) -> Result<Response<pb::StoreForwardEnqueueResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let job = request
+            .into_inner()
+            .job
+            .ok_or_else(invalid_argument)
+            .and_then(decode_store_forward_job);
+        let result = match (credentials, job) {
+            (Ok((credential_id, secret)), Ok(job)) => {
+                StoreForwardIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .enqueue(&job.scope, &credential_id, &secret, &job)
+                    .map(pb_acknowledgement)
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::StoreForwardEnqueueResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::store_forward_enqueue_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::store_forward_enqueue_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn get_status(
+        &self,
+        request: Request<pb::StoreForwardGetStatusRequest>,
+    ) -> Result<Response<pb::StoreForwardGetStatusResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let lookup = decode_store_forward_lookup(request.into_inner());
+        let result = match (credentials, lookup) {
+            (Ok((credential_id, secret)), Ok((scope, store_forward_id))) => {
+                StoreForwardIngress::new(&*self.clock, &*self.authorization, &*self.store)
+                    .get_job(&scope, &credential_id, &secret, &scope, &store_forward_id)
+                    .map(|job| pb_store_forward_status(&job))
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::StoreForwardGetStatusResponse {
+            result: Some(match result {
+                Ok(status) => pb::store_forward_get_status_response::Result::Status(status),
+                Err(error) => pb::store_forward_get_status_response::Result::Error(pb_error(error)),
             }),
         }))
     }
@@ -2688,6 +2801,45 @@ fn decode_sync_checkpoint_lookup(
     ))
 }
 
+fn decode_store_forward_policy(
+    value: pb::StoreForwardPolicy,
+) -> Result<StoreForwardPolicy, CanonicalError> {
+    Ok(StoreForwardPolicy {
+        max_delivery_attempts: u16::try_from(value.max_delivery_attempts)
+            .map_err(|_| invalid_argument())?,
+        base_retry_delay_ms: value.base_retry_delay_ms,
+        max_retry_delay_ms: value.max_retry_delay_ms,
+        lease_duration_ms: value.lease_duration_ms,
+        expires_at_unix_ms: value.expires_at_unix_ms,
+    })
+}
+
+fn decode_store_forward_job(value: pb::StoreForwardJob) -> Result<StoreForwardJob, CanonicalError> {
+    Ok(StoreForwardJob {
+        store_forward_id: StoreForwardId::from_opaque(decode_opaque(value.store_forward_id)?),
+        scope: decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        intent_id: IntentId::from_opaque(decode_opaque(value.intent_id)?),
+        message_id: MessageId::from_opaque(decode_opaque(value.message_id)?),
+        encrypted_envelope: value.encrypted_envelope,
+        policy: decode_store_forward_policy(value.policy.ok_or_else(invalid_argument)?)?,
+        attempts_used: u16::try_from(value.attempts_used).map_err(|_| invalid_argument())?,
+        next_attempt_at_unix_ms: value.next_attempt_at_unix_ms,
+        last_delivery_id: value
+            .last_delivery_id
+            .map(|value| decode_opaque(Some(value)).map(DeliveryId::from_opaque))
+            .transpose()?,
+    })
+}
+
+fn decode_store_forward_lookup(
+    value: pb::StoreForwardGetStatusRequest,
+) -> Result<(TenantScope, StoreForwardId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        StoreForwardId::from_opaque(decode_opaque(value.store_forward_id)?),
+    ))
+}
+
 fn decode_origin_ref(value: pb::OriginRef) -> Result<OriginRef, CanonicalError> {
     Ok(OriginRef {
         principal_id: value
@@ -3344,6 +3496,22 @@ fn pb_sync_checkpoint(value: &SyncCheckpoint) -> pb::SyncCheckpoint {
     }
 }
 
+fn pb_store_forward_status(value: &StoreForwardJob) -> pb::StoreForwardStatus {
+    pb::StoreForwardStatus {
+        store_forward_id: Some(pb_opaque(value.store_forward_id.as_opaque())),
+        scope: Some(pb_scope(&value.scope)),
+        intent_id: Some(pb_opaque(value.intent_id.as_opaque())),
+        message_id: Some(pb_opaque(value.message_id.as_opaque())),
+        attempts_used: u32::from(value.attempts_used),
+        next_attempt_at_unix_ms: value.next_attempt_at_unix_ms,
+        last_delivery_id: value
+            .last_delivery_id
+            .as_ref()
+            .map(|id| pb_opaque(id.as_opaque())),
+        expires_at_unix_ms: value.policy.expires_at_unix_ms,
+    }
+}
+
 fn pb_origin_ref(value: &OriginRef) -> pb::OriginRef {
     pb::OriginRef {
         principal_id: value
@@ -3562,13 +3730,13 @@ mod tests {
     use ucr_core::{
         CommunicationIntentStore, ConversationStore, IdentityStore, MessageStore,
         PermissionGrantStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
-        ServiceQuotaStore, SystemEventDeliveryClock, SystemServiceQuotaClock,
+        ServiceQuotaStore, StoreForwardStore, SystemEventDeliveryClock, SystemServiceQuotaClock,
         issue_service_credential,
     };
     use ucr_model::{
         IdentityId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuditOperationRef,
-        ServiceAuditOutcome, ServiceQuotaPolicy, TenantId, TenantScope,
+        ServiceAuditOutcome, ServiceQuotaPolicy, StoreForwardId, TenantId, TenantScope,
     };
     use ucr_protocol::{
         ALGORITHM_VERSION, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION, CALL_START_PERMISSION,
@@ -3586,8 +3754,11 @@ mod tests {
         MAX_INTENT_TRANSPORT_CONSTRAINTS, MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS,
         MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_READ_PERMISSION,
         MESSAGE_RELATION_LIMIT, MESSAGE_WRITE_PERMISSION,
-        SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND, SERVICE_AUDIT_SYNC_CREATE_OPERATION_KIND,
-        SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN, SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION,
+        SERVICE_AUDIT_GROUP_CREATE_OPERATION_KIND,
+        SERVICE_AUDIT_STORE_FORWARD_ENQUEUE_OPERATION_KIND,
+        SERVICE_AUDIT_STORE_FORWARD_READ_OPERATION_KIND, SERVICE_AUDIT_SYNC_CREATE_OPERATION_KIND,
+        SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN, STORE_FORWARD_READ_PERMISSION,
+        STORE_FORWARD_WRITE_PERMISSION, SYNC_READ_PERMISSION, SYNC_WRITE_PERMISSION,
         validate_communication_intent, validate_event, validate_message,
     };
     use ucr_storage_memory::MemoryLocalStore;
@@ -3595,12 +3766,13 @@ mod tests {
     use super::{
         GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, GrpcCallService,
         GrpcDeviceService, GrpcEventService, GrpcGroupService, GrpcIntegrationService,
-        GrpcSyncService, SERVICE_CREDENTIAL_ID_METADATA_KEY,
+        GrpcStoreForwardService, GrpcSyncService, SERVICE_CREDENTIAL_ID_METADATA_KEY,
         SERVICE_CREDENTIAL_SECRET_METADATA_KEY, attach_service_credential, call_service_server,
         decode_call_session, decode_command, decode_communication_intent,
         decode_conversation_record, decode_event_envelope, decode_message_envelope,
         decode_principal_ref, device_service_server, event_service_server, group_service_server,
-        integration_service_server, pb, pb_call_session, sync_service_server,
+        integration_service_server, pb, pb_call_session, store_forward_service_server,
+        sync_service_server,
     };
 
     fn oid(value: &str) -> OpaqueId {
@@ -4253,6 +4425,39 @@ mod tests {
             .expect("connect Sync loopback client")
             .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
         (device_client, sync_client, server)
+    }
+
+    async fn store_forward_client_and_server(
+        store: Arc<MemoryLocalStore>,
+    ) -> (
+        pb::store_forward_service_client::StoreForwardServiceClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind StoreForward loopback listener");
+        let address = listener
+            .local_addr()
+            .expect("StoreForward listener address");
+        let incoming = TcpListenerStream::new(listener);
+        let service = GrpcStoreForwardService::new(
+            Arc::new(SystemServiceQuotaClock),
+            Arc::clone(&store),
+            store,
+        );
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(store_forward_service_server(service))
+                .serve_with_incoming(incoming)
+                .await
+        });
+        let client = pb::store_forward_service_client::StoreForwardServiceClient::connect(format!(
+            "http://{address}"
+        ))
+        .await
+        .expect("connect StoreForward loopback client")
+        .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
+        (client, server)
     }
 
     async fn call_client_and_server(
@@ -4919,6 +5124,209 @@ mod tests {
         assert_sync_create_audit(&store);
         transition_checkpoint_and_read_sync(&mut sync, &credential_id, &secret).await;
         revoke_and_read_multidevice(&mut devices, &credential_id, &secret).await;
+        server.abort();
+    }
+
+    type TestStoreForwardClient =
+        pb::store_forward_service_client::StoreForwardServiceClient<tonic::transport::Channel>;
+
+    fn seed_store_forward_owners(store: &MemoryLocalStore) {
+        store
+            .persist_conversation(
+                &decode_conversation_record(conversation(
+                    "offline-conversation-grpc",
+                    pb::ConversationKind::Direct,
+                ))
+                .expect("decode offline conversation"),
+            )
+            .expect("persist offline conversation");
+        store
+            .persist_message(
+                &decode_message_envelope(message(
+                    "offline-message-grpc",
+                    "offline-conversation-grpc",
+                    b"offline payload",
+                    b"offline-external-message".to_vec(),
+                ))
+                .expect("decode offline message"),
+            )
+            .expect("persist offline message");
+        store
+            .persist_communication_intent(
+                &decode_communication_intent(intent("offline-intent-grpc", b"offline intent"))
+                    .expect("decode offline intent"),
+            )
+            .expect("persist offline intent");
+    }
+
+    fn wire_store_forward_job(encrypted_envelope: Vec<u8>) -> pb::StoreForwardJob {
+        pb::StoreForwardJob {
+            store_forward_id: Some(pb_id("store-forward-grpc")),
+            scope: Some(wire_scope()),
+            intent_id: Some(pb_id("offline-intent-grpc")),
+            message_id: Some(pb_id("offline-message-grpc")),
+            encrypted_envelope,
+            policy: Some(pb::StoreForwardPolicy {
+                max_delivery_attempts: 3,
+                base_retry_delay_ms: 100,
+                max_retry_delay_ms: 1_000,
+                lease_duration_ms: 30_000,
+                expires_at_unix_ms: Some(1_800_000_000_000),
+            }),
+            attempts_used: 0,
+            next_attempt_at_unix_ms: 1_700_000_001_000,
+            last_delivery_id: None,
+        }
+    }
+
+    async fn enqueue_store_forward_job(
+        client: &mut TestStoreForwardClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        job: pb::StoreForwardJob,
+    ) {
+        let mut request = Request::new(pb::StoreForwardEnqueueRequest { job: Some(job) });
+        attach_service_credential(&mut request, credential_id, secret);
+        let response = client
+            .enqueue(request)
+            .await
+            .expect("StoreForward enqueue transport")
+            .into_inner();
+        match response.result.expect("StoreForward enqueue result") {
+            pb::store_forward_enqueue_response::Result::Acknowledgement(acknowledgement) => {
+                assert_eq!(
+                    acknowledgement
+                        .acknowledged_id
+                        .expect("StoreForward acknowledged id")
+                        .value,
+                    b"store-forward-grpc"
+                );
+            }
+            pb::store_forward_enqueue_response::Result::Error(error) => {
+                panic!("StoreForward enqueue failed: {}", error.code)
+            }
+        }
+    }
+
+    async fn assert_store_forward_read_permission_and_status(
+        store: &MemoryLocalStore,
+        client: &mut TestStoreForwardClient,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+    ) {
+        let request_body = || pb::StoreForwardGetStatusRequest {
+            scope: Some(wire_scope()),
+            store_forward_id: Some(pb_id("store-forward-grpc")),
+        };
+        let mut denied_request = Request::new(request_body());
+        attach_service_credential(&mut denied_request, credential_id, secret);
+        let denied = client
+            .get_status(denied_request)
+            .await
+            .expect("StoreForward denied status transport")
+            .into_inner();
+        assert!(matches!(
+            denied.result,
+            Some(pb::store_forward_get_status_response::Result::Error(error))
+                if error.code == pb::ErrorCode::PermissionDenied as i32
+        ));
+
+        store
+            .grant_permission(&PermissionGrant {
+                grantee: subject(),
+                permission: STORE_FORWARD_READ_PERMISSION.to_owned(),
+                scope: PermissionScope::Exact(scope()),
+            })
+            .expect("grant StoreForward read");
+        let mut status_request = Request::new(request_body());
+        attach_service_credential(&mut status_request, credential_id, secret);
+        let response = client
+            .get_status(status_request)
+            .await
+            .expect("StoreForward status transport")
+            .into_inner();
+        let status = match response.result.expect("StoreForward status result") {
+            pb::store_forward_get_status_response::Result::Status(status) => status,
+            pb::store_forward_get_status_response::Result::Error(error) => {
+                panic!("StoreForward status failed: {}", error.code)
+            }
+        };
+        assert_eq!(
+            status
+                .store_forward_id
+                .expect("StoreForward status id")
+                .value,
+            b"store-forward-grpc"
+        );
+        assert_eq!(status.attempts_used, 0);
+        assert_eq!(status.next_attempt_at_unix_ms, 1_700_000_001_000);
+        assert!(status.last_delivery_id.is_none());
+        assert_eq!(status.expires_at_unix_ms, Some(1_800_000_000_000));
+    }
+
+    fn assert_store_forward_owner_and_audit(store: &MemoryLocalStore, encrypted_envelope: &[u8]) {
+        let stored = store
+            .store_forward_job(
+                &scope(),
+                &StoreForwardId::from_opaque(oid("store-forward-grpc")),
+            )
+            .expect("StoreForward canonical owner read")
+            .expect("StoreForward canonical job");
+        assert_eq!(stored.encrypted_envelope, encrypted_envelope);
+
+        let enqueue_operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_STORE_FORWARD_ENQUEUE_OPERATION_KIND.to_owned(),
+            operation_id: oid("store-forward-grpc"),
+        };
+        let enqueue_audit = store
+            .service_audit_records_for_operation(&scope(), &enqueue_operation, 8)
+            .expect("StoreForward enqueue audit");
+        assert_eq!(enqueue_audit.len(), 1);
+        assert_eq!(enqueue_audit[0].permission, STORE_FORWARD_WRITE_PERMISSION);
+        assert_eq!(enqueue_audit[0].outcome, ServiceAuditOutcome::Authorized);
+
+        let read_operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_STORE_FORWARD_READ_OPERATION_KIND.to_owned(),
+            operation_id: oid("store-forward-grpc"),
+        };
+        let read_audit = store
+            .service_audit_records_for_operation(&scope(), &read_operation, 8)
+            .expect("StoreForward read audit");
+        assert_eq!(read_audit.len(), 2);
+        assert!(read_audit.iter().any(|record| {
+            record.permission == STORE_FORWARD_READ_PERMISSION
+                && record.outcome == ServiceAuditOutcome::PermissionDenied
+        }));
+        assert!(read_audit.iter().any(|record| {
+            record.permission == STORE_FORWARD_READ_PERMISSION
+                && record.outcome == ServiceAuditOutcome::Authorized
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn store_forward_enqueue_status_permission_and_audit_round_trip_over_public_grpc() {
+        let store = Arc::new(MemoryLocalStore::default());
+        let (credential_id, secret) =
+            seed_with_permissions(&store, &[STORE_FORWARD_WRITE_PERMISSION]);
+        seed_store_forward_owners(&store);
+        let (mut client, server) = store_forward_client_and_server(Arc::clone(&store)).await;
+        let encrypted_envelope = vec![0x00, 0xff, 0x42, 0x7f];
+
+        enqueue_store_forward_job(
+            &mut client,
+            &credential_id,
+            &secret,
+            wire_store_forward_job(encrypted_envelope.clone()),
+        )
+        .await;
+        assert_store_forward_read_permission_and_status(
+            &store,
+            &mut client,
+            &credential_id,
+            &secret,
+        )
+        .await;
+        assert_store_forward_owner_and_audit(&store, &encrypted_envelope);
         server.abort();
     }
 

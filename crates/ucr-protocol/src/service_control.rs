@@ -49,6 +49,9 @@ pub const SERVICE_AUDIT_SYNC_READ_OPERATION_KIND: &str = "ucr.sync.read";
 pub const SERVICE_AUDIT_SYNC_TRANSITION_OPERATION_KIND: &str = "ucr.sync.transition";
 pub const SERVICE_AUDIT_SYNC_CHECKPOINT_WRITE_OPERATION_KIND: &str = "ucr.sync.checkpoint.write";
 pub const SERVICE_AUDIT_SYNC_CHECKPOINT_READ_OPERATION_KIND: &str = "ucr.sync.checkpoint.read";
+pub const SERVICE_AUDIT_STORE_FORWARD_ENQUEUE_OPERATION_KIND: &str =
+    "ucr.delivery.store_forward.enqueue";
+pub const SERVICE_AUDIT_STORE_FORWARD_READ_OPERATION_KIND: &str = "ucr.delivery.store_forward.read";
 pub const MAX_SERVICE_AUDIT_OPERATION_KIND_LEN: usize = 256;
 pub const MAX_SERVICE_AUDIT_READ_ITEMS: usize = 1024;
 pub const MAX_SERVICE_REQUEST_PERMISSION_LEN: usize = 256;

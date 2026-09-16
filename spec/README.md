@@ -23,3 +23,5 @@ Phase 39 adds `public-sdks.md`: Prepared Rust/Python/TypeScript/Kotlin/Swift cli
 Phase 40 begins `reference-messenger.md`: a standalone public-SDK-only Reference Messenger boundary with honest proof gaps, public CallService access, user-level presentation vocabulary and explicit accessibility/localization requirements.
 Phase 40 adds `group-api.md`: a public `GroupService` over the existing canonical Group/Conversation/Message owners, preserving dual create permissions, membership/history gating, audit and atomic storage semantics.
 Phase 40 adds `device-sync-api.md`: public `DeviceService`/`SyncService` bindings over the existing canonical Device lifecycle and Sync session/checkpoint owners, preserving exact scope, permissions, audit, irreversible revocation, CAS transitions and opaque resume tokens.
+
+Phase 40 adds `store-forward-api.md`: public `StoreForwardService` enqueue/status over the existing canonical Store-and-Forward scheduler, with dedicated Service Principal permissions and no public worker lease, due-scan, retry or route controls.

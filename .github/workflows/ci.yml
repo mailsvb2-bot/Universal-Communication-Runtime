@@ -306,6 +306,8 @@ jobs:
           test -s docs/adr/0079-phase40-group-service-reuses-canonical-group-and-message-owners.md &&
           test -s spec/device-sync-api.md &&
           test -s docs/adr/0080-phase40-device-and-sync-services-reuse-canonical-lifecycle-owners.md &&
+          test -s spec/store-forward-api.md &&
+          test -s docs/adr/0081-phase40-store-forward-service-reuses-canonical-scheduler-owner.md &&
           test -s crates/ucr-reference-messenger/src/lib.rs
       - name: Validate public SDK boundaries
         run: python3 sdk/validate.py

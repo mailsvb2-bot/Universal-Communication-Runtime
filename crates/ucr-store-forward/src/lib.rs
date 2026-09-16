@@ -3,17 +3,23 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ucr_core::{
-    DeliveryStore, DurableRecordStatus, DurableStoreError, IdGenerationError, PolicyEvaluator,
+    AuthorizationEvaluator, DeliveryStore, DurableRecordStatus, DurableStoreError,
+    IdGenerationError, PolicyEvaluator, ServiceAuditStore, ServiceCredentialSecret,
+    ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
     StoreForwardStore, generate_opaque_id,
 };
 use ucr_model::{
-    DeliveryAttempt, DeliveryEvidence, DeliveryEvidenceKind, DeliveryPolicy, DeliveryState,
-    MessageEnvelope, StoreForwardId, StoreForwardJob, StoreForwardLeaseId, StoreForwardOutcome,
-    TenantScope, TransportFailoverPolicy, TransportResourceSnapshot, TransportRoutingHint,
+    AuthorizationRequest, DeliveryAttempt, DeliveryEvidence, DeliveryEvidenceKind, DeliveryPolicy,
+    DeliveryState, MessageEnvelope, ServiceAuditOperationRef, ServiceCredentialId, StoreForwardId,
+    StoreForwardJob, StoreForwardLeaseId, StoreForwardOutcome, TenantScope,
+    TransportFailoverPolicy, TransportResourceSnapshot, TransportRoutingHint,
 };
 use ucr_protocol::{
-    StoreForwardError, store_forward_delivery_id, store_forward_next_attempt_at,
-    validate_store_forward_job,
+    AcknowledgementEnvelope, CanonicalError, CanonicalErrorCode,
+    SERVICE_AUDIT_STORE_FORWARD_ENQUEUE_OPERATION_KIND,
+    SERVICE_AUDIT_STORE_FORWARD_READ_OPERATION_KIND, STORE_FORWARD_READ_PERMISSION,
+    STORE_FORWARD_WRITE_PERMISSION, StoreForwardError, acknowledgement_for,
+    store_forward_delivery_id, store_forward_next_attempt_at, validate_store_forward_job,
 };
 use ucr_transport_orchestrator::{
     TransportFailoverClock, TransportOrchestrator, TransportOrchestratorError, TransportRouteOption,
@@ -75,6 +81,186 @@ impl From<IdGenerationError> for StoreForwardRuntimeError {
     }
 }
 
+/// Public Service Principal ingress for the canonical Store-and-Forward owner.
+///
+/// It exposes durable enqueue/read operations only. Worker leasing, due-job scans, route
+/// discovery, retry execution and provider invocation remain runtime-owned and are not public API.
+pub struct StoreForwardIngress<'a, C, A, S> {
+    quota_clock: &'a C,
+    authorization: &'a A,
+    store: &'a S,
+}
+
+impl<C, A, S> core::fmt::Debug for StoreForwardIngress<'_, C, A, S> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("StoreForwardIngress")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, C, A, S> StoreForwardIngress<'a, C, A, S> {
+    #[must_use]
+    pub const fn new(quota_clock: &'a C, authorization: &'a A, store: &'a S) -> Self {
+        Self {
+            quota_clock,
+            authorization,
+            store,
+        }
+    }
+}
+
+impl<C, A, S> StoreForwardIngress<'_, C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: StoreForwardStore + ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore,
+{
+    /// Authenticates, rate-limits, audits, authorizes and durably enqueues one existing
+    /// canonical Message/Intent pair for Store-and-Forward processing.
+    ///
+    /// # Errors
+    /// Fails closed for authentication, quota, permission, malformed/cross-owner job,
+    /// unsupported delivery policy, semantic ID reuse, or storage failure.
+    pub fn enqueue(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        job: &StoreForwardJob,
+    ) -> Result<AcknowledgementEnvelope, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_STORE_FORWARD_ENQUEUE_OPERATION_KIND.to_owned(),
+            operation_id: job.store_forward_id.as_opaque().clone(),
+        };
+        let request =
+            ServicePrincipalRequestGate::new(self.quota_clock, self.authorization, self.store)
+                .authenticate_request_for_operation(
+                    presented_scope,
+                    credential_id,
+                    secret,
+                    STORE_FORWARD_WRITE_PERMISSION,
+                    &job.scope,
+                    &operation,
+                )?;
+        request.authorize(&AuthorizationRequest {
+            subject: request.subject().clone(),
+            permission: STORE_FORWARD_WRITE_PERMISSION.to_owned(),
+            resource_scope: job.scope.clone(),
+        })?;
+        enqueue_canonical_job(self.store, job).map_err(map_public_error)?;
+        Ok(acknowledgement_for(
+            job.store_forward_id.as_opaque().clone(),
+        ))
+    }
+
+    /// Authenticates, rate-limits, audits and reads one live Store-and-Forward scheduling record.
+    ///
+    /// The returned canonical job is for trusted bindings only; public adapters must not expose
+    /// `encrypted_envelope` or worker lease internals on status/read surfaces.
+    ///
+    /// # Errors
+    /// Fails closed for authentication, quota, permission, absence, corruption or storage failure.
+    pub fn get_job(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        store_forward_id: &StoreForwardId,
+    ) -> Result<StoreForwardJob, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_STORE_FORWARD_READ_OPERATION_KIND.to_owned(),
+            operation_id: store_forward_id.as_opaque().clone(),
+        };
+        let request =
+            ServicePrincipalRequestGate::new(self.quota_clock, self.authorization, self.store)
+                .authenticate_request_for_operation(
+                    presented_scope,
+                    credential_id,
+                    secret,
+                    STORE_FORWARD_READ_PERMISSION,
+                    scope,
+                    &operation,
+                )?;
+        request.authorize(&AuthorizationRequest {
+            subject: request.subject().clone(),
+            permission: STORE_FORWARD_READ_PERMISSION.to_owned(),
+            resource_scope: scope.clone(),
+        })?;
+        load_canonical_job(self.store, scope, store_forward_id)
+            .map_err(map_public_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+}
+
+fn enqueue_canonical_job<S: StoreForwardStore>(
+    store: &S,
+    job: &StoreForwardJob,
+) -> Result<DurableRecordStatus, StoreForwardRuntimeError> {
+    validate_store_forward_job(job)?;
+    if job.attempts_used != 0 || job.last_delivery_id.is_some() {
+        return Err(StoreForwardRuntimeError::Protocol(
+            StoreForwardError::InvalidAttemptState,
+        ));
+    }
+    let intent = store
+        .communication_intent(&job.scope, &job.intent_id)?
+        .ok_or(StoreForwardRuntimeError::MissingIntent)?;
+    let message = store
+        .message(&job.scope, &job.message_id)?
+        .ok_or(StoreForwardRuntimeError::MissingMessage)?;
+    validate_delivery_policy(&message, job)?;
+    if intent.scope != job.scope || message.scope != job.scope {
+        return Err(StoreForwardRuntimeError::Store(
+            DurableStoreError::InvalidRecord,
+        ));
+    }
+    store.persist_store_forward_job(job).map_err(Into::into)
+}
+
+fn load_canonical_job<S: StoreForwardStore>(
+    store: &S,
+    scope: &TenantScope,
+    store_forward_id: &StoreForwardId,
+) -> Result<Option<StoreForwardJob>, StoreForwardRuntimeError> {
+    let job = store.store_forward_job(scope, store_forward_id)?;
+    if let Some(value) = &job {
+        validate_store_forward_job(value)?;
+    }
+    Ok(job)
+}
+
+const fn map_public_store_error(error: DurableStoreError) -> CanonicalErrorCode {
+    match error {
+        DurableStoreError::InvalidRecord => CanonicalErrorCode::InvalidArgument,
+        DurableStoreError::Conflict => CanonicalErrorCode::Conflict,
+        DurableStoreError::Full => CanonicalErrorCode::ResourceExhausted,
+        DurableStoreError::Unavailable => CanonicalErrorCode::TemporarilyUnavailable,
+        DurableStoreError::PermissionDenied => CanonicalErrorCode::PermissionDenied,
+        DurableStoreError::Corrupt
+        | DurableStoreError::UnsupportedSchemaVersion
+        | DurableStoreError::ForeignStore
+        | DurableStoreError::Internal => CanonicalErrorCode::Internal,
+    }
+}
+
+const fn map_public_error(error: StoreForwardRuntimeError) -> CanonicalError {
+    let code = match error {
+        StoreForwardRuntimeError::Store(error) => map_public_store_error(error),
+        StoreForwardRuntimeError::Protocol(_)
+        | StoreForwardRuntimeError::UnsupportedDeliveryPolicy => {
+            CanonicalErrorCode::InvalidArgument
+        }
+        StoreForwardRuntimeError::MissingJob
+        | StoreForwardRuntimeError::MissingIntent
+        | StoreForwardRuntimeError::MissingMessage => CanonicalErrorCode::NotFound,
+        StoreForwardRuntimeError::IdGeneration(_) => CanonicalErrorCode::Internal,
+        StoreForwardRuntimeError::Orchestrator(_) => CanonicalErrorCode::TemporarilyUnavailable,
+    };
+    CanonicalError::new(code)
+}
+
 #[derive(Debug)]
 struct PreparedAttempt {
     attempt: DeliveryAttempt,
@@ -116,29 +302,7 @@ where
         &self,
         job: &StoreForwardJob,
     ) -> Result<DurableRecordStatus, StoreForwardRuntimeError> {
-        validate_store_forward_job(job)?;
-        if job.attempts_used != 0 || job.last_delivery_id.is_some() {
-            return Err(StoreForwardRuntimeError::Protocol(
-                StoreForwardError::InvalidAttemptState,
-            ));
-        }
-        let intent = self
-            .store
-            .communication_intent(&job.scope, &job.intent_id)?
-            .ok_or(StoreForwardRuntimeError::MissingIntent)?;
-        let message = self
-            .store
-            .message(&job.scope, &job.message_id)?
-            .ok_or(StoreForwardRuntimeError::MissingMessage)?;
-        validate_delivery_policy(&message, job)?;
-        if intent.scope != job.scope || message.scope != job.scope {
-            return Err(StoreForwardRuntimeError::Store(
-                DurableStoreError::InvalidRecord,
-            ));
-        }
-        self.store
-            .persist_store_forward_job(job)
-            .map_err(Into::into)
+        enqueue_canonical_job(self.store, job)
     }
 
     /// Returns bounded due jobs without exposing payload or route metadata.
@@ -174,11 +338,8 @@ where
         options: Vec<TransportRouteOption<'_>>,
     ) -> Result<StoreForwardOutcome, StoreForwardRuntimeError> {
         let now = self.clock.now_unix_ms();
-        let job = self
-            .store
-            .store_forward_job(scope, store_forward_id)?
+        let job = load_canonical_job(self.store, scope, store_forward_id)?
             .ok_or(StoreForwardRuntimeError::MissingJob)?;
-        validate_store_forward_job(&job)?;
         let last = self.last_attempt(&job)?;
         if let Some(outcome) = self.resolve_existing_state(&job, last.as_ref(), now)? {
             return Ok(outcome);

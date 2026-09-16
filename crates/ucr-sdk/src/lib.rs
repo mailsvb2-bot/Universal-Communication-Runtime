@@ -84,6 +84,7 @@ pub struct UcrSdkClient {
     groups: pb::group_service_client::GroupServiceClient<Channel>,
     devices: pb::device_service_client::DeviceServiceClient<Channel>,
     sync: pb::sync_service_client::SyncServiceClient<Channel>,
+    store_forward: pb::store_forward_service_client::StoreForwardServiceClient<Channel>,
 }
 
 impl fmt::Debug for UcrSdkClient {
@@ -122,9 +123,13 @@ impl UcrSdkClient {
         let devices = pb::device_service_client::DeviceServiceClient::new(channel.clone())
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
-        let sync = pb::sync_service_client::SyncServiceClient::new(channel)
+        let sync = pb::sync_service_client::SyncServiceClient::new(channel.clone())
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+        let store_forward =
+            pb::store_forward_service_client::StoreForwardServiceClient::new(channel)
+                .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+                .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         Ok(Self {
             credential,
             integration,
@@ -133,6 +138,7 @@ impl UcrSdkClient {
             groups,
             devices,
             sync,
+            store_forward,
         })
     }
     /// Creates one authenticated request without changing its protobuf body.
@@ -603,6 +609,30 @@ impl UcrSdkClient {
             .get_latest_sync_checkpoint(request)
             .await?
             .into_inner())
+    }
+
+    /// Durably enqueues one Store-and-Forward job without running worker scheduling in the SDK.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn enqueue_store_forward(
+        &mut self,
+        message: pb::StoreForwardEnqueueRequest,
+    ) -> Result<pb::StoreForwardEnqueueResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.store_forward.enqueue(request).await?.into_inner())
+    }
+
+    /// Reads payload-free Store-and-Forward scheduling status.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_store_forward_status(
+        &mut self,
+        message: pb::StoreForwardGetStatusRequest,
+    ) -> Result<pb::StoreForwardGetStatusResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.store_forward.get_status(request).await?.into_inner())
     }
 
     /// Lists canonical dead letters for one Event subscription.

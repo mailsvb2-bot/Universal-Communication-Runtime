@@ -3,6 +3,8 @@ syntax = "proto3";
 package ucr.v1;
 
 import "ucr/v1/common.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/runtime.proto";
 
 // Phase 27 Store-and-Forward describes bounded sender-side durable scheduling data.
 // It is not a Relay, Mesh, route graph, transport service, or second Delivery state machine.
@@ -38,5 +40,44 @@ enum StoreForwardOutcome {
   STORE_FORWARD_OUTCOME_BUSY = 8;
 }
 
-// No service and no public lease message are defined here. Scheduling leases are store-private
-// concurrency metadata; transport execution continues to use the canonical Transport owners.
+// Payload-free status returned to external consumers. Ciphertext, worker leases, route candidates,
+// retry execution and provider state are intentionally absent from this surface.
+message StoreForwardStatus {
+  OpaqueId store_forward_id = 1;
+  TenantScope scope = 2;
+  OpaqueId intent_id = 3;
+  OpaqueId message_id = 4;
+  uint32 attempts_used = 5;
+  int64 next_attempt_at_unix_ms = 6;
+  optional OpaqueId last_delivery_id = 7;
+  optional int64 expires_at_unix_ms = 8;
+}
+
+message StoreForwardEnqueueRequest {
+  StoreForwardJob job = 1;
+}
+message StoreForwardEnqueueResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message StoreForwardGetStatusRequest {
+  TenantScope scope = 1;
+  OpaqueId store_forward_id = 2;
+}
+message StoreForwardGetStatusResponse {
+  oneof result {
+    StoreForwardStatus status = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Thin Phase-40 consumer API over the existing StoreForwardRuntime/StoreForwardStore owner.
+// Worker orchestration remains internal: public clients cannot claim leases, enumerate due jobs,
+// select route candidates, trigger retries or invoke TransportProvider directly.
+service StoreForwardService {
+  rpc Enqueue(StoreForwardEnqueueRequest) returns (StoreForwardEnqueueResponse);
+  rpc GetStatus(StoreForwardGetStatusRequest) returns (StoreForwardGetStatusResponse);
+}
