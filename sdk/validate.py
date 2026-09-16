@@ -30,7 +30,7 @@ def main() -> None:
     require(manifest["protocol_package"] == "ucr.v1", "wrong protocol package")
     require(manifest["languages"] == LANGUAGES, "required SDK language set drifted")
     require(
-        manifest["services"] == ["IntegrationService", "EventService", "CallService", "GroupService"],
+        manifest["services"] == ["IntegrationService", "EventService", "CallService", "GroupService", "DeviceService", "SyncService"],
         "required SDK service set drifted",
     )
     auth = manifest["authentication"]
@@ -63,6 +63,10 @@ def main() -> None:
         require(f"pub async fn {method}" in rust_sdk, f"Rust SDK missing CallService method: {method}")
     for method in ("create_group", "get_group", "get_group_membership", "list_group_memberships", "apply_group_change", "send_group_message", "get_group_message"):
         require(f"pub async fn {method}" in rust_sdk, f"Rust SDK missing GroupService method: {method}")
+    require("pb::device_service_client::DeviceServiceClient<Channel>" in rust_sdk, "Rust SDK missing DeviceService client")
+    require("pb::sync_service_client::SyncServiceClient<Channel>" in rust_sdk, "Rust SDK missing SyncService client")
+    for method in ("register_device", "get_device", "revoke_device", "create_sync_session", "get_sync_session", "transition_sync", "record_sync_checkpoint", "get_latest_sync_checkpoint"):
+        require(f"pub async fn {method}" in rust_sdk, f"Rust SDK missing multi-device method: {method}")
 
 
 if __name__ == "__main__":

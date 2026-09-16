@@ -82,6 +82,8 @@ pub struct UcrSdkClient {
     events: pb::event_service_client::EventServiceClient<Channel>,
     calls: pb::call_service_client::CallServiceClient<Channel>,
     groups: pb::group_service_client::GroupServiceClient<Channel>,
+    devices: pb::device_service_client::DeviceServiceClient<Channel>,
+    sync: pb::sync_service_client::SyncServiceClient<Channel>,
 }
 
 impl fmt::Debug for UcrSdkClient {
@@ -114,7 +116,13 @@ impl UcrSdkClient {
         let calls = pb::call_service_client::CallServiceClient::new(channel.clone())
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
-        let groups = pb::group_service_client::GroupServiceClient::new(channel)
+        let groups = pb::group_service_client::GroupServiceClient::new(channel.clone())
+            .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+            .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+        let devices = pb::device_service_client::DeviceServiceClient::new(channel.clone())
+            .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+            .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+        let sync = pb::sync_service_client::SyncServiceClient::new(channel)
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         Ok(Self {
@@ -123,6 +131,8 @@ impl UcrSdkClient {
             events,
             calls,
             groups,
+            devices,
+            sync,
         })
     }
     /// Creates one authenticated request without changing its protobuf body.
@@ -489,6 +499,110 @@ impl UcrSdkClient {
     ) -> Result<pb::GroupGetMessageResponse, tonic::Status> {
         let request = self.authenticated_request(message);
         Ok(self.groups.get_group_message(request).await?.into_inner())
+    }
+
+    /// Registers one canonical Device through the public Device service.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn register_device(
+        &mut self,
+        message: pb::DeviceRegisterRequest,
+    ) -> Result<pb::DeviceRegisterResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.devices.register_device(request).await?.into_inner())
+    }
+
+    /// Reads one canonical Device through the public Device service.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_device(
+        &mut self,
+        message: pb::DeviceGetRequest,
+    ) -> Result<pb::DeviceGetResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.devices.get_device(request).await?.into_inner())
+    }
+
+    /// Revokes one canonical Device through the public Device service.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn revoke_device(
+        &mut self,
+        message: pb::DeviceRevokeRequest,
+    ) -> Result<pb::DeviceRevokeResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.devices.revoke_device(request).await?.into_inner())
+    }
+
+    /// Creates or deduplicates one canonical Sync session.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn create_sync_session(
+        &mut self,
+        message: pb::SyncCreateRequest,
+    ) -> Result<pb::SyncCreateResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.sync.create_sync_session(request).await?.into_inner())
+    }
+
+    /// Reads one canonical Sync session.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_sync_session(
+        &mut self,
+        message: pb::SyncGetRequest,
+    ) -> Result<pb::SyncGetResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.sync.get_sync_session(request).await?.into_inner())
+    }
+
+    /// Advances one canonical Sync session by expected-state compare-and-swap.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn transition_sync(
+        &mut self,
+        message: pb::SyncTransitionRequest,
+    ) -> Result<pb::SyncTransitionResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.sync.transition_sync(request).await?.into_inner())
+    }
+
+    /// Records one canonical monotonic Sync checkpoint.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn record_sync_checkpoint(
+        &mut self,
+        message: pb::SyncRecordCheckpointRequest,
+    ) -> Result<pb::SyncRecordCheckpointResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .sync
+            .record_sync_checkpoint(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Reads the latest canonical Sync checkpoint.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_latest_sync_checkpoint(
+        &mut self,
+        message: pb::SyncGetLatestCheckpointRequest,
+    ) -> Result<pb::SyncGetLatestCheckpointResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .sync
+            .get_latest_sync_checkpoint(request)
+            .await?
+            .into_inner())
     }
 
     /// Lists canonical dead letters for one Event subscription.

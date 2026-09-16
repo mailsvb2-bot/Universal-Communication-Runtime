@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/identity.proto";
+import "ucr/v1/runtime.proto";
+import "ucr/v1/sync.proto";
+
+message DeviceRegisterRequest {
+  TenantScope scope = 1;
+  DeviceDescriptor device = 2;
+}
+message DeviceRegisterResponse {
+  oneof result {
+    DeviceDescriptor device = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message DeviceGetRequest {
+  TenantScope scope = 1;
+  OpaqueId device_id = 2;
+}
+message DeviceGetResponse {
+  oneof result {
+    DeviceDescriptor device = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+message DeviceRevokeRequest {
+  TenantScope scope = 1;
+  OpaqueId device_id = 2;
+  OpaqueId expected_identity_id = 3;
+}
+message DeviceRevokeResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message SyncCreateRequest { SyncSession session = 1; }
+message SyncCreateResponse {
+  oneof result {
+    SyncSession session = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message SyncGetRequest {
+  TenantScope scope = 1;
+  OpaqueId session_id = 2;
+}
+message SyncGetResponse {
+  oneof result {
+    SyncSession session = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+message SyncTransitionRequest {
+  TenantScope scope = 1;
+  OpaqueId session_id = 2;
+  SyncState expected_state = 3;
+  SyncState next_state = 4;
+}
+message SyncTransitionResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message SyncRecordCheckpointRequest { SyncCheckpoint checkpoint = 1; }
+message SyncRecordCheckpointResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message SyncGetLatestCheckpointRequest {
+  TenantScope scope = 1;
+  OpaqueId session_id = 2;
+}
+message SyncGetLatestCheckpointResponse {
+  oneof result {
+    SyncCheckpoint checkpoint = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+// Thin Phase-40 consumer API over the existing DeviceLifecycleStore owner.
+service DeviceService {
+  rpc RegisterDevice(DeviceRegisterRequest) returns (DeviceRegisterResponse);
+  rpc GetDevice(DeviceGetRequest) returns (DeviceGetResponse);
+  rpc RevokeDevice(DeviceRevokeRequest) returns (DeviceRevokeResponse);
+}
+
+// Thin Phase-40 consumer API over the existing SyncStore owner.
+// This surface does not own anti-entropy, routing, retry, or transport state.
+service SyncService {
+  rpc CreateSyncSession(SyncCreateRequest) returns (SyncCreateResponse);
+  rpc GetSyncSession(SyncGetRequest) returns (SyncGetResponse);
+  rpc TransitionSync(SyncTransitionRequest) returns (SyncTransitionResponse);
+  rpc RecordSyncCheckpoint(SyncRecordCheckpointRequest) returns (SyncRecordCheckpointResponse);
+  rpc GetLatestSyncCheckpoint(SyncGetLatestCheckpointRequest) returns (SyncGetLatestCheckpointResponse);
+}

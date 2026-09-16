@@ -150,3 +150,71 @@ fn phase40_groups_use_public_service_and_existing_canonical_owners() {
     assert!(adr.contains("writes a separate audit decision"));
     assert!(adr.contains("does not consume request quota twice"));
 }
+#[test]
+fn phase40_multidevice_uses_public_device_sync_services_and_existing_canonical_owners() {
+    let proto = read("proto/ucr/v1/device_sync_api.proto");
+    let ingress = read("crates/ucr-core/src/integration_api.rs");
+    let grpc = read("crates/ucr-api-grpc/src/lib.rs");
+    let sdk = read("crates/ucr-sdk/src/lib.rs");
+    let client = read("crates/ucr-reference-messenger/src/client.rs");
+    let capability = read("crates/ucr-reference-messenger/src/capability.rs");
+    let adr =
+        read("docs/adr/0080-phase40-device-and-sync-services-reuse-canonical-lifecycle-owners.md");
+
+    assert!(proto.contains("service DeviceService"));
+    assert!(proto.contains("service SyncService"));
+    for rpc in [
+        "rpc RegisterDevice",
+        "rpc GetDevice",
+        "rpc RevokeDevice",
+        "rpc CreateSyncSession",
+        "rpc GetSyncSession",
+        "rpc TransitionSync",
+        "rpc RecordSyncCheckpoint",
+        "rpc GetLatestSyncCheckpoint",
+    ] {
+        assert!(
+            proto.contains(rpc),
+            "missing public multi-device RPC: {rpc}"
+        );
+    }
+    assert!(ingress.contains("DeviceLifecycleStore"));
+    assert!(ingress.contains("SyncStore"));
+    assert!(grpc.contains("pb::device_service_server::DeviceService"));
+    assert!(grpc.contains("pb::sync_service_server::SyncService"));
+    assert!(sdk.contains("pb::device_service_client::DeviceServiceClient<Channel>"));
+    assert!(sdk.contains("pb::sync_service_client::SyncServiceClient<Channel>"));
+    assert!(client.contains("self.sdk.register_device(request).await"));
+    assert!(client.contains("self.sdk.create_sync_session(request).await"));
+    assert!(capability.contains("DeviceService lifecycle + SyncService session/checkpoint RPCs"));
+    assert!(
+        adr.contains("Resume tokens are canonical opaque source-issued cursors")
+            || adr.contains("resume tokens are canonical opaque source-issued cursors")
+    );
+}
+
+#[test]
+fn phase40_multidevice_does_not_move_sync_brain_into_public_sdk() {
+    let sdk = read("crates/ucr-sdk/src/lib.rs");
+    let reference = read("crates/ucr-reference-messenger/src/client.rs");
+    let spec = read("spec/device-sync-api.md");
+
+    for forbidden in [
+        "anti_entropy_session",
+        "TransportOrchestrator",
+        "StoreForwardJob",
+        "retry_sync",
+        "merge_checkpoint",
+    ] {
+        assert!(
+            !sdk.contains(forbidden),
+            "SDK acquired sync-brain symbol: {forbidden}"
+        );
+        assert!(
+            !reference.contains(forbidden),
+            "Reference Messenger acquired sync-brain symbol: {forbidden}"
+        );
+    }
+    assert!(spec.contains("resume tokens remain opaque"));
+    assert!(spec.contains("no automatic retry, anti-entropy, route selection or transport state"));
+}
