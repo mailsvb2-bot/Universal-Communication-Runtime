@@ -15,6 +15,8 @@ ucr-core = { path = "../ucr-core" }
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
 ucr-store-forward = { path = "../ucr-store-forward" }
+ucr-transport-internet = { path = "../ucr-transport-internet" }
+tokio = { version = "=1.53.1", features = ["rt"] }
 
 [build-dependencies]
 prost-build = "=0.14.4"
@@ -22,6 +24,7 @@ protoc-bin-vendored = "=3.2.0"
 tonic-prost-build = "=0.14.6"
 
 [dev-dependencies]
+ucr-crypto = { path = "../ucr-crypto" }
 tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "time"] }
 tokio-stream = { version = "=0.1.17", features = ["net"] }
 ucr-storage-memory = { path = "../ucr-storage-memory" }

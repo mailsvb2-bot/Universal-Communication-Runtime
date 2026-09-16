@@ -4,22 +4,23 @@ use std::{fmt, sync::Arc};
 
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_core::{
-    AuthorizationEvaluator, CallStore, CommandAcceptanceStore, CommunicationIntentStore,
-    ConversationStore, DeviceLifecycleStore, EventApiIngress, EventAppendStatus,
-    EventCursorRejection, EventDeliveryClock, EventSubscriptionStore,
-    ExternalIdentityBindingLookup, ExternalIdentityBindingStore, GroupMessageStore, IdentityStore,
-    IntegrationIngress, MessageStore, ServiceAuditStore, ServiceCredentialSecret,
-    ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore, StoreForwardStore, SyncStore,
-    SyncTransition,
+    AuthorizationEvaluator, CallStore, CanonicalTransportError, ClassifiedTransportFailure,
+    CommandAcceptanceStore, CommunicationIntentStore, ConversationStore, DeviceLifecycleStore,
+    EventApiIngress, EventAppendStatus, EventCursorRejection, EventDeliveryClock,
+    EventSubscriptionStore, ExternalIdentityBindingLookup, ExternalIdentityBindingStore,
+    GroupMessageStore, IdentityStore, IntegrationIngress, MessageStore, RouteCandidate,
+    ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
+    ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore, StoreForwardStore,
+    SyncStore, SyncTransition, TransportFailureDisposition, TransportProvider,
 };
 use ucr_model::{
-    ActorId, ActorKind, AttachmentId, CallId, CallParticipant, CallParticipantState,
-    CallParticipantUpdateKind, CallReconnectPhase, CallSession, CallSignal, CallSignalKind,
-    CallSignallingState, CallTerminationReason, CommandEnvelope, CommandId, CommunicationIntent,
-    ConversationId, ConversationKind, ConversationRecord, ConversationRef, CorrelationContext,
-    CryptoSuite, DeliveryId, DeliveryPolicy, DeliveryState, DeviceDescriptor, DeviceId,
-    DeviceLifecycleState, DeviceRef, EndpointId, EventConsumerCursor, EventDeadLetter,
-    EventDeliveryBatch, EventDeliveryFailureKind, EventEnvelope, EventPollResult,
+    ActorId, ActorKind, AttachmentId, AuthorizationRequest, CallId, CallParticipant,
+    CallParticipantState, CallParticipantUpdateKind, CallReconnectPhase, CallSession, CallSignal,
+    CallSignalKind, CallSignallingState, CallTerminationReason, CommandEnvelope, CommandId,
+    CommunicationIntent, ConversationId, ConversationKind, ConversationRecord, ConversationRef,
+    CorrelationContext, CryptoSuite, DeliveryId, DeliveryPolicy, DeliveryState, DeviceDescriptor,
+    DeviceId, DeviceLifecycleState, DeviceRef, EndpointAddress, EndpointId, EventConsumerCursor,
+    EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind, EventEnvelope, EventPollResult,
     EventSubscription, EventSubscriptionId, EventSubscriptionMode, EventSubscriptionStart,
     ExternalIdentityBinding, ExternalMessageMapping, GroupBridgeMapping, GroupChange,
     GroupChangeKind, GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState,
@@ -28,21 +29,25 @@ use ucr_model::{
     IntentConstraints, IntentId, KeyId, MessageCryptoMetadata, MessageEnvelope, MessageId,
     MessageRelation, MessageRelationKind, MessageSignature, NamespaceId, OpaqueId, OriginRef,
     PrincipalId, PrincipalKind, PrincipalRef, ProtocolExtension, ProtocolVersion,
-    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, ServiceCredentialId, SessionId,
-    StoreForwardId, StoreForwardJob, StoreForwardPolicy, SyncCheckpoint, SyncLinkKind, SyncMode,
-    SyncSelection, SyncSession, SyncState, TenantId, TenantScope,
+    PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy, ServiceAuditOperationRef,
+    ServiceCredentialId, SessionId, StoreForwardId, StoreForwardJob, StoreForwardPolicy,
+    SyncCheckpoint, SyncLinkKind, SyncMode, SyncSelection, SyncSession, SyncState, TenantId,
+    TenantScope,
 };
 use ucr_protocol::{
     AcknowledgementEnvelope, CanonicalError, CanonicalErrorCode, CommandReceipt,
     CommandReceiptStatus, EXTERNAL_MESSAGE_ID_LIMIT, EXTERNAL_MESSAGE_MAPPING_LIMIT,
-    MAX_COMMAND_PAYLOAD_LEN, MAX_EVENT_BATCH_ITEMS, MAX_EVENT_DELIVERY_BATCH_BYTES,
-    MAX_EVENT_DELIVERY_SIZE, MAX_EVENT_INTEGRITY_METADATA_LEN, MAX_EVENT_PAYLOAD_LEN,
-    MAX_EXTENSION_PAYLOAD_LEN, MAX_IDEMPOTENCY_KEY_LEN, MAX_INTENT_POLICY_VALUE_LEN,
-    MAX_INTENT_TRANSPORT_CONSTRAINTS, MAX_NAMESPACED_IDENTIFIER_LEN, MAX_PROTOCOL_EXTENSIONS,
-    MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT, MESSAGE_RELATION_LIMIT,
+    LOCAL_TRANSPORT_USE_PERMISSION, MAX_COMMAND_PAYLOAD_LEN, MAX_EVENT_BATCH_ITEMS,
+    MAX_EVENT_DELIVERY_BATCH_BYTES, MAX_EVENT_DELIVERY_SIZE, MAX_EVENT_INTEGRITY_METADATA_LEN,
+    MAX_EVENT_PAYLOAD_LEN, MAX_EXTENSION_PAYLOAD_LEN, MAX_IDEMPOTENCY_KEY_LEN,
+    MAX_INTENT_POLICY_VALUE_LEN, MAX_INTENT_TRANSPORT_CONSTRAINTS, MAX_NAMESPACED_IDENTIFIER_LEN,
+    MAX_PROTOCOL_EXTENSIONS, MESSAGE_ATTACHMENT_LIMIT, MESSAGE_CRYPTO_METADATA_LIMIT,
+    MESSAGE_RELATION_LIMIT, SERVICE_AUDIT_LOCAL_TRANSPORT_TRANSMIT_OPERATION_KIND,
     SIGNATURE_ALGORITHM_ID, SIGNATURE_LEN, acknowledgement_for, error_envelope_from_canonical,
+    validate_endpoint_address,
 };
 use ucr_store_forward::StoreForwardIngress;
+use ucr_transport_internet::{LOCAL_TCP_CAPABILITY, LocalTransportProvider};
 
 /// Generated Rust mapping of the versioned public `ucr.v1` protobuf/gRPC contract.
 #[allow(clippy::all, clippy::pedantic)]
@@ -1395,6 +1400,212 @@ where
             }),
         }))
     }
+}
+
+/// Thin Phase-40 public binding over the existing Phase-16 local/direct transport provider.
+pub struct GrpcLocalTransportService<C, A, S> {
+    clock: Arc<C>,
+    authorization: Arc<A>,
+    store: Arc<S>,
+    provider: Arc<LocalTransportProvider>,
+}
+
+impl<C, A, S> GrpcLocalTransportService<C, A, S> {
+    #[must_use]
+    pub const fn new(
+        clock: Arc<C>,
+        authorization: Arc<A>,
+        store: Arc<S>,
+        provider: Arc<LocalTransportProvider>,
+    ) -> Self {
+        Self {
+            clock,
+            authorization,
+            store,
+            provider,
+        }
+    }
+}
+
+impl<C, A, S> Clone for GrpcLocalTransportService<C, A, S> {
+    fn clone(&self) -> Self {
+        Self {
+            clock: Arc::clone(&self.clock),
+            authorization: Arc::clone(&self.authorization),
+            store: Arc::clone(&self.store),
+            provider: Arc::clone(&self.provider),
+        }
+    }
+}
+
+impl<C, A, S> fmt::Debug for GrpcLocalTransportService<C, A, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrpcLocalTransportService")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Builds the public Local Transport service without owning listener, discovery, or routing state.
+#[must_use]
+pub fn local_transport_service_server<C, A, S>(
+    service: GrpcLocalTransportService<C, A, S>,
+) -> pb::local_transport_service_server::LocalTransportServiceServer<
+    GrpcLocalTransportService<C, A, S>,
+>
+where
+    C: ServiceQuotaClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + 'static,
+{
+    pb::local_transport_service_server::LocalTransportServiceServer::new(service)
+        .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
+        .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE)
+}
+
+#[tonic::async_trait]
+impl<C, A, S> pb::local_transport_service_server::LocalTransportService
+    for GrpcLocalTransportService<C, A, S>
+where
+    C: ServiceQuotaClock + 'static,
+    A: AuthorizationEvaluator + 'static,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + 'static,
+{
+    async fn transmit(
+        &self,
+        request: Request<pb::LocalTransportTransmitRequest>,
+    ) -> Result<Response<pb::LocalTransportTransmitResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let decoded = decode_local_transport_request(request.into_inner());
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok((scope, route, encrypted_envelope))) => {
+                let operation = ServiceAuditOperationRef {
+                    operation_kind: SERVICE_AUDIT_LOCAL_TRANSPORT_TRANSMIT_OPERATION_KIND
+                        .to_owned(),
+                    operation_id: route.endpoint_id.as_opaque().clone(),
+                };
+                let admission = ServicePrincipalRequestGate::new(
+                    &*self.clock,
+                    &*self.authorization,
+                    &*self.store,
+                )
+                .authenticate_request_for_operation(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    LOCAL_TRANSPORT_USE_PERMISSION,
+                    &scope,
+                    &operation,
+                )
+                .and_then(|request| {
+                    request.authorize(&AuthorizationRequest {
+                        subject: request.subject().clone(),
+                        permission: LOCAL_TRANSPORT_USE_PERMISSION.to_owned(),
+                        resource_scope: scope.clone(),
+                    })
+                });
+                match admission {
+                    Ok(()) => {
+                        let provider = Arc::clone(&self.provider);
+                        match tokio::task::spawn_blocking(move || {
+                            provider.transmit_classified(&scope, &route, &encrypted_envelope)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => LocalTransportPublicResult::Accepted,
+                            Ok(Err(failure)) => {
+                                LocalTransportPublicResult::TransportFailure(failure)
+                            }
+                            Err(_) => LocalTransportPublicResult::TransportFailure(
+                                ClassifiedTransportFailure::acceptance_unknown(
+                                    CanonicalTransportError::Internal,
+                                ),
+                            ),
+                        }
+                    }
+                    Err(error) => LocalTransportPublicResult::AdmissionFailure(error),
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                LocalTransportPublicResult::AdmissionFailure(error)
+            }
+        };
+        Ok(Response::new(pb_local_transport_response(result)))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LocalTransportPublicResult {
+    Accepted,
+    AdmissionFailure(CanonicalError),
+    TransportFailure(ClassifiedTransportFailure),
+}
+
+fn decode_local_transport_request(
+    value: pb::LocalTransportTransmitRequest,
+) -> Result<(TenantScope, RouteCandidate, Vec<u8>), CanonicalError> {
+    let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
+    let route = value.route.ok_or_else(invalid_argument)?;
+    let address = route.address.ok_or_else(invalid_argument)?;
+    let address = EndpointAddress {
+        scheme: address.scheme,
+        value: address.value,
+    };
+    validate_endpoint_address(&address).map_err(|_| invalid_argument())?;
+    Ok((
+        scope,
+        RouteCandidate {
+            endpoint_id: EndpointId::from_opaque(decode_opaque(route.destination_endpoint_id)?),
+            transport_capability: LOCAL_TCP_CAPABILITY.to_owned(),
+            address,
+        },
+        value.encrypted_envelope,
+    ))
+}
+
+fn pb_local_transport_response(
+    result: LocalTransportPublicResult,
+) -> pb::LocalTransportTransmitResponse {
+    use pb::local_transport_transmit_response::Result;
+    let result = match result {
+        LocalTransportPublicResult::Accepted => Result::Accepted(pb::LocalTransportAccepted {}),
+        LocalTransportPublicResult::AdmissionFailure(error) => {
+            Result::Failure(pb::LocalTransportFailure {
+                error: Some(pb_error(error)),
+                disposition: pb::LocalTransportFailureDisposition::NotAccepted as i32,
+            })
+        }
+        LocalTransportPublicResult::TransportFailure(failure) => {
+            Result::Failure(pb::LocalTransportFailure {
+                error: Some(pb_error(canonical_transport_error(failure.error))),
+                disposition: match failure.disposition {
+                    TransportFailureDisposition::NotAccepted => {
+                        pb::LocalTransportFailureDisposition::NotAccepted
+                    }
+                    TransportFailureDisposition::AcceptanceUnknown => {
+                        pb::LocalTransportFailureDisposition::AcceptanceUnknown
+                    }
+                } as i32,
+            })
+        }
+    };
+    pb::LocalTransportTransmitResponse {
+        result: Some(result),
+    }
+}
+
+const fn canonical_transport_error(error: CanonicalTransportError) -> CanonicalError {
+    let code = match error {
+        CanonicalTransportError::Unavailable => CanonicalErrorCode::TemporarilyUnavailable,
+        CanonicalTransportError::Timeout => CanonicalErrorCode::DeadlineExceeded,
+        CanonicalTransportError::Rejected => CanonicalErrorCode::InvalidArgument,
+        CanonicalTransportError::PolicyDenied => CanonicalErrorCode::PolicyDenied,
+        CanonicalTransportError::UnsupportedCapability => CanonicalErrorCode::CapabilityMismatch,
+        CanonicalTransportError::ResourceExhausted => CanonicalErrorCode::ResourceExhausted,
+        CanonicalTransportError::MalformedResponse => CanonicalErrorCode::IntegrityFailure,
+        CanonicalTransportError::Internal => CanonicalErrorCode::Internal,
+    };
+    CanonicalError::new(code)
 }
 
 /// Thin Phase-19 gRPC binding over the existing `ServicePrincipal` request gate and `CallStore` owner.

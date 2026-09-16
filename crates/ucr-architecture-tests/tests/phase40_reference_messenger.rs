@@ -270,3 +270,49 @@ fn phase40_offline_uses_public_store_forward_service_without_exporting_worker_br
     assert!(spec.contains("Worker orchestration remains internal"));
     assert!(adr.contains("No second enqueue implementation is permitted"));
 }
+
+#[test]
+fn phase40_local_uses_public_service_and_existing_phase16_provider() {
+    let proto = read("proto/ucr/v1/local_transport_api.proto");
+    let phase16 = read("crates/ucr-transport-internet/src/local.rs");
+    let grpc = read("crates/ucr-api-grpc/src/lib.rs");
+    let sdk = read("crates/ucr-sdk/src/lib.rs");
+    let client = read("crates/ucr-reference-messenger/src/client.rs");
+    let capability = read("crates/ucr-reference-messenger/src/capability.rs");
+    let spec = read("spec/local-transport-api.md");
+    let adr = read("docs/adr/0082-phase40-local-transport-service-reuses-phase16-provider.md");
+
+    assert!(proto.contains("service LocalTransportService"));
+    assert!(proto.contains("rpc Transmit"));
+    assert_eq!(proto.matches("rpc ").count(), 1);
+    let route = proto
+        .split("message LocalTransportRoute")
+        .nth(1)
+        .and_then(|tail| tail.split("enum LocalTransportFailureDisposition").next())
+        .expect("LocalTransportRoute section");
+    assert!(route.contains("destination_endpoint_id"));
+    assert!(route.contains("EndpointAddress address"));
+    assert!(!route.contains("transport_capability"));
+
+    assert!(phase16.contains("impl TransportProvider for LocalTransportProvider"));
+    assert!(phase16.contains("transmit_classified_inner"));
+    assert!(grpc.contains("GrpcLocalTransportService"));
+    assert!(grpc.contains("LocalTransportProvider"));
+    assert!(grpc.contains("provider.transmit_classified"));
+    assert!(grpc.contains("tokio::task::spawn_blocking"));
+    assert!(grpc.contains("LOCAL_TRANSPORT_USE_PERMISSION"));
+    assert!(grpc.contains("SERVICE_AUDIT_LOCAL_TRANSPORT_TRANSMIT_OPERATION_KIND"));
+    assert!(
+        sdk.contains("pb::local_transport_service_client::LocalTransportServiceClient<Channel>")
+    );
+    assert!(sdk.contains("pub async fn transmit_local"));
+    assert!(client.contains("self.sdk.transmit_local(request).await"));
+    assert!(capability.contains("LocalTransportService authenticated direct transmit RPC"));
+    assert!(capability.contains("no public mesh/peer-to-peer consumer service"));
+    assert!(spec.contains("Success means only authenticated peer-side transport acceptance"));
+    assert!(spec.contains("No retry is added above the provider"));
+    assert!(
+        adr.contains("does not make Phase 40 complete")
+            || spec.contains("does not make Phase 40 complete")
+    );
+}

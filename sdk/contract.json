@@ -3,7 +3,7 @@
   "maturity": "prepared",
   "protocol_package": "ucr.v1",
   "proto_root": "proto/ucr/v1",
-  "services": ["IntegrationService", "EventService", "CallService", "GroupService", "DeviceService", "SyncService", "StoreForwardService"],
+  "services": ["IntegrationService", "EventService", "CallService", "GroupService", "DeviceService", "SyncService", "StoreForwardService", "LocalTransportService"],
   "authentication": {
     "kind": "service_principal_binary_metadata",
     "credential_id_key": "ucr-service-credential-id-bin",

@@ -85,6 +85,7 @@ pub struct UcrSdkClient {
     devices: pb::device_service_client::DeviceServiceClient<Channel>,
     sync: pb::sync_service_client::SyncServiceClient<Channel>,
     store_forward: pb::store_forward_service_client::StoreForwardServiceClient<Channel>,
+    local_transport: pb::local_transport_service_client::LocalTransportServiceClient<Channel>,
 }
 
 impl fmt::Debug for UcrSdkClient {
@@ -127,7 +128,11 @@ impl UcrSdkClient {
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         let store_forward =
-            pb::store_forward_service_client::StoreForwardServiceClient::new(channel)
+            pb::store_forward_service_client::StoreForwardServiceClient::new(channel.clone())
+                .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+                .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+        let local_transport =
+            pb::local_transport_service_client::LocalTransportServiceClient::new(channel)
                 .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
                 .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         Ok(Self {
@@ -139,6 +144,7 @@ impl UcrSdkClient {
             devices,
             sync,
             store_forward,
+            local_transport,
         })
     }
     /// Creates one authenticated request without changing its protobuf body.
@@ -633,6 +639,20 @@ impl UcrSdkClient {
     ) -> Result<pb::StoreForwardGetStatusResponse, tonic::Status> {
         let request = self.authenticated_request(message);
         Ok(self.store_forward.get_status(request).await?.into_inner())
+    }
+
+    /// Transmits one already-encrypted envelope through the public local/direct transport service.
+    ///
+    /// The SDK performs no discovery, route fallback or application retry.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn transmit_local(
+        &mut self,
+        message: pb::LocalTransportTransmitRequest,
+    ) -> Result<pb::LocalTransportTransmitResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.local_transport.transmit(request).await?.into_inner())
     }
 
     /// Lists canonical dead letters for one Event subscription.

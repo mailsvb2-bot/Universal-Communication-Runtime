@@ -2832,10 +2832,12 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "ucr-core",
+ "ucr-crypto",
  "ucr-model",
  "ucr-protocol",
  "ucr-storage-memory",
  "ucr-store-forward",
+ "ucr-transport-internet",
 ]
 
 [[package]]
