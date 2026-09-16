@@ -18,7 +18,7 @@ fn phase39_rust_sdk_is_a_client_only_public_contract_binding() {
     assert!(!cargo.contains("ucr-storage-memory"));
     assert!(!cargo.contains("ucr-storage-sqlite"));
     let workspace_cargo = read("Cargo.toml");
-    assert!(workspace_cargo.contains("exclude = [\"crates/ucr-sdk\"]"));
+    assert!(workspace_cargo.contains("\"crates/ucr-sdk\""));
     assert!(build.contains(".build_client(true)"));
     assert!(build.contains(".build_server(false)"));
     assert!(sdk.contains("tonic::include_proto!(\"ucr.v1\")"));

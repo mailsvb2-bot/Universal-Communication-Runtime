@@ -20,3 +20,4 @@ Phase 37 adds `personal-node.md`: Prepared owner-controlled Personal Node compos
 
 Phase 38 adds `organization-mode.md`: Prepared exact-namespace Organization Mode over existing Identity, Device, Store-and-Forward, SFU and Bridge owners, with SQLite v31 restart-safe policy associations and no protocol fork for self-hosting.
 Phase 39 adds `public-sdks.md`: Prepared Rust/Python/TypeScript/Kotlin/Swift clients over the single versioned public contract, with exact binary Service Principal metadata, opaque Event cursors, no direct storage access and no SDK-owned application retry.
+Phase 40 begins `reference-messenger.md`: a standalone public-SDK-only Reference Messenger boundary with honest proof gaps, public CallService access, user-level presentation vocabulary and explicit accessibility/localization requirements.

@@ -47,6 +47,18 @@ jobs:
         run: cargo doc --manifest-path crates/ucr-sdk/Cargo.toml --no-deps
       - name: Public SDK tests
         run: cargo test --manifest-path crates/ucr-sdk/Cargo.toml --all-targets
+      - name: Reference Messenger format
+        run: cargo fmt --manifest-path crates/ucr-reference-messenger/Cargo.toml -- --check
+      - name: Reference Messenger check
+        run: cargo check --manifest-path crates/ucr-reference-messenger/Cargo.toml --all-targets
+      - name: Reference Messenger clippy
+        run: cargo clippy --manifest-path crates/ucr-reference-messenger/Cargo.toml --all-targets -- -D warnings
+      - name: Reference Messenger docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --manifest-path crates/ucr-reference-messenger/Cargo.toml --no-deps
+      - name: Reference Messenger tests
+        run: cargo test --manifest-path crates/ucr-reference-messenger/Cargo.toml --all-targets
       - name: Fuzz workspace format
         run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
       - name: Fuzz workspace check
@@ -67,6 +79,8 @@ jobs:
         run: cargo test --workspace --all-targets --release --locked
       - name: Public SDK release tests
         run: cargo test --manifest-path crates/ucr-sdk/Cargo.toml --all-targets --release
+      - name: Reference Messenger release tests
+        run: cargo test --manifest-path crates/ucr-reference-messenger/Cargo.toml --all-targets --release
 
   security-audit:
     runs-on: ubuntu-24.04
@@ -85,6 +99,10 @@ jobs:
         run: cargo generate-lockfile --manifest-path crates/ucr-sdk/Cargo.toml
       - name: Audit Prepared Public SDK lock
         run: cargo audit --file crates/ucr-sdk/Cargo.lock --deny warnings
+      - name: Resolve Reference Messenger lock
+        run: cargo generate-lockfile --manifest-path crates/ucr-reference-messenger/Cargo.toml
+      - name: Audit Reference Messenger lock
+        run: cargo audit --file crates/ucr-reference-messenger/Cargo.lock --deny warnings
 
   fuzz-smoke:
     runs-on: ubuntu-24.04
@@ -279,6 +297,11 @@ jobs:
           test -s spec/public-sdks.md &&
           test -s docs/adr/0077-phase39-public-sdks-are-thin-clients-of-one-versioned-public-contract.md &&
           test -s sdk/contract.json &&
-          test -s crates/ucr-sdk/src/lib.rs
+          test -s crates/ucr-sdk/src/lib.rs &&
+          test -s spec/reference-messenger.md &&
+          test -s docs/adr/0078-phase40-reference-messenger-is-a-public-api-consumer.md &&
+          test -s crates/ucr-reference-messenger/src/lib.rs
       - name: Validate public SDK boundaries
         run: python3 sdk/validate.py
+      - name: Validate Reference Messenger boundary
+        run: python3 crates/ucr-reference-messenger/validate.py

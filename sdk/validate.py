@@ -29,6 +29,10 @@ def main() -> None:
     manifest = json.loads((SDK / "contract.json").read_text(encoding="utf-8"))
     require(manifest["protocol_package"] == "ucr.v1", "wrong protocol package")
     require(manifest["languages"] == LANGUAGES, "required SDK language set drifted")
+    require(
+        manifest["services"] == ["IntegrationService", "EventService", "CallService"],
+        "required SDK service set drifted",
+    )
     auth = manifest["authentication"]
     require(auth["credential_id_key"] == ID_KEY, "credential id metadata drifted")
     require(auth["credential_secret_key"] == SECRET_KEY, "credential secret metadata drifted")
@@ -54,6 +58,9 @@ def main() -> None:
     build = (ROOT / "crates/ucr-sdk/build.rs").read_text(encoding="utf-8")
     require(".build_client(true)" in build, "Rust SDK client generation disabled")
     require(".build_server(false)" in build, "Rust SDK unexpectedly generates server code")
+    rust_sdk = (ROOT / "crates/ucr-sdk/src/lib.rs").read_text(encoding="utf-8")
+    for method in ("start_call", "get_call", "signal_call"):
+        require(f"pub async fn {method}" in rust_sdk, f"Rust SDK missing CallService method: {method}")
 
 
 if __name__ == "__main__":

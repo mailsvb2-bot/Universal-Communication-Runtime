@@ -20,6 +20,11 @@ pub const SERVICE_CREDENTIAL_SECRET_METADATA_KEY: &str = "ucr-service-credential
 /// reintroducing Tonic's 4 MiB default below the current public contract maxima.
 pub const SDK_GRPC_MESSAGE_CEILING: usize = 128 * 1024 * 1024;
 
+/// Public SDK transport-connection error type.
+pub type TransportError = tonic::transport::Error;
+/// Public SDK RPC transport/status error type. Canonical application errors remain protobuf envelopes.
+pub type RpcStatus = tonic::Status;
+
 /// Opaque Service Principal credential bytes owned by the external consumer.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ServiceCredential {
@@ -75,6 +80,7 @@ pub struct UcrSdkClient {
     credential: ServiceCredential,
     integration: pb::integration_service_client::IntegrationServiceClient<Channel>,
     events: pb::event_service_client::EventServiceClient<Channel>,
+    calls: pb::call_service_client::CallServiceClient<Channel>,
 }
 
 impl fmt::Debug for UcrSdkClient {
@@ -101,13 +107,17 @@ impl UcrSdkClient {
             pb::integration_service_client::IntegrationServiceClient::new(channel.clone())
                 .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
                 .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
-        let events = pb::event_service_client::EventServiceClient::new(channel)
+        let events = pb::event_service_client::EventServiceClient::new(channel.clone())
+            .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+            .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+        let calls = pb::call_service_client::CallServiceClient::new(channel)
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         Ok(Self {
             credential,
             integration,
             events,
+            calls,
         })
     }
     /// Creates one authenticated request without changing its protobuf body.
@@ -354,6 +364,42 @@ impl UcrSdkClient {
     ) -> Result<pb::EventReplayResponse, tonic::Status> {
         let request = self.authenticated_request(message);
         Ok(self.events.replay_subscription(request).await?.into_inner())
+    }
+
+    /// Starts one canonical Call signalling session.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn start_call(
+        &mut self,
+        message: pb::CallStartRequest,
+    ) -> Result<pb::CallStartResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.calls.start_call(request).await?.into_inner())
+    }
+
+    /// Reads one canonical Call signalling session.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_call(
+        &mut self,
+        message: pb::CallGetRequest,
+    ) -> Result<pb::CallGetResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.calls.get_call(request).await?.into_inner())
+    }
+
+    /// Applies one canonical Call signalling transition.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn signal_call(
+        &mut self,
+        message: pb::CallSignalRequest,
+    ) -> Result<pb::CallSignalResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.calls.signal_call(request).await?.into_inner())
     }
 
     /// Lists canonical dead letters for one Event subscription.
