@@ -117,3 +117,36 @@ fn phase40_presentation_contract_is_accessibility_and_localization_ready() {
     }
     assert!(presentation.contains("AwaitingDeliveryOpportunity"));
 }
+
+#[test]
+fn phase40_groups_use_public_service_and_existing_canonical_owners() {
+    let proto = read("proto/ucr/v1/group_api.proto");
+    let ingress = read("crates/ucr-core/src/integration_api.rs");
+    let grpc = read("crates/ucr-api-grpc/src/lib.rs");
+    let sdk = read("crates/ucr-sdk/src/lib.rs");
+    let capability = read("crates/ucr-reference-messenger/src/capability.rs");
+    let adr =
+        read("docs/adr/0079-phase40-group-service-reuses-canonical-group-and-message-owners.md");
+
+    assert!(proto.contains("service GroupService"));
+    for rpc in [
+        "rpc CreateGroup",
+        "rpc GetGroup",
+        "rpc GetMembership",
+        "rpc ListMemberships",
+        "rpc ApplyChange",
+        "rpc SendGroupMessage",
+        "rpc GetGroupMessage",
+    ] {
+        assert!(proto.contains(rpc), "missing public Group RPC: {rpc}");
+    }
+    assert!(proto.contains("OfflineGroupChange change"));
+    assert!(ingress.contains("CONVERSATION_WRITE_PERMISSION"));
+    assert!(ingress.contains("GROUP_CREATE_PERMISSION"));
+    assert!(ingress.contains("GroupMessageStore"));
+    assert!(grpc.contains("pb::group_service_server::GroupService"));
+    assert!(sdk.contains("pb::group_service_client::GroupServiceClient<Channel>"));
+    assert!(capability.contains("GroupService lifecycle/membership/message RPCs"));
+    assert!(adr.contains("writes a separate audit decision"));
+    assert!(adr.contains("does not consume request quota twice"));
+}

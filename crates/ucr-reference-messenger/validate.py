@@ -33,11 +33,14 @@ def main() -> None:
     require("pb::call_service_client::CallServiceClient<Channel>" in sdk, "public SDK missing CallService client")
     for method in ("start_call", "get_call", "signal_call"):
         require(f"pub async fn {method}" in sdk, f"public SDK missing {method}")
+    require("pb::group_service_client::GroupServiceClient<Channel>" in sdk, "public SDK missing GroupService client")
+    for method in ("create_group", "get_group", "get_group_membership", "list_group_memberships", "apply_group_change", "send_group_message", "get_group_message"):
+        require(f"pub async fn {method}" in sdk, f"public SDK missing {method}")
 
     capability = (CRATE / "src/capability.rs").read_text(encoding="utf-8")
     for item in ("Chat", "Groups", "Calls", "MultiDevice", "Local", "Offline", "P2p", "Recovery", "Accessibility"):
         require(item in capability, f"Phase-40 proof area missing: {item}")
-    require(capability.count("ProofState::PublicApiGap") == 6, "Phase-40 public API gap count drifted")
+    require(capability.count("ProofState::PublicApiGap") == 5, "Phase-40 public API gap count drifted")
     require("ProofState::PresentationModelOnly" in capability, "accessibility maturity gap hidden")
 
     accessibility = (CRATE / "src/accessibility.rs").read_text(encoding="utf-8")
@@ -48,6 +51,10 @@ def main() -> None:
     for forbidden in ("Stun", "Turn", "Quic", "Relay", "ProviderApi"):
         require(forbidden not in presentation, f"infrastructure leaked into primary UX: {forbidden}")
     require("AwaitingDeliveryOpportunity" in presentation, "offline waiting UX missing")
+    group_proto = (ROOT / "proto/ucr/v1/group_api.proto").read_text(encoding="utf-8")
+    require("service GroupService" in group_proto, "public GroupService missing")
+    require("OfflineGroupChange change" in group_proto, "GroupService invented a second mutation vocabulary")
+    require("GroupService lifecycle/membership/message RPCs" in capability, "Groups not marked with public evidence")
 
     spec = (ROOT / "spec/reference-messenger.md").read_text(encoding="utf-8")
     require("Phase 40 is incomplete" in spec, "Phase 40 completion is overclaimed")

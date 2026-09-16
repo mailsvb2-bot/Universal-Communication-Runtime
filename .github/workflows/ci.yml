@@ -205,6 +205,7 @@ jobs:
           test -s proto/ucr/v1/transport_orchestrator.proto &&
           test -s proto/ucr/v1/transport_failover.proto &&
           test -s proto/ucr/v1/offline_groups.proto &&
+          test -s proto/ucr/v1/group_api.proto &&
           test -s proto/ucr/v1/store_forward.proto &&
           test -s proto/ucr/v1/mesh.proto &&
           test -s proto/ucr/v1/group_media_e2ee.proto &&
@@ -300,6 +301,8 @@ jobs:
           test -s crates/ucr-sdk/src/lib.rs &&
           test -s spec/reference-messenger.md &&
           test -s docs/adr/0078-phase40-reference-messenger-is-a-public-api-consumer.md &&
+          test -s spec/group-api.md &&
+          test -s docs/adr/0079-phase40-group-service-reuses-canonical-group-and-message-owners.md &&
           test -s crates/ucr-reference-messenger/src/lib.rs
       - name: Validate public SDK boundaries
         run: python3 sdk/validate.py

@@ -74,6 +74,83 @@ impl ReferenceMessengerClient {
         self.sdk.get_message(request).await
     }
 
+    /// Creates one canonical Group through the public Group service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn create_group(
+        &mut self,
+        request: pb::GroupCreateRequest,
+    ) -> Result<pb::GroupCreateResponse, RpcStatus> {
+        self.sdk.create_group(request).await
+    }
+
+    /// Reads one canonical Group through the public Group service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn get_group(
+        &mut self,
+        request: pb::GroupGetRequest,
+    ) -> Result<pb::GroupGetResponse, RpcStatus> {
+        self.sdk.get_group(request).await
+    }
+
+    /// Reads one canonical Group membership through the public Group service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn get_group_membership(
+        &mut self,
+        request: pb::GroupGetMembershipRequest,
+    ) -> Result<pb::GroupGetMembershipResponse, RpcStatus> {
+        self.sdk.get_group_membership(request).await
+    }
+
+    /// Lists bounded canonical Group memberships through the public Group service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn list_group_memberships(
+        &mut self,
+        request: pb::GroupListMembershipsRequest,
+    ) -> Result<pb::GroupListMembershipsResponse, RpcStatus> {
+        self.sdk.list_group_memberships(request).await
+    }
+
+    /// Applies one canonical Group mutation through the public Group service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn apply_group_change(
+        &mut self,
+        request: pb::GroupApplyChangeRequest,
+    ) -> Result<pb::GroupApplyChangeResponse, RpcStatus> {
+        self.sdk.apply_group_change(request).await
+    }
+
+    /// Sends one membership-gated Group Message through the public Group service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn send_group_message(
+        &mut self,
+        request: pb::GroupSendMessageRequest,
+    ) -> Result<pb::GroupSendMessageResponse, RpcStatus> {
+        self.sdk.send_group_message(request).await
+    }
+
+    /// Reads one membership/history-gated Group Message through the public Group service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn get_group_message(
+        &mut self,
+        request: pb::GroupGetMessageRequest,
+    ) -> Result<pb::GroupGetMessageResponse, RpcStatus> {
+        self.sdk.get_group_message(request).await
+    }
+
     /// Starts canonical Call signalling through the public Call service.
     ///
     /// # Errors
@@ -122,7 +199,7 @@ mod tests {
             matrix
                 .iter()
                 .any(|item| item.capability == ProofCapability::Groups
-                    && item.state == ProofState::PublicApiGap)
+                    && item.state == ProofState::PublicApiAvailable)
         );
         assert!(
             matrix
