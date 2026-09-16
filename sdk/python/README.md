@@ -1,7 +1,7 @@
 # Python SDK surface
 
 Generate Python protobuf and gRPC client stubs from the repository `proto/ucr/v1` schema root.
-Use `ucr_sdk.auth.ServiceCredential.metadata()` as call metadata for generated `IntegrationService` and `EventService` stubs.
+Use `ucr_sdk.auth.ServiceCredential.metadata()` as call metadata for generated `IntegrationService`, `EventService` and `CallService` stubs.
 
 The helper keeps credential bytes opaque, redacts diagnostics and contains no canonical domain model or retry engine.
 Generated code is build output; the checked-in `.proto` files remain the contract source.
