@@ -4068,6 +4068,30 @@ fn phase14_public_event_binding_governance_and_backpressure_are_locked() {
     }
 }
 
+fn assert_phase13_grpc_has_no_implementation_owners(production_grpc: &str) {
+    for forbidden in ["SqliteLocalStore", "MemoryLocalStore", "rusqlite"] {
+        assert!(
+            !production_grpc.contains(forbidden),
+            "gRPC adapter leaked storage implementation owner: {forbidden}"
+        );
+    }
+    let integration_grpc = production_grpc
+        .split("pub struct GrpcIntegrationService")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct GrpcGroupService").next())
+        .expect("Phase-13 IntegrationService adapter section");
+    for forbidden in [
+        "TransportProvider",
+        "RouteCandidate",
+        "LocalTransportProvider",
+    ] {
+        assert!(
+            !integration_grpc.contains(forbidden),
+            "Phase-13 IntegrationService leaked transport owner: {forbidden}"
+        );
+    }
+}
+
 #[test]
 fn phase13_grpc_bindings_are_thin_without_second_core_or_transport_brain() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4133,17 +4157,7 @@ fn phase13_grpc_bindings_are_thin_without_second_core_or_transport_brain() {
         .split("#[cfg(test)]")
         .next()
         .expect("production gRPC adapter section");
-    for forbidden in [
-        "SqliteLocalStore",
-        "MemoryLocalStore",
-        "rusqlite",
-        "TransportProvider",
-    ] {
-        assert!(
-            !production_grpc.contains(forbidden),
-            "gRPC adapter leaked storage/transport implementation owner: {forbidden}"
-        );
-    }
+    assert_phase13_grpc_has_no_implementation_owners(production_grpc);
     assert!(!proto.contains("credential_secret"));
     assert!(!proto.contains("ucr-service-credential"));
     assert!(!core.contains("tonic::"));

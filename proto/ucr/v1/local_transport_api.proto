@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/identity.proto";
+
+// One caller-supplied transient local/direct route. Capability selection is not public input:
+// LocalTransportService always invokes the existing ucr.transport.local.tcp provider.
+message LocalTransportRoute {
+  OpaqueId destination_endpoint_id = 1;
+  EndpointAddress address = 2;
+}
+
+enum LocalTransportFailureDisposition {
+  LOCAL_TRANSPORT_FAILURE_DISPOSITION_UNSPECIFIED = 0;
+  LOCAL_TRANSPORT_FAILURE_DISPOSITION_NOT_ACCEPTED = 1;
+  LOCAL_TRANSPORT_FAILURE_DISPOSITION_ACCEPTANCE_UNKNOWN = 2;
+}
+
+// Success means only peer-side transport acceptance/deduplication. It is never application
+// delivery, presentation, read, or business-effect evidence.
+message LocalTransportAccepted {}
+
+message LocalTransportFailure {
+  ErrorEnvelope error = 1;
+  LocalTransportFailureDisposition disposition = 2;
+}
+
+message LocalTransportTransmitRequest {
+  TenantScope scope = 1;
+  LocalTransportRoute route = 2;
+  bytes encrypted_envelope = 3;
+}
+
+message LocalTransportTransmitResponse {
+  oneof result {
+    LocalTransportAccepted accepted = 1;
+    LocalTransportFailure failure = 2;
+  }
+}
+
+// Thin Phase-40 consumer API over the existing Phase-16 LocalTransportProvider. The service
+// does not discover peers, create listeners, rank routes, fall back to other transports, or retry
+// above provider-owned bounded reconnect semantics.
+service LocalTransportService {
+  rpc Transmit(LocalTransportTransmitRequest) returns (LocalTransportTransmitResponse);
+}

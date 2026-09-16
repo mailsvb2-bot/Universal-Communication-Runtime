@@ -57,8 +57,8 @@ pub const fn phase40_proof_matrix() -> [ProofItem; 9] {
         },
         ProofItem {
             capability: ProofCapability::Local,
-            state: ProofState::PublicApiGap,
-            evidence: "no public local-route consumer service",
+            state: ProofState::PublicApiAvailable,
+            evidence: "LocalTransportService authenticated direct transmit RPC",
         },
         ProofItem {
             capability: ProofCapability::Offline,
@@ -68,7 +68,7 @@ pub const fn phase40_proof_matrix() -> [ProofItem; 9] {
         ProofItem {
             capability: ProofCapability::P2p,
             state: ProofState::PublicApiGap,
-            evidence: "no public P2P/local transport consumer service",
+            evidence: "no public mesh/peer-to-peer consumer service",
         },
         ProofItem {
             capability: ProofCapability::Recovery,

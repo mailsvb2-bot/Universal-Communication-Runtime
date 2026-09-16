@@ -25,3 +25,5 @@ Phase 40 adds `group-api.md`: a public `GroupService` over the existing canonica
 Phase 40 adds `device-sync-api.md`: public `DeviceService`/`SyncService` bindings over the existing canonical Device lifecycle and Sync session/checkpoint owners, preserving exact scope, permissions, audit, irreversible revocation, CAS transitions and opaque resume tokens.
 
 Phase 40 adds `store-forward-api.md`: public `StoreForwardService` enqueue/status over the existing canonical Store-and-Forward scheduler, with dedicated Service Principal permissions and no public worker lease, due-scan, retry or route controls.
+
+Phase 40 adds `local-transport-api.md`: public `LocalTransportService` over the existing Phase-16 authenticated local/direct provider, preserving exact Service Principal admission and `NotAccepted` versus `AcceptanceUnknown` transport evidence without exporting discovery, listener, route-ranking or fallback ownership.

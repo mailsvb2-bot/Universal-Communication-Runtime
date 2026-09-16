@@ -263,6 +263,20 @@ impl ReferenceMessengerClient {
         self.sdk.get_store_forward_status(request).await
     }
 
+    /// Attempts one direct local transport of an already-encrypted envelope.
+    ///
+    /// Success is only peer transport acceptance/deduplication, never delivery/read evidence.
+    /// The Reference Messenger performs no hidden retry or route fallback.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn send_direct_local(
+        &mut self,
+        request: pb::LocalTransportTransmitRequest,
+    ) -> Result<pb::LocalTransportTransmitResponse, RpcStatus> {
+        self.sdk.transmit_local(request).await
+    }
+
     /// Starts canonical Call signalling through the public Call service.
     ///
     /// # Errors
