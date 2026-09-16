@@ -36,7 +36,7 @@ The code-level states are `PublicApiAvailable`, `PublicApiGap` and `Presentation
 | Calls | Public API available | CallService StartCall/GetCall/SignalCall |
 | Multi-device | Public API available | DeviceService lifecycle + SyncService session/checkpoint RPCs |
 | Local | Public API gap | no public local-route consumer service |
-| Offline | Public API gap | no public Store-and-Forward consumer service |
+| Offline | Public API available | StoreForwardService enqueue + payload-free status RPCs |
 | P2P | Public API gap | no public P2P/local transport consumer service |
 | Recovery | Public API gap | no public Recovery workflow service |
 | Accessibility | Presentation model only | concrete platform UI evidence still required |
@@ -53,7 +53,7 @@ Call response envelopes remain canonical protobuf responses. SDK or Reference Me
 
 The presentation vocabulary contains an explicit `AwaitingDeliveryOpportunity` state. Absence of an allowed route is not automatically presented as a terminal send failure. Partial availability is representable without claiming that an entire Conversation is unavailable.
 
-This slice does not yet expose cancel/expiry/retry/priority operations because the required public Store-and-Forward consumer service is not present. Those controls must not be simulated locally.
+The public `StoreForwardService` now exposes durable enqueue plus payload-free status through the same public SDK boundary. Reference Messenger maps queued work to `AwaitingDeliveryOpportunity`; enqueue acknowledgement is not Delivery/Read proof. Worker leases, due scans, route selection and retry execution remain internal, and cancel/manual-retry controls are still not simulated locally.
 
 ## Accessibility and localization maturity
 
@@ -61,6 +61,6 @@ The checked-in Rust presentation contract records the Canon requirements, but it
 
 ## Nonclaims and next closure work
 
-Phase 40 is incomplete until public consumer surfaces and executable Reference Messenger evidence cover local, offline, P2P, recovery and concrete accessibility. Creating those surfaces must reuse the existing canonical owners and must not add a second communication brain.
+Phase 40 is incomplete until public consumer surfaces and executable Reference Messenger evidence cover local, P2P, recovery and concrete accessibility. Creating those surfaces must reuse the existing canonical owners and must not add a second communication brain.
 
 Phase 41 remains the owner of the full cross-implementation Conformance Suite; Phase 40 may add focused evidence only for its Reference Messenger boundary.

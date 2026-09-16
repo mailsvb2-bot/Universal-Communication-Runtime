@@ -48,7 +48,7 @@ The tombstone prevents a caller from resurrecting a successfully completed or ex
 
 ## Public contract
 
-`proto/ucr/v1/store_forward.proto` defines bounded policy/job/outcome data parity only. It intentionally defines no service, no `EndpointAddress`, no Relay type and no public lease message. Production service lifecycle, worker orchestration and remote intermediary protocols remain separate phases.
+Phase 27 originally defined bounded policy/job/outcome parity only. Phase 40 now adds a thin public `StoreForwardService` with `Enqueue` and payload-free `GetStatus` over the same canonical owner. It still defines no `EndpointAddress`, Relay type or public lease message. Due scans, lease ownership, retry execution, route discovery and provider invocation remain worker/runtime concerns; production worker orchestration and remote intermediary protocols remain separate work.
 
 ## Non-claims
 

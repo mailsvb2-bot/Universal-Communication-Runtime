@@ -62,8 +62,8 @@ pub const fn phase40_proof_matrix() -> [ProofItem; 9] {
         },
         ProofItem {
             capability: ProofCapability::Offline,
-            state: ProofState::PublicApiGap,
-            evidence: "no public Store-and-Forward consumer service",
+            state: ProofState::PublicApiAvailable,
+            evidence: "StoreForwardService enqueue + payload-free status RPCs",
         },
         ProofItem {
             capability: ProofCapability::P2p,

@@ -43,6 +43,8 @@ fn phase27_schema_and_public_boundary_are_machine_locked() {
         fs::read_to_string(root.join("crates/ucr-storage-sqlite/src/lib.rs")).expect("sqlite root");
     let proto = fs::read_to_string(root.join("proto/ucr/v1/store_forward.proto")).expect("proto");
     let spec = fs::read_to_string(root.join("spec/store-forward.md")).expect("spec");
+    let public_spec =
+        fs::read_to_string(root.join("spec/store-forward-api.md")).expect("public spec");
 
     assert!(protocol.contains("MAX_STORE_FORWARD_DELIVERY_ATTEMPTS: u16 = 64"));
     assert!(protocol.contains("MAX_STORE_FORWARD_PAGE_ITEMS: usize = 256"));
@@ -50,7 +52,12 @@ fn phase27_schema_and_public_boundary_are_machine_locked() {
     assert!(sqlite.contains("const SQLITE_SCHEMA_V24: u32 = 24"));
     assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 ="));
     assert!(sqlite.contains("migrate_v23_to_v24"));
-    assert!(!proto.contains("service StoreForward"));
+    assert!(proto.contains("service StoreForwardService"));
+    assert!(proto.contains("rpc Enqueue"));
+    assert!(proto.contains("rpc GetStatus"));
+    assert!(public_spec.contains("Phase 40"));
+    assert!(public_spec.contains("Worker orchestration remains internal"));
+    assert!(public_spec.contains("StoreForwardIngress"));
     assert!(!proto.contains("EndpointAddress"));
     assert!(!proto.contains("message StoreForwardLease"));
     assert!(!proto.contains("message Relay"));

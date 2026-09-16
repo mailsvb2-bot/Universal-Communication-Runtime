@@ -218,3 +218,55 @@ fn phase40_multidevice_does_not_move_sync_brain_into_public_sdk() {
     assert!(spec.contains("resume tokens remain opaque"));
     assert!(spec.contains("no automatic retry, anti-entropy, route selection or transport state"));
 }
+
+#[test]
+fn phase40_offline_uses_public_store_forward_service_without_exporting_worker_brain() {
+    let proto = read("proto/ucr/v1/store_forward.proto");
+    let owner = read("crates/ucr-store-forward/src/lib.rs");
+    let grpc = read("crates/ucr-api-grpc/src/lib.rs");
+    let sdk = read("crates/ucr-sdk/src/lib.rs");
+    let client = read("crates/ucr-reference-messenger/src/client.rs");
+    let capability = read("crates/ucr-reference-messenger/src/capability.rs");
+    let spec = read("spec/store-forward-api.md");
+    let adr =
+        read("docs/adr/0081-phase40-store-forward-service-reuses-canonical-scheduler-owner.md");
+
+    assert!(proto.contains("service StoreForwardService"));
+    assert!(proto.contains("rpc Enqueue"));
+    assert!(proto.contains("rpc GetStatus"));
+    for forbidden_rpc in ["Claim", "Due", "Process", "Retry", "Route", "Transmit"] {
+        assert!(
+            !proto.contains(&format!("rpc {forbidden_rpc}")),
+            "worker/scheduler control leaked into public StoreForwardService: {forbidden_rpc}"
+        );
+    }
+    let status = proto
+        .split("message StoreForwardStatus")
+        .nth(1)
+        .and_then(|tail| tail.split("message StoreForwardEnqueueRequest").next())
+        .expect("StoreForwardStatus section");
+    for forbidden in [
+        "encrypted_envelope",
+        "lease_id",
+        "lease_duration_ms",
+        "EndpointAddress",
+    ] {
+        assert!(
+            !status.contains(forbidden),
+            "private field leaked into public status: {forbidden}"
+        );
+    }
+
+    assert!(owner.contains("pub struct StoreForwardIngress"));
+    assert!(owner.contains("enqueue_canonical_job(self.store, job)"));
+    assert!(grpc.contains("StoreForwardIngress::new"));
+    assert!(grpc.contains("pb::store_forward_service_server::StoreForwardService"));
+    assert!(sdk.contains("pb::store_forward_service_client::StoreForwardServiceClient<Channel>"));
+    assert!(sdk.contains("pub async fn enqueue_store_forward"));
+    assert!(sdk.contains("pub async fn get_store_forward_status"));
+    assert!(client.contains("self.sdk.enqueue_store_forward(request).await"));
+    assert!(client.contains("self.sdk.get_store_forward_status(request).await"));
+    assert!(capability.contains("StoreForwardService enqueue + payload-free status RPCs"));
+    assert!(spec.contains("Worker orchestration remains internal"));
+    assert!(adr.contains("No second enqueue implementation is permitted"));
+}
