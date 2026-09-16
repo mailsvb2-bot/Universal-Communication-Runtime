@@ -55,6 +55,11 @@ pub mod pb {
     tonic::include_proto!("ucr.v1");
 }
 
+mod mesh_service;
+pub use mesh_service::{
+    AuthenticatedMeshPeerSession, GrpcMeshService, MeshPeerSessionResolver, mesh_service_server,
+};
+
 pub const SERVICE_CREDENTIAL_ID_METADATA_KEY: &str = "ucr-service-credential-id-bin";
 pub const SERVICE_CREDENTIAL_SECRET_METADATA_KEY: &str = "ucr-service-credential-secret-bin";
 pub const GRPC_DIAGNOSTIC_DOMAIN: &str = "ucr.grpc.binding";

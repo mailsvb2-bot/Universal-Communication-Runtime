@@ -67,8 +67,8 @@ pub const fn phase40_proof_matrix() -> [ProofItem; 9] {
         },
         ProofItem {
             capability: ProofCapability::P2p,
-            state: ProofState::PublicApiGap,
-            evidence: "no public mesh/peer-to-peer consumer service",
+            state: ProofState::PublicApiAvailable,
+            evidence: "MeshService authenticated peer export/reconcile RPCs",
         },
         ProofItem {
             capability: ProofCapability::Recovery,

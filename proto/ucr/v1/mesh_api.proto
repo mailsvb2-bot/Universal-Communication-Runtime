@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/mesh.proto";
+import "ucr/v1/runtime.proto";
+
+// Public Phase-40 consumer request for one bounded page of signed Group Messages.
+// source/peer identity and cryptographic session state are deliberately absent: the UCR host
+// resolves them from the already-authenticated live peer session bound to sync_session_id.
+message MeshExportGroupMessagesRequest {
+  TenantScope scope = 1;
+  OpaqueId sync_session_id = 2;
+  OpaqueId group_id = 3;
+  optional MeshCursor cursor = 4;
+  uint32 max_items = 5;
+}
+
+message MeshExportGroupMessagesResponse {
+  oneof result {
+    MeshGroupMessagePage page = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Reconciles one signed multi-hop Group Message received on the already-authenticated peer session.
+// The caller cannot nominate the peer or local Device; those remain live-session evidence.
+message MeshReconcileGroupMessageRequest {
+  TenantScope scope = 1;
+  OpaqueId sync_session_id = 2;
+  MeshGroupMessageReplica record = 3;
+}
+
+message MeshReconcileGroupMessageResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Thin Phase-40 public consumer API over the existing Phase-28 MeshGroupsRuntime.
+// It owns no discovery, topology graph, NAT traversal, Relay, route selection, retry, or peer trust.
+service MeshService {
+  rpc ExportGroupMessages(MeshExportGroupMessagesRequest) returns (MeshExportGroupMessagesResponse);
+  rpc ReconcileGroupMessage(MeshReconcileGroupMessageRequest) returns (MeshReconcileGroupMessageResponse);
+}

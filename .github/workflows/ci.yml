@@ -209,6 +209,7 @@ jobs:
           test -s proto/ucr/v1/device_sync_api.proto &&
           test -s proto/ucr/v1/store_forward.proto &&
           test -s proto/ucr/v1/mesh.proto &&
+          test -s proto/ucr/v1/mesh_api.proto &&
           test -s proto/ucr/v1/group_media_e2ee.proto &&
           test -s proto/ucr/v1/sfu.proto &&
           test -s proto/ucr/v1/conference.proto &&
@@ -310,6 +311,8 @@ jobs:
           test -s docs/adr/0081-phase40-store-forward-service-reuses-canonical-scheduler-owner.md &&
           test -s spec/local-transport-api.md &&
           test -s docs/adr/0082-phase40-local-transport-service-reuses-phase16-provider.md &&
+          test -s spec/mesh-api.md &&
+          test -s docs/adr/0083-phase40-mesh-service-reuses-phase28-runtime.md &&
           test -s crates/ucr-reference-messenger/src/lib.rs
       - name: Validate public SDK boundaries
         run: python3 sdk/validate.py

@@ -277,6 +277,30 @@ impl ReferenceMessengerClient {
         self.sdk.transmit_local(request).await
     }
 
+    /// Exports one bounded page of signed Group Messages to an authenticated P2P/Mesh peer.
+    ///
+    /// The Reference Messenger does not choose topology, routes, relays or peer trust.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn export_p2p_group_messages(
+        &mut self,
+        request: pb::MeshExportGroupMessagesRequest,
+    ) -> Result<pb::MeshExportGroupMessagesResponse, RpcStatus> {
+        self.sdk.export_mesh_group_messages(request).await
+    }
+
+    /// Reconciles one signed multi-hop Group Message received from an authenticated P2P/Mesh peer.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn reconcile_p2p_group_message(
+        &mut self,
+        request: pb::MeshReconcileGroupMessageRequest,
+    ) -> Result<pb::MeshReconcileGroupMessageResponse, RpcStatus> {
+        self.sdk.reconcile_mesh_group_message(request).await
+    }
+
     /// Starts canonical Call signalling through the public Call service.
     ///
     /// # Errors

@@ -86,6 +86,7 @@ pub struct UcrSdkClient {
     sync: pb::sync_service_client::SyncServiceClient<Channel>,
     store_forward: pb::store_forward_service_client::StoreForwardServiceClient<Channel>,
     local_transport: pb::local_transport_service_client::LocalTransportServiceClient<Channel>,
+    mesh: pb::mesh_service_client::MeshServiceClient<Channel>,
 }
 
 impl fmt::Debug for UcrSdkClient {
@@ -132,9 +133,12 @@ impl UcrSdkClient {
                 .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
                 .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         let local_transport =
-            pb::local_transport_service_client::LocalTransportServiceClient::new(channel)
+            pb::local_transport_service_client::LocalTransportServiceClient::new(channel.clone())
                 .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
                 .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+        let mesh = pb::mesh_service_client::MeshServiceClient::new(channel)
+            .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+            .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         Ok(Self {
             credential,
             integration,
@@ -145,6 +149,7 @@ impl UcrSdkClient {
             sync,
             store_forward,
             local_transport,
+            mesh,
         })
     }
     /// Creates one authenticated request without changing its protobuf body.
@@ -653,6 +658,38 @@ impl UcrSdkClient {
     ) -> Result<pb::LocalTransportTransmitResponse, tonic::Status> {
         let request = self.authenticated_request(message);
         Ok(self.local_transport.transmit(request).await?.into_inner())
+    }
+
+    /// Exports one bounded page of signed Group Message replicas to an authenticated Mesh peer.
+    ///
+    /// Peer identity and cryptographic session state remain server-owned live-session evidence.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn export_mesh_group_messages(
+        &mut self,
+        message: pb::MeshExportGroupMessagesRequest,
+    ) -> Result<pb::MeshExportGroupMessagesResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.mesh.export_group_messages(request).await?.into_inner())
+    }
+
+    /// Reconciles one signed multi-hop Group Message from an authenticated Mesh peer.
+    ///
+    /// The SDK performs no discovery, topology selection, NAT traversal or automatic retry.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn reconcile_mesh_group_message(
+        &mut self,
+        message: pb::MeshReconcileGroupMessageRequest,
+    ) -> Result<pb::MeshReconcileGroupMessageResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .mesh
+            .reconcile_group_message(request)
+            .await?
+            .into_inner())
     }
 
     /// Lists canonical dead letters for one Event subscription.
