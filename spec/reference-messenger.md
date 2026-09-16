@@ -37,7 +37,7 @@ The code-level states are `PublicApiAvailable`, `PublicApiGap` and `Presentation
 | Multi-device | Public API available | DeviceService lifecycle + SyncService session/checkpoint RPCs |
 | Local | Public API available | LocalTransportService authenticated direct transmit RPC |
 | Offline | Public API available | StoreForwardService enqueue + payload-free status RPCs |
-| P2P | Public API gap | no public mesh/peer-to-peer consumer service |
+| P2P | Public API available | MeshService authenticated peer export/reconcile RPCs |
 | Recovery | Public API gap | no public Recovery workflow service |
 | Accessibility | Presentation model only | concrete platform UI evidence still required |
 
@@ -54,6 +54,8 @@ Call response envelopes remain canonical protobuf responses. SDK or Reference Me
 
 The public `LocalTransportService` exposes one explicit direct transmit through the existing Phase-16 local provider. The caller supplies the destination endpoint, transient local address and already-encrypted envelope; capability selection is fixed by UCR, and the service performs no discovery, listener creation, route ranking or cross-route fallback.
 
+The public `MeshService` exposes only bounded export/reconcile of signed Group Message replicas through the existing Phase-28 `MeshGroupsRuntime`. Peer identity and cryptographic session state are resolved by the UCR host from an already-authenticated live Sync session; callers cannot nominate peer identity, topology, relay, NAT traversal, route selection or retry behavior.
+
 A successful response means only authenticated peer-side transport acceptance/deduplication. Failure preserves `NotAccepted` versus `AcceptanceUnknown`, so the Reference Messenger must not present an ambiguous transport result as safely retryable or as Delivery/Read success. The primary UI concept remains `DirectCommunication`; TCP/address/provider vocabulary is not promoted to a primary user concept.
 
 ## Offline and partial-availability UX
@@ -68,6 +70,6 @@ The checked-in Rust presentation contract records the Canon requirements, but it
 
 ## Nonclaims and next closure work
 
-Phase 40 is incomplete until public consumer surfaces and executable Reference Messenger evidence cover P2P, recovery and concrete accessibility. Creating those surfaces must reuse the existing canonical owners and must not add a second communication brain.
+Phase 40 is incomplete until public consumer surfaces and executable Reference Messenger evidence cover recovery and concrete accessibility. Creating those surfaces must reuse the existing canonical owners and must not add a second communication brain.
 
 Phase 41 remains the owner of the full cross-implementation Conformance Suite; Phase 40 may add focused evidence only for its Reference Messenger boundary.

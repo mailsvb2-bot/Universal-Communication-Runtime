@@ -54,6 +54,8 @@ pub const SERVICE_AUDIT_STORE_FORWARD_ENQUEUE_OPERATION_KIND: &str =
 pub const SERVICE_AUDIT_STORE_FORWARD_READ_OPERATION_KIND: &str = "ucr.delivery.store_forward.read";
 pub const SERVICE_AUDIT_LOCAL_TRANSPORT_TRANSMIT_OPERATION_KIND: &str =
     "ucr.transport.local.transmit";
+pub const SERVICE_AUDIT_MESH_EXPORT_OPERATION_KIND: &str = "ucr.mesh.export";
+pub const SERVICE_AUDIT_MESH_RECONCILE_OPERATION_KIND: &str = "ucr.mesh.reconcile";
 pub const MAX_SERVICE_AUDIT_OPERATION_KIND_LEN: usize = 256;
 pub const MAX_SERVICE_AUDIT_READ_ITEMS: usize = 1024;
 pub const MAX_SERVICE_REQUEST_PERMISSION_LEN: usize = 256;

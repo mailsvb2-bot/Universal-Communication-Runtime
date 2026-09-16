@@ -308,11 +308,54 @@ fn phase40_local_uses_public_service_and_existing_phase16_provider() {
     assert!(sdk.contains("pub async fn transmit_local"));
     assert!(client.contains("self.sdk.transmit_local(request).await"));
     assert!(capability.contains("LocalTransportService authenticated direct transmit RPC"));
-    assert!(capability.contains("no public mesh/peer-to-peer consumer service"));
+    assert!(capability.contains("MeshService authenticated peer export/reconcile RPCs"));
     assert!(spec.contains("Success means only authenticated peer-side transport acceptance"));
     assert!(spec.contains("No retry is added above the provider"));
     assert!(
         adr.contains("does not make Phase 40 complete")
             || spec.contains("does not make Phase 40 complete")
     );
+}
+
+#[test]
+fn phase40_p2p_uses_public_mesh_service_without_exporting_topology_brain() {
+    let proto = read("proto/ucr/v1/mesh_api.proto");
+    let grpc = read("crates/ucr-api-grpc/src/mesh_service.rs");
+    let sdk = read("crates/ucr-sdk/src/lib.rs");
+    let client = read("crates/ucr-reference-messenger/src/client.rs");
+    let capability = read("crates/ucr-reference-messenger/src/capability.rs");
+    let spec = read("spec/mesh-api.md");
+    let adr = read("docs/adr/0083-phase40-mesh-service-reuses-phase28-runtime.md");
+
+    assert!(proto.contains("service MeshService"));
+    assert!(proto.contains("rpc ExportGroupMessages"));
+    assert!(proto.contains("rpc ReconcileGroupMessage"));
+    for forbidden in [
+        "PeerAddress peer",
+        "RouteCandidate route",
+        "string transport_capability",
+        "rpc Discover",
+        "rpc SelectRoute",
+        "rpc Retry",
+        "uint32 retry",
+    ] {
+        assert!(
+            !proto.contains(forbidden),
+            "topology/routing control leaked into MeshService: {forbidden}"
+        );
+    }
+    assert!(grpc.contains("MeshGroupsRuntime::new"));
+    assert!(grpc.contains("MeshPeerSessionResolver"));
+    assert!(grpc.contains("SYNC_READ_PERMISSION"));
+    assert!(grpc.contains("SYNC_WRITE_PERMISSION"));
+    assert!(sdk.contains("pb::mesh_service_client::MeshServiceClient<Channel>"));
+    assert!(sdk.contains("pub async fn export_mesh_group_messages"));
+    assert!(sdk.contains("pub async fn reconcile_mesh_group_message"));
+    assert!(client.contains("self.sdk.export_mesh_group_messages(request).await"));
+    assert!(client.contains("self.sdk.reconcile_mesh_group_message(request).await"));
+    assert!(capability.contains("MeshService authenticated peer export/reconcile RPCs"));
+    assert!(spec.contains(
+        "does not expose discovery, topology, NAT traversal, Relay, route selection or retry"
+    ));
+    assert!(adr.contains("existing Phase-28 `MeshGroupsRuntime` remains the canonical Mesh owner"));
 }

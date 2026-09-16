@@ -40,13 +40,14 @@ def main() -> None:
     require("pb::sync_service_client::SyncServiceClient<Channel>" in sdk, "public SDK missing SyncService client")
     require("pb::store_forward_service_client::StoreForwardServiceClient<Channel>" in sdk, "public SDK missing StoreForwardService client")
     require("pb::local_transport_service_client::LocalTransportServiceClient<Channel>" in sdk, "public SDK missing LocalTransportService client")
+    require("pb::mesh_service_client::MeshServiceClient<Channel>" in sdk, "public SDK missing MeshService client")
     for method in ("register_device", "get_device", "revoke_device", "create_sync_session", "get_sync_session", "transition_sync", "record_sync_checkpoint", "get_latest_sync_checkpoint"):
         require(f"pub async fn {method}" in sdk, f"public SDK missing {method}")
 
     capability = (CRATE / "src/capability.rs").read_text(encoding="utf-8")
     for item in ("Chat", "Groups", "Calls", "MultiDevice", "Local", "Offline", "P2p", "Recovery", "Accessibility"):
         require(item in capability, f"Phase-40 proof area missing: {item}")
-    require(capability.count("ProofState::PublicApiGap") == 2, "Phase-40 public API gap count drifted")
+    require(capability.count("ProofState::PublicApiGap") == 1, "Phase-40 public API gap count drifted")
     require("ProofState::PresentationModelOnly" in capability, "accessibility maturity gap hidden")
 
     accessibility = (CRATE / "src/accessibility.rs").read_text(encoding="utf-8")
@@ -72,6 +73,9 @@ def main() -> None:
     require("service LocalTransportService" in local_proto, "public LocalTransportService missing")
     require("LocalTransportFailureDisposition" in local_proto, "local acceptance classification missing")
     require("LocalTransportService authenticated direct transmit RPC" in capability, "Local not marked with public evidence")
+    mesh_proto = (ROOT / "proto/ucr/v1/mesh_api.proto").read_text(encoding="utf-8")
+    require("service MeshService" in mesh_proto, "public MeshService missing")
+    require("MeshService authenticated peer export/reconcile RPCs" in capability, "P2P not marked with public evidence")
     local_spec = (ROOT / "spec/local-transport-api.md").read_text(encoding="utf-8")
     require("existing Phase-16 local/direct transport owner" in local_spec, "Local public API owner reuse missing")
     require("NotAccepted" in local_spec and "AcceptanceUnknown" in local_spec, "Local failure ambiguity hidden")
@@ -79,6 +83,8 @@ def main() -> None:
     require("self.sdk.enqueue_store_forward(request).await" in client, "Reference Messenger missing offline enqueue")
     require("self.sdk.get_store_forward_status(request).await" in client, "Reference Messenger missing offline status read")
     require("self.sdk.transmit_local(request).await" in client, "Reference Messenger missing direct local transmit")
+    require("self.sdk.export_mesh_group_messages(request).await" in client, "Reference Messenger missing P2P export")
+    require("self.sdk.reconcile_mesh_group_message(request).await" in client, "Reference Messenger missing P2P reconcile")
 
     spec = (ROOT / "spec/reference-messenger.md").read_text(encoding="utf-8")
     require("Phase 40 is incomplete" in spec, "Phase 40 completion is overclaimed")
