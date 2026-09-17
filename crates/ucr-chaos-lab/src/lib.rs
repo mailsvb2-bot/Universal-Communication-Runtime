@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PeerId(pub u16);
@@ -23,7 +23,7 @@ pub enum InfrastructureComponent {
     Sfu,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CanonicalChaosScenario {
     NetworkLoss,
     NetworkSwitch,
@@ -103,8 +103,6 @@ impl LabPacket {
 }
 
 fn lab_integrity_tag(payload: &[u8]) -> u64 {
-    // Non-cryptographic by design: this is deterministic corruption evidence for the test lab,
-    // never a production integrity primitive.
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in payload {
         hash ^= u64::from(*byte);
@@ -137,7 +135,10 @@ pub enum ChaosError {
     PeerRevoked(PeerId),
     NetworkPartitioned(PeerId, PeerId),
     InfrastructureUnavailable(InfrastructureComponent),
-    StorageFull { capacity: usize, required: usize },
+    StorageFull {
+        capacity: usize,
+        required: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,7 +192,7 @@ impl ChaosTransport {
     ///
     /// # Panics
     ///
-    /// Panics if `peer_count` does not fit in `u16`. The canonical network simulation uses 100 peers.
+    /// Panics if `peer_count` does not fit in `u16`.
     #[must_use]
     pub fn with_peers(peer_count: usize) -> Self {
         let count = u16::try_from(peer_count).expect("peer count must fit in u16");
@@ -215,11 +216,11 @@ impl ChaosTransport {
         }
     }
 
-    /// Applies one deterministic fault to the lab.
+    /// Applies one deterministic fault.
     ///
     /// # Errors
     ///
-    /// Returns `UnknownPeer` when a peer-targeted fault references a peer outside the lab.
+    /// Returns `UnknownPeer` for a peer outside this lab.
     pub fn apply(&mut self, fault: Fault) -> Result<(), ChaosError> {
         match fault {
             Fault::DropNext => self.one_shot.drop_next = true,
@@ -252,23 +253,24 @@ impl ChaosTransport {
                 self.require_peer(right)?;
                 self.latency_ms.insert(peer_pair(left, right), latency_ms);
             }
-            Fault::SetClockDrift(peer, drift_ms) => self.peer_mut(peer)?.clock_drift_ms = drift_ms,
-            Fault::SetSlowConsumer(peer, slow) => self.peer_mut(peer)?.slow_consumer = slow,
+            Fault::SetClockDrift(peer, drift_ms) => {
+                self.peer_mut(peer)?.clock_drift_ms = drift_ms;
+            }
+            Fault::SetSlowConsumer(peer, slow) => {
+                self.peer_mut(peer)?.slow_consumer = slow;
+            }
             Fault::RevokePeer(peer) => self.peer_mut(peer)?.revoked = true,
         }
         Ok(())
     }
 
-    /// Sends one packet through the deterministic fault substrate.
+    /// Sends through the deterministic fault substrate.
     ///
-    /// An empty vector means the packet was intentionally lost or is held for a configured reorder.
-    /// Duplicate injection can return two wire deliveries with the same packet ID. User-visible
-    /// deduplication is intentionally delegated to `ChaosInbox` so the lab can prove that boundary.
+    /// An empty vector means intentional loss or a packet held for reorder.
     ///
     /// # Errors
     ///
-    /// Returns an explicit error for unknown/offline/revoked peers, partitions, or unavailable
-    /// route infrastructure. No such failure is reported as a successful delivery.
+    /// Returns explicit peer, partition, revocation, or infrastructure failures.
     pub fn send(&mut self, mut packet: LabPacket) -> Result<Vec<WireDelivery>, ChaosError> {
         self.require_sendable(&packet)?;
 
@@ -305,9 +307,9 @@ impl ChaosTransport {
 
     #[must_use]
     pub fn peer_display_clock_ms(&self, peer: PeerId, monotonic_ms: u64) -> Option<i128> {
-        self.peers.get(&peer).map(|state| {
-            i128::from(monotonic_ms) + i128::from(state.clock_drift_ms)
-        })
+        self.peers
+            .get(&peer)
+            .map(|state| i128::from(monotonic_ms) + i128::from(state.clock_drift_ms))
     }
 
     fn delivery(&self, packet: LabPacket) -> Result<WireDelivery, ChaosError> {
@@ -358,7 +360,11 @@ impl ChaosTransport {
             ));
         }
         if let Some(component) = route_component(packet.route)
-            && !self.infrastructure.get(&component).copied().unwrap_or(false)
+            && !self
+                .infrastructure
+                .get(&component)
+                .copied()
+                .unwrap_or(false)
         {
             return Err(ChaosError::InfrastructureUnavailable(component));
         }
@@ -426,7 +432,10 @@ impl ChaosInbox {
 
     #[must_use]
     pub fn packet_ids(&self) -> Vec<PacketId> {
-        self.accepted.iter().map(|packet| packet.packet_id).collect()
+        self.accepted
+            .iter()
+            .map(|packet| packet.packet_id)
+            .collect()
     }
 }
 
@@ -447,11 +456,11 @@ impl DurableQueueLab {
         }
     }
 
-    /// Persists a packet atomically with respect to the lab's storage limit.
+    /// Persists a packet atomically with respect to the lab storage limit.
     ///
     /// # Errors
     ///
-    /// Returns `StorageFull` before mutating existing state when the packet would exceed capacity.
+    /// Returns `StorageFull` before existing state is mutated.
     pub fn persist(&mut self, packet: LabPacket) -> Result<(), ChaosError> {
         if self.pending.contains_key(&packet.packet_id) {
             return Ok(());
@@ -492,7 +501,6 @@ pub struct DeterministicNetworkSimulation {
 }
 
 impl DeterministicNetworkSimulation {
-    /// Builds the canonical 100-peer simulation fixture.
     #[must_use]
     pub fn canonical_100_peers() -> Self {
         Self {
@@ -527,17 +535,22 @@ mod tests {
             .send(packet(1, 0, 1, RouteKind::Direct))
             .expect("send");
         assert_eq!(duplicated.len(), 2);
-        assert_eq!(inbox.accept(duplicated[0].packet.clone()), InboxOutcome::Accepted);
+        assert_eq!(
+            inbox.accept(duplicated[0].packet.clone()),
+            InboxOutcome::Accepted
+        );
         assert_eq!(
             inbox.accept(duplicated[1].packet.clone()),
             InboxOutcome::DuplicateSuppressed
         );
 
         transport.apply(Fault::ReorderNextPair).expect("fault");
-        assert!(transport
-            .send(packet(2, 0, 1, RouteKind::Direct))
-            .expect("first")
-            .is_empty());
+        assert!(
+            transport
+                .send(packet(2, 0, 1, RouteKind::Direct))
+                .expect("first")
+                .is_empty()
+        );
         let reordered = transport
             .send(packet(3, 0, 1, RouteKind::Direct))
             .expect("second");
@@ -558,20 +571,29 @@ mod tests {
             .send(packet(10, 0, 1, RouteKind::Direct))
             .expect("wire")
             .remove(0);
-        assert_eq!(inbox.accept(delivery.packet), InboxOutcome::CorruptRejected);
+        assert_eq!(
+            inbox.accept(delivery.packet),
+            InboxOutcome::CorruptRejected
+        );
         assert_eq!(inbox.accepted_count(), 0);
     }
 
     #[test]
     fn partition_merge_and_network_switch_are_recoverable() {
         let mut transport = ChaosTransport::with_peers(2);
-        transport.apply(Fault::Partition(PeerId(0), PeerId(1))).expect("partition");
+        transport
+            .apply(Fault::Partition(PeerId(0), PeerId(1)))
+            .expect("partition");
         assert_eq!(
             transport.send(packet(20, 0, 1, RouteKind::Direct)),
             Err(ChaosError::NetworkPartitioned(PeerId(0), PeerId(1)))
         );
-        transport.apply(Fault::SwitchNetwork(PeerId(1))).expect("switch");
-        transport.apply(Fault::Merge(PeerId(0), PeerId(1))).expect("merge");
+        transport
+            .apply(Fault::SwitchNetwork(PeerId(1)))
+            .expect("switch");
+        transport
+            .apply(Fault::Merge(PeerId(0), PeerId(1)))
+            .expect("merge");
         let delivery = transport
             .send(packet(20, 0, 1, RouteKind::Direct))
             .expect("recovered")
@@ -627,7 +649,9 @@ mod tests {
     #[test]
     fn revoked_or_disappeared_peer_fails_closed() {
         let mut transport = ChaosTransport::with_peers(3);
-        transport.apply(Fault::RevokePeer(PeerId(1))).expect("revoke");
+        transport
+            .apply(Fault::RevokePeer(PeerId(1)))
+            .expect("revoke");
         assert_eq!(
             transport.send(packet(50, 0, 1, RouteKind::Direct)),
             Err(ChaosError::PeerRevoked(PeerId(1)))
