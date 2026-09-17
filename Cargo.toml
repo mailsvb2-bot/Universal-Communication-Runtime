@@ -33,7 +33,7 @@ members = [
     "crates/ucr-personal-node",
     "crates/ucr-organization-mode",
 ]
-exclude = ["crates/ucr-sdk", "crates/ucr-reference-messenger", "crates/ucr-ai-actor"]
+exclude = ["crates/ucr-sdk", "crates/ucr-reference-messenger", "crates/ucr-ai-actor", "crates/ucr-chaos-lab"]
 
 [workspace.package]
 version = "0.0.1"
