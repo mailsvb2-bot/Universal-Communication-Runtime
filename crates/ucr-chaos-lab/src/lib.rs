@@ -555,9 +555,7 @@ impl DeterministicNetworkSimulation {
     pub fn canonical_100_peers() -> Self {
         let battery_limit_percent = 20;
         let mut transport = ChaosTransport::with_peers(100);
-        transport
-            .apply(Fault::SetMinimumSendBatteryPercent(battery_limit_percent))
-            .expect("canonical battery limit is valid");
+        transport.minimum_send_battery_percent = battery_limit_percent;
         Self {
             transport,
             peer_count: 100,
