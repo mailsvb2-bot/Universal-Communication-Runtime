@@ -73,10 +73,7 @@ fn phase44_has_committed_lock_state_for_every_current_rust_surface() {
         let full = workspace().join(path);
         assert!(full.is_file(), "missing committed lockfile: {path}");
         assert!(
-            fs::metadata(&full)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0)
-                > 0,
+            fs::metadata(&full).map_or(0, |metadata| metadata.len()) > 0,
             "empty committed lockfile: {path}"
         );
     }
@@ -89,7 +86,7 @@ fn every_external_action_is_pinned_to_a_full_commit_sha() {
         let path = entry.expect("workflow entry").path();
         if !matches!(
             path.extension().and_then(|value| value.to_str()),
-            Some("yml") | Some("yaml")
+            Some("yml" | "yaml")
         ) {
             continue;
         }
