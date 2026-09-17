@@ -27,7 +27,7 @@ Presentation state uses localization keys rather than baked event sentences. The
 
 ## Current public proof matrix
 
-The code-level states are `PublicApiAvailable`, `PublicApiGap` and `PresentationModelOnly`.
+The code-level states are `PublicApiAvailable`, `PublicApiGap` and `ConcretePlatformEvidence`.
 
 | Canon proof area | Phase-40 state | Public evidence / blocker |
 | --- | --- | --- |
@@ -39,7 +39,7 @@ The code-level states are `PublicApiAvailable`, `PublicApiGap` and `Presentation
 | Offline | Public API available | StoreForwardService enqueue + payload-free status RPCs |
 | P2P | Public API available | MeshService authenticated peer export/reconcile RPCs |
 | Recovery | Public API available | RecoveryService plan + proof-gated Device recovery RPCs |
-| Accessibility | Presentation model only | concrete platform UI evidence still required |
+| Accessibility | Concrete platform evidence | browser semantic UI + executable accessibility validator |
 
 A gap must remain explicit until the corresponding functionality is reachable through a versioned public API. Phase 40 must not close a gap by linking the Reference Messenger directly to an internal owner.
 
@@ -68,12 +68,18 @@ The public `StoreForwardService` now exposes durable enqueue plus payload-free s
 
 The public `RecoveryService` exposes Recovery Plan install/rotate/revoke/read plus proof-gated recovered-Device staging and independent re-verification activation. Service Principal auth/quota/audit admits the application channel, but ordinary permissions never substitute for the active Recovery Plan, `RecoveryAuthorityVerifier`, or `DeviceReverificationVerifier`. A recovered Device is first staged as `REVERIFICATION_REQUIRED`; only a separate verifier decision can promote that exact Device/Identity to `ACTIVE`.
 
-## Accessibility and localization maturity
+## Concrete browser accessibility evidence
 
-The checked-in Rust presentation contract records the Canon requirements, but it is not itself proof that a native/web platform has passed screen-reader, keyboard, scaling, caption/subtitle/transcription and high-contrast tests. That proof remains required before Phase 40 can be called complete.
+The checked-in Rust presentation contract is paired with a concrete browser presentation adapter under `crates/ucr-reference-messenger/web/`. The adapter uses semantic landmarks and labels for screen-reader exposure, native keyboard controls and a skip link, scalable `rem`/percentage typography with working 100/125/150% controls, visible focus, explicit high-contrast plus `prefers-contrast`/forced-colors handling, caption and subtitle WebVTT tracks, a live transcript surface, direction-aware content and a working LTR/RTL control. State changes are announced through an `aria-live` status surface. `web/validate_accessibility.py` is executable evidence that these requirements remain present and rejects positive tabindex or browser-side network/native capability leakage.
 
-## Nonclaims and next closure work
+The browser artifact is presentation-only. It does not claim native-node, LAN transport, background execution, media capture, filesystem or push capabilities, and it does not own communication state. The Reference Messenger still reaches UCR only through the public SDK/API.
 
-Phase 40 public consumer API gaps are closed. Completion still requires concrete platform accessibility evidence; that evidence must use the same public-client boundary and must not add a second communication brain.
+## Developer-first Dev Mode
 
-Phase 41 remains the owner of the full cross-implementation Conformance Suite; Phase 40 may add focused evidence only for its Reference Messenger boundary.
+Phase 40 also includes the development-only `ucr dev` host. It seeds canonical local/mock-peer Identity+Device state, memory test storage, authenticated Service Principal admission, a test transport, debug events and diagnostics, then exposes public UCR services on loopback. `ucr dev --check` executes authenticated Identity, Conversation, Message, Group and Call operations and the sandbox fault matrix. Auth, permissions and quota admission remain enabled; non-loopback bind is rejected. Full conformance remains Phase 41.
+
+## Phase-40 closure
+
+All nine Canon proof areas now have explicit Reference Messenger evidence: eight communication areas through public UCR services and accessibility through the concrete browser presentation adapter. The developer-first requirement is independently exercised by `ucr dev --check` with auth-on loopback public API and the required sandbox/test-transport matrix. Phase 40 does not claim Phase-41 cross-implementation conformance or production platform certification; those remain later work.
+
+Phase 41 remains the owner of the full cross-implementation Conformance Suite.

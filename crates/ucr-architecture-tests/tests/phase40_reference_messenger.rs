@@ -53,7 +53,7 @@ fn phase40_calls_are_reachable_through_the_same_public_sdk_boundary() {
 }
 
 #[test]
-fn phase40_keeps_accessibility_blocker_visible_without_hidden_apis() {
+fn phase40_closes_all_nine_areas_without_hidden_apis() {
     let capability = read("crates/ucr-reference-messenger/src/capability.rs");
     let spec = read("spec/reference-messenger.md");
     let adr = read("docs/adr/0078-phase40-reference-messenger-is-a-public-api-consumer.md");
@@ -80,9 +80,11 @@ fn phase40_keeps_accessibility_blocker_visible_without_hidden_apis() {
             .count(),
         0
     );
-    assert!(capability.contains("PresentationModelOnly"));
-    assert!(spec.contains("Phase 40 public consumer API gaps are closed"));
-    assert!(spec.contains("concrete platform accessibility evidence"));
+    assert!(capability.contains("ConcretePlatformEvidence"));
+    assert!(
+        spec.contains("All nine Canon proof areas now have explicit Reference Messenger evidence")
+    );
+    assert!(spec.contains("Concrete browser accessibility evidence"));
     assert!(spec.contains(
         "must not close a gap by linking the Reference Messenger directly to an internal owner"
     ));
@@ -122,6 +124,71 @@ fn phase40_presentation_contract_is_accessibility_and_localization_ready() {
         );
     }
     assert!(presentation.contains("AwaitingDeliveryOpportunity"));
+}
+
+#[test]
+fn phase40_concrete_browser_accessibility_surface_covers_canon_requirements() {
+    let html = read("crates/ucr-reference-messenger/web/index.html");
+    let css = read("crates/ucr-reference-messenger/web/styles.css");
+    let js = read("crates/ucr-reference-messenger/web/app.js");
+    let validator = read("crates/ucr-reference-messenger/web/validate_accessibility.py");
+    let readme = read("crates/ucr-reference-messenger/web/README.md");
+
+    for required in [
+        "data-ucr-boundary=\"presentation-only\"",
+        "role=\"log\"",
+        "aria-live=\"polite\"",
+        "kind=\"captions\"",
+        "kind=\"subtitles\"",
+        "id=\"transcript\"",
+        "id=\"direction-toggle\"",
+        "id=\"text-scale\"",
+        "id=\"contrast-toggle\"",
+        "dir=\"auto\"",
+    ] {
+        assert!(
+            html.contains(required),
+            "missing browser accessibility evidence: {required}"
+        );
+    }
+    for required in [
+        ":focus-visible",
+        "prefers-contrast: more",
+        "forced-colors: active",
+        "[dir=\"rtl\"]",
+        "1rem",
+    ] {
+        assert!(
+            css.contains(required),
+            "missing accessibility CSS evidence: {required}"
+        );
+    }
+    for required in [
+        "root.dir = nextDirection",
+        "root.dataset.textScale = textScale.value",
+        "root.dataset.contrast = \"high\"",
+        "setAttribute(\"aria-pressed\"",
+    ] {
+        assert!(
+            js.contains(required),
+            "missing interactive accessibility wiring: {required}"
+        );
+    }
+    for forbidden in [
+        "fetch(",
+        "WebSocket",
+        "RTCPeerConnection",
+        "navigator.mediaDevices",
+    ] {
+        assert!(
+            !js.contains(forbidden),
+            "browser presentation leaked capability: {forbidden}"
+        );
+    }
+    assert!(validator.contains("positive tabindex is forbidden"));
+    assert!(validator.contains("ACCESSIBILITY_WEB_EVIDENCE_OK"));
+    assert!(readme.contains("presentation-only"));
+    assert!(readme.contains("public SDK/API"));
 }
 
 #[test]
@@ -427,4 +494,71 @@ fn phase40_recovery_does_not_move_recovery_brain_into_sdk_or_reference_client() 
             "Reference Messenger acquired recovery-brain symbol: {forbidden}"
         );
     }
+}
+
+#[test]
+fn phase40_dev_mode_keeps_auth_on_and_exercises_public_api() {
+    let workspace = read("Cargo.toml");
+    let dev = read("crates/ucr-dev/src/lib.rs");
+    let cli = read("crates/ucr-dev/src/main.rs");
+    let spec = read("spec/dev-mode.md");
+    let adr = read("docs/adr/0086-phase40-dev-mode-composes-canonical-owners-behind-public-api.md");
+
+    assert!(workspace.contains("\"crates/ucr-dev\""));
+    for required in [
+        "MemoryLocalStore::default()",
+        "issue_service_credential",
+        "RUNTIME_PERMISSION_IDS",
+        "SystemServiceQuotaClock",
+        "integration_service_server",
+        "group_service_server",
+        "call_service_server",
+        "verify_integration_round_trip",
+        "verify_group_round_trip",
+        "verify_call_round_trip",
+        "127.0.0.1:50051",
+        "is_loopback()",
+    ] {
+        assert!(
+            dev.contains(required),
+            "missing Dev Mode evidence: {required}"
+        );
+    }
+    for scenario in [
+        "message",
+        "delivery",
+        "group",
+        "call",
+        "retry",
+        "failure",
+        "offline",
+        "reconnect",
+        "bridge-degradation",
+    ] {
+        assert!(
+            dev.contains(scenario),
+            "missing sandbox scenario: {scenario}"
+        );
+    }
+    for fault in [
+        "Delay",
+        "Drop",
+        "Duplicate",
+        "Reorder",
+        "Disconnect",
+        "Corrupt",
+        "Throttle",
+    ] {
+        assert!(dev.contains(fault), "missing TestTransport fault: {fault}");
+    }
+    assert!(dev.contains("pub fn reconnect"));
+    assert!(cli.contains("Some(\"dev\")"));
+    assert!(cli.contains("\"--check\""));
+    assert!(cli.contains("\"--simulate\""));
+    assert!(cli.contains("refuses non-loopback bind addresses"));
+    assert!(spec.contains("Authentication, authorization and quota admission remain enabled"));
+    assert!(spec.contains("Full cross-implementation behavior and conformance remain Phase 41"));
+    assert!(
+        adr.contains("no second Message, Group, Call, Delivery, Identity, routing or retry owner")
+    );
 }

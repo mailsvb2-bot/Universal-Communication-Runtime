@@ -411,7 +411,7 @@ mod tests {
     };
 
     #[test]
-    fn proof_matrix_keeps_remaining_accessibility_gap_explicit() {
+    fn proof_matrix_closes_all_nine_phase40_areas_with_concrete_accessibility_evidence() {
         let matrix = phase40_proof_matrix();
         assert_eq!(matrix.len(), 9);
         assert!(
@@ -436,7 +436,7 @@ mod tests {
             matrix
                 .iter()
                 .any(|item| item.capability == ProofCapability::Accessibility
-                    && item.state == ProofState::PresentationModelOnly)
+                    && item.state == ProofState::ConcretePlatformEvidence)
         );
     }
 

@@ -1,0 +1,19 @@
+:root { font-size: 100%; color-scheme: light dark; }
+html[data-text-scale="125"] { font-size: 125%; }
+html[data-text-scale="150"] { font-size: 150%; }
+* { box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; font-size: 1rem; line-height: 1.5; max-inline-size: 60rem; margin-inline: auto; padding: 1rem; }
+a, button, select, textarea { font: inherit; }
+nav, aside { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; }
+main, section { display: grid; gap: 1rem; }
+.message-log { max-block-size: 18rem; overflow: auto; padding-inline-start: 2rem; }
+video { inline-size: min(100%, 40rem); block-size: auto; }
+.skip-link { position: absolute; inset-inline-start: 1rem; inset-block-start: -10rem; }
+.skip-link:focus { inset-block-start: 1rem; }
+:focus-visible { outline: 0.2rem solid currentColor; outline-offset: 0.2rem; }
+.visually-hidden { position: absolute; inline-size: 0.1rem; block-size: 0.1rem; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+html[data-contrast="high"] body { background: Canvas; color: CanvasText; }
+html[data-contrast="high"] a, html[data-contrast="high"] button, html[data-contrast="high"] select, html[data-contrast="high"] textarea { border: 0.15rem solid currentColor; }
+@media (prefers-contrast: more) { body { font-weight: 500; } a, button, select, textarea { border: 0.15rem solid currentColor; } }
+@media (forced-colors: active) { :focus-visible { outline: 0.2rem solid Highlight; } button, select, textarea { forced-color-adjust: auto; } }
+[dir="rtl"] nav, [dir="rtl"] aside { direction: rtl; }

@@ -19,8 +19,8 @@ pub enum ProofState {
     PublicApiAvailable,
     /// Canonical functionality exists below the public boundary but no consumer service exists yet.
     PublicApiGap,
-    /// The Reference Messenger has a presentation contract, but platform UI evidence is not complete.
-    PresentationModelOnly,
+    /// A concrete platform presentation surface exists with executable accessibility evidence.
+    ConcretePlatformEvidence,
 }
 
 /// One explicit Phase-40 evidence item. Gaps are first-class and must not be hidden.
@@ -77,8 +77,8 @@ pub const fn phase40_proof_matrix() -> [ProofItem; 9] {
         },
         ProofItem {
             capability: ProofCapability::Accessibility,
-            state: ProofState::PresentationModelOnly,
-            evidence: "platform client evidence still required",
+            state: ProofState::ConcretePlatformEvidence,
+            evidence: "browser semantic UI + executable accessibility validator",
         },
     ]
 }
