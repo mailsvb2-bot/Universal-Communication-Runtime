@@ -1,0 +1,38 @@
+name: Phase 45 Lock Bootstrap
+
+on:
+  push:
+    branches: [phase45-production-hardening]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: phase45-lock-bootstrap-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  lock:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: phase45-production-hardening
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Generate exact workspace lock
+        run: cargo generate-lockfile
+      - name: Commit lock update when required
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock already exact"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "build: lock Phase 45 production runtime dependencies"
+          git push origin HEAD:phase45-production-hardening
