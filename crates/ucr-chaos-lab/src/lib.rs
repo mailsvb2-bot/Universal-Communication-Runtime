@@ -135,10 +135,7 @@ pub enum ChaosError {
     PeerRevoked(PeerId),
     NetworkPartitioned(PeerId, PeerId),
     InfrastructureUnavailable(InfrastructureComponent),
-    StorageFull {
-        capacity: usize,
-        required: usize,
-    },
+    StorageFull { capacity: usize, required: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -571,10 +568,7 @@ mod tests {
             .send(packet(10, 0, 1, RouteKind::Direct))
             .expect("wire")
             .remove(0);
-        assert_eq!(
-            inbox.accept(delivery.packet),
-            InboxOutcome::CorruptRejected
-        );
+        assert_eq!(inbox.accept(delivery.packet), InboxOutcome::CorruptRejected);
         assert_eq!(inbox.accepted_count(), 0);
     }
 
