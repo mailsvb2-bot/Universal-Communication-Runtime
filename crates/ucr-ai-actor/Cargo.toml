@@ -1,14 +1,20 @@
 [package]
 name = "ucr-ai-actor"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+license = "UNLICENSED"
+repository = "https://github.com/mailsvb2-bot/Universal-Communication-Runtime"
+publish = false
 
 [dependencies]
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"
