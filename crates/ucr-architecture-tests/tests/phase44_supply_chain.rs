@@ -32,7 +32,7 @@ fn phase44_covers_canonical_supply_chain_controls() {
     }
 
     for marker in [
-        "dependency audit",
+        "Dependency audit",
         "committed lockfiles",
         "secret scan",
         "SPDX 2.3",
