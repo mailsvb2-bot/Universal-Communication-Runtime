@@ -53,9 +53,7 @@ fn phase44_covers_canonical_supply_chain_controls() {
     assert!(workflow.contains("cargo audit --file Cargo.lock"));
     assert!(workflow.contains("tools/supply_chain.py scan-secrets"));
     assert!(workflow.contains("tools/supply_chain.py scan-actions"));
-    assert!(workflow.contains(
-        "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"
-    ));
+    assert!(workflow.contains("actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"));
     assert!(workflow.contains("gh attestation verify"));
     assert!(workflow.contains("--source-digest \"$GITHUB_SHA\""));
     assert!(!workflow.contains("continue-on-error"));
