@@ -41,7 +41,8 @@ fn phase41_rust_sdk_keeps_the_eight_canonical_semantics_observable() {
     let root = repository_root();
     let manifest = fs::read_to_string(root.join("sdk/contract.json")).expect("SDK manifest");
     let sdk = fs::read_to_string(root.join("crates/ucr-sdk/src/lib.rs")).expect("Rust SDK");
-    let runtime = fs::read_to_string(root.join("proto/ucr/v1/runtime.proto")).expect("runtime proto");
+    let runtime =
+        fs::read_to_string(root.join("proto/ucr/v1/runtime.proto")).expect("runtime proto");
     let errors = fs::read_to_string(root.join("proto/ucr/v1/errors.proto")).expect("errors proto");
 
     for marker in [
