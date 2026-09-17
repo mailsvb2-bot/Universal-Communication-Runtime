@@ -50,8 +50,9 @@ jobs:
       - name: Production-runtime operator smoke and telemetry privacy
         run: |
           set -euo pipefail
-          cargo build --locked --profile staging -p ucr-runtime
-          runtime=target/staging/ucr-runtime
+          mkdir -p dist/phase45
+          cargo build --locked --profile production -p ucr-runtime
+          runtime=target/production/ucr-runtime
           database="$RUNNER_TEMP/ucr-phase45-runtime.sqlite"
           init_out="$RUNNER_TEMP/ucr-phase45-init.txt"
           check_out="$RUNNER_TEMP/ucr-phase45-check.txt"
@@ -78,6 +79,19 @@ jobs:
             echo 'production local-daemon accepted a remote plaintext bind' >&2
             exit 1
           fi
+
+          sha256sum "$runtime" > dist/phase45/ucr-runtime.sha256
+
+      - name: Fixed production-profile performance gate
+        env:
+          UCR_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --profile production -p ucr-conference \
+            --test reference thousand_person_sfu_conference_fits_bounded_call_ceiling --no-run
+          python3 tools/performance_gate.py \
+            --output dist/phase45/performance-evidence.json \
+            --source-commit "$UCR_SOURCE_COMMIT"
 
       - name: Candidate critical Chaos gate
         run: cargo test --manifest-path crates/ucr-chaos-lab/Cargo.toml --locked
@@ -116,11 +130,10 @@ jobs:
       - name: Build release-like workspace candidate
         run: cargo build --locked --workspace --profile staging
 
-      - name: Emit exact candidate evidence
+      - name: Emit exact candidate and production-attempt evidence
         env:
           UCR_SOURCE_COMMIT: ${{ github.sha }}
         run: |
-          mkdir -p dist/phase45
           python3 - <<'PY'
           import json
           import os
@@ -132,28 +145,39 @@ jobs:
           def pending() -> dict[str, str]:
               return {"status": "not-run", "evidence": ""}
 
-          document = {
+          gates = {
+              "security": passed("ucr-security-tests on exact commit; repository security-audit remains an independent CI check"),
+              "data_safety": passed("ucr-storage-sqlite durable regression suite plus canonical Chaos Lab on exact commit"),
+              "compatibility": passed("Phase-41 common matrix and all five SDK host probes on exact commit"),
+              "conformance": passed("Python/TypeScript/Kotlin/Swift/Rust Phase-41 conformance probes on exact commit"),
+              "critical_chaos": passed("ucr-chaos-lab complete locked test suite on exact commit"),
+              "public_contract": passed("canonical protobuf descriptor compilation plus SDK conformance on exact commit"),
+              "performance": passed("fixed 1000-participant production-profile gate; see performance-evidence.json"),
+              "metrics": passed("production-profile ucr-runtime emitted bounded metadata-only Prometheus metrics"),
+              "diagnostics": passed("production-profile ucr-runtime opened exact SQLite schema and emitted health diagnostics"),
+              "telemetry_privacy": passed("operator smoke rejected sensitive-data markers in runtime diagnostics/metrics outputs"),
+              "production_runtime": passed("dedicated SQLite local-daemon runtime unit + production-profile init/check/metrics + remote-bind rejection smoke"),
+              "platform_signing": pending(),
+          }
+          candidate = {
               "schema": "ucr.production-readiness.v1",
               "source_commit": os.environ["UCR_SOURCE_COMMIT"],
               "build_profile": "staging",
               "maturity_claim": "candidate",
-              "gates": {
-                  "security": passed("ucr-security-tests on exact commit; repository security-audit remains an independent CI check"),
-                  "data_safety": passed("ucr-storage-sqlite durable regression suite plus canonical Chaos Lab on exact commit"),
-                  "compatibility": passed("Phase-41 common matrix and all five SDK host probes on exact commit"),
-                  "conformance": passed("Python/TypeScript/Kotlin/Swift/Rust Phase-41 conformance probes on exact commit"),
-                  "critical_chaos": passed("ucr-chaos-lab complete locked test suite on exact commit"),
-                  "public_contract": passed("canonical protobuf descriptor compilation plus SDK conformance on exact commit"),
-                  "performance": pending(),
-                  "metrics": passed("ucr-runtime staging binary emitted bounded metadata-only Prometheus metrics"),
-                  "diagnostics": passed("ucr-runtime staging binary opened exact SQLite schema and emitted health diagnostics"),
-                  "telemetry_privacy": passed("operator smoke rejected sensitive-data markers in runtime diagnostics/metrics outputs"),
-                  "production_runtime": passed("dedicated SQLite local-daemon runtime unit + init/check/metrics + remote-bind rejection smoke"),
-                  "platform_signing": pending(),
-              },
+              "gates": gates,
           }
-          Path("dist/phase45/candidate-evidence.json").write_text(
-              json.dumps(document, indent=2, sort_keys=True) + "\n",
+          production_attempt = json.loads(json.dumps(candidate))
+          production_attempt["build_profile"] = "production"
+          production_attempt["maturity_claim"] = "production"
+
+          out = Path("dist/phase45")
+          out.mkdir(parents=True, exist_ok=True)
+          (out / "candidate-evidence.json").write_text(
+              json.dumps(candidate, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          (out / "production-attempt-evidence.json").write_text(
+              json.dumps(production_attempt, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
           PY
@@ -161,9 +185,9 @@ jobs:
       - name: Fail closed on candidate evidence
         run: python3 tools/production_readiness.py validate --mode candidate --evidence dist/phase45/candidate-evidence.json
 
-      - name: Prove candidate cannot be promoted as Production
+      - name: Prove missing platform signing blocks Production
         run: |
-          if python3 tools/production_readiness.py validate --mode production --evidence dist/phase45/candidate-evidence.json; then
-            echo "candidate evidence was incorrectly accepted as Production" >&2
+          if python3 tools/production_readiness.py validate --mode production --evidence dist/phase45/production-attempt-evidence.json; then
+            echo "unsigned production attempt was incorrectly accepted" >&2
             exit 1
           fi
