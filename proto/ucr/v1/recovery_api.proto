@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/identity.proto";
+import "ucr/v1/recovery.proto";
+import "ucr/v1/runtime.proto";
+
+// Recovery Plan administration remains ordinary Service Principal permission-gated state.
+message RecoveryInstallPlanRequest {
+  RecoveryPlan plan = 1;
+}
+
+message RecoveryRotatePlanRequest {
+  OpaqueId expected_plan_id = 1;
+  RecoveryPlan replacement = 2;
+}
+
+message RecoveryRevokePlanRequest {
+  TenantScope scope = 1;
+  OpaqueId identity_id = 2;
+  OpaqueId expected_plan_id = 3;
+}
+
+message RecoveryGetActivePlanRequest {
+  TenantScope scope = 1;
+  OpaqueId identity_id = 2;
+}
+
+message RecoveryPlanMutationResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RecoveryGetActivePlanResponse {
+  oneof result {
+    RecoveryPlan plan = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Service Principal permission gates the public RPC channel only; it is not recovery authority.
+// The canonical RecoveryRequest is still validated against the active plan and passed to the
+// deployment-owned RecoveryAuthorityVerifier before Core can mint a staging proof.
+message RecoveryStageDeviceRequest {
+  RecoveryRequest recovery = 1;
+}
+
+message RecoveryActivateDeviceRequest {
+  TenantScope scope = 1;
+  OpaqueId device_id = 2;
+  OpaqueId identity_id = 3;
+}
+
+message RecoveryDeviceResponse {
+  oneof result {
+    DeviceDescriptor device = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Thin Phase-40 public consumer surface over the existing recovery-plan owner and the
+// proof-gated Recovery/Device re-verification workflow. Concrete authority proof transport,
+// credential re-issuance and protected-content restoration remain provider/deployment concerns.
+service RecoveryService {
+  rpc InstallPlan(RecoveryInstallPlanRequest) returns (RecoveryPlanMutationResponse);
+  rpc RotatePlan(RecoveryRotatePlanRequest) returns (RecoveryPlanMutationResponse);
+  rpc RevokePlan(RecoveryRevokePlanRequest) returns (RecoveryPlanMutationResponse);
+  rpc GetActivePlan(RecoveryGetActivePlanRequest) returns (RecoveryGetActivePlanResponse);
+  rpc StageRecoveredDevice(RecoveryStageDeviceRequest) returns (RecoveryDeviceResponse);
+  rpc ActivateRecoveredDevice(RecoveryActivateDeviceRequest) returns (RecoveryDeviceResponse);
+}

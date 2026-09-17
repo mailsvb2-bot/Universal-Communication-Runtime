@@ -1,12 +1,28 @@
 use core::fmt;
 
 use ucr_model::{
-    DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId, RecoveryAuthority, RecoveryPlan,
-    RecoveryPlanId, RecoveryRequest, TenantScope,
+    AuthorizationRequest, DeviceDescriptor, DeviceId, DeviceLifecycleState, IdentityId,
+    RecoveryAuthority, RecoveryPlan, RecoveryPlanId, RecoveryRequest, ServiceAuditOperationRef,
+    ServiceCredentialId, TenantScope,
 };
-use ucr_protocol::{CanonicalError, CanonicalErrorCode, RecoveryError, validate_recovery_request};
+use ucr_protocol::{
+    CanonicalError, CanonicalErrorCode, RECOVERY_ACTIVATE_PERMISSION,
+    RECOVERY_PLAN_INSTALL_PERMISSION, RECOVERY_PLAN_READ_PERMISSION,
+    RECOVERY_PLAN_REVOKE_PERMISSION, RECOVERY_PLAN_ROTATE_PERMISSION, RECOVERY_STAGE_PERMISSION,
+    RecoveryError, SERVICE_AUDIT_RECOVERY_ACTIVATE_OPERATION_KIND,
+    SERVICE_AUDIT_RECOVERY_PLAN_INSTALL_OPERATION_KIND,
+    SERVICE_AUDIT_RECOVERY_PLAN_READ_OPERATION_KIND,
+    SERVICE_AUDIT_RECOVERY_PLAN_REVOKE_OPERATION_KIND,
+    SERVICE_AUDIT_RECOVERY_PLAN_ROTATE_OPERATION_KIND, SERVICE_AUDIT_RECOVERY_STAGE_OPERATION_KIND,
+    validate_recovery_request,
+};
 
-use crate::{DeviceLifecycleStore, DurableStoreError, RecoveryPlanStore, StorageProvider};
+use crate::{
+    AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError,
+    DeviceLifecycleStore, DurableStoreError, RecoveryPlanStore, ServiceAuditStore,
+    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
+    ServiceQuotaClock, ServiceQuotaStore, StorageProvider,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryAuthorityVerificationError {
@@ -283,6 +299,323 @@ where
     })
 }
 
+/// Service-Principal ingress for Recovery Plan administration only.
+///
+/// Recovery execution uses a separate Service Principal channel-admission boundary, but ordinary
+/// permissions never establish recovery authority. The active Recovery Plan plus independent
+/// recovery/re-verification verifiers remain the only security authority for Device recovery.
+pub struct RecoveryPlanIngress<'a, C, A, S> {
+    clock: &'a C,
+    authorization: &'a A,
+    store: &'a S,
+}
+
+impl<C, A, S> fmt::Debug for RecoveryPlanIngress<'_, C, A, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RecoveryPlanIngress")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, C, A, S> RecoveryPlanIngress<'a, C, A, S> {
+    #[must_use]
+    pub const fn new(clock: &'a C, authorization: &'a A, store: &'a S) -> Self {
+        Self {
+            clock,
+            authorization,
+            store,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RecoveryPlanAdmission<'a> {
+    permission: &'a str,
+    resource_scope: &'a TenantScope,
+    operation_kind: &'a str,
+    operation_id: &'a ucr_model::OpaqueId,
+}
+
+impl<C, A, S> RecoveryPlanIngress<'_, C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: RecoveryPlanStore + ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore,
+{
+    /// Installs one canonical Recovery Plan after ordinary Service Principal administration
+    /// admission. This permission never substitutes for recovery authority proof.
+    ///
+    /// # Errors
+    /// Fails closed for authentication, quota, permission, malformed plan, conflict, or storage failure.
+    pub fn install_plan(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        plan: &RecoveryPlan,
+    ) -> Result<(), CanonicalError> {
+        let request = self.admit(
+            presented_scope,
+            credential_id,
+            secret,
+            RecoveryPlanAdmission {
+                permission: RECOVERY_PLAN_INSTALL_PERMISSION,
+                resource_scope: &plan.scope,
+                operation_kind: SERVICE_AUDIT_RECOVERY_PLAN_INSTALL_OPERATION_KIND,
+                operation_id: plan.plan_id.as_opaque(),
+            },
+        )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .install_recovery_plan(&subject, plan)
+            .map_err(map_authorized_plan_error)
+    }
+
+    /// Rotates the active Recovery Plan using the canonical expected-current compare-and-swap.
+    ///
+    /// # Errors
+    /// Fails closed for authentication, quota, permission, stale expected plan, malformed replacement, or storage failure.
+    pub fn rotate_plan(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        expected_current: &RecoveryPlanId,
+        replacement: &RecoveryPlan,
+    ) -> Result<(), CanonicalError> {
+        let request = self.admit(
+            presented_scope,
+            credential_id,
+            secret,
+            RecoveryPlanAdmission {
+                permission: RECOVERY_PLAN_ROTATE_PERMISSION,
+                resource_scope: &replacement.scope,
+                operation_kind: SERVICE_AUDIT_RECOVERY_PLAN_ROTATE_OPERATION_KIND,
+                operation_id: replacement.plan_id.as_opaque(),
+            },
+        )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .rotate_recovery_plan(&subject, expected_current, replacement)
+            .map_err(map_authorized_plan_error)
+    }
+
+    /// Revokes the active Recovery Plan using the canonical expected-current identifier.
+    ///
+    /// # Errors
+    /// Fails closed for authentication, quota, permission, stale expected plan, scope mismatch, or storage failure.
+    pub fn revoke_plan(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        expected_current: &RecoveryPlanId,
+    ) -> Result<(), CanonicalError> {
+        let request = self.admit(
+            presented_scope,
+            credential_id,
+            secret,
+            RecoveryPlanAdmission {
+                permission: RECOVERY_PLAN_REVOKE_PERMISSION,
+                resource_scope: scope,
+                operation_kind: SERVICE_AUDIT_RECOVERY_PLAN_REVOKE_OPERATION_KIND,
+                operation_id: expected_current.as_opaque(),
+            },
+        )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .revoke_recovery_plan(&subject, scope, identity_id, expected_current)
+            .map_err(map_authorized_plan_error)
+    }
+
+    /// Reads the active Recovery Plan only after ordinary plan-read permission admission.
+    ///
+    /// # Errors
+    /// Fails closed for authentication, quota, permission, absence, corruption, or storage failure.
+    pub fn active_plan(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+    ) -> Result<RecoveryPlan, CanonicalError> {
+        let request = self.admit(
+            presented_scope,
+            credential_id,
+            secret,
+            RecoveryPlanAdmission {
+                permission: RECOVERY_PLAN_READ_PERMISSION,
+                resource_scope: scope,
+                operation_kind: SERVICE_AUDIT_RECOVERY_PLAN_READ_OPERATION_KIND,
+                operation_id: identity_id.as_opaque(),
+            },
+        )?;
+        let subject = request.subject().clone();
+        AuthorizedDurableRuntime::new(&request, self.store)
+            .active_recovery_plan(&subject, scope, identity_id)
+            .map_err(map_authorized_plan_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
+    }
+
+    fn admit<'a>(
+        &'a self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        admission: RecoveryPlanAdmission<'_>,
+    ) -> Result<crate::ServicePrincipalRequestAuthorization<'a, C, A, S>, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: admission.operation_kind.to_owned(),
+            operation_id: admission.operation_id.clone(),
+        };
+        ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+            .authenticate_request_for_operation(
+                presented_scope,
+                credential_id,
+                secret,
+                admission.permission,
+                admission.resource_scope,
+                &operation,
+            )
+    }
+}
+
+/// Public-channel admission for recovery execution without turning ordinary permissions into
+/// recovery authority. Service Principal permissions only allow an application to invoke these
+/// sensitive RPCs; the canonical Recovery Plan and independent verifiers make the security
+/// decision that stages or activates a Device.
+pub struct RecoveryExecutionIngress<'a, C, A, S, RV, DV> {
+    clock: &'a C,
+    authorization: &'a A,
+    store: &'a S,
+    recovery_verifier: &'a RV,
+    reverification_verifier: &'a DV,
+}
+
+impl<C, A, S, RV, DV> fmt::Debug for RecoveryExecutionIngress<'_, C, A, S, RV, DV> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RecoveryExecutionIngress")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, C, A, S, RV, DV> RecoveryExecutionIngress<'a, C, A, S, RV, DV> {
+    #[must_use]
+    pub const fn new(
+        clock: &'a C,
+        authorization: &'a A,
+        store: &'a S,
+        recovery_verifier: &'a RV,
+        reverification_verifier: &'a DV,
+    ) -> Self {
+        Self {
+            clock,
+            authorization,
+            store,
+            recovery_verifier,
+            reverification_verifier,
+        }
+    }
+}
+
+impl<C, A, S, RV, DV> RecoveryExecutionIngress<'_, C, A, S, RV, DV>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: RecoveryPlanStore
+        + ServiceCredentialStore
+        + ServiceQuotaStore
+        + ServiceAuditStore
+        + RecoveryDeviceStagingStore
+        + DeviceLifecycleStore
+        + ReverifiedDeviceActivationStore,
+    RV: RecoveryAuthorityVerifier,
+    DV: DeviceReverificationVerifier,
+{
+    /// Admits the public application channel, then independently verifies Recovery authority and
+    /// atomically stages the recovered Device as `REVERIFICATION_REQUIRED`.
+    ///
+    /// # Errors
+    /// Fails closed for authentication, quota, channel permission, recovery authority,
+    /// active-plan mismatch, semantic conflict, or durable storage failure.
+    pub fn stage_recovered_device(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        recovery: &RecoveryRequest,
+    ) -> Result<DeviceDescriptor, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_RECOVERY_STAGE_OPERATION_KIND.to_owned(),
+            operation_id: recovery.target_device_id.as_opaque().clone(),
+        };
+        let admission =
+            ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+                .authenticate_request_for_operation(
+                    presented_scope,
+                    credential_id,
+                    secret,
+                    RECOVERY_STAGE_PERMISSION,
+                    &recovery.scope,
+                    &operation,
+                )?;
+        admission.authorize(&AuthorizationRequest {
+            subject: admission.subject().clone(),
+            permission: RECOVERY_STAGE_PERMISSION.to_owned(),
+            resource_scope: recovery.scope.clone(),
+        })?;
+        authorize_and_stage_recovered_device(self.recovery_verifier, self.store, recovery)
+    }
+
+    /// Admits the public application channel, then independently re-verifies and atomically
+    /// activates one exact staged recovered Device.
+    ///
+    /// # Errors
+    /// Fails closed for authentication, quota, channel permission, absent/mismatched staged Device,
+    /// failed independent re-verification, concurrent lifecycle change, or storage failure.
+    pub fn activate_recovered_device(
+        &self,
+        presented_scope: &TenantScope,
+        credential_id: &ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        scope: &TenantScope,
+        device_id: &DeviceId,
+        identity_id: &IdentityId,
+    ) -> Result<DeviceDescriptor, CanonicalError> {
+        let operation = ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_RECOVERY_ACTIVATE_OPERATION_KIND.to_owned(),
+            operation_id: device_id.as_opaque().clone(),
+        };
+        let admission =
+            ServicePrincipalRequestGate::new(self.clock, self.authorization, self.store)
+                .authenticate_request_for_operation(
+                    presented_scope,
+                    credential_id,
+                    secret,
+                    RECOVERY_ACTIVATE_PERMISSION,
+                    scope,
+                    &operation,
+                )?;
+        admission.authorize(&AuthorizationRequest {
+            subject: admission.subject().clone(),
+            permission: RECOVERY_ACTIVATE_PERMISSION.to_owned(),
+            resource_scope: scope.clone(),
+        })?;
+        authorize_and_activate_reverified_device(
+            self.reverification_verifier,
+            self.store,
+            scope,
+            device_id,
+            identity_id,
+        )
+    }
+}
+
 pub struct RecoveryRequestGate<'a, V, S> {
     verifier: &'a V,
     store: &'a S,
@@ -358,6 +691,23 @@ where
         .stage_recovered_device(&proof)
         .map_err(map_stage_error)?;
     Ok(descriptor)
+}
+
+const fn map_authorized_plan_error(error: AuthorizedMutationError) -> CanonicalError {
+    match error {
+        AuthorizedMutationError::Authorization(error) => error,
+        AuthorizedMutationError::Store(error) => CanonicalError::new(match error {
+            DurableStoreError::InvalidRecord => CanonicalErrorCode::InvalidArgument,
+            DurableStoreError::Conflict => CanonicalErrorCode::Conflict,
+            DurableStoreError::Full => CanonicalErrorCode::ResourceExhausted,
+            DurableStoreError::Unavailable => CanonicalErrorCode::TemporarilyUnavailable,
+            DurableStoreError::PermissionDenied => CanonicalErrorCode::PermissionDenied,
+            DurableStoreError::Corrupt
+            | DurableStoreError::UnsupportedSchemaVersion
+            | DurableStoreError::ForeignStore
+            | DurableStoreError::Internal => CanonicalErrorCode::Internal,
+        }),
+    }
 }
 
 const fn map_request_error(error: RecoveryError) -> CanonicalError {

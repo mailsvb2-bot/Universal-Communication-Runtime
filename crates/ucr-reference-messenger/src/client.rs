@@ -301,6 +301,75 @@ impl ReferenceMessengerClient {
         self.sdk.reconcile_mesh_group_message(request).await
     }
 
+    /// Installs one canonical Recovery Plan through the public Recovery service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn install_recovery_plan(
+        &mut self,
+        request: pb::RecoveryInstallPlanRequest,
+    ) -> Result<pb::RecoveryPlanMutationResponse, RpcStatus> {
+        self.sdk.install_recovery_plan(request).await
+    }
+
+    /// Rotates one canonical Recovery Plan through expected-current compare-and-swap.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn rotate_recovery_plan(
+        &mut self,
+        request: pb::RecoveryRotatePlanRequest,
+    ) -> Result<pb::RecoveryPlanMutationResponse, RpcStatus> {
+        self.sdk.rotate_recovery_plan(request).await
+    }
+
+    /// Revokes one canonical Recovery Plan through the public Recovery service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn revoke_recovery_plan(
+        &mut self,
+        request: pb::RecoveryRevokePlanRequest,
+    ) -> Result<pb::RecoveryPlanMutationResponse, RpcStatus> {
+        self.sdk.revoke_recovery_plan(request).await
+    }
+
+    /// Reads the active canonical Recovery Plan through the public Recovery service.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn get_active_recovery_plan(
+        &mut self,
+        request: pb::RecoveryGetActivePlanRequest,
+    ) -> Result<pb::RecoveryGetActivePlanResponse, RpcStatus> {
+        self.sdk.get_active_recovery_plan(request).await
+    }
+
+    /// Requests recovery-authority-gated staging of one recovered Device.
+    ///
+    /// Service Principal permission admits the application channel only; it cannot replace the
+    /// active Recovery Plan or independent recovery-authority proof.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn stage_recovered_device(
+        &mut self,
+        request: pb::RecoveryStageDeviceRequest,
+    ) -> Result<pb::RecoveryDeviceResponse, RpcStatus> {
+        self.sdk.stage_recovered_device(request).await
+    }
+
+    /// Requests independent re-verification and activation of one staged recovered Device.
+    ///
+    /// # Errors
+    /// Returns transport-level gRPC status unchanged from the public SDK.
+    pub async fn activate_recovered_device(
+        &mut self,
+        request: pb::RecoveryActivateDeviceRequest,
+    ) -> Result<pb::RecoveryDeviceResponse, RpcStatus> {
+        self.sdk.activate_recovered_device(request).await
+    }
+
     /// Starts canonical Call signalling through the public Call service.
     ///
     /// # Errors
@@ -342,7 +411,7 @@ mod tests {
     };
 
     #[test]
-    fn proof_matrix_keeps_unexposed_features_explicitly_blocked() {
+    fn proof_matrix_keeps_remaining_accessibility_gap_explicit() {
         let matrix = phase40_proof_matrix();
         assert_eq!(matrix.len(), 9);
         assert!(
@@ -355,13 +424,19 @@ mod tests {
             matrix
                 .iter()
                 .any(|item| item.capability == ProofCapability::Recovery
-                    && item.state == ProofState::PublicApiGap)
+                    && item.state == ProofState::PublicApiAvailable)
         );
         assert!(
             matrix
                 .iter()
                 .any(|item| item.capability == ProofCapability::Calls
                     && item.state == ProofState::PublicApiAvailable)
+        );
+        assert!(
+            matrix
+                .iter()
+                .any(|item| item.capability == ProofCapability::Accessibility
+                    && item.state == ProofState::PresentationModelOnly)
         );
     }
 

@@ -72,8 +72,8 @@ pub const fn phase40_proof_matrix() -> [ProofItem; 9] {
         },
         ProofItem {
             capability: ProofCapability::Recovery,
-            state: ProofState::PublicApiGap,
-            evidence: "no public Recovery workflow service",
+            state: ProofState::PublicApiAvailable,
+            evidence: "RecoveryService plan + proof-gated Device recovery RPCs",
         },
         ProofItem {
             capability: ProofCapability::Accessibility,
