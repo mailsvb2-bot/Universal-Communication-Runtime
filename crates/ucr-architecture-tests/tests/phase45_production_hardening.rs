@@ -76,6 +76,28 @@ fn development_environment_cannot_be_presented_as_production_runtime() {
 }
 
 #[test]
+fn production_runtime_is_durable_distinct_and_redaction_safe() {
+    let cargo = read("Cargo.toml");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let main = read("crates/ucr-runtime/src/main.rs");
+
+    assert!(cargo.contains("\"crates/ucr-runtime\""));
+    assert!(runtime.contains("SqliteLocalStore"));
+    assert!(runtime.contains("production runtime requires an explicitly initialized database"));
+    assert!(runtime.contains("production local-daemon API requires a loopback bind"));
+    assert!(runtime.contains("ucr_runtime_up"));
+    assert!(runtime.contains("ucr_storage_schema_version"));
+    assert!(!runtime.contains("MemoryLocalStore"));
+    assert!(!runtime.contains("TestTransport"));
+    assert!(!runtime.contains("credential_secret_hex"));
+    assert!(!runtime.contains("UCR_DEV_CREDENTIAL_SECRET_HEX"));
+
+    for command in ["\"init\"", "\"check\"", "\"metrics\"", "\"serve\""] {
+        assert!(main.contains(command), "missing production runtime command: {command}");
+    }
+}
+
+#[test]
 fn phase45_does_not_relabel_supply_chain_provenance_as_platform_signing() {
     let phase44 = read("spec/supply-chain.md");
     let phase45 = read("spec/production-hardening.md");
