@@ -1,0 +1,46 @@
+name: Phase 44 Lockfiles Commit
+
+on:
+  push:
+    branches: [phase44-supply-chain-hardening]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: phase44-lockfiles-commit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  commit-lockfiles:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: phase44-supply-chain-hardening
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Generate standalone lockfiles
+        run: |
+          set -euo pipefail
+          cargo generate-lockfile --manifest-path crates/ucr-sdk/Cargo.toml
+          cargo generate-lockfile --manifest-path crates/ucr-reference-messenger/Cargo.toml
+          cargo generate-lockfile --manifest-path crates/ucr-ai-actor/Cargo.toml
+          cargo generate-lockfile --manifest-path crates/ucr-chaos-lab/Cargo.toml
+      - name: Commit exact lock state when changed
+        run: |
+          set -euo pipefail
+          git add \
+            crates/ucr-sdk/Cargo.lock \
+            crates/ucr-reference-messenger/Cargo.lock \
+            crates/ucr-ai-actor/Cargo.lock \
+            crates/ucr-chaos-lab/Cargo.lock
+          if git diff --cached --quiet; then
+            echo LOCKFILES_ALREADY_COMMITTED
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "build: pin standalone Phase 44 dependency locks"
+          git push origin HEAD:phase44-supply-chain-hardening
