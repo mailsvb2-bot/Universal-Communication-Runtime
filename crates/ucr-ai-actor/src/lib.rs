@@ -69,7 +69,10 @@ fn policy_allows(policy: AiDataPolicy, execution: AiExecutionClass) -> bool {
         AiDataPolicy::AiForbidden => false,
         AiDataPolicy::LocalAiOnly => matches!(execution, AiExecutionClass::Local),
         AiDataPolicy::OrganizationAi => {
-            matches!(execution, AiExecutionClass::Local | AiExecutionClass::Organization)
+            matches!(
+                execution,
+                AiExecutionClass::Local | AiExecutionClass::Organization
+            )
         }
         AiDataPolicy::ExternalAiAllowed => true,
     }
@@ -128,9 +131,7 @@ pub fn admit_ai_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ucr_model::{
-        ActorId, OpaqueId, PermissionScope, PrincipalId, PrincipalRef, TenantId,
-    };
+    use ucr_model::{ActorId, OpaqueId, PermissionScope, PrincipalId, PrincipalRef, TenantId};
 
     fn id(value: &str) -> OpaqueId {
         OpaqueId::new(value).expect("test opaque id")
@@ -233,7 +234,10 @@ mod tests {
             permission,
             2,
         );
-        assert_eq!(missing_permission.outcome, AiAdmissionOutcome::DeniedPermission);
+        assert_eq!(
+            missing_permission.outcome,
+            AiAdmissionOutcome::DeniedPermission
+        );
 
         let over_quota = admit_ai_action(
             &profile,
