@@ -1,0 +1,33 @@
+name: Phase 42 AI Actor
+
+on:
+  push:
+    branches: [main, phase42-ai-actor-layer]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase42-ai-actor-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ai-actor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Format
+        run: cargo fmt --manifest-path crates/ucr-ai-actor/Cargo.toml -- --check
+      - name: Check
+        run: cargo check --manifest-path crates/ucr-ai-actor/Cargo.toml
+      - name: Clippy
+        run: cargo clippy --manifest-path crates/ucr-ai-actor/Cargo.toml --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --manifest-path crates/ucr-ai-actor/Cargo.toml
+      - name: Architecture lock
+        run: cargo test --locked -p ucr-architecture-tests --test phase42_ai_actor
