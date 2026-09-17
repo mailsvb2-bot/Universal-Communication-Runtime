@@ -44,6 +44,41 @@ jobs:
       - name: Candidate data-safety durable-store gate
         run: cargo test --locked -p ucr-storage-sqlite
 
+      - name: Durable production-runtime unit gate
+        run: cargo test --locked -p ucr-runtime
+
+      - name: Production-runtime operator smoke and telemetry privacy
+        run: |
+          set -euo pipefail
+          cargo build --locked --profile staging -p ucr-runtime
+          runtime=target/staging/ucr-runtime
+          database="$RUNNER_TEMP/ucr-phase45-runtime.sqlite"
+          init_out="$RUNNER_TEMP/ucr-phase45-init.txt"
+          check_out="$RUNNER_TEMP/ucr-phase45-check.txt"
+          metrics_out="$RUNNER_TEMP/ucr-phase45-metrics.txt"
+
+          "$runtime" init --database "$database" >"$init_out"
+          "$runtime" check --database "$database" >"$check_out"
+          "$runtime" metrics --database "$database" >"$metrics_out"
+
+          grep -F 'UCR_RUNTIME_INITIALIZED' "$init_out"
+          grep -F 'UCR_RUNTIME_CHECK_OK' "$check_out"
+          grep -F '"runtime_mode":"local-daemon"' "$check_out"
+          grep -F '"storage_health":"healthy"' "$check_out"
+          grep -F 'ucr_runtime_up 1' "$metrics_out"
+          grep -F 'ucr_storage_schema_version' "$metrics_out"
+          grep -F 'ucr_storage_healthy 1' "$metrics_out"
+
+          if cat "$init_out" "$check_out" "$metrics_out" | grep -Eiq 'credential|secret|private[_ -]?key|recovery[_ -]?secret|plaintext|message[_ -]?payload'; then
+            echo 'production observability leaked a forbidden sensitive-data marker' >&2
+            exit 1
+          fi
+
+          if "$runtime" serve --database "$database" --bind 0.0.0.0:50051; then
+            echo 'production local-daemon accepted a remote plaintext bind' >&2
+            exit 1
+          fi
+
       - name: Candidate critical Chaos gate
         run: cargo test --manifest-path crates/ucr-chaos-lab/Cargo.toml --locked
 
@@ -110,10 +145,10 @@ jobs:
                   "critical_chaos": passed("ucr-chaos-lab complete locked test suite on exact commit"),
                   "public_contract": passed("canonical protobuf descriptor compilation plus SDK conformance on exact commit"),
                   "performance": pending(),
-                  "metrics": pending(),
-                  "diagnostics": pending(),
-                  "telemetry_privacy": pending(),
-                  "production_runtime": pending(),
+                  "metrics": passed("ucr-runtime staging binary emitted bounded metadata-only Prometheus metrics"),
+                  "diagnostics": passed("ucr-runtime staging binary opened exact SQLite schema and emitted health diagnostics"),
+                  "telemetry_privacy": passed("operator smoke rejected sensitive-data markers in runtime diagnostics/metrics outputs"),
+                  "production_runtime": passed("dedicated SQLite local-daemon runtime unit + init/check/metrics + remote-bind rejection smoke"),
                   "platform_signing": pending(),
               },
           }
