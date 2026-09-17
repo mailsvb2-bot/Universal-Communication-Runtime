@@ -98,6 +98,29 @@ fn production_runtime_is_durable_distinct_and_redaction_safe() {
 }
 
 #[test]
+fn performance_budget_is_fixed_in_source_and_governed_by_adr() {
+    let gate = read("tools/performance_gate.py");
+    let adr = read("docs/adr/0092-phase45-performance-budget-is-a-release-contract.md");
+    let spec = read("spec/production-hardening.md");
+
+    for marker in [
+        "WORKLOAD = \"1000-person-sfu-conference-lifecycle\"",
+        "SAMPLES = 3",
+        "MAX_SAMPLE_SECONDS = 10.0",
+        "--profile",
+        "production",
+        "thousand_person_sfu_conference_fits_bounded_call_ceiling",
+    ] {
+        assert!(gate.contains(marker), "missing fixed performance marker: {marker}");
+    }
+    assert!(!gate.contains("--max-sample-seconds"));
+    assert!(adr.contains("**10.0 seconds per sample**"));
+    assert!(adr.contains("A red build by itself is not sufficient justification"));
+    assert!(spec.contains("10.0 seconds maximum per sample"));
+    assert!(spec.contains("intentionally not a workflow parameter"));
+}
+
+#[test]
 fn phase45_does_not_relabel_supply_chain_provenance_as_platform_signing() {
     let phase44 = read("spec/supply-chain.md");
     let phase45 = read("spec/production-hardening.md");
