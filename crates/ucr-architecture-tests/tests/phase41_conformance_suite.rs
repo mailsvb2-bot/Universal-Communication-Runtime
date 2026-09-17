@@ -11,7 +11,8 @@ fn read(path: &str) -> String {
 #[test]
 fn phase41_conformance_artifacts_lock_the_canonical_eight_axis_sdk_matrix() {
     let spec = read("spec/conformance-suite.md");
-    let adr = read("docs/adr/0087-phase41-conformance-suite-is-language-independent-and-fail-closed.md");
+    let adr =
+        read("docs/adr/0087-phase41-conformance-suite-is-language-independent-and-fail-closed.md");
     let matrix = read("sdk/conformance/matrix.json");
     let workflow = read(".github/workflows/conformance.yml");
 
@@ -25,10 +26,16 @@ fn phase41_conformance_artifacts_lock_the_canonical_eight_axis_sdk_matrix() {
         "errors",
         "idempotency",
     ] {
-        assert!(matrix.contains(&format!("\"{category}\"")), "missing {category}");
+        assert!(
+            matrix.contains(&format!("\"{category}\"")),
+            "missing {category}"
+        );
     }
     for language in ["rust", "python", "typescript", "kotlin", "swift"] {
-        assert!(matrix.contains(&format!("\"{language}\"")), "missing {language}");
+        assert!(
+            matrix.contains(&format!("\"{language}\"")),
+            "missing {language}"
+        );
     }
     assert!(spec.contains("Phase 41 defines the **Prepared** UCR Conformance Suite"));
     assert!(spec.contains("not a new runtime"));
@@ -52,7 +59,10 @@ fn phase41_language_probes_use_public_sdk_helpers_without_a_second_brain() {
         assert!(source.contains("UCR_PHASE41_") || path.contains("ucr-sdk/tests"));
         let lowered = source.to_ascii_lowercase();
         for forbidden in ["ucr-storage", "ucr_core", "ucr-core", "sqlite"] {
-            assert!(!lowered.contains(forbidden), "{path} imports forbidden owner {forbidden}");
+            assert!(
+                !lowered.contains(forbidden),
+                "{path} imports forbidden owner {forbidden}"
+            );
         }
     }
 
