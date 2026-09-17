@@ -49,6 +49,30 @@ missing_debug_implementations = "warn"
 [workspace.lints.clippy]
 all = "deny"
 pedantic = "deny"
+
+# Canon §257 requires explicit development, test, staging, and production build profiles.
+# These profiles define build mechanics only. Selecting `production` never promotes a
+# Prepared capability to Production maturity and never substitutes for release evidence.
+[profile.development]
+inherits = "dev"
+
+[profile.test]
+opt-level = 0
+debug = 2
+overflow-checks = true
+
+[profile.staging]
+inherits = "release"
+debug = 1
+overflow-checks = true
+
+[profile.production]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+overflow-checks = true
+strip = "symbols"
+
 [patch.crates-io]
 # Phase 29: hpke-rs 0.7.0 depends unconditionally on libcrux-sha3 only for
 # SHAKE256-based PQ KEM seed derivation. The local patch preserves SHAKE256
