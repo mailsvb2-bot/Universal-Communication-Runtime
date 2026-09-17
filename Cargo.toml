@@ -32,9 +32,8 @@ members = [
     "crates/ucr-federation",
     "crates/ucr-personal-node",
     "crates/ucr-organization-mode",
-    "crates/ucr-ai-actor",
 ]
-exclude = ["crates/ucr-sdk", "crates/ucr-reference-messenger"]
+exclude = ["crates/ucr-sdk", "crates/ucr-reference-messenger", "crates/ucr-ai-actor"]
 
 [workspace.package]
 version = "0.0.1"
