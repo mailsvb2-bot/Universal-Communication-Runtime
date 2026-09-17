@@ -12,7 +12,7 @@ Phase 44 does not turn a Prepared Linux release candidate into a Production rele
 
 The canonical root, fuzz and standalone Prepared Rust surfaces use committed lockfiles. The Phase 44 workflow consumes them with `--locked`; it must not silently resolve a new dependency graph during release evidence generation.
 
-The gate audits:
+Dependency audit is a mandatory fail-closed release check over every current Rust lockfile. The gate audits:
 
 - root `Cargo.lock`;
 - `fuzz/Cargo.lock`;
