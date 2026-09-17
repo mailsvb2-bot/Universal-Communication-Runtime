@@ -123,8 +123,11 @@ pub enum Fault {
     Partition(PeerId, PeerId),
     Merge(PeerId, PeerId),
     SetLatency(PeerId, PeerId, u64),
+    SetThrottle(PeerId, PeerId, u64),
     SetClockDrift(PeerId, i64),
     SetSlowConsumer(PeerId, bool),
+    SetBatteryPercent(PeerId, u8),
+    SetMinimumSendBatteryPercent(u8),
     RevokePeer(PeerId),
 }
 
@@ -135,13 +138,24 @@ pub enum ChaosError {
     PeerRevoked(PeerId),
     NetworkPartitioned(PeerId, PeerId),
     InfrastructureUnavailable(InfrastructureComponent),
-    StorageFull { capacity: usize, required: usize },
+    InvalidThrottle,
+    InvalidBatteryPercent(u8),
+    BatteryLimited {
+        peer: PeerId,
+        battery_percent: u8,
+        minimum_percent: u8,
+    },
+    StorageFull {
+        capacity: usize,
+        required: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireDelivery {
     pub packet: LabPacket,
     pub latency_ms: u64,
+    pub throttle_bytes_per_second: Option<u64>,
     pub destination_network_generation: u64,
 }
 
@@ -152,6 +166,7 @@ struct PeerState {
     network_generation: u64,
     clock_drift_ms: i64,
     slow_consumer: bool,
+    battery_percent: u8,
 }
 
 impl Default for PeerState {
@@ -162,6 +177,7 @@ impl Default for PeerState {
             network_generation: 0,
             clock_drift_ms: 0,
             slow_consumer: false,
+            battery_percent: 100,
         }
     }
 }
@@ -180,6 +196,8 @@ pub struct ChaosTransport {
     infrastructure: BTreeMap<InfrastructureComponent, bool>,
     partitions: BTreeSet<(PeerId, PeerId)>,
     latency_ms: BTreeMap<(PeerId, PeerId), u64>,
+    throttle_bytes_per_second: BTreeMap<(PeerId, PeerId), u64>,
+    minimum_send_battery_percent: u8,
     one_shot: BTreeSet<OneShotFault>,
     reorder_buffer: Option<LabPacket>,
 }
@@ -208,16 +226,18 @@ impl ChaosTransport {
             infrastructure,
             partitions: BTreeSet::new(),
             latency_ms: BTreeMap::new(),
+            throttle_bytes_per_second: BTreeMap::new(),
+            minimum_send_battery_percent: 0,
             one_shot: BTreeSet::new(),
             reorder_buffer: None,
         }
     }
 
-    /// Applies one deterministic fault.
+    /// Applies one deterministic fault or simulation constraint.
     ///
     /// # Errors
     ///
-    /// Returns `UnknownPeer` for a peer outside this lab.
+    /// Returns an explicit error for an unknown peer or invalid throttle/battery setting.
     pub fn apply(&mut self, fault: Fault) -> Result<(), ChaosError> {
         match fault {
             Fault::DropNext => {
@@ -256,11 +276,32 @@ impl ChaosTransport {
                 self.require_peer(right)?;
                 self.latency_ms.insert(peer_pair(left, right), latency_ms);
             }
+            Fault::SetThrottle(left, right, bytes_per_second) => {
+                self.require_peer(left)?;
+                self.require_peer(right)?;
+                if bytes_per_second == 0 {
+                    return Err(ChaosError::InvalidThrottle);
+                }
+                self.throttle_bytes_per_second
+                    .insert(peer_pair(left, right), bytes_per_second);
+            }
             Fault::SetClockDrift(peer, drift_ms) => {
                 self.peer_mut(peer)?.clock_drift_ms = drift_ms;
             }
             Fault::SetSlowConsumer(peer, slow) => {
                 self.peer_mut(peer)?.slow_consumer = slow;
+            }
+            Fault::SetBatteryPercent(peer, battery_percent) => {
+                if battery_percent > 100 {
+                    return Err(ChaosError::InvalidBatteryPercent(battery_percent));
+                }
+                self.peer_mut(peer)?.battery_percent = battery_percent;
+            }
+            Fault::SetMinimumSendBatteryPercent(minimum_percent) => {
+                if minimum_percent > 100 {
+                    return Err(ChaosError::InvalidBatteryPercent(minimum_percent));
+                }
+                self.minimum_send_battery_percent = minimum_percent;
             }
             Fault::RevokePeer(peer) => self.peer_mut(peer)?.revoked = true,
         }
@@ -273,7 +314,7 @@ impl ChaosTransport {
     ///
     /// # Errors
     ///
-    /// Returns explicit peer, partition, revocation, or infrastructure failures.
+    /// Returns explicit peer, partition, battery, revocation, or infrastructure failures.
     pub fn send(&mut self, mut packet: LabPacket) -> Result<Vec<WireDelivery>, ChaosError> {
         self.require_sendable(&packet)?;
 
@@ -318,19 +359,21 @@ impl ChaosTransport {
             .peers
             .get(&packet.destination)
             .ok_or(ChaosError::UnknownPeer(packet.destination))?;
-        let base_latency = self
-            .latency_ms
-            .get(&peer_pair(packet.source, packet.destination))
-            .copied()
-            .unwrap_or(0);
-        let latency_ms = if state.slow_consumer {
-            base_latency.saturating_add(5_000)
-        } else {
-            base_latency
-        };
+        let pair = peer_pair(packet.source, packet.destination);
+        let base_latency = self.latency_ms.get(&pair).copied().unwrap_or(0);
+        let throttle_bytes_per_second = self.throttle_bytes_per_second.get(&pair).copied();
+        let throttle_delay_ms = throttle_bytes_per_second.map_or(0, |rate| {
+            let bytes = u64::try_from(packet.payload.len()).expect("payload length must fit u64");
+            bytes.saturating_mul(1_000).div_ceil(rate)
+        });
+        let slow_consumer_delay_ms = if state.slow_consumer { 5_000 } else { 0 };
+        let latency_ms = base_latency
+            .saturating_add(throttle_delay_ms)
+            .saturating_add(slow_consumer_delay_ms);
         Ok(WireDelivery {
             packet,
             latency_ms,
+            throttle_bytes_per_second,
             destination_network_generation: state.network_generation,
         })
     }
@@ -349,6 +392,13 @@ impl ChaosTransport {
         }
         if destination.revoked {
             return Err(ChaosError::PeerRevoked(packet.destination));
+        }
+        if source.battery_percent < self.minimum_send_battery_percent {
+            return Err(ChaosError::BatteryLimited {
+                peer: packet.source,
+                battery_percent: source.battery_percent,
+                minimum_percent: self.minimum_send_battery_percent,
+            });
         }
         if self
             .partitions
@@ -503,10 +553,15 @@ pub struct DeterministicNetworkSimulation {
 impl DeterministicNetworkSimulation {
     #[must_use]
     pub fn canonical_100_peers() -> Self {
+        let battery_limit_percent = 20;
+        let mut transport = ChaosTransport::with_peers(100);
+        transport
+            .apply(Fault::SetMinimumSendBatteryPercent(battery_limit_percent))
+            .expect("canonical battery limit is valid");
         Self {
-            transport: ChaosTransport::with_peers(100),
+            transport,
             peer_count: 100,
-            battery_limit_percent: 20,
+            battery_limit_percent,
         }
     }
 }
@@ -693,6 +748,37 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_reconnect_and_throttle_are_deterministic() {
+        let mut transport = ChaosTransport::with_peers(2);
+        transport
+            .apply(Fault::SetPeerOnline(PeerId(1), false))
+            .expect("disconnect");
+        assert_eq!(
+            transport.send(packet(61, 0, 1, RouteKind::Direct)),
+            Err(ChaosError::PeerOffline(PeerId(1)))
+        );
+        transport
+            .apply(Fault::SetPeerOnline(PeerId(1), true))
+            .expect("reconnect");
+        transport
+            .apply(Fault::SetThrottle(PeerId(0), PeerId(1), 10))
+            .expect("throttle");
+        let delivery = transport
+            .send(LabPacket::new(
+                PacketId(61),
+                PeerId(0),
+                PeerId(1),
+                RouteKind::Direct,
+                vec![1; 10],
+            ))
+            .expect("reconnected send")
+            .remove(0);
+        assert_eq!(delivery.latency_ms, 1_000);
+        assert_eq!(delivery.throttle_bytes_per_second, Some(10));
+        assert_eq!(delivery.packet.payload, vec![1; 10]);
+    }
+
+    #[test]
     fn canonical_network_simulation_has_100_peers_and_survives_partition_merge() {
         let mut simulation = DeterministicNetworkSimulation::canonical_100_peers();
         assert_eq!(simulation.peer_count, 100);
@@ -706,6 +792,24 @@ mod tests {
                 .apply(Fault::SetLatency(left, right, u64::from(peer)))
                 .expect("latency");
         }
+        simulation
+            .transport
+            .apply(Fault::SetBatteryPercent(PeerId(0), 10))
+            .expect("battery");
+        assert_eq!(
+            simulation
+                .transport
+                .send(packet(69, 0, 1, RouteKind::Direct)),
+            Err(ChaosError::BatteryLimited {
+                peer: PeerId(0),
+                battery_percent: 10,
+                minimum_percent: 20,
+            })
+        );
+        simulation
+            .transport
+            .apply(Fault::SetBatteryPercent(PeerId(0), 20))
+            .expect("battery restored");
         simulation
             .transport
             .apply(Fault::Partition(PeerId(49), PeerId(50)))
