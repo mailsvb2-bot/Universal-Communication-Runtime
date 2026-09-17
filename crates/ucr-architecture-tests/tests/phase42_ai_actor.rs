@@ -23,7 +23,7 @@ fn phase42_ai_actor_is_optional_and_reuses_canonical_identity_and_authorization(
     assert!(protocol.contains("pub fn authorize("));
     assert!(!manifest.contains("ucr-storage"));
     assert!(!manifest.contains("ucr-api-grpc"));
-    assert!(spec.contains("Ordinary communication remains independent of this crate"));
+    assert!(spec.contains("Canonical communication continues to work when no AI system is available"));
 }
 
 #[test]
