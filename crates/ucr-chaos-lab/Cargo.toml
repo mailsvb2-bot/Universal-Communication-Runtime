@@ -1,0 +1,16 @@
+[package]
+name = "ucr-chaos-lab"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+license = "UNLICENSED"
+repository = "https://github.com/mailsvb2-bot/Universal-Communication-Runtime"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"
