@@ -1,4 +1,4 @@
-# UCR Public SDKs — Phase 39
+# UCR Public SDKs — Phase 39 + Phase 41 conformance
 
 This directory contains Prepared language surfaces for the single `ucr.v1` public contract.
 The canonical schemas stay in `proto/ucr/v1`; generated language files are derivative build output.
@@ -16,5 +16,12 @@ permission, offline queue or provider-acceptance logic. No SDK has a direct stor
 There is no hidden automatic application retry. A caller explicitly decides whether a
 canonical operation is safe to retry. Event cursor bytes are opaque and must round-trip unchanged.
 
-`contract.json` is a machine-readable release guard for these common Phase 39 boundaries.
-Full cross-language conformance remains Phase 41; registry publication/signing remains later hardening.
+`contract.json` is the machine-readable Phase-39 semantic guard for these common boundaries.
+`sdk/conformance/matrix.json` is the Phase-41 fail-closed SDK conformance matrix for auth,
+commands, events, retries, permissions, version negotiation, errors and idempotency.
+
+Phase 41 executes host probes against the actual Service Credential helper in all five required
+languages. The Rust reference SDK additionally carries runtime-binding evidence. These are
+Prepared semantic conformance claims, not registry/package/supply-chain or Production certification.
+
+Registry publication, package signing and broader supply-chain hardening remain Phase 44 work.

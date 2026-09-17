@@ -1,0 +1,82 @@
+name: Conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conformance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sdk-matrix:
+    name: sdk-${{ matrix.language }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, typescript, kotlin, swift]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Validate common Phase-41 matrix
+        run: python3 sdk/conformance/validate.py
+      - name: Run language host probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.language }}" in
+            python)
+              PYTHONPATH=sdk/python python3 sdk/python/phase41_conformance.py
+              ;;
+            typescript)
+              node --experimental-strip-types sdk/typescript/phase41_conformance.ts
+              ;;
+            kotlin)
+              kotlinc \
+                sdk/kotlin/src/main/kotlin/org/ucr/sdk/ServiceCredential.kt \
+                sdk/kotlin/src/test/kotlin/org/ucr/sdk/Phase41Conformance.kt \
+                -include-runtime -d /tmp/ucr-phase41-kotlin.jar
+              java -jar /tmp/ucr-phase41-kotlin.jar
+              ;;
+            swift)
+              swiftc \
+                sdk/swift/Sources/UCRSDK/ServiceCredential.swift \
+                sdk/swift/Tests/main.swift \
+                -o /tmp/ucr-phase41-swift
+              /tmp/ucr-phase41-swift
+              ;;
+            *)
+              echo "unknown Phase-41 SDK language" >&2
+              exit 2
+              ;;
+          esac
+
+  rust-sdk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Validate common Phase-41 matrix
+        run: python3 sdk/conformance/validate.py
+      - name: Rust runtime-binding conformance
+        run: cargo test --manifest-path crates/ucr-sdk/Cargo.toml --test phase41_conformance
+
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Validate Phase-41 matrix
+        run: python3 sdk/conformance/validate.py
+      - name: Install protobuf compiler
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends protobuf-compiler
+      - name: Compile canonical public contract
+        run: protoc --proto_path=proto --descriptor_set_out=/tmp/ucr-phase41.pb proto/ucr/v1/*.proto
