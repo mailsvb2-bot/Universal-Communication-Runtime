@@ -1,0 +1,33 @@
+name: Phase 43 Chaos Lab
+
+on:
+  push:
+    branches: [main, phase43-chaos-lab]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase43-chaos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chaos-lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Format standalone lab
+        run: cargo fmt --manifest-path crates/ucr-chaos-lab/Cargo.toml -- --check
+      - name: Check standalone lab
+        run: cargo check --manifest-path crates/ucr-chaos-lab/Cargo.toml
+      - name: Clippy standalone lab
+        run: cargo clippy --manifest-path crates/ucr-chaos-lab/Cargo.toml --all-targets -- -D warnings
+      - name: Execute chaos evidence
+        run: cargo test --manifest-path crates/ucr-chaos-lab/Cargo.toml
+      - name: Architecture lock
+        run: cargo test --locked -p ucr-architecture-tests --test phase43_chaos_lab
