@@ -1,0 +1,134 @@
+name: Phase 45 Production Hardening
+
+on:
+  push:
+    branches: [main, phase45-production-hardening]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase45-production-hardening-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Install native and contract build prerequisites
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake build-essential protobuf-compiler
+
+      - name: Readiness verifier adversarial self-test
+        run: python3 tools/production_readiness.py self-test
+
+      - name: Phase 45 architecture lock
+        run: cargo test --locked -p ucr-architecture-tests --test phase45_production_hardening
+
+      - name: Prove canonical build profiles are executable
+        run: |
+          set -euo pipefail
+          cargo check --locked --profile development -p ucr-core
+          cargo test --locked -p ucr-core --no-run
+          cargo check --locked --profile staging -p ucr-core
+          cargo check --locked --profile production -p ucr-core
+
+      - name: Candidate security gate
+        run: cargo test --locked -p ucr-security-tests
+
+      - name: Candidate data-safety durable-store gate
+        run: cargo test --locked -p ucr-storage-sqlite
+
+      - name: Candidate critical Chaos gate
+        run: cargo test --manifest-path crates/ucr-chaos-lab/Cargo.toml --locked
+
+      - name: Validate common conformance matrix
+        run: python3 sdk/conformance/validate.py
+
+      - name: Python conformance host probe
+        run: PYTHONPATH=sdk/python python3 sdk/python/phase41_conformance.py
+
+      - name: TypeScript conformance host probe
+        run: node --experimental-strip-types sdk/typescript/phase41_conformance.ts
+
+      - name: Kotlin conformance host probe
+        run: |
+          kotlinc \
+            sdk/kotlin/src/main/kotlin/org/ucr/sdk/ServiceCredential.kt \
+            sdk/kotlin/src/test/kotlin/org/ucr/sdk/Phase41Conformance.kt \
+            -include-runtime -d /tmp/ucr-phase45-kotlin.jar
+          java -jar /tmp/ucr-phase45-kotlin.jar
+
+      - name: Swift conformance host probe
+        run: |
+          swiftc \
+            sdk/swift/Sources/UCRSDK/ServiceCredential.swift \
+            sdk/swift/Tests/main.swift \
+            -o /tmp/ucr-phase45-swift
+          /tmp/ucr-phase45-swift
+
+      - name: Rust SDK conformance host probe
+        run: cargo test --manifest-path crates/ucr-sdk/Cargo.toml --locked --test phase41_conformance
+
+      - name: Compile canonical public contract
+        run: protoc --proto_path=proto --descriptor_set_out=/tmp/ucr-phase45.pb proto/ucr/v1/*.proto
+
+      - name: Build release-like workspace candidate
+        run: cargo build --locked --workspace --profile staging
+
+      - name: Emit exact candidate evidence
+        env:
+          UCR_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          mkdir -p dist/phase45
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          def passed(evidence: str) -> dict[str, str]:
+              return {"status": "pass", "evidence": evidence}
+
+          def pending() -> dict[str, str]:
+              return {"status": "not-run", "evidence": ""}
+
+          document = {
+              "schema": "ucr.production-readiness.v1",
+              "source_commit": os.environ["UCR_SOURCE_COMMIT"],
+              "build_profile": "staging",
+              "maturity_claim": "candidate",
+              "gates": {
+                  "security": passed("ucr-security-tests on exact commit; repository security-audit remains an independent CI check"),
+                  "data_safety": passed("ucr-storage-sqlite durable regression suite plus canonical Chaos Lab on exact commit"),
+                  "compatibility": passed("Phase-41 common matrix and all five SDK host probes on exact commit"),
+                  "conformance": passed("Python/TypeScript/Kotlin/Swift/Rust Phase-41 conformance probes on exact commit"),
+                  "critical_chaos": passed("ucr-chaos-lab complete locked test suite on exact commit"),
+                  "public_contract": passed("canonical protobuf descriptor compilation plus SDK conformance on exact commit"),
+                  "performance": pending(),
+                  "metrics": pending(),
+                  "diagnostics": pending(),
+                  "telemetry_privacy": pending(),
+                  "production_runtime": pending(),
+                  "platform_signing": pending(),
+              },
+          }
+          Path("dist/phase45/candidate-evidence.json").write_text(
+              json.dumps(document, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Fail closed on candidate evidence
+        run: python3 tools/production_readiness.py validate --mode candidate --evidence dist/phase45/candidate-evidence.json
+
+      - name: Prove candidate cannot be promoted as Production
+        run: |
+          if python3 tools/production_readiness.py validate --mode production --evidence dist/phase45/candidate-evidence.json; then
+            echo "candidate evidence was incorrectly accepted as Production" >&2
+            exit 1
+          fi
