@@ -38,8 +38,24 @@ fn phase43_chaos_lab_covers_the_canonical_failure_surface() {
             "missing chaos scenario {marker}"
         );
     }
+    for primitive in [
+        "DropNext",
+        "DuplicateNext",
+        "ReorderNextPair",
+        "CorruptNext",
+        "SetPeerOnline",
+        "SetLatency",
+        "SetThrottle",
+    ] {
+        assert!(
+            implementation.contains(primitive),
+            "missing canonical test-transport primitive {primitive}"
+        );
+    }
     assert!(spec.contains("100 peers"));
+    assert!(spec.contains("battery"));
     assert!(implementation.contains("canonical_100_peers"));
+    assert!(implementation.contains("SetMinimumSendBatteryPercent"));
 }
 
 #[test]
@@ -82,6 +98,7 @@ fn phase43_locks_data_safety_and_explicit_failure_evidence() {
         "revoked_or_disappeared_peer_fails_closed",
         "clock_drift_does_not_change_monotonic_test_time",
         "slow_consumer_is_bounded_as_latency_not_silent_loss",
+        "disconnect_reconnect_and_throttle_are_deterministic",
         "canonical_network_simulation_has_100_peers_and_survives_partition_merge",
     ] {
         assert!(
