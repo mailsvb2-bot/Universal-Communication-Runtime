@@ -166,12 +166,12 @@ impl Default for PeerState {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct OneShotFaults {
-    drop_next: bool,
-    duplicate_next: bool,
-    reorder_next_pair: bool,
-    corrupt_next: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum OneShotFault {
+    Drop,
+    Duplicate,
+    Reorder,
+    Corrupt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,7 +180,7 @@ pub struct ChaosTransport {
     infrastructure: BTreeMap<InfrastructureComponent, bool>,
     partitions: BTreeSet<(PeerId, PeerId)>,
     latency_ms: BTreeMap<(PeerId, PeerId), u64>,
-    one_shot: OneShotFaults,
+    one_shot: BTreeSet<OneShotFault>,
     reorder_buffer: Option<LabPacket>,
 }
 
@@ -208,7 +208,7 @@ impl ChaosTransport {
             infrastructure,
             partitions: BTreeSet::new(),
             latency_ms: BTreeMap::new(),
-            one_shot: OneShotFaults::default(),
+            one_shot: BTreeSet::new(),
             reorder_buffer: None,
         }
     }
@@ -220,13 +220,19 @@ impl ChaosTransport {
     /// Returns `UnknownPeer` for a peer outside this lab.
     pub fn apply(&mut self, fault: Fault) -> Result<(), ChaosError> {
         match fault {
-            Fault::DropNext => self.one_shot.drop_next = true,
-            Fault::DuplicateNext => self.one_shot.duplicate_next = true,
+            Fault::DropNext => {
+                self.one_shot.insert(OneShotFault::Drop);
+            }
+            Fault::DuplicateNext => {
+                self.one_shot.insert(OneShotFault::Duplicate);
+            }
             Fault::ReorderNextPair => {
-                self.one_shot.reorder_next_pair = true;
+                self.one_shot.insert(OneShotFault::Reorder);
                 self.reorder_buffer = None;
             }
-            Fault::CorruptNext => self.one_shot.corrupt_next = true,
+            Fault::CorruptNext => {
+                self.one_shot.insert(OneShotFault::Corrupt);
+            }
             Fault::SetPeerOnline(peer, online) => self.peer_mut(peer)?.online = online,
             Fault::SwitchNetwork(peer) => {
                 let state = self.peer_mut(peer)?;
@@ -271,13 +277,11 @@ impl ChaosTransport {
     pub fn send(&mut self, mut packet: LabPacket) -> Result<Vec<WireDelivery>, ChaosError> {
         self.require_sendable(&packet)?;
 
-        if self.one_shot.drop_next {
-            self.one_shot.drop_next = false;
+        if self.one_shot.remove(&OneShotFault::Drop) {
             return Ok(Vec::new());
         }
 
-        if self.one_shot.corrupt_next {
-            self.one_shot.corrupt_next = false;
+        if self.one_shot.remove(&OneShotFault::Corrupt) {
             if let Some(first) = packet.payload.first_mut() {
                 *first ^= 0xff;
             } else {
@@ -285,9 +289,9 @@ impl ChaosTransport {
             }
         }
 
-        if self.one_shot.reorder_next_pair {
+        if self.one_shot.contains(&OneShotFault::Reorder) {
             if let Some(first) = self.reorder_buffer.take() {
-                self.one_shot.reorder_next_pair = false;
+                self.one_shot.remove(&OneShotFault::Reorder);
                 return Ok(vec![self.delivery(packet)?, self.delivery(first)?]);
             }
             self.reorder_buffer = Some(packet);
@@ -295,8 +299,7 @@ impl ChaosTransport {
         }
 
         let delivery = self.delivery(packet)?;
-        if self.one_shot.duplicate_next {
-            self.one_shot.duplicate_next = false;
+        if self.one_shot.remove(&OneShotFault::Duplicate) {
             return Ok(vec![delivery.clone(), delivery]);
         }
         Ok(vec![delivery])
