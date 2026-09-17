@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en" dir="ltr" data-ucr-platform="browser-presentation" data-ucr-boundary="presentation-only" data-text-scale="100">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UCR Reference Messenger accessibility surface</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#conversation">Skip to conversation</a>
+  <header>
+    <h1>Reference Messenger</h1>
+    <p id="connection-status" role="status" aria-live="polite">Secure communication</p>
+  </header>
+  <nav aria-label="Primary">
+    <a href="#conversation">Messages</a>
+    <a href="#call">Call</a>
+    <a href="#transcript">Transcript</a>
+  </nav>
+  <aside aria-labelledby="accessibility-title">
+    <h2 id="accessibility-title">Accessibility</h2>
+    <button id="direction-toggle" type="button" aria-pressed="false">Use right-to-left layout</button>
+    <label for="text-scale">Text size</label>
+    <select id="text-scale" name="text-scale">
+      <option value="100" selected>100%</option>
+      <option value="125">125%</option>
+      <option value="150">150%</option>
+    </select>
+    <button id="contrast-toggle" type="button" aria-pressed="false">Use high contrast</button>
+    <p id="accessibility-status" class="visually-hidden" role="status" aria-live="polite"></p>
+  </aside>
+  <main id="conversation" tabindex="-1">
+    <section aria-labelledby="conversation-title" data-ucr-concept="Message">
+      <h2 id="conversation-title">Conversation</h2>
+      <ol class="message-log" role="log" aria-live="polite" aria-relevant="additions text" tabindex="0">
+        <li><article aria-label="Message from Alex"><p dir="auto">Hello from the public UCR boundary.</p></article></li>
+        <li><article aria-label="Message from Sam"><p dir="auto" lang="ar">مرحبا</p></article></li>
+      </ol>
+      <form aria-label="Send message">
+        <label for="message">Message</label>
+        <textarea id="message" name="message" rows="3"></textarea>
+        <button type="submit">Send</button>
+      </form>
+    </section>
+    <section id="call" aria-labelledby="call-title" data-ucr-concept="Call">
+      <h2 id="call-title">Call</h2>
+      <video controls preload="metadata" aria-describedby="media-description">
+        <track kind="captions" src="captions.vtt" srclang="en" label="English captions" default>
+        <track kind="subtitles" src="subtitles.vtt" srclang="es" label="Español">
+      </video>
+      <p id="media-description">Media preview with captions and subtitles. No native capture or transport capability is claimed by this browser surface.</p>
+      <button type="button">Mute</button>
+      <button type="button">End call</button>
+    </section>
+    <section id="transcript" aria-labelledby="transcript-title" aria-live="polite">
+      <h2 id="transcript-title">Transcript</h2>
+      <p><time datetime="2026-09-17T07:00:00Z">00:00</time> Alex: Hello from the public UCR boundary.</p>
+    </section>
+  </main>
+  <footer><p>This browser artifact proves presentation accessibility only. Communication remains owned by UCR through the public SDK/API.</p></footer>
+</body>
+</html>

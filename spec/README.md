@@ -20,7 +20,7 @@ Phase 37 adds `personal-node.md`: Prepared owner-controlled Personal Node compos
 
 Phase 38 adds `organization-mode.md`: Prepared exact-namespace Organization Mode over existing Identity, Device, Store-and-Forward, SFU and Bridge owners, with SQLite v31 restart-safe policy associations and no protocol fork for self-hosting.
 Phase 39 adds `public-sdks.md`: Prepared Rust/Python/TypeScript/Kotlin/Swift clients over the single versioned public contract, with exact binary Service Principal metadata, opaque Event cursors, no direct storage access and no SDK-owned application retry.
-Phase 40 begins `reference-messenger.md`: a standalone public-SDK-only Reference Messenger boundary with honest proof gaps, public CallService access, user-level presentation vocabulary and explicit accessibility/localization requirements.
+Phase 40 is completed by `reference-messenger.md` plus `dev-mode.md`: a standalone public-SDK-only Reference Messenger proof across Chat/Groups/Calls/Multi-device/Local/Offline/P2P/Recovery, concrete browser accessibility evidence, and an auth-on loopback `ucr dev` developer harness.
 Phase 40 adds `group-api.md`: a public `GroupService` over the existing canonical Group/Conversation/Message owners, preserving dual create permissions, membership/history gating, audit and atomic storage semantics.
 Phase 40 adds `device-sync-api.md`: public `DeviceService`/`SyncService` bindings over the existing canonical Device lifecycle and Sync session/checkpoint owners, preserving exact scope, permissions, audit, irreversible revocation, CAS transitions and opaque resume tokens.
 

@@ -2965,6 +2965,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-dev"
+version = "0.0.1"
+dependencies = [
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "ucr-api-grpc",
+ "ucr-core",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-memory",
+]
+
+[[package]]
 name = "ucr-federation"
 version = "0.0.1"
 dependencies = [

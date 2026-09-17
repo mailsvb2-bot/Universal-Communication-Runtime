@@ -35,6 +35,8 @@ jobs:
         run: cargo doc --workspace --no-deps --locked
       - name: Tests
         run: cargo test --workspace --all-targets --locked
+      - name: Dev mode self-check
+        run: cargo run -p ucr-dev -- dev --check
       - name: Public SDK format
         run: cargo fmt --manifest-path crates/ucr-sdk/Cargo.toml -- --check
       - name: Public SDK check
@@ -315,8 +317,23 @@ jobs:
           test -s docs/adr/0083-phase40-mesh-service-reuses-phase28-runtime.md &&
           test -s spec/recovery-api.md &&
           test -s docs/adr/0084-phase40-recovery-service-reuses-canonical-proof-gates.md &&
+          test -s docs/adr/0085-phase40-browser-accessibility-evidence-is-presentation-only.md &&
+          test -s crates/ucr-reference-messenger/web/index.html &&
+          test -s crates/ucr-reference-messenger/web/styles.css &&
+          test -s docs/adr/0086-phase40-dev-mode-composes-canonical-owners-behind-public-api.md &&
+          test -s spec/dev-mode.md &&
+          test -s crates/ucr-dev/Cargo.toml &&
+          test -s crates/ucr-dev/src/lib.rs &&
+          test -s crates/ucr-dev/src/main.rs &&
+          test -s crates/ucr-dev/README.md &&
+          test -s crates/ucr-reference-messenger/web/app.js &&
+          test -s crates/ucr-reference-messenger/web/captions.vtt &&
+          test -s crates/ucr-reference-messenger/web/subtitles.vtt &&
+          test -s crates/ucr-reference-messenger/web/validate_accessibility.py &&
           test -s crates/ucr-reference-messenger/src/lib.rs
       - name: Validate public SDK boundaries
         run: python3 sdk/validate.py
       - name: Validate Reference Messenger boundary
         run: python3 crates/ucr-reference-messenger/validate.py
+      - name: Validate concrete accessibility evidence
+        run: python3 crates/ucr-reference-messenger/web/validate_accessibility.py

@@ -49,9 +49,13 @@ def main() -> None:
     for item in ("Chat", "Groups", "Calls", "MultiDevice", "Local", "Offline", "P2p", "Recovery", "Accessibility"):
         require(item in capability, f"Phase-40 proof area missing: {item}")
     require(capability.count("ProofState::PublicApiGap") == 0, "Phase-40 public API gaps must be closed")
-    require("ProofState::PresentationModelOnly" in capability, "accessibility maturity gap hidden")
+    require("ProofState::ConcretePlatformEvidence" in capability, "concrete accessibility evidence state missing")
 
     accessibility = (CRATE / "src/accessibility.rs").read_text(encoding="utf-8")
+
+    web = CRATE / "web"
+    for filename in ("index.html", "styles.css", "app.js", "captions.vtt", "subtitles.vtt", "validate_accessibility.py", "README.md"):
+        require((web / filename).is_file(), f"concrete accessibility artifact missing: {filename}")
     for item in ("screen_reader_semantics", "keyboard_navigation", "text_scaling", "captions", "subtitles", "transcription_surfaces", "high_contrast", "rtl_layout"):
         require(item in accessibility, f"accessibility requirement missing: {item}")
 
@@ -95,9 +99,9 @@ def main() -> None:
         require(f"self.sdk.{method}(request).await" in client, f"Reference Messenger missing Recovery method: {method}")
 
     spec = (ROOT / "spec/reference-messenger.md").read_text(encoding="utf-8")
-    require("Concrete platform accessibility" in spec or "concrete platform accessibility" in spec, "Phase 40 accessibility blocker hidden")
+    require("Concrete browser accessibility evidence" in spec, "concrete accessibility evidence section missing")
     require("Recovery | Public API available" in spec, "Recovery public proof hidden from spec")
-    require("Accessibility | Presentation model only" in spec, "accessibility blocker hidden from spec")
+    require("Accessibility | Concrete platform evidence" in spec, "accessibility evidence missing from proof matrix")
 
 
 if __name__ == "__main__":
