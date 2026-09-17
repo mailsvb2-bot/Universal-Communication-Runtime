@@ -65,23 +65,45 @@ Conformance and public-contract checks remain independent release evidence and a
 
 ## Performance release gate
 
-The Canon forbids weakening a fixed SLO merely to make CI green without an ADR and evidence. Phase 45 therefore treats performance as `not-run` until a committed workload, environment description and immutable threshold are present and executable.
+The Canon forbids weakening a fixed SLO merely to make CI green without an ADR and evidence.
 
-The existing 1000-person conference reference test proves bounded functional scale; it is not, by itself, a production SLA/load proof.
+ADR 0092 fixes the initial Phase-45 production-profile performance regression contract:
+
+- canonical workload: `1000-person-sfu-conference-lifecycle`;
+- existing reference test: `thousand_person_sfu_conference_fits_bounded_call_ceiling`;
+- three measured samples;
+- **10.0 seconds maximum per sample**;
+- GitHub-hosted Ubuntu 24.04 with the repository-pinned Rust toolchain;
+- machine-readable evidence tied to the exact source commit.
+
+`tools/performance_gate.py` owns the threshold as source code. It is intentionally not a workflow parameter. Changing the workload, sample count or threshold requires a follow-up ADR and replacement evidence; a red CI run alone is not a reason to relax it.
+
+The existing 1000-person test remains a bounded functional-scale model rather than a public Internet/media latency SLA. Phase 45 adds a concrete production-profile regression budget without overclaiming WAN throughput, codec density or hardware-wide capacity planning.
 
 ## Observability and telemetry privacy
 
 The Definition of Done requires metrics and diagnostics to be available and plaintext to stay out of telemetry. Development diagnostics do not satisfy the production requirement.
 
-Production observability evidence must use metadata/health/counter surfaces only. It must not expose plaintext messages, decrypted attachments, private keys, recovery secrets or authentication secrets.
+The dedicated `ucr-runtime` local-daemon candidate exposes bounded operational evidence only:
 
-Until an explicit production runtime exports this redaction-safe observability surface, `metrics`, `diagnostics`, `telemetry_privacy` and `production_runtime` remain release-blocking for Production maturity.
+- runtime mode;
+- durable SQLite schema version;
+- durable-store health;
+- `ucr_runtime_up`;
+- `ucr_storage_schema_version`;
+- `ucr_storage_healthy`.
+
+The exact Phase-45 operator smoke initializes a fresh durable database, reopens it through `check`, reads `metrics`, rejects sensitive-data markers in those outputs and proves that a non-loopback plaintext bind is refused. Candidate evidence may mark `metrics`, `diagnostics`, `telemetry_privacy` and `production_runtime` as `pass` only after those executable steps succeed on the same source commit.
+
+No plaintext messages, decrypted attachments, private keys, recovery secrets or authentication secrets belong in this observability surface.
 
 ## Production runtime boundary
 
-A production runtime must use durable production storage and production providers. It must not auto-enable insecure test behavior and must not depend on `TestTransport`, `MemoryLocalStore`, sandbox fault injection or dev credential printing.
+`ucr-runtime` is a distinct durable local-daemon runtime candidate. It reuses the canonical public gRPC service layer, authorization owners and `SqliteLocalStore`; it does not copy Communication Core domain ownership.
 
-A production runtime is a consumer of canonical Core/Storage/API boundaries. It must not create alternate Message, Conversation, Delivery, Identity, Policy, Crypto or routing ownership.
+The runtime requires an explicitly initialized SQLite database before `serve`. It does not auto-create development credentials, identities or test transports. Plaintext service binding is loopback-only. Remote service mode is not claimed until an explicit authenticated TLS/public-listener boundary exists.
+
+The runtime must not depend on `TestTransport`, `MemoryLocalStore`, sandbox fault injection or dev credential printing.
 
 ## Platform signing boundary
 
@@ -93,16 +115,18 @@ No ephemeral CI key may be presented as long-lived production publisher identity
 
 ## Candidate CI
 
-The Phase-45 pull-request workflow builds and validates release-like profiles and reruns the candidate-critical security/data-safety/compatibility/conformance/chaos/public-contract evidence. It emits a **candidate** evidence document with production-only gates explicitly `not-run` until those boundaries are implemented and proven.
+The Phase-45 workflow builds and validates release-like profiles and reruns the candidate-critical security/data-safety/compatibility/conformance/chaos/public-contract evidence. It also executes the durable runtime/observability boundary and the fixed production-profile performance contract.
 
-This is intentional: a green Phase-45 candidate workflow means the evidence model itself is sound and the existing mandatory candidate gates passed. It does **not** mean UCR is Production.
+The evidence document remains a **candidate** claim. Platform signing stays explicit and independent; until real publisher signing is configured and verified, Production promotion must fail closed.
+
+A green Phase-45 candidate workflow therefore means the implemented candidate gates passed on one exact source commit. It does **not** by itself mean UCR is Production.
 
 ## Promotion rule
 
 Production promotion requires all of the following on the same exact source/artifact release candidate:
 
 1. candidate-required gates pass;
-2. fixed performance evidence passes without threshold weakening;
+2. the fixed performance contract passes without threshold weakening;
 3. production metrics and diagnostics are available;
 4. telemetry privacy is proven;
 5. the production runtime boundary is proven independently of dev/test mode;
