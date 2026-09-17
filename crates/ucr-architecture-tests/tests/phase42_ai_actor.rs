@@ -23,7 +23,9 @@ fn phase42_ai_actor_is_optional_and_reuses_canonical_identity_and_authorization(
     assert!(protocol.contains("pub fn authorize("));
     assert!(!manifest.contains("ucr-storage"));
     assert!(!manifest.contains("ucr-api-grpc"));
-    assert!(spec.contains("Canonical communication continues to work when no AI system is available"));
+    assert!(
+        spec.contains("Canonical communication continues to work when no AI system is available")
+    );
 }
 
 #[test]
@@ -92,7 +94,10 @@ fn phase42_has_executable_security_and_privacy_evidence() {
         "human_actor_cannot_be_admitted_as_ai",
         "audit_evidence_contains_no_prompt_or_response_payload",
     ] {
-        assert!(implementation.contains(test), "missing executable evidence {test}");
+        assert!(
+            implementation.contains(test),
+            "missing executable evidence {test}"
+        );
     }
     assert!(workflow.contains("cargo clippy"));
     assert!(workflow.contains("cargo test"));
