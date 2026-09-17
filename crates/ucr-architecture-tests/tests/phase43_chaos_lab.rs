@@ -33,7 +33,10 @@ fn phase43_chaos_lab_covers_the_canonical_failure_surface() {
         "RevokedDevice",
         "SlowConsumer",
     ] {
-        assert!(implementation.contains(marker), "missing chaos scenario {marker}");
+        assert!(
+            implementation.contains(marker),
+            "missing chaos scenario {marker}"
+        );
     }
     assert!(spec.contains("100 peers"));
     assert!(implementation.contains("canonical_100_peers"));
