@@ -1,0 +1,213 @@
+name: Phase 44 Supply Chain
+
+on:
+  push:
+    branches: [main, phase44-supply-chain-hardening]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase44-supply-chain-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  supply-chain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Install native build prerequisites
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake build-essential
+      - name: Phase 44 adversarial self-test
+        run: python3 tools/supply_chain.py self-test
+      - name: Secret scan
+        run: python3 tools/supply_chain.py scan-secrets --root .
+      - name: External action pin scan
+        run: python3 tools/supply_chain.py scan-actions --root .
+      - name: Require committed dependency locks
+        run: |
+          set -euo pipefail
+          test -s Cargo.lock
+          test -s fuzz/Cargo.lock
+          test -s crates/ucr-sdk/Cargo.lock
+          test -s crates/ucr-reference-messenger/Cargo.lock
+          test -s crates/ucr-ai-actor/Cargo.lock
+          test -s crates/ucr-chaos-lab/Cargo.lock
+      - name: Install pinned cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit every current Rust dependency lock
+        run: |
+          set -euo pipefail
+          cargo audit --file Cargo.lock --deny warnings
+          cargo audit --file fuzz/Cargo.lock --deny warnings
+          cargo audit --file crates/ucr-sdk/Cargo.lock --deny warnings
+          cargo audit --file crates/ucr-reference-messenger/Cargo.lock --deny warnings
+          cargo audit --file crates/ucr-ai-actor/Cargo.lock --deny warnings
+          cargo audit --file crates/ucr-chaos-lab/Cargo.lock --deny warnings
+      - name: Architecture lock
+        run: cargo test --locked -p ucr-architecture-tests --test phase44_supply_chain
+      - name: Capture locked Cargo metadata
+        run: |
+          set -euo pipefail
+          mkdir -p dist/phase44/metadata
+          cargo metadata --format-version 1 --locked > dist/phase44/metadata/root.json
+          cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 --locked > dist/phase44/metadata/fuzz.json
+          cargo metadata --manifest-path crates/ucr-sdk/Cargo.toml --format-version 1 --locked > dist/phase44/metadata/sdk.json
+          cargo metadata --manifest-path crates/ucr-reference-messenger/Cargo.toml --format-version 1 --locked > dist/phase44/metadata/reference-messenger.json
+          cargo metadata --manifest-path crates/ucr-ai-actor/Cargo.toml --format-version 1 --locked > dist/phase44/metadata/ai-actor.json
+          cargo metadata --manifest-path crates/ucr-chaos-lab/Cargo.toml --format-version 1 --locked > dist/phase44/metadata/chaos-lab.json
+      - name: Build exact release candidate
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p ucr-dev
+          cp target/release/ucr dist/phase44/ucr-linux-x86_64
+      - name: Generate deterministic SPDX 2.3 SBOM
+        run: |
+          python3 tools/supply_chain.py sbom \
+            --metadata dist/phase44/metadata/root.json \
+            --metadata dist/phase44/metadata/fuzz.json \
+            --metadata dist/phase44/metadata/sdk.json \
+            --metadata dist/phase44/metadata/reference-messenger.json \
+            --metadata dist/phase44/metadata/ai-actor.json \
+            --metadata dist/phase44/metadata/chaos-lab.json \
+            --output dist/phase44/ucr.spdx.json \
+            --namespace-seed "$GITHUB_SHA"
+      - name: Check GitHub CLI attestation support
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: gh attestation verify --help >/dev/null
+      - name: Attest binary provenance
+        id: attest-provenance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: dist/phase44/ucr-linux-x86_64
+      - name: Verify binary provenance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify dist/phase44/ucr-linux-x86_64 \
+            --bundle "${{ steps.attest-provenance.outputs.bundle-path }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/phase44-supply-chain.yml" \
+            --source-ref refs/heads/main \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
+      - name: Attest SPDX SBOM
+        id: attest-sbom
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: dist/phase44/ucr-linux-x86_64
+          sbom-path: dist/phase44/ucr.spdx.json
+      - name: Verify SPDX SBOM attestation
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify dist/phase44/ucr-linux-x86_64 \
+            --bundle "${{ steps.attest-sbom.outputs.bundle-path }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/phase44-supply-chain.yml" \
+            --source-ref refs/heads/main \
+            --source-digest "$GITHUB_SHA" \
+            --predicate-type https://spdx.dev/Document/v2.3 \
+            --deny-self-hosted-runners
+      - name: Generate build evidence
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then
+            supply_chain_status=github-sigstore-attested-and-verified
+          else
+            supply_chain_status=validation-only
+          fi
+          python3 tools/supply_chain.py evidence \
+            --output dist/phase44/build-evidence.json \
+            --commit "$GITHUB_SHA" \
+            --profile production-candidate \
+            --test phase44-adversarial-self-test \
+            --test phase44-architecture-lock \
+            --test all-lockfiles-audited \
+            --artifact dist/phase44/ucr-linux-x86_64 \
+            --artifact dist/phase44/ucr.spdx.json \
+            --lockfile Cargo.lock \
+            --lockfile fuzz/Cargo.lock \
+            --lockfile crates/ucr-sdk/Cargo.lock \
+            --lockfile crates/ucr-reference-messenger/Cargo.lock \
+            --lockfile crates/ucr-ai-actor/Cargo.lock \
+            --lockfile crates/ucr-chaos-lab/Cargo.lock \
+            --supply-chain-identity "$GITHUB_REPOSITORY/.github/workflows/phase44-supply-chain.yml" \
+            --supply-chain-status "$supply_chain_status" \
+            --platform-binary-status not-claimed-phase44
+      - name: Create complete release manifest
+        run: |
+          python3 tools/supply_chain.py manifest-create \
+            --output dist/phase44/release-manifest.json \
+            --commit "$GITHUB_SHA" \
+            --release-sequence "$GITHUB_RUN_NUMBER" \
+            --artifact dist/phase44/ucr-linux-x86_64 \
+            --artifact dist/phase44/ucr.spdx.json \
+            --artifact dist/phase44/build-evidence.json \
+            --required-artifact ucr-linux-x86_64 \
+            --required-artifact ucr.spdx.json \
+            --required-artifact build-evidence.json
+      - name: Verify source, rollback, tamper and completeness boundary
+        run: |
+          python3 tools/supply_chain.py manifest-verify \
+            --manifest dist/phase44/release-manifest.json \
+            --artifact-dir dist/phase44 \
+            --minimum-release-sequence "$GITHUB_RUN_NUMBER" \
+            --expected-commit "$GITHUB_SHA"
+      - name: Attest release evidence
+        id: attest-evidence
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: |
+            dist/phase44/build-evidence.json
+            dist/phase44/release-manifest.json
+      - name: Verify build-evidence provenance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify dist/phase44/build-evidence.json \
+            --bundle "${{ steps.attest-evidence.outputs.bundle-path }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/phase44-supply-chain.yml" \
+            --source-ref refs/heads/main \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
+      - name: Verify release-manifest provenance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify dist/phase44/release-manifest.json \
+            --bundle "${{ steps.attest-evidence.outputs.bundle-path }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/phase44-supply-chain.yml" \
+            --source-ref refs/heads/main \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
+      - name: Upload Phase 44 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ucr-phase44-evidence-${{ github.sha }}
+          path: |
+            dist/phase44/ucr-linux-x86_64
+            dist/phase44/ucr.spdx.json
+            dist/phase44/build-evidence.json
+            dist/phase44/release-manifest.json
+          if-no-files-found: error
+          retention-days: 14
