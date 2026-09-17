@@ -28,3 +28,4 @@ Phase 40 adds `store-forward-api.md`: public `StoreForwardService` enqueue/statu
 
 Phase 40 adds `local-transport-api.md`: public `LocalTransportService` over the existing Phase-16 authenticated local/direct provider, preserving exact Service Principal admission and `NotAccepted` versus `AcceptanceUnknown` transport evidence without exporting discovery, listener, route-ranking or fallback ownership.
 Phase 40 also adds `mesh-api.md`: public `MeshService` over the existing Phase-28 Mesh runtime for bounded authenticated Group Message export/reconciliation, while peer identity/session evidence remains host-resolved and topology, Relay/NAT, route selection and retry stay outside the public client.
+Phase 40 also adds `recovery-api.md`: public `RecoveryService` over the canonical Recovery Plan and proof-gated Device recovery owners; Service Principal permissions admit the application channel but cannot replace recovery-authority or re-verification proofs.

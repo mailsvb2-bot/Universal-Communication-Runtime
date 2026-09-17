@@ -53,7 +53,7 @@ fn phase40_calls_are_reachable_through_the_same_public_sdk_boundary() {
 }
 
 #[test]
-fn phase40_keeps_required_proof_gaps_visible_instead_of_using_hidden_apis() {
+fn phase40_keeps_accessibility_blocker_visible_without_hidden_apis() {
     let capability = read("crates/ucr-reference-messenger/src/capability.rs");
     let spec = read("spec/reference-messenger.md");
     let adr = read("docs/adr/0078-phase40-reference-messenger-is-a-public-api-consumer.md");
@@ -74,9 +74,15 @@ fn phase40_keeps_required_proof_gaps_visible_instead_of_using_hidden_apis() {
             "missing Phase-40 proof area: {required}"
         );
     }
-    assert!(capability.contains("PublicApiGap"));
+    assert_eq!(
+        capability
+            .matches("state: ProofState::PublicApiGap")
+            .count(),
+        0
+    );
     assert!(capability.contains("PresentationModelOnly"));
-    assert!(spec.contains("Phase 40 is incomplete"));
+    assert!(spec.contains("Phase 40 public consumer API gaps are closed"));
+    assert!(spec.contains("concrete platform accessibility evidence"));
     assert!(spec.contains(
         "must not close a gap by linking the Reference Messenger directly to an internal owner"
     ));
@@ -358,4 +364,67 @@ fn phase40_p2p_uses_public_mesh_service_without_exporting_topology_brain() {
         "does not expose discovery, topology, NAT traversal, Relay, route selection or retry"
     ));
     assert!(adr.contains("existing Phase-28 `MeshGroupsRuntime` remains the canonical Mesh owner"));
+}
+#[test]
+fn phase40_recovery_uses_public_service_and_existing_proof_gates() {
+    let proto = read("proto/ucr/v1/recovery_api.proto");
+    let workflow = read("crates/ucr-core/src/recovery_workflow.rs");
+    let grpc = read("crates/ucr-api-grpc/src/recovery_service.rs");
+    let sdk = read("crates/ucr-sdk/src/lib.rs");
+    let client = read("crates/ucr-reference-messenger/src/client.rs");
+    let capability = read("crates/ucr-reference-messenger/src/capability.rs");
+    let spec = read("spec/recovery-api.md");
+    let adr = read("docs/adr/0084-phase40-recovery-service-reuses-canonical-proof-gates.md");
+
+    assert!(proto.contains("service RecoveryService"));
+    for rpc in [
+        "rpc InstallPlan",
+        "rpc RotatePlan",
+        "rpc RevokePlan",
+        "rpc GetActivePlan",
+        "rpc StageRecoveredDevice",
+        "rpc ActivateRecoveredDevice",
+    ] {
+        assert!(proto.contains(rpc), "missing public Recovery RPC: {rpc}");
+    }
+    assert!(workflow.contains("pub struct RecoveryPlanIngress"));
+    assert!(workflow.contains("pub struct RecoveryExecutionIngress"));
+    assert!(workflow.contains("RecoveryRequestGate"));
+    assert!(workflow.contains("DeviceReverificationGate"));
+    assert!(workflow.contains("RECOVERY_STAGE_PERMISSION"));
+    assert!(workflow.contains("RECOVERY_ACTIVATE_PERMISSION"));
+    assert!(grpc.contains("RecoveryExecutionIngress::new"));
+    assert!(!grpc.contains("authorize_and_stage_recovered_device("));
+    assert!(!grpc.contains("authorize_and_activate_reverified_device("));
+    assert!(sdk.contains("pb::recovery_service_client::RecoveryServiceClient<Channel>"));
+    assert!(sdk.contains("pub async fn stage_recovered_device"));
+    assert!(sdk.contains("pub async fn activate_recovered_device"));
+    assert!(client.contains("self.sdk.stage_recovered_device(request).await"));
+    assert!(client.contains("self.sdk.activate_recovered_device(request).await"));
+    assert!(capability.contains("RecoveryService plan + proof-gated Device recovery RPCs"));
+    assert!(spec.contains("An ordinary `PermissionGrant` is not recovery authority"));
+    assert!(adr.contains("independent verifier decision remains mandatory"));
+}
+
+#[test]
+fn phase40_recovery_does_not_move_recovery_brain_into_sdk_or_reference_client() {
+    let sdk = read("crates/ucr-sdk/src/lib.rs");
+    let client = read("crates/ucr-reference-messenger/src/client.rs");
+    for forbidden in [
+        "RecoveryRequestGate",
+        "RecoveryAuthorityVerifier",
+        "DeviceReverificationGate",
+        "DeviceReverificationVerifier",
+        "RecoveryDeviceStagingStore",
+        "ReverifiedDeviceActivationStore",
+    ] {
+        assert!(
+            !sdk.contains(forbidden),
+            "SDK acquired recovery-brain symbol: {forbidden}"
+        );
+        assert!(
+            !client.contains(forbidden),
+            "Reference Messenger acquired recovery-brain symbol: {forbidden}"
+        );
+    }
 }

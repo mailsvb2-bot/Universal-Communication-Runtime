@@ -38,7 +38,7 @@ The code-level states are `PublicApiAvailable`, `PublicApiGap` and `Presentation
 | Local | Public API available | LocalTransportService authenticated direct transmit RPC |
 | Offline | Public API available | StoreForwardService enqueue + payload-free status RPCs |
 | P2P | Public API available | MeshService authenticated peer export/reconcile RPCs |
-| Recovery | Public API gap | no public Recovery workflow service |
+| Recovery | Public API available | RecoveryService plan + proof-gated Device recovery RPCs |
 | Accessibility | Presentation model only | concrete platform UI evidence still required |
 
 A gap must remain explicit until the corresponding functionality is reachable through a versioned public API. Phase 40 must not close a gap by linking the Reference Messenger directly to an internal owner.
@@ -64,12 +64,16 @@ The presentation vocabulary contains an explicit `AwaitingDeliveryOpportunity` s
 
 The public `StoreForwardService` now exposes durable enqueue plus payload-free status through the same public SDK boundary. Reference Messenger maps queued work to `AwaitingDeliveryOpportunity`; enqueue acknowledgement is not Delivery/Read proof. Worker leases, due scans, route selection and retry execution remain internal, and cancel/manual-retry controls are still not simulated locally.
 
+## Recovery
+
+The public `RecoveryService` exposes Recovery Plan install/rotate/revoke/read plus proof-gated recovered-Device staging and independent re-verification activation. Service Principal auth/quota/audit admits the application channel, but ordinary permissions never substitute for the active Recovery Plan, `RecoveryAuthorityVerifier`, or `DeviceReverificationVerifier`. A recovered Device is first staged as `REVERIFICATION_REQUIRED`; only a separate verifier decision can promote that exact Device/Identity to `ACTIVE`.
+
 ## Accessibility and localization maturity
 
 The checked-in Rust presentation contract records the Canon requirements, but it is not itself proof that a native/web platform has passed screen-reader, keyboard, scaling, caption/subtitle/transcription and high-contrast tests. That proof remains required before Phase 40 can be called complete.
 
 ## Nonclaims and next closure work
 
-Phase 40 is incomplete until public consumer surfaces and executable Reference Messenger evidence cover recovery and concrete accessibility. Creating those surfaces must reuse the existing canonical owners and must not add a second communication brain.
+Phase 40 public consumer API gaps are closed. Completion still requires concrete platform accessibility evidence; that evidence must use the same public-client boundary and must not add a second communication brain.
 
 Phase 41 remains the owner of the full cross-implementation Conformance Suite; Phase 40 may add focused evidence only for its Reference Messenger boundary.

@@ -49,9 +49,9 @@ pub use personal_node::PersonalNodeStore;
 pub use recovery_workflow::{
     DeviceReverificationGate, DeviceReverificationProof, DeviceReverificationVerificationError,
     DeviceReverificationVerifier, RecoveryAdmissionProof, RecoveryAuthorityVerificationError,
-    RecoveryAuthorityVerifier, RecoveryDeviceStagingStore, RecoveryRequestGate,
-    ReverifiedDeviceActivationStore, authorize_and_activate_reverified_device,
-    authorize_and_stage_recovered_device,
+    RecoveryAuthorityVerifier, RecoveryDeviceStagingStore, RecoveryExecutionIngress,
+    RecoveryPlanIngress, RecoveryRequestGate, ReverifiedDeviceActivationStore,
+    authorize_and_activate_reverified_device, authorize_and_stage_recovered_device,
 };
 pub use service_auth::{
     ServiceAuthenticationError, ServiceCredentialIssueError, ServiceCredentialSecret,

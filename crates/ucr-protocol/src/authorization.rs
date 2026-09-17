@@ -30,6 +30,8 @@ pub const RECOVERY_PLAN_READ_PERMISSION: &str = "ucr.recovery.plan.read";
 pub const RECOVERY_PLAN_INSTALL_PERMISSION: &str = "ucr.recovery.plan.install";
 pub const RECOVERY_PLAN_ROTATE_PERMISSION: &str = "ucr.recovery.plan.rotate";
 pub const RECOVERY_PLAN_REVOKE_PERMISSION: &str = "ucr.recovery.plan.revoke";
+pub const RECOVERY_STAGE_PERMISSION: &str = "ucr.recovery.stage";
+pub const RECOVERY_ACTIVATE_PERMISSION: &str = "ucr.recovery.activate";
 pub const COMMAND_ACCEPT_PERMISSION: &str = "ucr.command.accept";
 pub const COMMAND_OUTCOME_READ_PERMISSION: &str = "ucr.command.outcome.read";
 pub const COMMAND_OUTCOME_WRITE_PERMISSION: &str = "ucr.command.outcome.write";
@@ -109,6 +111,8 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     RECOVERY_PLAN_INSTALL_PERMISSION,
     RECOVERY_PLAN_ROTATE_PERMISSION,
     RECOVERY_PLAN_REVOKE_PERMISSION,
+    RECOVERY_STAGE_PERMISSION,
+    RECOVERY_ACTIVATE_PERMISSION,
     COMMAND_ACCEPT_PERMISSION,
     COMMAND_OUTCOME_READ_PERMISSION,
     COMMAND_OUTCOME_WRITE_PERMISSION,

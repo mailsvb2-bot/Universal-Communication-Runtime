@@ -313,6 +313,8 @@ jobs:
           test -s docs/adr/0082-phase40-local-transport-service-reuses-phase16-provider.md &&
           test -s spec/mesh-api.md &&
           test -s docs/adr/0083-phase40-mesh-service-reuses-phase28-runtime.md &&
+          test -s spec/recovery-api.md &&
+          test -s docs/adr/0084-phase40-recovery-service-reuses-canonical-proof-gates.md &&
           test -s crates/ucr-reference-messenger/src/lib.rs
       - name: Validate public SDK boundaries
         run: python3 sdk/validate.py

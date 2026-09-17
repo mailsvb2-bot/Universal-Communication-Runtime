@@ -41,13 +41,14 @@ def main() -> None:
     require("pb::store_forward_service_client::StoreForwardServiceClient<Channel>" in sdk, "public SDK missing StoreForwardService client")
     require("pb::local_transport_service_client::LocalTransportServiceClient<Channel>" in sdk, "public SDK missing LocalTransportService client")
     require("pb::mesh_service_client::MeshServiceClient<Channel>" in sdk, "public SDK missing MeshService client")
+    require("pb::recovery_service_client::RecoveryServiceClient<Channel>" in sdk, "public SDK missing RecoveryService client")
     for method in ("register_device", "get_device", "revoke_device", "create_sync_session", "get_sync_session", "transition_sync", "record_sync_checkpoint", "get_latest_sync_checkpoint"):
         require(f"pub async fn {method}" in sdk, f"public SDK missing {method}")
 
     capability = (CRATE / "src/capability.rs").read_text(encoding="utf-8")
     for item in ("Chat", "Groups", "Calls", "MultiDevice", "Local", "Offline", "P2p", "Recovery", "Accessibility"):
         require(item in capability, f"Phase-40 proof area missing: {item}")
-    require(capability.count("ProofState::PublicApiGap") == 1, "Phase-40 public API gap count drifted")
+    require(capability.count("ProofState::PublicApiGap") == 0, "Phase-40 public API gaps must be closed")
     require("ProofState::PresentationModelOnly" in capability, "accessibility maturity gap hidden")
 
     accessibility = (CRATE / "src/accessibility.rs").read_text(encoding="utf-8")
@@ -76,6 +77,11 @@ def main() -> None:
     mesh_proto = (ROOT / "proto/ucr/v1/mesh_api.proto").read_text(encoding="utf-8")
     require("service MeshService" in mesh_proto, "public MeshService missing")
     require("MeshService authenticated peer export/reconcile RPCs" in capability, "P2P not marked with public evidence")
+    recovery_proto = (ROOT / "proto/ucr/v1/recovery_api.proto").read_text(encoding="utf-8")
+    require("service RecoveryService" in recovery_proto, "public RecoveryService missing")
+    for rpc in ("InstallPlan", "RotatePlan", "RevokePlan", "GetActivePlan", "StageRecoveredDevice", "ActivateRecoveredDevice"):
+        require(f"rpc {rpc}" in recovery_proto, f"RecoveryService missing {rpc}")
+    require("RecoveryService plan + proof-gated Device recovery RPCs" in capability, "Recovery not marked with public evidence")
     local_spec = (ROOT / "spec/local-transport-api.md").read_text(encoding="utf-8")
     require("existing Phase-16 local/direct transport owner" in local_spec, "Local public API owner reuse missing")
     require("NotAccepted" in local_spec and "AcceptanceUnknown" in local_spec, "Local failure ambiguity hidden")
@@ -85,10 +91,13 @@ def main() -> None:
     require("self.sdk.transmit_local(request).await" in client, "Reference Messenger missing direct local transmit")
     require("self.sdk.export_mesh_group_messages(request).await" in client, "Reference Messenger missing P2P export")
     require("self.sdk.reconcile_mesh_group_message(request).await" in client, "Reference Messenger missing P2P reconcile")
+    for method in ("install_recovery_plan", "rotate_recovery_plan", "revoke_recovery_plan", "get_active_recovery_plan", "stage_recovered_device", "activate_recovered_device"):
+        require(f"self.sdk.{method}(request).await" in client, f"Reference Messenger missing Recovery method: {method}")
 
     spec = (ROOT / "spec/reference-messenger.md").read_text(encoding="utf-8")
-    require("Phase 40 is incomplete" in spec, "Phase 40 completion is overclaimed")
-    require("PublicApiGap" in spec, "public API blockers hidden from spec")
+    require("Concrete platform accessibility" in spec or "concrete platform accessibility" in spec, "Phase 40 accessibility blocker hidden")
+    require("Recovery | Public API available" in spec, "Recovery public proof hidden from spec")
+    require("Accessibility | Presentation model only" in spec, "accessibility blocker hidden from spec")
 
 
 if __name__ == "__main__":

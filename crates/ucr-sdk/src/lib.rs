@@ -87,6 +87,7 @@ pub struct UcrSdkClient {
     store_forward: pb::store_forward_service_client::StoreForwardServiceClient<Channel>,
     local_transport: pb::local_transport_service_client::LocalTransportServiceClient<Channel>,
     mesh: pb::mesh_service_client::MeshServiceClient<Channel>,
+    recovery: pb::recovery_service_client::RecoveryServiceClient<Channel>,
 }
 
 impl fmt::Debug for UcrSdkClient {
@@ -136,7 +137,10 @@ impl UcrSdkClient {
             pb::local_transport_service_client::LocalTransportServiceClient::new(channel.clone())
                 .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
                 .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
-        let mesh = pb::mesh_service_client::MeshServiceClient::new(channel)
+        let mesh = pb::mesh_service_client::MeshServiceClient::new(channel.clone())
+            .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+            .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+        let recovery = pb::recovery_service_client::RecoveryServiceClient::new(channel)
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         Ok(Self {
@@ -150,6 +154,7 @@ impl UcrSdkClient {
             store_forward,
             local_transport,
             mesh,
+            recovery,
         })
     }
     /// Creates one authenticated request without changing its protobuf body.
@@ -688,6 +693,92 @@ impl UcrSdkClient {
         Ok(self
             .mesh
             .reconcile_group_message(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Installs one canonical Recovery Plan through ordinary plan-administration permission.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the public UCR service.
+    pub async fn install_recovery_plan(
+        &mut self,
+        message: pb::RecoveryInstallPlanRequest,
+    ) -> Result<pb::RecoveryPlanMutationResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recovery.install_plan(request).await?.into_inner())
+    }
+
+    /// Rotates one canonical Recovery Plan through expected-current compare-and-swap.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the public UCR service.
+    pub async fn rotate_recovery_plan(
+        &mut self,
+        message: pb::RecoveryRotatePlanRequest,
+    ) -> Result<pb::RecoveryPlanMutationResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recovery.rotate_plan(request).await?.into_inner())
+    }
+
+    /// Revokes one canonical Recovery Plan.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the public UCR service.
+    pub async fn revoke_recovery_plan(
+        &mut self,
+        message: pb::RecoveryRevokePlanRequest,
+    ) -> Result<pb::RecoveryPlanMutationResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recovery.revoke_plan(request).await?.into_inner())
+    }
+
+    /// Reads the active canonical Recovery Plan.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the public UCR service.
+    pub async fn get_active_recovery_plan(
+        &mut self,
+        message: pb::RecoveryGetActivePlanRequest,
+    ) -> Result<pb::RecoveryGetActivePlanResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recovery.get_active_plan(request).await?.into_inner())
+    }
+
+    /// Requests proof-gated staging of one recovered Device.
+    ///
+    /// Service Principal metadata admits and audits the application channel only; the active
+    /// Recovery Plan and independent verifier remain the recovery authority.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the public UCR service.
+    pub async fn stage_recovered_device(
+        &mut self,
+        message: pb::RecoveryStageDeviceRequest,
+    ) -> Result<pb::RecoveryDeviceResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .recovery
+            .stage_recovered_device(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Requests independent re-verification and activation of one staged recovered Device.
+    ///
+    /// Service Principal metadata gates the RPC channel; independent re-verification remains
+    /// the authority that can promote the staged Device to Active.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the public UCR service.
+    pub async fn activate_recovered_device(
+        &mut self,
+        message: pb::RecoveryActivateDeviceRequest,
+    ) -> Result<pb::RecoveryDeviceResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .recovery
+            .activate_recovered_device(request)
             .await?
             .into_inner())
     }

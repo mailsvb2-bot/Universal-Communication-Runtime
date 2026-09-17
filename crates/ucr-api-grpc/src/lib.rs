@@ -60,6 +60,9 @@ pub use mesh_service::{
     AuthenticatedMeshPeerSession, GrpcMeshService, MeshPeerSessionResolver, mesh_service_server,
 };
 
+mod recovery_service;
+pub use recovery_service::{GrpcRecoveryService, recovery_service_server};
+
 pub const SERVICE_CREDENTIAL_ID_METADATA_KEY: &str = "ucr-service-credential-id-bin";
 pub const SERVICE_CREDENTIAL_SECRET_METADATA_KEY: &str = "ucr-service-credential-secret-bin";
 pub const GRPC_DIAGNOSTIC_DOMAIN: &str = "ucr.grpc.binding";

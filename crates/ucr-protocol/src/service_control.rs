@@ -56,6 +56,12 @@ pub const SERVICE_AUDIT_LOCAL_TRANSPORT_TRANSMIT_OPERATION_KIND: &str =
     "ucr.transport.local.transmit";
 pub const SERVICE_AUDIT_MESH_EXPORT_OPERATION_KIND: &str = "ucr.mesh.export";
 pub const SERVICE_AUDIT_MESH_RECONCILE_OPERATION_KIND: &str = "ucr.mesh.reconcile";
+pub const SERVICE_AUDIT_RECOVERY_PLAN_INSTALL_OPERATION_KIND: &str = "ucr.recovery.plan.install";
+pub const SERVICE_AUDIT_RECOVERY_PLAN_ROTATE_OPERATION_KIND: &str = "ucr.recovery.plan.rotate";
+pub const SERVICE_AUDIT_RECOVERY_PLAN_REVOKE_OPERATION_KIND: &str = "ucr.recovery.plan.revoke";
+pub const SERVICE_AUDIT_RECOVERY_PLAN_READ_OPERATION_KIND: &str = "ucr.recovery.plan.read";
+pub const SERVICE_AUDIT_RECOVERY_STAGE_OPERATION_KIND: &str = "ucr.recovery.stage";
+pub const SERVICE_AUDIT_RECOVERY_ACTIVATE_OPERATION_KIND: &str = "ucr.recovery.activate";
 pub const MAX_SERVICE_AUDIT_OPERATION_KIND_LEN: usize = 256;
 pub const MAX_SERVICE_AUDIT_READ_ITEMS: usize = 1024;
 pub const MAX_SERVICE_REQUEST_PERMISSION_LEN: usize = 256;
