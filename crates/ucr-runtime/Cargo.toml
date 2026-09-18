@@ -1,0 +1,23 @@
+[package]
+name = "ucr-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "ucr-runtime"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread"] }
+tokio-stream = { version = "=0.1.17", features = ["net"] }
+tonic = { version = "=0.14.6", features = ["transport"] }
+ucr-api-grpc = { path = "../ucr-api-grpc" }
+ucr-core = { path = "../ucr-core" }
+ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
+
+[lints]
+workspace = true
