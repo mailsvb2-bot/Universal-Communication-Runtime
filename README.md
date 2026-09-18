@@ -92,7 +92,7 @@ UCR is not CRM, ERP, payment processing, booking, marketing automation, medical 
 
 ## Licensing
 
-The licensing boundary is intentionally **not decided yet**. Protocol, Core, SDKs, Reference Client, Managed Infrastructure and Enterprise features require a dedicated ADR/RFC before a public release license is selected.
+The Production 1.0 licensing boundary is defined by ADR 0104. Repository visibility and that ADR do **not** themselves grant a general software redistribution/relicensing license. A release intended for general third-party redistribution must carry publisher-approved license text; Managed Infrastructure and Enterprise Features remain separate commercial/service licensing surfaces by default.
 
 Phase 33 adds a Prepared concrete VK API 5.199 text provider over the same Phase-31 Bridge boundary: `messages.send` uses a deterministic domain-separated SHA-256 context-bound `random_id`; Bots Long Poll provides bounded inbound `message_new` text; access tokens and Long Poll keys remain provider-local/redacted; dynamic Long Poll URLs are HTTPS + VK-host constrained; provider acceptance remains distinct from canonical Delivery/Read. Overlay Conversations, provider credential UX/secure-store integration, HA/restart-gap-free Long Poll ownership and Production maturity remain later work.
 
