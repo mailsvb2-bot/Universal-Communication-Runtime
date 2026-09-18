@@ -726,7 +726,7 @@ mod tests {
                     negotiation_generation: 1,
                     crypto_epoch: 1,
                     crypto_state_ref: id("crypto-state"),
-                    crypto_suite: CryptoSuite::X25519HkdfSha256XChaCha20Poly1305,
+                    crypto_suite: CryptoSuite::UcrV1,
                     media_kind: MediaKind::Video,
                     sequence: 1,
                     media_timestamp: 1,
