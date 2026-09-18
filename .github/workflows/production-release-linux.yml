@@ -74,6 +74,14 @@ jobs:
             echo "source_commit must be a lowercase 40-hex SHA" >&2
             exit 2
           fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Production signing workflow must be dispatched from refs/heads/main" >&2
+            exit 3
+          fi
+          if [[ "$GITHUB_SHA" != "$candidate" ]]; then
+            echo "Workflow provenance SHA differs from requested signing source" >&2
+            exit 3
+          fi
           actual="$(git rev-parse HEAD)"
           test "$actual" = "$candidate"
           git fetch --no-tags origin main
