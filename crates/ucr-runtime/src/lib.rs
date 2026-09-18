@@ -77,10 +77,13 @@ impl ProductionRuntime {
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         if !path.is_file() {
-            return Err(\n                "production runtime requires an explicitly initialized database".to_owned(),\n            );
+            return Err(
+                "production runtime requires an explicitly initialized database".to_owned(),
+            );
         }
         let store = Arc::new(
-            SqliteLocalStore::open(path)\n                .map_err(|error| format!("open durable store: {error:?}"))?,
+            SqliteLocalStore::open(path)
+                .map_err(|error| format!("open durable store: {error:?}"))?,
         );
         let diagnostics = diagnostics_for(store.as_ref())?;
         if diagnostics.storage_health != StorageHealth::Healthy {
