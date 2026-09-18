@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/call.proto";
+import "ucr/v1/common.proto";
+import "ucr/v1/conference.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/identity.proto";
+import "ucr/v1/runtime.proto";
+
+message ConferenceStartRequest {
+  ConferenceStart conference = 1;
+}
+
+message ConferenceStartResponse {
+  oneof result {
+    ConferenceSnapshot conference = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message ConferenceGetRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+}
+
+message ConferenceGetResponse {
+  oneof result {
+    ConferenceSnapshot conference = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message ConferenceSignalRequest {
+  CallSignal signal = 1;
+}
+
+message ConferenceSignalResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message ConferenceSetSubscriptionsRequest {
+  ConferenceSubscriptionSet subscriptions = 1;
+}
+
+message ConferenceSetSubscriptionsResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Issues a short-lived one-participant join URL. The token is embedded in the URL fragment so it
+// is not sent in normal HTTP request targets or referrer logs. Browser/native clients extract the
+// fragment and present the token in the realtime transport Authorization metadata.
+message ConferenceJoinUrlRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  PrincipalRef participant = 3;
+  optional OpaqueId device_id = 4;
+  uint32 ttl_seconds = 5;
+}
+
+message ConferenceJoinGrant {
+  OpaqueId session_id = 1;
+  string join_url = 2;
+  int64 expires_at_unix_ms = 3;
+}
+
+message ConferenceJoinUrlResponse {
+  oneof result {
+    ConferenceJoinGrant grant = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+enum ConferenceAttendanceKind {
+  CONFERENCE_ATTENDANCE_KIND_UNSPECIFIED = 0;
+  CONFERENCE_ATTENDANCE_KIND_JOINED = 1;
+  CONFERENCE_ATTENDANCE_KIND_LEFT = 2;
+  CONFERENCE_ATTENDANCE_KIND_RECONNECTED = 3;
+  CONFERENCE_ATTENDANCE_KIND_MEDIA_READY = 4;
+}
+
+// Payload for canonical EventEnvelope entries. Event types are versioned as
+// ucr.conference.attendance.{joined|left|reconnected|media_ready}.v1.
+message ConferenceAttendanceEvent {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  PrincipalRef participant = 4;
+  optional OpaqueId device_id = 5;
+  ConferenceAttendanceKind kind = 6;
+  int64 occurred_at_unix_ms = 7;
+  uint64 session_sequence = 8;
+}
+
+service ConferenceService {
+  rpc StartConference(ConferenceStartRequest) returns (ConferenceStartResponse);
+  rpc GetConference(ConferenceGetRequest) returns (ConferenceGetResponse);
+  rpc SignalConference(ConferenceSignalRequest) returns (ConferenceSignalResponse);
+  rpc SetSubscriptions(ConferenceSetSubscriptionsRequest) returns (ConferenceSetSubscriptionsResponse);
+  rpc IssueJoinUrl(ConferenceJoinUrlRequest) returns (ConferenceJoinUrlResponse);
+}

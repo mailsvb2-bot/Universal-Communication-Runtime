@@ -7,7 +7,7 @@ import "ucr/v1/common.proto";
 import "ucr/v1/identity.proto";
 import "ucr/v1/media_e2ee.proto";
 
-// Phase-30 Conference is a projection/coordinator over canonical Group + CallSession + MLS + SFU.
+// Conference is a projection/coordinator over canonical Group + CallSession + MLS + SFU.
 // It is not a second durable signalling or membership entity.
 enum ConferenceTopology {
   CONFERENCE_TOPOLOGY_UNSPECIFIED = 0;
@@ -45,5 +45,5 @@ message ConferenceSubscriptionSet {
   repeated ConferenceMediaSubscription subscriptions = 3;
 }
 
-// No ConferenceService is introduced in Phase 30. Start/Get/Signal lifecycle stays owned by the
-// existing CallService; embedded/reference coordinators may use the Conference projection above.
+// Public service messages live in conference_api.proto. That service is a stable facade over the
+// same CallSession/Group/MLS/SFU owners above; it does not create a second conference database.

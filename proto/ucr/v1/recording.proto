@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/identity.proto";
+import "ucr/v1/runtime.proto";
+
+enum RecordingState {
+  RECORDING_STATE_UNSPECIFIED = 0;
+  RECORDING_STATE_WAITING_FOR_CONSENT = 1;
+  RECORDING_STATE_READY = 2;
+  RECORDING_STATE_ACTIVE = 3;
+  RECORDING_STATE_STOPPED = 4;
+  RECORDING_STATE_EXPIRED = 5;
+  RECORDING_STATE_DELETED = 6;
+}
+
+enum RecordingConsentState {
+  RECORDING_CONSENT_STATE_UNSPECIFIED = 0;
+  RECORDING_CONSENT_STATE_PENDING = 1;
+  RECORDING_CONSENT_STATE_GRANTED = 2;
+  RECORDING_CONSENT_STATE_DENIED = 3;
+  RECORDING_CONSENT_STATE_REVOKED = 4;
+}
+
+// Recording is always encrypted at rest. Retention is explicit and finite for every recording.
+// A deployment may enforce stricter limits than requested.
+message RecordingPolicy {
+  bool require_all_participant_consent = 1;
+  bool notify_all_participants = 2;
+  uint64 retention_seconds = 3;
+  optional string policy_reference = 4;
+}
+
+message RecordingConsent {
+  PrincipalRef participant = 1;
+  RecordingConsentState state = 2;
+  int64 decided_at_unix_ms = 3;
+}
+
+message RecordingSession {
+  TenantScope scope = 1;
+  OpaqueId recording_id = 2;
+  OpaqueId call_id = 3;
+  PrincipalRef requested_by = 4;
+  RecordingPolicy policy = 5;
+  RecordingState state = 6;
+  repeated RecordingConsent consents = 7;
+  int64 requested_at_unix_ms = 8;
+  optional int64 started_at_unix_ms = 9;
+  optional int64 stopped_at_unix_ms = 10;
+  int64 expires_at_unix_ms = 11;
+}
+
+message RecordingRequest {
+  TenantScope scope = 1;
+  OpaqueId recording_id = 2;
+  OpaqueId call_id = 3;
+  RecordingPolicy policy = 4;
+}
+
+message RecordingRequestResponse {
+  oneof result {
+    RecordingSession recording = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RecordingGetRequest {
+  TenantScope scope = 1;
+  OpaqueId recording_id = 2;
+}
+
+message RecordingGetResponse {
+  oneof result {
+    RecordingSession recording = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RecordingSetConsentRequest {
+  TenantScope scope = 1;
+  OpaqueId recording_id = 2;
+  RecordingConsent consent = 3;
+}
+
+message RecordingSetConsentResponse {
+  oneof result {
+    RecordingSession recording = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RecordingStartRequest {
+  TenantScope scope = 1;
+  OpaqueId recording_id = 2;
+}
+
+message RecordingStartResponse {
+  oneof result {
+    RecordingSession recording = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RecordingStopRequest {
+  TenantScope scope = 1;
+  OpaqueId recording_id = 2;
+}
+
+message RecordingStopResponse {
+  oneof result {
+    RecordingSession recording = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RecordingDeleteRequest {
+  TenantScope scope = 1;
+  OpaqueId recording_id = 2;
+}
+
+message RecordingDeleteResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Available only when capability ucr.conference.recording is advertised. Implementations MUST
+// fail closed when policy/notification/required consent/retention/encrypted-storage preconditions
+// are not satisfied. SFU forwarding never implies recording.
+service RecordingService {
+  rpc RequestRecording(RecordingRequest) returns (RecordingRequestResponse);
+  rpc GetRecording(RecordingGetRequest) returns (RecordingGetResponse);
+  rpc SetRecordingConsent(RecordingSetConsentRequest) returns (RecordingSetConsentResponse);
+  rpc StartRecording(RecordingStartRequest) returns (RecordingStartResponse);
+  rpc StopRecording(RecordingStopRequest) returns (RecordingStopResponse);
+  rpc DeleteRecording(RecordingDeleteRequest) returns (RecordingDeleteResponse);
+}

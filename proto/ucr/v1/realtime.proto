@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/identity.proto";
+import "ucr/v1/runtime.proto";
+import "ucr/v1/sfu.proto";
+
+// Join credentials are transport metadata, never copied into this message or durable canonical
+// state. A successful join binds the short-lived token to this exact scope/call/session.
+message RealtimeJoinRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+}
+
+message RealtimeSession {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  PrincipalRef participant = 4;
+  optional OpaqueId device_id = 5;
+  int64 expires_at_unix_ms = 6;
+  uint64 heartbeat_interval_ms = 7;
+}
+
+message RealtimeJoinResponse {
+  oneof result {
+    RealtimeSession session = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeHeartbeatRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  uint64 expected_session_sequence = 4;
+}
+
+message RealtimeHeartbeatResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeLeaveRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+}
+
+message RealtimeLeaveResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// The source Principal/Device is taken from authenticated session state and revalidated against
+// the encrypted frame header plus canonical Call/Group/MLS state before any SFU sink side effect.
+message RealtimePublishMediaRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  SfuForwardEnvelope envelope = 4;
+}
+
+message RealtimePublishMediaReceipt {
+  OpaqueId call_id = 1;
+  OpaqueId session_id = 2;
+  uint32 accepted_recipient_count = 3;
+}
+
+message RealtimePublishMediaResponse {
+  oneof result {
+    RealtimePublishMediaReceipt receipt = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeSubscribeMediaRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+}
+
+// Contains exactly the already-encrypted SFU envelope accepted for this authenticated recipient.
+message RealtimeDownlinkMedia {
+  SfuForwardEnvelope envelope = 1;
+}
+
+service RealtimeService {
+  rpc JoinRealtime(RealtimeJoinRequest) returns (RealtimeJoinResponse);
+  rpc HeartbeatRealtime(RealtimeHeartbeatRequest) returns (RealtimeHeartbeatResponse);
+  rpc LeaveRealtime(RealtimeLeaveRequest) returns (RealtimeLeaveResponse);
+  rpc PublishMedia(RealtimePublishMediaRequest) returns (RealtimePublishMediaResponse);
+  rpc SubscribeMedia(RealtimeSubscribeMediaRequest) returns (stream RealtimeDownlinkMedia);
+}
