@@ -113,6 +113,21 @@ Phase 45 `platform_signing` can pass only on independently verifiable platform-a
 
 No ephemeral CI key may be presented as long-lived production publisher identity.
 
+Production readiness does not trust a free-form `platform_signing: pass` claim. The
+Production validator must perform **live platform verification** against the exact artifact and
+expected publisher identity in the same invocation:
+
+- Windows: Authenticode verification with `signtool`, with the signer certificate thumbprint
+  matched exactly;
+- macOS: `codesign --verify --deep --strict`, with the expected TeamIdentifier matched exactly;
+- Linux: detached OpenPGP verification with `gpg --verify`, with the VALIDSIG fingerprint
+  matched exactly.
+
+The verifier binds the successful native verification to the source commit, platform,
+`artifact_sha256`, `signing_identity`, and verifier method. Missing verifier tooling,
+missing signature material, identity mismatch, digest mismatch, or unsigned artifacts are
+release-blocking. A JSON evidence string alone can never promote a build to Production.
+
 ## Candidate CI
 
 The Phase-45 workflow builds and validates release-like profiles and reruns the candidate-critical security/data-safety/compatibility/conformance/chaos/public-contract evidence. It also executes the durable runtime/observability boundary and the fixed production-profile performance contract.
