@@ -6,10 +6,10 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use ucr_api_grpc::{
-    GrpcCallService, GrpcDeviceService, GrpcEventService, GrpcGroupService, GrpcIntegrationService,
-    GrpcStoreForwardService, GrpcSyncService, call_service_server, device_service_server,
-    event_service_server, group_service_server, integration_service_server,
-    store_forward_service_server, sync_service_server,
+    GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
+    GrpcIntegrationService, GrpcStoreForwardService, GrpcSyncService, call_service_server,
+    conference_service_server, device_service_server, event_service_server, group_service_server,
+    integration_service_server, store_forward_service_server, sync_service_server,
 };
 use ucr_core::{StorageHealth, StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock};
 use ucr_storage_sqlite::SqliteLocalStore;
@@ -152,6 +152,11 @@ impl ProductionRuntime {
                 Arc::clone(&store),
             )))
             .add_service(call_service_server(GrpcCallService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
+            .add_service(conference_service_server(GrpcConferenceService::new(
                 Arc::clone(&clock),
                 Arc::clone(&authorization),
                 Arc::clone(&store),
