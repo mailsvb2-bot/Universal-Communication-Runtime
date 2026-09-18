@@ -41,15 +41,15 @@ fn production_release_requires_exact_main_push_proof() {
 
     for marker in [
         "REQUIRED_MAIN_WORKFLOWS",
-        ""CI"",
-        ""Conformance"",
-        ""Phase 42 AI Actor"",
-        ""Phase 43 Chaos Lab"",
-        ""Phase 44 Supply Chain"",
-        ""Phase 45 Production Hardening"",
-        "item.get("event") != "push"",
-        "item.get("headSha") != source_commit",
-        "item.get("conclusion") != "success"",
+        r#""CI""#,
+        r#""Conformance""#,
+        r#""Phase 42 AI Actor""#,
+        r#""Phase 43 Chaos Lab""#,
+        r#""Phase 44 Supply Chain""#,
+        r#""Phase 45 Production Hardening""#,
+        r#"item.get("event") != "push""#,
+        r#"item.get("headSha") != source_commit"#,
+        r#"item.get("conclusion") != "success""#,
         "required exact-main workflows are not proven successful",
     ] {
         assert!(
@@ -59,7 +59,7 @@ fn production_release_requires_exact_main_push_proof() {
     }
 
     assert!(workflow.contains("gh run list"));
-    assert!(workflow.contains("--commit "$SOURCE_COMMIT""));
+    assert!(workflow.contains(r#"--commit "$SOURCE_COMMIT""#));
     assert!(workflow.contains("tools/production_release.py emit-readiness"));
 }
 
@@ -76,7 +76,7 @@ fn signed_binary_is_verified_live_before_production_claim() {
         "--platform linux-openpgp",
         "tools/production_readiness.py validate",
         "--mode production",
-        "--signing-identity "$UCR_LINUX_GPG_FINGERPRINT_NORMALIZED"",
+        r#"--signing-identity "$UCR_LINUX_GPG_FINGERPRINT_NORMALIZED""#,
     ] {
         assert!(
             workflow.contains(marker),
@@ -107,7 +107,7 @@ fn production_bundle_is_complete_and_supply_chain_attested() {
         "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
         "gh attestation verify",
         "--source-ref refs/heads/main",
-        "--source-digest "$SOURCE_COMMIT"",
+        r#"--source-digest "$SOURCE_COMMIT""#,
         "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
     ] {
         assert!(
