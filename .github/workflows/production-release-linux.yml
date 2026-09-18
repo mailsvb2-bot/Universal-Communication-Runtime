@@ -1,0 +1,302 @@
+name: Production Release Linux
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/production-release-linux.yml"
+      - "tools/production_release.py"
+      - "tools/platform_signing.py"
+      - "tools/production_readiness.py"
+      - "tools/supply_chain.py"
+      - "crates/ucr-architecture-tests/tests/production_release_signing.rs"
+      - "docs/adr/0094-production-release-requires-publisher-owned-platform-signing.md"
+      - "spec/production-release.md"
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact current main commit SHA to build and sign
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-release-linux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Production release helper self-test
+        run: python3 tools/production_release.py self-test
+      - name: Platform signing verifier self-test
+        run: python3 tools/platform_signing.py self-test
+      - name: Production readiness verifier self-test
+        run: python3 tools/production_readiness.py self-test
+      - name: Production release architecture lock
+        run: cargo test --locked -p ucr-architecture-tests --test production_release_signing
+      - name: Recheck pinned external actions
+        run: python3 tools/supply_chain.py scan-actions --root .
+
+  sign-linux:
+    if: github.event_name == 'workflow_dispatch'
+    needs: contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      UCR_LINUX_GPG_PRIVATE_KEY_BASE64: ${{ secrets.UCR_LINUX_GPG_PRIVATE_KEY_BASE64 }}
+      UCR_LINUX_GPG_FINGERPRINT: ${{ secrets.UCR_LINUX_GPG_FINGERPRINT }}
+      UCR_LINUX_GPG_PASSPHRASE: ${{ secrets.UCR_LINUX_GPG_PASSPHRASE }}
+    steps:
+      - name: Checkout requested exact source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+
+      - name: Verify requested source is the exact current main head
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate='${{ inputs.source_commit }}'
+          if [[ ! "$candidate" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_commit must be a lowercase 40-hex SHA" >&2
+            exit 2
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Production signing workflow must be dispatched from refs/heads/main" >&2
+            exit 3
+          fi
+          if [[ "$GITHUB_SHA" != "$candidate" ]]; then
+            echo "Workflow provenance SHA differs from requested signing source" >&2
+            exit 3
+          fi
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "$candidate"
+          git fetch --no-tags origin main
+          main_head="$(git rev-parse origin/main)"
+          if [[ "$candidate" != "$main_head" ]]; then
+            echo "Production signing only accepts the exact current main head" >&2
+            exit 3
+          fi
+          echo "SOURCE_COMMIT=$candidate" >> "$GITHUB_ENV"
+          echo "RELEASE_WORKFLOW_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+
+      - name: Require external publisher signing material
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${UCR_LINUX_GPG_PRIVATE_KEY_BASE64:-}" || {
+            echo "Missing UCR_LINUX_GPG_PRIVATE_KEY_BASE64" >&2
+            exit 4
+          }
+          test -n "${UCR_LINUX_GPG_FINGERPRINT:-}" || {
+            echo "Missing UCR_LINUX_GPG_FINGERPRINT" >&2
+            exit 4
+          }
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Install native release prerequisites
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake build-essential gnupg
+
+      - name: Prove all required exact-main workflows are green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/production-linux
+          gh run list \
+            --commit "$SOURCE_COMMIT" \
+            --limit 100 \
+            --json workflowName,conclusion,event,headSha,url \
+            > dist/production-linux/main-proof.json
+          python3 tools/production_release.py emit-readiness \
+            --proof-json dist/production-linux/main-proof.json \
+            --source-commit "$SOURCE_COMMIT" \
+            --release-workflow-url "$RELEASE_WORKFLOW_URL" \
+            --output dist/production-linux/ucr-production-readiness.json
+
+      - name: Build exact production runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --profile production -p ucr-runtime
+          cargo test --locked -p ucr-runtime
+          cp target/production/ucr-runtime dist/production-linux/ucr-runtime-linux-x86_64
+          chmod 0755 dist/production-linux/ucr-runtime-linux-x86_64
+
+      - name: Generate production SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 --locked > dist/production-linux/root-metadata.json
+          python3 tools/supply_chain.py sbom \
+            --metadata dist/production-linux/root-metadata.json \
+            --output dist/production-linux/ucr.spdx.json \
+            --namespace-seed "$SOURCE_COMMIT-production-linux"
+
+      - name: Import and verify publisher identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/ucr-publisher-gnupg"
+          mkdir -m 0700 "$GNUPGHOME"
+          key_file="$RUNNER_TEMP/ucr-publisher-private-key.asc"
+          printf '%s' "$UCR_LINUX_GPG_PRIVATE_KEY_BASE64" | base64 --decode > "$key_file"
+          chmod 0600 "$key_file"
+          gpg --batch --import "$key_file"
+          rm -f "$key_file"
+
+          expected="$(printf '%s' "$UCR_LINUX_GPG_FINGERPRINT" | tr -d ' :\t\r\n-' | tr '[:lower:]' '[:upper:]')"
+          [[ "$expected" =~ ^[0-9A-F]+$ ]] || {
+            echo "Publisher fingerprint is malformed" >&2
+            exit 5
+          }
+          actual="$(gpg --batch --with-colons --fingerprint --list-secret-keys "$expected" | awk -F: '$1 == "fpr" { print toupper($10); exit }')"
+          if [[ -z "$actual" || "$actual" != "$expected" ]]; then
+            echo "Imported publisher key fingerprint does not match configured identity" >&2
+            exit 6
+          fi
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          echo "UCR_LINUX_GPG_FINGERPRINT_NORMALIZED=$expected" >> "$GITHUB_ENV"
+
+      - name: Sign exact production runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="dist/production-linux/ucr-runtime-linux-x86_64"
+          signature="$artifact.asc"
+          if [[ -n "${UCR_LINUX_GPG_PASSPHRASE:-}" ]]; then
+            gpg --batch --yes --pinentry-mode loopback \
+              --passphrase "$UCR_LINUX_GPG_PASSPHRASE" \
+              --local-user "$UCR_LINUX_GPG_FINGERPRINT_NORMALIZED" \
+              --armor --detach-sign --output "$signature" "$artifact"
+          else
+            gpg --batch --yes \
+              --local-user "$UCR_LINUX_GPG_FINGERPRINT_NORMALIZED" \
+              --armor --detach-sign --output "$signature" "$artifact"
+          fi
+
+      - name: Verify native publisher signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/platform_signing.py verify \
+            --platform linux-openpgp \
+            --artifact dist/production-linux/ucr-runtime-linux-x86_64 \
+            --signature dist/production-linux/ucr-runtime-linux-x86_64.asc \
+            --expected-identity "$UCR_LINUX_GPG_FINGERPRINT_NORMALIZED" \
+            --source-commit "$SOURCE_COMMIT" \
+            --output dist/production-linux/ucr-platform-signing.json
+
+      - name: Validate Production readiness with live signature verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/production_readiness.py validate \
+            --evidence dist/production-linux/ucr-production-readiness.json \
+            --mode production \
+            --platform linux-openpgp \
+            --artifact dist/production-linux/ucr-runtime-linux-x86_64 \
+            --signature dist/production-linux/ucr-runtime-linux-x86_64.asc \
+            --signing-identity "$UCR_LINUX_GPG_FINGERPRINT_NORMALIZED"
+
+      - name: Create complete signed release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/supply_chain.py manifest-create \
+            --output dist/production-linux/release-manifest.json \
+            --commit "$SOURCE_COMMIT" \
+            --release-sequence "$GITHUB_RUN_ID" \
+            --artifact dist/production-linux/ucr-runtime-linux-x86_64 \
+            --artifact dist/production-linux/ucr-runtime-linux-x86_64.asc \
+            --artifact dist/production-linux/ucr-platform-signing.json \
+            --artifact dist/production-linux/ucr-production-readiness.json \
+            --artifact dist/production-linux/ucr.spdx.json \
+            --artifact dist/production-linux/main-proof.json \
+            --required-artifact ucr-runtime-linux-x86_64 \
+            --required-artifact ucr-runtime-linux-x86_64.asc \
+            --required-artifact ucr-platform-signing.json \
+            --required-artifact ucr-production-readiness.json \
+            --required-artifact ucr.spdx.json \
+            --required-artifact main-proof.json
+
+          python3 tools/supply_chain.py manifest-verify \
+            --manifest dist/production-linux/release-manifest.json \
+            --artifact-dir dist/production-linux \
+            --minimum-release-sequence "$GITHUB_RUN_ID" \
+            --expected-commit "$SOURCE_COMMIT"
+
+      - name: Attest signed Production release bundle
+        id: attest-release
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: |
+            dist/production-linux/ucr-runtime-linux-x86_64
+            dist/production-linux/ucr-runtime-linux-x86_64.asc
+            dist/production-linux/ucr-platform-signing.json
+            dist/production-linux/ucr-production-readiness.json
+            dist/production-linux/ucr.spdx.json
+            dist/production-linux/main-proof.json
+            dist/production-linux/release-manifest.json
+
+      - name: Verify signed release provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for artifact in \
+            ucr-runtime-linux-x86_64 \
+            ucr-runtime-linux-x86_64.asc \
+            ucr-platform-signing.json \
+            ucr-production-readiness.json \
+            ucr.spdx.json \
+            main-proof.json \
+            release-manifest.json
+          do
+            gh attestation verify "dist/production-linux/$artifact" \
+              --bundle "${{ steps.attest-release.outputs.bundle-path }}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/production-release-linux.yml" \
+              --source-ref refs/heads/main \
+              --source-digest "$SOURCE_COMMIT" \
+              --deny-self-hosted-runners
+          done
+
+      - name: Upload signed Production release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ucr-production-linux-${{ env.SOURCE_COMMIT }}
+          path: |
+            dist/production-linux/ucr-runtime-linux-x86_64
+            dist/production-linux/ucr-runtime-linux-x86_64.asc
+            dist/production-linux/ucr-platform-signing.json
+            dist/production-linux/ucr-production-readiness.json
+            dist/production-linux/ucr.spdx.json
+            dist/production-linux/main-proof.json
+            dist/production-linux/release-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove publisher key material
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "${GNUPGHOME:-}"
+          unset UCR_LINUX_GPG_PASSPHRASE
