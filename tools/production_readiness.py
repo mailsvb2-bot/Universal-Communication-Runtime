@@ -15,6 +15,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+from platform_signing import (
+    PLATFORMS,
+    SCHEMA as PLATFORM_SIGNING_SCHEMA,
+    VerificationError as PlatformVerificationError,
+    verify_platform_signature,
+)
+
 SCHEMA = "ucr.production-readiness.v1"
 PASS = "pass"
 NOT_RUN = "not-run"
