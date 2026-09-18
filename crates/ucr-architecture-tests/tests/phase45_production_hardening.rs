@@ -155,6 +155,23 @@ fn performance_budget_is_fixed_in_source_and_governed_by_adr() {
 }
 
 #[test]
+fn production_runtime_is_covered_by_phase44_provenance() {
+    let workflow = read(".github/workflows/phase44-supply-chain.yml");
+
+    for marker in [
+        "cargo build --locked --profile production -p ucr-runtime",
+        "ucr-runtime-linux-x86_64",
+        "gh attestation verify dist/phase44/ucr-runtime-linux-x86_64",
+        "--required-artifact ucr-runtime-linux-x86_64",
+    ] {
+        assert!(
+            workflow.contains(marker),
+            "production runtime missing from Phase 44 provenance boundary: {marker}"
+        );
+    }
+}
+
+#[test]
 fn phase45_does_not_relabel_supply_chain_provenance_as_platform_signing() {
     let phase44 = read("spec/supply-chain.md");
     let phase45 = read("spec/production-hardening.md");
