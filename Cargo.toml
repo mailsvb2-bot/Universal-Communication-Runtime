@@ -24,6 +24,7 @@ members = [
     "crates/ucr-store-forward",
     "crates/ucr-mesh",
     "crates/ucr-sfu",
+    "crates/ucr-realtime",
     "crates/ucr-conference",
     "crates/ucr-bridge",
     "crates/ucr-bridge-telegram",

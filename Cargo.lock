@@ -3102,6 +3102,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-realtime"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "hmac 0.12.1",
+ "sha2 0.10.9",
+ "tokio",
+ "ucr-core",
+ "ucr-model",
+ "ucr-sfu",
+]
+
+[[package]]
 name = "ucr-runtime"
 version = "0.0.1"
 dependencies = [
