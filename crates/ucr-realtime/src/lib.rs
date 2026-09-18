@@ -228,6 +228,7 @@ pub enum RealtimeRegistryError {
 struct SessionEntry {
     claims: RealtimeSessionClaims,
     sender: mpsc::Sender<SfuForwardEnvelope>,
+    receiver: Option<mpsc::Receiver<SfuForwardEnvelope>>,
     sequence: u64,
     media_ready: bool,
 }
@@ -251,20 +252,10 @@ pub struct RealtimeSessionRegistry {
     queue_capacity: usize,
 }
 
-pub struct RealtimeSessionHandle {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeJoinOutcome {
     pub claims: RealtimeSessionClaims,
     pub transition: AttendanceTransition,
-    pub receiver: mpsc::Receiver<SfuForwardEnvelope>,
-}
-
-impl fmt::Debug for RealtimeSessionHandle {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RealtimeSessionHandle")
-            .field("claims", &self.claims)
-            .field("transition", &self.transition)
-            .finish_non_exhaustive()
-    }
 }
 
 impl Default for RealtimeSessionRegistry {
@@ -293,9 +284,12 @@ impl RealtimeSessionRegistry {
         &self,
         claims: RealtimeSessionClaims,
         now_unix_ms: i64,
-    ) -> Result<RealtimeSessionHandle, RealtimeRegistryError> {
+    ) -> Result<RealtimeJoinOutcome, RealtimeRegistryError> {
         if now_unix_ms >= claims.expires_at_unix_ms {
             return Err(RealtimeRegistryError::Expired);
+        }
+        if self.max_sessions == 0 || self.queue_capacity == 0 {
+            return Err(RealtimeRegistryError::CapacityExceeded);
         }
         let mut entries = self
             .entries
@@ -313,17 +307,14 @@ impl RealtimeSessionRegistry {
             entry.media_ready = false;
             let (sender, receiver) = mpsc::channel(self.queue_capacity);
             entry.sender = sender;
+            entry.receiver = Some(receiver);
             let transition = AttendanceTransition {
                 kind: AttendanceTransitionKind::Reconnected,
                 claims: claims.clone(),
                 session_sequence: entry.sequence,
                 occurred_at_unix_ms: now_unix_ms,
             };
-            return Ok(RealtimeSessionHandle {
-                claims,
-                transition,
-                receiver,
-            });
+            return Ok(RealtimeJoinOutcome { claims, transition });
         }
         if entries.len() >= self.max_sessions {
             return Err(RealtimeRegistryError::CapacityExceeded);
@@ -338,14 +329,44 @@ impl RealtimeSessionRegistry {
         entries.push(SessionEntry {
             claims: claims.clone(),
             sender,
+            receiver: Some(receiver),
             sequence: 1,
             media_ready: false,
         });
-        Ok(RealtimeSessionHandle {
-            claims,
-            transition,
-            receiver,
-        })
+        Ok(RealtimeJoinOutcome { claims, transition })
+    }
+
+    /// Attaches the one downlink consumer for the current connection.
+    ///
+    /// The receiver is single-consumer. A second subscribe attempt fails until an authenticated
+    /// reconnect replaces the connection queue.
+    ///
+    /// # Errors
+    /// Fails for expiry, claim mismatch, missing session/downlink, or unavailable state.
+    pub fn take_downlink(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<mpsc::Receiver<SfuForwardEnvelope>, RealtimeRegistryError> {
+        if now_unix_ms >= claims.expires_at_unix_ms {
+            return Err(RealtimeRegistryError::Expired);
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        prune_expired(&mut entries, now_unix_ms);
+        let entry = entries
+            .iter_mut()
+            .find(|entry| same_session(entry, claims))
+            .ok_or(RealtimeRegistryError::SessionUnavailable)?;
+        if entry.claims != *claims {
+            return Err(RealtimeRegistryError::ClaimMismatch);
+        }
+        entry
+            .receiver
+            .take()
+            .ok_or(RealtimeRegistryError::SessionUnavailable)
     }
 
     /// Verifies liveness for the exact session and returns its current attendance sequence.
@@ -790,13 +811,22 @@ mod tests {
         let registry = RealtimeSessionRegistry::new(8, 2);
         let first = registry.join(claims.clone(), 30_001).expect("join");
         assert_eq!(first.transition.kind, AttendanceTransitionKind::Joined);
-        let second = registry.join(claims, 30_002).expect("reconnect");
+        let mut first_downlink = registry
+            .take_downlink(&claims, 30_001)
+            .expect("first downlink");
+        let second = registry.join(claims.clone(), 30_002).expect("reconnect");
         assert_eq!(
             second.transition.kind,
             AttendanceTransitionKind::Reconnected
         );
         assert_eq!(second.transition.session_sequence, 2);
         assert_eq!(registry.active_session_count(), 1);
+        assert!(first_downlink.try_recv().is_err());
+        assert!(
+            registry
+                .take_downlink(&claims, 30_002)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -819,8 +849,18 @@ mod tests {
             session_id: SessionId::from_opaque(id("session-b")),
             ..first_claims.clone()
         };
-        let mut first = registry.join(first_claims, now).expect("first");
-        let mut second = registry.join(second_claims, now).expect("second");
+        registry
+            .join(first_claims.clone(), now)
+            .expect("first");
+        registry
+            .join(second_claims.clone(), now)
+            .expect("second");
+        let mut first = registry
+            .take_downlink(&first_claims, now)
+            .expect("first downlink");
+        let mut second = registry
+            .take_downlink(&second_claims, now)
+            .expect("second downlink");
         let frame = envelope(
             call_id,
             PrincipalRef {
@@ -834,13 +874,13 @@ mod tests {
         registry
             .forward_encrypted(&target, &frame)
             .expect("initial fanout");
-        let _ = first.receiver.try_recv().expect("drain first only");
+        let _ = first.try_recv().expect("drain first only");
         assert_eq!(
             registry.forward_encrypted(&target, &frame),
             Err(SfuForwardSinkError::Backpressure)
         );
-        assert!(first.receiver.try_recv().is_err());
-        assert!(second.receiver.try_recv().is_ok());
-        assert!(second.receiver.try_recv().is_err());
+        assert!(first.try_recv().is_err());
+        assert!(second.try_recv().is_ok());
+        assert!(second.try_recv().is_err());
     }
 }
