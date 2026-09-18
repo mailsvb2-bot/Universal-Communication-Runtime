@@ -170,9 +170,7 @@ where
         };
         Ok(Response::new(pb::ConferenceStartResponse {
             result: Some(match result {
-                Ok(conference) => {
-                    pb::conference_start_response::Result::Conference(conference)
-                }
+                Ok(conference) => pb::conference_start_response::Result::Conference(conference),
                 Err(error) => pb::conference_start_response::Result::Error(pb_error(error)),
             }),
         }))
@@ -186,12 +184,7 @@ where
         let lookup = decode_conference_lookup(request.into_inner());
         let result = match (credentials, lookup) {
             (Ok((credential_id, secret)), Ok((scope, call_id))) => self
-                .admit(
-                    &scope,
-                    &credential_id,
-                    &secret,
-                    CALL_OBSERVE_PERMISSION,
-                )
+                .admit(&scope, &credential_id, &secret, CALL_OBSERVE_PERMISSION)
                 .and_then(|actor| {
                     conference_runtime(self)
                         .snapshot(&actor, &scope, &call_id)
@@ -202,9 +195,7 @@ where
         };
         Ok(Response::new(pb::ConferenceGetResponse {
             result: Some(match result {
-                Ok(conference) => {
-                    pb::conference_get_response::Result::Conference(conference)
-                }
+                Ok(conference) => pb::conference_get_response::Result::Conference(conference),
                 Err(error) => pb::conference_get_response::Result::Error(pb_error(error)),
             }),
         }))
@@ -272,9 +263,7 @@ where
                     conference_runtime(self)
                         .set_subscriptions(&actor, &set)
                         .map(|_| {
-                            pb_acknowledgement(acknowledgement_for(
-                                set.call_id.as_opaque().clone(),
-                            ))
+                            pb_acknowledgement(acknowledgement_for(set.call_id.as_opaque().clone()))
                         })
                         .map_err(map_conference_error)
                 }),
