@@ -12,14 +12,31 @@ fn read(path: &str) -> String {
 fn all_twenty_canon_production_decisions_are_mapped_and_accepted() {
     let matrix = read("spec/production-1.0-decisions.md");
     for marker in [
-        "Root Identity Model", "Device Identity Model", "Persona Model", "Account Recovery",
-        "Group Cryptography", "Protocol Framing", "Version Negotiation", "Conversation Taxonomy",
-        "Group History Policy", "Delivery Semantics", "Delete Semantics", "Federation Trust",
-        "Public API Compatibility", "Codec Baseline", "Metadata Privacy", "Multi-Tenant Boundary",
-        "Self-Hosted vs Managed Contract", "Licensing Boundary", "Public Extension Registry",
+        "Root Identity Model",
+        "Device Identity Model",
+        "Persona Model",
+        "Account Recovery",
+        "Group Cryptography",
+        "Protocol Framing",
+        "Version Negotiation",
+        "Conversation Taxonomy",
+        "Group History Policy",
+        "Delivery Semantics",
+        "Delete Semantics",
+        "Federation Trust",
+        "Public API Compatibility",
+        "Codec Baseline",
+        "Metadata Privacy",
+        "Multi-Tenant Boundary",
+        "Self-Hosted vs Managed Contract",
+        "Licensing Boundary",
+        "Public Extension Registry",
         "Data Lifecycle",
     ] {
-        assert!(matrix.contains(marker), "missing Canon decision mapping: {marker}");
+        assert!(
+            matrix.contains(marker),
+            "missing Canon decision mapping: {marker}"
+        );
     }
 
     for path in [
@@ -36,7 +53,10 @@ fn all_twenty_canon_production_decisions_are_mapped_and_accepted() {
         "docs/adr/0105-public-extension-registry-is-namespaced-and-fail-closed.md",
         "docs/adr/0106-data-lifecycle-is-policy-explicit-and-non-destructive.md",
     ] {
-        assert!(read(path).contains("Status: Accepted"), "decision is not accepted: {path}");
+        assert!(
+            read(path).contains("Status: Accepted"),
+            "decision is not accepted: {path}"
+        );
     }
 }
 
@@ -45,17 +65,46 @@ fn implemented_model_matches_persona_taxonomy_and_group_history_decisions() {
     let model = read("crates/ucr-model/src/lib.rs");
     let group = read("crates/ucr-model/src/group.rs");
 
-    for marker in ["pub struct PersonRecord", "pub struct PersonaRecord", "pub enum PersonaKind",
-                   "person_id: Option<PersonId>", "identity_id: IdentityId"] {
-        assert!(model.contains(marker), "missing Persona model marker: {marker}");
+    for marker in [
+        "pub struct PersonRecord",
+        "pub struct PersonaRecord",
+        "pub enum PersonaKind",
+        "person_id: Option<PersonId>",
+        "identity_id: IdentityId",
+    ] {
+        assert!(
+            model.contains(marker),
+            "missing Persona model marker: {marker}"
+        );
     }
-    for marker in ["Direct", "PrivateGroup", "PublicGroup", "Broadcast", "Community",
-                   "Room", "Topic", "Thread", "System"] {
-        assert!(model.contains(marker), "missing Conversation taxonomy marker: {marker}");
+    for marker in [
+        "Direct",
+        "PrivateGroup",
+        "PublicGroup",
+        "Broadcast",
+        "Community",
+        "Room",
+        "Topic",
+        "Thread",
+        "System",
+    ] {
+        assert!(
+            model.contains(marker),
+            "missing Conversation taxonomy marker: {marker}"
+        );
     }
-    for marker in ["NoHistory", "FromJoin", "LastNMessages", "FromTimestamp",
-                   "FullHistory", "CustomPolicy"] {
-        assert!(group.contains(marker), "missing Group history marker: {marker}");
+    for marker in [
+        "NoHistory",
+        "FromJoin",
+        "LastNMessages",
+        "FromTimestamp",
+        "FullHistory",
+        "CustomPolicy",
+    ] {
+        assert!(
+            group.contains(marker),
+            "missing Group history marker: {marker}"
+        );
     }
 }
 

@@ -36,7 +36,10 @@ fn personas_require_explicit_identity_associations_and_do_not_auto_merge() {
         expires_at_unix_ms: None,
     };
 
-    assert_eq!(person.person_id, private.person_id.clone().expect("person link"));
+    assert_eq!(
+        person.person_id,
+        private.person_id.clone().expect("person link")
+    );
     assert_ne!(private.persona_id, work.persona_id);
     assert_ne!(private.identity_id, work.identity_id);
 }
