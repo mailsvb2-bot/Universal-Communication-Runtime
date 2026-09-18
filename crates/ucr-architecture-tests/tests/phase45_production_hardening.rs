@@ -30,6 +30,7 @@ fn canonical_build_profiles_are_explicit() {
 #[test]
 fn production_claim_is_machine_fail_closed() {
     let helper = read("tools/production_readiness.py");
+    let signing = read("tools/platform_signing.py");
     let spec = read("spec/production-hardening.md");
     let adr = read("docs/adr/0091-phase45-production-maturity-requires-exact-release-evidence.md");
 
@@ -43,6 +44,8 @@ fn production_claim_is_machine_fail_closed() {
         "candidate validation forbids a Production maturity claim",
         "Production requires the production build profile",
         "supply-chain attestation is not platform artifact signing",
+        "Production requires live platform signature verification",
+        "verify_platform_signature",
     ] {
         assert!(
             helper.contains(marker),
@@ -67,6 +70,22 @@ fn production_claim_is_machine_fail_closed() {
 
     assert!(adr.contains("Production maturity requires exact release evidence"));
     assert!(adr.contains("Sigstore/GitHub attestations cannot satisfy `platform_signing`"));
+
+    for marker in [
+        "windows-authenticode",
+        "macos-codesign",
+        "linux-openpgp",
+        "signtool",
+        "codesign",
+        "gpg",
+        "artifact_sha256",
+        "signing_identity",
+    ] {
+        assert!(
+            signing.contains(marker),
+            "missing live signing verifier marker: {marker}"
+        );
+    }
 }
 
 #[test]
