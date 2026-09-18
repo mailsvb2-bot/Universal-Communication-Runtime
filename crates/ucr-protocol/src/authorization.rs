@@ -46,6 +46,7 @@ pub const CALL_START_PERMISSION: &str = "ucr.call.start";
 pub const CALL_OBSERVE_PERMISSION: &str = "ucr.call.observe";
 pub const CALL_SIGNAL_PERMISSION: &str = "ucr.call.signal";
 pub const CONFERENCE_SUBSCRIBE_PERMISSION: &str = "ucr.conference.subscribe";
+pub const CONFERENCE_JOIN_ISSUE_PERMISSION: &str = "ucr.conference.join.issue";
 pub const AUDIO_SEND_PERMISSION: &str = "ucr.call.audio.send";
 pub const AUDIO_RECEIVE_PERMISSION: &str = "ucr.call.audio.receive";
 pub const VIDEO_SEND_PERMISSION: &str = "ucr.call.video.send";

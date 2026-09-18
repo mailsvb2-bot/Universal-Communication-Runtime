@@ -11,12 +11,15 @@ build = "build.rs"
 prost = "=0.14.4"
 tonic = { version = "=0.14.6", features = ["transport"] }
 tonic-prost = "=0.14.6"
+ucr-conference = { path = "../ucr-conference" }
 ucr-core = { path = "../ucr-core" }
 ucr-crypto = { path = "../ucr-crypto" }
+ucr-media-e2ee = { path = "../ucr-media-e2ee" }
 ucr-mesh = { path = "../ucr-mesh" }
 ucr-model = { path = "../ucr-model" }
 ucr-offline-groups = { path = "../ucr-offline-groups" }
 ucr-protocol = { path = "../ucr-protocol" }
+ucr-sfu = { path = "../ucr-sfu" }
 ucr-store-forward = { path = "../ucr-store-forward" }
 ucr-transport-internet = { path = "../ucr-transport-internet" }
 tokio = { version = "=1.53.1", features = ["rt"] }
