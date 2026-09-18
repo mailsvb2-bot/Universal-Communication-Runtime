@@ -134,7 +134,9 @@ fn canon_boundary_is_documented_without_false_production_claim() {
     }
 
     assert!(adr.contains("publisher-owned platform signing"));
-    assert!(adr.contains("Production 1.0 is still not claimed merely because this workflow exists"));
+    assert!(
+        adr.contains("Production 1.0 is still not claimed merely because this workflow exists")
+    );
     assert!(adr.contains("publisher-signed release execution is required"));
     assert!(adr.contains("GitHub Environment secrets"));
 }
