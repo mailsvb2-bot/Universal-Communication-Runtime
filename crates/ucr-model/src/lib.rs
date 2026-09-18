@@ -210,6 +210,41 @@ id_type!(RecoveryPlanId);
 id_type!(ServiceCredentialId);
 id_type!(AuditRecordId);
 
+/// Canonical persona/profile class. Persona is a communication-facing profile boundary,
+/// never evidence that two identities belong to the same physical person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersonaKind {
+    Private,
+    Work,
+    Anonymous,
+    Event,
+    Organization,
+    Temporary,
+    Custom(String),
+}
+
+/// Minimal physical-person aggregate. It intentionally carries no endpoint/provider/profile data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonRecord {
+    pub scope: TenantScope,
+    pub person_id: PersonId,
+}
+
+/// Explicit Persona -> Identity association.
+///
+/// `person_id == None` preserves pseudonymous/organization/temporary personas without forcing
+/// correlation to a physical Person. Distinct Persona records MUST NOT be merged merely because
+/// display/profile/provider metadata happens to match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonaRecord {
+    pub scope: TenantScope,
+    pub persona_id: PersonaId,
+    pub person_id: Option<PersonId>,
+    pub identity_id: IdentityId,
+    pub kind: PersonaKind,
+    pub expires_at_unix_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrincipalKind {
     Person,
