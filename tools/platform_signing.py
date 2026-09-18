@@ -40,7 +40,7 @@ def _sha256(path: Path) -> str:
 
 
 def _normalize_fingerprint(value: str) -> str:
-    normalized = re.sub(r"[:\\s-]", "", value)
+    normalized = re.sub(r"[:\s-]", "", value)
     if not normalized:
         raise VerificationError("signing identity fingerprint is empty")
     if re.fullmatch(r"[0-9A-Fa-f]+", normalized) is None:
