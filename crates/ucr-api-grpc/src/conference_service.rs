@@ -12,15 +12,16 @@ use ucr_core::{
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
-    AuthorizationRequest, CallId, ConferenceMediaSubscription, ConferenceSnapshot, ConferenceStart,
-    ConferenceSubscriptionSet, ConferenceTopology, DeviceId, GroupId, MediaKind, PrincipalRef,
-    ScopedPrincipal, TenantScope,
+    AuthorizationRequest, CallId, CallParticipantState, ConferenceMediaSubscription,
+    ConferenceSnapshot, ConferenceStart, ConferenceSubscriptionSet, ConferenceTopology, DeviceId,
+    GroupId, MediaKind, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
     CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION, CALL_START_PERMISSION,
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_SUBSCRIBE_PERMISSION, CanonicalError,
     CanonicalErrorCode, ConferenceProtocolError, acknowledgement_for,
 };
+use ucr_realtime::{JoinTokenError, JoinTokenIssuer};
 use ucr_sfu::PreparedSfuCapabilities;
 
 use super::{
@@ -35,6 +36,7 @@ pub struct GrpcConferenceService<C, A, S> {
     authorization: Arc<A>,
     store: Arc<S>,
     state: Arc<ConferenceRuntimeState>,
+    join_issuer: Option<Arc<JoinTokenIssuer>>,
 }
 
 impl<C, A, S> GrpcConferenceService<C, A, S> {
@@ -45,6 +47,23 @@ impl<C, A, S> GrpcConferenceService<C, A, S> {
             authorization,
             store,
             state: Arc::new(ConferenceRuntimeState::new()),
+            join_issuer: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_join_issuer(
+        clock: Arc<C>,
+        authorization: Arc<A>,
+        store: Arc<S>,
+        join_issuer: Arc<JoinTokenIssuer>,
+    ) -> Self {
+        Self {
+            clock,
+            authorization,
+            store,
+            state: Arc::new(ConferenceRuntimeState::new()),
+            join_issuer: Some(join_issuer),
         }
     }
 
@@ -60,6 +79,24 @@ impl<C, A, S> GrpcConferenceService<C, A, S> {
             authorization,
             store,
             state,
+            join_issuer: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_state_and_join_issuer(
+        clock: Arc<C>,
+        authorization: Arc<A>,
+        store: Arc<S>,
+        state: Arc<ConferenceRuntimeState>,
+        join_issuer: Arc<JoinTokenIssuer>,
+    ) -> Self {
+        Self {
+            clock,
+            authorization,
+            store,
+            state,
+            join_issuer: Some(join_issuer),
         }
     }
 }
@@ -71,6 +108,7 @@ impl<C, A, S> Clone for GrpcConferenceService<C, A, S> {
             authorization: Arc::clone(&self.authorization),
             store: Arc::clone(&self.store),
             state: Arc::clone(&self.state),
+            join_issuer: self.join_issuer.as_ref().map(Arc::clone),
         }
     }
 }
@@ -290,14 +328,56 @@ where
         let credentials = decode_credentials(request.metadata());
         let join = decode_join_request(request.into_inner());
         let result = match (credentials, join) {
-            (Ok((credential_id, secret)), Ok((scope, _, _, _, _))) => self
+            (
+                Ok((credential_id, secret)),
+                Ok((scope, call_id, participant, device_id, ttl_seconds)),
+            ) => self
                 .admit(
                     &scope,
                     &credential_id,
                     &secret,
                     CONFERENCE_JOIN_ISSUE_PERMISSION,
                 )
-                .and_then(|_| Err(CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))),
+                .and_then(|actor| {
+                    let snapshot = conference_runtime(self)
+                        .snapshot(&actor, &scope, &call_id)
+                        .map_err(map_conference_error)?;
+                    let eligible = snapshot.call.participants.iter().any(|candidate| {
+                        candidate.principal == participant
+                            && candidate.left_revision.is_none()
+                            && matches!(
+                                candidate.state,
+                                CallParticipantState::Invited
+                                    | CallParticipantState::Ringing
+                                    | CallParticipantState::Accepted
+                            )
+                    });
+                    if !eligible {
+                        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+                    }
+                    let issuer = self
+                        .join_issuer
+                        .as_deref()
+                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+                    let now_unix_ms = self.clock.now_unix_ms().map_err(|_| {
+                        CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+                    })?;
+                    issuer
+                        .issue(
+                            scope,
+                            call_id,
+                            participant,
+                            device_id,
+                            ttl_seconds,
+                            now_unix_ms,
+                        )
+                        .map(|grant| pb::ConferenceJoinGrant {
+                            session_id: Some(pb_opaque(grant.claims.session_id.as_opaque())),
+                            join_url: grant.join_url,
+                            expires_at_unix_ms: grant.claims.expires_at_unix_ms,
+                        })
+                        .map_err(map_join_token_error)
+                }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::ConferenceJoinUrlResponse {
@@ -419,6 +499,22 @@ fn pb_conference_snapshot(value: &ConferenceSnapshot) -> pb::ConferenceSnapshot 
         group_crypto_epoch: value.group_crypto_epoch,
         group_crypto_state_ref: Some(pb_opaque(&value.group_crypto_state_ref)),
     }
+}
+
+const fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
+    let code = match error {
+        JoinTokenError::InvalidBaseUrl | JoinTokenError::InvalidTtl => {
+            CanonicalErrorCode::InvalidArgument
+        }
+        JoinTokenError::Malformed
+        | JoinTokenError::InvalidSignature
+        | JoinTokenError::NotYetValid
+        | JoinTokenError::Expired => CanonicalErrorCode::Unauthenticated,
+        JoinTokenError::ClockOverflow
+        | JoinTokenError::RandomUnavailable
+        | JoinTokenError::Internal => CanonicalErrorCode::Internal,
+    };
+    CanonicalError::new(code)
 }
 
 fn map_conference_error(error: ConferenceError) -> CanonicalError {

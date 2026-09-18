@@ -2839,6 +2839,7 @@ dependencies = [
  "ucr-model",
  "ucr-offline-groups",
  "ucr-protocol",
+ "ucr-realtime",
  "ucr-sfu",
  "ucr-storage-memory",
  "ucr-store-forward",
