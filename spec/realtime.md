@@ -8,7 +8,7 @@ The public realtime boundary is `ucr.v1.RealtimeService`. It exposes conference 
 
 `ConferenceService.IssueJoinUrl` issues a short-lived, single-participant session grant only after current Call/Group authorization succeeds. The join URL carries the signed credential in its URL fragment, not the query string. Browser clients extract the fragment locally and present the credential through Authorization metadata when calling the realtime boundary. Gateways must redact the credential and full join URL from access logs, metrics, errors and traces.
 
-A grant is bound to exact TenantScope, Call ID, participant, optional Device ID, session ID and expiry. It cannot be widened by client-provided request fields. Expired, malformed, wrong-scope, wrong-call or wrong-session credentials fail closed. Production signing keys are deployment secrets, never protocol payloads.
+A grant is bound to exact TenantScope, Call ID, participant, **active canonical Device ID**, session ID and expiry. Join issuance resolves the Device and its Principal→Identity association before signing; realtime attendance therefore never invents a synthetic source device. It cannot be widened by client-provided request fields. Expired, malformed, wrong-scope, wrong-call or wrong-session credentials fail closed. Production signing keys are deployment secrets, never protocol payloads.
 
 ## Media path
 

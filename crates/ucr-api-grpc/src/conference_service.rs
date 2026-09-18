@@ -14,7 +14,8 @@ use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     AuthorizationRequest, CallId, CallParticipantState, ConferenceMediaSubscription,
     ConferenceSnapshot, ConferenceStart, ConferenceSubscriptionSet, ConferenceTopology, DeviceId,
-    GroupId, MediaKind, PrincipalRef, ScopedPrincipal, TenantScope,
+    DeviceLifecycleState, GroupId, MediaKind, PrincipalKind, PrincipalRef, ScopedPrincipal,
+    TenantScope,
 };
 use ucr_protocol::{
     CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION, CALL_START_PERMISSION,
@@ -355,6 +356,7 @@ where
                     if !eligible {
                         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
                     }
+                    validate_join_device(&*self.store, &scope, &participant, &device_id)?;
                     let issuer = self
                         .join_issuer
                         .as_deref()
@@ -367,7 +369,7 @@ where
                             scope,
                             call_id,
                             participant,
-                            device_id,
+                            Some(device_id),
                             ttl_seconds,
                             now_unix_ms,
                         )
@@ -473,7 +475,7 @@ fn decode_media_kind(value: i32) -> Result<MediaKind, CanonicalError> {
 
 fn decode_join_request(
     value: pb::ConferenceJoinUrlRequest,
-) -> Result<(TenantScope, CallId, PrincipalRef, Option<DeviceId>, u32), CanonicalError> {
+) -> Result<(TenantScope, CallId, PrincipalRef, DeviceId, u32), CanonicalError> {
     if value.ttl_seconds == 0 {
         return Err(invalid_argument());
     }
@@ -481,10 +483,7 @@ fn decode_join_request(
         decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
         CallId::from_opaque(decode_opaque(value.call_id)?),
         decode_principal_ref(value.participant.ok_or_else(invalid_argument)?)?,
-        value
-            .device_id
-            .map(|id| decode_opaque(Some(id)).map(DeviceId::from_opaque))
-            .transpose()?,
+        DeviceId::from_opaque(decode_opaque(value.device_id)?),
         value.ttl_seconds,
     ))
 }
@@ -499,6 +498,38 @@ fn pb_conference_snapshot(value: &ConferenceSnapshot) -> pb::ConferenceSnapshot 
         group_crypto_epoch: value.group_crypto_epoch,
         group_crypto_state_ref: Some(pb_opaque(&value.group_crypto_state_ref)),
     }
+}
+
+fn validate_join_device<S>(
+    store: &S,
+    scope: &TenantScope,
+    participant: &PrincipalRef,
+    device_id: &DeviceId,
+) -> Result<(), CanonicalError>
+where
+    S: DeviceLifecycleStore + PrincipalIdentityBindingStore,
+{
+    let device = store
+        .device(scope, device_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    if device.state != DeviceLifecycleState::Active {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    if participant.kind == PrincipalKind::Device {
+        if participant.principal_id.as_opaque() != device_id.as_opaque() {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        }
+        return Ok(());
+    }
+    let binding = store
+        .principal_identity_binding(scope, participant)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+    if binding.identity_id != device.identity_id {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    Ok(())
 }
 
 const fn map_join_token_error(error: JoinTokenError) -> CanonicalError {

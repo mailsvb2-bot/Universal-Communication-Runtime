@@ -61,8 +61,7 @@ message ConferenceJoinUrlRequest {
   TenantScope scope = 1;
   OpaqueId call_id = 2;
   PrincipalRef participant = 3;
-  optional OpaqueId device_id = 4;
-  uint32 ttl_seconds = 5;
+  // Required by the service: realtime attendance and MLS media are Device-bound.\n  OpaqueId device_id = 4;\n  uint32 ttl_seconds = 5;
 }
 
 message ConferenceJoinGrant {
