@@ -133,6 +133,7 @@ def validate(document: dict[str, object], mode: str) -> None:
         assert isinstance(text, str)
         if "sigstore-only" in text.lower() or "not-claimed-phase44" in text.lower():
             raise EvidenceError("supply-chain attestation is not platform artifact signing")
+        _validate_live_signing_binding(document, signing_verification)
 
 
 def _sample(*, claim: str = "candidate", profile: str = "staging") -> dict[str, object]:
@@ -170,8 +171,15 @@ def self_test() -> None:
         record = complete_gates[name]
         assert isinstance(record, dict)
         record["status"] = PASS
-        record["evidence"] = f"self-test:{name}:platform-proof"
-    validate(complete, "production")
+        record["evidence"] = f"self-test:{name}:claimed-proof"
+
+    try:
+        validate(complete, "production")
+    except EvidenceError as error:
+        if "live platform signature verification" not in str(error):
+            raise
+    else:
+        raise AssertionError("self-reported signing evidence bypassed live verification")
 
     signing = complete_gates["platform_signing"]
     assert isinstance(signing, dict)
@@ -208,13 +216,48 @@ def main() -> int:
     validate_parser = subparsers.add_parser("validate")
     validate_parser.add_argument("--evidence", type=Path, required=True)
     validate_parser.add_argument("--mode", choices=("candidate", "production"), required=True)
+    validate_parser.add_argument("--platform", choices=PLATFORMS)
+    validate_parser.add_argument("--artifact", type=Path)
+    validate_parser.add_argument("--signature", type=Path)
+    validate_parser.add_argument("--signing-identity")
     args = parser.parse_args()
 
     try:
         if args.command == "self-test":
             self_test()
         elif args.command == "validate":
-            validate(_load(args.evidence), args.mode)
+            document = _load(args.evidence)
+            _validate_shape(document)
+            signing_verification = None
+            gates = document["gates"]
+            assert isinstance(gates, dict)
+            signing = gates["platform_signing"]
+            assert isinstance(signing, dict)
+            if args.mode == "production" and signing["status"] == PASS:
+                if args.platform is None or args.artifact is None or args.signing_identity is None:
+                    raise EvidenceError(
+                        "Production requires --platform, --artifact and --signing-identity "
+                        "for live platform signature verification"
+                    )
+                source_commit = document["source_commit"]
+                assert isinstance(source_commit, str)
+                try:
+                    signing_verification = verify_platform_signature(
+                        platform_name=args.platform,
+                        artifact=args.artifact,
+                        signature=args.signature,
+                        expected_identity=args.signing_identity,
+                        source_commit=source_commit,
+                    )
+                except PlatformVerificationError as error:
+                    raise EvidenceError(
+                        f"live platform signature verification failed: {error}"
+                    ) from error
+            validate(
+                document,
+                args.mode,
+                signing_verification=signing_verification,
+            )
             print(f"PRODUCTION_READINESS_{args.mode.upper()}_OK")
         else:  # pragma: no cover - argparse prevents this
             raise EvidenceError("unknown command")
