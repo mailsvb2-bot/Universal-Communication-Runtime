@@ -144,8 +144,11 @@ fn repository_never_contains_publisher_private_key_material() {
     let helper = read("tools/production_release.py");
     let adr = read("docs/adr/0094-production-release-requires-publisher-owned-platform-signing.md");
 
+    let generic_private_key_marker = ["-----BEGIN ", "PRIVATE KEY-----"].concat();
+    let pgp_private_key_marker = ["-----BEGIN PGP ", "PRIVATE KEY BLOCK-----"].concat();
+
     for text in [workflow, helper, adr] {
-        assert!(!text.contains("-----BEGIN PGP PRIVATE KEY BLOCK-----"));
-        assert!(!text.contains("-----BEGIN PRIVATE KEY-----"));
+        assert!(!text.contains(&generic_private_key_marker));
+        assert!(!text.contains(&pgp_private_key_marker));
     }
 }
