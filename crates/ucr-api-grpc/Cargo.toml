@@ -24,6 +24,7 @@ ucr-sfu = { path = "../ucr-sfu" }
 ucr-store-forward = { path = "../ucr-store-forward" }
 ucr-transport-internet = { path = "../ucr-transport-internet" }
 tokio = { version = "=1.53.1", features = ["rt"] }
+tokio-stream = "=0.1.17"
 
 [build-dependencies]
 prost-build = "=0.14.4"

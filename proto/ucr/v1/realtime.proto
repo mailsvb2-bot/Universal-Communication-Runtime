@@ -3,6 +3,7 @@ syntax = "proto3";
 package ucr.v1;
 
 import "ucr/v1/common.proto";
+import "ucr/v1/conference.proto";
 import "ucr/v1/errors.proto";
 import "ucr/v1/identity.proto";
 import "ucr/v1/runtime.proto";
@@ -93,10 +94,25 @@ message RealtimeDownlinkMedia {
   SfuForwardEnvelope envelope = 1;
 }
 
+message RealtimeSetSubscriptionsRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  repeated ConferenceMediaSubscription subscriptions = 4;
+}
+
+message RealtimeSetSubscriptionsResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 service RealtimeService {
   rpc JoinRealtime(RealtimeJoinRequest) returns (RealtimeJoinResponse);
   rpc HeartbeatRealtime(RealtimeHeartbeatRequest) returns (RealtimeHeartbeatResponse);
   rpc LeaveRealtime(RealtimeLeaveRequest) returns (RealtimeLeaveResponse);
+  rpc SetSubscriptions(RealtimeSetSubscriptionsRequest) returns (RealtimeSetSubscriptionsResponse);
   rpc PublishMedia(RealtimePublishMediaRequest) returns (RealtimePublishMediaResponse);
   rpc SubscribeMedia(RealtimeSubscribeMediaRequest) returns (stream RealtimeDownlinkMedia);
 }
