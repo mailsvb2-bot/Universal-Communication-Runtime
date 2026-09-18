@@ -56,7 +56,7 @@ pub struct ProductionRuntime {
 }
 
 impl ProductionRuntime {
-    /// Initializes a durable UCR SQLite database without creating credentials, identities,
+    /// Initializes a durable UCR `SQLite` database without creating credentials, identities,
     /// permissions, test transports, or other development bootstrap state.
     ///
     /// # Errors
