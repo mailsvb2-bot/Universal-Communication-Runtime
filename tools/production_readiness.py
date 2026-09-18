@@ -103,7 +103,50 @@ def _validate_shape(document: dict[str, object]) -> None:
             raise EvidenceError(f"passing gate lacks evidence: {gate_name}")
 
 
-def validate(document: dict[str, object], mode: str) -> None:
+def _validate_live_signing_binding(
+    document: dict[str, object], verification: dict[str, object] | None
+) -> None:
+    if verification is None:
+        raise EvidenceError("Production requires live platform signature verification")
+    if verification.get("schema") != PLATFORM_SIGNING_SCHEMA:
+        raise EvidenceError("platform signing verification schema is invalid")
+    if verification.get("verified") is not True:
+        raise EvidenceError("platform signature was not verified")
+    if verification.get("source_commit") != document.get("source_commit"):
+        raise EvidenceError(
+            "platform signature verification is bound to a different source commit"
+        )
+
+    digest = verification.get("artifact_sha256")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(ch not in "0123456789abcdef" for ch in digest)
+    ):
+        raise EvidenceError(
+            "platform signature verification lacks an exact artifact SHA-256"
+        )
+
+    identity = verification.get("signing_identity")
+    if not isinstance(identity, str) or not identity.strip():
+        raise EvidenceError("platform signature verification lacks signing identity")
+
+    verifier = verification.get("verifier")
+    if not isinstance(verifier, str) or not verifier.strip():
+        raise EvidenceError("platform signature verification lacks verifier identity")
+
+    if verification.get("platform") not in PLATFORMS:
+        raise EvidenceError(
+            "platform signature verification uses an unsupported platform mode"
+        )
+
+
+def validate(
+    document: dict[str, object],
+    mode: str,
+    *,
+    signing_verification: dict[str, object] | None = None,
+) -> None:
     _validate_shape(document)
     gates = document["gates"]
     assert isinstance(gates, dict)
