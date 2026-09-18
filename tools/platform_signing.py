@@ -40,10 +40,12 @@ def _sha256(path: Path) -> str:
 
 
 def _normalize_fingerprint(value: str) -> str:
-    normalized = re.sub(r"[^0-9A-Fa-f]", "", value).upper()
+    normalized = re.sub(r"[:\\s-]", "", value)
     if not normalized:
         raise VerificationError("signing identity fingerprint is empty")
-    return normalized
+    if re.fullmatch(r"[0-9A-Fa-f]+", normalized) is None:
+        raise VerificationError("signing identity fingerprint contains non-hex characters")
+    return normalized.upper()
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
