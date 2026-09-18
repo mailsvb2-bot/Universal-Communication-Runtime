@@ -27,6 +27,9 @@ jobs:
       - name: Readiness verifier adversarial self-test
         run: python3 tools/production_readiness.py self-test
 
+      - name: Platform signing verifier self-test
+        run: python3 tools/platform_signing.py self-test
+
       - name: Phase 45 architecture lock
         run: cargo test --locked -p ucr-architecture-tests --test phase45_production_hardening
 
