@@ -17,7 +17,10 @@ fn canonical_build_profiles_are_explicit() {
         "[profile.staging]",
         "[profile.production]",
     ] {
-        assert!(cargo.contains(profile), "missing canonical build profile: {profile}");
+        assert!(
+            cargo.contains(profile),
+            "missing canonical build profile: {profile}"
+        );
     }
     assert!(cargo.contains("[profile.production]\n"));
     assert!(cargo.contains("lto = \"thin\""));
@@ -41,7 +44,10 @@ fn production_claim_is_machine_fail_closed() {
         "Production requires the production build profile",
         "supply-chain attestation is not platform artifact signing",
     ] {
-        assert!(helper.contains(marker), "missing readiness control: {marker}");
+        assert!(
+            helper.contains(marker),
+            "missing readiness control: {marker}"
+        );
     }
 
     for marker in [
@@ -53,7 +59,10 @@ fn production_claim_is_machine_fail_closed() {
         "Observability and telemetry privacy",
         "Platform signing boundary",
     ] {
-        assert!(spec.contains(marker), "missing Phase 45 spec marker: {marker}");
+        assert!(
+            spec.contains(marker),
+            "missing Phase 45 spec marker: {marker}"
+        );
     }
 
     assert!(adr.contains("Production maturity requires exact release evidence"));
@@ -93,7 +102,10 @@ fn production_runtime_is_durable_distinct_and_redaction_safe() {
     assert!(!runtime.contains("UCR_DEV_CREDENTIAL_SECRET_HEX"));
 
     for command in ["\"init\"", "\"check\"", "\"metrics\"", "\"serve\""] {
-        assert!(main.contains(command), "missing production runtime command: {command}");
+        assert!(
+            main.contains(command),
+            "missing production runtime command: {command}"
+        );
     }
 }
 
@@ -111,7 +123,10 @@ fn performance_budget_is_fixed_in_source_and_governed_by_adr() {
         "production",
         "thousand_person_sfu_conference_fits_bounded_call_ceiling",
     ] {
-        assert!(gate.contains(marker), "missing fixed performance marker: {marker}");
+        assert!(
+            gate.contains(marker),
+            "missing fixed performance marker: {marker}"
+        );
     }
     assert!(!gate.contains("--max-sample-seconds"));
     assert!(adr.contains("**10.0 seconds per sample**"));
