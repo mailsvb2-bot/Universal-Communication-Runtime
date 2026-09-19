@@ -101,11 +101,25 @@ message UniversalResolveConferenceResponse {
   }
 }
 
+message UniversalGetConferenceRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId integration_id = 3;
+}
+
+message UniversalGetConferenceResponse {
+  oneof result {
+    UniversalConferenceDescriptor conference = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 message UniversalConferenceLifecycleRequest {
   TenantScope scope = 1;
   OpaqueId conference_id = 2;
   UniversalConferenceLifecycle target = 3;
   string idempotency_key = 4;
+  OpaqueId integration_id = 5;
 }
 
 message UniversalConferenceLifecycleResponse {
@@ -120,6 +134,7 @@ message UniversalSetEntryOpenRequest {
   OpaqueId conference_id = 2;
   bool entry_open = 3;
   string idempotency_key = 4;
+  OpaqueId integration_id = 5;
 }
 
 message UniversalSetEntryOpenResponse {
@@ -155,6 +170,7 @@ message UniversalUpdateParticipantRequest {
   optional bool publish_audio_allowed = 7;
   optional bool publish_video_allowed = 8;
   string idempotency_key = 9;
+  OpaqueId integration_id = 10;
 }
 
 message UniversalUpdateParticipantResponse {
@@ -169,6 +185,7 @@ message UniversalRemoveParticipantRequest {
   OpaqueId conference_id = 2;
   OpaqueId participant_id = 3;
   string idempotency_key = 4;
+  OpaqueId integration_id = 5;
 }
 
 message UniversalRemoveParticipantResponse {
@@ -182,6 +199,7 @@ message UniversalListParticipantsRequest {
   TenantScope scope = 1;
   OpaqueId conference_id = 2;
   uint32 max_items = 3;
+  OpaqueId integration_id = 4;
 }
 
 message UniversalParticipantList {
@@ -217,6 +235,7 @@ message UniversalRevokeJoinGrantRequest {
   TenantScope scope = 1;
   OpaqueId conference_id = 2;
   OpaqueId session_id = 3;
+  OpaqueId integration_id = 4;
 }
 
 message UniversalRevokeJoinGrantResponse {
@@ -231,6 +250,7 @@ message UniversalRevokeJoinGrantResponse {
 service UniversalConferenceService {
   rpc CreateConference(UniversalCreateConferenceRequest) returns (UniversalCreateConferenceResponse);
   rpc ResolveConference(UniversalResolveConferenceRequest) returns (UniversalResolveConferenceResponse);
+  rpc GetConference(UniversalGetConferenceRequest) returns (UniversalGetConferenceResponse);
   rpc TransitionConference(UniversalConferenceLifecycleRequest) returns (UniversalConferenceLifecycleResponse);
   rpc SetEntryOpen(UniversalSetEntryOpenRequest) returns (UniversalSetEntryOpenResponse);
   rpc EnsureParticipant(UniversalEnsureParticipantRequest) returns (UniversalEnsureParticipantResponse);
