@@ -69,6 +69,7 @@ message UniversalConferenceParticipant {
   bool camera_allowed = 5;
   bool publish_audio_allowed = 6;
   bool publish_video_allowed = 7;
+  bool active = 8;
 }
 
 message UniversalCreateConferenceRequest {
