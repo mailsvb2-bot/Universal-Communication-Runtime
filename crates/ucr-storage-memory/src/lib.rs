@@ -43,12 +43,11 @@ use ucr_model::{
     OrganizationManagedDeviceBinding, OrganizationManagedIdentityBinding, OrganizationModeProfile,
     PermissionGrant, PersonalNodeObject, PersonalNodeProfile, PrincipalIdentityBinding,
     PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecordingConsentState, RecordingId,
-    RecordingSession,
-    RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
-    ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy,
-    SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId, SyncCheckpoint, SyncSession,
-    SyncState, TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
-    UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
+    RecordingSession, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
+    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
+    ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId,
+    SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    TrustedSigningKeyState, UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
     UniversalConferenceProfile,
 };
 use ucr_protocol::{
