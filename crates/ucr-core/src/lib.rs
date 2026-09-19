@@ -13,6 +13,7 @@ mod recovery_workflow;
 mod service_auth;
 mod service_request;
 mod store_forward;
+mod universal_conference;
 
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, BridgeActionId, BridgeActionRecord,
@@ -63,6 +64,7 @@ pub use service_request::{
     SystemServiceQuotaClock,
 };
 pub use store_forward::StoreForwardStore;
+pub use universal_conference::UniversalConferenceStore;
 
 /// A route candidate is transient runtime state, never canonical identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
