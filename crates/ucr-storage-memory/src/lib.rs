@@ -8206,16 +8206,19 @@ impl UniversalConferenceStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
-        let participant_count = state
-            .universal_conference_participants
-            .values()
-            .filter(|existing| {
-                existing.scope == participant.scope
-                    && existing.conference_id == participant.conference_id
-            })
-            .count();
-        if participant_count >= MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS {
-            return Err(DurableStoreError::Full);
+        if participant.active {
+            let active_participant_count = state
+                .universal_conference_participants
+                .values()
+                .filter(|existing| {
+                    existing.scope == participant.scope
+                        && existing.conference_id == participant.conference_id
+                        && existing.active
+                })
+                .count();
+            if active_participant_count >= MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS {
+                return Err(DurableStoreError::Full);
+            }
         }
         if participant.active
             && participant.role == ConferenceParticipantRole::Owner
@@ -8303,6 +8306,31 @@ impl UniversalConferenceStore for MemoryLocalStore {
             .collect())
     }
 
+    fn active_universal_conference_participants(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        max_items: usize,
+    ) -> Result<Vec<UniversalConferenceParticipantProfile>, DurableStoreError> {
+        if max_items == 0 || max_items > MAX_UNIVERSAL_CONFERENCE_PARTICIPANT_SCAN_ITEMS {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let scope_key_value = scope_key(scope);
+        let conference = conference_id.as_opaque().as_str();
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .universal_conference_participants
+            .iter()
+            .filter(|((candidate_scope, candidate_conference, _), profile)| {
+                candidate_scope == &scope_key_value
+                    && candidate_conference == conference
+                    && profile.active
+            })
+            .map(|(_, profile)| profile.clone())
+            .take(max_items)
+            .collect())
+    }
+
     fn update_universal_conference_participant(
         &self,
         scope: &TenantScope,
@@ -8318,6 +8346,27 @@ impl UniversalConferenceStore for MemoryLocalStore {
     ) -> Result<UniversalConferenceParticipantProfile, DurableStoreError> {
         let key = universal_conference_participant_key(scope, conference_id, participant);
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current_active = state
+            .universal_conference_participants
+            .get(&key)
+            .ok_or(DurableStoreError::Conflict)?
+            .active;
+        if active && !current_active {
+            let scope_key_value = scope_key(scope);
+            let conference = conference_id.as_opaque().as_str();
+            let active_participant_count = state
+                .universal_conference_participants
+                .iter()
+                .filter(|((candidate_scope, candidate_conference, _), profile)| {
+                    candidate_scope == &scope_key_value
+                        && candidate_conference == conference
+                        && profile.active
+                })
+                .count();
+            if active_participant_count >= MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS {
+                return Err(DurableStoreError::Full);
+            }
+        }
         if active
             && role == ConferenceParticipantRole::Owner
             && has_conflicting_active_conference_owner(&state, scope, conference_id, participant)
