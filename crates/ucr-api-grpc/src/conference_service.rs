@@ -357,10 +357,9 @@ where
                         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
                     }
                     validate_join_device(&*self.store, &scope, &participant, &device_id)?;
-                    let issuer = self
-                        .join_issuer
-                        .as_deref()
-                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+                    let issuer = self.join_issuer.as_deref().ok_or_else(|| {
+                        CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)
+                    })?;
                     let now_unix_ms = self.clock.now_unix_ms().map_err(|_| {
                         CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
                     })?;
