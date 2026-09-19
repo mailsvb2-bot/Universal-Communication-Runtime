@@ -3170,8 +3170,9 @@ mod universal_runtime_tests {
     };
 
     use ucr_core::{
-        CallStore, DeviceLifecycleStore, GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore,
-        IdentityStore, PrincipalIdentityBindingStore, UniversalConferenceStore,
+        CallStore, DeviceLifecycleStore, GroupCallLookupStore, GroupStore,
+        IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
+        UniversalConferenceStore,
     };
     use ucr_model::{
         CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
