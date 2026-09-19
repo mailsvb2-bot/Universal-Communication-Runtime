@@ -2653,6 +2653,7 @@ struct AttendanceProjectionState {
 
 #[derive(Debug)]
 struct AttendanceObservation {
+    call_id: CallId,
     session_id: SessionId,
     kind: pb::ConferenceAttendanceKind,
     occurred_at_unix_ms: i64,
@@ -2682,19 +2683,6 @@ where
         integration_id,
         external_user_id,
     )?;
-    let calls = store
-        .calls_for_group(scope, conference_id, 64)
-        .map_err(map_store_error)?;
-    if calls.len() == 64 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
-    }
-    let call_ids = calls
-        .into_iter()
-        .map(|call| call.call_id)
-        .collect::<Vec<_>>();
-    if call_ids.is_empty() {
-        return Ok(empty_attendance(external_user_id));
-    }
     let events = store
         .events_for_types(
             scope,
@@ -2707,11 +2695,26 @@ where
     }
 
     let mut state = AttendanceProjectionState::default();
+    let mut group_call_cache: Vec<(CallId, bool)> = Vec::new();
     for event in &events {
         if let Some(observation) =
-            decode_attendance_observation(event, scope, &participant.participant, &call_ids)?
+            decode_attendance_observation(event, scope, &participant.participant)?
         {
-            apply_attendance_observation(&mut state, observation)?;
+            let belongs_to_conference = if let Some((_, belongs)) = group_call_cache
+                .iter()
+                .find(|(call_id, _)| call_id == &observation.call_id)
+            {
+                *belongs
+            } else {
+                let belongs = store
+                    .call_belongs_to_group(scope, conference_id, &observation.call_id)
+                    .map_err(map_store_error)?;
+                group_call_cache.push((observation.call_id.clone(), belongs));
+                belongs
+            };
+            if belongs_to_conference {
+                apply_attendance_observation(&mut state, observation)?;
+            }
         }
     }
     finalize_attendance(external_user_id, state, now_unix_ms)
@@ -2721,7 +2724,6 @@ fn decode_attendance_observation(
     event: &ucr_model::EventEnvelope,
     scope: &TenantScope,
     participant: &PrincipalRef,
-    call_ids: &[CallId],
 ) -> Result<Option<AttendanceObservation>, CanonicalError> {
     let attendance = pb::ConferenceAttendanceEvent::decode(event.payload.as_slice())
         .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
@@ -2742,7 +2744,7 @@ fn decode_attendance_observation(
             super::decode_principal_ref(value)
                 .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
         })?;
-    if event_scope != *scope || !call_ids.contains(&call_id) || event_participant != *participant {
+    if event_scope != *scope || event_participant != *participant {
         return Ok(None);
     }
     if attendance.occurred_at_unix_ms < 0
@@ -2760,6 +2762,7 @@ fn decode_attendance_observation(
         return Err(CanonicalError::new(CanonicalErrorCode::Internal));
     }
     Ok(Some(AttendanceObservation {
+        call_id,
         session_id,
         kind,
         occurred_at_unix_ms: attendance.occurred_at_unix_ms,
