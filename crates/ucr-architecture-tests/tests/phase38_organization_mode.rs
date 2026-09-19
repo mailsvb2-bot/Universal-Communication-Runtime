@@ -8,6 +8,19 @@ fn read(path: &str) -> String {
     fs::read_to_string(workspace().join(path)).unwrap_or_else(|error| panic!("{path}: {error}"))
 }
 
+fn current_sqlite_schema_version(source: &str) -> u32 {
+    const PREFIX: &str = "pub const SQLITE_SCHEMA_VERSION: u32 = ";
+    source
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix(PREFIX)
+                .and_then(|value| value.strip_suffix(';'))
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+        .expect("current SQLite schema version declaration")
+}
+
 #[test]
 fn phase38_organization_mode_reuses_existing_canonical_owners() {
     let model = read("crates/ucr-model/src/organization.rs");
@@ -53,7 +66,8 @@ fn phase38_sqlite_restart_migration_and_public_contract_are_locked() {
     assert!(core.contains("pub trait OrganizationModeStore"));
     assert!(memory.contains("impl OrganizationModeStore for MemoryLocalStore"));
     assert!(sqlite.contains("impl OrganizationModeStore for SqliteLocalStore"));
-    assert!(sqlite_root.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 32"));
+    assert!(sqlite_root.contains("const SQLITE_SCHEMA_V32: u32 = 32"));
+    assert!(current_sqlite_schema_version(&sqlite_root) >= 32);
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V30: u32 = 30"));
     assert!(sqlite_root.contains("const SQLITE_SCHEMA_V31: u32 = 31"));
     assert!(sqlite_root.contains("fn migrate_v30_to_v31"));
