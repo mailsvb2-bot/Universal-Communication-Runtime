@@ -195,9 +195,14 @@ fn universal_conference_owner_is_unique_and_not_transferred_by_generic_participa
     assert!(service.contains("profile.role != requested_role"));
     assert!(service.contains("requested_role == ConferenceParticipantRole::Owner"));
     assert!(service.contains("owner.external_user_id.as_slice() == external_user_id"));
+    let sqlite = read("crates/ucr-storage-sqlite/src/universal_conference_store.rs");
+    let memory = read("crates/ucr-storage-memory/src/lib.rs");
+    assert!(sqlite.contains("ensure_unique_active_owner"));
+    assert!(memory.contains("has_conflicting_active_conference_owner"));
     assert!(
         spec.contains("Ordinary participant ensure/update operations never transfer ownership")
     );
+    assert!(spec.contains("enforced atomically by every canonical `UniversalConferenceStore`"));
 }
 
 #[test]
