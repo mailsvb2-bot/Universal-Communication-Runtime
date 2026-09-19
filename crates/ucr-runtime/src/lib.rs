@@ -244,19 +244,29 @@ impl ProductionRuntime {
 
         Server::builder()
             .add_service(integration_service_server(GrpcIntegrationService::new(
-                Arc::clone(&clock), Arc::clone(&authorization), Arc::clone(&store),
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
             )))
             .add_service(group_service_server(GrpcGroupService::new(
-                Arc::clone(&clock), Arc::clone(&authorization), Arc::clone(&store),
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
             )))
             .add_service(device_service_server(GrpcDeviceService::new(
-                Arc::clone(&clock), Arc::clone(&authorization), Arc::clone(&store),
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
             )))
             .add_service(sync_service_server(GrpcSyncService::new(
-                Arc::clone(&clock), Arc::clone(&authorization), Arc::clone(&store),
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
             )))
             .add_service(call_service_server(GrpcCallService::new(
-                Arc::clone(&clock), Arc::clone(&authorization), Arc::clone(&store),
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
             )))
             .add_service(conference_service_server(
                 GrpcConferenceService::with_state_and_join_issuer(
@@ -282,7 +292,9 @@ impl ProductionRuntime {
                 Arc::clone(&store),
             )))
             .add_service(store_forward_service_server(GrpcStoreForwardService::new(
-                clock, authorization, store,
+                clock,
+                authorization,
+                store,
             )))
             .serve_with_incoming(incoming)
             .await
