@@ -468,23 +468,73 @@ where
 
     async fn issue_join_grant(
         &self,
-        _request: Request<pb::UniversalIssueJoinGrantRequest>,
+        request: Request<pb::UniversalIssueJoinGrantRequest>,
     ) -> Result<Response<pb::UniversalIssueJoinGrantResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let decoded = decode_issue_join_grant(request.into_inner());
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok(input)) => self
+                .admit(
+                    &input.scope,
+                    &credential_id,
+                    &secret,
+                    CONFERENCE_JOIN_ISSUE_PERMISSION,
+                )
+                .and_then(|_| {
+                    let issuer = self.join_issuer.as_deref().ok_or_else(|| {
+                        CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)
+                    })?;
+                    let now_unix_ms = self.clock.now_unix_ms().map_err(|_| {
+                        CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+                    })?;
+                    issue_join_grant(&*self.store, issuer, input, now_unix_ms)
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
         Ok(Response::new(pb::UniversalIssueJoinGrantResponse {
-            result: Some(pb::universal_issue_join_grant_response::Result::Error(
-                unsupported(),
-            )),
+            result: Some(match result {
+                Ok(grant) => pb::universal_issue_join_grant_response::Result::Grant(grant),
+                Err(error) => pb::universal_issue_join_grant_response::Result::Error(pb_error(error)),
+            }),
         }))
     }
 
     async fn revoke_join_grant(
         &self,
-        _request: Request<pb::UniversalRevokeJoinGrantRequest>,
+        request: Request<pb::UniversalRevokeJoinGrantRequest>,
     ) -> Result<Response<pb::UniversalRevokeJoinGrantResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let decoded = decode_revoke_join_grant(request.into_inner());
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok((scope, conference_id, session_id))) => self
+                .admit(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    CONFERENCE_JOIN_ISSUE_PERMISSION,
+                )
+                .and_then(|_| {
+                    let issuer = self.join_issuer.as_deref().ok_or_else(|| {
+                        CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)
+                    })?;
+                    revoke_join_grant(&*self.store, issuer, &scope, &conference_id, &session_id)?;
+                    Ok(session_id)
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
         Ok(Response::new(pb::UniversalRevokeJoinGrantResponse {
-            result: Some(pb::universal_revoke_join_grant_response::Result::Error(
-                unsupported(),
-            )),
+            result: Some(match result {
+                Ok(session_id) => {
+                    pb::universal_revoke_join_grant_response::Result::Acknowledgement(
+                        pb_acknowledgement(acknowledgement_for(
+                            session_id.as_opaque().clone(),
+                        )),
+                    )
+                }
+                Err(error) => {
+                    pb::universal_revoke_join_grant_response::Result::Error(pb_error(error))
+                }
+            }),
         }))
     }
 }
