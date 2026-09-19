@@ -7,9 +7,8 @@ use ucr_core::{
     DurableStoreError, EventJournalStore, ExternalIdentityBindingStore, GroupCallLookupStore,
     GroupStore, IdentityDeviceLookupStore, IdentityStore, PermissionGrantStore,
     PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, ServiceAuditStore,
-    ServiceCredentialSecret,
-    ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
-    UniversalConferenceStore, generate_opaque_id,
+    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
+    ServiceQuotaClock, ServiceQuotaStore, UniversalConferenceStore, generate_opaque_id,
 };
 use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
 use ucr_model::{
@@ -22,8 +21,8 @@ use ucr_model::{
     GroupRole, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
     OpaqueId, PermissionGrant, PermissionScope, PrincipalId, PrincipalIdentityBinding,
     PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal, SessionId, TenantScope,
-    UniversalConferenceLifecycle, UniversalConferenceMode,
-    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    UniversalConferenceLifecycle, UniversalConferenceMode, UniversalConferenceParticipantProfile,
+    UniversalConferenceProfile,
 };
 use ucr_protocol::{
     AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CALL_OBSERVE_PERMISSION,
@@ -1637,21 +1636,15 @@ where
     if participants.len() == 1024 {
         return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
     }
-    let mut owners = participants
-        .into_iter()
-        .filter(|participant| {
-            participant.active && participant.role == ConferenceParticipantRole::Owner
-        });
+    let mut owners = participants.into_iter().filter(|participant| {
+        participant.active && participant.role == ConferenceParticipantRole::Owner
+    });
     let owner = match (owners.next(), owners.next()) {
         (Some(owner), None) => owner,
         _ => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
     };
-    let owner_device_id = optional_single_active_device(
-        store,
-        &removed.scope,
-        &owner.participant,
-    )?
-    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+    let owner_device_id = optional_single_active_device(store, &removed.scope, &owner.participant)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
     let owner_actor = ScopedPrincipal {
         scope: removed.scope.clone(),
         principal: owner.participant,
@@ -3107,7 +3100,6 @@ fn map_store_error(error: DurableStoreError) -> CanonicalError {
     CanonicalError::new(code)
 }
 
-
 #[cfg(test)]
 mod universal_runtime_tests {
     use std::{
@@ -3129,9 +3121,7 @@ mod universal_runtime_tests {
     };
     use ucr_storage_sqlite::SqliteLocalStore;
 
-    use super::{
-        GROUP_MLS_CAPABILITY, PrepareConferenceRuntimeInput, prepare_conference_runtime,
-    };
+    use super::{GROUP_MLS_CAPABILITY, PrepareConferenceRuntimeInput, prepare_conference_runtime};
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
