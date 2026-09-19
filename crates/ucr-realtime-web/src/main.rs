@@ -733,7 +733,7 @@ mod tests {
     #[test]
     fn retryable_unavailable_join_maps_to_waiting_room() {
         let response = join_error(&pb::ErrorEnvelope {
-            code: pb::ErrorCode::TemporarilyUnavailable as i32,
+            code: pb::ErrorCode::PolicyDenied as i32,
             retryable: true,
             retry_after_ms: Some(2_000),
             diagnostic_domain: "ucr.grpc.binding".to_owned(),
