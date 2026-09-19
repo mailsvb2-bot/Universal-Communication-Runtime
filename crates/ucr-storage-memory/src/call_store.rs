@@ -38,11 +38,7 @@ impl GroupCallLookupStore for MemoryLocalStore {
             .filter(|call| call.scope == *scope && call.conversation == group.conversation)
             .map(|call| call.call_id.clone())
             .collect::<Vec<_>>();
-        call_ids.sort_by(|left, right| {
-            left.as_opaque()
-                .as_str()
-                .cmp(right.as_opaque().as_str())
-        });
+        call_ids.sort_by(|left, right| left.as_opaque().as_str().cmp(right.as_opaque().as_str()));
         call_ids.truncate(max_items);
         call_ids
             .into_iter()
