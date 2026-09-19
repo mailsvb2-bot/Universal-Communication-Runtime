@@ -1,6 +1,4 @@
-use ucr_model::{
-    PrincipalRef, RecordingConsentState, RecordingId, RecordingSession, TenantScope,
-};
+use ucr_model::{PrincipalRef, RecordingConsentState, RecordingId, RecordingSession, TenantScope};
 
 use crate::{DurableRecordStatus, DurableStoreError, StorageProvider};
 
