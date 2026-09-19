@@ -64,6 +64,11 @@ CREATE TABLE universal_conference_participants (
     CHECK((namespace_present = 0 AND namespace_id = '') OR
           (namespace_present = 1 AND namespace_id <> ''))
 ) WITHOUT ROWID;
+
+CREATE UNIQUE INDEX universal_conference_participants_external_user
+ON universal_conference_participants(
+    tenant_id, namespace_present, namespace_id, conference_id, integration_id, external_user_id
+);
 ";
 
 pub(super) fn create_v32_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
@@ -117,6 +122,19 @@ pub(super) fn verify_schema_v32(connection: &Connection) -> Result<(), DurableSt
             ("revision", "BLOB", 1, 0),
         ],
     )?;
+    let external_participant_index_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'index' AND name = 'universal_conference_participants_external_user'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if !external_participant_index_exists {
+        return Err(DurableStoreError::Corrupt);
+    }
     let mut foreign_key_check = connection
         .prepare("PRAGMA foreign_key_check")
         .map_err(|error| map_sqlite_error(&error))?;
@@ -307,6 +325,19 @@ impl UniversalConferenceStore for SqliteLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        if let Some(existing) = load_participant_for_external(
+            &transaction,
+            &participant.scope,
+            &participant.conference_id,
+            &participant.integration_id,
+            &participant.external_user_id,
+        )? {
+            return if existing == *participant {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
 
         insert_participant(&transaction, participant)?;
         transaction
@@ -323,6 +354,24 @@ impl UniversalConferenceStore for SqliteLocalStore {
     ) -> Result<Option<UniversalConferenceParticipantProfile>, DurableStoreError> {
         let connection = self.lock_connection()?;
         load_participant(&connection, scope, conference_id, participant)
+    }
+
+    fn universal_conference_participant_for_external(
+        &self,
+        scope: &TenantScope,
+        conference_id: &GroupId,
+        integration_id: &IntegrationId,
+        external_user_id: &[u8],
+    ) -> Result<Option<UniversalConferenceParticipantProfile>, DurableStoreError> {
+        validate_external_reference(external_user_id)?;
+        let connection = self.lock_connection()?;
+        load_participant_for_external(
+            &connection,
+            scope,
+            conference_id,
+            integration_id,
+            external_user_id,
+        )
     }
 
     fn universal_conference_participants(
@@ -614,6 +663,39 @@ fn load_participant(
                 conference_id.as_opaque().as_str(),
                 principal_kind_text(participant.kind),
                 participant.principal_id.as_opaque().as_str(),
+            ],
+            decode_stored_participant,
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(&error))?;
+    stored
+        .map(|row| decode_participant(scope, conference_id, row))
+        .transpose()
+}
+
+fn load_participant_for_external(
+    connection: &Connection,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    integration_id: &IntegrationId,
+    external_user_id: &[u8],
+) -> Result<Option<UniversalConferenceParticipantProfile>, DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let stored = connection
+        .query_row(
+            "SELECT integration_id, external_user_id, principal_kind, principal_id, role,
+                    audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed,
+                    active, revision
+             FROM universal_conference_participants
+             WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
+               AND conference_id = ?4 AND integration_id = ?5 AND external_user_id = ?6",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                conference_id.as_opaque().as_str(),
+                integration_id.as_opaque().as_str(),
+                external_user_id,
             ],
             decode_stored_participant,
         )
