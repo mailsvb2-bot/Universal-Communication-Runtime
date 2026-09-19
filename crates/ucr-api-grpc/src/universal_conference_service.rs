@@ -402,9 +402,11 @@ where
         };
         Ok(Response::new(pb::UniversalRemoveParticipantResponse {
             result: Some(match result {
-                Ok(command_id) => pb::universal_remove_participant_response::Result::Acknowledgement(
-                    pb_acknowledgement(acknowledgement_for(command_id.as_opaque().clone())),
-                ),
+                Ok(command_id) => {
+                    pb::universal_remove_participant_response::Result::Acknowledgement(
+                        pb_acknowledgement(acknowledgement_for(command_id.as_opaque().clone())),
+                    )
+                }
                 Err(error) => {
                     pb::universal_remove_participant_response::Result::Error(pb_error(error))
                 }
@@ -426,13 +428,11 @@ where
         };
         Ok(Response::new(pb::UniversalListParticipantsResponse {
             result: Some(match result {
-                Ok(participants) => {
-                    pb::universal_list_participants_response::Result::Participants(
-                        pb::UniversalParticipantList {
-                            participants: participants.iter().map(pb_participant).collect(),
-                        },
-                    )
-                }
+                Ok(participants) => pb::universal_list_participants_response::Result::Participants(
+                    pb::UniversalParticipantList {
+                        participants: participants.iter().map(pb_participant).collect(),
+                    },
+                ),
                 Err(error) => {
                     pb::universal_list_participants_response::Result::Error(pb_error(error))
                 }
@@ -877,11 +877,7 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
     let current = store
-        .universal_conference_participant(
-            &input.scope,
-            &input.conference_id,
-            &input.participant,
-        )
+        .universal_conference_participant(&input.scope, &input.conference_id, &input.participant)
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
 
@@ -907,12 +903,14 @@ where
 
     let audio_muted = input.audio_muted.unwrap_or(current.audio_muted) || required_muted;
     let camera_allowed = input.camera_allowed.unwrap_or(current.camera_allowed) && camera_ceiling;
-    let publish_audio_allowed =
-        input.publish_audio_allowed.unwrap_or(current.publish_audio_allowed)
-            && audio_publish_ceiling;
-    let publish_video_allowed =
-        input.publish_video_allowed.unwrap_or(current.publish_video_allowed)
-            && video_publish_ceiling;
+    let publish_audio_allowed = input
+        .publish_audio_allowed
+        .unwrap_or(current.publish_audio_allowed)
+        && audio_publish_ceiling;
+    let publish_video_allowed = input
+        .publish_video_allowed
+        .unwrap_or(current.publish_video_allowed)
+        && video_publish_ceiling;
 
     if publish_video_allowed && !camera_allowed {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
@@ -960,11 +958,7 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
     let current = store
-        .universal_conference_participant(
-            &input.scope,
-            &input.conference_id,
-            &input.participant,
-        )
+        .universal_conference_participant(&input.scope, &input.conference_id, &input.participant)
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
 
