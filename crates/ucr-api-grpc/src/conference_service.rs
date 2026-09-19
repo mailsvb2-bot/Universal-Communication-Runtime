@@ -533,13 +533,18 @@ where
 
 const fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
     let code = match error {
-        JoinTokenError::InvalidBaseUrl | JoinTokenError::InvalidTtl => {
-            CanonicalErrorCode::InvalidArgument
-        }
+        JoinTokenError::InvalidBaseUrl
+        | JoinTokenError::InvalidTtl
+        | JoinTokenError::InvalidWindow => CanonicalErrorCode::InvalidArgument,
         JoinTokenError::Malformed
         | JoinTokenError::InvalidSignature
         | JoinTokenError::NotYetValid
-        | JoinTokenError::Expired => CanonicalErrorCode::Unauthenticated,
+        | JoinTokenError::Expired
+        | JoinTokenError::UnknownGrant
+        | JoinTokenError::Revoked
+        | JoinTokenError::AlreadyUsed => CanonicalErrorCode::Unauthenticated,
+        JoinTokenError::CapacityExceeded => CanonicalErrorCode::ResourceExhausted,
+        JoinTokenError::StateUnavailable => CanonicalErrorCode::TemporarilyUnavailable,
         JoinTokenError::ClockOverflow
         | JoinTokenError::RandomUnavailable
         | JoinTokenError::Internal => CanonicalErrorCode::Internal,
