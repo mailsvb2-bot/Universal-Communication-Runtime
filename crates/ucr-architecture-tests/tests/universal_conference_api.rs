@@ -105,3 +105,15 @@ fn universal_conference_attendance_is_external_reference_projection() {
     assert!(proto.contains("external_user_id"));
     assert!(spec.contains("projection over the canonical Event journal"));
 }
+
+
+#[test]
+fn universal_conference_credentials_are_bound_to_integration_identity() {
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    assert!(service.contains("fn admit_integration("));
+    assert!(service.contains("actor.principal.kind != PrincipalKind::ServiceAccount"));
+    assert!(
+        service.contains("actor.principal.principal_id.as_opaque() != integration_id.as_opaque()")
+    );
+    assert!(service.contains("CanonicalErrorCode::PermissionDenied"));
+}
