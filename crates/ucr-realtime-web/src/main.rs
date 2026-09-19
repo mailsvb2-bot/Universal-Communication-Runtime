@@ -4,10 +4,7 @@ use std::{convert::Infallible, net::SocketAddr};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
-use http_body_util::{
-    BodyExt, Full, StreamBody,
-    combinators::UnsyncBoxBody,
-};
+use http_body_util::{BodyExt, Full, StreamBody, combinators::UnsyncBoxBody};
 use hyper::{
     Method, Request, Response, StatusCode,
     body::{Frame, Incoming},
@@ -20,11 +17,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use tokio::{net::TcpListener, sync::mpsc};
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
-use tonic::{
-    Request as GrpcRequest,
-    metadata::MetadataValue,
-    transport::Channel,
-};
+use tonic::{Request as GrpcRequest, metadata::MetadataValue, transport::Channel};
 use ucr_api_grpc::pb;
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
@@ -112,9 +105,8 @@ async fn run() -> Result<(), String> {
         let io = TokioIo::new(stream);
         let connection_state = state.clone();
         tokio::spawn(async move {
-            let service = service_fn(move |request| {
-                handle_request(request, connection_state.clone())
-            });
+            let service =
+                service_fn(move |request| handle_request(request, connection_state.clone()));
             if let Err(error) = http1::Builder::new().serve_connection(io, service).await {
                 eprintln!("ucr-realtime-web: connection closed: {error}");
             }
@@ -133,7 +125,10 @@ fn validate_loopback_bind(bind: SocketAddr) -> Result<(), String> {
     }
 }
 
-async fn handle_request(request: Request<Incoming>, state: AppState) -> Result<HttpResponse, Infallible> {
+async fn handle_request(
+    request: Request<Incoming>,
+    state: AppState,
+) -> Result<HttpResponse, Infallible> {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
 
@@ -161,19 +156,25 @@ async fn handle_request(request: Request<Incoming>, state: AppState) -> Result<H
     let response = match path.as_str() {
         "/v1/realtime/join" => decode_json::<SessionRequest>(&body)
             .map_or_else(|response| response, |input| join(&state, &token, input)),
-        "/v1/realtime/heartbeat" => decode_json::<HeartbeatRequest>(&body)
-            .map_or_else(|response| response, |input| heartbeat(&state, &token, input)),
+        "/v1/realtime/heartbeat" => decode_json::<HeartbeatRequest>(&body).map_or_else(
+            |response| response,
+            |input| heartbeat(&state, &token, input),
+        ),
         "/v1/realtime/leave" => decode_json::<SessionRequest>(&body)
             .map_or_else(|response| response, |input| leave(&state, &token, input)),
-        "/v1/realtime/media/publish" => decode_json::<PublishRequest>(&body)
-            .map_or_else(|response| response, |input| publish_media(&state, &token, input)),
-        "/v1/realtime/media/stream" => {
-            match decode_json::<SessionRequest>(&body) {
-                Ok(input) => return Ok(subscribe_media(&state, &token, input).await),
-                Err(response) => response,
-            }
+        "/v1/realtime/media/publish" => decode_json::<PublishRequest>(&body).map_or_else(
+            |response| response,
+            |input| publish_media(&state, &token, input),
+        ),
+        "/v1/realtime/media/stream" => match decode_json::<SessionRequest>(&body) {
+            Ok(input) => return Ok(subscribe_media(&state, &token, input).await),
+            Err(response) => response,
         }
-        _ => api_error(StatusCode::NOT_FOUND, "not_found", "realtime route not found"),
+        _ => api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "realtime route not found",
+        ),
     };
 
     Ok(response.await)
@@ -314,11 +315,7 @@ async fn publish_media(state: &AppState, token: &str, input: PublishRequest) -> 
     }
 }
 
-async fn subscribe_media(
-    state: &AppState,
-    token: &str,
-    input: SessionRequest,
-) -> HttpResponse {
+async fn subscribe_media(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeSubscribeMediaRequest {
         scope: Some(pb_scope(&input)),
@@ -423,9 +420,7 @@ fn bearer_from_headers(headers: &hyper::HeaderMap) -> Result<String, HttpRespons
             "invalid realtime bearer token",
         )
     })?;
-    if token.is_empty()
-        || token.len() > MAX_BEARER_BYTES
-        || token.chars().any(char::is_whitespace)
+    if token.is_empty() || token.len() > MAX_BEARER_BYTES || token.chars().any(char::is_whitespace)
     {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
