@@ -281,3 +281,21 @@ fn universal_conference_current_call_flows_do_not_depend_on_bounded_call_history
     assert!(service.contains(".call_belongs_to_group(scope, conference_id, &claims.call_id)"));
     assert!(service.contains("active_call_projection_ignores_more_than_sixty_four_terminated_calls"));
 }
+
+#[test]
+fn universal_conference_current_device_flows_do_not_depend_on_bounded_device_history() {
+    let core = read("crates/ucr-core/src/lib.rs");
+    let memory = read("crates/ucr-storage-memory/src/lib.rs");
+    let sqlite = read("crates/ucr-storage-sqlite/src/device_store.rs");
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+
+    assert!(core.contains("fn active_devices_for_identity"));
+    assert!(memory.contains("descriptor.state == DeviceLifecycleState::Active"));
+    assert!(sqlite.contains("AND identity_id=?4 AND state='active'"));
+    assert!(service.contains(".active_devices_for_identity(&input.scope, &binding.identity_id, 2)"));
+    assert!(service.contains(".active_devices_for_identity(scope, &binding.identity_id, 2)"));
+    assert!(
+        service.contains(".active_devices_for_identity(scope, &identity_binding.identity_id, 2)")
+    );
+    assert!(service.contains("active_device_projection_ignores_sixty_four_revoked_devices"));
+}
