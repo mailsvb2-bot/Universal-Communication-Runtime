@@ -1529,10 +1529,6 @@ fn validate_idempotency_key(value: &str) -> Result<(), CanonicalError> {
     }
 }
 
-fn unsupported() -> pb::ErrorEnvelope {
-    pb_error(CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))
-}
-
 fn map_store_error(error: DurableStoreError) -> CanonicalError {
     let code = match error {
         DurableStoreError::InvalidRecord => CanonicalErrorCode::InvalidArgument,
