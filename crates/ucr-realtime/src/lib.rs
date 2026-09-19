@@ -2,7 +2,7 @@
 
 use core::fmt;
 use std::{
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -22,8 +22,15 @@ pub const MAX_JOIN_TTL_SECONDS: u32 = 900;
 pub const DEFAULT_JOIN_TTL_SECONDS: u32 = 300;
 pub const DEFAULT_REALTIME_QUEUE_CAPACITY: usize = 64;
 pub const MAX_REALTIME_SESSIONS: usize = 4096;
+pub const MAX_JOIN_GRANTS: usize = 4096;
 
 type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinGrantUsePolicy {
+    SingleUse,
+    Reusable,
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct JoinTokenKey([u8; 32]);
@@ -52,7 +59,9 @@ pub struct RealtimeSessionClaims {
     pub device_id: Option<DeviceId>,
     pub session_id: SessionId,
     pub issued_at_unix_ms: i64,
+    pub not_before_unix_ms: i64,
     pub expires_at_unix_ms: i64,
+    pub use_policy: JoinGrantUsePolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,12 +74,18 @@ pub struct IssuedJoinGrant {
 pub enum JoinTokenError {
     InvalidBaseUrl,
     InvalidTtl,
+    InvalidWindow,
     ClockOverflow,
     RandomUnavailable,
     Malformed,
     InvalidSignature,
     NotYetValid,
     Expired,
+    UnknownGrant,
+    Revoked,
+    AlreadyUsed,
+    CapacityExceeded,
+    StateUnavailable,
     Internal,
 }
 
@@ -78,6 +93,14 @@ pub enum JoinTokenError {
 pub struct JoinTokenIssuer {
     key: JoinTokenKey,
     join_base_url: String,
+    grants: Arc<Mutex<Vec<JoinGrantState>>>,
+}
+
+#[derive(Debug, Clone)]
+struct JoinGrantState {
+    claims: RealtimeSessionClaims,
+    revoked: bool,
+    redeemed: bool,
 }
 
 impl JoinTokenIssuer {
@@ -96,14 +119,17 @@ impl JoinTokenIssuer {
         {
             return Err(JoinTokenError::InvalidBaseUrl);
         }
-        Ok(Self { key, join_base_url })
+        Ok(Self {
+            key,
+            join_base_url,
+            grants: Arc::new(Mutex::new(Vec::new())),
+        })
     }
 
-    /// Issues one short-lived session grant. The signed credential is placed in the URL fragment,
-    /// so normal HTTP request targets and referrers do not receive it.
+    /// Issues one short-lived reusable session grant.
     ///
     /// # Errors
-    /// Rejects TTL outside the bounded 30..=900 second window, clock overflow, or OS-random failure.
+    /// Rejects invalid TTL, clock overflow, random failure, or exhausted bounded grant state.
     pub fn issue(
         &self,
         scope: TenantScope,
@@ -113,15 +139,55 @@ impl JoinTokenIssuer {
         ttl_seconds: u32,
         now_unix_ms: i64,
     ) -> Result<IssuedJoinGrant, JoinTokenError> {
+        self.issue_with_policy(
+            scope,
+            call_id,
+            participant,
+            device_id,
+            ttl_seconds,
+            JoinGrantUsePolicy::Reusable,
+            None,
+            None,
+            now_unix_ms,
+        )
+    }
+
+    /// Issues one bounded grant with explicit use and validity policy.
+    ///
+    /// Explicit bounds may only narrow the TTL window; they can never extend it.
+    ///
+    /// # Errors
+    /// Rejects invalid time windows, TTL, exhausted state, clock overflow, or random failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_with_policy(
+        &self,
+        scope: TenantScope,
+        call_id: CallId,
+        participant: PrincipalRef,
+        device_id: Option<DeviceId>,
+        ttl_seconds: u32,
+        use_policy: JoinGrantUsePolicy,
+        not_before_unix_ms: Option<i64>,
+        not_after_unix_ms: Option<i64>,
+        now_unix_ms: i64,
+    ) -> Result<IssuedJoinGrant, JoinTokenError> {
         if !(MIN_JOIN_TTL_SECONDS..=MAX_JOIN_TTL_SECONDS).contains(&ttl_seconds) {
             return Err(JoinTokenError::InvalidTtl);
         }
         let ttl_ms = i64::from(ttl_seconds)
             .checked_mul(1000)
             .ok_or(JoinTokenError::ClockOverflow)?;
-        let expires_at_unix_ms = now_unix_ms
+        let maximum_expiry = now_unix_ms
             .checked_add(ttl_ms)
             .ok_or(JoinTokenError::ClockOverflow)?;
+        let not_before_unix_ms = not_before_unix_ms.unwrap_or(now_unix_ms);
+        let expires_at_unix_ms = not_after_unix_ms.unwrap_or(maximum_expiry);
+        if not_before_unix_ms < now_unix_ms
+            || not_before_unix_ms >= expires_at_unix_ms
+            || expires_at_unix_ms > maximum_expiry
+        {
+            return Err(JoinTokenError::InvalidWindow);
+        }
         let session_id = SessionId::from_opaque(
             generate_opaque_id().map_err(|_| JoinTokenError::RandomUnavailable)?,
         );
@@ -132,9 +198,24 @@ impl JoinTokenIssuer {
             device_id,
             session_id,
             issued_at_unix_ms: now_unix_ms,
+            not_before_unix_ms,
             expires_at_unix_ms,
+            use_policy,
         };
         let token = self.sign(&claims)?;
+        let mut grants = self
+            .grants
+            .lock()
+            .map_err(|_| JoinTokenError::StateUnavailable)?;
+        grants.retain(|entry| now_unix_ms < entry.claims.expires_at_unix_ms);
+        if grants.len() >= MAX_JOIN_GRANTS {
+            return Err(JoinTokenError::CapacityExceeded);
+        }
+        grants.push(JoinGrantState {
+            claims: claims.clone(),
+            revoked: false,
+            redeemed: false,
+        });
         Ok(IssuedJoinGrant {
             join_url: format!("{}#ucr_join={token}", self.join_base_url),
             claims,
