@@ -21,7 +21,7 @@ use ucr_core::{
     PermissionGrantStore, PrincipalIdentityBindingStore, RecoveryAdmissionProof,
     RecoveryDeviceStagingStore, RecoveryPlanStore, ReverifiedDeviceActivationStore,
     ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
-    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore,
+    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore, UniversalConferenceStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -45,7 +45,8 @@ use ucr_model::{
     ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
     ServiceCredentialState, ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob,
     StoreForwardLeaseId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord, TrustedSigningKeyState,
+    TrustedSigningKeyRecord, TrustedSigningKeyState, ConferenceParticipantRole,
+    UniversalConferenceLifecycle, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -106,6 +107,9 @@ type TrustedSigningDeviceRef = (ScopeKey, String);
 type DeviceKey = (ScopeKey, String);
 type ServiceCredentialRef = (ScopeKey, String);
 type ServicePrincipalKey = (ScopeKey, String);
+type UniversalConferenceKey = (ScopeKey, String);
+type UniversalConferenceExternalKey = (ScopeKey, String, Vec<u8>);
+type UniversalConferenceParticipantKey = (ScopeKey, String, PrincipalRef);
 
 #[derive(Debug, Clone, Copy)]
 struct MemoryQuotaUsage {
@@ -194,6 +198,11 @@ struct MemoryState {
     service_quota_policies: HashMap<ServicePrincipalKey, ServiceQuotaPolicy>,
     service_quota_usage: HashMap<ServicePrincipalKey, MemoryQuotaUsage>,
     service_audit_records: Vec<(ServiceAuditRecord, [u8; 32])>,
+    universal_conferences: HashMap<UniversalConferenceKey, UniversalConferenceProfile>,
+    universal_conference_external:
+        HashMap<UniversalConferenceExternalKey, UniversalConferenceKey>,
+    universal_conference_participants:
+        HashMap<UniversalConferenceParticipantKey, UniversalConferenceParticipantProfile>,
 }
 
 #[derive(Default)]
@@ -1051,6 +1060,34 @@ fn external_identity_binding_key(
         integration_id.as_opaque().as_str().to_owned(),
         external_namespace.to_owned(),
         external_entity_id.to_vec(),
+    )
+}
+
+fn universal_conference_key(scope: &TenantScope, conference_id: &ucr_model::GroupId) -> UniversalConferenceKey {
+    (scope_key(scope), conference_id.as_opaque().as_str().to_owned())
+}
+
+fn universal_conference_external_key(
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    external_conference_id: &[u8],
+) -> UniversalConferenceExternalKey {
+    (
+        scope_key(scope),
+        integration_id.as_opaque().as_str().to_owned(),
+        external_conference_id.to_vec(),
+    )
+}
+
+fn universal_conference_participant_key(
+    scope: &TenantScope,
+    conference_id: &ucr_model::GroupId,
+    participant: &PrincipalRef,
+) -> UniversalConferenceParticipantKey {
+    (
+        scope_key(scope),
+        conference_id.as_opaque().as_str().to_owned(),
+        participant.clone(),
     )
 }
 
@@ -7878,6 +7915,252 @@ mod integration_api_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].operation.as_ref(), Some(&operation));
     }
+}
+
+impl UniversalConferenceStore for MemoryLocalStore {
+    fn persist_universal_conference_profile(
+        &self,
+        profile: &UniversalConferenceProfile,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        if profile.external_conference_id.is_empty()
+            || profile.external_conference_id.len() > 512
+            || profile.revision != 1
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let key = universal_conference_key(&profile.scope, &profile.conference_id);
+        let external_key = universal_conference_external_key(
+            &profile.scope,
+            &profile.integration_id,
+            &profile.external_conference_id,
+        );
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.universal_conferences.get(&key) {
+            return if existing == profile {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if let Some(existing_key) = state.universal_conference_external.get(&external_key) {
+            return if state.universal_conferences.get(existing_key) == Some(profile) {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state
+            .universal_conference_external
+            .insert(external_key, key.clone());
+        state.universal_conferences.insert(key, profile.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn universal_conference_profile(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+    ) -> Result<Option<UniversalConferenceProfile>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .universal_conferences
+            .get(&universal_conference_key(scope, conference_id))
+            .cloned())
+    }
+
+    fn universal_conference_profile_for_external(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        external_conference_id: &[u8],
+    ) -> Result<Option<UniversalConferenceProfile>, DurableStoreError> {
+        if external_conference_id.is_empty() || external_conference_id.len() > 512 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let external_key =
+            universal_conference_external_key(scope, integration_id, external_conference_id);
+        Ok(state
+            .universal_conference_external
+            .get(&external_key)
+            .and_then(|key| state.universal_conferences.get(key))
+            .cloned())
+    }
+
+    fn transition_universal_conference(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        expected_revision: u64,
+        lifecycle: UniversalConferenceLifecycle,
+        entry_open: bool,
+    ) -> Result<UniversalConferenceProfile, DurableStoreError> {
+        let key = universal_conference_key(scope, conference_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current = state
+            .universal_conferences
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Conflict)?;
+        if current.revision == expected_revision.saturating_add(1)
+            && current.lifecycle == lifecycle
+            && current.entry_open == entry_open
+        {
+            return Ok(current.clone());
+        }
+        if current.revision != expected_revision
+            || !valid_universal_conference_transition(current.lifecycle, lifecycle)
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+        current.lifecycle = lifecycle;
+        current.entry_open = entry_open;
+        current.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        Ok(current.clone())
+    }
+
+    fn persist_universal_conference_participant(
+        &self,
+        participant: &UniversalConferenceParticipantProfile,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        if participant.external_user_id.is_empty()
+            || participant.external_user_id.len() > 512
+            || participant.revision != 1
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let conference_key =
+            universal_conference_key(&participant.scope, &participant.conference_id);
+        let key = universal_conference_participant_key(
+            &participant.scope,
+            &participant.conference_id,
+            &participant.participant,
+        );
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if !state.universal_conferences.contains_key(&conference_key) {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        if let Some(existing) = state.universal_conference_participants.get(&key) {
+            return if existing == participant {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state
+            .universal_conference_participants
+            .insert(key, participant.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn universal_conference_participant(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        participant: &PrincipalRef,
+    ) -> Result<Option<UniversalConferenceParticipantProfile>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .universal_conference_participants
+            .get(&universal_conference_participant_key(
+                scope,
+                conference_id,
+                participant,
+            ))
+            .cloned())
+    }
+
+    fn universal_conference_participants(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        max_items: usize,
+    ) -> Result<Vec<UniversalConferenceParticipantProfile>, DurableStoreError> {
+        if max_items == 0 || max_items > 1024 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let scope_key_value = scope_key(scope);
+        let conference = conference_id.as_opaque().as_str();
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .universal_conference_participants
+            .iter()
+            .filter(|((candidate_scope, candidate_conference, _), _)| {
+                *candidate_scope == scope_key_value && candidate_conference == conference
+            })
+            .map(|(_, profile)| profile.clone())
+            .take(max_items)
+            .collect())
+    }
+
+    fn update_universal_conference_participant(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        participant: &PrincipalRef,
+        expected_revision: u64,
+        role: ConferenceParticipantRole,
+        audio_muted: bool,
+        camera_allowed: bool,
+        publish_audio_allowed: bool,
+        publish_video_allowed: bool,
+        active: bool,
+    ) -> Result<UniversalConferenceParticipantProfile, DurableStoreError> {
+        let key = universal_conference_participant_key(scope, conference_id, participant);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current = state
+            .universal_conference_participants
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Conflict)?;
+        if current.revision == expected_revision.saturating_add(1)
+            && current.role == role
+            && current.audio_muted == audio_muted
+            && current.camera_allowed == camera_allowed
+            && current.publish_audio_allowed == publish_audio_allowed
+            && current.publish_video_allowed == publish_video_allowed
+            && current.active == active
+        {
+            return Ok(current.clone());
+        }
+        if current.revision != expected_revision {
+            return Err(DurableStoreError::Conflict);
+        }
+        current.role = role;
+        current.audio_muted = audio_muted;
+        current.camera_allowed = camera_allowed;
+        current.publish_audio_allowed = publish_audio_allowed;
+        current.publish_video_allowed = publish_video_allowed;
+        current.active = active;
+        current.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        Ok(current.clone())
+    }
+}
+
+const fn valid_universal_conference_transition(
+    current: UniversalConferenceLifecycle,
+    next: UniversalConferenceLifecycle,
+) -> bool {
+    matches!(
+        (current, next),
+        (
+            UniversalConferenceLifecycle::Scheduled,
+            UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
+        ) | (
+            UniversalConferenceLifecycle::Waiting,
+            UniversalConferenceLifecycle::Live
+        ) | (
+            UniversalConferenceLifecycle::Live,
+            UniversalConferenceLifecycle::Ending
+        ) | (
+            UniversalConferenceLifecycle::Ending,
+            UniversalConferenceLifecycle::Ended
+        )
+    )
 }
 
 #[cfg(test)]
