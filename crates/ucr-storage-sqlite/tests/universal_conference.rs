@@ -166,6 +166,66 @@ fn create_idempotency_key_conflicts_when_semantics_change() {
 }
 
 #[test]
+fn active_owner_is_unique_at_the_atomic_storage_boundary() {
+    let path = db_path("universal-conference-owner");
+    let store = SqliteLocalStore::open(&path).expect("open");
+    store
+        .persist_universal_conference_profile(&conference())
+        .expect("conference");
+
+    let mut owner = participant();
+    owner.external_user_id = b"owner-1".to_vec();
+    owner.participant = PrincipalRef {
+        principal_id: PrincipalId::from_opaque(oid("owner-1")),
+        kind: PrincipalKind::Person,
+    };
+    owner.role = ConferenceParticipantRole::Owner;
+    assert_eq!(
+        store.persist_universal_conference_participant(&owner),
+        Ok(DurableRecordStatus::Persisted)
+    );
+
+    let mut second_owner = owner.clone();
+    second_owner.external_user_id = b"owner-2".to_vec();
+    second_owner.participant = PrincipalRef {
+        principal_id: PrincipalId::from_opaque(oid("owner-2")),
+        kind: PrincipalKind::Person,
+    };
+    assert_eq!(
+        store.persist_universal_conference_participant(&second_owner),
+        Err(ucr_core::DurableStoreError::Conflict)
+    );
+
+    let mut attendee = participant();
+    attendee.external_user_id = b"attendee-owner-check".to_vec();
+    attendee.participant = PrincipalRef {
+        principal_id: PrincipalId::from_opaque(oid("attendee-owner-check")),
+        kind: PrincipalKind::Person,
+    };
+    attendee.role = ConferenceParticipantRole::Attendee;
+    store
+        .persist_universal_conference_participant(&attendee)
+        .expect("attendee");
+    assert_eq!(
+        store.update_universal_conference_participant(
+            &scope(),
+            &conference().conference_id,
+            &attendee.participant,
+            attendee.revision,
+            ConferenceParticipantRole::Owner,
+            attendee.audio_muted,
+            attendee.camera_allowed,
+            attendee.publish_audio_allowed,
+            attendee.publish_video_allowed,
+            true,
+        ),
+        Err(ucr_core::DurableStoreError::Conflict)
+    );
+
+    cleanup(&path);
+}
+
+#[test]
 fn external_participant_reference_is_unique_within_integration_conference() {
     let path = db_path("universal-conference-external-participant");
     let store = SqliteLocalStore::open(&path).expect("open");
