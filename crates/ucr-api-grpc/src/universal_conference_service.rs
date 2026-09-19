@@ -1298,9 +1298,9 @@ where
     if participants.len() == 1024 {
         return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
     }
-    let mut owners = participants
-        .iter()
-        .filter(|participant| participant.active && participant.role == ConferenceParticipantRole::Owner);
+    let mut owners = participants.iter().filter(|participant| {
+        participant.active && participant.role == ConferenceParticipantRole::Owner
+    });
     match (owners.next(), owners.next()) {
         (None, _) => Ok(()),
         (Some(owner), None)
@@ -3194,10 +3194,10 @@ mod universal_runtime_tests {
     use ucr_storage_sqlite::SqliteLocalStore;
 
     use super::{
-        GROUP_MLS_CAPABILITY, EnsureParticipantDeviceInput, EnsureParticipantInput,
+        EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
         IssueJoinGrantInput, PrepareConferenceRuntimeInput, UpdateParticipantInput,
-        ensure_participant, ensure_participant_device, issue_join_grant, prepare_conference_runtime,
-        update_participant,
+        ensure_participant, ensure_participant_device, issue_join_grant,
+        prepare_conference_runtime, update_participant,
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -3500,7 +3500,9 @@ mod universal_runtime_tests {
             .join_url
             .strip_prefix("https://join.example.test/join#ucr_join=")
             .expect("public join url token");
-        let claims = issuer.verify(token, now_unix_ms).expect("verify join token");
+        let claims = issuer
+            .verify(token, now_unix_ms)
+            .expect("verify join token");
         assert_eq!(claims.participant, attendee.participant);
         assert!(claims.device_id.is_some());
         assert_eq!(grant.expires_at_unix_ms, 1_300_000);
