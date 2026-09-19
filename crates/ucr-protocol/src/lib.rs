@@ -33,9 +33,9 @@ mod message_signature;
 mod offline_group;
 mod organization;
 mod personal_node;
-mod recording;
 mod principal_identity_binding;
 mod provenance;
+mod recording;
 mod recovery;
 mod scope;
 mod service_control;
@@ -267,16 +267,16 @@ pub use personal_node::{
     canonical_personal_node_object, canonical_personal_node_profile, validate_personal_node_object,
     validate_personal_node_profile, validate_personal_node_transition,
 };
+pub use principal_identity_binding::{
+    PrincipalIdentityBindingError, validate_principal_identity_binding,
+};
+pub use provenance::{ProvenanceError, validate_origin_ref};
 pub use recording::{
     MAX_RECORDING_CONSENTS, MAX_RECORDING_POLICY_REFERENCE_BYTES, MAX_RECORDING_RETENTION_SECONDS,
     MIN_RECORDING_RETENTION_SECONDS, RecordingProtocolError, apply_recording_consent,
     delete_recording, expire_recording, start_recording, stop_recording,
     validate_recording_session,
 };
-pub use principal_identity_binding::{
-    PrincipalIdentityBindingError, validate_principal_identity_binding,
-};
-pub use provenance::{ProvenanceError, validate_origin_ref};
 pub use recovery::{
     MAX_RECOVERY_AUTHORITIES, RecoveryError, canonical_recovery_plan, recovery_plan_aad,
     validate_recovery_plan, validate_recovery_request,
