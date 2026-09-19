@@ -76,6 +76,7 @@ fn universal_conference_management_is_integration_scoped() {
         "UniversalListParticipantsRequest",
         "UniversalRevokeJoinGrantRequest",
         "UniversalGetParticipantAttendanceRequest",
+        "UniversalEnsureParticipantDeviceRequest",
     ] {
         let start = format!("message {message} {{");
         let block = proto
@@ -140,4 +141,22 @@ fn universal_conference_capability_discovery_is_explicit_and_truthful() {
     assert!(service.contains("recording: false"));
     assert!(service.contains("horizontal_sfu: false"));
     assert!(spec.contains("must not claim production readiness"));
+}
+
+#[test]
+fn universal_participant_device_enrollment_hides_canonical_device_id() {
+    let proto = read("proto/ucr/v1/universal_conference.proto");
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    assert!(proto.contains("rpc EnsureParticipantDevice"));
+    let block = proto
+        .split_once("message UniversalParticipantDeviceStatus {")
+        .expect("device status")
+        .1
+        .split_once('}')
+        .expect("device status close")
+        .0;
+    assert!(!block.contains("device_id"));
+    assert!(block.contains("external_user_id"));
+    assert!(service.contains("DEVICE_REGISTER_PERMISSION"));
+    assert!(service.contains("register_device("));
 }
