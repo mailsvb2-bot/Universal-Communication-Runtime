@@ -92,7 +92,6 @@ fn universal_conference_management_is_integration_scoped() {
     }
 }
 
-
 #[test]
 fn universal_conference_attendance_is_external_reference_projection() {
     let proto = read("proto/ucr/v1/universal_conference.proto");
@@ -105,7 +104,6 @@ fn universal_conference_attendance_is_external_reference_projection() {
     assert!(proto.contains("external_user_id"));
     assert!(spec.contains("projection over the canonical Event journal"));
 }
-
 
 #[test]
 fn universal_conference_credentials_are_bound_to_integration_identity() {
