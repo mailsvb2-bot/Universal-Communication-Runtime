@@ -392,7 +392,7 @@ where
                     &secret,
                     CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
                 )
-                .and_then(|_| update_participant(&*self.store, input, payload)),
+                .and_then(|_| update_participant(&*self.store, &input, payload)),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::UniversalUpdateParticipantResponse {
@@ -423,7 +423,7 @@ where
                     &secret,
                     CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
                 )
-                .and_then(|_| remove_participant(&*self.store, input, payload)),
+                .and_then(|_| remove_participant(&*self.store, &input, payload)),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::UniversalRemoveParticipantResponse {
@@ -987,7 +987,7 @@ where
 
 fn update_participant<S>(
     store: &S,
-    input: UpdateParticipantInput,
+    input: &UpdateParticipantInput,
     payload: Vec<u8>,
 ) -> Result<UniversalConferenceParticipantProfile, CanonicalError>
 where
@@ -1068,7 +1068,7 @@ where
 
 fn remove_participant<S>(
     store: &S,
-    input: RemoveParticipantInput,
+    input: &RemoveParticipantInput,
     payload: Vec<u8>,
 ) -> Result<CommandId, CanonicalError>
 where
@@ -1340,10 +1340,9 @@ const fn participant_defaults(
         ),
         ConferenceParticipantRole::Attendee => match mode {
             UniversalConferenceMode::Meeting => (false, true, true, true),
-            UniversalConferenceMode::Webinar | UniversalConferenceMode::Broadcast => {
-                (true, false, false, false)
-            }
-            UniversalConferenceMode::AudioRoom => (true, false, false, false),
+            UniversalConferenceMode::Webinar
+            | UniversalConferenceMode::Broadcast
+            | UniversalConferenceMode::AudioRoom => (true, false, false, false),
         },
     }
 }
