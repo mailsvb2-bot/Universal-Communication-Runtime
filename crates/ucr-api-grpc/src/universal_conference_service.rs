@@ -1269,6 +1269,50 @@ where
     }
 }
 
+fn enforce_owner_role_transition<S>(
+    store: &S,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    integration_id: &IntegrationId,
+    external_user_id: &[u8],
+    current: Option<&UniversalConferenceParticipantProfile>,
+    requested_role: ConferenceParticipantRole,
+) -> Result<(), CanonicalError>
+where
+    S: UniversalConferenceStore,
+{
+    if current.is_some_and(|profile| {
+        profile.role != requested_role
+            && (profile.role == ConferenceParticipantRole::Owner
+                || requested_role == ConferenceParticipantRole::Owner)
+    }) {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    if requested_role != ConferenceParticipantRole::Owner {
+        return Ok(());
+    }
+
+    let participants = store
+        .universal_conference_participants(scope, conference_id, 1024)
+        .map_err(map_store_error)?;
+    if participants.len() == 1024 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    let mut owners = participants
+        .iter()
+        .filter(|participant| participant.active && participant.role == ConferenceParticipantRole::Owner);
+    match (owners.next(), owners.next()) {
+        (None, _) => Ok(()),
+        (Some(owner), None)
+            if &owner.integration_id == integration_id
+                && owner.external_user_id.as_slice() == external_user_id =>
+        {
+            Ok(())
+        }
+        _ => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    }
+}
+
 fn ensure_participant<S>(
     store: &S,
     input: EnsureParticipantInput,
@@ -1292,6 +1336,23 @@ where
     {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
+    let current_external = store
+        .universal_conference_participant_for_external(
+            &input.scope,
+            &input.conference_id,
+            &input.integration_id,
+            &input.external_user_id,
+        )
+        .map_err(map_store_error)?;
+    enforce_owner_role_transition(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+        &input.external_user_id,
+        current_external.as_ref(),
+        input.role,
+    )?;
 
     let stable_command_id = accept_mutation_id(
         store,
@@ -1478,6 +1539,16 @@ where
         &input.integration_id,
         &input.external_user_id,
     )?;
+    let role = input.role.unwrap_or(current.role);
+    enforce_owner_role_transition(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+        &input.external_user_id,
+        Some(&current),
+        role,
+    )?;
 
     accept_mutation(
         store,
@@ -1487,7 +1558,6 @@ where
         payload,
     )?;
 
-    let role = input.role.unwrap_or(current.role);
     let (required_muted, camera_ceiling, audio_publish_ceiling, video_publish_ceiling) =
         participant_defaults(conference.mode, role);
 
