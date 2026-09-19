@@ -149,10 +149,7 @@ fn retention_expiry_is_finite_and_delete_is_idempotent() {
         )
         .expect("expire");
     assert_eq!(expired.state, RecordingState::Expired);
-    assert_eq!(
-        expired.stopped_at_unix_ms,
-        Some(initial.expires_at_unix_ms)
-    );
+    assert_eq!(expired.stopped_at_unix_ms, Some(initial.expires_at_unix_ms));
 
     let deleted = store
         .delete_recording(
