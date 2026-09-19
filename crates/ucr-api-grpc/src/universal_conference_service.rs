@@ -1281,7 +1281,8 @@ where
         + IdentityStore
         + ExternalIdentityBindingStore
         + PrincipalIdentityBindingStore
-        + PrincipalIdentityLookupStore,
+        + PrincipalIdentityLookupStore
+        + PermissionGrantStore,
 {
     let conference = store
         .universal_conference_profile(&input.scope, &input.conference_id)
@@ -1326,7 +1327,7 @@ where
         revision: 1,
     };
 
-    match store
+    let profile = match store
         .universal_conference_participant(&input.scope, &input.conference_id, &participant)
         .map_err(map_store_error)?
     {
@@ -1334,7 +1335,7 @@ where
             store
                 .persist_universal_conference_participant(&desired)
                 .map_err(map_store_error)?;
-            Ok(desired)
+            desired
         }
         Some(current)
             if current.integration_id == desired.integration_id
@@ -1346,7 +1347,7 @@ where
                 && current.publish_video_allowed == desired.publish_video_allowed
                 && current.active =>
         {
-            Ok(current)
+            current
         }
         Some(current)
             if current.integration_id == desired.integration_id
@@ -1365,10 +1366,12 @@ where
                     desired.publish_video_allowed,
                     true,
                 )
-                .map_err(map_store_error)
+                .map_err(map_store_error)?
         }
-        Some(_) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
-    }
+        Some(_) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    };
+    sync_participant_permissions(store, &profile, conference.mode)?;
+    Ok(profile)
 }
 
 fn ensure_participant_device<S>(
@@ -1458,7 +1461,7 @@ fn update_participant<S>(
     payload: Vec<u8>,
 ) -> Result<UniversalConferenceParticipantProfile, CanonicalError>
 where
-    S: UniversalConferenceStore + CommandAcceptanceStore,
+    S: UniversalConferenceStore + CommandAcceptanceStore + PermissionGrantStore,
 {
     let conference = conference_for_integration(
         store,
@@ -1519,10 +1522,11 @@ where
         && current.publish_video_allowed == publish_video_allowed
         && current.active
     {
+        sync_participant_permissions(store, &current, conference.mode)?;
         return Ok(current);
     }
 
-    store
+    let updated = store
         .update_universal_conference_participant(
             &input.scope,
             &input.conference_id,
@@ -1535,7 +1539,9 @@ where
             publish_video_allowed,
             true,
         )
-        .map_err(map_store_error)
+        .map_err(map_store_error)?;
+    sync_participant_permissions(store, &updated, conference.mode)?;
+    Ok(updated)
 }
 
 fn remove_participant<S>(
@@ -1544,7 +1550,7 @@ fn remove_participant<S>(
     payload: Vec<u8>,
 ) -> Result<CommandId, CanonicalError>
 where
-    S: UniversalConferenceStore + CommandAcceptanceStore,
+    S: UniversalConferenceStore + CommandAcceptanceStore + PermissionGrantStore,
 {
     let conference = conference_for_integration(
         store,
@@ -1571,7 +1577,7 @@ where
         payload,
     )?;
 
-    if current.active {
+    let inactive = if current.active {
         store
             .update_universal_conference_participant(
                 &input.scope,
@@ -1585,9 +1591,65 @@ where
                 false,
                 false,
             )
-            .map_err(map_store_error)?;
-    }
+            .map_err(map_store_error)?
+    } else {
+        current
+    };
+    sync_participant_permissions(store, &inactive, conference.mode)?;
     Ok(command_id)
+}
+
+const MANAGED_PARTICIPANT_PERMISSIONS: [&str; 6] = [
+    CALL_OBSERVE_PERMISSION,
+    CONFERENCE_SUBSCRIBE_PERMISSION,
+    AUDIO_RECEIVE_PERMISSION,
+    VIDEO_RECEIVE_PERMISSION,
+    AUDIO_SEND_PERMISSION,
+    VIDEO_SEND_PERMISSION,
+];
+
+fn sync_participant_permissions<S: PermissionGrantStore>(
+    store: &S,
+    profile: &UniversalConferenceParticipantProfile,
+    mode: UniversalConferenceMode,
+) -> Result<(), CanonicalError> {
+    let grantee = ScopedPrincipal {
+        scope: profile.scope.clone(),
+        principal: profile.participant.clone(),
+    };
+    let mut desired = Vec::new();
+    if profile.active {
+        desired.push(CALL_OBSERVE_PERMISSION);
+        desired.push(CONFERENCE_SUBSCRIBE_PERMISSION);
+        desired.push(AUDIO_RECEIVE_PERMISSION);
+        if mode != UniversalConferenceMode::AudioRoom {
+            desired.push(VIDEO_RECEIVE_PERMISSION);
+        }
+        if profile.publish_audio_allowed {
+            desired.push(AUDIO_SEND_PERMISSION);
+        }
+        if profile.publish_video_allowed {
+            desired.push(VIDEO_SEND_PERMISSION);
+        }
+    }
+    let existing = store
+        .permission_grants_for(&grantee)
+        .map_err(map_store_error)?;
+    for permission in MANAGED_PARTICIPANT_PERMISSIONS {
+        let grant = PermissionGrant {
+            grantee: grantee.clone(),
+            permission: permission.to_owned(),
+            scope: PermissionScope::Exact(profile.scope.clone()),
+        };
+        let has_exact = existing.iter().any(|candidate| candidate == &grant);
+        let should_have = desired.contains(&permission);
+        match (has_exact, should_have) {
+            (false, true) => store.grant_permission(&grant).map_err(map_store_error)?,
+            (true, false) => store.revoke_permission(&grant).map_err(map_store_error)?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn conference_for_integration<S: UniversalConferenceStore>(
