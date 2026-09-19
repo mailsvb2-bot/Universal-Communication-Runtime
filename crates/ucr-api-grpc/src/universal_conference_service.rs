@@ -3297,6 +3297,63 @@ mod universal_runtime_tests {
             .expect("conference participant");
     }
 
+    fn history_call(
+        conversation: ucr_model::ConversationRef,
+        call_id: CallId,
+        owner: &PrincipalRef,
+        attendee: &PrincipalRef,
+    ) -> CallSession {
+        CallSession {
+            scope: scope(),
+            call_id,
+            conversation,
+            initiated_by: owner.clone(),
+            participants: vec![
+                CallParticipant {
+                    principal: owner.clone(),
+                    state: CallParticipantState::Accepted,
+                    joined_revision: 0,
+                    left_revision: None,
+                },
+                CallParticipant {
+                    principal: attendee.clone(),
+                    state: CallParticipantState::Invited,
+                    joined_revision: 0,
+                    left_revision: None,
+                },
+            ],
+            signalling_state: CallSignallingState::Inviting,
+            reconnecting_participant: None,
+            media_negotiation_ref: None,
+            media_negotiation_generation: 0,
+            replication_generation: 0,
+            revision: 0,
+            termination_reason: None,
+        }
+    }
+
+    fn terminate_call(
+        store: &SqliteLocalStore,
+        actor: &ScopedPrincipal,
+        call: &CallSession,
+        event_id: EventId,
+    ) {
+        store
+            .apply_call_signal(
+                actor,
+                &CallSignal {
+                    event_id,
+                    scope: scope(),
+                    call_id: call.call_id.clone(),
+                    expected_revision: call.revision,
+                    kind: CallSignalKind::Terminate {
+                        reason: CallTerminationReason::Completed,
+                    },
+                },
+            )
+            .expect("terminate call");
+    }
+
     #[test]
     fn participant_owner_transitions_fail_closed_in_real_sqlite_store() {
         let db = TestDb::new();
@@ -3640,100 +3697,40 @@ mod universal_runtime_tests {
             .into_iter()
             .next()
             .expect("initial call");
-        store
-            .apply_call_signal(
-                &owner_actor,
-                &CallSignal {
-                    event_id: EventId::from_opaque(oid("history-end-initial")),
-                    scope: scope(),
-                    call_id: initial.call_id,
-                    expected_revision: initial.revision,
-                    kind: CallSignalKind::Terminate {
-                        reason: CallTerminationReason::Completed,
-                    },
-                },
-            )
-            .expect("terminate initial call");
+        terminate_call(
+            &store,
+            &owner_actor,
+            &initial,
+            EventId::from_opaque(oid("history-end-initial")),
+        );
 
         for index in 0..64_u32 {
-            let call = CallSession {
-                scope: scope(),
-                call_id: CallId::from_opaque(oid(&format!("history-call-{index:03}"))),
-                conversation: group.conversation.clone(),
-                initiated_by: owner.clone(),
-                participants: vec![
-                    CallParticipant {
-                        principal: owner.clone(),
-                        state: CallParticipantState::Accepted,
-                        joined_revision: 0,
-                        left_revision: None,
-                    },
-                    CallParticipant {
-                        principal: attendee.clone(),
-                        state: CallParticipantState::Invited,
-                        joined_revision: 0,
-                        left_revision: None,
-                    },
-                ],
-                signalling_state: CallSignallingState::Inviting,
-                reconnecting_participant: None,
-                media_negotiation_ref: None,
-                media_negotiation_generation: 0,
-                replication_generation: 0,
-                revision: 0,
-                termination_reason: None,
-            };
+            let call = history_call(
+                group.conversation.clone(),
+                CallId::from_opaque(oid(&format!("history-call-{index:03}"))),
+                &owner,
+                &attendee,
+            );
             store
                 .create_call(&owner_actor, &call)
                 .expect("history call");
-            store
-                .apply_call_signal(
-                    &owner_actor,
-                    &CallSignal {
-                        event_id: EventId::from_opaque(oid(&format!("history-end-{index:03}"))),
-                        scope: scope(),
-                        call_id: call.call_id.clone(),
-                        expected_revision: 0,
-                        kind: CallSignalKind::Terminate {
-                            reason: CallTerminationReason::Completed,
-                        },
-                    },
-                )
-                .expect("terminate history call");
+            terminate_call(
+                &store,
+                &owner_actor,
+                &call,
+                EventId::from_opaque(oid(&format!("history-end-{index:03}"))),
+            );
         }
 
         let active_call_id = CallId::from_opaque(oid("zz-live-call"));
+        let active_call = history_call(
+            group.conversation,
+            active_call_id.clone(),
+            &owner,
+            &attendee,
+        );
         store
-            .create_call(
-                &owner_actor,
-                &CallSession {
-                    scope: scope(),
-                    call_id: active_call_id.clone(),
-                    conversation: group.conversation,
-                    initiated_by: owner,
-                    participants: vec![
-                        CallParticipant {
-                            principal: owner_actor.principal.clone(),
-                            state: CallParticipantState::Accepted,
-                            joined_revision: 0,
-                            left_revision: None,
-                        },
-                        CallParticipant {
-                            principal: attendee.clone(),
-                            state: CallParticipantState::Invited,
-                            joined_revision: 0,
-                            left_revision: None,
-                        },
-                    ],
-                    signalling_state: CallSignallingState::Inviting,
-                    reconnecting_participant: None,
-                    media_negotiation_ref: None,
-                    media_negotiation_generation: 0,
-                    replication_generation: 0,
-                    revision: 0,
-                    termination_reason: None,
-                },
-            )
+            .create_call(&owner_actor, &active_call)
             .expect("live call");
 
         assert_eq!(
