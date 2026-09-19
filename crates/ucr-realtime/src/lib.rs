@@ -85,7 +85,10 @@ impl JoinTokenIssuer {
     ///
     /// # Errors
     /// Rejects non-HTTPS, fragment-bearing, or whitespace-bearing base URLs.
-    pub fn new(key: JoinTokenKey, join_base_url: impl Into<String>) -> Result<Self, JoinTokenError> {
+    pub fn new(
+        key: JoinTokenKey,
+        join_base_url: impl Into<String>,
+    ) -> Result<Self, JoinTokenError> {
         let join_base_url = join_base_url.into();
         if !join_base_url.starts_with("https://")
             || join_base_url.contains('#')
@@ -93,10 +96,7 @@ impl JoinTokenIssuer {
         {
             return Err(JoinTokenError::InvalidBaseUrl);
         }
-        Ok(Self {
-            key,
-            join_base_url,
-        })
+        Ok(Self { key, join_base_url })
     }
 
     /// Issues one short-lived session grant. The signed credential is placed in the URL fragment,
@@ -178,9 +178,7 @@ impl JoinTokenIssuer {
             .expires_at_unix_ms
             .checked_sub(claims.issued_at_unix_ms)
             .ok_or(JoinTokenError::Malformed)?;
-        if lifetime < i64::from(MIN_JOIN_TTL_SECONDS) * 1000
-            || lifetime > maximum_lifetime_ms
-        {
+        if lifetime < i64::from(MIN_JOIN_TTL_SECONDS) * 1000 || lifetime > maximum_lifetime_ms {
             return Err(JoinTokenError::Malformed);
         }
         Ok(claims)
@@ -296,7 +294,10 @@ impl RealtimeSessionRegistry {
             .lock()
             .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
         prune_expired(&mut entries, now_unix_ms);
-        if let Some(entry) = entries.iter_mut().find(|entry| same_session(entry, &claims)) {
+        if let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| same_session(entry, &claims))
+        {
             if entry.claims != claims {
                 return Err(RealtimeRegistryError::ClaimMismatch);
             }
@@ -638,9 +639,7 @@ fn take<'a>(
     let end = cursor
         .checked_add(length)
         .ok_or(JoinTokenError::Malformed)?;
-    let slice = payload
-        .get(*cursor..end)
-        .ok_or(JoinTokenError::Malformed)?;
+    let slice = payload.get(*cursor..end).ok_or(JoinTokenError::Malformed)?;
     *cursor = end;
     Ok(slice)
 }
@@ -707,9 +706,7 @@ mod tests {
     }
 
     fn token_from_url(url: &str) -> &str {
-        url.split_once("#ucr_join=")
-            .expect("join fragment")
-            .1
+        url.split_once("#ucr_join=").expect("join fragment").1
     }
 
     fn envelope(call_id: CallId, source: PrincipalRef) -> SfuForwardEnvelope {
@@ -765,7 +762,10 @@ mod tests {
             .expect("verify");
         assert_eq!(decoded, grant.claims);
         assert_eq!(
-            issuer.verify(token_from_url(&grant.join_url), grant.claims.expires_at_unix_ms),
+            issuer.verify(
+                token_from_url(&grant.join_url),
+                grant.claims.expires_at_unix_ms
+            ),
             Err(JoinTokenError::Expired)
         );
     }
@@ -785,7 +785,10 @@ mod tests {
             .expect("issue");
         let token = token_from_url(&grant.join_url);
         let mut tampered = token.as_bytes().to_vec();
-        let index = tampered.iter().position(|byte| *byte != b'.').expect("byte");
+        let index = tampered
+            .iter()
+            .position(|byte| *byte != b'.')
+            .expect("byte");
         tampered[index] = if tampered[index] == b'A' { b'B' } else { b'A' };
         let tampered = String::from_utf8(tampered).expect("ascii token");
         assert!(matches!(
@@ -822,11 +825,7 @@ mod tests {
         assert_eq!(second.transition.session_sequence, 2);
         assert_eq!(registry.active_session_count(), 1);
         assert!(first_downlink.try_recv().is_err());
-        assert!(
-            registry
-                .take_downlink(&claims, 30_002)
-                .is_ok()
-        );
+        assert!(registry.take_downlink(&claims, 30_002).is_ok());
     }
 
     #[test]
@@ -849,12 +848,8 @@ mod tests {
             session_id: SessionId::from_opaque(id("session-b")),
             ..first_claims.clone()
         };
-        registry
-            .join(first_claims.clone(), now)
-            .expect("first");
-        registry
-            .join(second_claims.clone(), now)
-            .expect("second");
+        registry.join(first_claims.clone(), now).expect("first");
+        registry.join(second_claims.clone(), now).expect("second");
         let mut first = registry
             .take_downlink(&first_claims, now)
             .expect("first downlink");
