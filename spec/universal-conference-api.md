@@ -20,6 +20,10 @@ Lifecycle metadata is separate from Call signalling:
 
 The lifecycle coordinator may project into canonical Group/Call state but must never become a second CallSession authority. Scheduled rooms may exist before a realtime Call is started.
 
+## Integration isolation
+
+Every conference read or mutation is scoped by both `TenantScope` and `IntegrationId`. A caller that presents another integration's `conference_id` receives `NOT_FOUND`; the public API must not expose cross-integration existence or permit management by handle alone. External references remain integration-scoped and no integration credential is a tenant-wide conference superuser by default.
+
 ## Participant roles and media policy
 
 The public role vocabulary is `owner`, `host`, `moderator`, `speaker`, `attendee`. Role and media policy must be server-enforced; UI labels are never authorization evidence. Group membership remains canonical membership. Any role projection must fail closed if it conflicts with current membership.
