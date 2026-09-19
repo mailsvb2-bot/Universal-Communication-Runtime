@@ -231,6 +231,94 @@ impl JoinTokenIssuer {
         token: &str,
         now_unix_ms: i64,
     ) -> Result<RealtimeSessionClaims, JoinTokenError> {
+        let claims = self.verify_signed(token, now_unix_ms)?;
+        self.require_live_grant(&claims)?;
+        Ok(claims)
+    }
+
+    /// Redeems a grant for a realtime join.
+    ///
+    /// Reusable grants may be redeemed again for reconnect. Single-use grants reject a second
+    /// join while remaining valid for the already-open session's heartbeat and media requests.
+    ///
+    /// # Errors
+    /// Returns signature, time, state, revocation, or already-used errors.
+    pub fn redeem(
+        &self,
+        token: &str,
+        now_unix_ms: i64,
+    ) -> Result<RealtimeSessionClaims, JoinTokenError> {
+        let claims = self.verify_signed(token, now_unix_ms)?;
+        let mut grants = self
+            .grants
+            .lock()
+            .map_err(|_| JoinTokenError::StateUnavailable)?;
+        let entry = grants
+            .iter_mut()
+            .find(|entry| entry.claims.session_id == claims.session_id)
+            .ok_or(JoinTokenError::UnknownGrant)?;
+        if entry.claims != claims {
+            return Err(JoinTokenError::Malformed);
+        }
+        if entry.revoked {
+            return Err(JoinTokenError::Revoked);
+        }
+        if entry.claims.use_policy == JoinGrantUsePolicy::SingleUse && entry.redeemed {
+            return Err(JoinTokenError::AlreadyUsed);
+        }
+        entry.redeemed = true;
+        Ok(claims)
+    }
+
+    /// Returns immutable claims for one exact scoped controlled grant.
+    ///
+    /// # Errors
+    /// Returns unavailable state if the bounded control registry is poisoned.
+    pub fn grant_claims(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<Option<RealtimeSessionClaims>, JoinTokenError> {
+        let grants = self
+            .grants
+            .lock()
+            .map_err(|_| JoinTokenError::StateUnavailable)?;
+        Ok(grants
+            .iter()
+            .find(|entry| {
+                entry.claims.scope == *scope && entry.claims.session_id == *session_id
+            })
+            .map(|entry| entry.claims.clone()))
+    }
+
+    /// Revokes one exact scoped grant. Repeating the same revocation is idempotent.
+    ///
+    /// # Errors
+    /// Returns UnknownGrant or unavailable control state.
+    pub fn revoke(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<RealtimeSessionClaims, JoinTokenError> {
+        let mut grants = self
+            .grants
+            .lock()
+            .map_err(|_| JoinTokenError::StateUnavailable)?;
+        let entry = grants
+            .iter_mut()
+            .find(|entry| {
+                entry.claims.scope == *scope && entry.claims.session_id == *session_id
+            })
+            .ok_or(JoinTokenError::UnknownGrant)?;
+        entry.revoked = true;
+        Ok(entry.claims.clone())
+    }
+
+    fn verify_signed(
+        &self,
+        token: &str,
+        now_unix_ms: i64,
+    ) -> Result<RealtimeSessionClaims, JoinTokenError> {
         let (payload_text, signature_text) =
             token.split_once('.').ok_or(JoinTokenError::Malformed)?;
         if signature_text.contains('.') {
@@ -248,7 +336,12 @@ impl JoinTokenIssuer {
         mac.verify_slice(&signature)
             .map_err(|_| JoinTokenError::InvalidSignature)?;
         let claims = decode_claims(&payload)?;
-        if now_unix_ms < claims.issued_at_unix_ms {
+        if claims.not_before_unix_ms < claims.issued_at_unix_ms
+            || claims.not_before_unix_ms >= claims.expires_at_unix_ms
+        {
+            return Err(JoinTokenError::Malformed);
+        }
+        if now_unix_ms < claims.not_before_unix_ms {
             return Err(JoinTokenError::NotYetValid);
         }
         if now_unix_ms >= claims.expires_at_unix_ms {
@@ -263,6 +356,24 @@ impl JoinTokenIssuer {
             return Err(JoinTokenError::Malformed);
         }
         Ok(claims)
+    }
+
+    fn require_live_grant(&self, claims: &RealtimeSessionClaims) -> Result<(), JoinTokenError> {
+        let grants = self
+            .grants
+            .lock()
+            .map_err(|_| JoinTokenError::StateUnavailable)?;
+        let entry = grants
+            .iter()
+            .find(|entry| entry.claims.session_id == claims.session_id)
+            .ok_or(JoinTokenError::UnknownGrant)?;
+        if entry.claims != *claims {
+            return Err(JoinTokenError::Malformed);
+        }
+        if entry.revoked {
+            return Err(JoinTokenError::Revoked);
+        }
+        Ok(())
     }
 
     fn sign(&self, claims: &RealtimeSessionClaims) -> Result<String, JoinTokenError> {
