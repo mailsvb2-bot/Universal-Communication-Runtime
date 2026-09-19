@@ -567,6 +567,17 @@ struct RemoveParticipantInput {
     idempotency_key: String,
 }
 
+struct IssueJoinGrantInput {
+    scope: TenantScope,
+    conference_id: GroupId,
+    integration_id: IntegrationId,
+    external_user_id: Vec<u8>,
+    ttl_seconds: u32,
+    use_policy: RealtimeJoinGrantUsePolicy,
+    not_before_unix_ms: Option<i64>,
+    not_after_unix_ms: Option<i64>,
+}
+
 struct CreateInput {
     scope: TenantScope,
     integration_id: IntegrationId,
