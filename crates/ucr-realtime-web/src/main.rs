@@ -3,6 +3,7 @@
 use std::{convert::Infallible, net::SocketAddr};
 
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     response::{
@@ -10,7 +11,6 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
-    Json, Router,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use prost::Message;
@@ -289,11 +289,9 @@ async fn subscribe_media(
                 Ok(None) => break,
                 Err(_) => {
                     let _ = sender
-                        .send(Ok(
-                            Event::default()
-                                .event("error")
-                                .data("realtime stream closed"),
-                        ))
+                        .send(Ok(Event::default()
+                            .event("error")
+                            .data("realtime stream closed")))
                         .await;
                     break;
                 }
@@ -306,9 +304,7 @@ async fn subscribe_media(
         .into_response()
 }
 
-fn client(
-    state: &AppState,
-) -> pb::realtime_service_client::RealtimeServiceClient<Channel> {
+fn client(state: &AppState) -> pb::realtime_service_client::RealtimeServiceClient<Channel> {
     pb::realtime_service_client::RealtimeServiceClient::new(state.upstream.clone())
 }
 
