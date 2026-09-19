@@ -564,6 +564,14 @@ where
         if !participant.active {
             return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
         }
+        if participant.role == ucr_model::ConferenceParticipantRole::Attendee
+            && !conference.entry_open
+        {
+            return Err(
+                CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+                    .with_retry_after(2_000),
+            );
+        }
         Ok(())
     }
 

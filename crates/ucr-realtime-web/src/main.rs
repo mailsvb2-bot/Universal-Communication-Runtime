@@ -338,7 +338,8 @@ async fn join(state: &AppState, token: &str, input: SessionRequest) -> HttpRespo
                 Some(session.heartbeat_interval_ms),
                 None,
             ),
-            Some(pb::realtime_join_response::Result::Error(_)) | None => api_error(
+            Some(pb::realtime_join_response::Result::Error(error)) => join_error(&error),
+            None => api_error(
                 StatusCode::UNAUTHORIZED,
                 "join_rejected",
                 "realtime join rejected",
@@ -346,6 +347,21 @@ async fn join(state: &AppState, token: &str, input: SessionRequest) -> HttpRespo
         },
         Err(status) => grpc_error(&status),
     }
+}
+
+fn join_error(error: &pb::ErrorEnvelope) -> HttpResponse {
+    if error.code == pb::ErrorCode::TemporarilyUnavailable as i32 && error.retryable {
+        return api_error(
+            StatusCode::TOO_EARLY,
+            "waiting_room",
+            "conference entry is not open yet",
+        );
+    }
+    api_error(
+        StatusCode::UNAUTHORIZED,
+        "join_rejected",
+        "realtime join rejected",
+    )
 }
 
 async fn heartbeat(state: &AppState, token: &str, input: HeartbeatRequest) -> HttpResponse {
@@ -712,6 +728,18 @@ mod tests {
         );
         assert!(parse_allowed_origins("*").is_err());
         assert!(parse_allowed_origins("http://example.test").is_err());
+    }
+
+    #[test]
+    fn retryable_unavailable_join_maps_to_waiting_room() {
+        let response = join_error(&pb::ErrorEnvelope {
+            code: pb::ErrorCode::TemporarilyUnavailable as i32,
+            retryable: true,
+            retry_after_ms: Some(2_000),
+            diagnostic_domain: "ucr.grpc.binding".to_owned(),
+            extensions: Vec::new(),
+        });
+        assert_eq!(response.status(), StatusCode::TOO_EARLY);
     }
 
     #[test]

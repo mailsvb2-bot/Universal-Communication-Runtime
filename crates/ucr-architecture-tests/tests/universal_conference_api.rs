@@ -359,6 +359,26 @@ fn realtime_browser_waiting_room_uses_join_grant_window() {
 }
 
 #[test]
+fn waiting_room_separates_grant_issuance_from_attendee_admission() {
+    let universal = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let gateway = read("crates/ucr-realtime-web/src/main.rs");
+    let client = read("crates/ucr-realtime-web/static/client.html");
+
+    assert!(!universal.contains("|| !conference.entry_open\n        || !matches!("));
+    assert!(realtime.contains(
+        "participant.role == ucr_model::ConferenceParticipantRole::Attendee"
+    ));
+    assert!(realtime.contains("CanonicalErrorCode::TemporarilyUnavailable"));
+    assert!(realtime.contains(".with_retry_after(2_000)"));
+    assert!(gateway.contains("\"waiting_room\""));
+    assert!(gateway.contains("StatusCode::TOO_EARLY"));
+    assert!(client.contains("scheduleEntryRetry"));
+    assert!(client.contains("ENTRY_RETRY_MS=2000"));
+    assert!(client.contains("e.code===\"waiting_room\""));
+}
+
+#[test]
 fn universal_join_grants_are_durable_idempotent_and_restart_safe() {
     let proto = read("proto/ucr/v1/universal_conference.proto");
     let core = read("crates/ucr-core/src/universal_conference.rs");

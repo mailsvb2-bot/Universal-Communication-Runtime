@@ -2515,7 +2515,6 @@ where
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
     if conference.integration_id != input.integration_id
-        || !conference.entry_open
         || !matches!(
             conference.lifecycle,
             UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
@@ -3627,6 +3626,17 @@ mod universal_runtime_tests {
         assert!(runtime.group_ready);
         assert!(runtime.call_ready);
         assert_eq!(runtime.admitted_participant_count, 2);
+
+        let closed = store
+            .transition_universal_conference(
+                &scope(),
+                &conference().conference_id,
+                conference().revision,
+                UniversalConferenceLifecycle::Waiting,
+                false,
+            )
+            .expect("close attendee entry before issuing grant");
+        assert!(!closed.entry_open);
 
         let issuer = JoinTokenIssuer::new(
             JoinTokenKey::from_bytes([7_u8; 32]),
