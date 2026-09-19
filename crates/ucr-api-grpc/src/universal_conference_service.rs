@@ -4,24 +4,28 @@ use prost::Message;
 use tonic::{Request, Response, Status};
 use ucr_core::{
     AuthorizationEvaluator, CommandAcceptanceStore, DurableStoreError,
-    ExternalIdentityBindingStore, IdentityStore, PrincipalIdentityBindingStore,
-    PrincipalIdentityLookupStore, ServiceAuditStore, ServiceCredentialSecret,
-    ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
-    UniversalConferenceStore, generate_opaque_id,
+    ExternalIdentityBindingStore, GroupCallLookupStore, IdentityDeviceLookupStore, IdentityStore,
+    PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, ServiceAuditStore,
+    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
+    ServiceQuotaClock, ServiceQuotaStore, UniversalConferenceStore, generate_opaque_id,
 };
 use ucr_model::{
-    AuthorizationRequest, CommandEnvelope, CommandId, ConferenceParticipantRole,
-    ConferenceScheduleMetadata, CorrelationContext, ExternalIdentityBinding, GroupId,
-    IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, OpaqueId,
-    PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion,
-    ScopedPrincipal, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
+    AuthorizationRequest, CallParticipantState, CallSignallingState, CommandEnvelope, CommandId,
+    ConferenceParticipantRole, ConferenceScheduleMetadata, CorrelationContext,
+    DeviceLifecycleState, ExternalIdentityBinding, GroupId, IdentityEvidence, IdentityId,
+    IdentityOwnership, IdentityRecord, IntegrationId, OpaqueId, PrincipalId,
+    PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal,
+    SessionId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
     UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
-    CONFERENCE_CREATE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
+    CONFERENCE_CREATE_PERMISSION, CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
     CONFERENCE_READ_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceiptStatus,
     acknowledgement_for,
+};
+use ucr_realtime::{
+    JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
 };
 
 use super::{
@@ -39,6 +43,7 @@ pub struct GrpcUniversalConferenceService<C, A, S> {
     clock: Arc<C>,
     authorization: Arc<A>,
     store: Arc<S>,
+    join_issuer: Option<Arc<JoinTokenIssuer>>,
 }
 
 impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
@@ -48,6 +53,22 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             clock,
             authorization,
             store,
+            join_issuer: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_join_issuer(
+        clock: Arc<C>,
+        authorization: Arc<A>,
+        store: Arc<S>,
+        join_issuer: Arc<JoinTokenIssuer>,
+    ) -> Self {
+        Self {
+            clock,
+            authorization,
+            store,
+            join_issuer: Some(join_issuer),
         }
     }
 }
@@ -58,6 +79,7 @@ impl<C, A, S> Clone for GrpcUniversalConferenceService<C, A, S> {
             clock: Arc::clone(&self.clock),
             authorization: Arc::clone(&self.authorization),
             store: Arc::clone(&self.store),
+            join_issuer: self.join_issuer.as_ref().map(Arc::clone),
         }
     }
 }
@@ -115,6 +137,8 @@ where
         + ExternalIdentityBindingStore
         + PrincipalIdentityBindingStore
         + PrincipalIdentityLookupStore
+        + IdentityDeviceLookupStore
+        + GroupCallLookupStore
         + 'static,
 {
     pb::universal_conference_service_server::UniversalConferenceServiceServer::new(service)
@@ -137,6 +161,8 @@ where
         + ExternalIdentityBindingStore
         + PrincipalIdentityBindingStore
         + PrincipalIdentityLookupStore
+        + IdentityDeviceLookupStore
+        + GroupCallLookupStore
         + 'static,
 {
     async fn create_conference(
