@@ -19,13 +19,15 @@ use ucr_model::{
 };
 use ucr_protocol::{
     CONFERENCE_CREATE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
-    CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_READ_PERMISSION, CanonicalError,
-    CanonicalErrorCode, CommandReceiptStatus,
+    CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
+    CONFERENCE_READ_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceiptStatus,
+    acknowledgement_for,
 };
 
 use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_credentials,
-    decode_opaque, decode_scope, invalid_argument, pb, pb_error, pb_opaque, pb_scope,
+    decode_opaque, decode_scope, invalid_argument, pb, pb_acknowledgement, pb_error, pb_opaque,
+    pb_scope,
 };
 
 const MAX_EXTERNAL_CONFERENCE_ID_BYTES: usize = 512;
@@ -350,34 +352,91 @@ where
 
     async fn update_participant(
         &self,
-        _request: Request<pb::UniversalUpdateParticipantRequest>,
+        request: Request<pb::UniversalUpdateParticipantRequest>,
     ) -> Result<Response<pb::UniversalUpdateParticipantResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let payload = body.encode_to_vec();
+        let decoded = decode_update_participant(body);
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok(input)) => self
+                .admit(
+                    &input.scope,
+                    &credential_id,
+                    &secret,
+                    CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
+                )
+                .and_then(|_| update_participant(&*self.store, input, payload)),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
         Ok(Response::new(pb::UniversalUpdateParticipantResponse {
-            result: Some(pb::universal_update_participant_response::Result::Error(
-                unsupported(),
-            )),
+            result: Some(match result {
+                Ok(participant) => pb::universal_update_participant_response::Result::Participant(
+                    pb_participant(&participant),
+                ),
+                Err(error) => {
+                    pb::universal_update_participant_response::Result::Error(pb_error(error))
+                }
+            }),
         }))
     }
 
     async fn remove_participant(
         &self,
-        _request: Request<pb::UniversalRemoveParticipantRequest>,
+        request: Request<pb::UniversalRemoveParticipantRequest>,
     ) -> Result<Response<pb::UniversalRemoveParticipantResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let payload = body.encode_to_vec();
+        let decoded = decode_remove_participant(body);
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok(input)) => self
+                .admit(
+                    &input.scope,
+                    &credential_id,
+                    &secret,
+                    CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
+                )
+                .and_then(|_| remove_participant(&*self.store, input, payload)),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
         Ok(Response::new(pb::UniversalRemoveParticipantResponse {
-            result: Some(pb::universal_remove_participant_response::Result::Error(
-                unsupported(),
-            )),
+            result: Some(match result {
+                Ok(command_id) => pb::universal_remove_participant_response::Result::Acknowledgement(
+                    pb_acknowledgement(acknowledgement_for(command_id.as_opaque().clone())),
+                ),
+                Err(error) => {
+                    pb::universal_remove_participant_response::Result::Error(pb_error(error))
+                }
+            }),
         }))
     }
 
     async fn list_participants(
         &self,
-        _request: Request<pb::UniversalListParticipantsRequest>,
+        request: Request<pb::UniversalListParticipantsRequest>,
     ) -> Result<Response<pb::UniversalListParticipantsResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let decoded = decode_list_participants(request.into_inner());
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok((scope, conference_id, max_items))) => self
+                .admit(&scope, &credential_id, &secret, CONFERENCE_READ_PERMISSION)
+                .and_then(|_| list_participants(&*self.store, &scope, &conference_id, max_items)),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
         Ok(Response::new(pb::UniversalListParticipantsResponse {
-            result: Some(pb::universal_list_participants_response::Result::Error(
-                unsupported(),
-            )),
+            result: Some(match result {
+                Ok(participants) => {
+                    pb::universal_list_participants_response::Result::Participants(
+                        pb::UniversalParticipantList {
+                            participants: participants.iter().map(pb_participant).collect(),
+                        },
+                    )
+                }
+                Err(error) => {
+                    pb::universal_list_participants_response::Result::Error(pb_error(error))
+                }
+            }),
         }))
     }
 
@@ -410,6 +469,25 @@ struct EnsureParticipantInput {
     integration_id: IntegrationId,
     external_user_id: Vec<u8>,
     role: ConferenceParticipantRole,
+    idempotency_key: String,
+}
+
+struct UpdateParticipantInput {
+    scope: TenantScope,
+    conference_id: GroupId,
+    participant: PrincipalRef,
+    role: Option<ConferenceParticipantRole>,
+    audio_muted: Option<bool>,
+    camera_allowed: Option<bool>,
+    publish_audio_allowed: Option<bool>,
+    publish_video_allowed: Option<bool>,
+    idempotency_key: String,
+}
+
+struct RemoveParticipantInput {
+    scope: TenantScope,
+    conference_id: GroupId,
+    participant: PrincipalRef,
     idempotency_key: String,
 }
 
@@ -471,6 +549,65 @@ fn decode_participant_role(value: i32) -> Result<ConferenceParticipantRole, Cano
         pb::ConferenceParticipantRole::Speaker => Ok(ConferenceParticipantRole::Speaker),
         pb::ConferenceParticipantRole::Attendee => Ok(ConferenceParticipantRole::Attendee),
     }
+}
+
+fn participant_ref(value: Option<pb::OpaqueId>) -> Result<PrincipalRef, CanonicalError> {
+    Ok(PrincipalRef {
+        principal_id: PrincipalId::from_opaque(decode_opaque(value)?),
+        kind: PrincipalKind::Person,
+    })
+}
+
+fn decode_update_participant(
+    value: pb::UniversalUpdateParticipantRequest,
+) -> Result<UpdateParticipantInput, CanonicalError> {
+    let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
+    let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let participant = participant_ref(value.participant_id)?;
+    validate_idempotency_key(&value.idempotency_key)?;
+    let role = value.role.map(decode_participant_role).transpose()?;
+    Ok(UpdateParticipantInput {
+        scope,
+        conference_id,
+        participant,
+        role,
+        audio_muted: value.audio_muted,
+        camera_allowed: value.camera_allowed,
+        publish_audio_allowed: value.publish_audio_allowed,
+        publish_video_allowed: value.publish_video_allowed,
+        idempotency_key: value.idempotency_key,
+    })
+}
+
+fn decode_remove_participant(
+    value: pb::UniversalRemoveParticipantRequest,
+) -> Result<RemoveParticipantInput, CanonicalError> {
+    let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
+    let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let participant = participant_ref(value.participant_id)?;
+    validate_idempotency_key(&value.idempotency_key)?;
+    Ok(RemoveParticipantInput {
+        scope,
+        conference_id,
+        participant,
+        idempotency_key: value.idempotency_key,
+    })
+}
+
+fn decode_list_participants(
+    value: pb::UniversalListParticipantsRequest,
+) -> Result<(TenantScope, GroupId, usize), CanonicalError> {
+    let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
+    let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let max_items = if value.max_items == 0 {
+        256
+    } else {
+        usize::try_from(value.max_items).map_err(|_| invalid_argument())?
+    };
+    if max_items > 1024 {
+        return Err(invalid_argument());
+    }
+    Ok((scope, conference_id, max_items))
 }
 
 fn decode_lifecycle_request(
@@ -722,6 +859,155 @@ where
         }
         Some(_) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
     }
+}
+
+fn update_participant<S>(
+    store: &S,
+    input: UpdateParticipantInput,
+    payload: Vec<u8>,
+) -> Result<UniversalConferenceParticipantProfile, CanonicalError>
+where
+    S: UniversalConferenceStore + CommandAcceptanceStore,
+{
+    let conference = store
+        .universal_conference_profile(&input.scope, &input.conference_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    if conference.lifecycle == UniversalConferenceLifecycle::Ended {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    let current = store
+        .universal_conference_participant(
+            &input.scope,
+            &input.conference_id,
+            &input.participant,
+        )
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+
+    accept_mutation(
+        store,
+        &input.scope,
+        "ucr.conference.participant.update.v1",
+        &input.idempotency_key,
+        payload,
+    )?;
+
+    let role = input.role.unwrap_or(current.role);
+    let (required_muted, camera_ceiling, audio_publish_ceiling, video_publish_ceiling) =
+        participant_defaults(conference.mode, role);
+
+    if input.audio_muted == Some(false) && required_muted
+        || input.camera_allowed == Some(true) && !camera_ceiling
+        || input.publish_audio_allowed == Some(true) && !audio_publish_ceiling
+        || input.publish_video_allowed == Some(true) && !video_publish_ceiling
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+
+    let audio_muted = input.audio_muted.unwrap_or(current.audio_muted) || required_muted;
+    let camera_allowed = input.camera_allowed.unwrap_or(current.camera_allowed) && camera_ceiling;
+    let publish_audio_allowed =
+        input.publish_audio_allowed.unwrap_or(current.publish_audio_allowed)
+            && audio_publish_ceiling;
+    let publish_video_allowed =
+        input.publish_video_allowed.unwrap_or(current.publish_video_allowed)
+            && video_publish_ceiling;
+
+    if publish_video_allowed && !camera_allowed {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+
+    if current.role == role
+        && current.audio_muted == audio_muted
+        && current.camera_allowed == camera_allowed
+        && current.publish_audio_allowed == publish_audio_allowed
+        && current.publish_video_allowed == publish_video_allowed
+        && current.active
+    {
+        return Ok(current);
+    }
+
+    store
+        .update_universal_conference_participant(
+            &input.scope,
+            &input.conference_id,
+            &input.participant,
+            current.revision,
+            role,
+            audio_muted,
+            camera_allowed,
+            publish_audio_allowed,
+            publish_video_allowed,
+            true,
+        )
+        .map_err(map_store_error)
+}
+
+fn remove_participant<S>(
+    store: &S,
+    input: RemoveParticipantInput,
+    payload: Vec<u8>,
+) -> Result<CommandId, CanonicalError>
+where
+    S: UniversalConferenceStore + CommandAcceptanceStore,
+{
+    let conference = store
+        .universal_conference_profile(&input.scope, &input.conference_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    if conference.lifecycle == UniversalConferenceLifecycle::Ended {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    let current = store
+        .universal_conference_participant(
+            &input.scope,
+            &input.conference_id,
+            &input.participant,
+        )
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+
+    let command_id = accept_mutation_id(
+        store,
+        &input.scope,
+        "ucr.conference.participant.remove.v1",
+        &input.idempotency_key,
+        payload,
+    )?;
+
+    if current.active {
+        store
+            .update_universal_conference_participant(
+                &input.scope,
+                &input.conference_id,
+                &input.participant,
+                current.revision,
+                current.role,
+                true,
+                false,
+                false,
+                false,
+                false,
+            )
+            .map_err(map_store_error)?;
+    }
+    Ok(command_id)
+}
+
+fn list_participants<S: UniversalConferenceStore>(
+    store: &S,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    max_items: usize,
+) -> Result<Vec<UniversalConferenceParticipantProfile>, CanonicalError> {
+    store
+        .universal_conference_profile(scope, conference_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    store
+        .universal_conference_participants(scope, conference_id, max_items)
+        .map_err(map_store_error)
 }
 
 fn derived_id(prefix: &str, command_id: &CommandId) -> Result<OpaqueId, CanonicalError> {
