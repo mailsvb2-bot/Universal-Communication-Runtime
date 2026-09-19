@@ -14,7 +14,7 @@ use super::{
 const MAX_EXTERNAL_REFERENCE_BYTES: usize = 512;
 const MAX_PARTICIPANTS: usize = 1024;
 
-const V32_OBJECTS_SQL: &str = r#"
+const V32_OBJECTS_SQL: &str = r"
 CREATE TABLE universal_conferences (
     tenant_id TEXT NOT NULL,
     namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
@@ -64,7 +64,7 @@ CREATE TABLE universal_conference_participants (
     CHECK((namespace_present = 0 AND namespace_id = '') OR
           (namespace_present = 1 AND namespace_id <> ''))
 ) WITHOUT ROWID;
-"#;
+";
 
 pub(super) fn create_v32_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
     transaction
