@@ -1824,10 +1824,10 @@ where
     };
     let key_package = store
         .create_mls_device_key_package(&input.scope, owner_device_id)
-        .map_err(map_group_mls_error)?;
+        .map_err(|error| map_group_mls_error(&error))?;
     let (_, created) = store
         .create_mls_backed_group(&conversation, &group, owner, owner_device_id, &key_package)
-        .map_err(map_group_mls_error)?;
+        .map_err(|error| map_group_mls_error(&error))?;
     validate_runtime_group(&created, owner)?;
     Ok(created)
 }
@@ -1879,7 +1879,7 @@ where
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
         let key_package = store
             .create_mls_device_key_package(&owner.scope, &participant.device_id)
-            .map_err(map_group_mls_error)?;
+            .map_err(|error| map_group_mls_error(&error))?;
         let change = GroupChange {
             event_id: runtime_event_id("gm", group.revision, &participant.profile.participant)?,
             scope: owner.scope.clone(),
@@ -1901,7 +1901,7 @@ where
                     key_package: key_package.bytes,
                 }],
             )
-            .map_err(map_group_mls_error)?;
+            .map_err(|error| map_group_mls_error(&error))?;
     }
     Ok(())
 }
@@ -2052,9 +2052,9 @@ fn runtime_event_id(
     .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
 }
 
-fn map_group_mls_error(error: GroupMlsStoreError) -> CanonicalError {
+fn map_group_mls_error(error: &GroupMlsStoreError) -> CanonicalError {
     match error {
-        GroupMlsStoreError::Durable(error) => map_store_error(error),
+        GroupMlsStoreError::Durable(error) => map_store_error(*error),
         GroupMlsStoreError::ActorDeviceMismatch | GroupMlsStoreError::TargetDeviceMismatch => {
             CanonicalError::new(CanonicalErrorCode::PolicyDenied)
         }
