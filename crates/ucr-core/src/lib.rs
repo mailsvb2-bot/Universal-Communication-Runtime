@@ -9,8 +9,8 @@ mod integration_api;
 mod mesh;
 mod organization;
 mod personal_node;
-mod recovery_workflow;
 mod recording;
+mod recovery_workflow;
 mod service_auth;
 mod service_request;
 mod store_forward;
@@ -48,6 +48,7 @@ pub use integration_api::{
 pub use mesh::MeshGroupStore;
 pub use organization::OrganizationModeStore;
 pub use personal_node::PersonalNodeStore;
+pub use recording::RecordingStore;
 pub use recovery_workflow::{
     DeviceReverificationGate, DeviceReverificationProof, DeviceReverificationVerificationError,
     DeviceReverificationVerifier, RecoveryAdmissionProof, RecoveryAuthorityVerificationError,
@@ -55,7 +56,6 @@ pub use recovery_workflow::{
     RecoveryPlanIngress, RecoveryRequestGate, ReverifiedDeviceActivationStore,
     authorize_and_activate_reverified_device, authorize_and_stage_recovered_device,
 };
-pub use recording::RecordingStore;
 pub use service_auth::{
     ServiceAuthenticationError, ServiceCredentialIssueError, ServiceCredentialSecret,
     authenticate_service_principal, issue_service_credential,
