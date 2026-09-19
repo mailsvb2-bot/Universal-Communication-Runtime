@@ -609,7 +609,7 @@ struct UpdateParticipantInput {
     scope: TenantScope,
     conference_id: GroupId,
     integration_id: IntegrationId,
-    participant: PrincipalRef,
+    external_user_id: Vec<u8>,
     role: Option<ConferenceParticipantRole>,
     audio_muted: Option<bool>,
     camera_allowed: Option<bool>,
@@ -622,7 +622,7 @@ struct RemoveParticipantInput {
     scope: TenantScope,
     conference_id: GroupId,
     integration_id: IntegrationId,
-    participant: PrincipalRef,
+    external_user_id: Vec<u8>,
     idempotency_key: String,
 }
 
@@ -671,9 +671,7 @@ fn decode_ensure_participant(
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
-    if value.external_user_id.is_empty() || value.external_user_id.len() > 512 {
-        return Err(invalid_argument());
-    }
+    validate_external_user_id(&value.external_user_id)?;
     validate_idempotency_key(&value.idempotency_key)?;
     let role = decode_participant_role(value.role)?;
     Ok(EnsureParticipantInput {
@@ -697,27 +695,20 @@ fn decode_participant_role(value: i32) -> Result<ConferenceParticipantRole, Cano
     }
 }
 
-fn participant_ref(value: Option<pb::OpaqueId>) -> Result<PrincipalRef, CanonicalError> {
-    Ok(PrincipalRef {
-        principal_id: PrincipalId::from_opaque(decode_opaque(value)?),
-        kind: PrincipalKind::Person,
-    })
-}
-
 fn decode_update_participant(
     value: pb::UniversalUpdateParticipantRequest,
 ) -> Result<UpdateParticipantInput, CanonicalError> {
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
-    let participant = participant_ref(value.participant_id)?;
+    validate_external_user_id(&value.external_user_id)?;
     validate_idempotency_key(&value.idempotency_key)?;
     let role = value.role.map(decode_participant_role).transpose()?;
     Ok(UpdateParticipantInput {
         scope,
         conference_id,
         integration_id,
-        participant,
+        external_user_id: value.external_user_id,
         role,
         audio_muted: value.audio_muted,
         camera_allowed: value.camera_allowed,
@@ -733,13 +724,13 @@ fn decode_remove_participant(
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
-    let participant = participant_ref(value.participant_id)?;
+    validate_external_user_id(&value.external_user_id)?;
     validate_idempotency_key(&value.idempotency_key)?;
     Ok(RemoveParticipantInput {
         scope,
         conference_id,
         integration_id,
-        participant,
+        external_user_id: value.external_user_id,
         idempotency_key: value.idempotency_key,
     })
 }
@@ -767,9 +758,7 @@ fn decode_issue_join_grant(
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
-    if value.external_user_id.is_empty() || value.external_user_id.len() > 512 {
-        return Err(invalid_argument());
-    }
+    validate_external_user_id(&value.external_user_id)?;
     let use_policy =
         match pb::JoinGrantUsePolicy::try_from(value.use_policy).map_err(|_| invalid_argument())? {
             pb::JoinGrantUsePolicy::Unspecified => return Err(invalid_argument()),
@@ -1113,10 +1102,13 @@ where
     if conference.lifecycle == UniversalConferenceLifecycle::Ended {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
-    let current = store
-        .universal_conference_participant(&input.scope, &input.conference_id, &input.participant)
-        .map_err(map_store_error)?
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    let current = participant_for_external(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+        &input.external_user_id,
+    )?;
 
     accept_mutation(
         store,
@@ -1167,7 +1159,7 @@ where
         .update_universal_conference_participant(
             &input.scope,
             &input.conference_id,
-            &input.participant,
+            &current.participant,
             current.revision,
             role,
             audio_muted,
@@ -1196,10 +1188,13 @@ where
     if conference.lifecycle == UniversalConferenceLifecycle::Ended {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
-    let current = store
-        .universal_conference_participant(&input.scope, &input.conference_id, &input.participant)
-        .map_err(map_store_error)?
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    let current = participant_for_external(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+        &input.external_user_id,
+    )?;
 
     let command_id = accept_mutation_id(
         store,
@@ -1214,7 +1209,7 @@ where
             .update_universal_conference_participant(
                 &input.scope,
                 &input.conference_id,
-                &input.participant,
+                &current.participant,
                 current.revision,
                 current.role,
                 true,
@@ -1242,6 +1237,30 @@ fn conference_for_integration<S: UniversalConferenceStore>(
         return Err(CanonicalError::new(CanonicalErrorCode::NotFound));
     }
     Ok(conference)
+}
+
+fn participant_for_external<S: UniversalConferenceStore>(
+    store: &S,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    integration_id: &IntegrationId,
+    external_user_id: &[u8],
+) -> Result<UniversalConferenceParticipantProfile, CanonicalError> {
+    let participants = store
+        .universal_conference_participants(scope, conference_id, 1024)
+        .map_err(map_store_error)?;
+    if participants.len() == 1024 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    let mut matching = participants.into_iter().filter(|candidate| {
+        candidate.integration_id == *integration_id
+            && candidate.external_user_id == external_user_id
+    });
+    match (matching.next(), matching.next()) {
+        (Some(participant), None) => Ok(participant),
+        (None, _) => Err(CanonicalError::new(CanonicalErrorCode::NotFound)),
+        (Some(_), Some(_)) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    }
 }
 
 fn list_participants<S: UniversalConferenceStore>(
@@ -1294,22 +1313,17 @@ fn resolve_join_participant<S>(
 where
     S: UniversalConferenceStore,
 {
-    let participants = store
-        .universal_conference_participants(&input.scope, &input.conference_id, 1024)
-        .map_err(map_store_error)?;
-    if participants.len() == 1024 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    let participant = participant_for_external(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+        &input.external_user_id,
+    )?;
+    if !participant.active {
+        return Err(CanonicalError::new(CanonicalErrorCode::NotFound));
     }
-    let mut matching = participants.into_iter().filter(|candidate| {
-        candidate.active
-            && candidate.integration_id == input.integration_id
-            && candidate.external_user_id == input.external_user_id
-    });
-    match (matching.next(), matching.next()) {
-        (Some(participant), None) => Ok(participant),
-        (None, _) => Err(CanonicalError::new(CanonicalErrorCode::NotFound)),
-        (Some(_), Some(_)) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
-    }
+    Ok(participant)
 }
 
 fn resolve_join_device<S>(
@@ -1531,7 +1545,6 @@ fn pb_participant(
     value: &UniversalConferenceParticipantProfile,
 ) -> pb::UniversalConferenceParticipant {
     pb::UniversalConferenceParticipant {
-        participant_id: Some(pb_opaque(value.participant.principal_id.as_opaque())),
         external_user_id: value.external_user_id.clone(),
         role: (match value.role {
             ConferenceParticipantRole::Owner => pb::ConferenceParticipantRole::Owner,
@@ -1686,6 +1699,13 @@ fn pb_conference(value: &UniversalConferenceProfile) -> pb::UniversalConferenceD
         entry_open: value.entry_open,
         revision: value.revision,
     }
+}
+
+fn validate_external_user_id(value: &[u8]) -> Result<(), CanonicalError> {
+    if value.is_empty() || value.len() > 512 {
+        return Err(invalid_argument());
+    }
+    Ok(())
 }
 
 fn validate_external_id(value: &[u8]) -> Result<(), CanonicalError> {
