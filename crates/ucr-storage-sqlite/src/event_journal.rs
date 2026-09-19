@@ -440,6 +440,72 @@ impl EventJournalStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         Ok(status)
     }
+
+    fn events_for_types(
+        &self,
+        scope: &TenantScope,
+        event_types: &[&str],
+        max_items: usize,
+    ) -> Result<Vec<EventEnvelope>, DurableStoreError> {
+        if event_types.is_empty()
+            || event_types.len() > 16
+            || event_types.iter().any(|event_type| event_type.is_empty())
+            || max_items == 0
+            || max_items > 16_384
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let namespace = namespace_storage_key(scope);
+        let connection = self.lock_connection()?;
+        let placeholders = (0..event_types.len())
+            .map(|index| format!("?{}", index + 4))
+            .collect::<Vec<_>>()
+            .join(",");
+        let limit_index = event_types
+            .len()
+            .checked_add(4)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        let sql = format!(
+            "SELECT event_id FROM events
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+               AND event_type IN ({placeholders})
+             ORDER BY journal_seq
+             LIMIT ?{limit_index}"
+        );
+        let mut values = Vec::<rusqlite::types::Value>::with_capacity(event_types.len() + 4);
+        values.push(rusqlite::types::Value::Text(
+            scope.tenant_id.as_opaque().as_str().to_owned(),
+        ));
+        values.push(rusqlite::types::Value::Integer(namespace.present));
+        values.push(rusqlite::types::Value::Text(namespace.value.to_owned()));
+        values.extend(
+            event_types
+                .iter()
+                .map(|event_type| rusqlite::types::Value::Text((*event_type).to_owned())),
+        );
+        values.push(rusqlite::types::Value::Integer(
+            i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?,
+        ));
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| map_sqlite_error(&error))?;
+        let mut events = Vec::with_capacity(max_items.min(256));
+        for row in rows {
+            let event_id = EventId::from_opaque(parse_id(
+                &row.map_err(|error| map_sqlite_error(&error))?,
+            )?);
+            events.push(
+                load_event_by_id(&connection, scope, &event_id)?
+                    .ok_or(DurableStoreError::Corrupt)?,
+            );
+        }
+        Ok(events)
+    }
 }
 
 impl CommandOutcomeStore for SqliteLocalStore {
