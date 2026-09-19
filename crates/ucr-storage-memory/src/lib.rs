@@ -30,23 +30,23 @@ use ucr_crypto::{
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, BridgeActionId, BridgeActionRecord,
     BridgeActionState, BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState,
-    CallSession, CommandEnvelope, CommandId, CommunicationIntent, ConversationId,
-    ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState,
-    DeviceDescriptor, DeviceId, DeviceLifecycleState, EndpointId, EventConsumerCursor,
-    EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind, EventEnvelope, EventId,
-    EventPollResult, EventReconciliation, EventReplicaState, EventSubscription,
-    EventSubscriptionId, EventSubscriptionStart, EventSummary, ExternalIdentityBinding,
-    FederationPeerRecord, FederationTrustState, GroupMembership, GroupRecord, IdentityId,
-    IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId,
-    OfflineGroupChangeReplica, OfflineGroupMessageReplica, OpaqueId,
+    CallSession, CommandEnvelope, CommandId, CommunicationIntent, ConferenceParticipantRole,
+    ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
+    DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, EndpointId,
+    EventConsumerCursor, EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind,
+    EventEnvelope, EventId, EventPollResult, EventReconciliation, EventReplicaState,
+    EventSubscription, EventSubscriptionId, EventSubscriptionStart, EventSummary,
+    ExternalIdentityBinding, FederationPeerRecord, FederationTrustState, GroupMembership,
+    GroupRecord, IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope,
+    MessageId, OfflineGroupChangeReplica, OfflineGroupMessageReplica, OpaqueId,
     OrganizationManagedDeviceBinding, OrganizationManagedIdentityBinding, OrganizationModeProfile,
     PermissionGrant, PersonalNodeObject, PersonalNodeProfile, PrincipalIdentityBinding,
     PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
     ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
     ServiceCredentialState, ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob,
     StoreForwardLeaseId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord, TrustedSigningKeyState, ConferenceParticipantRole,
-    UniversalConferenceLifecycle, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    TrustedSigningKeyRecord, TrustedSigningKeyState, UniversalConferenceLifecycle,
+    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -199,8 +199,7 @@ struct MemoryState {
     service_quota_usage: HashMap<ServicePrincipalKey, MemoryQuotaUsage>,
     service_audit_records: Vec<(ServiceAuditRecord, [u8; 32])>,
     universal_conferences: HashMap<UniversalConferenceKey, UniversalConferenceProfile>,
-    universal_conference_external:
-        HashMap<UniversalConferenceExternalKey, UniversalConferenceKey>,
+    universal_conference_external: HashMap<UniversalConferenceExternalKey, UniversalConferenceKey>,
     universal_conference_participants:
         HashMap<UniversalConferenceParticipantKey, UniversalConferenceParticipantProfile>,
 }
@@ -1063,8 +1062,14 @@ fn external_identity_binding_key(
     )
 }
 
-fn universal_conference_key(scope: &TenantScope, conference_id: &ucr_model::GroupId) -> UniversalConferenceKey {
-    (scope_key(scope), conference_id.as_opaque().as_str().to_owned())
+fn universal_conference_key(
+    scope: &TenantScope,
+    conference_id: &ucr_model::GroupId,
+) -> UniversalConferenceKey {
+    (
+        scope_key(scope),
+        conference_id.as_opaque().as_str().to_owned(),
+    )
 }
 
 fn universal_conference_external_key(
