@@ -2065,15 +2065,41 @@ where
         if participant.profile.participant == owner.principal {
             continue;
         }
-        if store
+        let membership = store
             .group_membership(
                 &owner.scope,
                 &initial_group.group_id,
                 &participant.profile.participant,
             )
-            .map_err(map_store_error)?
-            .is_some_and(|membership| membership.state == ucr_model::GroupMemberState::Active)
+            .map_err(map_store_error)?;
+        let desired_role = runtime_group_role(participant.profile.role);
+        if let Some(membership) = membership
+            && membership.state == ucr_model::GroupMemberState::Active
         {
+            if membership.role != desired_role {
+                let group = store
+                    .group(&owner.scope, &initial_group.group_id)
+                    .map_err(map_store_error)?
+                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+                let change = GroupChange {
+                    event_id: runtime_event_id(
+                        "gc",
+                        group.revision,
+                        &participant.profile.participant,
+                    )?,
+                    scope: owner.scope.clone(),
+                    group_id: group.group_id.clone(),
+                    expected_revision: group.revision,
+                    kind: GroupChangeKind::ChangeRole {
+                        member: participant.profile.participant.clone(),
+                        role: desired_role,
+                    },
+                    next_crypto_state: None,
+                };
+                store
+                    .apply_mls_backed_group_change(owner, owner_device_id, &change, &[])
+                    .map_err(|error| map_group_mls_error(&error))?;
+            }
             continue;
         }
         let group = store
@@ -2090,7 +2116,7 @@ where
             expected_revision: group.revision,
             kind: GroupChangeKind::AddMember {
                 member: participant.profile.participant.clone(),
-                role: runtime_group_role(participant.profile.role),
+                role: desired_role,
             },
             next_crypto_state: None,
         };
