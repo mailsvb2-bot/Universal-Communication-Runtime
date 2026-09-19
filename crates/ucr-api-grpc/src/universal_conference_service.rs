@@ -1249,21 +1249,15 @@ fn participant_for_external<S: UniversalConferenceStore>(
     integration_id: &IntegrationId,
     external_user_id: &[u8],
 ) -> Result<UniversalConferenceParticipantProfile, CanonicalError> {
-    let participants = store
-        .universal_conference_participants(scope, conference_id, 1024)
-        .map_err(map_store_error)?;
-    if participants.len() == 1024 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
-    }
-    let mut matching = participants.into_iter().filter(|candidate| {
-        candidate.integration_id == *integration_id
-            && candidate.external_user_id == external_user_id
-    });
-    match (matching.next(), matching.next()) {
-        (Some(participant), None) => Ok(participant),
-        (None, _) => Err(CanonicalError::new(CanonicalErrorCode::NotFound)),
-        (Some(_), Some(_)) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
-    }
+    store
+        .universal_conference_participant_for_external(
+            scope,
+            conference_id,
+            integration_id,
+            external_user_id,
+        )
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
 }
 
 fn list_participants<S: UniversalConferenceStore>(
