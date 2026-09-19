@@ -245,6 +245,33 @@ message UniversalRevokeJoinGrantResponse {
   }
 }
 
+message UniversalGetParticipantAttendanceRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId integration_id = 3;
+  bytes external_user_id = 4;
+}
+
+message UniversalParticipantAttendance {
+  bytes external_user_id = 1;
+  optional int64 first_join_at_unix_ms = 2;
+  optional int64 last_leave_at_unix_ms = 3;
+  optional int64 first_media_ready_at_unix_ms = 4;
+  uint64 total_connected_seconds = 5;
+  uint64 current_connected_seconds = 6;
+  uint32 join_count = 7;
+  uint32 reconnect_count = 8;
+  uint32 media_ready_count = 9;
+  bool connected = 10;
+}
+
+message UniversalGetParticipantAttendanceResponse {
+  oneof result {
+    UniversalParticipantAttendance attendance = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 // Stable business-neutral facade for SaaS, mobile backends and other products.
 // Concrete REST/OpenAPI/SDK adapters must remain thin transports over this service.
 service UniversalConferenceService {
@@ -259,4 +286,5 @@ service UniversalConferenceService {
   rpc ListParticipants(UniversalListParticipantsRequest) returns (UniversalListParticipantsResponse);
   rpc IssueJoinGrant(UniversalIssueJoinGrantRequest) returns (UniversalIssueJoinGrantResponse);
   rpc RevokeJoinGrant(UniversalRevokeJoinGrantRequest) returns (UniversalRevokeJoinGrantResponse);
+  rpc GetParticipantAttendance(UniversalGetParticipantAttendanceRequest) returns (UniversalGetParticipantAttendanceResponse);
 }
