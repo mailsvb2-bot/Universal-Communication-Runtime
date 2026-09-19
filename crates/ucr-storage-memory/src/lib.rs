@@ -19,10 +19,10 @@ use ucr_core::{
     DurableStoreError, EventAppendStatus, EventJournalStore, EventSubscriptionStore,
     ExternalIdentityBindingStore, FederationPeerStore, IdentityDeviceLookupStore, IdentityStore,
     MessageStore, PermissionGrantStore, PrincipalIdentityBindingStore,
-    PrincipalIdentityLookupStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore,
-    RecoveryPlanStore, RecordingStore, ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
-    ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth, StorageProvider, SyncStore,
-    TrustedSigningKeyStore, UniversalConferenceStore,
+    PrincipalIdentityLookupStore, RecordingStore, RecoveryAdmissionProof,
+    RecoveryDeviceStagingStore, RecoveryPlanStore, ReverifiedDeviceActivationStore,
+    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
+    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore, UniversalConferenceStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -42,23 +42,25 @@ use ucr_model::{
     MessageId, OfflineGroupChangeReplica, OfflineGroupMessageReplica, OpaqueId,
     OrganizationManagedDeviceBinding, OrganizationManagedIdentityBinding, OrganizationModeProfile,
     PermissionGrant, PersonalNodeObject, PersonalNodeProfile, PrincipalIdentityBinding,
-    PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, RecordingConsentState, RecordingId, RecordingSession, ScopedPrincipal,
-    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
-    ServiceCredentialState, ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob,
-    StoreForwardLeaseId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord, TrustedSigningKeyState, UniversalConferenceLifecycle,
-    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    PrincipalRef, PublicKeyDescriptor, RecordingConsentState, RecordingId, RecordingSession,
+    RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
+    ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy,
+    SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId, SyncCheckpoint, SyncSession,
+    SyncState, TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
+    UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
+    UniversalConferenceProfile,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
     IdempotencyDecision, MAX_EVENT_DELIVERY_BATCH_BYTES, MAX_SERVICE_AUDIT_READ_ITEMS,
-    accepted_command_receipt, anti_entropy_session_binding, canonical_bridge_registration,
-    canonical_command, canonical_communication_intent, canonical_event,
-    canonical_event_subscription, canonical_federation_peer, canonical_message,
-    canonical_recovery_plan, canonical_sync_session, compare_command_idempotency,
-    device_allows_protected_access, duplicate_command_receipt, event_consumer_cursor_token,
-    event_delivery_batch_next_size, event_delivery_size, event_fingerprint,
-    event_matches_subscription, event_retry_delay_ms, service_audit_hash,
+    RecordingProtocolError, accepted_command_receipt, anti_entropy_session_binding,
+    apply_recording_consent, canonical_bridge_registration, canonical_command,
+    canonical_communication_intent, canonical_event, canonical_event_subscription,
+    canonical_federation_peer, canonical_message, canonical_recovery_plan, canonical_sync_session,
+    compare_command_idempotency, delete_recording, device_allows_protected_access,
+    duplicate_command_receipt, event_consumer_cursor_token, event_delivery_batch_next_size,
+    event_delivery_size, event_fingerprint, event_matches_subscription, event_retry_delay_ms,
+    expire_recording, service_audit_hash, start_recording, stop_recording,
     validate_anti_entropy_cursor, validate_anti_entropy_page_size, validate_anti_entropy_session,
     validate_anti_entropy_summary_count, validate_bridge_action_record,
     validate_bridge_action_transition, validate_bridge_registration_transition,
@@ -70,8 +72,7 @@ use ucr_protocol::{
     validate_federation_transition, validate_identity_record, validate_permission_grant,
     validate_principal_identity_binding, validate_recording_session, validate_service_audit_record,
     validate_service_quota_policy, validate_sync_checkpoint, validate_sync_transition,
-    validate_trusted_signing_key_descriptor, apply_recording_consent, delete_recording,
-    expire_recording, start_recording, stop_recording, RecordingProtocolError,
+    validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 12;
@@ -8043,9 +8044,11 @@ fn has_conflicting_active_conference_owner(
         })
 }
 
-
 fn recording_key(scope: &TenantScope, recording_id: &RecordingId) -> RecordingKey {
-    (scope_key(scope), recording_id.as_opaque().as_str().to_owned())
+    (
+        scope_key(scope),
+        recording_id.as_opaque().as_str().to_owned(),
+    )
 }
 
 fn map_recording_protocol_error(error: RecordingProtocolError) -> DurableStoreError {
@@ -8107,7 +8110,10 @@ impl RecordingStore for MemoryLocalStore {
         recording_id: &RecordingId,
     ) -> Result<Option<RecordingSession>, DurableStoreError> {
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        Ok(state.recordings.get(&recording_key(scope, recording_id)).cloned())
+        Ok(state
+            .recordings
+            .get(&recording_key(scope, recording_id))
+            .cloned())
     }
 
     fn set_recording_consent(
