@@ -34,6 +34,12 @@ The public role vocabulary is `owner`, `host`, `moderator`, `speaker`, `attendee
 
 Join grants are short-lived and conference-scoped. The contract reserves single-use/reusable policy, explicit not-before/not-after bounds and revocation. Runtime implementations must reject unsupported semantics rather than silently weakening them.
 
+## Attendance
+
+`GetParticipantAttendance` is integration-scoped and addressed by `external_user_id`. It returns first join, last leave, first media-ready time, join/reconnect/media-ready counts, current connection duration and total connected duration.
+
+Attendance is a read-only projection over the canonical Event journal. The projection does not create a second attendance database or expose private Event journal positions. If the bounded projection cannot prove that it has the complete relevant history, it fails closed with resource exhaustion instead of returning partial totals as complete data.
+
 ## Idempotency
 
 All create/mutate operations carry an explicit idempotency key where appropriate. Exact retries must deduplicate durably; changed requests under the same idempotency identity must conflict.
