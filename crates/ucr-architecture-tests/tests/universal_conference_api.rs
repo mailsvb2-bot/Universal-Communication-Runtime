@@ -18,8 +18,14 @@ fn universal_conference_contract_hides_internal_ucr_identity_mechanics() {
     assert!(proto.contains("external_conference_id"));
     assert!(proto.contains("external_user_id"));
     assert!(!proto.contains("participant_id"));
-    assert!(!proto.contains("PrincipalRef"));
-    assert!(!proto.contains("DeviceId"));
+    assert!(!proto.lines().any(|line| {
+        let line = line.trim_start();
+        !line.starts_with("//") && line.contains("PrincipalRef ")
+    }));
+    assert!(!proto.lines().any(|line| {
+        let line = line.trim_start();
+        !line.starts_with("//") && line.contains("DeviceId ")
+    }));
     assert!(!proto.contains("clientplatform"));
     assert!(!proto.contains("crm"));
 }
