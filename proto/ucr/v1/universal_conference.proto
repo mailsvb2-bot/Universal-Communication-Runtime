@@ -235,6 +235,26 @@ message UniversalListParticipantsResponse {
   }
 }
 
+message UniversalPrepareConferenceRuntimeRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId integration_id = 3;
+  string idempotency_key = 4;
+}
+
+message UniversalConferenceRuntimeStatus {
+  bool group_ready = 1;
+  bool call_ready = 2;
+  uint32 admitted_participant_count = 3;
+}
+
+message UniversalPrepareConferenceRuntimeResponse {
+  oneof result {
+    UniversalConferenceRuntimeStatus runtime = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 message UniversalIssueJoinGrantRequest {
   TenantScope scope = 1;
   OpaqueId conference_id = 2;
@@ -329,6 +349,7 @@ service UniversalConferenceService {
   rpc UpdateParticipant(UniversalUpdateParticipantRequest) returns (UniversalUpdateParticipantResponse);
   rpc RemoveParticipant(UniversalRemoveParticipantRequest) returns (UniversalRemoveParticipantResponse);
   rpc ListParticipants(UniversalListParticipantsRequest) returns (UniversalListParticipantsResponse);
+  rpc PrepareConferenceRuntime(UniversalPrepareConferenceRuntimeRequest) returns (UniversalPrepareConferenceRuntimeResponse);
   rpc IssueJoinGrant(UniversalIssueJoinGrantRequest) returns (UniversalIssueJoinGrantResponse);
   rpc RevokeJoinGrant(UniversalRevokeJoinGrantRequest) returns (UniversalRevokeJoinGrantResponse);
   rpc GetParticipantAttendance(UniversalGetParticipantAttendanceRequest) returns (UniversalGetParticipantAttendanceResponse);
