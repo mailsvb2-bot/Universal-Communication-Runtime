@@ -461,8 +461,7 @@ where
                 kind: CallSignalKind::Accept,
             };
             match self.store.apply_call_signal(&actor, &signal) {
-                Ok(_) => continue,
-                Err(DurableStoreError::Conflict) => continue,
+                Ok(_) | Err(DurableStoreError::Conflict) => {}
                 Err(error) => return Err(map_store_error(error)),
             }
         }
