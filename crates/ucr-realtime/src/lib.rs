@@ -239,7 +239,7 @@ impl fmt::Debug for SessionEntry {
             .field("sequence", &self.sequence)
             .field("media_ready", &self.media_ready)
             .field("queue_capacity", &self.sender.capacity())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
