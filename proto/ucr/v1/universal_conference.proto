@@ -222,6 +222,7 @@ message UniversalListParticipantsRequest {
   OpaqueId conference_id = 2;
   uint32 max_items = 3;
   OpaqueId integration_id = 4;
+  string idempotency_key = 5;
 }
 
 message UniversalParticipantList {
@@ -264,6 +265,7 @@ message UniversalIssueJoinGrantRequest {
   JoinGrantUsePolicy use_policy = 6;
   optional int64 not_before_unix_ms = 7;
   optional int64 not_after_unix_ms = 8;
+  string idempotency_key = 9;
 }
 
 message UniversalIssueJoinGrantResponse {

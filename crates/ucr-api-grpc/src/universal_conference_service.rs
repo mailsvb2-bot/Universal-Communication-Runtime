@@ -3,8 +3,9 @@ use std::{fmt, sync::Arc};
 use prost::Message;
 use tonic::{Request, Response, Status};
 use ucr_core::{
-    AuthorizationEvaluator, CallStore, CommandAcceptanceStore, DeviceLifecycleStore,
-    DurableStoreError, EventJournalStore, ExternalIdentityBindingStore, GroupCallLookupStore,
+    AuthorizationEvaluator, CallStore, CommandAcceptanceStore, ConferenceJoinGrantStore,
+    DeviceLifecycleStore, DurableStoreError, EventJournalStore, ExternalIdentityBindingStore,
+    GroupCallLookupStore,
     GroupStore, IdentityDeviceLookupStore, IdentityStore, PermissionGrantStore,
     PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, ServiceAuditStore,
     ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
@@ -14,7 +15,8 @@ use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission}
 use ucr_model::{
     AuthorizationRequest, CallId, CallParticipant, CallParticipantState, CallParticipantUpdateKind,
     CallSession, CallSignal, CallSignalKind, CallSignallingState, CommandEnvelope, CommandId,
-    ConferenceParticipantRole, ConferenceScheduleMetadata, ConversationId, ConversationKind,
+    ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceParticipantRole,
+    ConferenceScheduleMetadata, ConversationId, ConversationKind,
     ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy, DeviceDescriptor,
     DeviceId, DeviceLifecycleState, EventId, ExternalIdentityBinding, GroupChange, GroupChangeKind,
     GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState, GroupOwnership, GroupRecord,
@@ -38,6 +40,7 @@ use ucr_protocol::{
 };
 use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
+    RealtimeSessionClaims,
 };
 
 use super::{
@@ -162,6 +165,7 @@ where
         + ServiceQuotaStore
         + ServiceAuditStore
         + UniversalConferenceStore
+        + ConferenceJoinGrantStore
         + CommandAcceptanceStore
         + IdentityStore
         + ExternalIdentityBindingStore
@@ -192,6 +196,7 @@ where
         + ServiceQuotaStore
         + ServiceAuditStore
         + UniversalConferenceStore
+        + ConferenceJoinGrantStore
         + CommandAcceptanceStore
         + IdentityStore
         + ExternalIdentityBindingStore
@@ -649,7 +654,9 @@ where
         request: Request<pb::UniversalIssueJoinGrantRequest>,
     ) -> Result<Response<pb::UniversalIssueJoinGrantResponse>, Status> {
         let credentials = decode_credentials(request.metadata());
-        let decoded = decode_issue_join_grant(request.into_inner());
+        let body = request.into_inner();
+        let payload = body.encode_to_vec();
+        let decoded = decode_issue_join_grant(body);
         let result = match (credentials, decoded) {
             (Ok((credential_id, secret)), Ok(input)) => self
                 .admit_integration(
@@ -666,7 +673,7 @@ where
                     let now_unix_ms = self.clock.now_unix_ms().map_err(|_| {
                         CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
                     })?;
-                    issue_join_grant(&*self.store, issuer, input, now_unix_ms)
+                    issue_join_grant(&*self.store, issuer, input, payload, now_unix_ms)
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
@@ -685,11 +692,13 @@ where
         request: Request<pb::UniversalRevokeJoinGrantRequest>,
     ) -> Result<Response<pb::UniversalRevokeJoinGrantResponse>, Status> {
         let credentials = decode_credentials(request.metadata());
-        let decoded = decode_revoke_join_grant(request.into_inner());
+        let body = request.into_inner();
+        let payload = body.encode_to_vec();
+        let decoded = decode_revoke_join_grant(body);
         let result = match (credentials, decoded) {
             (
                 Ok((credential_id, secret)),
-                Ok((scope, conference_id, integration_id, session_id)),
+                Ok((scope, conference_id, integration_id, session_id, idempotency_key)),
             ) => self
                 .admit_integration(
                     &scope,
@@ -699,16 +708,14 @@ where
                     CONFERENCE_JOIN_ISSUE_PERMISSION,
                 )
                 .and_then(|_| {
-                    let issuer = self.join_issuer.as_deref().ok_or_else(|| {
-                        CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)
-                    })?;
                     revoke_join_grant(
                         &*self.store,
-                        issuer,
                         &scope,
                         &conference_id,
                         &integration_id,
                         &session_id,
+                        &idempotency_key,
+                        payload,
                     )?;
                     Ok(session_id)
                 }),
@@ -862,6 +869,7 @@ struct IssueJoinGrantInput {
     use_policy: RealtimeJoinGrantUsePolicy,
     not_before_unix_ms: Option<i64>,
     not_after_unix_ms: Option<i64>,
+    idempotency_key: String,
 }
 
 struct CreateInput {
@@ -1018,6 +1026,7 @@ fn decode_issue_join_grant(
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     validate_external_user_id(&value.external_user_id)?;
+    validate_idempotency_key(&value.idempotency_key)?;
     let use_policy =
         match pb::JoinGrantUsePolicy::try_from(value.use_policy).map_err(|_| invalid_argument())? {
             pb::JoinGrantUsePolicy::Unspecified => return Err(invalid_argument()),
@@ -1033,17 +1042,20 @@ fn decode_issue_join_grant(
         use_policy,
         not_before_unix_ms: value.not_before_unix_ms,
         not_after_unix_ms: value.not_after_unix_ms,
+        idempotency_key: value.idempotency_key,
     })
 }
 
 fn decode_revoke_join_grant(
     value: pb::UniversalRevokeJoinGrantRequest,
-) -> Result<(TenantScope, GroupId, IntegrationId, SessionId), CanonicalError> {
+) -> Result<(TenantScope, GroupId, IntegrationId, SessionId, String), CanonicalError> {
+    validate_idempotency_key(&value.idempotency_key)?;
     Ok((
         decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
         GroupId::from_opaque(decode_opaque(value.conference_id)?),
         IntegrationId::from_opaque(decode_opaque(value.integration_id)?),
         SessionId::from_opaque(decode_opaque(value.session_id)?),
+        value.idempotency_key,
     ))
 }
 
@@ -2471,14 +2483,33 @@ fn issue_join_grant<S>(
     store: &S,
     issuer: &JoinTokenIssuer,
     input: IssueJoinGrantInput,
+    payload: Vec<u8>,
     now_unix_ms: i64,
 ) -> Result<pb::ConferenceJoinGrant, CanonicalError>
 where
     S: UniversalConferenceStore
+        + ConferenceJoinGrantStore
+        + CommandAcceptanceStore
         + PrincipalIdentityBindingStore
         + IdentityDeviceLookupStore
         + GroupCallLookupStore,
 {
+    let stable_command_id = accept_mutation_id(
+        store,
+        &input.scope,
+        "ucr.conference.join.issue.v1",
+        &input.idempotency_key,
+        payload,
+    )?;
+    let session_id = SessionId::from_opaque(stable_command_id.as_opaque().clone());
+    if let Some(existing) = store
+        .conference_join_grant(&input.scope, &session_id)
+        .map_err(map_store_error)?
+    {
+        require_join_grant_context(&existing, &input.conference_id, &input.integration_id)?;
+        return pb_join_grant_from_record(issuer, &existing);
+    }
+
     let conference = store
         .universal_conference_profile(&input.scope, &input.conference_id)
         .map_err(map_store_error)?
@@ -2518,18 +2549,100 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
 
-    issuer
-        .issue_with_policy(
-            input.scope,
+    let issued = issuer
+        .issue_with_session_id(
+            input.scope.clone(),
             call_id,
             participant.participant,
-            Some(device_id),
+            Some(device_id.clone()),
+            session_id.clone(),
             input.ttl_seconds,
             input.use_policy,
             input.not_before_unix_ms,
             input.not_after_unix_ms,
             now_unix_ms,
         )
+        .map_err(map_join_token_error)?;
+    let record = ConferenceJoinGrantRecord {
+        scope: input.scope.clone(),
+        conference_id: input.conference_id,
+        integration_id: input.integration_id,
+        call_id: issued.claims.call_id.clone(),
+        participant: issued.claims.participant.clone(),
+        device_id,
+        session_id,
+        issued_at_unix_ms: issued.claims.issued_at_unix_ms,
+        not_before_unix_ms: issued.claims.not_before_unix_ms,
+        expires_at_unix_ms: issued.claims.expires_at_unix_ms,
+        use_policy: durable_join_use_policy(input.use_policy),
+        revoked: false,
+        redeemed: false,
+    };
+    match store.persist_conference_join_grant(&record) {
+        Ok(_) => pb_join_grant_from_record(issuer, &record),
+        Err(DurableStoreError::Conflict) => {
+            let existing = store
+                .conference_join_grant(&input.scope, &record.session_id)
+                .map_err(map_store_error)?
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
+            require_join_grant_context(
+                &existing,
+                &record.conference_id,
+                &record.integration_id,
+            )?;
+            pb_join_grant_from_record(issuer, &existing)
+        }
+        Err(error) => Err(map_store_error(error)),
+    }
+}
+
+fn durable_join_use_policy(
+    value: RealtimeJoinGrantUsePolicy,
+) -> ConferenceJoinGrantUsePolicy {
+    match value {
+        RealtimeJoinGrantUsePolicy::SingleUse => ConferenceJoinGrantUsePolicy::SingleUse,
+        RealtimeJoinGrantUsePolicy::Reusable => ConferenceJoinGrantUsePolicy::Reusable,
+    }
+}
+
+fn realtime_join_use_policy(
+    value: ConferenceJoinGrantUsePolicy,
+) -> RealtimeJoinGrantUsePolicy {
+    match value {
+        ConferenceJoinGrantUsePolicy::SingleUse => RealtimeJoinGrantUsePolicy::SingleUse,
+        ConferenceJoinGrantUsePolicy::Reusable => RealtimeJoinGrantUsePolicy::Reusable,
+    }
+}
+
+fn require_join_grant_context(
+    record: &ConferenceJoinGrantRecord,
+    conference_id: &GroupId,
+    integration_id: &IntegrationId,
+) -> Result<(), CanonicalError> {
+    if record.conference_id != *conference_id || record.integration_id != *integration_id {
+        Err(CanonicalError::new(CanonicalErrorCode::Conflict))
+    } else {
+        Ok(())
+    }
+}
+
+fn pb_join_grant_from_record(
+    issuer: &JoinTokenIssuer,
+    record: &ConferenceJoinGrantRecord,
+) -> Result<pb::ConferenceJoinGrant, CanonicalError> {
+    let claims = RealtimeSessionClaims {
+        scope: record.scope.clone(),
+        call_id: record.call_id.clone(),
+        participant: record.participant.clone(),
+        device_id: Some(record.device_id.clone()),
+        session_id: record.session_id.clone(),
+        issued_at_unix_ms: record.issued_at_unix_ms,
+        not_before_unix_ms: record.not_before_unix_ms,
+        expires_at_unix_ms: record.expires_at_unix_ms,
+        use_policy: realtime_join_use_policy(record.use_policy),
+    };
+    issuer
+        .signed_grant_for_claims(&claims)
         .map(|grant| pb::ConferenceJoinGrant {
             session_id: Some(pb_opaque(grant.claims.session_id.as_opaque())),
             join_url: grant.join_url,
@@ -2540,30 +2653,42 @@ where
 
 fn revoke_join_grant<S>(
     store: &S,
-    issuer: &JoinTokenIssuer,
     scope: &TenantScope,
     conference_id: &GroupId,
     integration_id: &IntegrationId,
     session_id: &SessionId,
+    idempotency_key: &str,
+    payload: Vec<u8>,
 ) -> Result<(), CanonicalError>
 where
-    S: UniversalConferenceStore + GroupCallLookupStore,
+    S: UniversalConferenceStore
+        + ConferenceJoinGrantStore
+        + CommandAcceptanceStore
+        + GroupCallLookupStore,
 {
+    accept_mutation(
+        store,
+        scope,
+        "ucr.conference.join.revoke.v1",
+        idempotency_key,
+        payload,
+    )?;
     conference_for_integration(store, scope, conference_id, integration_id)?;
-    let claims = issuer
-        .grant_claims(scope, session_id)
-        .map_err(map_join_token_error)?
+    let record = store
+        .conference_join_grant(scope, session_id)
+        .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    require_join_grant_context(&record, conference_id, integration_id)?;
     if !store
-        .call_belongs_to_group(scope, conference_id, &claims.call_id)
+        .call_belongs_to_group(scope, conference_id, &record.call_id)
         .map_err(map_store_error)?
     {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
-    issuer
-        .revoke(scope, session_id)
+    store
+        .revoke_conference_join_grant(scope, session_id)
         .map(|_| ())
-        .map_err(map_join_token_error)
+        .map_err(map_store_error)
 }
 
 fn universal_capabilities() -> Result<pb::UniversalConferenceCapabilities, CanonicalError> {

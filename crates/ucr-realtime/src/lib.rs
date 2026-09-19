@@ -226,6 +226,89 @@ impl JoinTokenIssuer {
         })
     }
 
+    /// Issues a grant for a caller-supplied stable session ID without storing control state
+    /// in the in-memory compatibility registry. Durable callers persist the claims separately.
+    ///
+    /// # Errors
+    /// Rejects invalid TTL/window values or signing failures.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_with_session_id(
+        &self,
+        scope: TenantScope,
+        call_id: CallId,
+        participant: PrincipalRef,
+        device_id: Option<DeviceId>,
+        session_id: SessionId,
+        ttl_seconds: u32,
+        use_policy: JoinGrantUsePolicy,
+        not_before_unix_ms: Option<i64>,
+        not_after_unix_ms: Option<i64>,
+        now_unix_ms: i64,
+    ) -> Result<IssuedJoinGrant, JoinTokenError> {
+        if !(MIN_JOIN_TTL_SECONDS..=MAX_JOIN_TTL_SECONDS).contains(&ttl_seconds) {
+            return Err(JoinTokenError::InvalidTtl);
+        }
+        let ttl_ms = i64::from(ttl_seconds)
+            .checked_mul(1000)
+            .ok_or(JoinTokenError::ClockOverflow)?;
+        let maximum_expiry = now_unix_ms
+            .checked_add(ttl_ms)
+            .ok_or(JoinTokenError::ClockOverflow)?;
+        let not_before_unix_ms = not_before_unix_ms.unwrap_or(now_unix_ms);
+        let expires_at_unix_ms = not_after_unix_ms.unwrap_or(maximum_expiry);
+        let minimum_expiry = now_unix_ms
+            .checked_add(i64::from(MIN_JOIN_TTL_SECONDS) * 1000)
+            .ok_or(JoinTokenError::ClockOverflow)?;
+        if not_before_unix_ms < now_unix_ms
+            || not_before_unix_ms >= expires_at_unix_ms
+            || expires_at_unix_ms < minimum_expiry
+            || expires_at_unix_ms > maximum_expiry
+        {
+            return Err(JoinTokenError::InvalidWindow);
+        }
+        let claims = RealtimeSessionClaims {
+            scope,
+            call_id,
+            participant,
+            device_id,
+            session_id,
+            issued_at_unix_ms: now_unix_ms,
+            not_before_unix_ms,
+            expires_at_unix_ms,
+            use_policy,
+        };
+        self.signed_grant_for_claims(&claims)
+    }
+
+    /// Recreates the exact signed URL for already-durable claims without changing grant state.
+    ///
+    /// # Errors
+    /// Returns a signing failure for malformed internal state.
+    pub fn signed_grant_for_claims(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<IssuedJoinGrant, JoinTokenError> {
+        let token = self.sign(claims)?;
+        Ok(IssuedJoinGrant {
+            join_url: format!("{}#ucr_join={token}", self.join_base_url),
+            claims: claims.clone(),
+        })
+    }
+
+    /// Verifies only cryptographic and temporal token claims.
+    ///
+    /// Durable callers separately check canonical grant control state.
+    ///
+    /// # Errors
+    /// Rejects malformed, tampered, not-yet-valid or expired tokens.
+    pub fn verify_signed_claims(
+        &self,
+        token: &str,
+        now_unix_ms: i64,
+    ) -> Result<RealtimeSessionClaims, JoinTokenError> {
+        self.verify_signed(token, now_unix_ms)
+    }
+
     /// Verifies signature and temporal validity and returns the exact signed claims.
     ///
     /// # Errors

@@ -60,6 +60,8 @@ Enrollment is deliberately conservative: multiple active devices are a conflict,
 
 Join grants are short-lived and conference-scoped. The contract reserves single-use/reusable policy, explicit not-before/not-after bounds and revocation. An eligible canonical Call participant may be `invited`, `ringing` or already `accepted` when a grant is issued; presenting a valid grant at the realtime join boundary performs the participant's canonical `Accept` transition before the media session is opened. Rejected, busy, left, inactive or removed participants remain denied. Runtime implementations must reject unsupported semantics rather than silently weakening them.
 
+Universal join issuance and revocation are durable idempotent mutations. The accepted idempotency command yields the stable session identifier; the signed token is reproducible from durable claims and is never stored as plaintext. Revocation and single-use redemption live in the canonical `ConferenceJoinGrantStore`, so a process restart does not reactivate a revoked grant or forget that a single-use grant was consumed. The older low-level Conference join URL path remains a compatibility boundary until it is migrated separately.
+
 ## Capability discovery
 
 `GetCapabilities` exposes the canonical prepared media/conference capabilities plus explicit runtime-readiness flags. Capability discovery must not claim production readiness for browser realtime, WebRTC, TURN, recording, or horizontal SFU until the corresponding implementation and conformance evidence exist. A prepared protocol capability is not the same thing as a production deployment feature.

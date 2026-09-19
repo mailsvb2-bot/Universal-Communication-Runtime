@@ -7,14 +7,16 @@ use ucr_conference::{
     ConferenceError, ConferenceRuntime, ConferenceRuntimeState, PreparedConferenceCapabilities,
 };
 use ucr_core::{
-    AuthorizationEvaluator, CallStore, DeviceLifecycleStore, DurableStoreError, EventJournalStore,
-    GroupStore, PrincipalIdentityBindingStore, UniversalConferenceStore,
+    AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
+    DurableStoreError, EventJournalStore, GroupStore, PrincipalIdentityBindingStore,
+    UniversalConferenceStore,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipantState, CallSignal, CallSignalKind,
-    ConferenceMediaSubscription, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
+    ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
+    ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
     DeviceId, DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId,
     GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId,
     PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope,
@@ -372,7 +374,8 @@ where
         + PrincipalIdentityBindingStore
         + TrustedSigningKeyResolver
         + EventJournalStore
-        + UniversalConferenceStore,
+        + UniversalConferenceStore
+        + ConferenceJoinGrantStore,
 {
     fn now(&self) -> Result<i64, CanonicalError> {
         self.clock
@@ -389,11 +392,42 @@ where
     ) -> Result<RealtimeSessionClaims, CanonicalError> {
         let claims = self
             .join_issuer
-            .redeem(token, self.now()?)
+            .verify_signed_claims(token, self.now()?)
             .map_err(map_join_token_error)?;
         if claims.scope != *scope || claims.call_id != *call_id || claims.session_id != *session_id
         {
             return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+        }
+        if let Some(record) = self
+            .store
+            .conference_join_grant(scope, session_id)
+            .map_err(map_store_error)?
+        {
+            require_durable_grant_matches_claims(&record, &claims)?;
+            if record.revoked {
+                return Err(map_join_token_error(JoinTokenError::Revoked));
+            }
+            if record.use_policy == ConferenceJoinGrantUsePolicy::SingleUse && record.redeemed {
+                return Err(map_join_token_error(JoinTokenError::AlreadyUsed));
+            }
+            match self.store.redeem_conference_join_grant(scope, session_id) {
+                Ok(_) => {}
+                Err(DurableStoreError::PermissionDenied) => {
+                    return Err(map_join_token_error(JoinTokenError::Revoked));
+                }
+                Err(DurableStoreError::Conflict) => {
+                    return Err(map_join_token_error(JoinTokenError::AlreadyUsed));
+                }
+                Err(error) => return Err(map_store_error(error)),
+            }
+        } else {
+            let legacy = self
+                .join_issuer
+                .redeem(token, self.now()?)
+                .map_err(map_join_token_error)?;
+            if legacy != claims {
+                return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+            }
         }
         validate_device_claim(&*self.store, &claims)?;
         Ok(claims)
@@ -408,11 +442,29 @@ where
     ) -> Result<RealtimeSessionClaims, CanonicalError> {
         let claims = self
             .join_issuer
-            .verify(token, self.now()?)
+            .verify_signed_claims(token, self.now()?)
             .map_err(map_join_token_error)?;
         if claims.scope != *scope || claims.call_id != *call_id || claims.session_id != *session_id
         {
             return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+        }
+        if let Some(record) = self
+            .store
+            .conference_join_grant(scope, session_id)
+            .map_err(map_store_error)?
+        {
+            require_durable_grant_matches_claims(&record, &claims)?;
+            if record.revoked {
+                return Err(map_join_token_error(JoinTokenError::Revoked));
+            }
+        } else {
+            let legacy = self
+                .join_issuer
+                .verify(token, self.now()?)
+                .map_err(map_join_token_error)?;
+            if legacy != claims {
+                return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+            }
         }
         validate_device_claim(&*self.store, &claims)?;
         Ok(claims)
@@ -941,7 +993,36 @@ const fn pb_attendance_kind(kind: AttendanceTransitionKind) -> i32 {
     }
 }
 
-const fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
+const fn require_durable_grant_matches_claims(
+    record: &ConferenceJoinGrantRecord,
+    claims: &RealtimeSessionClaims,
+) -> Result<(), CanonicalError> {
+    let use_policy_matches = matches!(
+        (record.use_policy, claims.use_policy),
+        (
+            ConferenceJoinGrantUsePolicy::SingleUse,
+            ucr_realtime::JoinGrantUsePolicy::SingleUse
+        ) | (
+            ConferenceJoinGrantUsePolicy::Reusable,
+            ucr_realtime::JoinGrantUsePolicy::Reusable
+        )
+    );
+    if record.scope != claims.scope
+        || record.call_id != claims.call_id
+        || record.participant != claims.participant
+        || claims.device_id.as_ref() != Some(&record.device_id)
+        || record.session_id != claims.session_id
+        || record.issued_at_unix_ms != claims.issued_at_unix_ms
+        || record.not_before_unix_ms != claims.not_before_unix_ms
+        || record.expires_at_unix_ms != claims.expires_at_unix_ms
+        || !use_policy_matches
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+    }
+    Ok(())
+}
+
+fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
     match error {
         JoinTokenError::Malformed
         | JoinTokenError::InvalidSignature
