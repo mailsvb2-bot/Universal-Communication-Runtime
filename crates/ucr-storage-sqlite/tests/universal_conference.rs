@@ -168,6 +168,42 @@ fn create_idempotency_key_conflicts_when_semantics_change() {
 }
 
 #[test]
+fn inactive_history_is_excluded_from_the_active_runtime_roster() {
+    let path = db_path("universal-conference-active-roster");
+    let store = SqliteLocalStore::open(&path).expect("open");
+    store
+        .persist_universal_conference_profile(&conference())
+        .expect("conference");
+
+    let active = participant();
+    store
+        .persist_universal_conference_participant(&active)
+        .expect("active participant");
+
+    let mut inactive = participant();
+    inactive.external_user_id = b"historical-user".to_vec();
+    inactive.participant = PrincipalRef {
+        principal_id: PrincipalId::from_opaque(oid("historical-user")),
+        kind: PrincipalKind::Person,
+    };
+    inactive.active = false;
+    store
+        .persist_universal_conference_participant(&inactive)
+        .expect("inactive historical participant");
+
+    let all = store
+        .universal_conference_participants(&scope(), &conference().conference_id, 16)
+        .expect("all participants");
+    assert_eq!(all.len(), 2);
+    let active_only = store
+        .active_universal_conference_participants(&scope(), &conference().conference_id, 16)
+        .expect("active participants");
+    assert_eq!(active_only, vec![active]);
+
+    cleanup(&path);
+}
+
+#[test]
 fn active_owner_is_unique_at_the_atomic_storage_boundary() {
     let path = db_path("universal-conference-owner");
     let store = SqliteLocalStore::open(&path).expect("open");
