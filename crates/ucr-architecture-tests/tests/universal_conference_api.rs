@@ -160,3 +160,14 @@ fn universal_participant_device_enrollment_hides_canonical_device_id() {
     assert!(service.contains("DEVICE_REGISTER_PERMISSION"));
     assert!(service.contains("register_device("));
 }
+
+#[test]
+fn realtime_join_accepts_invited_participant_through_canonical_call_signal() {
+    let universal = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    assert!(universal.contains("CallParticipantState::Invited"));
+    assert!(universal.contains("CallParticipantState::Ringing"));
+    assert!(realtime.contains("ensure_accepted_conference_participant_for_join"));
+    assert!(realtime.contains("kind: CallSignalKind::Accept"));
+    assert!(realtime.contains("self.store.apply_call_signal(&actor, &signal)"));
+}
