@@ -1,10 +1,10 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use ucr_core::{CallStore, DurableRecordStatus, DurableStoreError};
+use ucr_core::{CallStore, DurableRecordStatus, DurableStoreError, GroupCallLookupStore};
 use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallParticipantUpdateKind, CallSession,
     CallSignal, CallSignalKind, CallSignallingState, CallTerminationReason, ConversationId,
-    ConversationKind, ConversationRef, GroupMemberState, GroupMembership, GroupRecord, NamespaceId,
-    OpaqueId, PrincipalId, PrincipalRef, ScopedPrincipal, TenantId, TenantScope,
+    ConversationKind, ConversationRef, GroupId, GroupMemberState, GroupMembership, GroupRecord,
+    NamespaceId, OpaqueId, PrincipalId, PrincipalRef, ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_protocol::{
     active_call_participant, apply_call_signal, call_creation_fingerprint, call_signal_fingerprint,
@@ -247,6 +247,57 @@ fn verify_call_rows(connection: &Connection) -> Result<(), DurableStoreError> {
         load_call_from(connection, &scope, &call_id)?.ok_or(DurableStoreError::Corrupt)?;
     }
     Ok(())
+}
+
+impl GroupCallLookupStore for SqliteLocalStore {
+    fn calls_for_group(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<CallSession>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        let Some(group) = group_store::load_group_from(&connection, scope, group_id)? else {
+            return Ok(Vec::new());
+        };
+        let namespace = namespace_storage_key(scope);
+        let limit = i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT call_id FROM calls
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND conversation_id=?4 AND conversation_kind=?5
+                 ORDER BY call_id
+                 LIMIT ?6",
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let call_ids = statement
+            .query_map(
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    group.conversation.conversation_id.as_opaque().as_str(),
+                    call_conversation_kind_name(group.conversation.kind),
+                    limit,
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_sqlite_error(&error))?;
+        drop(statement);
+        call_ids
+            .into_iter()
+            .map(|raw| {
+                let call_id = CallId::from_opaque(parse_id(&raw)?);
+                load_call_from(&connection, scope, &call_id)?.ok_or(DurableStoreError::Corrupt)
+            })
+            .collect()
+    }
 }
 
 impl CallStore for SqliteLocalStore {

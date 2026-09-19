@@ -15,10 +15,12 @@ mod mesh;
 mod offline_group;
 mod organization;
 mod personal_node;
+mod recording;
 mod sfu;
 mod store_forward;
 mod transport_failover;
 mod transport_orchestrator;
+mod universal_conference;
 mod video;
 pub use adaptive_media::{
     AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage, AdaptiveMediaTelemetry,
@@ -65,6 +67,9 @@ pub use personal_node::{
     PersonalNodeObject, PersonalNodeObjectKind, PersonalNodeProfile, PersonalNodeService,
     PersonalNodeState,
 };
+pub use recording::{
+    RecordingConsent, RecordingConsentState, RecordingPolicy, RecordingSession, RecordingState,
+};
 pub use sfu::{SfuForwardEnvelope, SfuForwardTarget};
 pub use store_forward::{
     StoreForwardJob, StoreForwardLease, StoreForwardOutcome, StoreForwardPolicy,
@@ -76,6 +81,10 @@ pub use transport_failover::{
 pub use transport_orchestrator::{
     TransportOrchestrationDecision, TransportResourceSnapshot, TransportRouteDecision,
     TransportRouteTelemetry, TransportRoutingHint,
+};
+pub use universal_conference::{
+    ConferenceParticipantRole, ConferenceScheduleMetadata, UniversalConferenceLifecycle,
+    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 pub use video::{EncodedVideoFrame, VideoCodecConfig, VideoSourceKind, VideoStreamDescriptor};
 
@@ -207,6 +216,7 @@ id_type!(EventSubscriptionId);
 id_type!(IntentId);
 id_type!(KeyId);
 id_type!(RecoveryPlanId);
+id_type!(RecordingId);
 id_type!(ServiceCredentialId);
 id_type!(AuditRecordId);
 

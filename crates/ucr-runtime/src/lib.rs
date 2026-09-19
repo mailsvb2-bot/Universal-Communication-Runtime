@@ -6,16 +6,44 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use ucr_api_grpc::{
-    GrpcCallService, GrpcDeviceService, GrpcEventService, GrpcGroupService, GrpcIntegrationService,
-    GrpcStoreForwardService, GrpcSyncService, call_service_server, device_service_server,
-    event_service_server, group_service_server, integration_service_server,
-    store_forward_service_server, sync_service_server,
+    GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
+    GrpcIntegrationService, GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService,
+    GrpcUniversalConferenceService, call_service_server, conference_service_server,
+    device_service_server, event_service_server, group_service_server, integration_service_server,
+    realtime_service_server, store_forward_service_server, sync_service_server,
+    universal_conference_service_server,
 };
+use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{StorageHealth, StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock};
+use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_storage_sqlite::SqliteLocalStore;
 
 pub const DEFAULT_RUNTIME_BIND: &str = "127.0.0.1:50051";
 pub const RUNTIME_MODE: &str = "local-daemon";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RealtimeRuntimeConfig {
+    join_base_url: String,
+    join_token_key: JoinTokenKey,
+}
+
+impl RealtimeRuntimeConfig {
+    /// Builds the loopback realtime service configuration. The join base URL must be HTTPS even
+    /// though the daemon itself stays loopback-only; a trusted TLS edge terminates public traffic.
+    ///
+    /// # Errors
+    /// Rejects an invalid public join URL.
+    pub fn new(join_base_url: impl Into<String>, join_token_key: [u8; 32]) -> Result<Self, String> {
+        let join_base_url = join_base_url.into();
+        let join_token_key = JoinTokenKey::from_bytes(join_token_key);
+        JoinTokenIssuer::new(join_token_key.clone(), join_base_url.clone())
+            .map_err(|error| format!("invalid realtime join configuration: {error:?}"))?;
+        Ok(Self {
+            join_base_url,
+            join_token_key,
+        })
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeDiagnostics {
@@ -156,6 +184,18 @@ impl ProductionRuntime {
                 Arc::clone(&authorization),
                 Arc::clone(&store),
             )))
+            .add_service(conference_service_server(GrpcConferenceService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
+            .add_service(universal_conference_service_server(
+                GrpcUniversalConferenceService::new(
+                    Arc::clone(&clock),
+                    Arc::clone(&authorization),
+                    Arc::clone(&store),
+                ),
+            ))
             .add_service(event_service_server(GrpcEventService::new(
                 Arc::clone(&clock),
                 event_clock,
@@ -170,6 +210,111 @@ impl ProductionRuntime {
             .serve_with_incoming(incoming)
             .await
             .map_err(|error| format!("local runtime API server: {error}"))
+    }
+
+    /// Serves the canonical API plus Conference join and Realtime media on a loopback-only
+    /// listener. Public reachability belongs to a separate authenticated TLS reverse proxy or
+    /// gateway; this method never opens plaintext on a non-loopback address.
+    ///
+    /// # Errors
+    /// Returns explicit configuration, bind, storage, or gRPC server errors.
+    pub async fn serve_realtime(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        config: RealtimeRuntimeConfig,
+    ) -> Result<(), String> {
+        validate_local_bind(bind)?;
+        let diagnostics = self.diagnostics()?;
+        if diagnostics.storage_health != StorageHealth::Healthy {
+            return Err("production runtime refuses unhealthy storage".to_owned());
+        }
+
+        let listener = TcpListener::bind(bind)
+            .await
+            .map_err(|error| format!("bind local realtime API: {error}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("resolve local realtime API: {error}"))?;
+        println!("UCR_REALTIME_READY endpoint=http://{address}");
+        println!("UCR_RUNTIME_MODE={RUNTIME_MODE} realtime=true tls_edge=required test_mode=false");
+
+        let incoming = TcpListenerStream::new(listener);
+        let clock = Arc::new(SystemServiceQuotaClock);
+        let event_clock = Arc::new(SystemEventDeliveryClock);
+        let store = Arc::clone(&self.store);
+        let authorization = Arc::clone(&self.store);
+        let conference_state = Arc::new(ConferenceRuntimeState::new());
+        let join_issuer = Arc::new(
+            JoinTokenIssuer::new(config.join_token_key, config.join_base_url)
+                .map_err(|error| format!("configure realtime join issuer: {error:?}"))?,
+        );
+        let registry = Arc::new(RealtimeSessionRegistry::default());
+
+        Server::builder()
+            .add_service(integration_service_server(GrpcIntegrationService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
+            .add_service(group_service_server(GrpcGroupService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
+            .add_service(device_service_server(GrpcDeviceService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
+            .add_service(sync_service_server(GrpcSyncService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
+            .add_service(call_service_server(GrpcCallService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
+            .add_service(conference_service_server(
+                GrpcConferenceService::with_state_and_join_issuer(
+                    Arc::clone(&clock),
+                    Arc::clone(&authorization),
+                    Arc::clone(&store),
+                    Arc::clone(&conference_state),
+                    Arc::clone(&join_issuer),
+                ),
+            ))
+            .add_service(realtime_service_server(GrpcRealtimeService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+                Arc::clone(&join_issuer),
+                registry,
+                conference_state,
+            )))
+            .add_service(universal_conference_service_server(
+                GrpcUniversalConferenceService::with_join_issuer(
+                    Arc::clone(&clock),
+                    Arc::clone(&authorization),
+                    Arc::clone(&store),
+                    join_issuer,
+                ),
+            ))
+            .add_service(event_service_server(GrpcEventService::new(
+                Arc::clone(&clock),
+                event_clock,
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
+            .add_service(store_forward_service_server(GrpcStoreForwardService::new(
+                clock,
+                authorization,
+                store,
+            )))
+            .serve_with_incoming(incoming)
+            .await
+            .map_err(|error| format!("local realtime API server: {error}"))
     }
 }
 

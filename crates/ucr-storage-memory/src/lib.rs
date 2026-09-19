@@ -17,11 +17,12 @@ use ucr_core::{
     CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore, ConversationStore,
     DeliveryStore, DeviceLifecycleStore, DeviceReverificationProof, DurableRecordStatus,
     DurableStoreError, EventAppendStatus, EventJournalStore, EventSubscriptionStore,
-    ExternalIdentityBindingStore, FederationPeerStore, IdentityStore, MessageStore,
-    PermissionGrantStore, PrincipalIdentityBindingStore, RecoveryAdmissionProof,
+    ExternalIdentityBindingStore, FederationPeerStore, IdentityDeviceLookupStore, IdentityStore,
+    MessageStore, PermissionGrantStore, PrincipalIdentityBindingStore,
+    PrincipalIdentityLookupStore, RecordingStore, RecoveryAdmissionProof,
     RecoveryDeviceStagingStore, RecoveryPlanStore, ReverifiedDeviceActivationStore,
     ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
-    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore,
+    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore, UniversalConferenceStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -30,33 +31,36 @@ use ucr_crypto::{
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, BridgeActionId, BridgeActionRecord,
     BridgeActionState, BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState,
-    CallSession, CommandEnvelope, CommandId, CommunicationIntent, ConversationId,
-    ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState,
-    DeviceDescriptor, DeviceId, DeviceLifecycleState, EndpointId, EventConsumerCursor,
-    EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind, EventEnvelope, EventId,
-    EventPollResult, EventReconciliation, EventReplicaState, EventSubscription,
-    EventSubscriptionId, EventSubscriptionStart, EventSummary, ExternalIdentityBinding,
-    FederationPeerRecord, FederationTrustState, GroupMembership, GroupRecord, IdentityId,
-    IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId,
-    OfflineGroupChangeReplica, OfflineGroupMessageReplica, OpaqueId,
+    CallSession, CommandEnvelope, CommandId, CommunicationIntent, ConferenceParticipantRole,
+    ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
+    DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, EndpointId,
+    EventConsumerCursor, EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind,
+    EventEnvelope, EventId, EventPollResult, EventReconciliation, EventReplicaState,
+    EventSubscription, EventSubscriptionId, EventSubscriptionStart, EventSummary,
+    ExternalIdentityBinding, FederationPeerRecord, FederationTrustState, GroupMembership,
+    GroupRecord, IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope,
+    MessageId, OfflineGroupChangeReplica, OfflineGroupMessageReplica, OpaqueId,
     OrganizationManagedDeviceBinding, OrganizationManagedIdentityBinding, OrganizationModeProfile,
     PermissionGrant, PersonalNodeObject, PersonalNodeProfile, PrincipalIdentityBinding,
-    PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
-    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
-    ServiceCredentialState, ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob,
-    StoreForwardLeaseId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord, TrustedSigningKeyState,
+    PrincipalRef, PublicKeyDescriptor, RecordingConsentState, RecordingId, RecordingSession,
+    RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
+    ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState, ServiceQuotaPolicy,
+    SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId, SyncCheckpoint, SyncSession,
+    SyncState, TenantScope, TrustedSigningKeyRecord, TrustedSigningKeyState,
+    UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
+    UniversalConferenceProfile,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
     IdempotencyDecision, MAX_EVENT_DELIVERY_BATCH_BYTES, MAX_SERVICE_AUDIT_READ_ITEMS,
-    accepted_command_receipt, anti_entropy_session_binding, canonical_bridge_registration,
-    canonical_command, canonical_communication_intent, canonical_event,
-    canonical_event_subscription, canonical_federation_peer, canonical_message,
-    canonical_recovery_plan, canonical_sync_session, compare_command_idempotency,
-    device_allows_protected_access, duplicate_command_receipt, event_consumer_cursor_token,
-    event_delivery_batch_next_size, event_delivery_size, event_fingerprint,
-    event_matches_subscription, event_retry_delay_ms, service_audit_hash,
+    RecordingProtocolError, accepted_command_receipt, anti_entropy_session_binding,
+    apply_recording_consent, canonical_bridge_registration, canonical_command,
+    canonical_communication_intent, canonical_event, canonical_event_subscription,
+    canonical_federation_peer, canonical_message, canonical_recovery_plan, canonical_sync_session,
+    compare_command_idempotency, delete_recording, device_allows_protected_access,
+    duplicate_command_receipt, event_consumer_cursor_token, event_delivery_batch_next_size,
+    event_delivery_size, event_fingerprint, event_matches_subscription, event_retry_delay_ms,
+    expire_recording, service_audit_hash, start_recording, stop_recording,
     validate_anti_entropy_cursor, validate_anti_entropy_page_size, validate_anti_entropy_session,
     validate_anti_entropy_summary_count, validate_bridge_action_record,
     validate_bridge_action_transition, validate_bridge_registration_transition,
@@ -66,7 +70,7 @@ use ucr_protocol::{
     validate_event_consumer_cursor, validate_external_identity_binding,
     validate_external_identity_binding_key, validate_federation_credential_rotation,
     validate_federation_transition, validate_identity_record, validate_permission_grant,
-    validate_principal_identity_binding, validate_service_audit_record,
+    validate_principal_identity_binding, validate_recording_session, validate_service_audit_record,
     validate_service_quota_policy, validate_sync_checkpoint, validate_sync_transition,
     validate_trusted_signing_key_descriptor,
 };
@@ -106,6 +110,11 @@ type TrustedSigningDeviceRef = (ScopeKey, String);
 type DeviceKey = (ScopeKey, String);
 type ServiceCredentialRef = (ScopeKey, String);
 type ServicePrincipalKey = (ScopeKey, String);
+type UniversalConferenceKey = (ScopeKey, String);
+type UniversalConferenceExternalKey = (ScopeKey, String, Vec<u8>);
+type UniversalConferenceIdempotencyKey = (ScopeKey, String, String);
+type UniversalConferenceParticipantKey = (ScopeKey, String, PrincipalRef);
+type RecordingKey = (ScopeKey, String);
 
 #[derive(Debug, Clone, Copy)]
 struct MemoryQuotaUsage {
@@ -194,6 +203,13 @@ struct MemoryState {
     service_quota_policies: HashMap<ServicePrincipalKey, ServiceQuotaPolicy>,
     service_quota_usage: HashMap<ServicePrincipalKey, MemoryQuotaUsage>,
     service_audit_records: Vec<(ServiceAuditRecord, [u8; 32])>,
+    universal_conferences: HashMap<UniversalConferenceKey, UniversalConferenceProfile>,
+    universal_conference_external: HashMap<UniversalConferenceExternalKey, UniversalConferenceKey>,
+    universal_conference_idempotency:
+        HashMap<UniversalConferenceIdempotencyKey, UniversalConferenceKey>,
+    universal_conference_participants:
+        HashMap<UniversalConferenceParticipantKey, UniversalConferenceParticipantProfile>,
+    recordings: HashMap<RecordingKey, RecordingSession>,
 }
 
 #[derive(Default)]
@@ -552,6 +568,30 @@ impl DeviceLifecycleStore for MemoryLocalStore {
     ) -> Result<Option<DeviceDescriptor>, DurableStoreError> {
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         Ok(state.devices.get(&device_key(scope, device_id)).cloned())
+    }
+}
+
+impl IdentityDeviceLookupStore for MemoryLocalStore {
+    fn devices_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<DeviceDescriptor>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let expected_scope = scope_key(scope);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .devices
+            .iter()
+            .filter(|((candidate_scope, _), descriptor)| {
+                candidate_scope == &expected_scope && descriptor.identity_id == *identity_id
+            })
+            .map(|(_, descriptor)| descriptor.clone())
+            .take(max_items)
+            .collect())
     }
 }
 
@@ -1054,6 +1094,52 @@ fn external_identity_binding_key(
     )
 }
 
+fn universal_conference_key(
+    scope: &TenantScope,
+    conference_id: &ucr_model::GroupId,
+) -> UniversalConferenceKey {
+    (
+        scope_key(scope),
+        conference_id.as_opaque().as_str().to_owned(),
+    )
+}
+
+fn universal_conference_external_key(
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    external_conference_id: &[u8],
+) -> UniversalConferenceExternalKey {
+    (
+        scope_key(scope),
+        integration_id.as_opaque().as_str().to_owned(),
+        external_conference_id.to_vec(),
+    )
+}
+
+fn universal_conference_idempotency_key(
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    idempotency_key: &str,
+) -> UniversalConferenceIdempotencyKey {
+    (
+        scope_key(scope),
+        integration_id.as_opaque().as_str().to_owned(),
+        idempotency_key.to_owned(),
+    )
+}
+
+fn universal_conference_participant_key(
+    scope: &TenantScope,
+    conference_id: &ucr_model::GroupId,
+    participant: &PrincipalRef,
+) -> UniversalConferenceParticipantKey {
+    (
+        scope_key(scope),
+        conference_id.as_opaque().as_str().to_owned(),
+        participant.clone(),
+    )
+}
+
 fn delivery_key(scope: &TenantScope, delivery_id: &DeliveryId) -> DeliveryKey {
     (
         scope_key(scope),
@@ -1142,6 +1228,30 @@ impl PrincipalIdentityBindingStore for MemoryLocalStore {
             .principal_identity_bindings
             .get(&principal_identity_binding_key(scope, principal))
             .cloned())
+    }
+}
+
+impl PrincipalIdentityLookupStore for MemoryLocalStore {
+    fn principal_identity_bindings_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<PrincipalIdentityBinding>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let expected_scope = scope_key(scope);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .principal_identity_bindings
+            .values()
+            .filter(|binding| {
+                scope_key(&binding.scope) == expected_scope && binding.identity_id == *identity_id
+            })
+            .take(max_items)
+            .cloned()
+            .collect())
     }
 }
 
@@ -2139,6 +2249,38 @@ impl EventJournalStore for MemoryLocalStore {
         state.events.insert(key.clone(), event);
         state.event_order.push(key);
         Ok(EventAppendStatus::Appended)
+    }
+
+    fn events_for_types(
+        &self,
+        scope: &TenantScope,
+        event_types: &[&str],
+        max_items: usize,
+    ) -> Result<Vec<EventEnvelope>, DurableStoreError> {
+        if event_types.is_empty()
+            || event_types.len() > 16
+            || event_types.iter().any(|event_type| event_type.is_empty())
+            || max_items == 0
+            || max_items > 16_384
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut events = Vec::with_capacity(max_items.min(256));
+        for key in &state.event_order {
+            let event = state.events.get(key).ok_or(DurableStoreError::Corrupt)?;
+            if event.scope == *scope
+                && event_types
+                    .iter()
+                    .any(|event_type| *event_type == event.event_type)
+            {
+                events.push(event.clone());
+                if events.len() == max_items {
+                    break;
+                }
+            }
+        }
+        Ok(events)
     }
 }
 
@@ -7878,6 +8020,569 @@ mod integration_api_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].operation.as_ref(), Some(&operation));
     }
+}
+
+const MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS: usize = 1024;
+const MAX_UNIVERSAL_CONFERENCE_PARTICIPANT_SCAN_ITEMS: usize =
+    MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS + 1;
+
+fn has_conflicting_active_conference_owner(
+    state: &MemoryState,
+    scope: &TenantScope,
+    conference_id: &ucr_model::GroupId,
+    participant: &PrincipalRef,
+) -> bool {
+    state
+        .universal_conference_participants
+        .values()
+        .any(|existing| {
+            existing.scope == *scope
+                && existing.conference_id == *conference_id
+                && existing.active
+                && existing.role == ConferenceParticipantRole::Owner
+                && existing.participant != *participant
+        })
+}
+
+fn recording_key(scope: &TenantScope, recording_id: &RecordingId) -> RecordingKey {
+    (
+        scope_key(scope),
+        recording_id.as_opaque().as_str().to_owned(),
+    )
+}
+
+fn map_recording_protocol_error(error: RecordingProtocolError) -> DurableStoreError {
+    match error {
+        RecordingProtocolError::InvalidPolicy
+        | RecordingProtocolError::InvalidSession
+        | RecordingProtocolError::InvalidConsent
+        | RecordingProtocolError::Overflow => DurableStoreError::InvalidRecord,
+        RecordingProtocolError::InvalidTransition
+        | RecordingProtocolError::ConsentRequired
+        | RecordingProtocolError::Expired => DurableStoreError::Conflict,
+    }
+}
+
+fn transition_recording<F>(
+    state: &mut MemoryState,
+    key: &RecordingKey,
+    expected_revision: u64,
+    transition: F,
+) -> Result<RecordingSession, DurableStoreError>
+where
+    F: FnOnce(&RecordingSession) -> Result<RecordingSession, RecordingProtocolError>,
+{
+    let current = state
+        .recordings
+        .get(key)
+        .cloned()
+        .ok_or(DurableStoreError::Conflict)?;
+    if current.revision != expected_revision {
+        return Err(DurableStoreError::Conflict);
+    }
+    let next = transition(&current).map_err(map_recording_protocol_error)?;
+    state.recordings.insert(key.clone(), next.clone());
+    Ok(next)
+}
+
+impl RecordingStore for MemoryLocalStore {
+    fn persist_recording(
+        &self,
+        recording: &RecordingSession,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_recording_session(recording).map_err(map_recording_protocol_error)?;
+        let key = recording_key(&recording.scope, &recording.recording_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.recordings.get(&key) {
+            return if existing == recording {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.recordings.insert(key, recording.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn recording(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+    ) -> Result<Option<RecordingSession>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .recordings
+            .get(&recording_key(scope, recording_id))
+            .cloned())
+    }
+
+    fn set_recording_consent(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        participant: &PrincipalRef,
+        consent_state: RecordingConsentState,
+        now_unix_ms: i64,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| apply_recording_consent(current, participant, consent_state, now_unix_ms),
+        )
+    }
+
+    fn start_recording(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| start_recording(current, now_unix_ms),
+        )
+    }
+
+    fn stop_recording(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| stop_recording(current, now_unix_ms),
+        )
+    }
+
+    fn expire_recording(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| expire_recording(current, now_unix_ms),
+        )
+    }
+
+    fn delete_recording(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| delete_recording(current, now_unix_ms),
+        )
+    }
+}
+
+impl UniversalConferenceStore for MemoryLocalStore {
+    fn persist_universal_conference_profile(
+        &self,
+        profile: &UniversalConferenceProfile,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        if profile.external_conference_id.is_empty()
+            || profile.external_conference_id.len() > 512
+            || profile.create_idempotency_key.is_empty()
+            || profile.create_idempotency_key.len() > 256
+            || profile.revision != 1
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let key = universal_conference_key(&profile.scope, &profile.conference_id);
+        let external_key = universal_conference_external_key(
+            &profile.scope,
+            &profile.integration_id,
+            &profile.external_conference_id,
+        );
+        let idempotency_key = universal_conference_idempotency_key(
+            &profile.scope,
+            &profile.integration_id,
+            &profile.create_idempotency_key,
+        );
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.universal_conferences.get(&key) {
+            return if existing == profile {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if let Some(existing_key) = state.universal_conference_external.get(&external_key) {
+            return if state.universal_conferences.get(existing_key) == Some(profile) {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if let Some(existing_key) = state.universal_conference_idempotency.get(&idempotency_key) {
+            return if state.universal_conferences.get(existing_key) == Some(profile) {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state
+            .universal_conference_external
+            .insert(external_key, key.clone());
+        state
+            .universal_conference_idempotency
+            .insert(idempotency_key, key.clone());
+        state.universal_conferences.insert(key, profile.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn universal_conference_profile(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+    ) -> Result<Option<UniversalConferenceProfile>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .universal_conferences
+            .get(&universal_conference_key(scope, conference_id))
+            .cloned())
+    }
+
+    fn universal_conference_profile_for_external(
+        &self,
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        external_conference_id: &[u8],
+    ) -> Result<Option<UniversalConferenceProfile>, DurableStoreError> {
+        if external_conference_id.is_empty() || external_conference_id.len() > 512 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let external_key =
+            universal_conference_external_key(scope, integration_id, external_conference_id);
+        Ok(state
+            .universal_conference_external
+            .get(&external_key)
+            .and_then(|key| state.universal_conferences.get(key))
+            .cloned())
+    }
+
+    fn transition_universal_conference(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        expected_revision: u64,
+        lifecycle: UniversalConferenceLifecycle,
+        entry_open: bool,
+    ) -> Result<UniversalConferenceProfile, DurableStoreError> {
+        let key = universal_conference_key(scope, conference_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current = state
+            .universal_conferences
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Conflict)?;
+        if current.revision == expected_revision.saturating_add(1)
+            && current.lifecycle == lifecycle
+            && current.entry_open == entry_open
+        {
+            return Ok(current.clone());
+        }
+        let lifecycle_change_allowed = current.lifecycle == lifecycle
+            && current.entry_open != entry_open
+            || valid_universal_conference_transition(current.lifecycle, lifecycle);
+        if current.revision != expected_revision || !lifecycle_change_allowed {
+            return Err(DurableStoreError::Conflict);
+        }
+        current.lifecycle = lifecycle;
+        current.entry_open = entry_open;
+        current.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        Ok(current.clone())
+    }
+
+    fn persist_universal_conference_participant(
+        &self,
+        participant: &UniversalConferenceParticipantProfile,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        if participant.external_user_id.is_empty()
+            || participant.external_user_id.len() > 512
+            || participant.revision != 1
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let conference_key =
+            universal_conference_key(&participant.scope, &participant.conference_id);
+        let key = universal_conference_participant_key(
+            &participant.scope,
+            &participant.conference_id,
+            &participant.participant,
+        );
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if !state.universal_conferences.contains_key(&conference_key) {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        if let Some(existing) = state.universal_conference_participants.get(&key) {
+            return if existing == participant {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        let external_conflict = state
+            .universal_conference_participants
+            .values()
+            .find(|existing| {
+                existing.scope == participant.scope
+                    && existing.conference_id == participant.conference_id
+                    && existing.integration_id == participant.integration_id
+                    && existing.external_user_id == participant.external_user_id
+            });
+        if let Some(existing) = external_conflict {
+            return if existing == participant {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        if participant.active {
+            let active_participant_count = state
+                .universal_conference_participants
+                .values()
+                .filter(|existing| {
+                    existing.scope == participant.scope
+                        && existing.conference_id == participant.conference_id
+                        && existing.active
+                })
+                .count();
+            if active_participant_count >= MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS {
+                return Err(DurableStoreError::Full);
+            }
+        }
+        if participant.active
+            && participant.role == ConferenceParticipantRole::Owner
+            && has_conflicting_active_conference_owner(
+                &state,
+                &participant.scope,
+                &participant.conference_id,
+                &participant.participant,
+            )
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+        state
+            .universal_conference_participants
+            .insert(key, participant.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn universal_conference_participant(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        participant: &PrincipalRef,
+    ) -> Result<Option<UniversalConferenceParticipantProfile>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .universal_conference_participants
+            .get(&universal_conference_participant_key(
+                scope,
+                conference_id,
+                participant,
+            ))
+            .cloned())
+    }
+
+    fn universal_conference_participant_for_external(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        integration_id: &IntegrationId,
+        external_user_id: &[u8],
+    ) -> Result<Option<UniversalConferenceParticipantProfile>, DurableStoreError> {
+        if external_user_id.is_empty() || external_user_id.len() > 512 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let expected_scope = scope_key(scope);
+        let conference = conference_id.as_opaque().as_str();
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut matching = state
+            .universal_conference_participants
+            .values()
+            .filter(|profile| {
+                scope_key(&profile.scope) == expected_scope
+                    && profile.conference_id.as_opaque().as_str() == conference
+                    && profile.integration_id == *integration_id
+                    && profile.external_user_id == external_user_id
+            });
+        let first = matching.next().cloned();
+        if matching.next().is_some() {
+            return Err(DurableStoreError::Corrupt);
+        }
+        Ok(first)
+    }
+
+    fn universal_conference_participants(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        max_items: usize,
+    ) -> Result<Vec<UniversalConferenceParticipantProfile>, DurableStoreError> {
+        if max_items == 0 || max_items > MAX_UNIVERSAL_CONFERENCE_PARTICIPANT_SCAN_ITEMS {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let scope_key_value = scope_key(scope);
+        let conference = conference_id.as_opaque().as_str();
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .universal_conference_participants
+            .iter()
+            .filter(|((candidate_scope, candidate_conference, _), _)| {
+                candidate_scope == &scope_key_value && candidate_conference == conference
+            })
+            .map(|(_, profile)| profile.clone())
+            .take(max_items)
+            .collect())
+    }
+
+    fn active_universal_conference_participants(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        max_items: usize,
+    ) -> Result<Vec<UniversalConferenceParticipantProfile>, DurableStoreError> {
+        if max_items == 0 || max_items > MAX_UNIVERSAL_CONFERENCE_PARTICIPANT_SCAN_ITEMS {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let scope_key_value = scope_key(scope);
+        let conference = conference_id.as_opaque().as_str();
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .universal_conference_participants
+            .iter()
+            .filter(|((candidate_scope, candidate_conference, _), profile)| {
+                candidate_scope == &scope_key_value
+                    && candidate_conference == conference
+                    && profile.active
+            })
+            .map(|(_, profile)| profile.clone())
+            .take(max_items)
+            .collect())
+    }
+
+    fn update_universal_conference_participant(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        participant: &PrincipalRef,
+        expected_revision: u64,
+        role: ConferenceParticipantRole,
+        audio_muted: bool,
+        camera_allowed: bool,
+        publish_audio_allowed: bool,
+        publish_video_allowed: bool,
+        active: bool,
+    ) -> Result<UniversalConferenceParticipantProfile, DurableStoreError> {
+        let key = universal_conference_participant_key(scope, conference_id, participant);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current_active = state
+            .universal_conference_participants
+            .get(&key)
+            .ok_or(DurableStoreError::Conflict)?
+            .active;
+        if active && !current_active {
+            let scope_key_value = scope_key(scope);
+            let conference = conference_id.as_opaque().as_str();
+            let active_participant_count = state
+                .universal_conference_participants
+                .iter()
+                .filter(|((candidate_scope, candidate_conference, _), profile)| {
+                    candidate_scope == &scope_key_value
+                        && candidate_conference == conference
+                        && profile.active
+                })
+                .count();
+            if active_participant_count >= MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS {
+                return Err(DurableStoreError::Full);
+            }
+        }
+        if active
+            && role == ConferenceParticipantRole::Owner
+            && has_conflicting_active_conference_owner(&state, scope, conference_id, participant)
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+        let current = state
+            .universal_conference_participants
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Conflict)?;
+        if current.revision == expected_revision.saturating_add(1)
+            && current.role == role
+            && current.audio_muted == audio_muted
+            && current.camera_allowed == camera_allowed
+            && current.publish_audio_allowed == publish_audio_allowed
+            && current.publish_video_allowed == publish_video_allowed
+            && current.active == active
+        {
+            return Ok(current.clone());
+        }
+        if current.revision != expected_revision {
+            return Err(DurableStoreError::Conflict);
+        }
+        current.role = role;
+        current.audio_muted = audio_muted;
+        current.camera_allowed = camera_allowed;
+        current.publish_audio_allowed = publish_audio_allowed;
+        current.publish_video_allowed = publish_video_allowed;
+        current.active = active;
+        current.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        Ok(current.clone())
+    }
+}
+
+const fn valid_universal_conference_transition(
+    current: UniversalConferenceLifecycle,
+    next: UniversalConferenceLifecycle,
+) -> bool {
+    matches!(
+        (current, next),
+        (
+            UniversalConferenceLifecycle::Scheduled,
+            UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
+        ) | (
+            UniversalConferenceLifecycle::Waiting,
+            UniversalConferenceLifecycle::Live
+        ) | (
+            UniversalConferenceLifecycle::Live,
+            UniversalConferenceLifecycle::Ending
+        ) | (
+            UniversalConferenceLifecycle::Ending,
+            UniversalConferenceLifecycle::Ended
+        )
+    )
 }
 
 #[cfg(test)]

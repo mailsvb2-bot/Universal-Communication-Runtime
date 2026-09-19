@@ -2831,13 +2831,19 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "ucr-conference",
  "ucr-core",
  "ucr-crypto",
+ "ucr-group-mls",
+ "ucr-media-e2ee",
  "ucr-mesh",
  "ucr-model",
  "ucr-offline-groups",
  "ucr-protocol",
+ "ucr-realtime",
+ "ucr-sfu",
  "ucr-storage-memory",
+ "ucr-storage-sqlite",
  "ucr-store-forward",
  "ucr-transport-internet",
 ]
@@ -3099,6 +3105,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-realtime"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "hmac 0.12.1",
+ "sha2 0.10.9",
+ "tokio",
+ "ucr-core",
+ "ucr-model",
+ "ucr-sfu",
+]
+
+[[package]]
+name = "ucr-realtime-web"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "prost",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "ucr-api-grpc",
+]
+
+[[package]]
 name = "ucr-runtime"
 version = "0.0.1"
 dependencies = [
@@ -3106,7 +3143,9 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "ucr-api-grpc",
+ "ucr-conference",
  "ucr-core",
+ "ucr-realtime",
  "ucr-storage-sqlite",
 ]
 
