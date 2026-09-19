@@ -289,15 +289,16 @@ impl ProductionRuntime {
                 Arc::clone(&clock),
                 Arc::clone(&authorization),
                 Arc::clone(&store),
-                join_issuer,
+                Arc::clone(&join_issuer),
                 registry,
                 conference_state,
             )))
             .add_service(universal_conference_service_server(
-                GrpcUniversalConferenceService::new(
+                GrpcUniversalConferenceService::with_join_issuer(
                     Arc::clone(&clock),
                     Arc::clone(&authorization),
                     Arc::clone(&store),
+                    join_issuer,
                 ),
             ))
             .add_service(event_service_server(GrpcEventService::new(
