@@ -9,23 +9,34 @@ use crate::{DurableRecordStatus, DurableStoreError, StorageProvider};
 /// Durable coordinator metadata for the high-level Conference integration boundary.
 ///
 /// This store owns only integration-facing schedule/mode/lifecycle and role/media-policy projection.
-/// Canonical Group membership and CallSession signalling stay owned by their existing stores.
+/// Canonical Group membership and `CallSession` signalling stay owned by their existing stores.
 pub trait UniversalConferenceStore: StorageProvider {
     /// Creates or deduplicates one conference profile.
     ///
-    /// The exact external key (scope, integration_id, external_conference_id) is immutable.
+    /// The exact external key (scope, `integration_id`, `external_conference_id`) is immutable.
     /// Equal retries return Duplicate; changed semantics conflict.
+    ///
+    /// # Errors
+    /// Rejects malformed/conflicting records and explicit durable-store failures.
     fn persist_universal_conference_profile(
         &self,
         profile: &UniversalConferenceProfile,
     ) -> Result<DurableRecordStatus, DurableStoreError>;
 
+    /// Loads one exact conference coordinator record; absence is not an error.
+    ///
+    /// # Errors
+    /// Returns explicit durable-store failures or corruption evidence.
     fn universal_conference_profile(
         &self,
         scope: &TenantScope,
         conference_id: &GroupId,
     ) -> Result<Option<UniversalConferenceProfile>, DurableStoreError>;
 
+    /// Resolves one exact external conference reference; absence is not an error.
+    ///
+    /// # Errors
+    /// Rejects malformed lookup keys and returns explicit durable-store failures.
     fn universal_conference_profile_for_external(
         &self,
         scope: &TenantScope,
@@ -34,6 +45,9 @@ pub trait UniversalConferenceStore: StorageProvider {
     ) -> Result<Option<UniversalConferenceProfile>, DurableStoreError>;
 
     /// Applies one optimistic lifecycle transition and increments revision exactly once.
+    ///
+    /// # Errors
+    /// Rejects invalid/stale transitions and explicit durable-store failures.
     fn transition_universal_conference(
         &self,
         scope: &TenantScope,
@@ -44,11 +58,18 @@ pub trait UniversalConferenceStore: StorageProvider {
     ) -> Result<UniversalConferenceProfile, DurableStoreError>;
 
     /// Creates or deduplicates one integration-facing participant projection.
+    ///
+    /// # Errors
+    /// Rejects malformed/conflicting participant records and explicit durable-store failures.
     fn persist_universal_conference_participant(
         &self,
         participant: &UniversalConferenceParticipantProfile,
     ) -> Result<DurableRecordStatus, DurableStoreError>;
 
+    /// Loads one exact conference participant projection; absence is not an error.
+    ///
+    /// # Errors
+    /// Returns explicit durable-store failures or corruption evidence.
     fn universal_conference_participant(
         &self,
         scope: &TenantScope,
@@ -56,6 +77,10 @@ pub trait UniversalConferenceStore: StorageProvider {
         participant: &PrincipalRef,
     ) -> Result<Option<UniversalConferenceParticipantProfile>, DurableStoreError>;
 
+    /// Lists a bounded participant projection set for one conference.
+    ///
+    /// # Errors
+    /// Rejects invalid bounds and returns explicit durable-store failures.
     fn universal_conference_participants(
         &self,
         scope: &TenantScope,
@@ -64,7 +89,10 @@ pub trait UniversalConferenceStore: StorageProvider {
     ) -> Result<Vec<UniversalConferenceParticipantProfile>, DurableStoreError>;
 
     /// Replaces the conference-specific role/media policy under optimistic revision.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// # Errors
+    /// Rejects stale/malformed updates and returns explicit durable-store failures.
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn update_universal_conference_participant(
         &self,
         scope: &TenantScope,
