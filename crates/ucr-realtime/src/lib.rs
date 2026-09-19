@@ -296,7 +296,7 @@ impl JoinTokenIssuer {
     /// Revokes one exact scoped grant. Repeating the same revocation is idempotent.
     ///
     /// # Errors
-    /// Returns UnknownGrant or unavailable control state.
+    /// Returns `UnknownGrant` or unavailable control state.
     pub fn revoke(
         &self,
         scope: &TenantScope,
