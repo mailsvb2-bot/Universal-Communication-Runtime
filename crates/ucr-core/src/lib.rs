@@ -370,7 +370,7 @@ pub trait DeviceLifecycleStore: StorageProvider {
 /// Read-only reverse lookup over the canonical Device lifecycle owner.
 ///
 /// This does not create a second device registry. It exists so integration-facing flows can
-/// resolve already-registered devices for one canonical Identity without exposing DeviceId to
+/// resolve already-registered devices for one canonical Identity without exposing `DeviceId` to
 /// external products.
 pub trait IdentityDeviceLookupStore: StorageProvider {
     /// Lists a bounded set of exact-scope canonical Devices owned by one Identity.
