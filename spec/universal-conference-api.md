@@ -22,7 +22,7 @@ The lifecycle coordinator may project into canonical Group/Call state but must n
 
 ## Integration isolation
 
-Every conference read or mutation is scoped by both `TenantScope` and `IntegrationId`. A caller that presents another integration's `conference_id` receives `NOT_FOUND`; the public API must not expose cross-integration existence or permit management by handle alone. External references remain integration-scoped and no integration credential is a tenant-wide conference superuser by default.
+Every conference read or mutation is scoped by both `TenantScope` and `IntegrationId`. Universal Conference credentials are canonical Service Account credentials whose authenticated principal ID must exactly match the presented `IntegrationId`; a tenant permission by itself is not sufficient to impersonate another integration. A caller that presents another integration's `conference_id` receives `NOT_FOUND` after integration admission; the public API must not expose cross-integration existence or permit management by handle alone. External references remain integration-scoped and no integration credential is a tenant-wide conference superuser by default.
 
 ## Participant roles and media policy
 
