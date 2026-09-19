@@ -38,7 +38,7 @@ pub struct ConferenceScheduleMetadata {
 /// Durable coordinator metadata for a Group-backed universal conference.
 ///
 /// This record owns only integration-facing mode/schedule/lifecycle policy. Group remains
-/// membership authority and CallSession remains realtime signalling authority.
+/// membership authority and `CallSession` remains realtime signalling authority.
 #[derive(Clone, PartialEq, Eq)]
 pub struct UniversalConferenceProfile {
     pub scope: TenantScope,
@@ -78,9 +78,10 @@ impl core::fmt::Debug for UniversalConferenceProfile {
 
 /// Conference-specific role/media policy projection for one canonical Group member.
 ///
-/// The external reference is integration context only. It never replaces ExternalIdentityBinding,
+/// The external reference is integration context only. It never replaces `ExternalIdentityBinding`,
 /// canonical Group membership, authorization, Device trust or Call participation.
 #[derive(Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // Public conference media policy has independent wire-level toggles.
 pub struct UniversalConferenceParticipantProfile {
     pub scope: TenantScope,
     pub conference_id: GroupId,
