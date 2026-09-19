@@ -1,6 +1,6 @@
 # Realtime Conference Transport
 
-Status: **contract-stable / runtime implementation pending in this slice**.
+Status: **contract-stable / bounded runtime and browser-mobile transport implemented; Production certification pending**.
 
 The public realtime boundary is `ucr.v1.RealtimeService`. It exposes conference join/session liveness plus uplink/downlink of already-encrypted MLS group-media frames. It is a transport/service boundary over the canonical Conference/SFU implementation, not a new Call, Group, membership, authorization, crypto, Delivery or recording owner.
 
@@ -16,7 +16,7 @@ A grant is bound to exact TenantScope, Call ID, participant, **active canonical 
 
 `SubscribeMedia` streams only encrypted envelopes selected for the authenticated recipient. Subscription preference remains owned by `ConferenceSubscriptionSet`; receiving a stream never grants membership or media permission. Backpressure is bounded and explicit. A full per-session queue rejects new forwarding work rather than buffering without bound.
 
-The production HTTP/browser binding may map protobuf POST uplink plus authenticated server-streaming/SSE or HTTP/2 downlink onto the same semantics. That binding must use HTTPS at the public edge. It must not widen the existing loopback-only plaintext daemon. A future WebRTC/ICE/TURN provider may implement the same service semantics without changing canonical owners.
+The reference browser/mobile binding is `ucr-realtime-web`: it serves a self-contained join client plus bounded JSON/protobuf POST uplink and authenticated streaming/SSE downlink over a loopback listener. The public edge must terminate HTTPS and proxy only to that loopback boundary. The join client reads the signed grant from the URL fragment, derives only the non-secret routing coordinates needed for the request, and never places the bearer token in the request URL. A future WebRTC/ICE/TURN provider may implement the same service semantics without changing canonical owners.
 
 ## Attendance
 
