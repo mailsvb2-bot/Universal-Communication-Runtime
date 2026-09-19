@@ -8,7 +8,10 @@ use http_body_util::{BodyExt, Full, StreamBody, combinators::UnsyncBoxBody};
 use hyper::{
     Method, Request, Response, StatusCode,
     body::{Frame, Incoming},
-    header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
+    header::{
+        ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+        AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ORIGIN, VARY,
+    },
     server::conn::http1,
     service::service_fn,
 };
@@ -53,6 +56,7 @@ impl GatewayFailure {
 #[derive(Clone, Debug)]
 struct AppState {
     upstream: Channel,
+    allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,7 +117,13 @@ async fn run() -> Result<(), String> {
         .connect()
         .await
         .map_err(|error| format!("connect realtime upstream: {error}"))?;
-    let state = AppState { upstream: channel };
+    let allowed_origins = parse_allowed_origins(
+        std::env::var("UCR_REALTIME_ALLOWED_ORIGINS").unwrap_or_default(),
+    )?;
+    let state = AppState {
+        upstream: channel,
+        allowed_origins,
+    };
 
     let listener = TcpListener::bind(bind)
         .await
@@ -157,6 +167,14 @@ async fn handle_request(
 ) -> Result<HttpResponse, Infallible> {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
+    let origin = match request_origin(request.headers(), &state.allowed_origins) {
+        Ok(origin) => origin,
+        Err(error) => return Ok(error.into_response()),
+    };
+
+    if method == Method::OPTIONS {
+        return Ok(cors_preflight(origin.as_deref()));
+    }
 
     if method == Method::GET && path == "/healthz" {
         return Ok(text_response(StatusCode::OK, "ok"));
@@ -210,7 +228,81 @@ async fn handle_request(
         ),
     };
 
-    Ok(response)
+    Ok(with_cors(response, origin.as_deref()))
+}
+
+fn parse_allowed_origins(raw: String) -> Result<Vec<String>, String> {
+    let mut origins = Vec::new();
+    for candidate in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+        if candidate == "*" {
+            return Err("UCR_REALTIME_ALLOWED_ORIGINS must not contain wildcard origins".to_owned());
+        }
+        let valid_scheme = candidate.starts_with("https://")
+            || candidate.starts_with("http://127.0.0.1:")
+            || candidate.starts_with("http://localhost:");
+        if !valid_scheme
+            || candidate.contains(char::is_whitespace)
+            || candidate.ends_with('/')
+            || candidate.contains('#')
+            || candidate.contains('?')
+        {
+            return Err(format!("invalid allowed realtime origin: {candidate}"));
+        }
+        if !origins.iter().any(|origin| origin == candidate) {
+            origins.push(candidate.to_owned());
+        }
+    }
+    Ok(origins)
+}
+
+fn request_origin(
+    headers: &hyper::HeaderMap,
+    allowed_origins: &[String],
+) -> Result<Option<String>, GatewayFailure> {
+    let Some(value) = headers.get(ORIGIN) else {
+        return Ok(None);
+    };
+    let origin = value.to_str().map_err(|_| {
+        GatewayFailure::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_origin",
+            "invalid browser Origin header",
+        )
+    })?;
+    if allowed_origins.iter().any(|allowed| allowed == origin) {
+        Ok(Some(origin.to_owned()))
+    } else {
+        Err(GatewayFailure::new(
+            StatusCode::FORBIDDEN,
+            "origin_denied",
+            "browser origin is not allowed for this realtime gateway",
+        ))
+    }
+}
+
+fn with_cors(mut response: HttpResponse, origin: Option<&str>) -> HttpResponse {
+    if let Some(origin) = origin
+        && let Ok(value) = hyper::header::HeaderValue::from_str(origin)
+    {
+        response.headers_mut().insert(ACCESS_CONTROL_ALLOW_ORIGIN, value);
+        response
+            .headers_mut()
+            .insert(VARY, hyper::header::HeaderValue::from_static("Origin"));
+    }
+    response
+}
+
+fn cors_preflight(origin: Option<&str>) -> HttpResponse {
+    let mut response = empty_response(StatusCode::NO_CONTENT);
+    response.headers_mut().insert(
+        ACCESS_CONTROL_ALLOW_METHODS,
+        hyper::header::HeaderValue::from_static("POST, OPTIONS"),
+    );
+    response.headers_mut().insert(
+        ACCESS_CONTROL_ALLOW_HEADERS,
+        hyper::header::HeaderValue::from_static("Authorization, Content-Type"),
+    );
+    with_cors(response, origin)
 }
 
 async fn join(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
@@ -590,5 +682,44 @@ mod tests {
         let remote: SocketAddr = "0.0.0.0:8080".parse().expect("remote");
         assert!(validate_loopback_bind(local).is_ok());
         assert!(validate_loopback_bind(remote).is_err());
+    }
+
+    #[test]
+    fn allowed_origins_are_exact_and_wildcards_fail_closed() {
+        let origins = parse_allowed_origins(
+            "https://app.example.test, http://localhost:5173,https://app.example.test".to_owned(),
+        )
+        .expect("valid origins");
+        assert_eq!(
+            origins,
+            vec![
+                "https://app.example.test".to_owned(),
+                "http://localhost:5173".to_owned()
+            ]
+        );
+        assert!(parse_allowed_origins("*".to_owned()).is_err());
+        assert!(parse_allowed_origins("http://example.test".to_owned()).is_err());
+    }
+
+    #[test]
+    fn browser_origin_must_match_allowlist_exactly() {
+        let allowed = vec!["https://app.example.test".to_owned()];
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            ORIGIN,
+            hyper::header::HeaderValue::from_static("https://app.example.test"),
+        );
+        assert_eq!(
+            request_origin(&headers, &allowed).expect("allowed"),
+            Some("https://app.example.test".to_owned())
+        );
+        headers.insert(
+            ORIGIN,
+            hyper::header::HeaderValue::from_static("https://evil.example.test"),
+        );
+        assert!(request_origin(&headers, &allowed).is_err());
+        assert!(request_origin(&hyper::HeaderMap::new(), &allowed)
+            .expect("non-browser request")
+            .is_none());
     }
 }
