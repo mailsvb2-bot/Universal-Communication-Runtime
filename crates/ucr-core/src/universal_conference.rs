@@ -1,6 +1,6 @@
 use ucr_model::{
-    ConferenceParticipantRole, GroupId, IntegrationId, PrincipalRef, TenantScope,
-    UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
+    ConferenceJoinGrantRecord, ConferenceParticipantRole, GroupId, IntegrationId, PrincipalRef,
+    SessionId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
     UniversalConferenceProfile,
 };
 
@@ -146,4 +146,51 @@ pub trait UniversalConferenceStore: StorageProvider {
         publish_video_allowed: bool,
         active: bool,
     ) -> Result<UniversalConferenceParticipantProfile, DurableStoreError>;
+}
+
+
+/// Durable owner for Conference join-grant control state.
+///
+/// Token signing remains a realtime cryptographic concern; this store owns only the minimum
+/// metadata required for exact retry, revocation and single-use semantics across restarts.
+pub trait ConferenceJoinGrantStore: StorageProvider {
+    /// Persists one exact grant. Equal retries deduplicate; session-id reuse conflicts.
+    ///
+    /// # Errors
+    /// Rejects malformed/conflicting records and explicit durable-store failures.
+    fn persist_conference_join_grant(
+        &self,
+        grant: &ConferenceJoinGrantRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one exact scoped grant; absence is not an error.
+    ///
+    /// # Errors
+    /// Returns explicit durable-store failures or corruption evidence.
+    fn conference_join_grant(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<Option<ConferenceJoinGrantRecord>, DurableStoreError>;
+
+    /// Irreversibly revokes one exact grant. Repeating the same revocation is idempotent.
+    ///
+    /// # Errors
+    /// Rejects unknown grants and explicit durable-store failures.
+    fn revoke_conference_join_grant(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<ConferenceJoinGrantRecord, DurableStoreError>;
+
+    /// Marks one exact grant redeemed. Reusable grants may be redeemed repeatedly; single-use
+    /// grants fail closed after the first successful redemption.
+    ///
+    /// # Errors
+    /// Rejects unknown, revoked or already-consumed single-use grants and storage failures.
+    fn redeem_conference_join_grant(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<ConferenceJoinGrantRecord, DurableStoreError>;
 }

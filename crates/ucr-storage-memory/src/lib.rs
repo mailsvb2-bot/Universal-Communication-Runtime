@@ -14,8 +14,9 @@ use std::{
 
 use ucr_core::{
     AntiEntropyStore, AuthorizationEvaluator, BridgeActionStore, BridgeRegistrationStore,
-    CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore, ConversationStore,
-    DeliveryStore, DeviceLifecycleStore, DeviceReverificationProof, DurableRecordStatus,
+    CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore,
+    ConferenceJoinGrantStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
+    DeviceReverificationProof, DurableRecordStatus,
     DurableStoreError, EventAppendStatus, EventJournalStore, EventSubscriptionStore,
     ExternalIdentityBindingStore, FederationPeerStore, IdentityDeviceLookupStore, IdentityStore,
     MessageStore, PermissionGrantStore, PrincipalIdentityBindingStore,
@@ -31,8 +32,9 @@ use ucr_crypto::{
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, BridgeActionId, BridgeActionRecord,
     BridgeActionState, BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState,
-    CallSession, CommandEnvelope, CommandId, CommunicationIntent, ConferenceParticipantRole,
-    ConversationId, ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId,
+    CallSession, CommandEnvelope, CommandId, CommunicationIntent, ConferenceJoinGrantRecord,
+    ConferenceJoinGrantUsePolicy, ConferenceParticipantRole, ConversationId, ConversationRecord,
+    DeliveryAttempt, DeliveryEvidence, DeliveryId,
     DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, EndpointId,
     EventConsumerCursor, EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind,
     EventEnvelope, EventId, EventPollResult, EventReconciliation, EventReplicaState,
@@ -114,6 +116,7 @@ type UniversalConferenceKey = (ScopeKey, String);
 type UniversalConferenceExternalKey = (ScopeKey, String, Vec<u8>);
 type UniversalConferenceIdempotencyKey = (ScopeKey, String, String);
 type UniversalConferenceParticipantKey = (ScopeKey, String, PrincipalRef);
+type ConferenceJoinGrantKey = (ScopeKey, String);
 type RecordingKey = (ScopeKey, String);
 
 #[derive(Debug, Clone, Copy)]
@@ -209,6 +212,7 @@ struct MemoryState {
         HashMap<UniversalConferenceIdempotencyKey, UniversalConferenceKey>,
     universal_conference_participants:
         HashMap<UniversalConferenceParticipantKey, UniversalConferenceParticipantProfile>,
+    conference_join_grants: HashMap<ConferenceJoinGrantKey, ConferenceJoinGrantRecord>,
     recordings: HashMap<RecordingKey, RecordingSession>,
 }
 
@@ -8304,6 +8308,87 @@ impl RecordingStore for MemoryLocalStore {
             |current| delete_recording(current, now_unix_ms),
         )
     }
+}
+
+impl ConferenceJoinGrantStore for MemoryLocalStore {
+    fn persist_conference_join_grant(
+        &self,
+        grant: &ConferenceJoinGrantRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_memory_join_grant(grant)?;
+        let key = (
+            scope_key(&grant.scope),
+            grant.session_id.as_opaque().as_str().to_owned(),
+        );
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.conference_join_grants.get(&key) {
+            return if existing == grant {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.conference_join_grants.insert(key, grant.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn conference_join_grant(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<Option<ConferenceJoinGrantRecord>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .conference_join_grants
+            .get(&(scope_key(scope), session_id.as_opaque().as_str().to_owned()))
+            .cloned())
+    }
+
+    fn revoke_conference_join_grant(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<ConferenceJoinGrantRecord, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let grant = state
+            .conference_join_grants
+            .get_mut(&(scope_key(scope), session_id.as_opaque().as_str().to_owned()))
+            .ok_or(DurableStoreError::Conflict)?;
+        grant.revoked = true;
+        Ok(grant.clone())
+    }
+
+    fn redeem_conference_join_grant(
+        &self,
+        scope: &TenantScope,
+        session_id: &SessionId,
+    ) -> Result<ConferenceJoinGrantRecord, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let grant = state
+            .conference_join_grants
+            .get_mut(&(scope_key(scope), session_id.as_opaque().as_str().to_owned()))
+            .ok_or(DurableStoreError::Conflict)?;
+        if grant.revoked {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        if grant.use_policy == ConferenceJoinGrantUsePolicy::SingleUse && grant.redeemed {
+            return Err(DurableStoreError::Conflict);
+        }
+        grant.redeemed = true;
+        Ok(grant.clone())
+    }
+}
+
+fn validate_memory_join_grant(grant: &ConferenceJoinGrantRecord) -> Result<(), DurableStoreError> {
+    if grant.issued_at_unix_ms < 0
+        || grant.not_before_unix_ms < grant.issued_at_unix_ms
+        || grant.expires_at_unix_ms <= grant.not_before_unix_ms
+        || grant.revoked
+        || grant.redeemed
+    {
+        return Err(DurableStoreError::InvalidRecord);
+    }
+    Ok(())
 }
 
 impl UniversalConferenceStore for MemoryLocalStore {

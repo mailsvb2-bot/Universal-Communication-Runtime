@@ -1,4 +1,6 @@
-use crate::{GroupId, IntegrationId, PrincipalRef, TenantScope};
+use crate::{
+    CallId, DeviceId, GroupId, IntegrationId, PrincipalRef, SessionId, TenantScope,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UniversalConferenceMode {
@@ -24,6 +26,33 @@ pub enum ConferenceParticipantRole {
     Moderator,
     Speaker,
     Attendee,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConferenceJoinGrantUsePolicy {
+    SingleUse,
+    Reusable,
+}
+
+/// Durable control-plane state for one signed Conference join grant.
+///
+/// The signed bearer token itself is deliberately not persisted. This record is the canonical
+/// revocation/redeem state required to preserve join semantics across runtime restarts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConferenceJoinGrantRecord {
+    pub scope: TenantScope,
+    pub conference_id: GroupId,
+    pub integration_id: IntegrationId,
+    pub call_id: CallId,
+    pub participant: PrincipalRef,
+    pub device_id: DeviceId,
+    pub session_id: SessionId,
+    pub issued_at_unix_ms: i64,
+    pub not_before_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+    pub use_policy: ConferenceJoinGrantUsePolicy,
+    pub revoked: bool,
+    pub redeemed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

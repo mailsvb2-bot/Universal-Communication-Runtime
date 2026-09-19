@@ -83,8 +83,9 @@ pub use transport_orchestrator::{
     TransportRouteTelemetry, TransportRoutingHint,
 };
 pub use universal_conference::{
-    ConferenceParticipantRole, ConferenceScheduleMetadata, UniversalConferenceLifecycle,
-    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceParticipantRole,
+    ConferenceScheduleMetadata, UniversalConferenceLifecycle, UniversalConferenceMode,
+    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 pub use video::{EncodedVideoFrame, VideoCodecConfig, VideoSourceKind, VideoStreamDescriptor};
 
