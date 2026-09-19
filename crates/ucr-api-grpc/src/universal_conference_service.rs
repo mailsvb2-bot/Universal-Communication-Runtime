@@ -671,18 +671,20 @@ where
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
-        Ok(Response::new(pb::UniversalGetParticipantAttendanceResponse {
-            result: Some(match result {
-                Ok(attendance) => {
-                    pb::universal_get_participant_attendance_response::Result::Attendance(
-                        attendance,
-                    )
-                }
-                Err(error) => {
-                    pb::universal_get_participant_attendance_response::Result::Error(pb_error(error))
-                }
-            }),
-        }))
+        Ok(Response::new(
+            pb::UniversalGetParticipantAttendanceResponse {
+                result: Some(match result {
+                    Ok(attendance) => {
+                        pb::universal_get_participant_attendance_response::Result::Attendance(
+                            attendance,
+                        )
+                    }
+                    Err(error) => pb::universal_get_participant_attendance_response::Result::Error(
+                        pb_error(error),
+                    ),
+                }),
+            },
+        ))
     }
 }
 
@@ -1621,11 +1623,18 @@ where
     S: UniversalConferenceStore + GroupCallLookupStore + EventJournalStore,
 {
     if now_unix_ms < 0 {
-        return Err(CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable));
+        return Err(CanonicalError::new(
+            CanonicalErrorCode::TemporarilyUnavailable,
+        ));
     }
     conference_for_integration(store, scope, conference_id, integration_id)?;
-    let participant =
-        participant_for_external(store, scope, conference_id, integration_id, external_user_id)?;
+    let participant = participant_for_external(
+        store,
+        scope,
+        conference_id,
+        integration_id,
+        external_user_id,
+    )?;
     let calls = store
         .calls_for_group(scope, conference_id, 64)
         .map_err(map_store_error)?;
@@ -1666,8 +1675,7 @@ where
             .scope
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
             .and_then(|value| {
-                decode_scope(value)
-                    .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+                decode_scope(value).map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
             })?;
         let call_id = CallId::from_opaque(
             decode_opaque(attendance.call_id)
@@ -1700,12 +1708,8 @@ where
         let expected_kind = match event.event_type.as_str() {
             "ucr.conference.attendance.joined.v1" => pb::ConferenceAttendanceKind::Joined,
             "ucr.conference.attendance.left.v1" => pb::ConferenceAttendanceKind::Left,
-            "ucr.conference.attendance.reconnected.v1" => {
-                pb::ConferenceAttendanceKind::Reconnected
-            }
-            "ucr.conference.attendance.media_ready.v1" => {
-                pb::ConferenceAttendanceKind::MediaReady
-            }
+            "ucr.conference.attendance.reconnected.v1" => pb::ConferenceAttendanceKind::Reconnected,
+            "ucr.conference.attendance.media_ready.v1" => pb::ConferenceAttendanceKind::MediaReady,
             _ => return Err(CanonicalError::new(CanonicalErrorCode::Internal)),
         };
         if kind != expected_kind {
@@ -1714,7 +1718,10 @@ where
 
         match kind {
             pb::ConferenceAttendanceKind::Joined => {
-                if sessions.iter().any(|session| session.session_id == session_id) {
+                if sessions
+                    .iter()
+                    .any(|session| session.session_id == session_id)
+                {
                     return Err(CanonicalError::new(CanonicalErrorCode::Internal));
                 }
                 sessions.push(AttendanceSessionProjection {
@@ -1725,10 +1732,11 @@ where
                 join_count = join_count
                     .checked_add(1)
                     .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-                first_join_at_unix_ms = Some(first_join_at_unix_ms.map_or(
-                    attendance.occurred_at_unix_ms,
-                    |current: i64| current.min(attendance.occurred_at_unix_ms),
-                ));
+                first_join_at_unix_ms = Some(
+                    first_join_at_unix_ms.map_or(attendance.occurred_at_unix_ms, |current: i64| {
+                        current.min(attendance.occurred_at_unix_ms)
+                    }),
+                );
             }
             pb::ConferenceAttendanceKind::Left => {
                 let session = sessions
@@ -1741,10 +1749,11 @@ where
                     return Err(CanonicalError::new(CanonicalErrorCode::Internal));
                 }
                 session.left_at_unix_ms = Some(attendance.occurred_at_unix_ms);
-                last_leave_at_unix_ms = Some(last_leave_at_unix_ms.map_or(
-                    attendance.occurred_at_unix_ms,
-                    |current: i64| current.max(attendance.occurred_at_unix_ms),
-                ));
+                last_leave_at_unix_ms = Some(
+                    last_leave_at_unix_ms.map_or(attendance.occurred_at_unix_ms, |current: i64| {
+                        current.max(attendance.occurred_at_unix_ms)
+                    }),
+                );
             }
             pb::ConferenceAttendanceKind::Reconnected => {
                 let session = sessions
@@ -1773,10 +1782,12 @@ where
                 media_ready_count = media_ready_count
                     .checked_add(1)
                     .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-                first_media_ready_at_unix_ms = Some(first_media_ready_at_unix_ms.map_or(
-                    attendance.occurred_at_unix_ms,
-                    |current: i64| current.min(attendance.occurred_at_unix_ms),
-                ));
+                first_media_ready_at_unix_ms = Some(
+                    first_media_ready_at_unix_ms
+                        .map_or(attendance.occurred_at_unix_ms, |current: i64| {
+                            current.min(attendance.occurred_at_unix_ms)
+                        }),
+                );
             }
             pb::ConferenceAttendanceKind::Unspecified => {
                 return Err(CanonicalError::new(CanonicalErrorCode::Internal));
