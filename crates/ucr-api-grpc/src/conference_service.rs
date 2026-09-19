@@ -203,7 +203,7 @@ where
                     conference_runtime(self)
                         .start(&actor, &start)
                         .map(|(_, snapshot)| pb_conference_snapshot(&snapshot))
-                        .map_err(map_conference_error)
+                        .map_err(|error| map_conference_error(&error))
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
@@ -228,7 +228,7 @@ where
                     conference_runtime(self)
                         .snapshot(&actor, &scope, &call_id)
                         .map(|snapshot| pb_conference_snapshot(&snapshot))
-                        .map_err(map_conference_error)
+                        .map_err(|error| map_conference_error(&error))
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
@@ -266,7 +266,7 @@ where
                                 signal.event_id.as_opaque().clone(),
                             ))
                         })
-                        .map_err(map_conference_error)
+                        .map_err(|error| map_conference_error(&error))
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
@@ -304,7 +304,7 @@ where
                         .map(|_| {
                             pb_acknowledgement(acknowledgement_for(set.call_id.as_opaque().clone()))
                         })
-                        .map_err(map_conference_error)
+                        .map_err(|error| map_conference_error(&error))
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
@@ -342,7 +342,7 @@ where
                 .and_then(|actor| {
                     let snapshot = conference_runtime(self)
                         .snapshot(&actor, &scope, &call_id)
-                        .map_err(map_conference_error)?;
+                        .map_err(|error| map_conference_error(&error))?;
                     let eligible = snapshot.call.participants.iter().any(|candidate| {
                         candidate.principal == participant
                             && candidate.left_revision.is_none()
@@ -547,11 +547,11 @@ const fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
     CanonicalError::new(code)
 }
 
-fn map_conference_error(error: ConferenceError) -> CanonicalError {
+fn map_conference_error(error: &ConferenceError) -> CanonicalError {
     match error {
-        ConferenceError::Protocol(error) => map_conference_protocol_error(error),
-        ConferenceError::Authorization(error) => error,
-        ConferenceError::Store(error) => map_store_error(error),
+        ConferenceError::Protocol(error) => map_conference_protocol_error(*error),
+        ConferenceError::Authorization(error) => *error,
+        ConferenceError::Store(error) => map_store_error(*error),
         ConferenceError::CapabilityUnavailable | ConferenceError::GroupCryptoUnavailable => {
             CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)
         }
