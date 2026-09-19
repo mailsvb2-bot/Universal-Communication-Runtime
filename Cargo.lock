@@ -2843,6 +2843,7 @@ dependencies = [
  "ucr-realtime",
  "ucr-sfu",
  "ucr-storage-memory",
+ "ucr-storage-sqlite",
  "ucr-store-forward",
  "ucr-transport-internet",
 ]
