@@ -812,6 +812,99 @@ fn decode_schedule(
 
 const EXTERNAL_PARTICIPANT_NAMESPACE: &str = "ucr.conference.participant.v1";
 
+fn resolve_external_participant_identity<S>(
+    store: &S,
+    input: &EnsureParticipantInput,
+    stable_command_id: &CommandId,
+) -> Result<ExternalIdentityBinding, CanonicalError>
+where
+    S: IdentityStore + ExternalIdentityBindingStore,
+{
+    if let Some(binding) = store
+        .external_identity_binding(
+            &input.scope,
+            &input.integration_id,
+            EXTERNAL_PARTICIPANT_NAMESPACE,
+            &input.external_user_id,
+        )
+        .map_err(map_store_error)?
+    {
+        return Ok(binding);
+    }
+
+    let identity_id = IdentityId::from_opaque(derived_id("identity", stable_command_id)?);
+    let identity = IdentityRecord {
+        scope: input.scope.clone(),
+        identity_id: identity_id.clone(),
+        ownership: IdentityOwnership::PlatformManaged,
+        evidence: IdentityEvidence::Unverified,
+        expires_at_unix_ms: None,
+    };
+    store.persist_identity(&identity).map_err(map_store_error)?;
+    let binding = ExternalIdentityBinding {
+        scope: input.scope.clone(),
+        integration_id: input.integration_id.clone(),
+        external_namespace: EXTERNAL_PARTICIPANT_NAMESPACE.to_owned(),
+        external_entity_id: input.external_user_id.clone(),
+        identity_id,
+    };
+    match store.persist_external_identity_binding(&binding) {
+        Ok(_) => Ok(binding),
+        Err(DurableStoreError::Conflict) => store
+            .external_identity_binding(
+                &input.scope,
+                &input.integration_id,
+                EXTERNAL_PARTICIPANT_NAMESPACE,
+                &input.external_user_id,
+            )
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict)),
+        Err(error) => Err(map_store_error(error)),
+    }
+}
+
+fn resolve_person_principal<S>(
+    store: &S,
+    scope: &TenantScope,
+    identity_id: &IdentityId,
+    stable_command_id: &CommandId,
+) -> Result<PrincipalRef, CanonicalError>
+where
+    S: IdentityStore + PrincipalIdentityBindingStore + PrincipalIdentityLookupStore,
+{
+    if store
+        .identity(scope, identity_id)
+        .map_err(map_store_error)?
+        .is_none()
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+    }
+    let bindings = store
+        .principal_identity_bindings_for_identity(scope, identity_id, 16)
+        .map_err(map_store_error)?;
+    let mut person_principals = bindings
+        .into_iter()
+        .filter(|candidate| candidate.principal.kind == PrincipalKind::Person);
+    match (person_principals.next(), person_principals.next()) {
+        (Some(existing), None) => Ok(existing.principal),
+        (Some(_), Some(_)) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+        (None, _) => {
+            let principal = PrincipalRef {
+                principal_id: PrincipalId::from_opaque(derived_id("principal", stable_command_id)?),
+                kind: PrincipalKind::Person,
+            };
+            store
+                .persist_principal_identity_binding(&PrincipalIdentityBinding {
+                    scope: scope.clone(),
+                    principal: principal.clone(),
+                    identity_id: identity_id.clone(),
+                })
+                .map_err(map_store_error)?;
+            Ok(principal)
+        }
+    }
+}
+
 fn ensure_participant<S>(
     store: &S,
     input: EnsureParticipantInput,
@@ -843,85 +936,9 @@ where
         payload,
     )?;
 
-    let binding = match store
-        .external_identity_binding(
-            &input.scope,
-            &input.integration_id,
-            EXTERNAL_PARTICIPANT_NAMESPACE,
-            &input.external_user_id,
-        )
-        .map_err(map_store_error)?
-    {
-        Some(binding) => binding,
-        None => {
-            let identity_id = IdentityId::from_opaque(derived_id("identity", &stable_command_id)?);
-            let identity = IdentityRecord {
-                scope: input.scope.clone(),
-                identity_id: identity_id.clone(),
-                ownership: IdentityOwnership::PlatformManaged,
-                evidence: IdentityEvidence::Unverified,
-                expires_at_unix_ms: None,
-            };
-            store.persist_identity(&identity).map_err(map_store_error)?;
-            let binding = ExternalIdentityBinding {
-                scope: input.scope.clone(),
-                integration_id: input.integration_id.clone(),
-                external_namespace: EXTERNAL_PARTICIPANT_NAMESPACE.to_owned(),
-                external_entity_id: input.external_user_id.clone(),
-                identity_id,
-            };
-            match store.persist_external_identity_binding(&binding) {
-                Ok(_) => binding,
-                Err(DurableStoreError::Conflict) => store
-                    .external_identity_binding(
-                        &input.scope,
-                        &input.integration_id,
-                        EXTERNAL_PARTICIPANT_NAMESPACE,
-                        &input.external_user_id,
-                    )
-                    .map_err(map_store_error)?
-                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?,
-                Err(error) => return Err(map_store_error(error)),
-            }
-        }
-    };
-
-    if store
-        .identity(&input.scope, &binding.identity_id)
-        .map_err(map_store_error)?
-        .is_none()
-    {
-        return Err(CanonicalError::new(CanonicalErrorCode::Internal));
-    }
-
-    let bindings = store
-        .principal_identity_bindings_for_identity(&input.scope, &binding.identity_id, 16)
-        .map_err(map_store_error)?;
-    let mut person_principals = bindings
-        .into_iter()
-        .filter(|candidate| candidate.principal.kind == PrincipalKind::Person);
-    let participant = match (person_principals.next(), person_principals.next()) {
-        (Some(existing), None) => existing.principal,
-        (Some(_), Some(_)) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
-        (None, _) => {
-            let principal = PrincipalRef {
-                principal_id: PrincipalId::from_opaque(derived_id(
-                    "principal",
-                    &stable_command_id,
-                )?),
-                kind: PrincipalKind::Person,
-            };
-            let principal_binding = PrincipalIdentityBinding {
-                scope: input.scope.clone(),
-                principal: principal.clone(),
-                identity_id: binding.identity_id.clone(),
-            };
-            store
-                .persist_principal_identity_binding(&principal_binding)
-                .map_err(map_store_error)?;
-            principal
-        }
-    };
+    let binding = resolve_external_participant_identity(store, &input, &stable_command_id)?;
+    let participant =
+        resolve_person_principal(store, &input.scope, &binding.identity_id, &stable_command_id)?;
 
     let (audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed) =
         participant_defaults(conference.mode, input.role);
