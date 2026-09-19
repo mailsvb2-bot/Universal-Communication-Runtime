@@ -3183,8 +3183,8 @@ mod universal_runtime_tests {
         CallSignallingState, CallTerminationReason, CommandId, ConferenceParticipantRole,
         ConferenceScheduleMetadata, DeviceDescriptor, DeviceLifecycleState, EventId,
         GroupMemberState, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord,
-        IntegrationId, OpaqueId, PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef,
-        ScopedPrincipal, TenantId, TenantScope, UniversalConferenceLifecycle,
+        IntegrationId, OpaqueId, PrincipalId, PrincipalIdentityBinding, PrincipalKind,
+        PrincipalRef, ScopedPrincipal, TenantId, TenantScope, UniversalConferenceLifecycle,
         UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
     };
     use ucr_protocol::CanonicalErrorCode;
@@ -3195,8 +3195,8 @@ mod universal_runtime_tests {
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
         IssueJoinGrantInput, PrepareConferenceRuntimeInput, UpdateParticipantInput,
         ensure_participant, ensure_participant_device, issue_join_grant,
-        prepare_conference_runtime, resolve_join_call, resolve_join_device, resolve_person_principal,
-        update_participant,
+        prepare_conference_runtime, resolve_join_call, resolve_join_device,
+        resolve_person_principal, update_participant,
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -3605,7 +3605,6 @@ mod universal_runtime_tests {
         assert_eq!(repeated_calls[0].call_id, call_id);
     }
 
-
     #[test]
     fn active_call_projection_ignores_more_than_sixty_four_terminated_calls() {
         let db = TestDb::new();
@@ -3702,7 +3701,9 @@ mod universal_runtime_tests {
                 revision: 0,
                 termination_reason: None,
             };
-            store.create_call(&owner_actor, &call).expect("history call");
+            store
+                .create_call(&owner_actor, &call)
+                .expect("history call");
             store
                 .apply_call_signal(
                     &owner_actor,
@@ -3766,13 +3767,8 @@ mod universal_runtime_tests {
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].call_id, active_call_id);
         assert_eq!(
-            resolve_join_call(
-                &store,
-                &scope(),
-                &conference().conference_id,
-                &attendee,
-            )
-            .expect("join resolves current call"),
+            resolve_join_call(&store, &scope(), &conference().conference_id, &attendee,)
+                .expect("join resolves current call"),
             active_call_id
         );
     }
@@ -3832,7 +3828,6 @@ mod universal_runtime_tests {
         );
     }
 
-
     #[test]
     fn person_principal_resolution_ignores_unrelated_principal_history() {
         let db = TestDb::new();
@@ -3881,5 +3876,4 @@ mod universal_runtime_tests {
         .expect("person principal retry");
         assert_eq!(repeated, resolved);
     }
-
 }
