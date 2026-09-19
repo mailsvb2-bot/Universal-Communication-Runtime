@@ -237,6 +237,65 @@ impl PrincipalIdentityLookupStore for SqliteLocalStore {
         }
         Ok(bindings)
     }
+
+    fn principal_identity_bindings_for_identity_kind(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        kind: PrincipalKind,
+        max_items: usize,
+    ) -> Result<Vec<PrincipalIdentityBinding>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        let namespace = namespace_storage_key(scope);
+        let limit = i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let encoded_kind = encode_principal_kind(kind);
+        let mut statement = connection
+            .prepare(
+                "SELECT principal_id, principal_kind
+                 FROM principal_identity_bindings
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND identity_id=?4 AND principal_kind=?5
+                 ORDER BY principal_id
+                 LIMIT ?6",
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    identity_id.as_opaque().as_str(),
+                    encoded_kind,
+                    limit,
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let mut bindings = Vec::new();
+        for row in rows {
+            let (principal_id, principal_kind) = row.map_err(|error| map_sqlite_error(&error))?;
+            let decoded_kind = decode_principal_kind(&principal_kind)?;
+            if decoded_kind != kind {
+                return Err(DurableStoreError::Corrupt);
+            }
+            let binding = PrincipalIdentityBinding {
+                scope: scope.clone(),
+                principal: PrincipalRef {
+                    principal_id: PrincipalId::from_opaque(parse_id(&principal_id)?),
+                    kind: decoded_kind,
+                },
+                identity_id: identity_id.clone(),
+            };
+            validate_principal_identity_binding(&binding)
+                .map_err(|_| DurableStoreError::Corrupt)?;
+            bindings.push(binding);
+        }
+        Ok(bindings)
+    }
 }
 
 pub(super) fn load_binding_from(
