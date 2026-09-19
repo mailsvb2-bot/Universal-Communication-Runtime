@@ -1,17 +1,20 @@
 use std::{fmt, sync::Arc};
 
+use prost::Message;
 use tonic::{Request, Response, Status};
 use ucr_core::{
-    AuthorizationEvaluator, DurableStoreError, ServiceAuditStore, ServiceCredentialSecret,
-    ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
-    UniversalConferenceStore, generate_opaque_id,
+    AuthorizationEvaluator, CommandAcceptanceStore, DurableStoreError, ServiceAuditStore,
+    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock,
+    ServiceQuotaStore, UniversalConferenceStore, generate_opaque_id,
 };
 use ucr_model::{
-    AuthorizationRequest, ConferenceScheduleMetadata, GroupId, IntegrationId, ScopedPrincipal,
-    TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode, UniversalConferenceProfile,
+    AuthorizationRequest, CommandEnvelope, CommandId, ConferenceScheduleMetadata,
+    CorrelationContext, GroupId, IntegrationId, ProtocolVersion, ScopedPrincipal, TenantScope,
+    UniversalConferenceLifecycle, UniversalConferenceMode, UniversalConferenceProfile,
 };
 use ucr_protocol::{
     CONFERENCE_CREATE_PERMISSION, CONFERENCE_READ_PERMISSION, CanonicalError, CanonicalErrorCode,
+    CommandReceiptStatus,
 };
 
 use super::{
@@ -99,6 +102,7 @@ where
         + ServiceQuotaStore
         + ServiceAuditStore
         + UniversalConferenceStore
+        + CommandAcceptanceStore
         + 'static,
 {
     pb::universal_conference_service_server::UniversalConferenceServiceServer::new(service)
@@ -116,6 +120,7 @@ where
         + ServiceQuotaStore
         + ServiceAuditStore
         + UniversalConferenceStore
+        + CommandAcceptanceStore
         + 'static,
 {
     async fn create_conference(
@@ -123,7 +128,9 @@ where
         request: Request<pb::UniversalCreateConferenceRequest>,
     ) -> Result<Response<pb::UniversalCreateConferenceResponse>, Status> {
         let credentials = decode_credentials(request.metadata());
-        let decoded = decode_create(request.into_inner());
+        let body = request.into_inner();
+        let command_payload = body.encode_to_vec();
+        let decoded = decode_create(body);
         let result = match (credentials, decoded) {
             (Ok((credential_id, secret)), Ok(input)) => self
                 .admit(
@@ -132,7 +139,7 @@ where
                     &secret,
                     CONFERENCE_CREATE_PERMISSION,
                 )
-                .and_then(|_| create_or_resolve(&*self.store, input)),
+                .and_then(|_| create_or_resolve(&*self.store, input, command_payload)),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
 
@@ -349,9 +356,10 @@ fn decode_schedule(
     })
 }
 
-fn create_or_resolve<S: UniversalConferenceStore>(
+fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
     store: &S,
     input: CreateInput,
+    command_payload: Vec<u8>,
 ) -> Result<UniversalConferenceProfile, CanonicalError> {
     if let Some(existing) = store
         .universal_conference_profile_for_external(
@@ -372,9 +380,30 @@ fn create_or_resolve<S: UniversalConferenceStore>(
         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
     }
 
-    let conference_id = GroupId::from_opaque(
+    let incoming_command_id = CommandId::from_opaque(
         generate_opaque_id().map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
     );
+    let command = CommandEnvelope {
+        command_id: incoming_command_id.clone(),
+        scope: input.scope.clone(),
+        command_type: "ucr.conference.create.v1".to_owned(),
+        payload: command_payload,
+        correlation: CorrelationContext {
+            correlation_id: incoming_command_id.as_opaque().clone(),
+            causation_id: None,
+            idempotency_key: Some(input.idempotency_key.clone()),
+        },
+        schema_version: ProtocolVersion::new(1, 0),
+        extensions: Vec::new(),
+    };
+    let receipt = store.accept_command(&command).map_err(map_store_error)?;
+    let stable_command_id = match receipt.status {
+        CommandReceiptStatus::Accepted => receipt.command_id,
+        CommandReceiptStatus::Duplicate => receipt
+            .original_command_id
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?,
+    };
+    let conference_id = GroupId::from_opaque(stable_command_id.as_opaque().clone());
     let profile = UniversalConferenceProfile {
         scope: input.scope,
         conference_id,
