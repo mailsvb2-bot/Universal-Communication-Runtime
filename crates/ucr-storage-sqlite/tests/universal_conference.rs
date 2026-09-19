@@ -1,6 +1,8 @@
 use std::{
     fs,
     path::PathBuf,
+    sync::{Arc, Barrier},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -222,6 +224,63 @@ fn active_owner_is_unique_at_the_atomic_storage_boundary() {
         Err(ucr_core::DurableStoreError::Conflict)
     );
 
+    cleanup(&path);
+}
+
+#[test]
+fn concurrent_stores_cannot_create_two_active_owners() {
+    let path = db_path("universal-conference-owner-race");
+    {
+        let store = SqliteLocalStore::open(&path).expect("open seed store");
+        store
+            .persist_universal_conference_profile(&conference())
+            .expect("conference");
+    }
+
+    let barrier = Arc::new(Barrier::new(2));
+    let handles = ["race-owner-1", "race-owner-2"].map(|id| {
+        let path = path.clone();
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            let store = SqliteLocalStore::open(&path).expect("open racing store");
+            let mut owner = participant();
+            owner.external_user_id = id.as_bytes().to_vec();
+            owner.participant = PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid(id)),
+                kind: PrincipalKind::Person,
+            };
+            owner.role = ConferenceParticipantRole::Owner;
+            barrier.wait();
+            store.persist_universal_conference_participant(&owner)
+        })
+    });
+
+    let mut outcomes = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("owner writer"))
+        .collect::<Vec<_>>();
+    outcomes.sort_by_key(|outcome| match outcome {
+        Ok(DurableRecordStatus::Persisted) => 0,
+        Err(ucr_core::DurableStoreError::Conflict) => 1,
+        _ => 2,
+    });
+    assert_eq!(
+        outcomes,
+        vec![
+            Ok(DurableRecordStatus::Persisted),
+            Err(ucr_core::DurableStoreError::Conflict),
+        ]
+    );
+
+    let store = SqliteLocalStore::open(&path).expect("reopen");
+    let owners = store
+        .universal_conference_participants(&scope(), &conference().conference_id, 16)
+        .expect("participants")
+        .into_iter()
+        .filter(|profile| profile.active && profile.role == ConferenceParticipantRole::Owner)
+        .count();
+    assert_eq!(owners, 1);
+    drop(store);
     cleanup(&path);
 }
 
