@@ -623,3 +623,210 @@ fn decode_u64(value: &[u8]) -> Result<u64, DurableStoreError> {
     let bytes: [u8; 8] = value.try_into().map_err(|_| DurableStoreError::Corrupt)?;
     Ok(u64::from_be_bytes(bytes))
 }
+
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+    use ucr_core::{CallStore, ConversationStore, RecordingStore, StorageProvider};
+    use ucr_model::{
+        CallParticipant, CallParticipantState, CallSession, CallSignallingState, ConversationId,
+        ConversationKind, ConversationRecord, ConversationRef, NamespaceId, PrincipalId,
+        RecordingConsent, RecordingConsentState, RecordingPolicy, RecordingState, ScopedPrincipal,
+        TenantId,
+    };
+
+    use super::*;
+    use crate::{
+        SQLITE_SCHEMA_V32, SQLITE_SCHEMA_VERSION, message_store::tests::TestDb,
+        test_remove_v33_objects,
+    };
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("test id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("recording-tenant")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("recording-namespace"))),
+        }
+    }
+
+    fn subject(value: &str) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid(value)),
+                kind: PrincipalKind::Person,
+            },
+        }
+    }
+
+    fn conversation() -> ConversationRecord {
+        ConversationRecord {
+            scope: scope(),
+            conversation: ConversationRef {
+                conversation_id: ConversationId::from_opaque(oid("recording-conversation")),
+                kind: ConversationKind::Direct,
+            },
+            parent_conversation_id: None,
+        }
+    }
+
+    fn call() -> (CallSession, ScopedPrincipal, ScopedPrincipal) {
+        let host = subject("recording-host");
+        let guest = subject("recording-guest");
+        (
+            CallSession {
+                scope: scope(),
+                call_id: CallId::from_opaque(oid("recording-call")),
+                conversation: conversation().conversation,
+                initiated_by: host.principal.clone(),
+                participants: vec![
+                    CallParticipant {
+                        principal: host.principal.clone(),
+                        state: CallParticipantState::Accepted,
+                        joined_revision: 0,
+                        left_revision: None,
+                    },
+                    CallParticipant {
+                        principal: guest.principal.clone(),
+                        state: CallParticipantState::Invited,
+                        joined_revision: 0,
+                        left_revision: None,
+                    },
+                ],
+                signalling_state: CallSignallingState::Inviting,
+                reconnecting_participant: None,
+                media_negotiation_ref: None,
+                media_negotiation_generation: 0,
+                replication_generation: 0,
+                revision: 0,
+                termination_reason: None,
+            },
+            host,
+            guest,
+        )
+    }
+
+    fn recording(call: &CallSession, host: &ScopedPrincipal, guest: &ScopedPrincipal) -> RecordingSession {
+        RecordingSession {
+            scope: scope(),
+            recording_id: RecordingId::from_opaque(oid("recording-session")),
+            call_id: call.call_id.clone(),
+            requested_by: host.principal.clone(),
+            policy: RecordingPolicy {
+                require_all_participant_consent: true,
+                notify_all_participants: true,
+                retention_seconds: 600,
+                policy_reference: Some("recording-policy".to_owned()),
+            },
+            state: RecordingState::WaitingForConsent,
+            consents: vec![
+                RecordingConsent {
+                    participant: host.principal.clone(),
+                    state: RecordingConsentState::Pending,
+                    decided_at_unix_ms: 0,
+                },
+                RecordingConsent {
+                    participant: guest.principal.clone(),
+                    state: RecordingConsentState::Pending,
+                    decided_at_unix_ms: 0,
+                },
+            ],
+            requested_at_unix_ms: 1_000_000,
+            started_at_unix_ms: None,
+            stopped_at_unix_ms: None,
+            expires_at_unix_ms: 1_600_000,
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn recording_lifecycle_and_consents_survive_sqlite_reopen() {
+        let db = TestDb::new();
+        let (call, host, guest) = call();
+        let initial = recording(&call, &host, &guest);
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+            store
+                .persist_conversation(&conversation())
+                .expect("conversation");
+            store.create_call(&host, &call).expect("call");
+            store.persist_recording(&initial).expect("recording");
+
+            let host_granted = store
+                .set_recording_consent(
+                    &initial.scope,
+                    &initial.recording_id,
+                    initial.revision,
+                    &host.principal,
+                    RecordingConsentState::Granted,
+                    1_010_000,
+                )
+                .expect("host consent");
+            let ready = store
+                .set_recording_consent(
+                    &initial.scope,
+                    &initial.recording_id,
+                    host_granted.revision,
+                    &guest.principal,
+                    RecordingConsentState::Granted,
+                    1_020_000,
+                )
+                .expect("guest consent");
+            assert_eq!(ready.state, RecordingState::Ready);
+            let active = store
+                .start_recording(
+                    &initial.scope,
+                    &initial.recording_id,
+                    ready.revision,
+                    1_030_000,
+                )
+                .expect("start");
+            assert_eq!(active.state, RecordingState::Active);
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        let active = reopened
+            .recording(&initial.scope, &initial.recording_id)
+            .expect("read")
+            .expect("recording");
+        assert_eq!(active.state, RecordingState::Active);
+        let stopped = reopened
+            .set_recording_consent(
+                &initial.scope,
+                &initial.recording_id,
+                active.revision,
+                &guest.principal,
+                RecordingConsentState::Revoked,
+                1_040_000,
+            )
+            .expect("revoke");
+        assert_eq!(stopped.state, RecordingState::Stopped);
+        assert_eq!(stopped.stopped_at_unix_ms, Some(1_040_000));
+    }
+
+    #[test]
+    fn v32_store_migrates_to_v33_recording_schema() {
+        let db = TestDb::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create current");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = Connection::open(db.path()).expect("open migration fixture");
+            test_remove_v33_objects(&connection).expect("remove v33 objects");
+            connection
+                .pragma_update(None, "user_version", SQLITE_SCHEMA_V32)
+                .expect("set v32");
+        }
+
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v32 to v33");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        let connection = migrated.lock_connection().expect("connection");
+        verify_schema_v33(&connection).expect("verify v33");
+    }
+}
