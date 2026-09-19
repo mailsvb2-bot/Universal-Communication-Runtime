@@ -8,7 +8,7 @@ use ucr_conference::{
 };
 use ucr_core::{
     AuthorizationEvaluator, CallStore, DeviceLifecycleStore, DurableStoreError, EventJournalStore,
-    GroupStore, PrincipalIdentityBindingStore,
+    GroupStore, PrincipalIdentityBindingStore, UniversalConferenceStore,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
@@ -103,6 +103,7 @@ where
         + PrincipalIdentityBindingStore
         + TrustedSigningKeyResolver
         + EventJournalStore
+        + UniversalConferenceStore
         + 'static,
 {
     pb::realtime_service_server::RealtimeServiceServer::new(service)
@@ -121,6 +122,7 @@ where
         + PrincipalIdentityBindingStore
         + TrustedSigningKeyResolver
         + EventJournalStore
+        + UniversalConferenceStore
         + 'static,
 {
     type SubscribeMediaStream =
@@ -297,6 +299,7 @@ where
                         .device_id
                         .as_ref()
                         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
+                    self.require_universal_publish_allowed(&claims, envelope.frame.header.media_kind)?;
                     let outcome = conference_runtime(self)
                         .forward(&actor_for(&claims), device_id, &envelope, &*self.registry)
                         .map_err(|error| map_conference_error(&error))?;
@@ -361,7 +364,8 @@ where
         + DeviceLifecycleStore
         + PrincipalIdentityBindingStore
         + TrustedSigningKeyResolver
-        + EventJournalStore,
+        + EventJournalStore
+        + UniversalConferenceStore,
 {
     fn now(&self) -> Result<i64, CanonicalError> {
         self.clock
@@ -401,7 +405,67 @@ where
                 && participant.state == CallParticipantState::Accepted
                 && participant.left_revision.is_none()
         });
-        if accepted {
+        if !accepted {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        }
+        let Some(conference) = self
+            .store
+            .universal_conference_profile(&claims.scope, &snapshot.group_id)
+            .map_err(map_store_error)?
+        else {
+            return Ok(());
+        };
+        if conference.lifecycle == ucr_model::UniversalConferenceLifecycle::Ended {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        }
+        let participant = self
+            .store
+            .universal_conference_participant(
+                &claims.scope,
+                &snapshot.group_id,
+                &claims.participant,
+            )
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+        if !participant.active {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        }
+        Ok(())
+    }
+
+    fn require_universal_publish_allowed(
+        &self,
+        claims: &RealtimeSessionClaims,
+        media_kind: MediaKind,
+    ) -> Result<(), CanonicalError> {
+        let actor = actor_for(claims);
+        let snapshot = conference_runtime(self)
+            .snapshot(&actor, &claims.scope, &claims.call_id)
+            .map_err(|error| map_conference_error(&error))?;
+        let Some(_) = self
+            .store
+            .universal_conference_profile(&claims.scope, &snapshot.group_id)
+            .map_err(map_store_error)?
+        else {
+            return Ok(());
+        };
+        let participant = self
+            .store
+            .universal_conference_participant(
+                &claims.scope,
+                &snapshot.group_id,
+                &claims.participant,
+            )
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+        if !participant.active {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        }
+        let allowed = match media_kind {
+            MediaKind::Audio => !participant.audio_muted && participant.publish_audio_allowed,
+            MediaKind::Video => participant.camera_allowed && participant.publish_video_allowed,
+        };
+        if allowed {
             Ok(())
         } else {
             Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
