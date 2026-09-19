@@ -125,6 +125,36 @@ fn all_required_consents_gate_start_and_revocation_stops_active_recording() {
 }
 
 #[test]
+fn explicit_denial_blocks_recording_even_when_all_consent_is_not_required() {
+    let store = MemoryLocalStore::default();
+    let mut initial = recording();
+    initial.policy.require_all_participant_consent = false;
+    initial.state = RecordingState::Ready;
+    store.persist_recording(&initial).expect("persist");
+
+    let blocked = store
+        .set_recording_consent(
+            &initial.scope,
+            &initial.recording_id,
+            initial.revision,
+            &principal("guest"),
+            RecordingConsentState::Denied,
+            1_010_000,
+        )
+        .expect("record denial");
+    assert_eq!(blocked.state, RecordingState::WaitingForConsent);
+    assert_eq!(
+        store.start_recording(
+            &initial.scope,
+            &initial.recording_id,
+            blocked.revision,
+            1_020_000,
+        ),
+        Err(DurableStoreError::Conflict)
+    );
+}
+
+#[test]
 fn retention_expiry_is_finite_and_delete_is_idempotent() {
     let store = MemoryLocalStore::default();
     let mut initial = recording();
