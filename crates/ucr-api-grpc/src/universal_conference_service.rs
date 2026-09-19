@@ -1129,6 +1129,197 @@ fn list_participants<S: UniversalConferenceStore>(
         .map_err(map_store_error)
 }
 
+fn issue_join_grant<S>(
+    store: &S,
+    issuer: &JoinTokenIssuer,
+    input: IssueJoinGrantInput,
+    now_unix_ms: i64,
+) -> Result<pb::ConferenceJoinGrant, CanonicalError>
+where
+    S: UniversalConferenceStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + GroupCallLookupStore,
+{
+    let conference = store
+        .universal_conference_profile(&input.scope, &input.conference_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    if conference.integration_id != input.integration_id
+        || !conference.entry_open
+        || !matches!(
+            conference.lifecycle,
+            UniversalConferenceLifecycle::Waiting | UniversalConferenceLifecycle::Live
+        )
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+
+    let join_before_ms = i64::from(conference.schedule.join_before_seconds)
+        .checked_mul(1000)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    let opens_at = conference
+        .schedule
+        .starts_at_unix_ms
+        .checked_sub(join_before_ms)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    if now_unix_ms < opens_at {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    let closes_at = conference
+        .schedule
+        .planned_end_unix_ms
+        .map(|planned_end| {
+            let join_after_ms = i64::from(conference.schedule.join_after_seconds)
+                .checked_mul(1000)
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+            planned_end
+                .checked_add(join_after_ms)
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
+        })
+        .transpose()?;
+    if closes_at.is_some_and(|close| now_unix_ms >= close) {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+
+    let participants = store
+        .universal_conference_participants(&input.scope, &input.conference_id, 1024)
+        .map_err(map_store_error)?;
+    let mut matching = participants.into_iter().filter(|candidate| {
+        candidate.active
+            && candidate.integration_id == input.integration_id
+            && candidate.external_user_id == input.external_user_id
+    });
+    let participant = match (matching.next(), matching.next()) {
+        (Some(participant), None) => participant,
+        (None, _) => return Err(CanonicalError::new(CanonicalErrorCode::NotFound)),
+        (Some(_), Some(_)) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    };
+
+    let identity_binding = store
+        .principal_identity_binding(&input.scope, &participant.participant)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    let devices = store
+        .devices_for_identity(&input.scope, &identity_binding.identity_id, 16)
+        .map_err(map_store_error)?;
+    let mut active_devices = devices
+        .into_iter()
+        .filter(|device| device.state == DeviceLifecycleState::Active);
+    let device = match (active_devices.next(), active_devices.next()) {
+        (Some(device), None) => device,
+        (None, _) => return Err(CanonicalError::new(CanonicalErrorCode::NotFound)),
+        (Some(_), Some(_)) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    };
+
+    let calls = store
+        .calls_for_group(&input.scope, &input.conference_id, 64)
+        .map_err(map_store_error)?;
+    let active_calls = calls
+        .into_iter()
+        .filter(|call| call.signalling_state != CallSignallingState::Terminated)
+        .collect::<Vec<_>>();
+    if active_calls.is_empty() {
+        return Err(CanonicalError::new(CanonicalErrorCode::CapabilityMismatch));
+    }
+    let mut eligible_calls = active_calls.into_iter().filter(|call| {
+        call.participants.iter().any(|candidate| {
+            candidate.principal == participant.participant
+                && candidate.state == CallParticipantState::Accepted
+                && candidate.left_revision.is_none()
+        })
+    });
+    let call = match (eligible_calls.next(), eligible_calls.next()) {
+        (Some(call), None) => call,
+        (None, _) => return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied)),
+        (Some(_), Some(_)) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    };
+
+    let ttl_ms = i64::from(input.ttl_seconds)
+        .checked_mul(1000)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+    let requested_expiry = input
+        .not_after_unix_ms
+        .unwrap_or_else(|| now_unix_ms.saturating_add(ttl_ms));
+    if input
+        .not_before_unix_ms
+        .is_some_and(|not_before| not_before < opens_at)
+        || closes_at.is_some_and(|close| requested_expiry > close)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+
+    issuer
+        .issue_with_policy(
+            input.scope,
+            call.call_id,
+            participant.participant,
+            Some(device.device_id),
+            input.ttl_seconds,
+            input.use_policy,
+            input.not_before_unix_ms,
+            input.not_after_unix_ms,
+            now_unix_ms,
+        )
+        .map(|grant| pb::ConferenceJoinGrant {
+            session_id: Some(pb_opaque(grant.claims.session_id.as_opaque())),
+            join_url: grant.join_url,
+            expires_at_unix_ms: grant.claims.expires_at_unix_ms,
+        })
+        .map_err(map_join_token_error)
+}
+
+fn revoke_join_grant<S>(
+    store: &S,
+    issuer: &JoinTokenIssuer,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    session_id: &SessionId,
+) -> Result<(), CanonicalError>
+where
+    S: UniversalConferenceStore + GroupCallLookupStore,
+{
+    store
+        .universal_conference_profile(scope, conference_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    let claims = issuer
+        .grant_claims(scope, session_id)
+        .map_err(map_join_token_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    let calls = store
+        .calls_for_group(scope, conference_id, 64)
+        .map_err(map_store_error)?;
+    if !calls.iter().any(|call| call.call_id == claims.call_id) {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    issuer
+        .revoke(scope, session_id)
+        .map(|_| ())
+        .map_err(map_join_token_error)
+}
+
+const fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
+    let code = match error {
+        JoinTokenError::InvalidBaseUrl
+        | JoinTokenError::InvalidTtl
+        | JoinTokenError::InvalidWindow => CanonicalErrorCode::InvalidArgument,
+        JoinTokenError::Malformed
+        | JoinTokenError::InvalidSignature
+        | JoinTokenError::NotYetValid
+        | JoinTokenError::Expired
+        | JoinTokenError::UnknownGrant
+        | JoinTokenError::Revoked
+        | JoinTokenError::AlreadyUsed => CanonicalErrorCode::Unauthenticated,
+        JoinTokenError::CapacityExceeded => CanonicalErrorCode::ResourceExhausted,
+        JoinTokenError::StateUnavailable => CanonicalErrorCode::TemporarilyUnavailable,
+        JoinTokenError::ClockOverflow
+        | JoinTokenError::RandomUnavailable
+        | JoinTokenError::Internal => CanonicalErrorCode::Internal,
+    };
+    CanonicalError::new(code)
+}
+
 fn derived_id(prefix: &str, command_id: &CommandId) -> Result<OpaqueId, CanonicalError> {
     OpaqueId::new(format!("{prefix}-{}", command_id.as_opaque().as_str()))
         .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
