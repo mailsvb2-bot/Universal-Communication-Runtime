@@ -188,6 +188,17 @@ fn universal_runtime_preparation_reuses_canonical_mls_group_and_call_owners() {
 }
 
 #[test]
+fn universal_conference_owner_is_unique_and_not_transferred_by_generic_participant_mutations() {
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    let spec = read("spec/universal-conference-api.md");
+    assert!(service.contains("enforce_owner_role_transition"));
+    assert!(service.contains("profile.role != requested_role"));
+    assert!(service.contains("requested_role == ConferenceParticipantRole::Owner"));
+    assert!(service.contains("owner.external_user_id.as_slice() == external_user_id"));
+    assert!(spec.contains("Ordinary participant ensure/update operations never transfer ownership"));
+}
+
+#[test]
 fn universal_participant_policy_syncs_minimum_canonical_permissions() {
     let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
     for required in [
