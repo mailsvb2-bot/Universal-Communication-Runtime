@@ -350,7 +350,7 @@ async fn join(state: &AppState, token: &str, input: SessionRequest) -> HttpRespo
 }
 
 fn join_error(error: &pb::ErrorEnvelope) -> HttpResponse {
-    if error.code == pb::ErrorCode::TemporarilyUnavailable as i32 && error.retryable {
+    if error.code == pb::ErrorCode::PolicyDenied as i32 && error.retryable {
         return api_error(
             StatusCode::TOO_EARLY,
             "waiting_room",
