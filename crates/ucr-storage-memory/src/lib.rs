@@ -18,7 +18,8 @@ use ucr_core::{
     DeliveryStore, DeviceLifecycleStore, DeviceReverificationProof, DurableRecordStatus,
     DurableStoreError, EventAppendStatus, EventJournalStore, EventSubscriptionStore,
     ExternalIdentityBindingStore, FederationPeerStore, IdentityStore, MessageStore,
-    PermissionGrantStore, PrincipalIdentityBindingStore, RecoveryAdmissionProof,
+    PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
+    RecoveryAdmissionProof,
     RecoveryDeviceStagingStore, RecoveryPlanStore, ReverifiedDeviceActivationStore,
     ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
     StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore, UniversalConferenceStore,
@@ -1199,6 +1200,30 @@ impl PrincipalIdentityBindingStore for MemoryLocalStore {
             .principal_identity_bindings
             .get(&principal_identity_binding_key(scope, principal))
             .cloned())
+    }
+}
+
+impl PrincipalIdentityLookupStore for MemoryLocalStore {
+    fn principal_identity_bindings_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<PrincipalIdentityBinding>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let expected_scope = scope_key(scope);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .principal_identity_bindings
+            .values()
+            .filter(|binding| {
+                scope_key(&binding.scope) == expected_scope && binding.identity_id == *identity_id
+            })
+            .take(max_items)
+            .cloned()
+            .collect())
     }
 }
 
