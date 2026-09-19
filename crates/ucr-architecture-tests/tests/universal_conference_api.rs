@@ -299,3 +299,19 @@ fn universal_conference_current_device_flows_do_not_depend_on_bounded_device_his
     );
     assert!(service.contains("active_device_projection_ignores_sixty_four_revoked_devices"));
 }
+
+
+#[test]
+fn universal_conference_person_resolution_filters_unrelated_principal_history() {
+    let core = read("crates/ucr-core/src/lib.rs");
+    let memory = read("crates/ucr-storage-memory/src/lib.rs");
+    let sqlite = read("crates/ucr-storage-sqlite/src/principal_identity_binding_store.rs");
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+
+    assert!(core.contains("fn principal_identity_bindings_for_identity_kind"));
+    assert!(memory.contains("binding.principal.kind == kind"));
+    assert!(sqlite.contains("AND identity_id=?4 AND principal_kind=?5"));
+    assert!(service.contains("principal_identity_bindings_for_identity_kind("));
+    assert!(service.contains("PrincipalKind::Person"));
+    assert!(service.contains("person_principal_resolution_ignores_unrelated_principal_history"));
+}
