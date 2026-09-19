@@ -24,6 +24,7 @@ const DEFAULT_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_UPSTREAM: &str = "http://127.0.0.1:50051";
 const MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BEARER_BYTES: usize = 4096;
+const CLIENT_HTML: &str = include_str!("../static/client.html");
 
 type HttpBody = UnsyncBoxBody<Bytes, Infallible>;
 type HttpResponse = Response<HttpBody>;
@@ -134,6 +135,9 @@ async fn handle_request(
 
     if method == Method::GET && path == "/healthz" {
         return Ok(text_response(StatusCode::OK, "ok"));
+    }
+    if method == Method::GET && matches!(path.as_str(), "/" | "/join" | "/conference") {
+        return Ok(html_response(StatusCode::OK, CLIENT_HTML));
     }
 
     if method != Method::POST {
@@ -521,6 +525,15 @@ fn json_response(status: StatusCode, payload: ApiResponse) -> HttpResponse {
         .header(CONTENT_TYPE, "application/json")
         .header(CACHE_CONTROL, "no-store")
         .body(full_body(Bytes::from(bytes)))
+        .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+fn html_response(status: StatusCode, html: &'static str) -> HttpResponse {
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
+        .body(full_body(Bytes::from_static(html.as_bytes())))
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
