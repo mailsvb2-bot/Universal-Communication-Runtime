@@ -2549,7 +2549,7 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
 
-    let issued = issuer
+    let signed_grant = issuer
         .issue_with_session_id(
             input.scope.clone(),
             call_id,
@@ -2567,13 +2567,13 @@ where
         scope: input.scope.clone(),
         conference_id: input.conference_id,
         integration_id: input.integration_id,
-        call_id: issued.claims.call_id.clone(),
-        participant: issued.claims.participant.clone(),
+        call_id: signed_grant.claims.call_id.clone(),
+        participant: signed_grant.claims.participant.clone(),
         device_id,
         session_id,
-        issued_at_unix_ms: issued.claims.issued_at_unix_ms,
-        not_before_unix_ms: issued.claims.not_before_unix_ms,
-        expires_at_unix_ms: issued.claims.expires_at_unix_ms,
+        issued_at_unix_ms: signed_grant.claims.issued_at_unix_ms,
+        not_before_unix_ms: signed_grant.claims.not_before_unix_ms,
+        expires_at_unix_ms: signed_grant.claims.expires_at_unix_ms,
         use_policy: durable_join_use_policy(input.use_policy),
         revoked: false,
         redeemed: false,
