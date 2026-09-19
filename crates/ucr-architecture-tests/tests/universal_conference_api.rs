@@ -77,6 +77,7 @@ fn universal_conference_management_is_integration_scoped() {
         "UniversalRevokeJoinGrantRequest",
         "UniversalGetParticipantAttendanceRequest",
         "UniversalEnsureParticipantDeviceRequest",
+        "UniversalPrepareConferenceRuntimeRequest",
     ] {
         let start = format!("message {message} {{");
         let block = proto
@@ -170,4 +171,18 @@ fn realtime_join_accepts_invited_participant_through_canonical_call_signal() {
     assert!(realtime.contains("ensure_accepted_conference_participant_for_join"));
     assert!(realtime.contains("kind: CallSignalKind::Accept"));
     assert!(realtime.contains("self.store.apply_call_signal(&actor, &signal)"));
+}
+
+#[test]
+fn universal_runtime_preparation_reuses_canonical_mls_group_and_call_owners() {
+    let proto = read("proto/ucr/v1/universal_conference.proto");
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    let spec = read("spec/universal-conference-api.md");
+    assert!(proto.contains("rpc PrepareConferenceRuntime"));
+    assert!(service.contains("GroupMlsAtomicStore"));
+    assert!(service.contains("create_mls_backed_group("));
+    assert!(service.contains("apply_mls_backed_group_change("));
+    assert!(service.contains("store.create_call(owner, &call)"));
+    assert!(service.contains("store.apply_call_signal(owner, &signal)"));
+    assert!(spec.contains("does not create a second Group, MLS, or Call owner"));
 }
