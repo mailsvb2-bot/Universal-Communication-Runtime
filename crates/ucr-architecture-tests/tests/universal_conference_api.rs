@@ -206,6 +206,25 @@ fn universal_conference_owner_is_unique_and_not_transferred_by_generic_participa
 }
 
 #[test]
+fn universal_conference_live_capacity_uses_active_storage_projection() {
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    let sqlite = read("crates/ucr-storage-sqlite/src/universal_conference_store.rs");
+    let memory = read("crates/ucr-storage-memory/src/lib.rs");
+    let core = read("crates/ucr-core/src/universal_conference.rs");
+    let spec = read("spec/universal-conference-api.md");
+
+    assert!(service.contains("MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS: usize = MAX_CALL_PARTICIPANTS + 1"));
+    assert!(service.contains("active_universal_conference_participants"));
+    assert!(service.contains("participants.len() > MAX_CALL_PARTICIPANTS"));
+    assert!(sqlite.contains("ensure_participant_capacity"));
+    assert!(sqlite.contains("AND conference_id = ?4 AND active = 1"));
+    assert!(memory.contains("active_participant_count"));
+    assert!(core.contains("fn active_universal_conference_participants"));
+    assert!(spec.contains("1024 active participants"));
+    assert!(spec.contains("Inactive historical participant projections"));
+}
+
+#[test]
 fn universal_participant_policy_syncs_minimum_canonical_permissions() {
     let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
     for required in [
