@@ -203,3 +203,21 @@ fn universal_participant_policy_syncs_minimum_canonical_permissions() {
     }
     assert!(service.contains("store.revoke_permission(&grant)"));
 }
+
+#[test]
+fn participant_remove_reconciles_call_and_mls_membership_and_protects_owner() {
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    assert!(service.contains("current.role == ConferenceParticipantRole::Owner"));
+    assert!(service.contains("reconcile_removed_participant"));
+    assert!(service.contains("CallParticipantUpdateKind::Remove"));
+    assert!(service.contains("GroupChangeKind::RemoveMember"));
+    assert!(service.contains("apply_mls_backed_group_change"));
+}
+
+#[test]
+fn runtime_reconcile_projects_role_changes_into_group_crypto_epoch() {
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    assert!(service.contains("membership.role != desired_role"));
+    assert!(service.contains("GroupChangeKind::ChangeRole"));
+    assert!(service.contains("runtime_event_id("));
+}
