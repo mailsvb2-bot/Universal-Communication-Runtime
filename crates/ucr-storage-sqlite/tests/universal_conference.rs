@@ -147,8 +147,10 @@ fn create_idempotency_key_conflicts_when_semantics_change() {
     let mut changed = conference();
     changed.conference_id = GroupId::from_opaque(oid("conference-2"));
     changed.external_conference_id = b"different-event".to_vec();
-    assert!(store
-        .persist_universal_conference_profile(&changed)
-        .is_err());
+    assert!(
+        store
+            .persist_universal_conference_profile(&changed)
+            .is_err()
+    );
     cleanup(&path);
 }
