@@ -272,6 +272,28 @@ message UniversalGetParticipantAttendanceResponse {
   }
 }
 
+message UniversalGetCapabilitiesRequest {
+  TenantScope scope = 1;
+  OpaqueId integration_id = 2;
+}
+
+message UniversalConferenceCapabilities {
+  repeated Capability capabilities = 1;
+  uint32 max_participants = 2;
+  bool browser_realtime_gateway = 3;
+  bool production_webrtc = 4;
+  bool turn = 5;
+  bool recording = 6;
+  bool horizontal_sfu = 7;
+}
+
+message UniversalGetCapabilitiesResponse {
+  oneof result {
+    UniversalConferenceCapabilities capabilities = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 // Stable business-neutral facade for SaaS, mobile backends and other products.
 // Concrete REST/OpenAPI/SDK adapters must remain thin transports over this service.
 service UniversalConferenceService {
@@ -287,4 +309,5 @@ service UniversalConferenceService {
   rpc IssueJoinGrant(UniversalIssueJoinGrantRequest) returns (UniversalIssueJoinGrantResponse);
   rpc RevokeJoinGrant(UniversalRevokeJoinGrantRequest) returns (UniversalRevokeJoinGrantResponse);
   rpc GetParticipantAttendance(UniversalGetParticipantAttendanceRequest) returns (UniversalGetParticipantAttendanceResponse);
+  rpc GetCapabilities(UniversalGetCapabilitiesRequest) returns (UniversalGetCapabilitiesResponse);
 }
