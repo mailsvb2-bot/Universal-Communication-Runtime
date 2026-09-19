@@ -61,7 +61,6 @@ pub fn validate_recording_session(
         }
         match consent.state {
             RecordingConsentState::Pending if consent.decided_at_unix_ms == 0 => {}
-            RecordingConsentState::Pending => return Err(RecordingProtocolError::InvalidConsent),
             RecordingConsentState::Granted
             | RecordingConsentState::Denied
             | RecordingConsentState::Revoked
@@ -106,8 +105,7 @@ pub fn validate_recording_session(
                 return Err(RecordingProtocolError::InvalidSession);
             }
         }
-        RecordingState::Expired => {}
-        RecordingState::Deleted => {}
+        RecordingState::Expired | RecordingState::Deleted => {}
     }
     Ok(())
 }
