@@ -496,9 +496,8 @@ impl EventJournalStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         let mut events = Vec::with_capacity(max_items.min(256));
         for row in rows {
-            let event_id = EventId::from_opaque(parse_id(
-                &row.map_err(|error| map_sqlite_error(&error))?,
-            )?);
+            let event_id =
+                EventId::from_opaque(parse_id(&row.map_err(|error| map_sqlite_error(&error))?)?);
             events.push(
                 load_event_by_id(&connection, scope, &event_id)?
                     .ok_or(DurableStoreError::Corrupt)?,
