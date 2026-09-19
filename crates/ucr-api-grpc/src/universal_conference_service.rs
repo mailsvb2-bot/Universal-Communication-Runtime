@@ -3190,11 +3190,14 @@ mod universal_runtime_tests {
         UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
     };
     use ucr_protocol::CanonicalErrorCode;
+    use ucr_realtime::{JoinGrantUsePolicy, JoinTokenIssuer, JoinTokenKey};
     use ucr_storage_sqlite::SqliteLocalStore;
 
     use super::{
-        GROUP_MLS_CAPABILITY, EnsureParticipantInput, PrepareConferenceRuntimeInput,
-        UpdateParticipantInput, ensure_participant, prepare_conference_runtime, update_participant,
+        GROUP_MLS_CAPABILITY, EnsureParticipantDeviceInput, EnsureParticipantInput,
+        IssueJoinGrantInput, PrepareConferenceRuntimeInput, UpdateParticipantInput,
+        ensure_participant, ensure_participant_device, issue_join_grant, prepare_conference_runtime,
+        update_participant,
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -3398,6 +3401,110 @@ mod universal_runtime_tests {
         )
         .expect_err("generic update must not promote owner");
         assert_eq!(promote_attendee.code, CanonicalErrorCode::PolicyDenied);
+    }
+
+    #[test]
+    fn universal_flow_issues_join_grant_after_device_and_runtime_preparation() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        store
+            .persist_universal_conference_profile(&conference())
+            .expect("conference profile");
+
+        let owner = ensure_participant(
+            &store,
+            EnsureParticipantInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                external_user_id: b"flow-owner".to_vec(),
+                role: ConferenceParticipantRole::Owner,
+                idempotency_key: "flow-owner".to_owned(),
+            },
+            b"flow-owner-payload".to_vec(),
+        )
+        .expect("owner");
+        let attendee = ensure_participant(
+            &store,
+            EnsureParticipantInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                external_user_id: b"flow-attendee".to_vec(),
+                role: ConferenceParticipantRole::Attendee,
+                idempotency_key: "flow-attendee".to_owned(),
+            },
+            b"flow-attendee-payload".to_vec(),
+        )
+        .expect("attendee");
+
+        for (external_user_id, idempotency_key) in [
+            (b"flow-owner".as_slice(), "flow-owner-device"),
+            (b"flow-attendee".as_slice(), "flow-attendee-device"),
+        ] {
+            let status = ensure_participant_device(
+                &store,
+                &EnsureParticipantDeviceInput {
+                    scope: scope(),
+                    conference_id: conference().conference_id,
+                    integration_id: conference().integration_id,
+                    external_user_id: external_user_id.to_vec(),
+                    idempotency_key: idempotency_key.to_owned(),
+                },
+                format!("{idempotency_key}-payload").into_bytes(),
+            )
+            .expect("participant device");
+            assert!(status.active);
+            assert_eq!(status.external_user_id, external_user_id);
+        }
+
+        let runtime = prepare_conference_runtime(
+            &store,
+            &PrepareConferenceRuntimeInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                idempotency_key: "flow-prepare".to_owned(),
+            },
+            b"flow-prepare-payload".to_vec(),
+        )
+        .expect("prepare runtime");
+        assert!(runtime.group_ready);
+        assert!(runtime.call_ready);
+        assert_eq!(runtime.admitted_participant_count, 2);
+
+        let issuer = JoinTokenIssuer::new(
+            JoinTokenKey::from_bytes([7_u8; 32]),
+            "https://join.example.test/join",
+        )
+        .expect("join issuer");
+        let now_unix_ms = 1_000_000;
+        let grant = issue_join_grant(
+            &store,
+            &issuer,
+            IssueJoinGrantInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                external_user_id: b"flow-attendee".to_vec(),
+                ttl_seconds: 300,
+                use_policy: JoinGrantUsePolicy::SingleUse,
+                not_before_unix_ms: None,
+                not_after_unix_ms: None,
+            },
+            now_unix_ms,
+        )
+        .expect("join grant");
+
+        let token = grant
+            .join_url
+            .strip_prefix("https://join.example.test/join#ucr_join=")
+            .expect("public join url token");
+        let claims = issuer.verify(token, now_unix_ms).expect("verify join token");
+        assert_eq!(claims.participant, attendee.participant);
+        assert!(claims.device_id.is_some());
+        assert_eq!(grant.expires_at_unix_ms, 1_300_000);
+        assert_eq!(owner.role, ConferenceParticipantRole::Owner);
     }
 
     #[test]
