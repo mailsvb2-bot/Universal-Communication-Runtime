@@ -158,20 +158,24 @@ async fn handle_request(
     };
 
     let response = match path.as_str() {
-        "/v1/realtime/join" => decode_json::<SessionRequest>(&body)
-            .map_or_else(|response| response, |input| join(&state, &token, input)),
-        "/v1/realtime/heartbeat" => decode_json::<HeartbeatRequest>(&body).map_or_else(
-            |response| response,
-            |input| heartbeat(&state, &token, input),
-        ),
-        "/v1/realtime/leave" => decode_json::<SessionRequest>(&body)
-            .map_or_else(|response| response, |input| leave(&state, &token, input)),
-        "/v1/realtime/media/publish" => decode_json::<PublishRequest>(&body).map_or_else(
-            |response| response,
-            |input| publish_media(&state, &token, input),
-        ),
+        "/v1/realtime/join" => match decode_json::<SessionRequest>(&body) {
+            Ok(input) => join(&state, &token, input).await,
+            Err(response) => response,
+        },
+        "/v1/realtime/heartbeat" => match decode_json::<HeartbeatRequest>(&body) {
+            Ok(input) => heartbeat(&state, &token, input).await,
+            Err(response) => response,
+        },
+        "/v1/realtime/leave" => match decode_json::<SessionRequest>(&body) {
+            Ok(input) => leave(&state, &token, input).await,
+            Err(response) => response,
+        },
+        "/v1/realtime/media/publish" => match decode_json::<PublishRequest>(&body) {
+            Ok(input) => publish_media(&state, &token, input).await,
+            Err(response) => response,
+        },
         "/v1/realtime/media/stream" => match decode_json::<SessionRequest>(&body) {
-            Ok(input) => return Ok(subscribe_media(&state, &token, input).await),
+            Ok(input) => subscribe_media(&state, &token, input).await,
             Err(response) => response,
         },
         _ => api_error(
@@ -181,7 +185,7 @@ async fn handle_request(
         ),
     };
 
-    Ok(response.await)
+    Ok(response)
 }
 
 async fn join(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
