@@ -22,6 +22,7 @@ CREATE TABLE universal_conferences (
     conference_id TEXT NOT NULL,
     integration_id TEXT NOT NULL,
     external_conference_id BLOB NOT NULL CHECK(length(external_conference_id) BETWEEN 1 AND 512),
+    create_idempotency_key TEXT NOT NULL CHECK(length(create_idempotency_key) BETWEEN 1 AND 256),
     mode TEXT NOT NULL CHECK(mode IN ('meeting', 'webinar', 'broadcast', 'audio_room')),
     lifecycle TEXT NOT NULL CHECK(lifecycle IN ('scheduled', 'waiting', 'live', 'ending', 'ended')),
     starts_at_unix_ms INTEGER NOT NULL,
@@ -33,6 +34,7 @@ CREATE TABLE universal_conferences (
     revision BLOB NOT NULL CHECK(length(revision) = 8),
     PRIMARY KEY(tenant_id, namespace_present, namespace_id, conference_id),
     UNIQUE(tenant_id, namespace_present, namespace_id, integration_id, external_conference_id),
+    UNIQUE(tenant_id, namespace_present, namespace_id, integration_id, create_idempotency_key),
     CHECK((namespace_present = 0 AND namespace_id = '') OR
           (namespace_present = 1 AND namespace_id <> ''))
 ) WITHOUT ROWID;
@@ -84,6 +86,7 @@ pub(super) fn verify_schema_v32(connection: &Connection) -> Result<(), DurableSt
             ("conference_id", "TEXT", 1, 4),
             ("integration_id", "TEXT", 1, 0),
             ("external_conference_id", "BLOB", 1, 0),
+            ("create_idempotency_key", "TEXT", 1, 0),
             ("mode", "TEXT", 1, 0),
             ("lifecycle", "TEXT", 1, 0),
             ("starts_at_unix_ms", "INTEGER", 1, 0),
@@ -135,6 +138,7 @@ pub(super) fn verify_schema_v32(connection: &Connection) -> Result<(), DurableSt
 struct StoredConference {
     integration_id: String,
     external_conference_id: Vec<u8>,
+    create_idempotency_key: String,
     mode: String,
     lifecycle: String,
     starts_at_unix_ms: i64,
@@ -421,9 +425,9 @@ fn insert_profile(
         .execute(
             "INSERT INTO universal_conferences (
                 tenant_id, namespace_present, namespace_id, conference_id, integration_id,
-                external_conference_id, mode, lifecycle, starts_at_unix_ms, planned_end_unix_ms,
-                join_before_seconds, join_after_seconds, timezone, entry_open, revision
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                external_conference_id, create_idempotency_key, mode, lifecycle, starts_at_unix_ms,
+                planned_end_unix_ms, join_before_seconds, join_after_seconds, timezone, entry_open, revision
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 profile.scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
@@ -431,6 +435,7 @@ fn insert_profile(
                 profile.conference_id.as_opaque().as_str(),
                 profile.integration_id.as_opaque().as_str(),
                 profile.external_conference_id.as_slice(),
+                profile.create_idempotency_key.as_str(),
                 mode_text(profile.mode),
                 lifecycle_text(profile.lifecycle),
                 profile.schedule.starts_at_unix_ms,
@@ -489,8 +494,8 @@ fn load_profile(
     let stored = connection
         .query_row(
             "SELECT integration_id, external_conference_id, mode, lifecycle, starts_at_unix_ms,
-                    planned_end_unix_ms, join_before_seconds, join_after_seconds, timezone,
-                    entry_open, revision
+                    create_idempotency_key, planned_end_unix_ms, join_before_seconds,
+                    join_after_seconds, timezone, entry_open, revision
              FROM universal_conferences
              WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
                AND conference_id = ?4",
@@ -507,12 +512,13 @@ fn load_profile(
                     mode: row.get(2)?,
                     lifecycle: row.get(3)?,
                     starts_at_unix_ms: row.get(4)?,
-                    planned_end_unix_ms: row.get(5)?,
-                    join_before_seconds: row.get(6)?,
-                    join_after_seconds: row.get(7)?,
-                    timezone: row.get(8)?,
-                    entry_open: row.get(9)?,
-                    revision: row.get(10)?,
+                    create_idempotency_key: row.get(5)?,
+                    planned_end_unix_ms: row.get(6)?,
+                    join_before_seconds: row.get(7)?,
+                    join_after_seconds: row.get(8)?,
+                    timezone: row.get(9)?,
+                    entry_open: row.get(10)?,
+                    revision: row.get(11)?,
                 })
             },
         )
@@ -568,6 +574,7 @@ fn decode_profile(
             OpaqueId::new(row.integration_id).map_err(|_| DurableStoreError::Corrupt)?,
         ),
         external_conference_id: row.external_conference_id,
+        create_idempotency_key: row.create_idempotency_key,
         mode: parse_mode(&row.mode)?,
         lifecycle: parse_lifecycle(&row.lifecycle)?,
         schedule: ConferenceScheduleMetadata {
@@ -710,6 +717,8 @@ fn decode_participant(
 fn validate_profile(profile: &UniversalConferenceProfile) -> Result<(), DurableStoreError> {
     validate_external_reference(&profile.external_conference_id)?;
     if profile.revision == 0
+        || profile.create_idempotency_key.is_empty()
+        || profile.create_idempotency_key.len() > 256
         || profile.schedule.join_before_seconds > 31_536_000
         || profile.schedule.join_after_seconds > 31_536_000
         || profile
