@@ -735,7 +735,7 @@ fn system_now_unix_ms() -> Option<i64> {
 
 fn encode_claims(claims: &RealtimeSessionClaims) -> Result<Vec<u8>, JoinTokenError> {
     let mut output = Vec::with_capacity(512);
-    output.push(1);
+    output.push(2);
     push_id(&mut output, claims.scope.tenant_id.as_opaque())?;
     match &claims.scope.namespace_id {
         Some(namespace_id) => {
@@ -757,12 +757,18 @@ fn encode_claims(claims: &RealtimeSessionClaims) -> Result<Vec<u8>, JoinTokenErr
     push_id(&mut output, claims.session_id.as_opaque())?;
     output.extend_from_slice(&claims.issued_at_unix_ms.to_be_bytes());
     output.extend_from_slice(&claims.expires_at_unix_ms.to_be_bytes());
+    output.extend_from_slice(&claims.not_before_unix_ms.to_be_bytes());
+    output.push(match claims.use_policy {
+        JoinGrantUsePolicy::SingleUse => 1,
+        JoinGrantUsePolicy::Reusable => 2,
+    });
     Ok(output)
 }
 
 fn decode_claims(payload: &[u8]) -> Result<RealtimeSessionClaims, JoinTokenError> {
     let mut cursor = 0_usize;
-    if take_u8(payload, &mut cursor)? != 1 {
+    let version = take_u8(payload, &mut cursor)?;
+    if !matches!(version, 1 | 2) {
         return Err(JoinTokenError::Malformed);
     }
     let tenant_id = TenantId::from_opaque(take_id(payload, &mut cursor)?);
@@ -782,6 +788,17 @@ fn decode_claims(payload: &[u8]) -> Result<RealtimeSessionClaims, JoinTokenError
     let session_id = SessionId::from_opaque(take_id(payload, &mut cursor)?);
     let issued_at_unix_ms = take_i64(payload, &mut cursor)?;
     let expires_at_unix_ms = take_i64(payload, &mut cursor)?;
+    let (not_before_unix_ms, use_policy) = if version == 1 {
+        (issued_at_unix_ms, JoinGrantUsePolicy::Reusable)
+    } else {
+        let not_before_unix_ms = take_i64(payload, &mut cursor)?;
+        let use_policy = match take_u8(payload, &mut cursor)? {
+            1 => JoinGrantUsePolicy::SingleUse,
+            2 => JoinGrantUsePolicy::Reusable,
+            _ => return Err(JoinTokenError::Malformed),
+        };
+        (not_before_unix_ms, use_policy)
+    };
     if cursor != payload.len() {
         return Err(JoinTokenError::Malformed);
     }
@@ -795,7 +812,9 @@ fn decode_claims(payload: &[u8]) -> Result<RealtimeSessionClaims, JoinTokenError
         device_id,
         session_id,
         issued_at_unix_ms,
+        not_before_unix_ms,
         expires_at_unix_ms,
+        use_policy,
     })
 }
 
@@ -963,6 +982,36 @@ mod tests {
     }
 
     #[test]
+    fn single_use_grant_rejects_second_redemption_and_revocation_blocks_verify() {
+        let issuer = issuer();
+        let grant = issuer
+            .issue_with_policy(
+                scope(),
+                CallId::from_opaque(id("call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("device"))),
+                300,
+                JoinGrantUsePolicy::SingleUse,
+                Some(40_010),
+                Some(40_100),
+                40_000,
+            )
+            .expect("issue");
+        let token = token_from_url(&grant.join_url);
+        assert_eq!(issuer.redeem(token, 40_001), Err(JoinTokenError::NotYetValid));
+        assert!(issuer.redeem(token, 40_010).is_ok());
+        assert_eq!(
+            issuer.redeem(token, 40_011),
+            Err(JoinTokenError::AlreadyUsed)
+        );
+        assert!(issuer.verify(token, 40_011).is_ok());
+        issuer
+            .revoke(&scope(), &grant.claims.session_id)
+            .expect("revoke");
+        assert_eq!(issuer.verify(token, 40_012), Err(JoinTokenError::Revoked));
+    }
+
+    #[test]
     fn tampered_join_grant_fails_signature_validation() {
         let issuer = issuer();
         let grant = issuer
@@ -1033,7 +1082,9 @@ mod tests {
             device_id: Some(DeviceId::from_opaque(id("device-a"))),
             session_id: SessionId::from_opaque(id("session-a")),
             issued_at_unix_ms: now,
+            not_before_unix_ms: now,
             expires_at_unix_ms: now + 60_000,
+            use_policy: JoinGrantUsePolicy::Reusable,
         };
         let second_claims = RealtimeSessionClaims {
             device_id: Some(DeviceId::from_opaque(id("device-b"))),
