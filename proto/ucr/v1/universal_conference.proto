@@ -1,0 +1,241 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/conference_api.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/runtime.proto";
+
+// High-level integration contract for external products. Integrators use their own stable
+// references and never need to understand GroupId, CallId, PrincipalRef or DeviceId.
+enum UniversalConferenceMode {
+  UNIVERSAL_CONFERENCE_MODE_UNSPECIFIED = 0;
+  UNIVERSAL_CONFERENCE_MODE_MEETING = 1;
+  UNIVERSAL_CONFERENCE_MODE_WEBINAR = 2;
+  UNIVERSAL_CONFERENCE_MODE_BROADCAST = 3;
+  UNIVERSAL_CONFERENCE_MODE_AUDIO_ROOM = 4;
+}
+
+enum UniversalConferenceLifecycle {
+  UNIVERSAL_CONFERENCE_LIFECYCLE_UNSPECIFIED = 0;
+  UNIVERSAL_CONFERENCE_LIFECYCLE_SCHEDULED = 1;
+  UNIVERSAL_CONFERENCE_LIFECYCLE_WAITING = 2;
+  UNIVERSAL_CONFERENCE_LIFECYCLE_LIVE = 3;
+  UNIVERSAL_CONFERENCE_LIFECYCLE_ENDING = 4;
+  UNIVERSAL_CONFERENCE_LIFECYCLE_ENDED = 5;
+}
+
+enum ConferenceParticipantRole {
+  CONFERENCE_PARTICIPANT_ROLE_UNSPECIFIED = 0;
+  CONFERENCE_PARTICIPANT_ROLE_OWNER = 1;
+  CONFERENCE_PARTICIPANT_ROLE_HOST = 2;
+  CONFERENCE_PARTICIPANT_ROLE_MODERATOR = 3;
+  CONFERENCE_PARTICIPANT_ROLE_SPEAKER = 4;
+  CONFERENCE_PARTICIPANT_ROLE_ATTENDEE = 5;
+}
+
+enum JoinGrantUsePolicy {
+  JOIN_GRANT_USE_POLICY_UNSPECIFIED = 0;
+  JOIN_GRANT_USE_POLICY_SINGLE_USE = 1;
+  JOIN_GRANT_USE_POLICY_REUSABLE = 2;
+}
+
+message ConferenceScheduleMetadata {
+  int64 starts_at_unix_ms = 1;
+  optional int64 planned_end_unix_ms = 2;
+  uint32 join_before_seconds = 3;
+  uint32 join_after_seconds = 4;
+  optional string timezone = 5;
+}
+
+message UniversalConferenceDescriptor {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId integration_id = 3;
+  bytes external_conference_id = 4;
+  UniversalConferenceMode mode = 5;
+  UniversalConferenceLifecycle lifecycle = 6;
+  ConferenceScheduleMetadata schedule = 7;
+  bool entry_open = 8;
+  uint64 revision = 9;
+}
+
+message UniversalConferenceParticipant {
+  OpaqueId participant_id = 1;
+  bytes external_user_id = 2;
+  ConferenceParticipantRole role = 3;
+  bool audio_muted = 4;
+  bool camera_allowed = 5;
+  bool publish_audio_allowed = 6;
+  bool publish_video_allowed = 7;
+}
+
+message UniversalCreateConferenceRequest {
+  TenantScope scope = 1;
+  OpaqueId integration_id = 2;
+  bytes external_conference_id = 3;
+  string idempotency_key = 4;
+  UniversalConferenceMode mode = 5;
+  ConferenceScheduleMetadata schedule = 6;
+}
+
+message UniversalCreateConferenceResponse {
+  oneof result {
+    UniversalConferenceDescriptor conference = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message UniversalResolveConferenceRequest {
+  TenantScope scope = 1;
+  OpaqueId integration_id = 2;
+  bytes external_conference_id = 3;
+}
+
+message UniversalResolveConferenceResponse {
+  oneof result {
+    UniversalConferenceDescriptor conference = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message UniversalConferenceLifecycleRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  UniversalConferenceLifecycle target = 3;
+  string idempotency_key = 4;
+}
+
+message UniversalConferenceLifecycleResponse {
+  oneof result {
+    UniversalConferenceDescriptor conference = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message UniversalSetEntryOpenRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  bool entry_open = 3;
+  string idempotency_key = 4;
+}
+
+message UniversalSetEntryOpenResponse {
+  oneof result {
+    UniversalConferenceDescriptor conference = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message UniversalEnsureParticipantRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId integration_id = 3;
+  bytes external_user_id = 4;
+  ConferenceParticipantRole role = 5;
+  string idempotency_key = 6;
+}
+
+message UniversalEnsureParticipantResponse {
+  oneof result {
+    UniversalConferenceParticipant participant = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message UniversalUpdateParticipantRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId participant_id = 3;
+  optional ConferenceParticipantRole role = 4;
+  optional bool audio_muted = 5;
+  optional bool camera_allowed = 6;
+  optional bool publish_audio_allowed = 7;
+  optional bool publish_video_allowed = 8;
+  string idempotency_key = 9;
+}
+
+message UniversalUpdateParticipantResponse {
+  oneof result {
+    UniversalConferenceParticipant participant = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message UniversalRemoveParticipantRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId participant_id = 3;
+  string idempotency_key = 4;
+}
+
+message UniversalRemoveParticipantResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message UniversalListParticipantsRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  uint32 max_items = 3;
+}
+
+message UniversalParticipantList {
+  repeated UniversalConferenceParticipant participants = 1;
+}
+
+message UniversalListParticipantsResponse {
+  oneof result {
+    UniversalParticipantList participants = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message UniversalIssueJoinGrantRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId integration_id = 3;
+  bytes external_user_id = 4;
+  uint32 ttl_seconds = 5;
+  JoinGrantUsePolicy use_policy = 6;
+  optional int64 not_before_unix_ms = 7;
+  optional int64 not_after_unix_ms = 8;
+}
+
+message UniversalIssueJoinGrantResponse {
+  oneof result {
+    ConferenceJoinGrant grant = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message UniversalRevokeJoinGrantRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId session_id = 3;
+}
+
+message UniversalRevokeJoinGrantResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Stable business-neutral facade for SaaS, mobile backends and other products.
+// Concrete REST/OpenAPI/SDK adapters must remain thin transports over this service.
+service UniversalConferenceService {
+  rpc CreateConference(UniversalCreateConferenceRequest) returns (UniversalCreateConferenceResponse);
+  rpc ResolveConference(UniversalResolveConferenceRequest) returns (UniversalResolveConferenceResponse);
+  rpc TransitionConference(UniversalConferenceLifecycleRequest) returns (UniversalConferenceLifecycleResponse);
+  rpc SetEntryOpen(UniversalSetEntryOpenRequest) returns (UniversalSetEntryOpenResponse);
+  rpc EnsureParticipant(UniversalEnsureParticipantRequest) returns (UniversalEnsureParticipantResponse);
+  rpc UpdateParticipant(UniversalUpdateParticipantRequest) returns (UniversalUpdateParticipantResponse);
+  rpc RemoveParticipant(UniversalRemoveParticipantRequest) returns (UniversalRemoveParticipantResponse);
+  rpc ListParticipants(UniversalListParticipantsRequest) returns (UniversalListParticipantsResponse);
+  rpc IssueJoinGrant(UniversalIssueJoinGrantRequest) returns (UniversalIssueJoinGrantResponse);
+  rpc RevokeJoinGrant(UniversalRevokeJoinGrantRequest) returns (UniversalRevokeJoinGrantResponse);
+}
