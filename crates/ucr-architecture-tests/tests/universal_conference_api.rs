@@ -264,7 +264,6 @@ fn runtime_reconcile_projects_role_changes_into_group_crypto_epoch() {
     assert!(service.contains("runtime_event_id("));
 }
 
-
 #[test]
 fn universal_conference_current_call_flows_do_not_depend_on_bounded_call_history() {
     let core = read("crates/ucr-core/src/call.rs");
@@ -279,7 +278,9 @@ fn universal_conference_current_call_flows_do_not_depend_on_bounded_call_history
     assert!(service.contains(".active_calls_for_group(&input.scope, &input.conference_id, 2)"));
     assert!(service.contains(".active_calls_for_group(scope, conference_id, 2)"));
     assert!(service.contains(".call_belongs_to_group(scope, conference_id, &claims.call_id)"));
-    assert!(service.contains("active_call_projection_ignores_more_than_sixty_four_terminated_calls"));
+    assert!(
+        service.contains("active_call_projection_ignores_more_than_sixty_four_terminated_calls")
+    );
 }
 
 #[test]
@@ -292,14 +293,15 @@ fn universal_conference_current_device_flows_do_not_depend_on_bounded_device_his
     assert!(core.contains("fn active_devices_for_identity"));
     assert!(memory.contains("descriptor.state == DeviceLifecycleState::Active"));
     assert!(sqlite.contains("AND identity_id=?4 AND state='active'"));
-    assert!(service.contains(".active_devices_for_identity(&input.scope, &binding.identity_id, 2)"));
+    assert!(
+        service.contains(".active_devices_for_identity(&input.scope, &binding.identity_id, 2)")
+    );
     assert!(service.contains(".active_devices_for_identity(scope, &binding.identity_id, 2)"));
     assert!(
         service.contains(".active_devices_for_identity(scope, &identity_binding.identity_id, 2)")
     );
     assert!(service.contains("active_device_projection_ignores_sixty_four_revoked_devices"));
 }
-
 
 #[test]
 fn universal_conference_person_resolution_filters_unrelated_principal_history() {
