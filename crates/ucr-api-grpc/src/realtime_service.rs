@@ -885,8 +885,13 @@ fn status_from_canonical(error: CanonicalError) -> Status {
         }
         CanonicalErrorCode::TemporarilyUnavailable => tonic::Code::Unavailable,
         CanonicalErrorCode::DeadlineExceeded => tonic::Code::DeadlineExceeded,
-        CanonicalErrorCode::InvalidArgument => tonic::Code::InvalidArgument,
-        CanonicalErrorCode::CapabilityMismatch => tonic::Code::FailedPrecondition,
+        CanonicalErrorCode::Cancelled => tonic::Code::Cancelled,
+        CanonicalErrorCode::InvalidArgument | CanonicalErrorCode::MalformedFrame => {
+            tonic::Code::InvalidArgument
+        }
+        CanonicalErrorCode::CapabilityMismatch
+        | CanonicalErrorCode::DowngradeRejected
+        | CanonicalErrorCode::UnsupportedCriticalExtension => tonic::Code::FailedPrecondition,
         CanonicalErrorCode::IntegrityFailure => tonic::Code::DataLoss,
         CanonicalErrorCode::UnsupportedProtocolVersion => tonic::Code::Unimplemented,
         CanonicalErrorCode::Internal => tonic::Code::Internal,
