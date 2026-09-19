@@ -37,6 +37,7 @@ ucr-crypto = { path = "../ucr-crypto" }
 tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "time"] }
 tokio-stream = { version = "=0.1.17", features = ["net"] }
 ucr-storage-memory = { path = "../ucr-storage-memory" }
+ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
 
 [lints]
 workspace = true
