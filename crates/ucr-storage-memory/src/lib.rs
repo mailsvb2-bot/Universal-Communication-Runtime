@@ -20,7 +20,7 @@ use ucr_core::{
     ExternalIdentityBindingStore, FederationPeerStore, IdentityDeviceLookupStore, IdentityStore,
     MessageStore, PermissionGrantStore, PrincipalIdentityBindingStore,
     PrincipalIdentityLookupStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore,
-    RecoveryPlanStore, ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
+    RecoveryPlanStore, RecordingStore, ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
     ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth, StorageProvider, SyncStore,
     TrustedSigningKeyStore, UniversalConferenceStore,
 };
@@ -42,7 +42,7 @@ use ucr_model::{
     MessageId, OfflineGroupChangeReplica, OfflineGroupMessageReplica, OpaqueId,
     OrganizationManagedDeviceBinding, OrganizationManagedIdentityBinding, OrganizationModeProfile,
     PermissionGrant, PersonalNodeObject, PersonalNodeProfile, PrincipalIdentityBinding,
-    PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
+    PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, RecordingConsentState, RecordingId, RecordingSession, ScopedPrincipal,
     ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
     ServiceCredentialState, ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob,
     StoreForwardLeaseId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
@@ -68,9 +68,10 @@ use ucr_protocol::{
     validate_event_consumer_cursor, validate_external_identity_binding,
     validate_external_identity_binding_key, validate_federation_credential_rotation,
     validate_federation_transition, validate_identity_record, validate_permission_grant,
-    validate_principal_identity_binding, validate_service_audit_record,
+    validate_principal_identity_binding, validate_recording_session, validate_service_audit_record,
     validate_service_quota_policy, validate_sync_checkpoint, validate_sync_transition,
-    validate_trusted_signing_key_descriptor,
+    validate_trusted_signing_key_descriptor, apply_recording_consent, delete_recording,
+    expire_recording, start_recording, stop_recording, RecordingProtocolError,
 };
 
 const SCHEMA_VERSION: u32 = 12;
@@ -112,6 +113,7 @@ type UniversalConferenceKey = (ScopeKey, String);
 type UniversalConferenceExternalKey = (ScopeKey, String, Vec<u8>);
 type UniversalConferenceIdempotencyKey = (ScopeKey, String, String);
 type UniversalConferenceParticipantKey = (ScopeKey, String, PrincipalRef);
+type RecordingKey = (ScopeKey, String);
 
 #[derive(Debug, Clone, Copy)]
 struct MemoryQuotaUsage {
@@ -206,6 +208,7 @@ struct MemoryState {
         HashMap<UniversalConferenceIdempotencyKey, UniversalConferenceKey>,
     universal_conference_participants:
         HashMap<UniversalConferenceParticipantKey, UniversalConferenceParticipantProfile>,
+    recordings: HashMap<RecordingKey, RecordingSession>,
 }
 
 #[derive(Default)]
@@ -8038,6 +8041,156 @@ fn has_conflicting_active_conference_owner(
                 && existing.role == ConferenceParticipantRole::Owner
                 && existing.participant != *participant
         })
+}
+
+
+fn recording_key(scope: &TenantScope, recording_id: &RecordingId) -> RecordingKey {
+    (scope_key(scope), recording_id.as_opaque().as_str().to_owned())
+}
+
+fn map_recording_protocol_error(error: RecordingProtocolError) -> DurableStoreError {
+    match error {
+        RecordingProtocolError::InvalidPolicy
+        | RecordingProtocolError::InvalidSession
+        | RecordingProtocolError::InvalidConsent
+        | RecordingProtocolError::Overflow => DurableStoreError::InvalidRecord,
+        RecordingProtocolError::InvalidTransition
+        | RecordingProtocolError::ConsentRequired
+        | RecordingProtocolError::Expired => DurableStoreError::Conflict,
+    }
+}
+
+fn transition_recording<F>(
+    state: &mut MemoryState,
+    key: &RecordingKey,
+    expected_revision: u64,
+    transition: F,
+) -> Result<RecordingSession, DurableStoreError>
+where
+    F: FnOnce(&RecordingSession) -> Result<RecordingSession, RecordingProtocolError>,
+{
+    let current = state
+        .recordings
+        .get(key)
+        .cloned()
+        .ok_or(DurableStoreError::Conflict)?;
+    if current.revision != expected_revision {
+        return Err(DurableStoreError::Conflict);
+    }
+    let next = transition(&current).map_err(map_recording_protocol_error)?;
+    state.recordings.insert(key.clone(), next.clone());
+    Ok(next)
+}
+
+impl RecordingStore for MemoryLocalStore {
+    fn persist_recording(
+        &self,
+        recording: &RecordingSession,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_recording_session(recording).map_err(map_recording_protocol_error)?;
+        let key = recording_key(&recording.scope, &recording.recording_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.recordings.get(&key) {
+            return if existing == recording {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.recordings.insert(key, recording.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn recording(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+    ) -> Result<Option<RecordingSession>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state.recordings.get(&recording_key(scope, recording_id)).cloned())
+    }
+
+    fn set_recording_consent(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        participant: &PrincipalRef,
+        consent_state: RecordingConsentState,
+        now_unix_ms: i64,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| apply_recording_consent(current, participant, consent_state, now_unix_ms),
+        )
+    }
+
+    fn start_recording(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| start_recording(current, now_unix_ms),
+        )
+    }
+
+    fn stop_recording(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| stop_recording(current, now_unix_ms),
+        )
+    }
+
+    fn expire_recording(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| expire_recording(current, now_unix_ms),
+        )
+    }
+
+    fn delete_recording(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| delete_recording(current, now_unix_ms),
+        )
+    }
 }
 
 impl UniversalConferenceStore for MemoryLocalStore {
