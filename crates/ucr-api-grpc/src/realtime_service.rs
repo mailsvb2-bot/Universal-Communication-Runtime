@@ -254,7 +254,7 @@ where
                     };
                     conference_runtime(self)
                         .set_subscriptions(&actor, &set)
-                        .map_err(map_conference_error)?;
+                        .map_err(|error| map_conference_error(&error))?;
                     Ok(pb_acknowledgement(acknowledgement_for(
                         claims.session_id.as_opaque().clone(),
                     )))
@@ -299,15 +299,14 @@ where
                         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
                     let outcome = conference_runtime(self)
                         .forward(&actor_for(&claims), device_id, &envelope, &*self.registry)
-                        .map_err(map_conference_error)?;
-                    if outcome.accepted_recipients > 0 {
-                        if let Some(transition) = self
+                        .map_err(|error| map_conference_error(&error))?;
+                    if outcome.accepted_recipients > 0
+                        && let Some(transition) = self
                             .registry
                             .mark_media_ready(&claims, self.now()?)
                             .map_err(map_registry_error)?
-                        {
-                            self.append_attendance(&transition)?;
-                        }
+                    {
+                        self.append_attendance(&transition)?;
                     }
                     let accepted_recipient_count = u32::try_from(outcome.accepted_recipients)
                         .map_err(|_| CanonicalError::new(CanonicalErrorCode::ResourceExhausted))?;
@@ -396,7 +395,7 @@ where
         let actor = actor_for(claims);
         let snapshot = conference_runtime(self)
             .snapshot(&actor, &claims.scope, &claims.call_id)
-            .map_err(map_conference_error)?;
+            .map_err(|error| map_conference_error(&error))?;
         let accepted = snapshot.call.participants.iter().any(|participant| {
             participant.principal == claims.participant
                 && participant.state == CallParticipantState::Accepted
@@ -830,11 +829,11 @@ const fn map_registry_error(error: RealtimeRegistryError) -> CanonicalError {
     }
 }
 
-fn map_conference_error(error: ConferenceError) -> CanonicalError {
+fn map_conference_error(error: &ConferenceError) -> CanonicalError {
     match error {
         ConferenceError::Protocol(_) => CanonicalError::new(CanonicalErrorCode::InvalidArgument),
-        ConferenceError::Authorization(error) => error,
-        ConferenceError::Store(error) => map_store_error(error),
+        ConferenceError::Authorization(error) => *error,
+        ConferenceError::Store(error) => map_store_error(*error),
         ConferenceError::CapabilityUnavailable | ConferenceError::GroupCryptoUnavailable => {
             CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)
         }
