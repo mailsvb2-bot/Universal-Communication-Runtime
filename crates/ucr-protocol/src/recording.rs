@@ -70,14 +70,21 @@ pub fn validate_recording_session(
         }
     }
 
+    let any_explicit_denial = session.consents.iter().any(|consent| {
+        matches!(
+            consent.state,
+            RecordingConsentState::Denied | RecordingConsentState::Revoked
+        )
+    });
     let all_required_consents_granted = !session.policy.require_all_participant_consent
         || session
             .consents
             .iter()
             .all(|consent| consent.state == RecordingConsentState::Granted);
+    let recording_allowed = all_required_consents_granted && !any_explicit_denial;
     match session.state {
         RecordingState::WaitingForConsent => {
-            if !session.policy.require_all_participant_consent || all_required_consents_granted {
+            if recording_allowed {
                 return Err(RecordingProtocolError::InvalidSession);
             }
             if session.started_at_unix_ms.is_some() || session.stopped_at_unix_ms.is_some() {
@@ -85,7 +92,7 @@ pub fn validate_recording_session(
             }
         }
         RecordingState::Ready => {
-            if !all_required_consents_granted
+            if !recording_allowed
                 || session.started_at_unix_ms.is_some()
                 || session.stopped_at_unix_ms.is_some()
             {
@@ -93,7 +100,7 @@ pub fn validate_recording_session(
             }
         }
         RecordingState::Active => {
-            if !all_required_consents_granted
+            if !recording_allowed
                 || session.started_at_unix_ms.is_none()
                 || session.stopped_at_unix_ms.is_some()
             {
@@ -147,11 +154,19 @@ pub fn apply_recording_consent(
         next.state = RecordingState::Stopped;
         next.stopped_at_unix_ms = Some(now_unix_ms);
     } else if next.state != RecordingState::Active {
+        let any_explicit_denial = next.consents.iter().any(|consent| {
+            matches!(
+                consent.state,
+                RecordingConsentState::Denied | RecordingConsentState::Revoked
+            )
+        });
         let all_granted = next
             .consents
             .iter()
             .all(|consent| consent.state == RecordingConsentState::Granted);
-        next.state = if !next.policy.require_all_participant_consent || all_granted {
+        next.state = if (!next.policy.require_all_participant_consent || all_granted)
+            && !any_explicit_denial
+        {
             RecordingState::Ready
         } else {
             RecordingState::WaitingForConsent
