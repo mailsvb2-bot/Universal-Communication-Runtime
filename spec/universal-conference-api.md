@@ -28,6 +28,12 @@ Every conference read or mutation is scoped by both `TenantScope` and `Integrati
 
 The public role vocabulary is `owner`, `host`, `moderator`, `speaker`, `attendee`. Role and media policy must be server-enforced; UI labels are never authorization evidence. Group membership remains canonical membership. Any role projection must fail closed if it conflicts with current membership.
 
+## Participant removal and role reconciliation
+
+Removing a non-owner participant first makes the Universal profile inactive and revokes managed realtime permissions, then removes the participant from any non-terminated canonical Call and finally applies an MLS-backed Group `RemoveMember`. This ordering is fail-closed: access is denied before cryptographic membership cleanup, and a retry can complete any later canonical cleanup. The active conference owner cannot be removed through ordinary participant removal because doing so would orphan the Person-owned Group.
+
+Role changes are reconciled into the canonical Group on the next runtime preparation. Host/moderator project to Group admin, speaker/attendee to Group member, and an actual Group role change is applied through the MLS-backed `ChangeRole` transition so the crypto epoch advances with the security-sensitive authorization change.
+
 ## Runtime materialization
 
 `PrepareConferenceRuntime` is the integration-facing reconcile operation that turns coordinator metadata into canonical realtime state. It does not create a second Group, MLS, or Call owner: the stable `conference_id` is used as the canonical Group handle, OpenMLS state is created/advanced through `GroupMlsAtomicStore`, and signalling is created/updated through `CallStore`.
