@@ -48,6 +48,64 @@ impl GroupCallLookupStore for MemoryLocalStore {
             })
             .collect()
     }
+
+    fn active_calls_for_group(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<CallSession>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let Some(group) = state
+            .groups
+            .values()
+            .find(|group| group.scope == *scope && group.group_id == *group_id)
+        else {
+            return Ok(Vec::new());
+        };
+        let mut call_ids = state
+            .calls
+            .values()
+            .filter(|call| {
+                call.scope == *scope
+                    && call.conversation == group.conversation
+                    && call.signalling_state != CallSignallingState::Terminated
+            })
+            .map(|call| call.call_id.clone())
+            .collect::<Vec<_>>();
+        call_ids.sort_by(|left, right| left.as_opaque().as_str().cmp(right.as_opaque().as_str()));
+        call_ids.truncate(max_items);
+        call_ids
+            .into_iter()
+            .map(|call_id| {
+                validated_call_from_state(&state, scope, &call_id)?
+                    .ok_or(DurableStoreError::Corrupt)
+            })
+            .collect()
+    }
+
+    fn call_belongs_to_group(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        call_id: &CallId,
+    ) -> Result<bool, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let Some(group) = state
+            .groups
+            .values()
+            .find(|group| group.scope == *scope && group.group_id == *group_id)
+        else {
+            return Ok(false);
+        };
+        let Some(call) = validated_call_from_state(&state, scope, call_id)? else {
+            return Ok(false);
+        };
+        Ok(call.conversation == group.conversation)
+    }
 }
 
 impl CallStore for MemoryLocalStore {
