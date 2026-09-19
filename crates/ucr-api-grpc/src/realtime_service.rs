@@ -136,9 +136,14 @@ where
         let request = decode_realtime_lookup(request.into_inner());
         let result = match (token, request) {
             (Ok(token), Ok((scope, call_id, session_id))) => self
-                .redeemed_claims(&token, &scope, &call_id, &session_id)
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
                     self.require_accepted_conference_participant(&claims)?;
+                    let redeemed =
+                        self.redeemed_claims(&token, &scope, &call_id, &session_id)?;
+                    if redeemed != claims {
+                        return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+                    }
                     let now = self.now()?;
                     let outcome = self
                         .registry
