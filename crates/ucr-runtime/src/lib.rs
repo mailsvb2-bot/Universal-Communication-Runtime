@@ -8,9 +8,10 @@ use tonic::transport::Server;
 use ucr_api_grpc::{
     GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
     GrpcIntegrationService, GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService,
-    call_service_server, conference_service_server, device_service_server, event_service_server,
-    group_service_server, integration_service_server, realtime_service_server,
-    store_forward_service_server, sync_service_server,
+    GrpcUniversalConferenceService, call_service_server, conference_service_server,
+    device_service_server, event_service_server, group_service_server, integration_service_server,
+    realtime_service_server, store_forward_service_server, sync_service_server,
+    universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{StorageHealth, StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock};
@@ -188,6 +189,13 @@ impl ProductionRuntime {
                 Arc::clone(&authorization),
                 Arc::clone(&store),
             )))
+            .add_service(universal_conference_service_server(
+                GrpcUniversalConferenceService::new(
+                    Arc::clone(&clock),
+                    Arc::clone(&authorization),
+                    Arc::clone(&store),
+                ),
+            ))
             .add_service(event_service_server(GrpcEventService::new(
                 Arc::clone(&clock),
                 event_clock,
@@ -285,6 +293,13 @@ impl ProductionRuntime {
                 registry,
                 conference_state,
             )))
+            .add_service(universal_conference_service_server(
+                GrpcUniversalConferenceService::new(
+                    Arc::clone(&clock),
+                    Arc::clone(&authorization),
+                    Arc::clone(&store),
+                ),
+            ))
             .add_service(event_service_server(GrpcEventService::new(
                 Arc::clone(&clock),
                 event_clock,
