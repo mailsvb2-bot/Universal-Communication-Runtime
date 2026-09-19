@@ -77,6 +77,22 @@ pub trait UniversalConferenceStore: StorageProvider {
         participant: &PrincipalRef,
     ) -> Result<Option<UniversalConferenceParticipantProfile>, DurableStoreError>;
 
+    /// Resolves one integration-owned participant by the caller's stable external user reference.
+    ///
+    /// The exact key (scope, conference, integration, external user) is unique. Absence is not an
+    /// error and implementations must never return an arbitrary principal when the durable key is
+    /// ambiguous.
+    ///
+    /// # Errors
+    /// Rejects malformed lookup keys and returns explicit durable-store failures or corruption.
+    fn universal_conference_participant_for_external(
+        &self,
+        scope: &TenantScope,
+        conference_id: &GroupId,
+        integration_id: &IntegrationId,
+        external_user_id: &[u8],
+    ) -> Result<Option<UniversalConferenceParticipantProfile>, DurableStoreError>;
+
     /// Lists a bounded participant projection set for one conference.
     ///
     /// # Errors
