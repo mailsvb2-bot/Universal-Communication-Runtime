@@ -1,8 +1,6 @@
 use std::collections::HashSet;
 
-use ucr_model::{
-    PrincipalRef, RecordingConsentState, RecordingSession, RecordingState,
-};
+use ucr_model::{PrincipalRef, RecordingConsentState, RecordingSession, RecordingState};
 
 pub const MIN_RECORDING_RETENTION_SECONDS: u64 = 60;
 pub const MAX_RECORDING_RETENTION_SECONDS: u64 = 31_536_000;
