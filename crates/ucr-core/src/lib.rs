@@ -10,6 +10,7 @@ mod mesh;
 mod organization;
 mod personal_node;
 mod recovery_workflow;
+mod recording;
 mod service_auth;
 mod service_request;
 mod store_forward;
@@ -54,6 +55,7 @@ pub use recovery_workflow::{
     RecoveryPlanIngress, RecoveryRequestGate, ReverifiedDeviceActivationStore,
     authorize_and_activate_reverified_device, authorize_and_stage_recovered_device,
 };
+pub use recording::RecordingStore;
 pub use service_auth::{
     ServiceAuthenticationError, ServiceCredentialIssueError, ServiceCredentialSecret,
     authenticate_service_principal, issue_service_credential,
