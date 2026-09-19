@@ -33,7 +33,7 @@ use ucr_model::{
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
 pub use authorized_runtime::AuthorizedDurableRuntime;
-pub use call::CallStore;
+pub use call::{CallStore, GroupCallLookupStore};
 pub use event_api::{
     EventApiIngress, EventCursorRejection, EventDeliveryClock, EventDeliveryClockError,
     EventWebhookDeliveryError, EventWebhookDispatcher, EventWebhookSink, SystemEventDeliveryClock,
