@@ -29,6 +29,23 @@ const CLIENT_HTML: &str = include_str!("../static/client.html");
 type HttpBody = UnsyncBoxBody<Bytes, Infallible>;
 type HttpResponse = Response<HttpBody>;
 
+#[derive(Debug, Clone, Copy)]
+struct GatewayFailure {
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+}
+
+impl GatewayFailure {
+    const fn new(status: StatusCode, code: &'static str, message: &'static str) -> Self {
+        Self { status, code, message }
+    }
+
+    fn into_response(self) -> HttpResponse {
+        api_error(self.status, self.code, self.message)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct AppState {
     upstream: Channel,
@@ -36,10 +53,14 @@ struct AppState {
 
 #[derive(Debug, Deserialize)]
 struct SessionRequest {
-    tenant_id: String,
-    namespace_id: Option<String>,
-    call_id: String,
-    session_id: String,
+    #[serde(rename = "tenant_id")]
+    tenant: String,
+    #[serde(rename = "namespace_id")]
+    namespace: Option<String>,
+    #[serde(rename = "call_id")]
+    call: String,
+    #[serde(rename = "session_id")]
+    session: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,33 +171,33 @@ async fn handle_request(
 
     let token = match bearer_from_headers(request.headers()) {
         Ok(token) => token,
-        Err(response) => return Ok(response),
+        Err(error) => return Ok(error.into_response()),
     };
     let body = match bounded_body(request.into_body()).await {
         Ok(body) => body,
-        Err(response) => return Ok(response),
+        Err(error) => return Ok(error.into_response()),
     };
 
     let response = match path.as_str() {
         "/v1/realtime/join" => match decode_json::<SessionRequest>(&body) {
             Ok(input) => join(&state, &token, input).await,
-            Err(response) => response,
+            Err(error) => error.into_response(),
         },
         "/v1/realtime/heartbeat" => match decode_json::<HeartbeatRequest>(&body) {
             Ok(input) => heartbeat(&state, &token, input).await,
-            Err(response) => response,
+            Err(error) => error.into_response(),
         },
         "/v1/realtime/leave" => match decode_json::<SessionRequest>(&body) {
             Ok(input) => leave(&state, &token, input).await,
-            Err(response) => response,
+            Err(error) => error.into_response(),
         },
         "/v1/realtime/media/publish" => match decode_json::<PublishRequest>(&body) {
             Ok(input) => publish_media(&state, &token, input).await,
-            Err(response) => response,
+            Err(error) => error.into_response(),
         },
         "/v1/realtime/media/stream" => match decode_json::<SessionRequest>(&body) {
             Ok(input) => subscribe_media(&state, &token, input).await,
-            Err(response) => response,
+            Err(error) => error.into_response(),
         },
         _ => api_error(
             StatusCode::NOT_FOUND,
@@ -192,11 +213,11 @@ async fn join(state: &AppState, token: &str, input: SessionRequest) -> HttpRespo
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeJoinRequest {
         scope: Some(pb_scope(&input)),
-        call_id: Some(pb_id(&input.call_id)),
-        session_id: Some(pb_id(&input.session_id)),
+        call_id: Some(pb_id(&input.call)),
+        session_id: Some(pb_id(&input.session)),
     });
-    if let Err(response) = attach_bearer(&mut request, token) {
-        return response;
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
     }
 
     match client.join_realtime(request).await {
@@ -214,7 +235,7 @@ async fn join(state: &AppState, token: &str, input: SessionRequest) -> HttpRespo
                 "realtime join rejected",
             ),
         },
-        Err(status) => grpc_error(status),
+        Err(status) => grpc_error(&status),
     }
 }
 
@@ -222,12 +243,12 @@ async fn heartbeat(state: &AppState, token: &str, input: HeartbeatRequest) -> Ht
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeHeartbeatRequest {
         scope: Some(pb_scope(&input.session)),
-        call_id: Some(pb_id(&input.session.call_id)),
-        session_id: Some(pb_id(&input.session.session_id)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
         expected_session_sequence: input.expected_session_sequence,
     });
-    if let Err(response) = attach_bearer(&mut request, token) {
-        return response;
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
     }
 
     match client.heartbeat_realtime(request).await {
@@ -241,7 +262,7 @@ async fn heartbeat(state: &AppState, token: &str, input: HeartbeatRequest) -> Ht
                 "realtime heartbeat rejected",
             ),
         },
-        Err(status) => grpc_error(status),
+        Err(status) => grpc_error(&status),
     }
 }
 
@@ -249,11 +270,11 @@ async fn leave(state: &AppState, token: &str, input: SessionRequest) -> HttpResp
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeLeaveRequest {
         scope: Some(pb_scope(&input)),
-        call_id: Some(pb_id(&input.call_id)),
-        session_id: Some(pb_id(&input.session_id)),
+        call_id: Some(pb_id(&input.call)),
+        session_id: Some(pb_id(&input.session)),
     });
-    if let Err(response) = attach_bearer(&mut request, token) {
-        return response;
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
     }
 
     match client.leave_realtime(request).await {
@@ -267,41 +288,35 @@ async fn leave(state: &AppState, token: &str, input: SessionRequest) -> HttpResp
                 "realtime leave rejected",
             ),
         },
-        Err(status) => grpc_error(status),
+        Err(status) => grpc_error(&status),
     }
 }
 
 async fn publish_media(state: &AppState, token: &str, input: PublishRequest) -> HttpResponse {
-    let bytes = match STANDARD.decode(input.envelope_base64.as_bytes()) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_media",
-                "invalid base64 media envelope",
-            );
-        }
+    let Ok(bytes) = STANDARD.decode(input.envelope_base64.as_bytes()) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_media",
+            "invalid base64 media envelope",
+        );
     };
-    let envelope = match pb::SfuForwardEnvelope::decode(bytes.as_slice()) {
-        Ok(envelope) => envelope,
-        Err(_) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_media",
-                "invalid protobuf media envelope",
-            );
-        }
+    let Ok(envelope) = pb::SfuForwardEnvelope::decode(bytes.as_slice()) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_media",
+            "invalid protobuf media envelope",
+        );
     };
 
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimePublishMediaRequest {
         scope: Some(pb_scope(&input.session)),
-        call_id: Some(pb_id(&input.session.call_id)),
-        session_id: Some(pb_id(&input.session.session_id)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
         envelope: Some(envelope),
     });
-    if let Err(response) = attach_bearer(&mut request, token) {
-        return response;
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
     }
 
     match client.publish_media(request).await {
@@ -319,7 +334,7 @@ async fn publish_media(state: &AppState, token: &str, input: PublishRequest) -> 
                 "encrypted media publish rejected",
             ),
         },
-        Err(status) => grpc_error(status),
+        Err(status) => grpc_error(&status),
     }
 }
 
@@ -327,16 +342,16 @@ async fn subscribe_media(state: &AppState, token: &str, input: SessionRequest) -
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeSubscribeMediaRequest {
         scope: Some(pb_scope(&input)),
-        call_id: Some(pb_id(&input.call_id)),
-        session_id: Some(pb_id(&input.session_id)),
+        call_id: Some(pb_id(&input.call)),
+        session_id: Some(pb_id(&input.session)),
     });
-    if let Err(response) = attach_bearer(&mut request, token) {
-        return response;
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
     }
 
     let response = match client.subscribe_media(request).await {
         Ok(response) => response,
-        Err(status) => return grpc_error(status),
+        Err(status) => return grpc_error(&status),
     };
     let mut stream = response.into_inner();
     let (sender, receiver) = mpsc::channel::<Bytes>(32);
@@ -374,9 +389,9 @@ async fn subscribe_media(state: &AppState, token: &str, input: SessionRequest) -
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
-async fn bounded_body(body: Incoming) -> Result<Bytes, HttpResponse> {
+async fn bounded_body(body: Incoming) -> Result<Bytes, GatewayFailure> {
     let collected = body.collect().await.map_err(|_| {
-        api_error(
+        GatewayFailure::new(
             StatusCode::BAD_REQUEST,
             "invalid_body",
             "could not read request body",
@@ -384,7 +399,7 @@ async fn bounded_body(body: Incoming) -> Result<Bytes, HttpResponse> {
     })?;
     let bytes = collected.to_bytes();
     if bytes.len() > MAX_REQUEST_BODY_BYTES {
-        return Err(api_error(
+        return Err(GatewayFailure::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             "body_too_large",
             "realtime request body exceeds the bounded limit",
@@ -393,12 +408,12 @@ async fn bounded_body(body: Incoming) -> Result<Bytes, HttpResponse> {
     Ok(bytes)
 }
 
-fn decode_json<T>(body: &[u8]) -> Result<T, HttpResponse>
+fn decode_json<T>(body: &[u8]) -> Result<T, GatewayFailure>
 where
     T: for<'de> Deserialize<'de>,
 {
     serde_json::from_slice(body).map_err(|_| {
-        api_error(
+        GatewayFailure::new(
             StatusCode::BAD_REQUEST,
             "invalid_json",
             "invalid realtime request JSON",
@@ -406,23 +421,23 @@ where
     })
 }
 
-fn bearer_from_headers(headers: &hyper::HeaderMap) -> Result<String, HttpResponse> {
+fn bearer_from_headers(headers: &hyper::HeaderMap) -> Result<String, GatewayFailure> {
     let value = headers.get(AUTHORIZATION).ok_or_else(|| {
-        api_error(
+        GatewayFailure::new(
             StatusCode::UNAUTHORIZED,
             "missing_token",
             "missing realtime bearer token",
         )
     })?;
     let value = value.to_str().map_err(|_| {
-        api_error(
+        GatewayFailure::new(
             StatusCode::BAD_REQUEST,
             "invalid_token",
             "invalid realtime bearer token",
         )
     })?;
     let token = value.strip_prefix("Bearer ").ok_or_else(|| {
-        api_error(
+        GatewayFailure::new(
             StatusCode::BAD_REQUEST,
             "invalid_token",
             "invalid realtime bearer token",
@@ -430,7 +445,7 @@ fn bearer_from_headers(headers: &hyper::HeaderMap) -> Result<String, HttpRespons
     })?;
     if token.is_empty() || token.len() > MAX_BEARER_BYTES || token.chars().any(char::is_whitespace)
     {
-        return Err(api_error(
+        return Err(GatewayFailure::new(
             StatusCode::BAD_REQUEST,
             "invalid_token",
             "invalid realtime bearer token",
@@ -443,10 +458,10 @@ fn client(state: &AppState) -> pb::realtime_service_client::RealtimeServiceClien
     pb::realtime_service_client::RealtimeServiceClient::new(state.upstream.clone())
 }
 
-fn attach_bearer<T>(request: &mut GrpcRequest<T>, token: &str) -> Result<(), HttpResponse> {
+fn attach_bearer<T>(request: &mut GrpcRequest<T>, token: &str) -> Result<(), GatewayFailure> {
     let bearer = format!("Bearer {token}");
     let value = MetadataValue::try_from(bearer.as_str()).map_err(|_| {
-        api_error(
+        GatewayFailure::new(
             StatusCode::BAD_REQUEST,
             "invalid_token",
             "invalid realtime bearer token",
@@ -458,8 +473,8 @@ fn attach_bearer<T>(request: &mut GrpcRequest<T>, token: &str) -> Result<(), Htt
 
 fn pb_scope(input: &SessionRequest) -> pb::TenantScope {
     pb::TenantScope {
-        tenant_id: Some(pb_id(&input.tenant_id)),
-        namespace_id: input.namespace_id.as_deref().map(pb_id),
+        tenant_id: Some(pb_id(&input.tenant)),
+        namespace_id: input.namespace.as_deref().map(pb_id),
     }
 }
 
@@ -469,7 +484,7 @@ fn pb_id(value: &str) -> pb::OpaqueId {
     }
 }
 
-fn grpc_error(status: tonic::Status) -> HttpResponse {
+fn grpc_error(status: &tonic::Status) -> HttpResponse {
     let http = match status.code() {
         tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
         tonic::Code::Unauthenticated => StatusCode::UNAUTHORIZED,
@@ -495,7 +510,7 @@ fn api_ok(
 ) -> HttpResponse {
     json_response(
         StatusCode::OK,
-        ApiResponse {
+        &ApiResponse {
             ok: true,
             code,
             message: message.into(),
@@ -509,7 +524,7 @@ fn api_ok(
 fn api_error(status: StatusCode, code: &'static str, message: impl Into<String>) -> HttpResponse {
     json_response(
         status,
-        ApiResponse {
+        &ApiResponse {
             ok: false,
             code,
             message: message.into(),
@@ -520,8 +535,8 @@ fn api_error(status: StatusCode, code: &'static str, message: impl Into<String>)
     )
 }
 
-fn json_response(status: StatusCode, payload: ApiResponse) -> HttpResponse {
-    let bytes = serde_json::to_vec(&payload).unwrap_or_else(|_| {
+fn json_response(status: StatusCode, payload: &ApiResponse) -> HttpResponse {
+    let bytes = serde_json::to_vec(payload).unwrap_or_else(|_| {
         b"{\"ok\":false,\"code\":\"internal\",\"message\":\"response encoding failed\",\"expires_at_unix_ms\":null,\"heartbeat_interval_ms\":null,\"accepted_recipient_count\":null}".to_vec()
     });
     Response::builder()
