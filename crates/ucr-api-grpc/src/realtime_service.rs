@@ -13,8 +13,9 @@ use ucr_core::{
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
-    ActorId, ActorKind, ActorRef, CallId, CallParticipantState, ConferenceMediaSubscription,
-    ConferenceSubscriptionSet, CorrelationContext, CryptoSuite, DeviceId, DeviceLifecycleState,
+    ActorId, ActorKind, ActorRef, CallId, CallParticipantState, CallSignal, CallSignalKind,
+    ConferenceMediaSubscription, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
+    DeviceId, DeviceLifecycleState,
     DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
     GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalKind, ScopedPrincipal,
     SessionId, SfuForwardEnvelope, TenantScope,
@@ -138,7 +139,7 @@ where
             (Ok(token), Ok((scope, call_id, session_id))) => self
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
-                    self.require_accepted_conference_participant(&claims)?;
+                    self.ensure_accepted_conference_participant_for_join(&claims)?;
                     let redeemed = self.redeemed_claims(&token, &scope, &call_id, &session_id)?;
                     if redeemed != claims {
                         return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
@@ -418,6 +419,60 @@ where
         Ok(claims)
     }
 
+    fn ensure_accepted_conference_participant_for_join(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<(), CanonicalError> {
+        const MAX_JOIN_ACCEPT_ATTEMPTS: usize = 4;
+        let actor = actor_for(claims);
+        for _ in 0..MAX_JOIN_ACCEPT_ATTEMPTS {
+            let snapshot = conference_runtime(self)
+                .snapshot(&actor, &claims.scope, &claims.call_id)
+                .map_err(|error| map_conference_error(&error))?;
+            let participant = snapshot
+                .call
+                .participants
+                .iter()
+                .find(|participant| {
+                    participant.principal == claims.participant
+                        && participant.left_revision.is_none()
+                })
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+            match participant.state {
+                CallParticipantState::Accepted => {
+                    return self.require_active_universal_participant(claims, &snapshot.group_id);
+                }
+                CallParticipantState::Invited | CallParticipantState::Ringing => {}
+                CallParticipantState::Rejected
+                | CallParticipantState::Busy
+                | CallParticipantState::Left => {
+                    return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+                }
+            }
+            self.require_active_universal_participant(claims, &snapshot.group_id)?;
+            let event_id = EventId::from_opaque(
+                OpaqueId::new(format!(
+                    "rj-{}",
+                    claims.session_id.as_opaque().as_str()
+                ))
+                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+            );
+            let signal = CallSignal {
+                event_id,
+                scope: claims.scope.clone(),
+                call_id: claims.call_id.clone(),
+                expected_revision: snapshot.call.revision,
+                kind: CallSignalKind::Accept,
+            };
+            match self.store.apply_call_signal(&actor, &signal) {
+                Ok(_) => continue,
+                Err(DurableStoreError::Conflict) => continue,
+                Err(error) => return Err(map_store_error(error)),
+            }
+        }
+        Err(CanonicalError::new(CanonicalErrorCode::Conflict))
+    }
+
     fn require_accepted_conference_participant(
         &self,
         claims: &RealtimeSessionClaims,
@@ -434,9 +489,17 @@ where
         if !accepted {
             return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
         }
+        self.require_active_universal_participant(claims, &snapshot.group_id)
+    }
+
+    fn require_active_universal_participant(
+        &self,
+        claims: &RealtimeSessionClaims,
+        group_id: &GroupId,
+    ) -> Result<(), CanonicalError> {
         let Some(conference) = self
             .store
-            .universal_conference_profile(&claims.scope, &snapshot.group_id)
+            .universal_conference_profile(&claims.scope, group_id)
             .map_err(map_store_error)?
         else {
             return Ok(());
@@ -446,11 +509,7 @@ where
         }
         let participant = self
             .store
-            .universal_conference_participant(
-                &claims.scope,
-                &snapshot.group_id,
-                &claims.participant,
-            )
+            .universal_conference_participant(&claims.scope, group_id, &claims.participant)
             .map_err(map_store_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
         if !participant.active {
