@@ -34,6 +34,10 @@ The public role vocabulary is `owner`, `host`, `moderator`, `speaker`, `attendee
 
 Join grants are short-lived and conference-scoped. The contract reserves single-use/reusable policy, explicit not-before/not-after bounds and revocation. Runtime implementations must reject unsupported semantics rather than silently weakening them.
 
+## Capability discovery
+
+`GetCapabilities` exposes the canonical prepared media/conference capabilities plus explicit runtime-readiness flags. Capability discovery must not claim production readiness for browser realtime, WebRTC, TURN, recording, or horizontal SFU until the corresponding implementation and conformance evidence exist. A prepared protocol capability is not the same thing as a production deployment feature.
+
 ## Attendance
 
 `GetParticipantAttendance` is integration-scoped and addressed by `external_user_id`. It returns first join, last leave, first media-ready time, join/reconnect/media-ready counts, current connection duration and total connected duration.
