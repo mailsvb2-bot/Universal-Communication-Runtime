@@ -21,6 +21,7 @@ mod organization_store;
 mod permission_store;
 mod personal_node_store;
 mod principal_identity_binding_store;
+mod recording_store;
 mod recovery_plan;
 mod replay;
 mod service_control_store;
@@ -73,7 +74,8 @@ const SQLITE_SCHEMA_V28: u32 = 28;
 const SQLITE_SCHEMA_V29: u32 = 29;
 const SQLITE_SCHEMA_V30: u32 = 30;
 const SQLITE_SCHEMA_V31: u32 = 31;
-pub const SQLITE_SCHEMA_VERSION: u32 = 32;
+const SQLITE_SCHEMA_V32: u32 = 32;
+pub const SQLITE_SCHEMA_VERSION: u32 = 33;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -455,7 +457,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return universal_conference_store::verify_schema_v32(connection);
+        return recording_store::verify_schema_v33(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -497,11 +499,12 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V29 => migrate_v29_to_v30(connection)?,
             SQLITE_SCHEMA_V30 => migrate_v30_to_v31(connection)?,
             SQLITE_SCHEMA_V31 => migrate_v31_to_v32(connection)?,
+            SQLITE_SCHEMA_V32 => migrate_v32_to_v33(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    universal_conference_store::verify_schema_v32(connection)
+    recording_store::verify_schema_v33(connection)
 }
 
 fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -562,6 +565,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     personal_node_store::create_v30_objects(&transaction)?;
     organization_store::create_v31_objects(&transaction)?;
     universal_conference_store::create_v32_objects(&transaction)?;
+    recording_store::create_v33_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1038,12 +1042,27 @@ fn migrate_v31_to_v32(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     universal_conference_store::create_v32_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V32)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     universal_conference_store::verify_schema_v32(connection)
+}
+
+fn migrate_v32_to_v33(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    universal_conference_store::verify_schema_v32(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    recording_store::create_v33_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    recording_store::verify_schema_v33(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1338,7 +1357,16 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v33_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS recording_consents;
+         DROP TABLE IF EXISTS recordings;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v32_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v33_objects(connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS universal_conference_participants;
          DROP TABLE IF EXISTS universal_conferences;",
