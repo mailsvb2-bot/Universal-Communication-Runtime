@@ -57,7 +57,6 @@ fn universal_conference_contract_reserves_required_roles_join_and_lifecycle_sema
     }
 }
 
-
 #[test]
 fn universal_conference_management_is_integration_scoped() {
     let proto = read("proto/ucr/v1/universal_conference.proto");
