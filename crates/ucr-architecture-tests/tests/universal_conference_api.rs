@@ -115,3 +115,26 @@ fn universal_conference_credentials_are_bound_to_integration_identity() {
     );
     assert!(service.contains("CanonicalErrorCode::PermissionDenied"));
 }
+
+#[test]
+fn universal_conference_capability_discovery_is_explicit_and_truthful() {
+    let proto = read("proto/ucr/v1/universal_conference.proto");
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    let spec = read("spec/universal-conference-api.md");
+    assert!(proto.contains("rpc GetCapabilities"));
+    for field in [
+        "browser_realtime_gateway",
+        "production_webrtc",
+        "turn",
+        "recording",
+        "horizontal_sfu",
+    ] {
+        assert!(proto.contains(field), "missing capability readiness field {field}");
+    }
+    assert!(service.contains("browser_realtime_gateway: false"));
+    assert!(service.contains("production_webrtc: false"));
+    assert!(service.contains("turn: false"));
+    assert!(service.contains("recording: false"));
+    assert!(service.contains("horizontal_sfu: false"));
+    assert!(spec.contains("must not claim production readiness"));
+}
