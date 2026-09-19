@@ -2246,6 +2246,38 @@ impl EventJournalStore for MemoryLocalStore {
         state.event_order.push(key);
         Ok(EventAppendStatus::Appended)
     }
+
+    fn events_for_types(
+        &self,
+        scope: &TenantScope,
+        event_types: &[&str],
+        max_items: usize,
+    ) -> Result<Vec<EventEnvelope>, DurableStoreError> {
+        if event_types.is_empty()
+            || event_types.len() > 16
+            || event_types.iter().any(|event_type| event_type.is_empty())
+            || max_items == 0
+            || max_items > 16_384
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut events = Vec::with_capacity(max_items.min(256));
+        for key in &state.event_order {
+            let event = state.events.get(key).ok_or(DurableStoreError::Corrupt)?;
+            if event.scope == *scope
+                && event_types
+                    .iter()
+                    .any(|event_type| *event_type == event.event_type)
+            {
+                events.push(event.clone());
+                if events.len() == max_items {
+                    break;
+                }
+            }
+        }
+        Ok(events)
+    }
 }
 
 impl EventSubscriptionStore for MemoryLocalStore {
