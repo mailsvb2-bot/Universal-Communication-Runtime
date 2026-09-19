@@ -11,8 +11,8 @@ use ucr_core::{
 };
 use ucr_model::{
     AuthorizationRequest, CallId, CallParticipantState, CallSignallingState, CommandEnvelope,
-    CommandId, ConferenceParticipantRole, ConferenceScheduleMetadata, CorrelationContext,
-    DeviceId, DeviceLifecycleState, ExternalIdentityBinding, GroupId, IdentityEvidence, IdentityId,
+    CommandId, ConferenceParticipantRole, ConferenceScheduleMetadata, CorrelationContext, DeviceId,
+    DeviceLifecycleState, ExternalIdentityBinding, GroupId, IdentityEvidence, IdentityId,
     IdentityOwnership, IdentityRecord, IntegrationId, OpaqueId, PrincipalId,
     PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal,
     SessionId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
@@ -937,8 +937,12 @@ where
     )?;
 
     let binding = resolve_external_participant_identity(store, &input, &stable_command_id)?;
-    let participant =
-        resolve_person_principal(store, &input.scope, &binding.identity_id, &stable_command_id)?;
+    let participant = resolve_person_principal(
+        store,
+        &input.scope,
+        &binding.identity_id,
+        &stable_command_id,
+    )?;
 
     let (audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed) =
         participant_defaults(conference.mode, input.role);
