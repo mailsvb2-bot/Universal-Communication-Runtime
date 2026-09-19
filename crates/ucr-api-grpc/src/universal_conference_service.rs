@@ -1242,12 +1242,7 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::Internal));
     }
     let mut person_principals = store
-        .principal_identity_bindings_for_identity_kind(
-            scope,
-            identity_id,
-            PrincipalKind::Person,
-            2,
-        )
+        .principal_identity_bindings_for_identity_kind(scope, identity_id, PrincipalKind::Person, 2)
         .map_err(map_store_error)?
         .into_iter();
     match (person_principals.next(), person_principals.next()) {
@@ -3175,8 +3170,8 @@ mod universal_runtime_tests {
     };
 
     use ucr_core::{
-        CallStore, DeviceLifecycleStore, GroupCallLookupStore, GroupStore, IdentityStore,
-        PrincipalIdentityBindingStore, UniversalConferenceStore,
+        CallStore, DeviceLifecycleStore, GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore,
+        IdentityStore, PrincipalIdentityBindingStore, UniversalConferenceStore,
     };
     use ucr_model::{
         CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
