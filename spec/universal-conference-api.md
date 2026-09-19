@@ -28,6 +28,12 @@ Every conference read or mutation is scoped by both `TenantScope` and `Integrati
 
 The public role vocabulary is `owner`, `host`, `moderator`, `speaker`, `attendee`. Role and media policy must be server-enforced; UI labels are never authorization evidence. Group membership remains canonical membership. Any role projection must fail closed if it conflicts with current membership.
 
+## Participant device enrollment
+
+`EnsureParticipantDevice` gives an already ensured external participant exactly one canonical active UCR Device when no device lifecycle exists yet. The public response exposes only the integration's `external_user_id` and readiness state; canonical `DeviceId` remains internal.
+
+Enrollment is deliberately conservative: multiple active devices are a conflict, and an existing stale/reverification-required/expired/revoked device is not silently replaced. Recovery and reverification remain explicit canonical flows. This server-managed device lifecycle is a prerequisite for MLS/Call orchestration, but it must not be presented as proof that browser WebRTC, TURN, or endpoint-held production E2EE is ready.
+
 ## Join grants
 
 `IssueJoinGrant` accepts external user identity and resolves canonical Identity/Principal/Device inside UCR. The integrator is not required to submit `PrincipalRef` or `DeviceId`.
