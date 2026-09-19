@@ -255,9 +255,7 @@ where
                 Ok(conference) => pb::universal_get_conference_response::Result::Conference(
                     pb_conference(&conference),
                 ),
-                Err(error) => {
-                    pb::universal_get_conference_response::Result::Error(pb_error(error))
-                }
+                Err(error) => pb::universal_get_conference_response::Result::Error(pb_error(error)),
             }),
         }))
     }
@@ -274,8 +272,8 @@ where
             (
                 Ok((credential_id, secret)),
                 Ok((scope, conference_id, integration_id, target, idempotency_key)),
-            ) => {
-                self.admit(
+            ) => self
+                .admit(
                     &scope,
                     &credential_id,
                     &secret,
@@ -307,8 +305,7 @@ where
                             current.entry_open,
                         )
                         .map_err(map_store_error)
-                })
-            }
+                }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::UniversalConferenceLifecycleResponse {
@@ -791,7 +788,13 @@ fn decode_revoke_join_grant(
 fn decode_lifecycle_request(
     value: pb::UniversalConferenceLifecycleRequest,
 ) -> Result<
-    (TenantScope, GroupId, IntegrationId, UniversalConferenceLifecycle, String),
+    (
+        TenantScope,
+        GroupId,
+        IntegrationId,
+        UniversalConferenceLifecycle,
+        String,
+    ),
     CanonicalError,
 > {
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
