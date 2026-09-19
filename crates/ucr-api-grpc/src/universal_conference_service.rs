@@ -4,8 +4,8 @@ use prost::Message;
 use tonic::{Request, Response, Status};
 use ucr_core::{
     AuthorizationEvaluator, CommandAcceptanceStore, DurableStoreError, ServiceAuditStore,
-    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock,
-    ServiceQuotaStore, UniversalConferenceStore, generate_opaque_id,
+    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
+    ServiceQuotaClock, ServiceQuotaStore, UniversalConferenceStore, generate_opaque_id,
 };
 use ucr_model::{
     AuthorizationRequest, CommandEnvelope, CommandId, ConferenceScheduleMetadata,
@@ -145,11 +145,9 @@ where
 
         Ok(Response::new(pb::UniversalCreateConferenceResponse {
             result: Some(match result {
-                Ok(conference) => {
-                    pb::universal_create_conference_response::Result::Conference(
-                        pb_conference(&conference),
-                    )
-                }
+                Ok(conference) => pb::universal_create_conference_response::Result::Conference(
+                    pb_conference(&conference),
+                ),
                 Err(error) => {
                     pb::universal_create_conference_response::Result::Error(pb_error(error))
                 }
@@ -165,12 +163,7 @@ where
         let decoded = decode_resolve(request.into_inner());
         let result = match (credentials, decoded) {
             (Ok((credential_id, secret)), Ok((scope, integration_id, external_id))) => self
-                .admit(
-                    &scope,
-                    &credential_id,
-                    &secret,
-                    CONFERENCE_READ_PERMISSION,
-                )
+                .admit(&scope, &credential_id, &secret, CONFERENCE_READ_PERMISSION)
                 .and_then(|_| {
                     self.store
                         .universal_conference_profile_for_external(
@@ -186,11 +179,9 @@ where
 
         Ok(Response::new(pb::UniversalResolveConferenceResponse {
             result: Some(match result {
-                Ok(conference) => {
-                    pb::universal_resolve_conference_response::Result::Conference(
-                        pb_conference(&conference),
-                    )
-                }
+                Ok(conference) => pb::universal_resolve_conference_response::Result::Conference(
+                    pb_conference(&conference),
+                ),
                 Err(error) => {
                     pb::universal_resolve_conference_response::Result::Error(pb_error(error))
                 }
@@ -392,7 +383,9 @@ struct CreateInput {
     schedule: ConferenceScheduleMetadata,
 }
 
-fn decode_create(value: pb::UniversalCreateConferenceRequest) -> Result<CreateInput, CanonicalError> {
+fn decode_create(
+    value: pb::UniversalCreateConferenceRequest,
+) -> Result<CreateInput, CanonicalError> {
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     validate_external_id(&value.external_conference_id)?;
@@ -592,9 +585,7 @@ fn pb_conference(value: &UniversalConferenceProfile) -> pb::UniversalConferenceD
             UniversalConferenceMode::AudioRoom => pb::UniversalConferenceMode::AudioRoom,
         }) as i32,
         lifecycle: (match value.lifecycle {
-            UniversalConferenceLifecycle::Scheduled => {
-                pb::UniversalConferenceLifecycle::Scheduled
-            }
+            UniversalConferenceLifecycle::Scheduled => pb::UniversalConferenceLifecycle::Scheduled,
             UniversalConferenceLifecycle::Waiting => pb::UniversalConferenceLifecycle::Waiting,
             UniversalConferenceLifecycle::Live => pb::UniversalConferenceLifecycle::Live,
             UniversalConferenceLifecycle::Ending => pb::UniversalConferenceLifecycle::Ending,
