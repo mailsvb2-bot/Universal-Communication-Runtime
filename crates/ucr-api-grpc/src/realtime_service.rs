@@ -136,7 +136,7 @@ where
         let request = decode_realtime_lookup(request.into_inner());
         let result = match (token, request) {
             (Ok(token), Ok((scope, call_id, session_id))) => self
-                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .redeemed_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
                     self.require_accepted_conference_participant(&claims)?;
                     let now = self.now()?;
@@ -374,6 +374,25 @@ where
         self.clock
             .now_unix_ms()
             .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))
+    }
+
+    fn redeemed_claims(
+        &self,
+        token: &str,
+        scope: &TenantScope,
+        call_id: &CallId,
+        session_id: &SessionId,
+    ) -> Result<RealtimeSessionClaims, CanonicalError> {
+        let claims = self
+            .join_issuer
+            .redeem(token, self.now()?)
+            .map_err(map_join_token_error)?;
+        if claims.scope != *scope || claims.call_id != *call_id || claims.session_id != *session_id
+        {
+            return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+        }
+        validate_device_claim(&*self.store, &claims)?;
+        Ok(claims)
     }
 
     fn authenticated_claims(
@@ -869,9 +888,18 @@ const fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
         JoinTokenError::Malformed
         | JoinTokenError::InvalidSignature
         | JoinTokenError::NotYetValid
-        | JoinTokenError::Expired => CanonicalError::new(CanonicalErrorCode::Unauthenticated),
-        JoinTokenError::InvalidBaseUrl | JoinTokenError::InvalidTtl => {
-            CanonicalError::new(CanonicalErrorCode::InvalidArgument)
+        | JoinTokenError::Expired
+        | JoinTokenError::UnknownGrant
+        | JoinTokenError::Revoked
+        | JoinTokenError::AlreadyUsed => CanonicalError::new(CanonicalErrorCode::Unauthenticated),
+        JoinTokenError::InvalidBaseUrl
+        | JoinTokenError::InvalidTtl
+        | JoinTokenError::InvalidWindow => CanonicalError::new(CanonicalErrorCode::InvalidArgument),
+        JoinTokenError::CapacityExceeded => {
+            CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
+        }
+        JoinTokenError::StateUnavailable => {
+            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
         }
         JoinTokenError::ClockOverflow
         | JoinTokenError::RandomUnavailable
