@@ -385,6 +385,21 @@ pub trait IdentityDeviceLookupStore: StorageProvider {
         identity_id: &IdentityId,
         max_items: usize,
     ) -> Result<Vec<DeviceDescriptor>, DurableStoreError>;
+
+    /// Lists only active canonical Devices owned by one Identity.
+    ///
+    /// Revoked and reverification-required history must not consume this bound. Integration-facing
+    /// conference flows use this projection when they need the current device set rather than
+    /// durable lifecycle history.
+    ///
+    /// # Errors
+    /// Rejects zero/unbounded limits and explicit durable-store failures.
+    fn active_devices_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<DeviceDescriptor>, DurableStoreError>;
 }
 
 /// Storage health is explicit and never inferred from successful construction.
