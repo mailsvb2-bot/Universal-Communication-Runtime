@@ -135,6 +135,21 @@ pub(super) fn verify_schema_v32(connection: &Connection) -> Result<(), DurableSt
     if !external_participant_index_exists {
         return Err(DurableStoreError::Corrupt);
     }
+    let duplicate_active_owner_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM universal_conference_participants
+                WHERE active = 1 AND role = 'owner'
+                GROUP BY tenant_id, namespace_present, namespace_id, conference_id
+                HAVING COUNT(*) > 1
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if duplicate_active_owner_exists {
+        return Err(DurableStoreError::Corrupt);
+    }
     let mut foreign_key_check = connection
         .prepare("PRAGMA foreign_key_check")
         .map_err(|error| map_sqlite_error(&error))?;
@@ -339,6 +354,14 @@ impl UniversalConferenceStore for SqliteLocalStore {
             };
         }
 
+        ensure_unique_active_owner(
+            &transaction,
+            &participant.scope,
+            &participant.conference_id,
+            &participant.participant,
+            participant.role,
+            participant.active,
+        )?;
         insert_participant(&transaction, participant)?;
         transaction
             .commit()
@@ -420,6 +443,14 @@ impl UniversalConferenceStore for SqliteLocalStore {
         if current.revision != expected_revision {
             return Err(DurableStoreError::Conflict);
         }
+        ensure_unique_active_owner(
+            &transaction,
+            scope,
+            conference_id,
+            participant,
+            role,
+            active,
+        )?;
 
         let next_revision = expected_revision
             .checked_add(1)
@@ -497,6 +528,44 @@ fn insert_profile(
         )
         .map_err(|error| map_sqlite_error(&error))?;
     Ok(())
+}
+
+fn ensure_unique_active_owner(
+    connection: &Connection,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    participant: &PrincipalRef,
+    role: ConferenceParticipantRole,
+    active: bool,
+) -> Result<(), DurableStoreError> {
+    if !active || role != ConferenceParticipantRole::Owner {
+        return Ok(());
+    }
+    let namespace = namespace_storage_key(scope);
+    let conflicting_owner_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM universal_conference_participants
+                WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
+                  AND conference_id = ?4 AND active = 1 AND role = 'owner'
+                  AND NOT (principal_kind = ?5 AND principal_id = ?6)
+            )",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                conference_id.as_opaque().as_str(),
+                principal_kind_text(participant.kind),
+                participant.principal_id.as_opaque().as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if conflicting_owner_exists {
+        Err(DurableStoreError::Conflict)
+    } else {
+        Ok(())
+    }
 }
 
 fn insert_participant(
