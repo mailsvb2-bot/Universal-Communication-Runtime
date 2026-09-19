@@ -331,3 +331,17 @@ fn universal_conference_attendance_filters_principal_before_history_bound() {
     assert!(service.contains(".events_for_types_by_principal("));
     assert!(service.contains("&participant.participant"));
 }
+
+
+#[test]
+fn realtime_browser_gateway_enforces_exact_origin_policy() {
+    let gateway = read("crates/ucr-realtime-web/src/main.rs");
+
+    assert!(gateway.contains("UCR_REALTIME_ALLOWED_ORIGINS"));
+    assert!(gateway.contains("request_origin("));
+    assert!(gateway.contains("origin_denied"));
+    assert!(gateway.contains("ACCESS_CONTROL_ALLOW_ORIGIN"));
+    assert!(gateway.contains("candidate == \"*\""));
+    assert!(gateway.contains("origin == format!(\"https://{host}\")"));
+    assert!(gateway.contains("origin == format!(\"http://{host}\")"));
+}
