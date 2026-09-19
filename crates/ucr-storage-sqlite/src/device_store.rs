@@ -424,8 +424,8 @@ mod tests {
     use ucr_core::{
         DeviceLifecycleStore, DeviceReverificationGate, DeviceReverificationVerificationError,
         DeviceReverificationVerifier, DurableStoreError, IdentityDeviceLookupStore,
-        ReverifiedDeviceActivationStore,
-        StorageProvider, TrustedSigningKeyStore, authorize_and_activate_reverified_device,
+        ReverifiedDeviceActivationStore, StorageProvider, TrustedSigningKeyStore,
+        authorize_and_activate_reverified_device,
     };
     use ucr_crypto::{TrustedKeyResolutionError, TrustedSigningKeyResolver};
     use ucr_model::{
