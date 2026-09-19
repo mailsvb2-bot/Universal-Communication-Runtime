@@ -22,8 +22,10 @@ use ucr_protocol::{
     CONFERENCE_ATTENDANCE_READ_PERMISSION, CONFERENCE_CREATE_PERMISSION,
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
-    CONFERENCE_READ_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceiptStatus,
-    acknowledgement_for,
+    CONFERENCE_READ_PERMISSION, CanonicalError, CanonicalErrorCode, CapabilityMaturity,
+    CommandReceiptStatus, MAX_CALL_PARTICIPANTS, acknowledgement_for, canonical_capabilities,
+    phase20_audio_capabilities, phase21_video_capabilities, phase22_media_e2ee_capabilities,
+    phase29_sfu_capabilities, phase30_conference_capabilities,
 };
 use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
@@ -686,6 +688,36 @@ where
             },
         ))
     }
+
+    async fn get_capabilities(
+        &self,
+        request: Request<pb::UniversalGetCapabilitiesRequest>,
+    ) -> Result<Response<pb::UniversalGetCapabilitiesResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let decoded = decode_capabilities_request(request.into_inner());
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok((scope, integration_id))) => self
+                .admit_integration(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    &integration_id,
+                    CONFERENCE_READ_PERMISSION,
+                )
+                .and_then(|_| universal_capabilities()),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::UniversalGetCapabilitiesResponse {
+            result: Some(match result {
+                Ok(capabilities) => {
+                    pb::universal_get_capabilities_response::Result::Capabilities(capabilities)
+                }
+                Err(error) => {
+                    pb::universal_get_capabilities_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
 }
 
 struct EnsureParticipantInput {
@@ -889,6 +921,15 @@ fn decode_participant_attendance(
         GroupId::from_opaque(decode_opaque(value.conference_id)?),
         IntegrationId::from_opaque(decode_opaque(value.integration_id)?),
         value.external_user_id,
+    ))
+}
+
+fn decode_capabilities_request(
+    value: pb::UniversalGetCapabilitiesRequest,
+) -> Result<(TenantScope, IntegrationId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        IntegrationId::from_opaque(decode_opaque(value.integration_id)?),
     ))
 }
 
@@ -1594,6 +1635,49 @@ where
         .revoke(scope, session_id)
         .map(|_| ())
         .map_err(map_join_token_error)
+}
+
+fn universal_capabilities() -> Result<pb::UniversalConferenceCapabilities, CanonicalError> {
+    let mut capabilities = phase20_audio_capabilities();
+    capabilities.extend(phase21_video_capabilities());
+    capabilities.extend(phase22_media_e2ee_capabilities());
+    capabilities.extend(phase29_sfu_capabilities());
+    capabilities.extend(phase30_conference_capabilities());
+    let capabilities = canonical_capabilities(&capabilities)
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    Ok(pb::UniversalConferenceCapabilities {
+        capabilities: capabilities.iter().map(pb_capability).collect(),
+        max_participants: u32::try_from(MAX_CALL_PARTICIPANTS)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+        browser_realtime_gateway: false,
+        production_webrtc: false,
+        turn: false,
+        recording: false,
+        horizontal_sfu: false,
+    })
+}
+
+fn pb_capability(value: &ucr_model::CapabilityDescriptor) -> pb::Capability {
+    pb::Capability {
+        id: value.id.clone(),
+        maturity: (match value.maturity {
+            CapabilityMaturity::Experimental => pb::CapabilityMaturity::Experimental,
+            CapabilityMaturity::Prepared => pb::CapabilityMaturity::Prepared,
+            CapabilityMaturity::Beta => pb::CapabilityMaturity::Beta,
+            CapabilityMaturity::Production => pb::CapabilityMaturity::Production,
+            CapabilityMaturity::Deprecated => pb::CapabilityMaturity::Deprecated,
+            CapabilityMaturity::Disabled => pb::CapabilityMaturity::Disabled,
+        }) as i32,
+        extensions: value
+            .extensions
+            .iter()
+            .map(|extension| pb::Extension {
+                name: extension.name.clone(),
+                critical: extension.critical,
+                payload: extension.payload.clone(),
+            })
+            .collect(),
+    }
 }
 
 const ATTENDANCE_EVENT_TYPES: [&str; 4] = [
