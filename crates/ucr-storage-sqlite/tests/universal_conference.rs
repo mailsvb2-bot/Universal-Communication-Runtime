@@ -165,7 +165,6 @@ fn create_idempotency_key_conflicts_when_semantics_change() {
     cleanup(&path);
 }
 
-
 #[test]
 fn external_participant_reference_is_unique_within_integration_conference() {
     let path = db_path("universal-conference-external-participant");
