@@ -75,12 +75,12 @@ pub use transport_failover::{
     TransportFailoverPolicy, TransportFailoverStopReason,
 };
 pub use transport_orchestrator::{
+    TransportOrchestrationDecision, TransportResourceSnapshot, TransportRouteDecision,
+    TransportRouteTelemetry, TransportRoutingHint,
+};
 pub use universal_conference::{
     ConferenceParticipantRole, ConferenceScheduleMetadata, UniversalConferenceLifecycle,
     UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
-};
-    TransportOrchestrationDecision, TransportResourceSnapshot, TransportRouteDecision,
-    TransportRouteTelemetry, TransportRoutingHint,
 };
 pub use video::{EncodedVideoFrame, VideoCodecConfig, VideoSourceKind, VideoStreamDescriptor};
 
