@@ -38,7 +38,11 @@ struct GatewayFailure {
 
 impl GatewayFailure {
     const fn new(status: StatusCode, code: &'static str, message: &'static str) -> Self {
-        Self { status, code, message }
+        Self {
+            status,
+            code,
+            message,
+        }
     }
 
     fn into_response(self) -> HttpResponse {
