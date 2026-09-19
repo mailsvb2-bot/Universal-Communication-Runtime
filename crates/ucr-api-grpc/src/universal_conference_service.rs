@@ -697,6 +697,44 @@ fn decode_list_participants(
     Ok((scope, conference_id, max_items))
 }
 
+fn decode_issue_join_grant(
+    value: pb::UniversalIssueJoinGrantRequest,
+) -> Result<IssueJoinGrantInput, CanonicalError> {
+    let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
+    let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
+    if value.external_user_id.is_empty() || value.external_user_id.len() > 512 {
+        return Err(invalid_argument());
+    }
+    let use_policy = match pb::JoinGrantUsePolicy::try_from(value.use_policy)
+        .map_err(|_| invalid_argument())?
+    {
+        pb::JoinGrantUsePolicy::Unspecified => return Err(invalid_argument()),
+        pb::JoinGrantUsePolicy::SingleUse => RealtimeJoinGrantUsePolicy::SingleUse,
+        pb::JoinGrantUsePolicy::Reusable => RealtimeJoinGrantUsePolicy::Reusable,
+    };
+    Ok(IssueJoinGrantInput {
+        scope,
+        conference_id,
+        integration_id,
+        external_user_id: value.external_user_id,
+        ttl_seconds: value.ttl_seconds,
+        use_policy,
+        not_before_unix_ms: value.not_before_unix_ms,
+        not_after_unix_ms: value.not_after_unix_ms,
+    })
+}
+
+fn decode_revoke_join_grant(
+    value: pb::UniversalRevokeJoinGrantRequest,
+) -> Result<(TenantScope, GroupId, SessionId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        GroupId::from_opaque(decode_opaque(value.conference_id)?),
+        SessionId::from_opaque(decode_opaque(value.session_id)?),
+    ))
+}
+
 fn decode_lifecycle_request(
     value: pb::UniversalConferenceLifecycleRequest,
 ) -> Result<(TenantScope, GroupId, UniversalConferenceLifecycle, String), CanonicalError> {
