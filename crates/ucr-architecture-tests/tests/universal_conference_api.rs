@@ -213,7 +213,9 @@ fn universal_conference_live_capacity_uses_active_storage_projection() {
     let core = read("crates/ucr-core/src/universal_conference.rs");
     let spec = read("spec/universal-conference-api.md");
 
-    assert!(service.contains("MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS: usize = MAX_CALL_PARTICIPANTS + 1"));
+    assert!(
+        service.contains("MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS: usize = MAX_CALL_PARTICIPANTS + 1")
+    );
     assert!(service.contains("active_universal_conference_participants"));
     assert!(service.contains("participants.len() > MAX_CALL_PARTICIPANTS"));
     assert!(sqlite.contains("ensure_participant_capacity"));
