@@ -180,6 +180,55 @@ impl IdentityDeviceLookupStore for SqliteLocalStore {
         }
         Ok(devices)
     }
+
+    fn active_devices_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<DeviceDescriptor>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        let namespace = namespace_storage_key(scope);
+        let limit = i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT device_id, state FROM devices
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND identity_id=?4 AND state='active'
+                 ORDER BY device_id
+                 LIMIT ?5",
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    identity_id.as_opaque().as_str(),
+                    limit,
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let mut devices = Vec::new();
+        for row in rows {
+            let (device_id, state) = row.map_err(|error| map_sqlite_error(&error))?;
+            let state = decode_state(&state)?;
+            if state != DeviceLifecycleState::Active {
+                return Err(DurableStoreError::Corrupt);
+            }
+            devices.push(DeviceDescriptor {
+                device_id: DeviceId::from_opaque(decode_id(&device_id)?),
+                identity_id: identity_id.clone(),
+                state,
+            });
+        }
+        Ok(devices)
+    }
 }
 
 impl ReverifiedDeviceActivationStore for SqliteLocalStore {
