@@ -11,10 +11,10 @@ use ucr_core::{
 };
 use ucr_model::{
     AuthorizationRequest, CommandEnvelope, CommandId, ConferenceParticipantRole,
-    ConferenceScheduleMetadata, CorrelationContext, ExternalIdentityBinding, GroupId, IdentityEvidence,
-    IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, OpaqueId, PrincipalId,
-    PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal,
-    TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
+    ConferenceScheduleMetadata, CorrelationContext, ExternalIdentityBinding, GroupId,
+    IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, OpaqueId,
+    PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion,
+    ScopedPrincipal, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
     UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
@@ -250,11 +250,9 @@ where
         };
         Ok(Response::new(pb::UniversalConferenceLifecycleResponse {
             result: Some(match result {
-                Ok(conference) => {
-                    pb::universal_conference_lifecycle_response::Result::Conference(
-                        pb_conference(&conference),
-                    )
-                }
+                Ok(conference) => pb::universal_conference_lifecycle_response::Result::Conference(
+                    pb_conference(&conference),
+                ),
                 Err(error) => {
                     pb::universal_conference_lifecycle_response::Result::Error(pb_error(error))
                 }
@@ -271,8 +269,11 @@ where
         let payload = body.encode_to_vec();
         let decoded = decode_entry_request(body);
         let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok((scope, conference_id, entry_open, idempotency_key))) => {
-                self.admit(
+            (
+                Ok((credential_id, secret)),
+                Ok((scope, conference_id, entry_open, idempotency_key)),
+            ) => self
+                .admit(
                     &scope,
                     &credential_id,
                     &secret,
@@ -303,20 +304,15 @@ where
                             entry_open,
                         )
                         .map_err(map_store_error)
-                })
-            }
+                }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::UniversalSetEntryOpenResponse {
             result: Some(match result {
-                Ok(conference) => {
-                    pb::universal_set_entry_open_response::Result::Conference(
-                        pb_conference(&conference),
-                    )
-                }
-                Err(error) => {
-                    pb::universal_set_entry_open_response::Result::Error(pb_error(error))
-                }
+                Ok(conference) => pb::universal_set_entry_open_response::Result::Conference(
+                    pb_conference(&conference),
+                ),
+                Err(error) => pb::universal_set_entry_open_response::Result::Error(pb_error(error)),
             }),
         }))
     }
@@ -342,11 +338,9 @@ where
         };
         Ok(Response::new(pb::UniversalEnsureParticipantResponse {
             result: Some(match result {
-                Ok(participant) => {
-                    pb::universal_ensure_participant_response::Result::Participant(
-                        pb_participant(&participant),
-                    )
-                }
+                Ok(participant) => pb::universal_ensure_participant_response::Result::Participant(
+                    pb_participant(&participant),
+                ),
                 Err(error) => {
                     pb::universal_ensure_participant_response::Result::Error(pb_error(error))
                 }
@@ -650,7 +644,10 @@ where
         (Some(_), Some(_)) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
         (None, _) => {
             let principal = PrincipalRef {
-                principal_id: PrincipalId::from_opaque(derived_id("principal", &stable_command_id)?),
+                principal_id: PrincipalId::from_opaque(derived_id(
+                    "principal",
+                    &stable_command_id,
+                )?),
                 kind: PrincipalKind::Person,
             };
             let principal_binding = PrincipalIdentityBinding {
