@@ -8088,7 +8088,7 @@ impl UniversalConferenceStore for MemoryLocalStore {
             .universal_conference_participants
             .iter()
             .filter(|((candidate_scope, candidate_conference, _), _)| {
-                *candidate_scope == scope_key_value && candidate_conference == conference
+                candidate_scope == &scope_key_value && candidate_conference == conference
             })
             .map(|(_, profile)| profile.clone())
             .take(max_items)
