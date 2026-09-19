@@ -16,7 +16,7 @@ use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipantState, ConferenceMediaSubscription,
     ConferenceSubscriptionSet, CorrelationContext, CryptoSuite, DeviceId, DeviceLifecycleState,
     DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalKind, PrincipalRef,
+    GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalKind,
     ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope,
 };
 use ucr_protocol::{
@@ -888,7 +888,7 @@ fn status_from_canonical(error: CanonicalError) -> Status {
         CanonicalErrorCode::InvalidArgument => tonic::Code::InvalidArgument,
         CanonicalErrorCode::CapabilityMismatch => tonic::Code::FailedPrecondition,
         CanonicalErrorCode::IntegrityFailure => tonic::Code::DataLoss,
-        CanonicalErrorCode::UnsupportedVersion => tonic::Code::Unimplemented,
+        CanonicalErrorCode::UnsupportedProtocolVersion => tonic::Code::Unimplemented,
         CanonicalErrorCode::Internal => tonic::Code::Internal,
     };
     Status::new(code, "realtime request rejected")
