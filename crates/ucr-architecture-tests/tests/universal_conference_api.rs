@@ -75,6 +75,7 @@ fn universal_conference_management_is_integration_scoped() {
         "UniversalRemoveParticipantRequest",
         "UniversalListParticipantsRequest",
         "UniversalRevokeJoinGrantRequest",
+        "UniversalGetParticipantAttendanceRequest",
     ] {
         let start = format!("message {message} {{");
         let block = proto
@@ -89,4 +90,18 @@ fn universal_conference_management_is_integration_scoped() {
             "{message} must remain integration-scoped"
         );
     }
+}
+
+
+#[test]
+fn universal_conference_attendance_is_external_reference_projection() {
+    let proto = read("proto/ucr/v1/universal_conference.proto");
+    let spec = read("spec/universal-conference-api.md");
+    assert!(proto.contains("rpc GetParticipantAttendance"));
+    assert!(proto.contains("first_join_at_unix_ms"));
+    assert!(proto.contains("last_leave_at_unix_ms"));
+    assert!(proto.contains("total_connected_seconds"));
+    assert!(proto.contains("current_connected_seconds"));
+    assert!(proto.contains("external_user_id"));
+    assert!(spec.contains("projection over the canonical Event journal"));
 }
