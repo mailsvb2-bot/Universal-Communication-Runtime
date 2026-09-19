@@ -17,7 +17,8 @@ use ucr_core::{
     CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore, ConversationStore,
     DeliveryStore, DeviceLifecycleStore, DeviceReverificationProof, DurableRecordStatus,
     DurableStoreError, EventAppendStatus, EventJournalStore, EventSubscriptionStore,
-    ExternalIdentityBindingStore, FederationPeerStore, IdentityStore, MessageStore,
+    ExternalIdentityBindingStore, FederationPeerStore, IdentityDeviceLookupStore, IdentityStore,
+    MessageStore,
     PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
     RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
     ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
@@ -564,6 +565,30 @@ impl DeviceLifecycleStore for MemoryLocalStore {
     ) -> Result<Option<DeviceDescriptor>, DurableStoreError> {
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         Ok(state.devices.get(&device_key(scope, device_id)).cloned())
+    }
+}
+
+impl IdentityDeviceLookupStore for MemoryLocalStore {
+    fn devices_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<DeviceDescriptor>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let expected_scope = scope_key(scope);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .devices
+            .iter()
+            .filter(|((candidate_scope, _), descriptor)| {
+                candidate_scope == &expected_scope && descriptor.identity_id == *identity_id
+            })
+            .map(|(_, descriptor)| descriptor.clone())
+            .take(max_items)
+            .collect())
     }
 }
 
