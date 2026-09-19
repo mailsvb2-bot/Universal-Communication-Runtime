@@ -1338,7 +1338,16 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v32_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS universal_conference_participants;
+         DROP TABLE IF EXISTS universal_conferences;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v31_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v32_objects(connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS organization_managed_devices;
          DROP TABLE IF EXISTS organization_managed_identities;
