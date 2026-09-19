@@ -133,22 +133,21 @@ where
         let token = decode_bearer_token(request.metadata());
         let request = decode_realtime_lookup(request.into_inner());
         let result = match (token, request) {
-            (Ok(token), Ok((scope, call_id, session_id))) => {
-                self.authenticated_claims(&token, &scope, &call_id, &session_id)
-                    .and_then(|claims| {
-                        self.require_accepted_conference_participant(&claims)?;
-                        let now = self.now()?;
-                        let outcome = self
-                            .registry
-                            .join(claims.clone(), now)
-                            .map_err(map_registry_error)?;
-                        if let Err(error) = self.append_attendance(&outcome.transition) {
-                            let _ = self.registry.leave(&claims, now);
-                            return Err(error);
-                        }
-                        Ok(pb_realtime_session(&claims))
-                    })
-            }
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    self.require_accepted_conference_participant(&claims)?;
+                    let now = self.now()?;
+                    let outcome = self
+                        .registry
+                        .join(claims.clone(), now)
+                        .map_err(map_registry_error)?;
+                    if let Err(error) = self.append_attendance(&outcome.transition) {
+                        let _ = self.registry.leave(&claims, now);
+                        return Err(error);
+                    }
+                    Ok(pb_realtime_session(&claims))
+                }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RealtimeJoinResponse {
@@ -165,7 +164,8 @@ where
     ) -> Result<Response<pb::RealtimeHeartbeatResponse>, Status> {
         let token = decode_bearer_token(request.metadata());
         let request = request.into_inner();
-        let lookup = decode_realtime_lookup_fields(request.scope, request.call_id, request.session_id);
+        let lookup =
+            decode_realtime_lookup_fields(request.scope, request.call_id, request.session_id);
         let result = match (token, lookup) {
             (Ok(token), Ok((scope, call_id, session_id))) => self
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
@@ -259,14 +259,14 @@ where
                         claims.session_id.as_opaque().clone(),
                     )))
                 }),
-            (Err(error), _, _)
-            | (_, Err(error), _)
-            | (_, _, Err(error)) => Err(error),
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RealtimeSetSubscriptionsResponse {
             result: Some(match result {
                 Ok(acknowledgement) => {
-                    pb::realtime_set_subscriptions_response::Result::Acknowledgement(acknowledgement)
+                    pb::realtime_set_subscriptions_response::Result::Acknowledgement(
+                        acknowledgement,
+                    )
                 }
                 Err(error) => {
                     pb::realtime_set_subscriptions_response::Result::Error(pb_error(error))
@@ -309,19 +309,15 @@ where
                             self.append_attendance(&transition)?;
                         }
                     }
-                    let accepted_recipient_count =
-                        u32::try_from(outcome.accepted_recipients).map_err(|_| {
-                            CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
-                        })?;
+                    let accepted_recipient_count = u32::try_from(outcome.accepted_recipients)
+                        .map_err(|_| CanonicalError::new(CanonicalErrorCode::ResourceExhausted))?;
                     Ok(pb::RealtimePublishMediaReceipt {
                         call_id: Some(pb_opaque(claims.call_id.as_opaque())),
                         session_id: Some(pb_opaque(claims.session_id.as_opaque())),
                         accepted_recipient_count,
                     })
                 }),
-            (Err(error), _, _)
-            | (_, Err(error), _)
-            | (_, _, Err(error)) => Err(error),
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RealtimePublishMediaResponse {
             result: Some(match result {
@@ -348,10 +344,11 @@ where
             .take_downlink(&claims, self.now().map_err(status_from_canonical)?)
             .map_err(map_registry_error)
             .map_err(status_from_canonical)?;
-        let stream = ReceiverStream::new(receiver)
-            .map(|envelope| Ok(pb::RealtimeDownlinkMedia {
+        let stream = ReceiverStream::new(receiver).map(|envelope| {
+            Ok(pb::RealtimeDownlinkMedia {
                 envelope: Some(pb_sfu_forward_envelope(&envelope)),
-            }));
+            })
+        });
         Ok(Response::new(Box::pin(stream)))
     }
 }
@@ -384,7 +381,8 @@ where
             .join_issuer
             .verify(token, self.now()?)
             .map_err(map_join_token_error)?;
-        if claims.scope != *scope || claims.call_id != *call_id || claims.session_id != *session_id {
+        if claims.scope != *scope || claims.call_id != *call_id || claims.session_id != *session_id
+        {
             return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
         }
         validate_device_claim(&*self.store, &claims)?;
@@ -411,10 +409,7 @@ where
         }
     }
 
-    fn append_attendance(
-        &self,
-        transition: &AttendanceTransition,
-    ) -> Result<(), CanonicalError> {
+    fn append_attendance(&self, transition: &AttendanceTransition) -> Result<(), CanonicalError> {
         let event = attendance_event(&*self.store, transition)?;
         self.store
             .append_event(&event)
@@ -546,10 +541,7 @@ fn decode_sfu_forward_envelope(
 ) -> Result<SfuForwardEnvelope, CanonicalError> {
     let frame = value.frame.ok_or_else(invalid_argument)?;
     let header = frame.header.ok_or_else(invalid_argument)?;
-    let nonce: [u8; 24] = frame
-        .nonce
-        .try_into()
-        .map_err(|_| invalid_argument())?;
+    let nonce: [u8; 24] = frame.nonce.try_into().map_err(|_| invalid_argument())?;
     let signature = frame.source_signature.ok_or_else(invalid_argument)?;
     Ok(SfuForwardEnvelope {
         frame: EncryptedGroupMediaFrame {
@@ -801,9 +793,7 @@ const fn pb_attendance_kind(kind: AttendanceTransitionKind) -> i32 {
     match kind {
         AttendanceTransitionKind::Joined => pb::ConferenceAttendanceKind::Joined as i32,
         AttendanceTransitionKind::Left => pb::ConferenceAttendanceKind::Left as i32,
-        AttendanceTransitionKind::Reconnected => {
-            pb::ConferenceAttendanceKind::Reconnected as i32
-        }
+        AttendanceTransitionKind::Reconnected => pb::ConferenceAttendanceKind::Reconnected as i32,
         AttendanceTransitionKind::MediaReady => pb::ConferenceAttendanceKind::MediaReady as i32,
     }
 }
