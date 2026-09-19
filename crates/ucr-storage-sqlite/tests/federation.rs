@@ -155,7 +155,9 @@ fn v28_migration_adds_empty_federation_state_without_inference() {
         let connection = rusqlite::Connection::open(&path).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE universal_conference_participants;
+                "DROP TABLE recording_consents;
+                 DROP TABLE recordings;
+                 DROP TABLE universal_conference_participants;
                  DROP TABLE universal_conferences;
                  DROP TABLE organization_managed_devices;
                  DROP TABLE organization_managed_identities;
