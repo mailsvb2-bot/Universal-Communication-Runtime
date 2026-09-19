@@ -17,6 +17,9 @@ fn universal_conference_contract_hides_internal_ucr_identity_mechanics() {
     assert!(proto.contains("rpc IssueJoinGrant"));
     assert!(proto.contains("external_conference_id"));
     assert!(proto.contains("external_user_id"));
+    assert!(!proto.contains("participant_id"));
+    assert!(!proto.contains("PrincipalRef"));
+    assert!(!proto.contains("DeviceId"));
     assert!(!proto.contains("clientplatform"));
     assert!(!proto.contains("crm"));
 }
