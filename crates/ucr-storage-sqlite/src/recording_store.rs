@@ -166,13 +166,9 @@ impl RecordingStore for SqliteLocalStore {
         consent_state: RecordingConsentState,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError> {
-        transition_recording(
-            self,
-            scope,
-            recording_id,
-            expected_revision,
-            |current| apply_recording_consent(current, participant, consent_state, now_unix_ms),
-        )
+        transition_recording(self, scope, recording_id, expected_revision, |current| {
+            apply_recording_consent(current, participant, consent_state, now_unix_ms)
+        })
     }
 
     fn start_recording(
@@ -182,13 +178,9 @@ impl RecordingStore for SqliteLocalStore {
         expected_revision: u64,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError> {
-        transition_recording(
-            self,
-            scope,
-            recording_id,
-            expected_revision,
-            |current| start_recording(current, now_unix_ms),
-        )
+        transition_recording(self, scope, recording_id, expected_revision, |current| {
+            start_recording(current, now_unix_ms)
+        })
     }
 
     fn stop_recording(
@@ -198,13 +190,9 @@ impl RecordingStore for SqliteLocalStore {
         expected_revision: u64,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError> {
-        transition_recording(
-            self,
-            scope,
-            recording_id,
-            expected_revision,
-            |current| stop_recording(current, now_unix_ms),
-        )
+        transition_recording(self, scope, recording_id, expected_revision, |current| {
+            stop_recording(current, now_unix_ms)
+        })
     }
 
     fn expire_recording(
@@ -214,13 +202,9 @@ impl RecordingStore for SqliteLocalStore {
         expected_revision: u64,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError> {
-        transition_recording(
-            self,
-            scope,
-            recording_id,
-            expected_revision,
-            |current| expire_recording(current, now_unix_ms),
-        )
+        transition_recording(self, scope, recording_id, expected_revision, |current| {
+            expire_recording(current, now_unix_ms)
+        })
     }
 
     fn delete_recording(
@@ -230,13 +214,9 @@ impl RecordingStore for SqliteLocalStore {
         expected_revision: u64,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError> {
-        transition_recording(
-            self,
-            scope,
-            recording_id,
-            expected_revision,
-            |current| delete_recording(current, now_unix_ms),
-        )
+        transition_recording(self, scope, recording_id, expected_revision, |current| {
+            delete_recording(current, now_unix_ms)
+        })
     }
 }
 
@@ -624,7 +604,6 @@ fn decode_u64(value: &[u8]) -> Result<u64, DurableStoreError> {
     Ok(u64::from_be_bytes(bytes))
 }
 
-
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -710,7 +689,11 @@ mod tests {
         )
     }
 
-    fn recording(call: &CallSession, host: &ScopedPrincipal, guest: &ScopedPrincipal) -> RecordingSession {
+    fn recording(
+        call: &CallSession,
+        host: &ScopedPrincipal,
+        guest: &ScopedPrincipal,
+    ) -> RecordingSession {
         RecordingSession {
             scope: scope(),
             recording_id: RecordingId::from_opaque(oid("recording-session")),
