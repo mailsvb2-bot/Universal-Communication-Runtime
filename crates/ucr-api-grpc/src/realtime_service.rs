@@ -106,6 +106,7 @@ where
         + TrustedSigningKeyResolver
         + EventJournalStore
         + UniversalConferenceStore
+        + ConferenceJoinGrantStore
         + 'static,
 {
     pb::realtime_service_server::RealtimeServiceServer::new(service)
@@ -125,6 +126,7 @@ where
         + TrustedSigningKeyResolver
         + EventJournalStore
         + UniversalConferenceStore
+        + ConferenceJoinGrantStore
         + 'static,
 {
     type SubscribeMediaStream =
@@ -993,7 +995,7 @@ const fn pb_attendance_kind(kind: AttendanceTransitionKind) -> i32 {
     }
 }
 
-const fn require_durable_grant_matches_claims(
+fn require_durable_grant_matches_claims(
     record: &ConferenceJoinGrantRecord,
     claims: &RealtimeSessionClaims,
 ) -> Result<(), CanonicalError> {
