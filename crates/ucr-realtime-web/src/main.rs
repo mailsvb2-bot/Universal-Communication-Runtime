@@ -10,7 +10,7 @@ use hyper::{
     body::{Frame, Incoming},
     header::{
         ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
-        AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ORIGIN, VARY,
+        AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HOST, ORIGIN, VARY,
     },
     server::conn::http1,
     service::service_fn,
@@ -269,7 +269,11 @@ fn request_origin(
             "invalid browser Origin header",
         )
     })?;
-    if allowed_origins.iter().any(|allowed| allowed == origin) {
+    let same_origin = headers
+        .get(HOST)
+        .and_then(|host| host.to_str().ok())
+        .is_some_and(|host| origin == format!("https://{host}") || origin == format!("http://{host}"));
+    if same_origin || allowed_origins.iter().any(|allowed| allowed == origin) {
         Ok(Some(origin.to_owned()))
     } else {
         Err(GatewayFailure::new(
@@ -718,6 +722,20 @@ mod tests {
             hyper::header::HeaderValue::from_static("https://evil.example.test"),
         );
         assert!(request_origin(&headers, &allowed).is_err());
+
+        let mut same_origin = hyper::HeaderMap::new();
+        same_origin.insert(
+            ORIGIN,
+            hyper::header::HeaderValue::from_static("http://127.0.0.1:8080"),
+        );
+        same_origin.insert(
+            HOST,
+            hyper::header::HeaderValue::from_static("127.0.0.1:8080"),
+        );
+        assert_eq!(
+            request_origin(&same_origin, &[]).expect("same origin"),
+            Some("http://127.0.0.1:8080".to_owned())
+        );
         assert!(request_origin(&hyper::HeaderMap::new(), &allowed)
             .expect("non-browser request")
             .is_none());
