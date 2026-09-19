@@ -1313,6 +1313,32 @@ where
     }
 }
 
+fn enforce_ensure_owner_role_transition<S>(
+    store: &S,
+    input: &EnsureParticipantInput,
+) -> Result<(), CanonicalError>
+where
+    S: UniversalConferenceStore,
+{
+    let current = store
+        .universal_conference_participant_for_external(
+            &input.scope,
+            &input.conference_id,
+            &input.integration_id,
+            &input.external_user_id,
+        )
+        .map_err(map_store_error)?;
+    enforce_owner_role_transition(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+        &input.external_user_id,
+        current.as_ref(),
+        input.role,
+    )
+}
+
 fn ensure_participant<S>(
     store: &S,
     input: EnsureParticipantInput,
@@ -1336,23 +1362,7 @@ where
     {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
-    let current_external = store
-        .universal_conference_participant_for_external(
-            &input.scope,
-            &input.conference_id,
-            &input.integration_id,
-            &input.external_user_id,
-        )
-        .map_err(map_store_error)?;
-    enforce_owner_role_transition(
-        store,
-        &input.scope,
-        &input.conference_id,
-        &input.integration_id,
-        &input.external_user_id,
-        current_external.as_ref(),
-        input.role,
-    )?;
+    enforce_ensure_owner_role_transition(store, &input)?;
 
     let stable_command_id = accept_mutation_id(
         store,
@@ -1709,9 +1719,8 @@ where
     let mut owners = participants.into_iter().filter(|participant| {
         participant.active && participant.role == ConferenceParticipantRole::Owner
     });
-    let owner = match (owners.next(), owners.next()) {
-        (Some(owner), None) => owner,
-        _ => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    let (Some(owner), None) = (owners.next(), owners.next()) else {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
     };
     let owner_device_id = optional_single_active_device(store, &removed.scope, &owner.participant)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
