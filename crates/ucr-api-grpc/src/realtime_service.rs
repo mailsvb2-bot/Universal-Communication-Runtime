@@ -16,10 +16,10 @@ use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipantState, CallSignal, CallSignalKind,
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
-    ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
-    DeviceId, DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId,
-    GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId,
-    PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope,
+    ConferenceSubscriptionSet, CorrelationContext, CryptoSuite, DeviceId, DeviceLifecycleState,
+    DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
+    GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalKind, ScopedPrincipal,
+    SessionId, SfuForwardEnvelope, TenantScope,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for,

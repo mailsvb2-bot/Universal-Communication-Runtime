@@ -5,20 +5,20 @@ use tonic::{Request, Response, Status};
 use ucr_core::{
     AuthorizationEvaluator, CallStore, CommandAcceptanceStore, ConferenceJoinGrantStore,
     DeviceLifecycleStore, DurableStoreError, EventJournalStore, ExternalIdentityBindingStore,
-    GroupCallLookupStore,
-    GroupStore, IdentityDeviceLookupStore, IdentityStore, PermissionGrantStore,
-    PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, ServiceAuditStore,
-    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
-    ServiceQuotaClock, ServiceQuotaStore, UniversalConferenceStore, generate_opaque_id,
+    GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore, IdentityStore,
+    PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
+    ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
+    ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore, UniversalConferenceStore,
+    generate_opaque_id,
 };
 use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
 use ucr_model::{
     AuthorizationRequest, CallId, CallParticipant, CallParticipantState, CallParticipantUpdateKind,
     CallSession, CallSignal, CallSignalKind, CallSignallingState, CommandEnvelope, CommandId,
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceParticipantRole,
-    ConferenceScheduleMetadata, ConversationId, ConversationKind,
-    ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy, DeviceDescriptor,
-    DeviceId, DeviceLifecycleState, EventId, ExternalIdentityBinding, GroupChange, GroupChangeKind,
+    ConferenceScheduleMetadata, ConversationId, ConversationKind, ConversationRecord,
+    ConversationRef, CorrelationContext, DeliveryPolicy, DeviceDescriptor, DeviceId,
+    DeviceLifecycleState, EventId, ExternalIdentityBinding, GroupChange, GroupChangeKind,
     GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState, GroupOwnership, GroupRecord,
     GroupRole, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
     OpaqueId, PermissionGrant, PermissionScope, PrincipalId, PrincipalIdentityBinding,
@@ -2585,29 +2585,21 @@ where
                 .conference_join_grant(&input.scope, &record.session_id)
                 .map_err(map_store_error)?
                 .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
-            require_join_grant_context(
-                &existing,
-                &record.conference_id,
-                &record.integration_id,
-            )?;
+            require_join_grant_context(&existing, &record.conference_id, &record.integration_id)?;
             pb_join_grant_from_record(issuer, &existing)
         }
         Err(error) => Err(map_store_error(error)),
     }
 }
 
-fn durable_join_use_policy(
-    value: RealtimeJoinGrantUsePolicy,
-) -> ConferenceJoinGrantUsePolicy {
+fn durable_join_use_policy(value: RealtimeJoinGrantUsePolicy) -> ConferenceJoinGrantUsePolicy {
     match value {
         RealtimeJoinGrantUsePolicy::SingleUse => ConferenceJoinGrantUsePolicy::SingleUse,
         RealtimeJoinGrantUsePolicy::Reusable => ConferenceJoinGrantUsePolicy::Reusable,
     }
 }
 
-fn realtime_join_use_policy(
-    value: ConferenceJoinGrantUsePolicy,
-) -> RealtimeJoinGrantUsePolicy {
+fn realtime_join_use_policy(value: ConferenceJoinGrantUsePolicy) -> RealtimeJoinGrantUsePolicy {
     match value {
         ConferenceJoinGrantUsePolicy::SingleUse => RealtimeJoinGrantUsePolicy::SingleUse,
         ConferenceJoinGrantUsePolicy::Reusable => RealtimeJoinGrantUsePolicy::Reusable,
@@ -3654,7 +3646,9 @@ mod universal_runtime_tests {
                 use_policy: JoinGrantUsePolicy::SingleUse,
                 not_before_unix_ms: None,
                 not_after_unix_ms: None,
+                idempotency_key: "flow-join".to_owned(),
             },
+            b"flow-join-payload".to_vec(),
             now_unix_ms,
         )
         .expect("join grant");

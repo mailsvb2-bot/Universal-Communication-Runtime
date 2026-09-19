@@ -148,7 +148,6 @@ pub trait UniversalConferenceStore: StorageProvider {
     ) -> Result<UniversalConferenceParticipantProfile, DurableStoreError>;
 }
 
-
 /// Durable owner for Conference join-grant control state.
 ///
 /// Token signing remains a realtime cryptographic concern; this store owns only the minimum

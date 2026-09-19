@@ -1,6 +1,4 @@
-use crate::{
-    CallId, DeviceId, GroupId, IntegrationId, PrincipalRef, SessionId, TenantScope,
-};
+use crate::{CallId, DeviceId, GroupId, IntegrationId, PrincipalRef, SessionId, TenantScope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UniversalConferenceMode {
