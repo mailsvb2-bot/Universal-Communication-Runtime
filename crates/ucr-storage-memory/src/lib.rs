@@ -8136,6 +8136,22 @@ impl UniversalConferenceStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        let external_conflict = state
+            .universal_conference_participants
+            .values()
+            .find(|existing| {
+                existing.scope == participant.scope
+                    && existing.conference_id == participant.conference_id
+                    && existing.integration_id == participant.integration_id
+                    && existing.external_user_id == participant.external_user_id
+            });
+        if let Some(existing) = external_conflict {
+            return if existing == participant {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
         state
             .universal_conference_participants
             .insert(key, participant.clone());
@@ -8157,6 +8173,35 @@ impl UniversalConferenceStore for MemoryLocalStore {
                 participant,
             ))
             .cloned())
+    }
+
+    fn universal_conference_participant_for_external(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        integration_id: &IntegrationId,
+        external_user_id: &[u8],
+    ) -> Result<Option<UniversalConferenceParticipantProfile>, DurableStoreError> {
+        if external_user_id.is_empty() || external_user_id.len() > 512 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let expected_scope = scope_key(scope);
+        let conference = conference_id.as_opaque().as_str();
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut matching = state
+            .universal_conference_participants
+            .values()
+            .filter(|profile| {
+                scope_key(&profile.scope) == expected_scope
+                    && profile.conference_id.as_opaque().as_str() == conference
+                    && profile.integration_id == *integration_id
+                    && profile.external_user_id == external_user_id
+            });
+        let first = matching.next().cloned();
+        if matching.next().is_some() {
+            return Err(DurableStoreError::Corrupt);
+        }
+        Ok(first)
     }
 
     fn universal_conference_participants(
