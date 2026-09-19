@@ -222,8 +222,7 @@ impl PrincipalIdentityLookupStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         let mut bindings = Vec::new();
         for row in rows {
-            let (principal_id, principal_kind) =
-                row.map_err(|error| map_sqlite_error(&error))?;
+            let (principal_id, principal_kind) = row.map_err(|error| map_sqlite_error(&error))?;
             let binding = PrincipalIdentityBinding {
                 scope: scope.clone(),
                 principal: PrincipalRef {
