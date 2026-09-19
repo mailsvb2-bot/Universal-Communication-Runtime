@@ -62,7 +62,7 @@ message UniversalConferenceDescriptor {
 }
 
 message UniversalConferenceParticipant {
-  OpaqueId participant_id = 1;
+  reserved 1; // Internal PrincipalId is deliberately not exposed by the universal facade.
   bytes external_user_id = 2;
   ConferenceParticipantRole role = 3;
   bool audio_muted = 4;
@@ -163,7 +163,7 @@ message UniversalEnsureParticipantResponse {
 message UniversalUpdateParticipantRequest {
   TenantScope scope = 1;
   OpaqueId conference_id = 2;
-  OpaqueId participant_id = 3;
+  bytes external_user_id = 3;
   optional ConferenceParticipantRole role = 4;
   optional bool audio_muted = 5;
   optional bool camera_allowed = 6;
@@ -183,7 +183,7 @@ message UniversalUpdateParticipantResponse {
 message UniversalRemoveParticipantRequest {
   TenantScope scope = 1;
   OpaqueId conference_id = 2;
-  OpaqueId participant_id = 3;
+  bytes external_user_id = 3;
   string idempotency_key = 4;
   OpaqueId integration_id = 5;
 }
