@@ -46,6 +46,7 @@ pub struct UniversalConferenceProfile {
     pub conference_id: GroupId,
     pub integration_id: IntegrationId,
     pub external_conference_id: Vec<u8>,
+    pub create_idempotency_key: String,
     pub mode: UniversalConferenceMode,
     pub lifecycle: UniversalConferenceLifecycle,
     pub schedule: ConferenceScheduleMetadata,
@@ -65,6 +66,7 @@ impl core::fmt::Debug for UniversalConferenceProfile {
                 "external_conference_id_len",
                 &self.external_conference_id.len(),
             )
+            .field("create_idempotency_key", &"<redacted>")
             .field("mode", &self.mode)
             .field("lifecycle", &self.lifecycle)
             .field("schedule", &self.schedule)
