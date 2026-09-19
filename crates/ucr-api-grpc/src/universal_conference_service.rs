@@ -1550,7 +1550,15 @@ fn remove_participant<S>(
     payload: Vec<u8>,
 ) -> Result<CommandId, CanonicalError>
 where
-    S: UniversalConferenceStore + CommandAcceptanceStore + PermissionGrantStore,
+    S: UniversalConferenceStore
+        + CommandAcceptanceStore
+        + PermissionGrantStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + GroupStore
+        + GroupMlsAtomicStore
+        + CallStore
+        + GroupCallLookupStore,
 {
     let conference = conference_for_integration(
         store,
@@ -1568,6 +1576,10 @@ where
         &input.integration_id,
         &input.external_user_id,
     )?;
+
+    if current.role == ConferenceParticipantRole::Owner {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
 
     let command_id = accept_mutation_id(
         store,
@@ -1596,7 +1608,130 @@ where
         current
     };
     sync_participant_permissions(store, &inactive, conference.mode)?;
+    reconcile_removed_participant(store, &inactive)?;
     Ok(command_id)
+}
+
+fn reconcile_removed_participant<S>(
+    store: &S,
+    removed: &UniversalConferenceParticipantProfile,
+) -> Result<(), CanonicalError>
+where
+    S: UniversalConferenceStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + GroupStore
+        + GroupMlsAtomicStore
+        + CallStore
+        + GroupCallLookupStore,
+{
+    let Some(group) = store
+        .group(&removed.scope, &removed.conference_id)
+        .map_err(map_store_error)?
+    else {
+        return Ok(());
+    };
+    let participants = store
+        .universal_conference_participants(&removed.scope, &removed.conference_id, 1024)
+        .map_err(map_store_error)?;
+    if participants.len() == 1024 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    let mut owners = participants
+        .into_iter()
+        .filter(|participant| {
+            participant.active && participant.role == ConferenceParticipantRole::Owner
+        });
+    let owner = match (owners.next(), owners.next()) {
+        (Some(owner), None) => owner,
+        _ => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    };
+    let owner_device_id = optional_single_active_device(
+        store,
+        &removed.scope,
+        &owner.participant,
+    )?
+    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+    let owner_actor = ScopedPrincipal {
+        scope: removed.scope.clone(),
+        principal: owner.participant,
+    };
+
+    remove_participant_from_calls(store, &owner_actor, removed)?;
+    let membership = store
+        .group_membership(&removed.scope, &group.group_id, &removed.participant)
+        .map_err(map_store_error)?;
+    if !membership.is_some_and(|value| value.state == ucr_model::GroupMemberState::Active) {
+        return Ok(());
+    }
+    let current = store
+        .group(&removed.scope, &group.group_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    let change = GroupChange {
+        event_id: runtime_event_id("gr", current.revision, &removed.participant)?,
+        scope: removed.scope.clone(),
+        group_id: group.group_id,
+        expected_revision: current.revision,
+        kind: GroupChangeKind::RemoveMember {
+            member: removed.participant.clone(),
+        },
+        next_crypto_state: None,
+    };
+    store
+        .apply_mls_backed_group_change(&owner_actor, &owner_device_id, &change, &[])
+        .map_err(|error| map_group_mls_error(&error))?;
+    Ok(())
+}
+
+fn remove_participant_from_calls<S>(
+    store: &S,
+    owner: &ScopedPrincipal,
+    removed: &UniversalConferenceParticipantProfile,
+) -> Result<(), CanonicalError>
+where
+    S: CallStore + GroupCallLookupStore,
+{
+    let calls = store
+        .calls_for_group(&removed.scope, &removed.conference_id, 64)
+        .map_err(map_store_error)?;
+    if calls.len() == 64 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    for mut call in calls
+        .into_iter()
+        .filter(|call| call.signalling_state != CallSignallingState::Terminated)
+    {
+        let present = call.participants.iter().any(|participant| {
+            participant.principal == removed.participant && participant.left_revision.is_none()
+        });
+        if !present {
+            continue;
+        }
+        let signal = CallSignal {
+            event_id: runtime_event_id("cr", call.revision, &removed.participant)?,
+            scope: removed.scope.clone(),
+            call_id: call.call_id.clone(),
+            expected_revision: call.revision,
+            kind: CallSignalKind::ParticipantUpdate {
+                participant: removed.participant.clone(),
+                kind: CallParticipantUpdateKind::Remove,
+            },
+        };
+        store
+            .apply_call_signal(owner, &signal)
+            .map_err(map_store_error)?;
+        call = store
+            .call(&removed.scope, &call.call_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+        if call.participants.iter().any(|participant| {
+            participant.principal == removed.participant && participant.left_revision.is_none()
+        }) {
+            return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+        }
+    }
+    Ok(())
 }
 
 const MANAGED_PARTICIPANT_PERMISSIONS: [&str; 6] = [
