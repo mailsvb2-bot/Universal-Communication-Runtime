@@ -87,6 +87,7 @@ pub struct UniversalConferenceParticipantProfile {
     pub camera_allowed: bool,
     pub publish_audio_allowed: bool,
     pub publish_video_allowed: bool,
+    pub active: bool,
     pub revision: u64,
 }
 
@@ -105,6 +106,7 @@ impl core::fmt::Debug for UniversalConferenceParticipantProfile {
             .field("camera_allowed", &self.camera_allowed)
             .field("publish_audio_allowed", &self.publish_audio_allowed)
             .field("publish_video_allowed", &self.publish_video_allowed)
+            .field("active", &self.active)
             .field("revision", &self.revision)
             .finish()
     }
