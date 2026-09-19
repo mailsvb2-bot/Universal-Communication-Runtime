@@ -1,5 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use ucr_core::{DurableRecordStatus, DurableStoreError, PrincipalIdentityBindingStore};
+use ucr_core::{
+    DurableRecordStatus, DurableStoreError, PrincipalIdentityBindingStore,
+    PrincipalIdentityLookupStore,
+};
 use ucr_model::{
     IdentityId, NamespaceId, OpaqueId, PrincipalId, PrincipalIdentityBinding, PrincipalKind,
     PrincipalRef, TenantId, TenantScope,
@@ -179,6 +182,61 @@ impl PrincipalIdentityBindingStore for SqliteLocalStore {
     ) -> Result<Option<PrincipalIdentityBinding>, DurableStoreError> {
         let connection = self.lock_connection()?;
         load_binding_from(&connection, scope, principal)
+    }
+}
+
+impl PrincipalIdentityLookupStore for SqliteLocalStore {
+    fn principal_identity_bindings_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<PrincipalIdentityBinding>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        let namespace = namespace_storage_key(scope);
+        let limit = i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT principal_id, principal_kind
+                 FROM principal_identity_bindings
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND identity_id=?4
+                 ORDER BY principal_kind, principal_id
+                 LIMIT ?5",
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    identity_id.as_opaque().as_str(),
+                    limit,
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let mut bindings = Vec::new();
+        for row in rows {
+            let (principal_id, principal_kind) =
+                row.map_err(|error| map_sqlite_error(&error))?;
+            let binding = PrincipalIdentityBinding {
+                scope: scope.clone(),
+                principal: PrincipalRef {
+                    principal_id: PrincipalId::from_opaque(parse_id(&principal_id)?),
+                    kind: decode_principal_kind(&principal_kind)?,
+                },
+                identity_id: identity_id.clone(),
+            };
+            validate_principal_identity_binding(&binding)
+                .map_err(|_| DurableStoreError::Corrupt)?;
+            bindings.push(binding);
+        }
+        Ok(bindings)
     }
 }
 
