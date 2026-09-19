@@ -222,7 +222,6 @@ message UniversalListParticipantsRequest {
   OpaqueId conference_id = 2;
   uint32 max_items = 3;
   OpaqueId integration_id = 4;
-  string idempotency_key = 5;
 }
 
 message UniversalParticipantList {
@@ -280,6 +279,7 @@ message UniversalRevokeJoinGrantRequest {
   OpaqueId conference_id = 2;
   OpaqueId session_id = 3;
   OpaqueId integration_id = 4;
+  string idempotency_key = 5;
 }
 
 message UniversalRevokeJoinGrantResponse {

@@ -370,8 +370,12 @@ fn universal_join_grants_are_durable_idempotent_and_restart_safe() {
 
     assert!(proto.contains("message UniversalIssueJoinGrantRequest"));
     assert!(proto.contains("string idempotency_key = 9;"));
-    assert!(proto.contains("message UniversalRevokeJoinGrantRequest"));
-    assert!(proto.contains("string idempotency_key = 5;"));
+    assert!(proto.contains(
+        "message UniversalRevokeJoinGrantRequest {\n  TenantScope scope = 1;\n  OpaqueId conference_id = 2;\n  OpaqueId session_id = 3;\n  OpaqueId integration_id = 4;\n  string idempotency_key = 5;\n}"
+    ));
+    assert!(!proto.contains(
+        "message UniversalListParticipantsRequest {\n  TenantScope scope = 1;\n  OpaqueId conference_id = 2;\n  uint32 max_items = 3;\n  OpaqueId integration_id = 4;\n  string idempotency_key = 5;"
+    ));
     assert!(core.contains("pub trait ConferenceJoinGrantStore"));
     assert!(sqlite.contains("CREATE TABLE conference_join_grants"));
     assert!(service.contains("ucr.conference.join.issue.v1"));
