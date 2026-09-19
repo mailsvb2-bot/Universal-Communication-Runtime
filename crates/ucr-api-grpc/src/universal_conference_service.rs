@@ -602,6 +602,42 @@ where
         }))
     }
 
+    async fn prepare_conference_runtime(
+        &self,
+        request: Request<pb::UniversalPrepareConferenceRuntimeRequest>,
+    ) -> Result<Response<pb::UniversalPrepareConferenceRuntimeResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let payload = body.encode_to_vec();
+        let decoded = decode_prepare_conference_runtime(body);
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok(input)) => self
+                .admit_integration(
+                    &input.scope,
+                    &credential_id,
+                    &secret,
+                    &input.integration_id,
+                    CONFERENCE_MANAGE_PERMISSION,
+                )
+                .and_then(|_| prepare_conference_runtime(&*self.store, &input, payload)),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(
+            pb::UniversalPrepareConferenceRuntimeResponse {
+                result: Some(match result {
+                    Ok(runtime) => {
+                        pb::universal_prepare_conference_runtime_response::Result::Runtime(runtime)
+                    }
+                    Err(error) => {
+                        pb::universal_prepare_conference_runtime_response::Result::Error(pb_error(
+                            error,
+                        ))
+                    }
+                }),
+            },
+        ))
+    }
+
     async fn issue_join_grant(
         &self,
         request: Request<pb::UniversalIssueJoinGrantRequest>,
@@ -804,6 +840,13 @@ struct RemoveParticipantInput {
     idempotency_key: String,
 }
 
+struct PrepareConferenceRuntimeInput {
+    scope: TenantScope,
+    conference_id: GroupId,
+    integration_id: IntegrationId,
+    idempotency_key: String,
+}
+
 struct IssueJoinGrantInput {
     scope: TenantScope,
     conference_id: GroupId,
@@ -945,6 +988,21 @@ fn decode_list_participants(
         return Err(invalid_argument());
     }
     Ok((scope, conference_id, integration_id, max_items))
+}
+
+fn decode_prepare_conference_runtime(
+    value: pb::UniversalPrepareConferenceRuntimeRequest,
+) -> Result<PrepareConferenceRuntimeInput, CanonicalError> {
+    let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
+    let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
+    validate_idempotency_key(&value.idempotency_key)?;
+    Ok(PrepareConferenceRuntimeInput {
+        scope,
+        conference_id,
+        integration_id,
+        idempotency_key: value.idempotency_key,
+    })
 }
 
 fn decode_issue_join_grant(
