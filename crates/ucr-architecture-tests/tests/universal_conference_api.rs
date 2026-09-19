@@ -369,7 +369,7 @@ fn waiting_room_separates_grant_issuance_from_attendee_admission() {
     assert!(realtime.contains(
         "participant.role == ucr_model::ConferenceParticipantRole::Attendee"
     ));
-    assert!(realtime.contains("CanonicalErrorCode::TemporarilyUnavailable"));
+    assert!(realtime.contains("CanonicalErrorCode::PolicyDenied"));
     assert!(realtime.contains(".with_retry_after(2_000)"));
     assert!(gateway.contains("\"waiting_room\""));
     assert!(gateway.contains("StatusCode::TOO_EARLY"));
