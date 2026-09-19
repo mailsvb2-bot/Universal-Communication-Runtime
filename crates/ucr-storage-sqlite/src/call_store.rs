@@ -4,8 +4,7 @@ use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallParticipantUpdateKind, CallSession,
     CallSignal, CallSignalKind, CallSignallingState, CallTerminationReason, ConversationId,
     ConversationKind, ConversationRef, GroupId, GroupMemberState, GroupMembership, GroupRecord,
-    NamespaceId,
-    OpaqueId, PrincipalId, PrincipalRef, ScopedPrincipal, TenantId, TenantScope,
+    NamespaceId, OpaqueId, PrincipalId, PrincipalRef, ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_protocol::{
     active_call_participant, apply_call_signal, call_creation_fingerprint, call_signal_fingerprint,
