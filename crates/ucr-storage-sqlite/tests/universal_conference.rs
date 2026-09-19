@@ -127,6 +127,16 @@ fn scheduled_conference_and_participant_policy_survive_restart() {
             .universal_conference_participants(&scope(), &conference().conference_id, 16)
             .expect("participants");
         assert_eq!(participants, vec![participant()]);
+        let external = store
+            .universal_conference_participant_for_external(
+                &scope(),
+                &conference().conference_id,
+                &conference().integration_id,
+                b"external-user-7",
+            )
+            .expect("external participant lookup")
+            .expect("external participant");
+        assert_eq!(external, participant());
     }
     cleanup(&path);
 }
@@ -152,5 +162,30 @@ fn create_idempotency_key_conflicts_when_semantics_change() {
             .persist_universal_conference_profile(&changed)
             .is_err()
     );
+    cleanup(&path);
+}
+
+
+#[test]
+fn external_participant_reference_is_unique_within_integration_conference() {
+    let path = db_path("universal-conference-external-participant");
+    let store = SqliteLocalStore::open(&path).expect("open");
+    store
+        .persist_universal_conference_profile(&conference())
+        .expect("conference");
+    store
+        .persist_universal_conference_participant(&participant())
+        .expect("participant");
+
+    let mut duplicate_external = participant();
+    duplicate_external.participant = PrincipalRef {
+        principal_id: PrincipalId::from_opaque(oid("participant-8")),
+        kind: PrincipalKind::Person,
+    };
+    assert_eq!(
+        store.persist_universal_conference_participant(&duplicate_external),
+        Err(ucr_core::DurableStoreError::Conflict)
+    );
+
     cleanup(&path);
 }
