@@ -1632,6 +1632,468 @@ fn list_participants<S: UniversalConferenceStore>(
         .map_err(map_store_error)
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeReadyParticipant {
+    profile: UniversalConferenceParticipantProfile,
+    device_id: DeviceId,
+}
+
+fn prepare_conference_runtime<S>(
+    store: &S,
+    input: &PrepareConferenceRuntimeInput,
+    payload: Vec<u8>,
+) -> Result<pb::UniversalConferenceRuntimeStatus, CanonicalError>
+where
+    S: UniversalConferenceStore
+        + CommandAcceptanceStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + DeviceLifecycleStore
+        + GroupStore
+        + GroupMlsAtomicStore
+        + CallStore
+        + GroupCallLookupStore,
+{
+    let conference = conference_for_integration(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+    )?;
+    if conference.lifecycle == UniversalConferenceLifecycle::Ended {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+
+    let stable_command_id = accept_mutation_id(
+        store,
+        &input.scope,
+        "ucr.conference.runtime.prepare.v1",
+        &input.idempotency_key,
+        payload,
+    )?;
+    let participants = store
+        .universal_conference_participants(&input.scope, &input.conference_id, 1024)
+        .map_err(map_store_error)?;
+    if participants.len() == 1024 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    let active = participants
+        .into_iter()
+        .filter(|participant| participant.active)
+        .collect::<Vec<_>>();
+    let owners = active
+        .iter()
+        .filter(|participant| participant.role == ConferenceParticipantRole::Owner)
+        .collect::<Vec<_>>();
+    let [owner] = owners.as_slice() else {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    };
+    if owner.participant.kind != PrincipalKind::Person {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+
+    let mut ready = Vec::new();
+    for participant in active {
+        if let Some(device_id) =
+            optional_single_active_device(store, &input.scope, &participant.participant)?
+        {
+            ready.push(RuntimeReadyParticipant {
+                profile: participant,
+                device_id,
+            });
+        }
+    }
+    ready.sort_by(|left, right| {
+        left.profile
+            .participant
+            .principal_id
+            .as_opaque()
+            .as_wire_bytes()
+            .cmp(
+                right
+                    .profile
+                    .participant
+                    .principal_id
+                    .as_opaque()
+                    .as_wire_bytes(),
+            )
+    });
+    let owner_ready = ready
+        .iter()
+        .find(|participant| participant.profile.participant == owner.participant)
+        .cloned()
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+    let owner_actor = ScopedPrincipal {
+        scope: input.scope.clone(),
+        principal: owner_ready.profile.participant.clone(),
+    };
+
+    let group = ensure_runtime_group(
+        store,
+        input,
+        &stable_command_id,
+        &owner_actor,
+        &owner_ready.device_id,
+    )?;
+    reconcile_runtime_group_members(
+        store,
+        &owner_actor,
+        &owner_ready.device_id,
+        &group,
+        &ready,
+    )?;
+    let call_ready = reconcile_runtime_call(
+        store,
+        input,
+        &stable_command_id,
+        &owner_actor,
+        &ready,
+    )?;
+    let admitted_participant_count = u32::try_from(ready.len())
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::ResourceExhausted))?;
+    Ok(pb::UniversalConferenceRuntimeStatus {
+        group_ready: true,
+        call_ready,
+        admitted_participant_count,
+    })
+}
+
+fn optional_single_active_device<S>(
+    store: &S,
+    scope: &TenantScope,
+    participant: &PrincipalRef,
+) -> Result<Option<DeviceId>, CanonicalError>
+where
+    S: PrincipalIdentityBindingStore + IdentityDeviceLookupStore,
+{
+    let binding = store
+        .principal_identity_binding(scope, participant)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    let devices = store
+        .devices_for_identity(scope, &binding.identity_id, 64)
+        .map_err(map_store_error)?;
+    if devices.len() == 64 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    let mut active = devices
+        .into_iter()
+        .filter(|device| device.state == DeviceLifecycleState::Active);
+    match (active.next(), active.next()) {
+        (None, _) => Ok(None),
+        (Some(device), None) => Ok(Some(device.device_id)),
+        (Some(_), Some(_)) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    }
+}
+
+fn ensure_runtime_group<S>(
+    store: &S,
+    input: &PrepareConferenceRuntimeInput,
+    stable_command_id: &CommandId,
+    owner: &ScopedPrincipal,
+    owner_device_id: &DeviceId,
+) -> Result<GroupRecord, CanonicalError>
+where
+    S: GroupStore + GroupMlsAtomicStore,
+{
+    if let Some(group) = store
+        .group(&input.scope, &input.conference_id)
+        .map_err(map_store_error)?
+    {
+        validate_runtime_group(&group, owner)?;
+        return Ok(group);
+    }
+
+    let conversation = ConversationRecord {
+        scope: input.scope.clone(),
+        conversation: ConversationRef {
+            conversation_id: ConversationId::from_opaque(derived_id(
+                "conversation",
+                stable_command_id,
+            )?),
+            kind: ConversationKind::PrivateGroup,
+        },
+        parent_conversation_id: None,
+    };
+    let group = GroupRecord {
+        scope: input.scope.clone(),
+        group_id: input.conference_id.clone(),
+        conversation: conversation.conversation.clone(),
+        ownership: GroupOwnership::PersonOwned(owner.principal.clone()),
+        history_policy: GroupHistoryPolicy::NoHistory,
+        delivery_policy: DeliveryPolicy::NoExternalBridge,
+        crypto_state: GroupCryptoState {
+            capability_id: None,
+            epoch: 0,
+            state_ref: None,
+        },
+        public_policy: None,
+        media_state: GroupMediaState::Idle,
+        bridge_mappings: Vec::new(),
+        replication_generation: 0,
+        revision: 0,
+    };
+    let key_package = store
+        .create_mls_device_key_package(&input.scope, owner_device_id)
+        .map_err(map_group_mls_error)?;
+    let (_, created) = store
+        .create_mls_backed_group(
+            &conversation,
+            &group,
+            owner,
+            owner_device_id,
+            &key_package,
+        )
+        .map_err(map_group_mls_error)?;
+    validate_runtime_group(&created, owner)?;
+    Ok(created)
+}
+
+fn validate_runtime_group(
+    group: &GroupRecord,
+    owner: &ScopedPrincipal,
+) -> Result<(), CanonicalError> {
+    if group.scope != owner.scope
+        || group.ownership != GroupOwnership::PersonOwned(owner.principal.clone())
+        || group.conversation.kind != ConversationKind::PrivateGroup
+        || group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY)
+        || group.crypto_state.state_ref.is_none()
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+    Ok(())
+}
+
+fn reconcile_runtime_group_members<S>(
+    store: &S,
+    owner: &ScopedPrincipal,
+    owner_device_id: &DeviceId,
+    initial_group: &GroupRecord,
+    ready: &[RuntimeReadyParticipant],
+) -> Result<(), CanonicalError>
+where
+    S: GroupStore + GroupMlsAtomicStore,
+{
+    validate_runtime_group(initial_group, owner)?;
+    for participant in ready {
+        if participant.profile.participant == owner.principal {
+            continue;
+        }
+        if store
+            .group_membership(
+                &owner.scope,
+                &initial_group.group_id,
+                &participant.profile.participant,
+            )
+            .map_err(map_store_error)?
+            .is_some_and(|membership| membership.state == ucr_model::GroupMemberState::Active)
+        {
+            continue;
+        }
+        let group = store
+            .group(&owner.scope, &initial_group.group_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+        let key_package = store
+            .create_mls_device_key_package(&owner.scope, &participant.device_id)
+            .map_err(map_group_mls_error)?;
+        let change = GroupChange {
+            event_id: runtime_event_id(
+                "gm",
+                group.revision,
+                &participant.profile.participant,
+            )?,
+            scope: owner.scope.clone(),
+            group_id: group.group_id.clone(),
+            expected_revision: group.revision,
+            kind: GroupChangeKind::AddMember {
+                member: participant.profile.participant.clone(),
+                role: runtime_group_role(participant.profile.role)?,
+            },
+            next_crypto_state: None,
+        };
+        store
+            .apply_mls_backed_group_change(
+                owner,
+                owner_device_id,
+                &change,
+                &[MlsDeviceAdmission {
+                    device_id: participant.device_id.clone(),
+                    key_package: key_package.bytes,
+                }],
+            )
+            .map_err(map_group_mls_error)?;
+    }
+    Ok(())
+}
+
+const fn runtime_group_role(
+    role: ConferenceParticipantRole,
+) -> Result<GroupRole, CanonicalError> {
+    match role {
+        ConferenceParticipantRole::Owner => Ok(GroupRole::Owner),
+        ConferenceParticipantRole::Host | ConferenceParticipantRole::Moderator => {
+            Ok(GroupRole::Admin)
+        }
+        ConferenceParticipantRole::Speaker | ConferenceParticipantRole::Attendee => {
+            Ok(GroupRole::Member)
+        }
+    }
+}
+
+fn reconcile_runtime_call<S>(
+    store: &S,
+    input: &PrepareConferenceRuntimeInput,
+    stable_command_id: &CommandId,
+    owner: &ScopedPrincipal,
+    ready: &[RuntimeReadyParticipant],
+) -> Result<bool, CanonicalError>
+where
+    S: GroupStore + CallStore + GroupCallLookupStore,
+{
+    let calls = store
+        .calls_for_group(&input.scope, &input.conference_id, 64)
+        .map_err(map_store_error)?;
+    if calls.len() == 64 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    let mut live_calls = calls
+        .into_iter()
+        .filter(|call| call.signalling_state != CallSignallingState::Terminated)
+        .collect::<Vec<_>>();
+    if live_calls.len() > 1 {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+    if let Some(call) = live_calls.pop() {
+        return reconcile_existing_runtime_call(store, owner, call, ready);
+    }
+    if ready.len() < 2 {
+        return Ok(false);
+    }
+    let group = store
+        .group(&input.scope, &input.conference_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    let mut participants = Vec::with_capacity(ready.len());
+    participants.push(CallParticipant {
+        principal: owner.principal.clone(),
+        state: CallParticipantState::Accepted,
+        joined_revision: 0,
+        left_revision: None,
+    });
+    participants.extend(
+        ready
+            .iter()
+            .filter(|participant| participant.profile.participant != owner.principal)
+            .map(|participant| CallParticipant {
+                principal: participant.profile.participant.clone(),
+                state: CallParticipantState::Invited,
+                joined_revision: 0,
+                left_revision: None,
+            }),
+    );
+    let call = CallSession {
+        scope: input.scope.clone(),
+        call_id: CallId::from_opaque(derived_id("call", stable_command_id)?),
+        conversation: group.conversation,
+        initiated_by: owner.principal.clone(),
+        participants,
+        signalling_state: CallSignallingState::Inviting,
+        reconnecting_participant: None,
+        media_negotiation_ref: None,
+        media_negotiation_generation: 0,
+        replication_generation: 0,
+        revision: 0,
+        termination_reason: None,
+    };
+    store.create_call(owner, &call).map_err(map_store_error)?;
+    Ok(true)
+}
+
+fn reconcile_existing_runtime_call<S>(
+    store: &S,
+    owner: &ScopedPrincipal,
+    mut call: CallSession,
+    ready: &[RuntimeReadyParticipant],
+) -> Result<bool, CanonicalError>
+where
+    S: CallStore,
+{
+    if call.initiated_by != owner.principal
+        || !call.participants.iter().any(|participant| {
+            participant.principal == owner.principal
+                && participant.state == CallParticipantState::Accepted
+                && participant.left_revision.is_none()
+        })
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+    for participant in ready {
+        if participant.profile.participant == owner.principal
+            || call.participants.iter().any(|candidate| {
+                candidate.principal == participant.profile.participant
+                    && matches!(
+                        candidate.state,
+                        CallParticipantState::Invited
+                            | CallParticipantState::Ringing
+                            | CallParticipantState::Accepted
+                    )
+                    && candidate.left_revision.is_none()
+            })
+        {
+            continue;
+        }
+        let signal = CallSignal {
+            event_id: runtime_event_id(
+                "ca",
+                call.revision,
+                &participant.profile.participant,
+            )?,
+            scope: owner.scope.clone(),
+            call_id: call.call_id.clone(),
+            expected_revision: call.revision,
+            kind: CallSignalKind::ParticipantUpdate {
+                participant: participant.profile.participant.clone(),
+                kind: CallParticipantUpdateKind::Add,
+            },
+        };
+        store
+            .apply_call_signal(owner, &signal)
+            .map_err(map_store_error)?;
+        call = store
+            .call(&owner.scope, &call.call_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    }
+    Ok(true)
+}
+
+fn runtime_event_id(
+    prefix: &str,
+    revision: u64,
+    participant: &PrincipalRef,
+) -> Result<EventId, CanonicalError> {
+    OpaqueId::new(format!(
+        "{prefix}-{revision}-{}",
+        participant.principal_id.as_opaque().as_str()
+    ))
+    .map(EventId::from_opaque)
+    .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+}
+
+fn map_group_mls_error(error: GroupMlsStoreError) -> CanonicalError {
+    match error {
+        GroupMlsStoreError::Durable(error) => map_store_error(error),
+        GroupMlsStoreError::ActorDeviceMismatch | GroupMlsStoreError::TargetDeviceMismatch => {
+            CanonicalError::new(CanonicalErrorCode::PolicyDenied)
+        }
+        GroupMlsStoreError::InvalidBootstrap | GroupMlsStoreError::InvalidChangeMaterial => {
+            CanonicalError::new(CanonicalErrorCode::Conflict)
+        }
+        GroupMlsStoreError::Mls(_) => CanonicalError::new(CanonicalErrorCode::Internal),
+    }
+}
+
 fn conference_join_window(
     conference: &UniversalConferenceProfile,
     now_unix_ms: i64,
