@@ -183,7 +183,7 @@ fn universal_runtime_preparation_reuses_canonical_mls_group_and_call_owners() {
     assert!(service.contains("create_mls_backed_group("));
     assert!(service.contains("apply_mls_backed_group_change("));
     assert!(service.contains("store.create_call(owner, &call)"));
-    assert!(service.contains("store.apply_call_signal(owner, &signal)"));
+    assert!(service.contains("apply_call_signal(owner, &signal)"));
     assert!(spec.contains("does not create a second Group, MLS, or Call owner"));
 }
 
@@ -199,7 +199,10 @@ fn universal_participant_policy_syncs_minimum_canonical_permissions() {
         "VIDEO_SEND_PERMISSION",
         "sync_participant_permissions",
     ] {
-        assert!(service.contains(required), "missing participant permission policy {required}");
+        assert!(
+            service.contains(required),
+            "missing participant permission policy {required}"
+        );
     }
     assert!(service.contains("store.revoke_permission(&grant)"));
 }
