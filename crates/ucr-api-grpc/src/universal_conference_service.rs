@@ -1667,7 +1667,12 @@ where
     let mut eligible = active_calls.into_iter().filter(|call| {
         call.participants.iter().any(|candidate| {
             &candidate.principal == participant
-                && candidate.state == CallParticipantState::Accepted
+                && matches!(
+                    candidate.state,
+                    CallParticipantState::Invited
+                        | CallParticipantState::Ringing
+                        | CallParticipantState::Accepted
+                )
                 && candidate.left_revision.is_none()
         })
     });
