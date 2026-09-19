@@ -34,7 +34,7 @@ All Conference media topology is SFU in this reference layer. Uncontrolled full-
 
 ## Permissions and failure semantics
 
-Conference start reuses `ucr.call.start`; signalling reuses `ucr.call.signal`; explicit reads reuse `ucr.call.observe`; recipient subscription changes require `ucr.conference.subscribe`. Join URL issuance requires its own service-bound authorization plus current participant eligibility. These permissions are independent. Audio/video send/receive permissions are still revalidated by the existing media/SFU owners.
+Conference start reuses `ucr.call.start`; signalling reuses `ucr.call.signal`; explicit reads reuse `ucr.call.observe`; recipient subscription changes require `ucr.conference.subscribe`. Join URL issuance requires its own service-bound authorization plus current participant eligibility. These permissions are independent: start/signal/forward do not implicitly require observe permission. Audio/video send/receive permissions are still revalidated by the existing media/SFU owners.
 
 Conference coordination does not convert SFU acceptance into Delivery/Read evidence and does not claim exactly-once media forwarding. SFU backpressure/partial acceptance retains the SFU semantics and cannot mutate Call authority.
 
