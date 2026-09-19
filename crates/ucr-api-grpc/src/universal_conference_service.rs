@@ -494,7 +494,9 @@ where
         Ok(Response::new(pb::UniversalIssueJoinGrantResponse {
             result: Some(match result {
                 Ok(grant) => pb::universal_issue_join_grant_response::Result::Grant(grant),
-                Err(error) => pb::universal_issue_join_grant_response::Result::Error(pb_error(error)),
+                Err(error) => {
+                    pb::universal_issue_join_grant_response::Result::Error(pb_error(error))
+                }
             }),
         }))
     }
@@ -526,9 +528,7 @@ where
             result: Some(match result {
                 Ok(session_id) => {
                     pb::universal_revoke_join_grant_response::Result::Acknowledgement(
-                        pb_acknowledgement(acknowledgement_for(
-                            session_id.as_opaque().clone(),
-                        )),
+                        pb_acknowledgement(acknowledgement_for(session_id.as_opaque().clone())),
                     )
                 }
                 Err(error) => {
@@ -706,13 +706,12 @@ fn decode_issue_join_grant(
     if value.external_user_id.is_empty() || value.external_user_id.len() > 512 {
         return Err(invalid_argument());
     }
-    let use_policy = match pb::JoinGrantUsePolicy::try_from(value.use_policy)
-        .map_err(|_| invalid_argument())?
-    {
-        pb::JoinGrantUsePolicy::Unspecified => return Err(invalid_argument()),
-        pb::JoinGrantUsePolicy::SingleUse => RealtimeJoinGrantUsePolicy::SingleUse,
-        pb::JoinGrantUsePolicy::Reusable => RealtimeJoinGrantUsePolicy::Reusable,
-    };
+    let use_policy =
+        match pb::JoinGrantUsePolicy::try_from(value.use_policy).map_err(|_| invalid_argument())? {
+            pb::JoinGrantUsePolicy::Unspecified => return Err(invalid_argument()),
+            pb::JoinGrantUsePolicy::SingleUse => RealtimeJoinGrantUsePolicy::SingleUse,
+            pb::JoinGrantUsePolicy::Reusable => RealtimeJoinGrantUsePolicy::Reusable,
+        };
     Ok(IssueJoinGrantInput {
         scope,
         conference_id,
