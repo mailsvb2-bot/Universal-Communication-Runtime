@@ -54,13 +54,15 @@ function readGrant(raw){
   const b=b64url(payload); let p=0;
   const u8=()=>{if(p>=b.length)throw new Error("Malformed grant");return b[p++];};
   const id=()=>{if(p+2>b.length)throw new Error("Malformed grant");const n=(b[p]<<8)|b[p+1];p+=2;if(p+n>b.length)throw new Error("Malformed grant");const v=new TextDecoder().decode(b.slice(p,p+n));p+=n;return v;};
-  if(u8()!==1) throw new Error("Unsupported join token version");
+  const version=u8(); if(version!==1&&version!==2) throw new Error("Unsupported join token version");
   const tenant_id=id(); const hasNs=u8(); const namespace_id=hasNs===1?id():null;
   const call_id=id(); u8(); id(); const hasDevice=u8(); if(hasDevice===1) id();
-  const session_id=id(); if(p+16!==b.length) throw new Error("Malformed grant");
-  const view=new DataView(b.buffer,b.byteOffset+p,16);
+  const session_id=id(); const remaining=b.length-p;
+  if((version===1&&remaining!==16)||(version===2&&remaining!==25)) throw new Error("Malformed grant");
+  const view=new DataView(b.buffer,b.byteOffset+p,remaining);
   const issued=Number(view.getBigInt64(0,false)); const expires=Number(view.getBigInt64(8,false));
-  return {tenant_id,namespace_id,call_id,session_id,issued,expires};
+  const not_before=version===2?Number(view.getBigInt64(16,false)):issued;
+  return {tenant_id,namespace_id,call_id,session_id,issued,not_before,expires};
 }
 function body(){return {tenant_id:claims.tenant_id,namespace_id:claims.namespace_id,call_id:claims.call_id,session_id:claims.session_id};}
 async function api(path,payload,signal){
@@ -100,6 +102,7 @@ try{
   if(!token) throw new Error("Missing #ucr_join grant");
   claims=readGrant(token);
   if(Date.now()>=claims.expires) throw new Error("Join grant has expired");
+  if(Date.now()<claims.not_before) throw new Error("Join grant is not active yet");
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
   ui.status.textContent="Signed grant loaded. Ready to join.";
 }catch(e){fail(e.message);}
