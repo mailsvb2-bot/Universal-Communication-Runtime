@@ -3,30 +3,33 @@ use std::{fmt, sync::Arc};
 use prost::Message;
 use tonic::{Request, Response, Status};
 use ucr_core::{
-    AuthorizationEvaluator, CommandAcceptanceStore, DeviceLifecycleStore, DurableStoreError,
-    EventJournalStore, ExternalIdentityBindingStore, GroupCallLookupStore,
-    IdentityDeviceLookupStore, IdentityStore,
+    AuthorizationEvaluator, CallStore, CommandAcceptanceStore, DeviceLifecycleStore,
+    DurableStoreError, EventJournalStore, ExternalIdentityBindingStore, GroupCallLookupStore,
+    GroupStore, IdentityDeviceLookupStore, IdentityStore,
     PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, ServiceAuditStore,
     ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
     ServiceQuotaClock, ServiceQuotaStore, UniversalConferenceStore, generate_opaque_id,
 };
+use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
 use ucr_model::{
-    AuthorizationRequest, CallId, CallParticipantState, CallSignallingState, CommandEnvelope,
-    CommandId, ConferenceParticipantRole, ConferenceScheduleMetadata, CorrelationContext,
-    DeviceDescriptor, DeviceId, DeviceLifecycleState, ExternalIdentityBinding, GroupId,
-    IdentityEvidence, IdentityId,
-    IdentityOwnership, IdentityRecord, IntegrationId, OpaqueId, PrincipalId,
-    PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal,
-    SessionId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
-    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    AuthorizationRequest, CallId, CallParticipant, CallParticipantState, CallSession,
+    CallSignallingState, CommandEnvelope, CommandId, ConferenceParticipantRole,
+    ConferenceScheduleMetadata, ConversationId, ConversationKind, ConversationRecord,
+    ConversationRef, CorrelationContext, DeliveryPolicy, DeviceDescriptor, DeviceId,
+    DeviceLifecycleState, EventId, ExternalIdentityBinding, GroupChange, GroupChangeKind,
+    GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState, GroupOwnership, GroupRecord,
+    GroupRole, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
+    OpaqueId, PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion,
+    ScopedPrincipal, SessionId, TenantScope, UniversalConferenceLifecycle,
+    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
     CONFERENCE_ATTENDANCE_READ_PERMISSION, CONFERENCE_CREATE_PERMISSION,
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
     CONFERENCE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION, CanonicalError, CanonicalErrorCode,
-    CapabilityMaturity, CommandReceiptStatus, MAX_CALL_PARTICIPANTS, acknowledgement_for,
-    canonical_capabilities,
+    CapabilityMaturity, CommandReceiptStatus, GROUP_MLS_CAPABILITY, MAX_CALL_PARTICIPANTS,
+    acknowledgement_for, canonical_capabilities,
     phase20_audio_capabilities, phase21_video_capabilities, phase22_media_e2ee_capabilities,
     phase29_sfu_capabilities, phase30_conference_capabilities,
 };
@@ -162,6 +165,9 @@ where
         + PrincipalIdentityLookupStore
         + IdentityDeviceLookupStore
         + DeviceLifecycleStore
+        + GroupStore
+        + GroupMlsAtomicStore
+        + CallStore
         + GroupCallLookupStore
         + EventJournalStore
         + 'static,
@@ -188,6 +194,9 @@ where
         + PrincipalIdentityLookupStore
         + IdentityDeviceLookupStore
         + DeviceLifecycleStore
+        + GroupStore
+        + GroupMlsAtomicStore
+        + CallStore
         + GroupCallLookupStore
         + EventJournalStore
         + 'static,
