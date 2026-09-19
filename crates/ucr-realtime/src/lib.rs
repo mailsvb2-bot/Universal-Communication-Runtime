@@ -182,8 +182,12 @@ impl JoinTokenIssuer {
             .ok_or(JoinTokenError::ClockOverflow)?;
         let not_before_unix_ms = not_before_unix_ms.unwrap_or(now_unix_ms);
         let expires_at_unix_ms = not_after_unix_ms.unwrap_or(maximum_expiry);
+        let minimum_expiry = now_unix_ms
+            .checked_add(i64::from(MIN_JOIN_TTL_SECONDS) * 1000)
+            .ok_or(JoinTokenError::ClockOverflow)?;
         if not_before_unix_ms < now_unix_ms
             || not_before_unix_ms >= expires_at_unix_ms
+            || expires_at_unix_ms < minimum_expiry
             || expires_at_unix_ms > maximum_expiry
         {
             return Err(JoinTokenError::InvalidWindow);
