@@ -34,6 +34,12 @@ The public role vocabulary is `owner`, `host`, `moderator`, `speaker`, `attendee
 
 Exactly one active Universal participant with role `owner` is required. Only active participants with exactly one active canonical Device are admitted into MLS/Call state. The owner becomes the real Person-owned Group owner and Call initiator; the authenticated integration Service Account authorizes orchestration but never becomes a media participant. A first Call requires at least two device-ready participants because canonical group-call creation requires an initiator plus at least one invitee. With only the owner ready, Group/MLS preparation may succeed while `call_ready=false`; a later reconcile can add newly device-ready participants and create the Call.
 
+## Participant authorization projection
+
+Universal participant role/media policy is projected into the existing canonical Permission Grant owner after the participant profile is persisted. Active participants receive only the exact-scope permissions needed to observe the Call, manage their receive subscriptions and receive supported media; audio/video send grants exist only while the participant profile allows the corresponding publish direction. Managed grants are revoked when policy removes that authority or the participant becomes inactive.
+
+The ordering is fail-closed: profile/policy is written before permission synchronization. A grant failure can therefore leave a participant unable to perform an allowed action, but cannot make a disallowed or removed participant usable because Universal profile checks remain mandatory at realtime boundaries.
+
 ## Participant device enrollment
 
 `EnsureParticipantDevice` gives an already ensured external participant exactly one canonical active UCR Device when no device lifecycle exists yet. The public response exposes only the integration's `external_user_id` and readiness state; canonical `DeviceId` remains internal.
