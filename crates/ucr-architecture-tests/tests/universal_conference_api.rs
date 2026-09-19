@@ -263,3 +263,21 @@ fn runtime_reconcile_projects_role_changes_into_group_crypto_epoch() {
     assert!(service.contains("GroupChangeKind::ChangeRole"));
     assert!(service.contains("runtime_event_id("));
 }
+
+
+#[test]
+fn universal_conference_current_call_flows_do_not_depend_on_bounded_call_history() {
+    let core = read("crates/ucr-core/src/call.rs");
+    let memory = read("crates/ucr-storage-memory/src/call_store.rs");
+    let sqlite = read("crates/ucr-storage-sqlite/src/call_store.rs");
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+
+    assert!(core.contains("fn active_calls_for_group"));
+    assert!(core.contains("fn call_belongs_to_group"));
+    assert!(memory.contains("call.signalling_state != CallSignallingState::Terminated"));
+    assert!(sqlite.contains("AND signalling_state<>?6"));
+    assert!(service.contains(".active_calls_for_group(&input.scope, &input.conference_id, 2)"));
+    assert!(service.contains(".active_calls_for_group(scope, conference_id, 2)"));
+    assert!(service.contains(".call_belongs_to_group(scope, conference_id, &claims.call_id)"));
+    assert!(service.contains("active_call_projection_ignores_more_than_sixty_four_terminated_calls"));
+}
