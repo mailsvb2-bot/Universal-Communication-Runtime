@@ -240,9 +240,10 @@ impl UniversalConferenceStore for SqliteLocalStore {
         {
             return Ok(current);
         }
-        if current.revision != expected_revision
-            || !valid_lifecycle_transition(current.lifecycle, lifecycle)
-        {
+        let lifecycle_change_allowed =
+            current.lifecycle == lifecycle && current.entry_open != entry_open
+                || valid_lifecycle_transition(current.lifecycle, lifecycle);
+        if current.revision != expected_revision || !lifecycle_change_allowed {
             return Err(DurableStoreError::Conflict);
         }
 
