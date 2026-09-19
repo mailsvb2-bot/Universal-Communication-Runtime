@@ -50,6 +50,7 @@ const MAX_EXTERNAL_CONFERENCE_ID_BYTES: usize = 512;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 const MAX_TIMEZONE_BYTES: usize = 128;
 const MAX_JOIN_WINDOW_SECONDS: u32 = 31_536_000;
+const MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS: usize = MAX_CALL_PARTICIPANTS + 1;
 
 pub struct GrpcUniversalConferenceService<C, A, S> {
     clock: Arc<C>,
@@ -1269,6 +1270,28 @@ where
     }
 }
 
+fn active_conference_participants<S>(
+    store: &S,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+) -> Result<Vec<UniversalConferenceParticipantProfile>, CanonicalError>
+where
+    S: UniversalConferenceStore,
+{
+    let participants = store
+        .active_universal_conference_participants(
+            scope,
+            conference_id,
+            MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS,
+        )
+        .map_err(map_store_error)?;
+    if participants.len() > MAX_CALL_PARTICIPANTS {
+        Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted))
+    } else {
+        Ok(participants)
+    }
+}
+
 fn enforce_owner_role_transition<S>(
     store: &S,
     scope: &TenantScope,
@@ -1288,16 +1311,11 @@ where
     }) {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
-    if requested_role != ConferenceParticipantRole::Owner {
+    if requested_role != ConferenceParticipantRole::Owner || current.is_some() {
         return Ok(());
     }
 
-    let participants = store
-        .universal_conference_participants(scope, conference_id, 1024)
-        .map_err(map_store_error)?;
-    if participants.len() == 1024 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
-    }
+    let participants = active_conference_participants(store, scope, conference_id)?;
     let mut owners = participants.iter().filter(|participant| {
         participant.active && participant.role == ConferenceParticipantRole::Owner
     });
@@ -1336,7 +1354,14 @@ where
         &input.external_user_id,
         current.as_ref(),
         input.role,
-    )
+    )?;
+    if !current.as_ref().is_some_and(|profile| profile.active)
+        && active_conference_participants(store, &input.scope, &input.conference_id)?.len()
+            >= MAX_CALL_PARTICIPANTS
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    Ok(())
 }
 
 fn ensure_participant<S>(
@@ -1710,15 +1735,11 @@ where
     else {
         return Ok(());
     };
-    let participants = store
-        .universal_conference_participants(&removed.scope, &removed.conference_id, 1024)
-        .map_err(map_store_error)?;
-    if participants.len() == 1024 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
-    }
-    let mut owners = participants.into_iter().filter(|participant| {
-        participant.active && participant.role == ConferenceParticipantRole::Owner
-    });
+    let participants =
+        active_conference_participants(store, &removed.scope, &removed.conference_id)?;
+    let mut owners = participants
+        .into_iter()
+        .filter(|participant| participant.role == ConferenceParticipantRole::Owner);
     let (Some(owner), None) = (owners.next(), owners.next()) else {
         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
     };
@@ -1938,16 +1959,7 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
 
-    let participants = store
-        .universal_conference_participants(&input.scope, &input.conference_id, 1024)
-        .map_err(map_store_error)?;
-    if participants.len() == 1024 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
-    }
-    let active = participants
-        .into_iter()
-        .filter(|participant| participant.active)
-        .collect::<Vec<_>>();
+    let active = active_conference_participants(store, &input.scope, &input.conference_id)?;
     let owners = active
         .iter()
         .filter(|participant| participant.role == ConferenceParticipantRole::Owner)
