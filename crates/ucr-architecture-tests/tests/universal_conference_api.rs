@@ -129,7 +129,10 @@ fn universal_conference_capability_discovery_is_explicit_and_truthful() {
         "recording",
         "horizontal_sfu",
     ] {
-        assert!(proto.contains(field), "missing capability readiness field {field}");
+        assert!(
+            proto.contains(field),
+            "missing capability readiness field {field}"
+        );
     }
     assert!(service.contains("browser_realtime_gateway: false"));
     assert!(service.contains("production_webrtc: false"));
