@@ -8018,6 +8018,21 @@ mod integration_api_tests {
     }
 }
 
+fn has_conflicting_active_conference_owner(
+    state: &MemoryState,
+    scope: &TenantScope,
+    conference_id: &ucr_model::GroupId,
+    participant: &PrincipalRef,
+) -> bool {
+    state.universal_conference_participants.values().any(|existing| {
+        existing.scope == *scope
+            && existing.conference_id == *conference_id
+            && existing.active
+            && existing.role == ConferenceParticipantRole::Owner
+            && existing.participant != *participant
+    })
+}
+
 impl UniversalConferenceStore for MemoryLocalStore {
     fn persist_universal_conference_profile(
         &self,
@@ -8184,6 +8199,17 @@ impl UniversalConferenceStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        if participant.active
+            && participant.role == ConferenceParticipantRole::Owner
+            && has_conflicting_active_conference_owner(
+                &state,
+                &participant.scope,
+                &participant.conference_id,
+                &participant.participant,
+            )
+        {
+            return Err(DurableStoreError::Conflict);
+        }
         state
             .universal_conference_participants
             .insert(key, participant.clone());
@@ -8274,6 +8300,12 @@ impl UniversalConferenceStore for MemoryLocalStore {
     ) -> Result<UniversalConferenceParticipantProfile, DurableStoreError> {
         let key = universal_conference_participant_key(scope, conference_id, participant);
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if active
+            && role == ConferenceParticipantRole::Owner
+            && has_conflicting_active_conference_owner(&state, scope, conference_id, participant)
+        {
+            return Err(DurableStoreError::Conflict);
+        }
         let current = state
             .universal_conference_participants
             .get_mut(&key)
