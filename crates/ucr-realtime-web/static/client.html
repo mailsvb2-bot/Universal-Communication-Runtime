@@ -45,7 +45,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 "use strict";
 const $=id=>document.getElementById(id);
 const ui={join:$("join"),leave:$("leave"),state:$("state"),packets:$("packets"),expires:$("expires"),status:$("status")};
-let token="", claims=null, heartbeatTimer=null, streamAbort=null, packetCount=0;
+let token="", claims=null, heartbeatTimer=null, waitTimer=null, streamAbort=null, packetCount=0;
 
 function fail(message){ui.state.textContent="Error";ui.status.textContent=message;ui.join.disabled=true;}
 function b64url(s){s=s.replace(/-/g,"+").replace(/_/g,"/");while(s.length%4)s+="=";return Uint8Array.from(atob(s),c=>c.charCodeAt(0));}
@@ -82,6 +82,10 @@ async function openStream(){
 }
 async function join(){
   try{
+    if(Date.now()<claims.not_before){
+      scheduleWaitingRoom();
+      return;
+    }
     ui.join.disabled=true;ui.state.textContent="Joining";ui.status.textContent="Authenticating signed session grant…";
     const r=await api("/v1/realtime/join",body()); const data=await r.json();
     if(!data.ok) throw new Error(data.message||"Join rejected");
@@ -93,20 +97,29 @@ async function join(){
   }catch(e){ui.state.textContent="Rejected";ui.status.textContent=e.message;ui.join.disabled=false;}
 }
 async function leave(){
-  ui.leave.disabled=true;if(heartbeatTimer)clearInterval(heartbeatTimer);if(streamAbort)streamAbort.abort();
+  ui.leave.disabled=true;if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(streamAbort)streamAbort.abort();
   try{await api("/v1/realtime/leave",body());}catch(_){}
   ui.state.textContent="Left";ui.status.textContent="Conference session closed.";ui.join.disabled=false;
 }
+function scheduleWaitingRoom(){
+  const delay=claims.not_before-Date.now();
+  if(delay<=0){ui.state.textContent="Ready";ui.status.textContent="Signed grant active. Ready to join.";ui.join.disabled=false;return false;}
+  ui.state.textContent="Waiting";ui.join.disabled=true;
+  ui.status.textContent="The conference has not started yet. This page will join automatically when entry opens.";
+  if(waitTimer)clearTimeout(waitTimer);
+  waitTimer=setTimeout(()=>{waitTimer=null;ui.join.disabled=false;join();},delay);
+  return true;
+}
+
 try{
   const params=new URLSearchParams(location.hash.slice(1));token=params.get("ucr_join")||"";
   if(!token) throw new Error("Missing #ucr_join grant");
   claims=readGrant(token);
   if(Date.now()>=claims.expires) throw new Error("Join grant has expired");
-  if(Date.now()<claims.not_before) throw new Error("Join grant is not active yet");
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
-  ui.status.textContent="Signed grant loaded. Ready to join.";
+  if(!scheduleWaitingRoom()) ui.status.textContent="Signed grant loaded. Ready to join.";
 }catch(e){fail(e.message);}
-ui.join.addEventListener("click",join);ui.leave.addEventListener("click",leave);window.addEventListener("pagehide",()=>{if(streamAbort)streamAbort.abort();});
+ui.join.addEventListener("click",join);ui.leave.addEventListener("click",leave);window.addEventListener("pagehide",()=>{if(waitTimer)clearTimeout(waitTimer);if(streamAbort)streamAbort.abort();});
 </script>
 </body>
 </html>
