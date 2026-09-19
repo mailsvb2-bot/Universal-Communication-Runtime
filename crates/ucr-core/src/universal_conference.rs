@@ -59,6 +59,10 @@ pub trait UniversalConferenceStore: StorageProvider {
 
     /// Creates or deduplicates one integration-facing participant projection.
     ///
+    /// At most one active participant with role `Owner` may exist for a conference. Implementations
+    /// must enforce that invariant atomically with the write rather than relying on a caller-side
+    /// read-before-write check.
+    ///
     /// # Errors
     /// Rejects malformed/conflicting participant records and explicit durable-store failures.
     fn persist_universal_conference_participant(
@@ -106,8 +110,10 @@ pub trait UniversalConferenceStore: StorageProvider {
 
     /// Replaces the conference-specific role/media policy under optimistic revision.
     ///
+    /// The single-active-owner invariant is part of this same atomic mutation boundary.
+    ///
     /// # Errors
-    /// Rejects stale/malformed updates and returns explicit durable-store failures.
+    /// Rejects stale/malformed/conflicting updates and returns explicit durable-store failures.
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn update_universal_conference_participant(
         &self,
