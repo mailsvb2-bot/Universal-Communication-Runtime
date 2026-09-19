@@ -2834,6 +2834,7 @@ dependencies = [
  "ucr-conference",
  "ucr-core",
  "ucr-crypto",
+ "ucr-group-mls",
  "ucr-media-e2ee",
  "ucr-mesh",
  "ucr-model",
