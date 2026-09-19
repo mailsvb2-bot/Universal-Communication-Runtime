@@ -1277,6 +1277,31 @@ impl PrincipalIdentityLookupStore for MemoryLocalStore {
             .cloned()
             .collect())
     }
+
+    fn principal_identity_bindings_for_identity_kind(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        kind: PrincipalKind,
+        max_items: usize,
+    ) -> Result<Vec<PrincipalIdentityBinding>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let expected_scope = scope_key(scope);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .principal_identity_bindings
+            .values()
+            .filter(|binding| {
+                scope_key(&binding.scope) == expected_scope
+                    && binding.identity_id == *identity_id
+                    && binding.principal.kind == kind
+            })
+            .take(max_items)
+            .cloned()
+            .collect())
+    }
 }
 
 impl ExternalIdentityBindingStore for MemoryLocalStore {
