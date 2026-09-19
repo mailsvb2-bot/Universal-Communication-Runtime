@@ -195,7 +195,9 @@ fn universal_conference_owner_is_unique_and_not_transferred_by_generic_participa
     assert!(service.contains("profile.role != requested_role"));
     assert!(service.contains("requested_role == ConferenceParticipantRole::Owner"));
     assert!(service.contains("owner.external_user_id.as_slice() == external_user_id"));
-    assert!(spec.contains("Ordinary participant ensure/update operations never transfer ownership"));
+    assert!(
+        spec.contains("Ordinary participant ensure/update operations never transfer ownership")
+    );
 }
 
 #[test]
