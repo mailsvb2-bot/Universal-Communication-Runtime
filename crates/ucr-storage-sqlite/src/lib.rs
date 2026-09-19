@@ -2372,6 +2372,47 @@ mod tests {
     }
 
     #[test]
+    fn principal_event_projection_filters_unrelated_history_before_bound() {
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open store");
+        let event_type = "ucr.conference.attendance.joined.v1";
+        let target = PrincipalRef {
+            principal_id: PrincipalId::from_opaque(opaque("attendance-target")),
+            kind: PrincipalKind::Person,
+        };
+        let other = PrincipalRef {
+            principal_id: PrincipalId::from_opaque(opaque("attendance-other")),
+            kind: PrincipalKind::Person,
+        };
+
+        for id in ["attendance-other-a", "attendance-other-b", "attendance-other-c"] {
+            let mut unrelated = event(id, "attendance-unrelated", b"unrelated");
+            unrelated.event_type = event_type.to_owned();
+            unrelated.actor = ActorRef {
+                actor_id: ActorId::from_opaque(other.principal_id.as_opaque().clone()),
+                kind: ActorKind::Person,
+                on_behalf_of: None,
+            };
+            store.append_event(&unrelated).expect("append unrelated");
+        }
+
+        let mut relevant = event("attendance-target-a", "attendance-target", b"target");
+        relevant.event_type = event_type.to_owned();
+        relevant.actor = ActorRef {
+            actor_id: ActorId::from_opaque(target.principal_id.as_opaque().clone()),
+            kind: ActorKind::Person,
+            on_behalf_of: None,
+        };
+        store.append_event(&relevant).expect("append target");
+
+        let projected = store
+            .events_for_types_by_principal(&relevant.scope, &[event_type], &target, 2)
+            .expect("principal projection");
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].event_id, relevant.event_id);
+    }
+
+    #[test]
     fn terminal_link_creation_is_appended_even_when_event_already_exists() {
         let db = TestDbPath::new();
         let store = SqliteLocalStore::open(db.path()).expect("open store");

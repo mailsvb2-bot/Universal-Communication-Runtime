@@ -1030,6 +1030,26 @@ pub trait EventJournalStore: StorageProvider {
         let _ = (scope, event_types, max_items);
         Err(DurableStoreError::Unavailable)
     }
+
+    /// Returns a bounded oldest-first projection of matching canonical events attributed to one
+    /// exact Principal.
+    ///
+    /// Principal attribution filtering must happen before max_items is applied so unrelated
+    /// event history cannot exhaust a caller's bounded projection. This remains a read-only view
+    /// over the same canonical Event journal and must not create a second event owner.
+    ///
+    /// # Errors
+    /// Rejects invalid/unbounded requests and returns explicit storage/corruption failures.
+    fn events_for_types_by_principal(
+        &self,
+        scope: &TenantScope,
+        event_types: &[&str],
+        principal: &PrincipalRef,
+        max_items: usize,
+    ) -> Result<Vec<EventEnvelope>, DurableStoreError> {
+        let _ = (scope, event_types, principal, max_items);
+        Err(DurableStoreError::Unavailable)
+    }
 }
 
 /// Durable Phase-14 Event consumer state layered over the one canonical append-only Event journal.

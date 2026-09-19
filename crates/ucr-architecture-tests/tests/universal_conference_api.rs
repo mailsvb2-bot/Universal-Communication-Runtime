@@ -317,3 +317,17 @@ fn universal_conference_person_resolution_filters_unrelated_principal_history() 
     assert!(service.contains("PrincipalKind::Person"));
     assert!(service.contains("person_principal_resolution_ignores_unrelated_principal_history"));
 }
+ 
+#[test]
+fn universal_conference_attendance_filters_principal_before_history_bound() {
+    let core = read("crates/ucr-core/src/lib.rs");
+    let memory = read("crates/ucr-storage-memory/src/lib.rs");
+    let sqlite = read("crates/ucr-storage-sqlite/src/event_journal.rs");
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+
+    assert!(core.contains("fn events_for_types_by_principal"));
+    assert!(memory.contains("event_is_attributed_to_principal"));
+    assert!(sqlite.contains("AND {actor_predicate}"));
+    assert!(service.contains(".events_for_types_by_principal("));
+    assert!(service.contains("&participant.participant"));
+}

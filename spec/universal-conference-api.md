@@ -68,7 +68,7 @@ Join grants are short-lived and conference-scoped. The contract reserves single-
 
 `GetParticipantAttendance` is integration-scoped and addressed by `external_user_id`. It returns first join, last leave, first media-ready time, join/reconnect/media-ready counts, current connection duration and total connected duration.
 
-Attendance is a read-only projection over the canonical Event journal. The projection does not create a second attendance database or expose private Event journal positions. If the bounded projection cannot prove that it has the complete relevant history, it fails closed with resource exhaustion instead of returning partial totals as complete data.
+Attendance is a read-only projection over the canonical Event journal. The projection does not create a second attendance database or expose private Event journal positions. EventJournal filters by the exact canonical participant principal before applying the bounded projection, so unrelated conference/participant history cannot exhaust an attendance read. If the participant's own bounded projection cannot prove that it has the complete relevant history, it fails closed with resource exhaustion instead of returning partial totals as complete data.
 
 ## Idempotency
 

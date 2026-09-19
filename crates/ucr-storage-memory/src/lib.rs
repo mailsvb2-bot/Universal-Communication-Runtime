@@ -2280,6 +2280,30 @@ const fn map_event_error(_error: EventError) -> DurableStoreError {
     DurableStoreError::InvalidRecord
 }
 
+fn event_is_attributed_to_principal(event: &EventEnvelope, principal: &PrincipalRef) -> bool {
+    let direct_kind = match principal.kind {
+        PrincipalKind::Person => Some(ucr_model::ActorKind::Person),
+        PrincipalKind::AiAgent => Some(ucr_model::ActorKind::AiAgent),
+        PrincipalKind::Bot => Some(ucr_model::ActorKind::Bot),
+        PrincipalKind::Organization => Some(ucr_model::ActorKind::Organization),
+        PrincipalKind::Device
+        | PrincipalKind::ServiceAccount
+        | PrincipalKind::Automation
+        | PrincipalKind::ExternalPlatform => None,
+    };
+    match direct_kind {
+        Some(kind) => {
+            event.actor.kind == kind
+                && event.actor.actor_id.as_opaque() == principal.principal_id.as_opaque()
+                && event.actor.on_behalf_of.is_none()
+        }
+        None => {
+            event.actor.kind == ucr_model::ActorKind::System
+                && event.actor.on_behalf_of.as_ref() == Some(&principal.principal_id)
+        }
+    }
+}
+
 impl EventJournalStore for MemoryLocalStore {
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError> {
         let event = canonical_event(event).map_err(map_event_error)?;
@@ -2322,6 +2346,40 @@ impl EventJournalStore for MemoryLocalStore {
                 && event_types
                     .iter()
                     .any(|event_type| *event_type == event.event_type)
+            {
+                events.push(event.clone());
+                if events.len() == max_items {
+                    break;
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    fn events_for_types_by_principal(
+        &self,
+        scope: &TenantScope,
+        event_types: &[&str],
+        principal: &PrincipalRef,
+        max_items: usize,
+    ) -> Result<Vec<EventEnvelope>, DurableStoreError> {
+        if event_types.is_empty()
+            || event_types.len() > 16
+            || event_types.iter().any(|event_type| event_type.is_empty())
+            || max_items == 0
+            || max_items > 16_384
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut events = Vec::with_capacity(max_items.min(256));
+        for key in &state.event_order {
+            let event = state.events.get(key).ok_or(DurableStoreError::Corrupt)?;
+            if event.scope == *scope
+                && event_types
+                    .iter()
+                    .any(|event_type| *event_type == event.event_type)
+                && event_is_attributed_to_principal(event, principal)
             {
                 events.push(event.clone());
                 if events.len() == max_items {

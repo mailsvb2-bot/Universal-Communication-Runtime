@@ -2668,9 +2668,10 @@ where
         external_user_id,
     )?;
     let events = store
-        .events_for_types(
+        .events_for_types_by_principal(
             scope,
             &ATTENDANCE_EVENT_TYPES,
+            &participant.participant,
             MAX_ATTENDANCE_PROJECTION_EVENTS,
         )
         .map_err(map_store_error)?;

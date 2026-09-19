@@ -2,8 +2,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use ucr_core::{CommandOutcomeStore, DurableStoreError, EventAppendStatus, EventJournalStore};
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CommandId, CorrelationContext, DeviceId, DeviceRef,
-    EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, PrincipalId, ProtocolExtension,
-    ProtocolVersion, TenantId, TenantScope,
+    EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind,
+    PrincipalRef, ProtocolExtension, ProtocolVersion, TenantId, TenantScope,
 };
 use ucr_protocol::{EventError, MAX_PROTOCOL_EXTENSIONS, canonical_event};
 
@@ -486,6 +486,102 @@ impl EventJournalStore for SqliteLocalStore {
         values.push(rusqlite::types::Value::Integer(
             i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?,
         ));
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| map_sqlite_error(&error))?;
+        let mut events = Vec::with_capacity(max_items.min(256));
+        for row in rows {
+            let event_id =
+                EventId::from_opaque(parse_id(&row.map_err(|error| map_sqlite_error(&error))?)?);
+            events.push(
+                load_event_by_id(&connection, scope, &event_id)?
+                    .ok_or(DurableStoreError::Corrupt)?,
+            );
+        }
+        Ok(events)
+    }
+
+    fn events_for_types_by_principal(
+        &self,
+        scope: &TenantScope,
+        event_types: &[&str],
+        principal: &PrincipalRef,
+        max_items: usize,
+    ) -> Result<Vec<EventEnvelope>, DurableStoreError> {
+        if event_types.is_empty()
+            || event_types.len() > 16
+            || event_types.iter().any(|event_type| event_type.is_empty())
+            || max_items == 0
+            || max_items > 16_384
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let namespace = namespace_storage_key(scope);
+        let connection = self.lock_connection()?;
+        let mut values = vec![
+            rusqlite::types::Value::Text(scope.tenant_id.as_opaque().as_str().to_owned()),
+            rusqlite::types::Value::Integer(namespace.present),
+            rusqlite::types::Value::Text(namespace.value.to_owned()),
+        ];
+        let actor_predicate = match principal.kind {
+            PrincipalKind::Person
+            | PrincipalKind::AiAgent
+            | PrincipalKind::Bot
+            | PrincipalKind::Organization => {
+                let actor_id_index = values.len() + 1;
+                values.push(rusqlite::types::Value::Text(
+                    principal.principal_id.as_opaque().as_str().to_owned(),
+                ));
+                let actor_kind_index = values.len() + 1;
+                let actor_kind = match principal.kind {
+                    PrincipalKind::Person => ActorKind::Person,
+                    PrincipalKind::AiAgent => ActorKind::AiAgent,
+                    PrincipalKind::Bot => ActorKind::Bot,
+                    PrincipalKind::Organization => ActorKind::Organization,
+                    _ => unreachable!(),
+                };
+                values.push(rusqlite::types::Value::Text(
+                    actor_kind_name(actor_kind).to_owned(),
+                ));
+                format!(
+                    "actor_id=?{actor_id_index} AND actor_kind=?{actor_kind_index} AND on_behalf_of IS NULL"
+                )
+            }
+            PrincipalKind::Device
+            | PrincipalKind::ServiceAccount
+            | PrincipalKind::Automation
+            | PrincipalKind::ExternalPlatform => {
+                let principal_index = values.len() + 1;
+                values.push(rusqlite::types::Value::Text(
+                    principal.principal_id.as_opaque().as_str().to_owned(),
+                ));
+                format!("actor_kind='system' AND on_behalf_of=?{principal_index}")
+            }
+        };
+        let mut placeholders = Vec::with_capacity(event_types.len());
+        for event_type in event_types {
+            let index = values.len() + 1;
+            values.push(rusqlite::types::Value::Text((*event_type).to_owned()));
+            placeholders.push(format!("?{index}"));
+        }
+        let limit_index = values.len() + 1;
+        values.push(rusqlite::types::Value::Integer(
+            i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?,
+        ));
+        let sql = format!(
+            "SELECT event_id FROM events
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+               AND {actor_predicate}
+               AND event_type IN ({})
+             ORDER BY journal_seq
+             LIMIT ?{limit_index}",
+            placeholders.join(",")
+        );
         let mut statement = connection
             .prepare(&sql)
             .map_err(|error| map_sqlite_error(&error))?;
