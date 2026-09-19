@@ -3,7 +3,7 @@ use std::{fmt, sync::Arc};
 use prost::Message;
 use tonic::{Request, Response, Status};
 use ucr_core::{
-    AuthorizationEvaluator, CommandAcceptanceStore, DurableStoreError,
+    AuthorizationEvaluator, CommandAcceptanceStore, DurableStoreError, EventJournalStore,
     ExternalIdentityBindingStore, GroupCallLookupStore, IdentityDeviceLookupStore, IdentityStore,
     PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, ServiceAuditStore,
     ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
@@ -19,7 +19,8 @@ use ucr_model::{
     UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
-    CONFERENCE_CREATE_PERMISSION, CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
+    CONFERENCE_ATTENDANCE_READ_PERMISSION, CONFERENCE_CREATE_PERMISSION,
+    CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
     CONFERENCE_READ_PERMISSION, CanonicalError, CanonicalErrorCode, CommandReceiptStatus,
     acknowledgement_for,
@@ -139,6 +140,7 @@ where
         + PrincipalIdentityLookupStore
         + IdentityDeviceLookupStore
         + GroupCallLookupStore
+        + EventJournalStore
         + 'static,
 {
     pb::universal_conference_service_server::UniversalConferenceServiceServer::new(service)
@@ -163,6 +165,7 @@ where
         + PrincipalIdentityLookupStore
         + IdentityDeviceLookupStore
         + GroupCallLookupStore
+        + EventJournalStore
         + 'static,
 {
     async fn create_conference(
@@ -591,6 +594,52 @@ where
             }),
         }))
     }
+
+    async fn get_participant_attendance(
+        &self,
+        request: Request<pb::UniversalGetParticipantAttendanceRequest>,
+    ) -> Result<Response<pb::UniversalGetParticipantAttendanceResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let decoded = decode_participant_attendance(request.into_inner());
+        let result = match (credentials, decoded) {
+            (
+                Ok((credential_id, secret)),
+                Ok((scope, conference_id, integration_id, external_user_id)),
+            ) => self
+                .admit(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    CONFERENCE_ATTENDANCE_READ_PERMISSION,
+                )
+                .and_then(|_| {
+                    let now_unix_ms = self.clock.now_unix_ms().map_err(|_| {
+                        CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+                    })?;
+                    participant_attendance(
+                        &*self.store,
+                        &scope,
+                        &conference_id,
+                        &integration_id,
+                        &external_user_id,
+                        now_unix_ms,
+                    )
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::UniversalGetParticipantAttendanceResponse {
+            result: Some(match result {
+                Ok(attendance) => {
+                    pb::universal_get_participant_attendance_response::Result::Attendance(
+                        attendance,
+                    )
+                }
+                Err(error) => {
+                    pb::universal_get_participant_attendance_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
 }
 
 struct EnsureParticipantInput {
@@ -782,6 +831,18 @@ fn decode_revoke_join_grant(
         GroupId::from_opaque(decode_opaque(value.conference_id)?),
         IntegrationId::from_opaque(decode_opaque(value.integration_id)?),
         SessionId::from_opaque(decode_opaque(value.session_id)?),
+    ))
+}
+
+fn decode_participant_attendance(
+    value: pb::UniversalGetParticipantAttendanceRequest,
+) -> Result<(TenantScope, GroupId, IntegrationId, Vec<u8>), CanonicalError> {
+    validate_external_user_id(&value.external_user_id)?;
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        GroupId::from_opaque(decode_opaque(value.conference_id)?),
+        IntegrationId::from_opaque(decode_opaque(value.integration_id)?),
+        value.external_user_id,
     ))
 }
 
@@ -1487,6 +1548,246 @@ where
         .revoke(scope, session_id)
         .map(|_| ())
         .map_err(map_join_token_error)
+}
+
+const ATTENDANCE_EVENT_TYPES: [&str; 4] = [
+    "ucr.conference.attendance.joined.v1",
+    "ucr.conference.attendance.left.v1",
+    "ucr.conference.attendance.reconnected.v1",
+    "ucr.conference.attendance.media_ready.v1",
+];
+const MAX_ATTENDANCE_PROJECTION_EVENTS: usize = 16_384;
+
+#[derive(Debug)]
+struct AttendanceSessionProjection {
+    session_id: SessionId,
+    joined_at_unix_ms: i64,
+    left_at_unix_ms: Option<i64>,
+}
+
+fn participant_attendance<S>(
+    store: &S,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    integration_id: &IntegrationId,
+    external_user_id: &[u8],
+    now_unix_ms: i64,
+) -> Result<pb::UniversalParticipantAttendance, CanonicalError>
+where
+    S: UniversalConferenceStore + GroupCallLookupStore + EventJournalStore,
+{
+    if now_unix_ms < 0 {
+        return Err(CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable));
+    }
+    conference_for_integration(store, scope, conference_id, integration_id)?;
+    let participant =
+        participant_for_external(store, scope, conference_id, integration_id, external_user_id)?;
+    let calls = store
+        .calls_for_group(scope, conference_id, 64)
+        .map_err(map_store_error)?;
+    if calls.len() == 64 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    let call_ids = calls
+        .into_iter()
+        .map(|call| call.call_id)
+        .collect::<Vec<_>>();
+    if call_ids.is_empty() {
+        return Ok(empty_attendance(external_user_id));
+    }
+
+    let events = store
+        .events_for_types(
+            scope,
+            &ATTENDANCE_EVENT_TYPES,
+            MAX_ATTENDANCE_PROJECTION_EVENTS,
+        )
+        .map_err(map_store_error)?;
+    if events.len() == MAX_ATTENDANCE_PROJECTION_EVENTS {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+
+    let mut sessions = Vec::<AttendanceSessionProjection>::new();
+    let mut first_join_at_unix_ms = None;
+    let mut last_leave_at_unix_ms = None;
+    let mut first_media_ready_at_unix_ms = None;
+    let mut join_count = 0_u32;
+    let mut reconnect_count = 0_u32;
+    let mut media_ready_count = 0_u32;
+
+    for event in events {
+        let attendance = pb::ConferenceAttendanceEvent::decode(event.payload.as_slice())
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
+        let event_scope = attendance
+            .scope
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
+            .and_then(|value| {
+                decode_scope(value)
+                    .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+            })?;
+        let call_id = CallId::from_opaque(
+            decode_opaque(attendance.call_id)
+                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+        );
+        let event_participant = attendance
+            .participant
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
+            .and_then(|value| {
+                super::decode_principal_ref(value)
+                    .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+            })?;
+        if event_scope != *scope
+            || !call_ids.contains(&call_id)
+            || event_participant != participant.participant
+        {
+            continue;
+        }
+        if attendance.occurred_at_unix_ms < 0
+            || attendance.occurred_at_unix_ms != event.wall_time_unix_ms
+        {
+            return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+        }
+        let session_id = SessionId::from_opaque(
+            decode_opaque(attendance.session_id)
+                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+        );
+        let kind = pb::ConferenceAttendanceKind::try_from(attendance.kind)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
+        let expected_kind = match event.event_type.as_str() {
+            "ucr.conference.attendance.joined.v1" => pb::ConferenceAttendanceKind::Joined,
+            "ucr.conference.attendance.left.v1" => pb::ConferenceAttendanceKind::Left,
+            "ucr.conference.attendance.reconnected.v1" => {
+                pb::ConferenceAttendanceKind::Reconnected
+            }
+            "ucr.conference.attendance.media_ready.v1" => {
+                pb::ConferenceAttendanceKind::MediaReady
+            }
+            _ => return Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+        };
+        if kind != expected_kind {
+            return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+        }
+
+        match kind {
+            pb::ConferenceAttendanceKind::Joined => {
+                if sessions.iter().any(|session| session.session_id == session_id) {
+                    return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+                }
+                sessions.push(AttendanceSessionProjection {
+                    session_id,
+                    joined_at_unix_ms: attendance.occurred_at_unix_ms,
+                    left_at_unix_ms: None,
+                });
+                join_count = join_count
+                    .checked_add(1)
+                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+                first_join_at_unix_ms = Some(first_join_at_unix_ms.map_or(
+                    attendance.occurred_at_unix_ms,
+                    |current: i64| current.min(attendance.occurred_at_unix_ms),
+                ));
+            }
+            pb::ConferenceAttendanceKind::Left => {
+                let session = sessions
+                    .iter_mut()
+                    .find(|session| session.session_id == session_id)
+                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+                if session.left_at_unix_ms.is_some()
+                    || attendance.occurred_at_unix_ms < session.joined_at_unix_ms
+                {
+                    return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+                }
+                session.left_at_unix_ms = Some(attendance.occurred_at_unix_ms);
+                last_leave_at_unix_ms = Some(last_leave_at_unix_ms.map_or(
+                    attendance.occurred_at_unix_ms,
+                    |current: i64| current.max(attendance.occurred_at_unix_ms),
+                ));
+            }
+            pb::ConferenceAttendanceKind::Reconnected => {
+                let session = sessions
+                    .iter()
+                    .find(|session| session.session_id == session_id)
+                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+                if session.left_at_unix_ms.is_some()
+                    || attendance.occurred_at_unix_ms < session.joined_at_unix_ms
+                {
+                    return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+                }
+                reconnect_count = reconnect_count
+                    .checked_add(1)
+                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+            }
+            pb::ConferenceAttendanceKind::MediaReady => {
+                let session = sessions
+                    .iter()
+                    .find(|session| session.session_id == session_id)
+                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+                if session.left_at_unix_ms.is_some()
+                    || attendance.occurred_at_unix_ms < session.joined_at_unix_ms
+                {
+                    return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+                }
+                media_ready_count = media_ready_count
+                    .checked_add(1)
+                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+                first_media_ready_at_unix_ms = Some(first_media_ready_at_unix_ms.map_or(
+                    attendance.occurred_at_unix_ms,
+                    |current: i64| current.min(attendance.occurred_at_unix_ms),
+                ));
+            }
+            pb::ConferenceAttendanceKind::Unspecified => {
+                return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+            }
+        }
+    }
+
+    let mut total_connected_ms = 0_u64;
+    let mut current_connected_ms = 0_u64;
+    let mut connected = false;
+    for session in sessions {
+        let end = session.left_at_unix_ms.unwrap_or(now_unix_ms);
+        if end < session.joined_at_unix_ms {
+            return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+        }
+        let duration = u64::try_from(end - session.joined_at_unix_ms)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
+        total_connected_ms = total_connected_ms
+            .checked_add(duration)
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+        if session.left_at_unix_ms.is_none() {
+            connected = true;
+            current_connected_ms = current_connected_ms
+                .checked_add(duration)
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+        }
+    }
+
+    Ok(pb::UniversalParticipantAttendance {
+        external_user_id: external_user_id.to_vec(),
+        first_join_at_unix_ms,
+        last_leave_at_unix_ms,
+        first_media_ready_at_unix_ms,
+        total_connected_seconds: total_connected_ms / 1000,
+        current_connected_seconds: current_connected_ms / 1000,
+        join_count,
+        reconnect_count,
+        media_ready_count,
+        connected,
+    })
+}
+
+fn empty_attendance(external_user_id: &[u8]) -> pb::UniversalParticipantAttendance {
+    pb::UniversalParticipantAttendance {
+        external_user_id: external_user_id.to_vec(),
+        first_join_at_unix_ms: None,
+        last_leave_at_unix_ms: None,
+        first_media_ready_at_unix_ms: None,
+        total_connected_seconds: 0,
+        current_connected_seconds: 0,
+        join_count: 0,
+        reconnect_count: 0,
+        media_ready_count: 0,
+        connected: false,
+    }
 }
 
 const fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
