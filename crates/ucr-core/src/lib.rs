@@ -25,11 +25,11 @@ use ucr_model::{
     EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult, EventReconciliation,
     EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding,
     FederationPeerRecord, FederationTrustState, IdentityId, IdentityRecord, IntegrationId,
-    IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PrincipalIdentityBinding, PrincipalKind,
-    PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
-    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
-    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord,
+    IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PrincipalIdentityBinding,
+    PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
+    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
+    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
+    TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
