@@ -765,6 +765,23 @@ pub trait PrincipalIdentityBindingStore: StorageProvider {
     ) -> Result<Option<PrincipalIdentityBinding>, DurableStoreError>;
 }
 
+/// Read-only reverse index over the canonical Principal→Identity association owner.
+///
+/// This does not create a second identity or principal registry. It exists for integration layers
+/// that start from an already-resolved Identity and must reuse an existing Principal when present.
+pub trait PrincipalIdentityLookupStore: StorageProvider {
+    /// Lists bounded canonical Principal bindings for one exact Root Identity.
+    ///
+    /// # Errors
+    /// Returns explicit invalid/storage/corrupt-state failures.
+    fn principal_identity_bindings_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<PrincipalIdentityBinding>, DurableStoreError>;
+}
+
 pub trait ExternalIdentityBindingStore: StorageProvider {
     /// Persists or deduplicates one canonical external Identity binding.
     ///
