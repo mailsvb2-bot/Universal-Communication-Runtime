@@ -593,6 +593,30 @@ impl IdentityDeviceLookupStore for MemoryLocalStore {
             .take(max_items)
             .collect())
     }
+
+    fn active_devices_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<DeviceDescriptor>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let expected_scope = scope_key(scope);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .devices
+            .iter()
+            .filter(|((candidate_scope, _), descriptor)| {
+                candidate_scope == &expected_scope
+                    && descriptor.identity_id == *identity_id
+                    && descriptor.state == DeviceLifecycleState::Active
+            })
+            .map(|(_, descriptor)| descriptor.clone())
+            .take(max_items)
+            .collect())
+    }
 }
 
 impl ReverifiedDeviceActivationStore for MemoryLocalStore {
