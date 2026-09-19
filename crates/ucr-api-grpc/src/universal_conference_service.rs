@@ -1241,15 +1241,15 @@ where
     {
         return Err(CanonicalError::new(CanonicalErrorCode::Internal));
     }
-    let bindings = store
-        .principal_identity_bindings_for_identity(scope, identity_id, 16)
-        .map_err(map_store_error)?;
-    if bindings.len() == 16 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
-    }
-    let mut person_principals = bindings
-        .into_iter()
-        .filter(|candidate| candidate.principal.kind == PrincipalKind::Person);
+    let mut person_principals = store
+        .principal_identity_bindings_for_identity_kind(
+            scope,
+            identity_id,
+            PrincipalKind::Person,
+            2,
+        )
+        .map_err(map_store_error)?
+        .into_iter();
     match (person_principals.next(), person_principals.next()) {
         (Some(existing), None) => Ok(existing.principal),
         (Some(_), Some(_)) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
