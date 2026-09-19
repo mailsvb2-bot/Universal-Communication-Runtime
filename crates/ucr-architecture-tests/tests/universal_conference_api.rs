@@ -345,3 +345,15 @@ fn realtime_browser_gateway_enforces_exact_origin_policy() {
     assert!(gateway.contains("origin == format!(\"https://{host}\")"));
     assert!(gateway.contains("origin == format!(\"http://{host}\")"));
 }
+
+
+#[test]
+fn realtime_browser_waiting_room_uses_join_grant_window() {
+    let client = read("crates/ucr-realtime-web/static/client.html");
+
+    assert!(client.contains("scheduleWaitingRoom"));
+    assert!(client.contains("claims.not_before-Date.now()"));
+    assert!(client.contains("The conference has not started yet"));
+    assert!(client.contains("setTimeout(()=>{waitTimer=null;ui.join.disabled=false;join();},delay)"));
+    assert!(!client.contains("Join grant is not active yet"));
+}
