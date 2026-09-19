@@ -5,34 +5,33 @@ use tonic::{Request, Response, Status};
 use ucr_core::{
     AuthorizationEvaluator, CallStore, CommandAcceptanceStore, DeviceLifecycleStore,
     DurableStoreError, EventJournalStore, ExternalIdentityBindingStore, GroupCallLookupStore,
-    GroupStore, IdentityDeviceLookupStore, IdentityStore,
-    PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, ServiceAuditStore,
-    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
-    ServiceQuotaClock, ServiceQuotaStore, UniversalConferenceStore, generate_opaque_id,
+    GroupStore, IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
+    PrincipalIdentityLookupStore, ServiceAuditStore, ServiceCredentialSecret,
+    ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
+    UniversalConferenceStore, generate_opaque_id,
 };
 use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
 use ucr_model::{
-    AuthorizationRequest, CallId, CallParticipant, CallParticipantState,
-    CallParticipantUpdateKind, CallSession, CallSignal, CallSignalKind, CallSignallingState,
-    CommandEnvelope, CommandId, ConferenceParticipantRole,
-    ConferenceScheduleMetadata, ConversationId, ConversationKind, ConversationRecord,
-    ConversationRef, CorrelationContext, DeliveryPolicy, DeviceDescriptor, DeviceId,
-    DeviceLifecycleState, EventId, ExternalIdentityBinding, GroupChange, GroupChangeKind,
+    AuthorizationRequest, CallId, CallParticipant, CallParticipantState, CallParticipantUpdateKind,
+    CallSession, CallSignal, CallSignalKind, CallSignallingState, CommandEnvelope, CommandId,
+    ConferenceParticipantRole, ConferenceScheduleMetadata, ConversationId, ConversationKind,
+    ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy, DeviceDescriptor,
+    DeviceId, DeviceLifecycleState, EventId, ExternalIdentityBinding, GroupChange, GroupChangeKind,
     GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState, GroupOwnership, GroupRecord,
     GroupRole, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
     OpaqueId, PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion,
-    ScopedPrincipal, SessionId, TenantScope, UniversalConferenceLifecycle,
-    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    ScopedPrincipal, SessionId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
+    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
     CONFERENCE_ATTENDANCE_READ_PERMISSION, CONFERENCE_CREATE_PERMISSION,
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
-    CONFERENCE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION, CanonicalError, CanonicalErrorCode,
-    CapabilityMaturity, CommandReceiptStatus, GROUP_MLS_CAPABILITY, MAX_CALL_PARTICIPANTS,
-    acknowledgement_for, canonical_capabilities,
-    phase20_audio_capabilities, phase21_video_capabilities, phase22_media_e2ee_capabilities,
-    phase29_sfu_capabilities, phase30_conference_capabilities,
+    CONFERENCE_READ_PERMISSION, CanonicalError, CanonicalErrorCode, CapabilityMaturity,
+    CommandReceiptStatus, DEVICE_REGISTER_PERMISSION, GROUP_MLS_CAPABILITY, MAX_CALL_PARTICIPANTS,
+    acknowledgement_for, canonical_capabilities, phase20_audio_capabilities,
+    phase21_video_capabilities, phase22_media_e2ee_capabilities, phase29_sfu_capabilities,
+    phase30_conference_capabilities,
 };
 use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
@@ -482,16 +481,18 @@ where
                 .and_then(|_| ensure_participant_device(&*self.store, &input, payload)),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
-        Ok(Response::new(pb::UniversalEnsureParticipantDeviceResponse {
-            result: Some(match result {
-                Ok(device) => {
-                    pb::universal_ensure_participant_device_response::Result::Device(device)
-                }
-                Err(error) => {
-                    pb::universal_ensure_participant_device_response::Result::Error(pb_error(error))
-                }
-            }),
-        }))
+        Ok(Response::new(
+            pb::UniversalEnsureParticipantDeviceResponse {
+                result: Some(match result {
+                    Ok(device) => {
+                        pb::universal_ensure_participant_device_response::Result::Device(device)
+                    }
+                    Err(error) => pb::universal_ensure_participant_device_response::Result::Error(
+                        pb_error(error),
+                    ),
+                }),
+            },
+        ))
     }
 
     async fn update_participant(
@@ -629,11 +630,9 @@ where
                     Ok(runtime) => {
                         pb::universal_prepare_conference_runtime_response::Result::Runtime(runtime)
                     }
-                    Err(error) => {
-                        pb::universal_prepare_conference_runtime_response::Result::Error(pb_error(
-                            error,
-                        ))
-                    }
+                    Err(error) => pb::universal_prepare_conference_runtime_response::Result::Error(
+                        pb_error(error),
+                    ),
                 }),
             },
         ))
@@ -1736,20 +1735,9 @@ where
         &owner_actor,
         &owner_ready.device_id,
     )?;
-    reconcile_runtime_group_members(
-        store,
-        &owner_actor,
-        &owner_ready.device_id,
-        &group,
-        &ready,
-    )?;
-    let call_ready = reconcile_runtime_call(
-        store,
-        input,
-        &stable_command_id,
-        &owner_actor,
-        &ready,
-    )?;
+    reconcile_runtime_group_members(store, &owner_actor, &owner_ready.device_id, &group, &ready)?;
+    let call_ready =
+        reconcile_runtime_call(store, input, &stable_command_id, &owner_actor, &ready)?;
     let admitted_participant_count = u32::try_from(ready.len())
         .map_err(|_| CanonicalError::new(CanonicalErrorCode::ResourceExhausted))?;
     Ok(pb::UniversalConferenceRuntimeStatus {
@@ -1838,13 +1826,7 @@ where
         .create_mls_device_key_package(&input.scope, owner_device_id)
         .map_err(map_group_mls_error)?;
     let (_, created) = store
-        .create_mls_backed_group(
-            &conversation,
-            &group,
-            owner,
-            owner_device_id,
-            &key_package,
-        )
+        .create_mls_backed_group(&conversation, &group, owner, owner_device_id, &key_package)
         .map_err(map_group_mls_error)?;
     validate_runtime_group(&created, owner)?;
     Ok(created)
@@ -1899,11 +1881,7 @@ where
             .create_mls_device_key_package(&owner.scope, &participant.device_id)
             .map_err(map_group_mls_error)?;
         let change = GroupChange {
-            event_id: runtime_event_id(
-                "gm",
-                group.revision,
-                &participant.profile.participant,
-            )?,
+            event_id: runtime_event_id("gm", group.revision, &participant.profile.participant)?,
             scope: owner.scope.clone(),
             group_id: group.group_id.clone(),
             expected_revision: group.revision,
@@ -2041,11 +2019,7 @@ where
             continue;
         }
         let signal = CallSignal {
-            event_id: runtime_event_id(
-                "ca",
-                call.revision,
-                &participant.profile.participant,
-            )?,
+            event_id: runtime_event_id("ca", call.revision, &participant.profile.participant)?,
             scope: owner.scope.clone(),
             call_id: call.call_id.clone(),
             expected_revision: call.revision,
