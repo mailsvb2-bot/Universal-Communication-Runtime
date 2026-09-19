@@ -1034,7 +1034,7 @@ pub trait EventJournalStore: StorageProvider {
     /// Returns a bounded oldest-first projection of matching canonical events attributed to one
     /// exact Principal.
     ///
-    /// Principal attribution filtering must happen before max_items is applied so unrelated
+    /// Principal attribution filtering must happen before `max_items` is applied so unrelated
     /// event history cannot exhaust a caller's bounded projection. This remains a read-only view
     /// over the same canonical Event journal and must not create a second event owner.
     ///
