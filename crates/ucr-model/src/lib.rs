@@ -19,6 +19,7 @@ mod sfu;
 mod store_forward;
 mod transport_failover;
 mod transport_orchestrator;
+mod universal_conference;
 mod video;
 pub use adaptive_media::{
     AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage, AdaptiveMediaTelemetry,
@@ -74,6 +75,10 @@ pub use transport_failover::{
     TransportFailoverPolicy, TransportFailoverStopReason,
 };
 pub use transport_orchestrator::{
+pub use universal_conference::{
+    ConferenceParticipantRole, ConferenceScheduleMetadata, UniversalConferenceLifecycle,
+    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+};
     TransportOrchestrationDecision, TransportResourceSnapshot, TransportRouteDecision,
     TransportRouteTelemetry, TransportRoutingHint,
 };
