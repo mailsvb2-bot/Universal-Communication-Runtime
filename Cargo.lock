@@ -3116,6 +3116,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-realtime-web"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "base64",
+ "prost",
+ "serde",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "ucr-api-grpc",
+]
+
+[[package]]
 name = "ucr-runtime"
 version = "0.0.1"
 dependencies = [
