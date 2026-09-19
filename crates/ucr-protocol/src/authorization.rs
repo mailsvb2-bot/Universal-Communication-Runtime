@@ -49,10 +49,8 @@ pub const CONFERENCE_SUBSCRIBE_PERMISSION: &str = "ucr.conference.subscribe";
 pub const CONFERENCE_CREATE_PERMISSION: &str = "ucr.conference.create";
 pub const CONFERENCE_READ_PERMISSION: &str = "ucr.conference.read";
 pub const CONFERENCE_MANAGE_PERMISSION: &str = "ucr.conference.manage";
-pub const CONFERENCE_PARTICIPANT_ENSURE_PERMISSION: &str =
-    "ucr.conference.participant.ensure";
-pub const CONFERENCE_PARTICIPANT_MANAGE_PERMISSION: &str =
-    "ucr.conference.participant.manage";
+pub const CONFERENCE_PARTICIPANT_ENSURE_PERMISSION: &str = "ucr.conference.participant.ensure";
+pub const CONFERENCE_PARTICIPANT_MANAGE_PERMISSION: &str = "ucr.conference.participant.manage";
 pub const CONFERENCE_JOIN_ISSUE_PERMISSION: &str = "ucr.conference.join.issue";
 pub const CONFERENCE_ATTENDANCE_READ_PERMISSION: &str = "ucr.conference.attendance.read";
 pub const CONFERENCE_RECORDING_MANAGE_PERMISSION: &str = "ucr.conference.recording.manage";
