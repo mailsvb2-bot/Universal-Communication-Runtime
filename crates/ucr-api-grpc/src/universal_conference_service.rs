@@ -5,8 +5,9 @@ use tonic::{Request, Response, Status};
 use ucr_core::{
     AuthorizationEvaluator, CallStore, CommandAcceptanceStore, DeviceLifecycleStore,
     DurableStoreError, EventJournalStore, ExternalIdentityBindingStore, GroupCallLookupStore,
-    GroupStore, IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
-    PrincipalIdentityLookupStore, ServiceAuditStore, ServiceCredentialSecret,
+    GroupStore, IdentityDeviceLookupStore, IdentityStore, PermissionGrantStore,
+    PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, ServiceAuditStore,
+    ServiceCredentialSecret,
     ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
     UniversalConferenceStore, generate_opaque_id,
 };
@@ -19,16 +20,19 @@ use ucr_model::{
     DeviceId, DeviceLifecycleState, EventId, ExternalIdentityBinding, GroupChange, GroupChangeKind,
     GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState, GroupOwnership, GroupRecord,
     GroupRole, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
-    OpaqueId, PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion,
-    ScopedPrincipal, SessionId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
+    OpaqueId, PermissionGrant, PermissionScope, PrincipalId, PrincipalIdentityBinding,
+    PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal, SessionId, TenantScope,
+    UniversalConferenceLifecycle, UniversalConferenceMode,
     UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
+    AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CALL_OBSERVE_PERMISSION,
     CONFERENCE_ATTENDANCE_READ_PERMISSION, CONFERENCE_CREATE_PERMISSION,
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
-    CONFERENCE_READ_PERMISSION, CanonicalError, CanonicalErrorCode, CapabilityMaturity,
-    CommandReceiptStatus, DEVICE_REGISTER_PERMISSION, GROUP_MLS_CAPABILITY, MAX_CALL_PARTICIPANTS,
+    CONFERENCE_READ_PERMISSION, CONFERENCE_SUBSCRIBE_PERMISSION, CanonicalError,
+    CanonicalErrorCode, CapabilityMaturity, CommandReceiptStatus, DEVICE_REGISTER_PERMISSION,
+    GROUP_MLS_CAPABILITY, MAX_CALL_PARTICIPANTS, VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
     acknowledgement_for, canonical_capabilities, phase20_audio_capabilities,
     phase21_video_capabilities, phase22_media_e2ee_capabilities, phase29_sfu_capabilities,
     phase30_conference_capabilities,
@@ -165,6 +169,7 @@ where
         + PrincipalIdentityLookupStore
         + IdentityDeviceLookupStore
         + DeviceLifecycleStore
+        + PermissionGrantStore
         + GroupStore
         + GroupMlsAtomicStore
         + CallStore
@@ -194,6 +199,7 @@ where
         + PrincipalIdentityLookupStore
         + IdentityDeviceLookupStore
         + DeviceLifecycleStore
+        + PermissionGrantStore
         + GroupStore
         + GroupMlsAtomicStore
         + CallStore
