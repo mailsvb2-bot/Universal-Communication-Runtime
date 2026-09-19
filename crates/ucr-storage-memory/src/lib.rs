@@ -18,10 +18,9 @@ use ucr_core::{
     DeliveryStore, DeviceLifecycleStore, DeviceReverificationProof, DurableRecordStatus,
     DurableStoreError, EventAppendStatus, EventJournalStore, EventSubscriptionStore,
     ExternalIdentityBindingStore, FederationPeerStore, IdentityDeviceLookupStore, IdentityStore,
-    MessageStore,
-    PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
-    RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
-    ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
+    MessageStore, PermissionGrantStore, PrincipalIdentityBindingStore,
+    PrincipalIdentityLookupStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore,
+    RecoveryPlanStore, ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
     ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth, StorageProvider, SyncStore,
     TrustedSigningKeyStore, UniversalConferenceStore,
 };
