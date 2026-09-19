@@ -3180,7 +3180,7 @@ mod universal_runtime_tests {
     };
     use ucr_model::{
         CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
-        CallSignallingState, CallTerminationReason, ConferenceParticipantRole,
+        CallSignallingState, CallTerminationReason, CommandId, ConferenceParticipantRole,
         ConferenceScheduleMetadata, DeviceDescriptor, DeviceLifecycleState, EventId,
         GroupMemberState, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord,
         IntegrationId, OpaqueId, PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef,
@@ -3195,7 +3195,8 @@ mod universal_runtime_tests {
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
         IssueJoinGrantInput, PrepareConferenceRuntimeInput, UpdateParticipantInput,
         ensure_participant, ensure_participant_device, issue_join_grant,
-        prepare_conference_runtime, resolve_join_call, resolve_join_device, update_participant,
+        prepare_conference_runtime, resolve_join_call, resolve_join_device, resolve_person_principal,
+        update_participant,
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -3829,6 +3830,56 @@ mod universal_runtime_tests {
                 .as_str(),
             "zz-active-device"
         );
+    }
+
+
+    #[test]
+    fn person_principal_resolution_ignores_unrelated_principal_history() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        let identity_id = IdentityId::from_opaque(oid("principal-history-identity"));
+        store
+            .persist_identity(&IdentityRecord {
+                scope: scope(),
+                identity_id: identity_id.clone(),
+                ownership: IdentityOwnership::PlatformManaged,
+                evidence: IdentityEvidence::Unverified,
+                expires_at_unix_ms: None,
+            })
+            .expect("identity");
+
+        for index in 0..16_u32 {
+            store
+                .persist_principal_identity_binding(&PrincipalIdentityBinding {
+                    scope: scope(),
+                    principal: PrincipalRef {
+                        principal_id: PrincipalId::from_opaque(oid(&format!(
+                            "organization-history-{index:03}"
+                        ))),
+                        kind: PrincipalKind::Organization,
+                    },
+                    identity_id: identity_id.clone(),
+                })
+                .expect("organization binding");
+        }
+
+        let resolved = resolve_person_principal(
+            &store,
+            &scope(),
+            &identity_id,
+            &CommandId::from_opaque(oid("principal-history-command")),
+        )
+        .expect("person principal resolution");
+        assert_eq!(resolved.kind, PrincipalKind::Person);
+
+        let repeated = resolve_person_principal(
+            &store,
+            &scope(),
+            &identity_id,
+            &CommandId::from_opaque(oid("principal-history-command-2")),
+        )
+        .expect("person principal retry");
+        assert_eq!(repeated, resolved);
     }
 
 }
