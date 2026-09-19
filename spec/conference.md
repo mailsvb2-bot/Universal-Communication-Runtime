@@ -42,6 +42,8 @@ Group removal immediately invalidates Call participation through the existing Gr
 
 ## Recording and transport
 
+Phase 30 does not add recording. That historical invariant remains true: the current RecordingService is a later, separate opt-in capability and lifecycle, not part of Phase 30 Conference coordination or implicit SFU forwarding.
+
 Realtime external transport is defined separately in `spec/realtime.md` and `realtime.proto`. It carries only encrypted SFU media and authenticated session liveness.
 
 Recording is defined separately in `spec/recording.md` and `recording.proto`. SFU forwarding never enables recording implicitly. Recording requires explicit capability, policy, participant notification/consent rules, encrypted storage and finite retention.
