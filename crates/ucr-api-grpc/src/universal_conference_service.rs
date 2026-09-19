@@ -2897,21 +2897,6 @@ fn finalize_attendance(
     })
 }
 
-fn empty_attendance(external_user_id: &[u8]) -> pb::UniversalParticipantAttendance {
-    pb::UniversalParticipantAttendance {
-        external_user_id: external_user_id.to_vec(),
-        first_join_at_unix_ms: None,
-        last_leave_at_unix_ms: None,
-        first_media_ready_at_unix_ms: None,
-        total_connected_seconds: 0,
-        current_connected_seconds: 0,
-        join_count: 0,
-        reconnect_count: 0,
-        media_ready_count: 0,
-        connected: false,
-    }
-}
-
 const fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
     let code = match error {
         JoinTokenError::InvalidBaseUrl
