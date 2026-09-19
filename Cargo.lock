@@ -3119,10 +3119,14 @@ dependencies = [
 name = "ucr-realtime-web"
 version = "0.0.1"
 dependencies = [
- "axum",
  "base64",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "prost",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",
