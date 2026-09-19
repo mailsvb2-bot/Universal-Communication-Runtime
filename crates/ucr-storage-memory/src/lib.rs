@@ -8024,13 +8024,16 @@ fn has_conflicting_active_conference_owner(
     conference_id: &ucr_model::GroupId,
     participant: &PrincipalRef,
 ) -> bool {
-    state.universal_conference_participants.values().any(|existing| {
-        existing.scope == *scope
-            && existing.conference_id == *conference_id
-            && existing.active
-            && existing.role == ConferenceParticipantRole::Owner
-            && existing.participant != *participant
-    })
+    state
+        .universal_conference_participants
+        .values()
+        .any(|existing| {
+            existing.scope == *scope
+                && existing.conference_id == *conference_id
+                && existing.active
+                && existing.role == ConferenceParticipantRole::Owner
+                && existing.participant != *participant
+        })
 }
 
 impl UniversalConferenceStore for MemoryLocalStore {
