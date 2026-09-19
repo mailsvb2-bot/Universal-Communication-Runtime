@@ -109,6 +109,7 @@ type ServiceCredentialRef = (ScopeKey, String);
 type ServicePrincipalKey = (ScopeKey, String);
 type UniversalConferenceKey = (ScopeKey, String);
 type UniversalConferenceExternalKey = (ScopeKey, String, Vec<u8>);
+type UniversalConferenceIdempotencyKey = (ScopeKey, String, String);
 type UniversalConferenceParticipantKey = (ScopeKey, String, PrincipalRef);
 
 #[derive(Debug, Clone, Copy)]
@@ -200,6 +201,8 @@ struct MemoryState {
     service_audit_records: Vec<(ServiceAuditRecord, [u8; 32])>,
     universal_conferences: HashMap<UniversalConferenceKey, UniversalConferenceProfile>,
     universal_conference_external: HashMap<UniversalConferenceExternalKey, UniversalConferenceKey>,
+    universal_conference_idempotency:
+        HashMap<UniversalConferenceIdempotencyKey, UniversalConferenceKey>,
     universal_conference_participants:
         HashMap<UniversalConferenceParticipantKey, UniversalConferenceParticipantProfile>,
 }
@@ -1081,6 +1084,18 @@ fn universal_conference_external_key(
         scope_key(scope),
         integration_id.as_opaque().as_str().to_owned(),
         external_conference_id.to_vec(),
+    )
+}
+
+fn universal_conference_idempotency_key(
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    idempotency_key: &str,
+) -> UniversalConferenceIdempotencyKey {
+    (
+        scope_key(scope),
+        integration_id.as_opaque().as_str().to_owned(),
+        idempotency_key.to_owned(),
     )
 }
 
@@ -7929,6 +7944,8 @@ impl UniversalConferenceStore for MemoryLocalStore {
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         if profile.external_conference_id.is_empty()
             || profile.external_conference_id.len() > 512
+            || profile.create_idempotency_key.is_empty()
+            || profile.create_idempotency_key.len() > 256
             || profile.revision != 1
         {
             return Err(DurableStoreError::InvalidRecord);
@@ -7938,6 +7955,11 @@ impl UniversalConferenceStore for MemoryLocalStore {
             &profile.scope,
             &profile.integration_id,
             &profile.external_conference_id,
+        );
+        let idempotency_key = universal_conference_idempotency_key(
+            &profile.scope,
+            &profile.integration_id,
+            &profile.create_idempotency_key,
         );
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.universal_conferences.get(&key) {
@@ -7954,9 +7976,19 @@ impl UniversalConferenceStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        if let Some(existing_key) = state.universal_conference_idempotency.get(&idempotency_key) {
+            return if state.universal_conferences.get(existing_key) == Some(profile) {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
         state
             .universal_conference_external
             .insert(external_key, key.clone());
+        state
+            .universal_conference_idempotency
+            .insert(idempotency_key, key.clone());
         state.universal_conferences.insert(key, profile.clone());
         Ok(DurableRecordStatus::Persisted)
     }
