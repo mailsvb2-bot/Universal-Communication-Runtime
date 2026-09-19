@@ -173,7 +173,7 @@ async fn handle_request(
         "/v1/realtime/media/stream" => match decode_json::<SessionRequest>(&body) {
             Ok(input) => return Ok(subscribe_media(&state, &token, input).await),
             Err(response) => response,
-        }
+        },
         _ => api_error(
             StatusCode::NOT_FOUND,
             "not_found",
