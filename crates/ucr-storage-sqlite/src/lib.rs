@@ -2385,7 +2385,11 @@ mod tests {
             kind: PrincipalKind::Person,
         };
 
-        for id in ["attendance-other-a", "attendance-other-b", "attendance-other-c"] {
+        for id in [
+            "attendance-other-a",
+            "attendance-other-b",
+            "attendance-other-c",
+        ] {
             let mut unrelated = event(id, "attendance-unrelated", b"unrelated");
             unrelated.event_type = event_type.to_owned();
             unrelated.actor = ActorRef {

@@ -317,7 +317,7 @@ fn universal_conference_person_resolution_filters_unrelated_principal_history() 
     assert!(service.contains("PrincipalKind::Person"));
     assert!(service.contains("person_principal_resolution_ignores_unrelated_principal_history"));
 }
- 
+
 #[test]
 fn universal_conference_attendance_filters_principal_before_history_bound() {
     let core = read("crates/ucr-core/src/lib.rs");
