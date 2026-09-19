@@ -15,10 +15,9 @@ use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipantState, CallSignal, CallSignalKind,
     ConferenceMediaSubscription, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
-    DeviceId, DeviceLifecycleState,
-    DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalKind, ScopedPrincipal,
-    SessionId, SfuForwardEnvelope, TenantScope,
+    DeviceId, DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId,
+    GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId,
+    PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for,
@@ -451,11 +450,8 @@ where
             }
             self.require_active_universal_participant(claims, &snapshot.group_id)?;
             let event_id = EventId::from_opaque(
-                OpaqueId::new(format!(
-                    "rj-{}",
-                    claims.session_id.as_opaque().as_str()
-                ))
-                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+                OpaqueId::new(format!("rj-{}", claims.session_id.as_opaque().as_str()))
+                    .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
             );
             let signal = CallSignal {
                 event_id,
