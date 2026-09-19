@@ -289,9 +289,7 @@ impl JoinTokenIssuer {
             .map_err(|_| JoinTokenError::StateUnavailable)?;
         Ok(grants
             .iter()
-            .find(|entry| {
-                entry.claims.scope == *scope && entry.claims.session_id == *session_id
-            })
+            .find(|entry| entry.claims.scope == *scope && entry.claims.session_id == *session_id)
             .map(|entry| entry.claims.clone()))
     }
 
@@ -310,9 +308,7 @@ impl JoinTokenIssuer {
             .map_err(|_| JoinTokenError::StateUnavailable)?;
         let entry = grants
             .iter_mut()
-            .find(|entry| {
-                entry.claims.scope == *scope && entry.claims.session_id == *session_id
-            })
+            .find(|entry| entry.claims.scope == *scope && entry.claims.session_id == *session_id)
             .ok_or(JoinTokenError::UnknownGrant)?;
         entry.revoked = true;
         Ok(entry.claims.clone())
@@ -1002,7 +998,10 @@ mod tests {
             )
             .expect("issue");
         let token = token_from_url(&grant.join_url);
-        assert_eq!(issuer.redeem(token, 40_001), Err(JoinTokenError::NotYetValid));
+        assert_eq!(
+            issuer.redeem(token, 40_001),
+            Err(JoinTokenError::NotYetValid)
+        );
         assert!(issuer.redeem(token, 40_010).is_ok());
         assert_eq!(
             issuer.redeem(token, 40_011),
