@@ -1512,21 +1512,20 @@ where
         &input.idempotency_key,
         payload,
     )?;
-    let devices = store
-        .devices_for_identity(&input.scope, &binding.identity_id, 64)
+    let active = store
+        .active_devices_for_identity(&input.scope, &binding.identity_id, 2)
         .map_err(map_store_error)?;
-    if devices.len() == 64 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
-    }
-    let active = devices
-        .iter()
-        .filter(|device| device.state == DeviceLifecycleState::Active)
-        .collect::<Vec<_>>();
     match active.as_slice() {
         [_] => Ok(participant_device_status(&input.external_user_id)),
         [_, ..] => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
-        [] if !devices.is_empty() => Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied)),
         [] => {
+            let has_device_history = !store
+                .devices_for_identity(&input.scope, &binding.identity_id, 1)
+                .map_err(map_store_error)?
+                .is_empty();
+            if has_device_history {
+                return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+            }
             let device_id = DeviceId::from_opaque(derived_id("device", &stable_command_id)?);
             store
                 .register_device(
@@ -2043,15 +2042,10 @@ where
         .principal_identity_binding(scope, participant)
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-    let devices = store
-        .devices_for_identity(scope, &binding.identity_id, 64)
-        .map_err(map_store_error)?;
-    if devices.len() == 64 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
-    }
-    let mut active = devices
-        .into_iter()
-        .filter(|device| device.state == DeviceLifecycleState::Active);
+    let mut active = store
+        .active_devices_for_identity(scope, &binding.identity_id, 2)
+        .map_err(map_store_error)?
+        .into_iter();
     match (active.next(), active.next()) {
         (None, _) => Ok(None),
         (Some(device), None) => Ok(Some(device.device_id)),
@@ -2430,15 +2424,10 @@ where
         .principal_identity_binding(scope, participant)
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
-    let devices = store
-        .devices_for_identity(scope, &identity_binding.identity_id, 64)
-        .map_err(map_store_error)?;
-    if devices.len() == 64 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
-    }
-    let mut active_devices = devices
-        .into_iter()
-        .filter(|device| device.state == DeviceLifecycleState::Active);
+    let mut active_devices = store
+        .active_devices_for_identity(scope, &identity_binding.identity_id, 2)
+        .map_err(map_store_error)?
+        .into_iter();
     match (active_devices.next(), active_devices.next()) {
         (Some(device), None) => Ok(device.device_id),
         (None, _) => Err(CanonicalError::new(CanonicalErrorCode::NotFound)),
