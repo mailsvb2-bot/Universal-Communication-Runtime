@@ -3106,3 +3106,243 @@ fn map_store_error(error: DurableStoreError) -> CanonicalError {
     };
     CanonicalError::new(code)
 }
+
+
+#[cfg(test)]
+mod universal_runtime_tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use ucr_core::{
+        DeviceLifecycleStore, GroupCallLookupStore, GroupStore, IdentityStore,
+        PrincipalIdentityBindingStore, UniversalConferenceStore,
+    };
+    use ucr_model::{
+        ConferenceParticipantRole, ConferenceScheduleMetadata, DeviceDescriptor,
+        DeviceLifecycleState, GroupMemberState, IdentityEvidence, IdentityId, IdentityOwnership,
+        IdentityRecord, IntegrationId, OpaqueId, PrincipalId, PrincipalIdentityBinding,
+        PrincipalKind, PrincipalRef, TenantId, TenantScope, UniversalConferenceLifecycle,
+        UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    };
+    use ucr_storage_sqlite::SqliteLocalStore;
+
+    use super::{
+        GROUP_MLS_CAPABILITY, PrepareConferenceRuntimeInput, prepare_conference_runtime,
+    };
+
+    static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+    struct TestDb(PathBuf);
+
+    impl TestDb {
+        fn new() -> Self {
+            let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            Self(std::env::temp_dir().join(format!(
+                "ucr-universal-runtime-{}-{sequence}.sqlite3",
+                std::process::id()
+            )))
+        }
+    }
+
+    impl Drop for TestDb {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+            let _ = fs::remove_file(format!("{}-wal", self.0.display()));
+            let _ = fs::remove_file(format!("{}-shm", self.0.display()));
+        }
+    }
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-universal-runtime")),
+            namespace_id: None,
+        }
+    }
+
+    fn conference() -> UniversalConferenceProfile {
+        UniversalConferenceProfile {
+            scope: scope(),
+            conference_id: ucr_model::GroupId::from_opaque(oid("conference-runtime")),
+            integration_id: IntegrationId::from_opaque(oid("integration-runtime")),
+            external_conference_id: b"external-conference-runtime".to_vec(),
+            create_idempotency_key: "create-runtime".to_owned(),
+            mode: UniversalConferenceMode::Webinar,
+            lifecycle: UniversalConferenceLifecycle::Waiting,
+            schedule: ConferenceScheduleMetadata {
+                starts_at_unix_ms: 1_000_000,
+                planned_end_unix_ms: Some(7_000_000),
+                join_before_seconds: 900,
+                join_after_seconds: 300,
+                timezone: Some("UTC".to_owned()),
+            },
+            entry_open: true,
+            revision: 1,
+        }
+    }
+
+    fn principal(value: &str) -> PrincipalRef {
+        PrincipalRef {
+            principal_id: PrincipalId::from_opaque(oid(value)),
+            kind: PrincipalKind::Person,
+        }
+    }
+
+    fn seed_participant(
+        store: &SqliteLocalStore,
+        principal: PrincipalRef,
+        identity_id: &str,
+        device_id: &str,
+        external_user_id: &[u8],
+        role: ConferenceParticipantRole,
+    ) {
+        let identity_id = IdentityId::from_opaque(oid(identity_id));
+        store
+            .persist_identity(&IdentityRecord {
+                scope: scope(),
+                identity_id: identity_id.clone(),
+                ownership: IdentityOwnership::PlatformManaged,
+                evidence: IdentityEvidence::Unverified,
+                expires_at_unix_ms: None,
+            })
+            .expect("identity");
+        store
+            .persist_principal_identity_binding(&PrincipalIdentityBinding {
+                scope: scope(),
+                principal: principal.clone(),
+                identity_id: identity_id.clone(),
+            })
+            .expect("principal identity");
+        store
+            .register_device(
+                &scope(),
+                &DeviceDescriptor {
+                    device_id: ucr_model::DeviceId::from_opaque(oid(device_id)),
+                    identity_id,
+                    state: DeviceLifecycleState::Active,
+                },
+            )
+            .expect("device");
+        let (audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed) =
+            super::participant_defaults(UniversalConferenceMode::Webinar, role);
+        store
+            .persist_universal_conference_participant(&UniversalConferenceParticipantProfile {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                external_user_id: external_user_id.to_vec(),
+                participant: principal,
+                role,
+                audio_muted,
+                camera_allowed,
+                publish_audio_allowed,
+                publish_video_allowed,
+                active: true,
+                revision: 1,
+            })
+            .expect("conference participant");
+    }
+
+    #[test]
+    fn prepare_runtime_materializes_real_sqlite_mls_group_and_single_call() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        store
+            .persist_universal_conference_profile(&conference())
+            .expect("conference profile");
+
+        let owner = principal("owner-runtime");
+        let attendee = principal("attendee-runtime");
+        seed_participant(
+            &store,
+            owner.clone(),
+            "identity-owner-runtime",
+            "device-owner-runtime",
+            b"external-owner",
+            ConferenceParticipantRole::Owner,
+        );
+        seed_participant(
+            &store,
+            attendee.clone(),
+            "identity-attendee-runtime",
+            "device-attendee-runtime",
+            b"external-attendee",
+            ConferenceParticipantRole::Attendee,
+        );
+
+        let input = PrepareConferenceRuntimeInput {
+            scope: scope(),
+            conference_id: conference().conference_id,
+            integration_id: conference().integration_id,
+            idempotency_key: "prepare-runtime".to_owned(),
+        };
+        let payload = b"prepare-runtime-payload".to_vec();
+
+        let first =
+            prepare_conference_runtime(&store, &input, payload.clone()).expect("first prepare");
+        assert!(first.group_ready);
+        assert!(first.call_ready);
+        assert_eq!(first.admitted_participant_count, 2);
+
+        let group = store
+            .group(&scope(), &conference().conference_id)
+            .expect("group read")
+            .expect("group");
+        assert_eq!(
+            group.crypto_state.capability_id.as_deref(),
+            Some(GROUP_MLS_CAPABILITY)
+        );
+        assert!(group.crypto_state.state_ref.is_some());
+
+        for expected in [&owner, &attendee] {
+            let membership = store
+                .group_membership(&scope(), &conference().conference_id, expected)
+                .expect("membership read")
+                .expect("membership");
+            assert_eq!(membership.state, GroupMemberState::Active);
+        }
+
+        let calls = store
+            .calls_for_group(&scope(), &conference().conference_id, 8)
+            .expect("calls");
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert!(call.participants.iter().any(|participant| {
+            participant.principal == owner
+                && participant.state == ucr_model::CallParticipantState::Accepted
+                && participant.left_revision.is_none()
+        }));
+        assert!(call.participants.iter().any(|participant| {
+            participant.principal == attendee
+                && participant.state == ucr_model::CallParticipantState::Invited
+                && participant.left_revision.is_none()
+        }));
+        let group_revision = group.revision;
+        let call_id = call.call_id.clone();
+
+        let repeated =
+            prepare_conference_runtime(&store, &input, payload).expect("repeated prepare");
+        assert!(repeated.group_ready);
+        assert!(repeated.call_ready);
+        assert_eq!(repeated.admitted_participant_count, 2);
+        assert_eq!(
+            store
+                .group(&scope(), &conference().conference_id)
+                .expect("group retry read")
+                .expect("group retry")
+                .revision,
+            group_revision
+        );
+        let repeated_calls = store
+            .calls_for_group(&scope(), &conference().conference_id, 8)
+            .expect("calls after retry");
+        assert_eq!(repeated_calls.len(), 1);
+        assert_eq!(repeated_calls[0].call_id, call_id);
+    }
+}
