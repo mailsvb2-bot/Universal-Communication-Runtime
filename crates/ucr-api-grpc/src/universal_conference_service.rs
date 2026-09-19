@@ -3186,14 +3186,16 @@ mod universal_runtime_tests {
     };
 
     use ucr_core::{
-        DeviceLifecycleStore, GroupCallLookupStore, GroupStore, IdentityStore,
+        CallStore, DeviceLifecycleStore, GroupCallLookupStore, GroupStore, IdentityStore,
         PrincipalIdentityBindingStore, UniversalConferenceStore,
     };
     use ucr_model::{
-        ConferenceParticipantRole, ConferenceScheduleMetadata, DeviceDescriptor,
-        DeviceLifecycleState, GroupMemberState, IdentityEvidence, IdentityId, IdentityOwnership,
-        IdentityRecord, IntegrationId, OpaqueId, PrincipalId, PrincipalIdentityBinding,
-        PrincipalKind, PrincipalRef, TenantId, TenantScope, UniversalConferenceLifecycle,
+        CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
+        CallSignallingState, CallTerminationReason, ConferenceParticipantRole,
+        ConferenceScheduleMetadata, DeviceDescriptor, DeviceLifecycleState, EventId,
+        GroupMemberState, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord,
+        IntegrationId, OpaqueId, PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef,
+        ScopedPrincipal, TenantId, TenantScope, UniversalConferenceLifecycle,
         UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
     };
     use ucr_protocol::CanonicalErrorCode;
@@ -3204,7 +3206,7 @@ mod universal_runtime_tests {
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
         IssueJoinGrantInput, PrepareConferenceRuntimeInput, UpdateParticipantInput,
         ensure_participant, ensure_participant_device, issue_join_grant,
-        prepare_conference_runtime, update_participant,
+        prepare_conference_runtime, resolve_join_call, update_participant,
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -3611,5 +3613,177 @@ mod universal_runtime_tests {
             .expect("calls after retry");
         assert_eq!(repeated_calls.len(), 1);
         assert_eq!(repeated_calls[0].call_id, call_id);
+    }
+
+
+    #[test]
+    fn active_call_projection_ignores_more_than_sixty_four_terminated_calls() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        store
+            .persist_universal_conference_profile(&conference())
+            .expect("conference profile");
+
+        let owner = principal("history-owner");
+        let attendee = principal("history-attendee");
+        seed_participant(
+            &store,
+            owner.clone(),
+            "history-owner-identity",
+            "history-owner-device",
+            b"history-owner-external",
+            ConferenceParticipantRole::Owner,
+        );
+        seed_participant(
+            &store,
+            attendee.clone(),
+            "history-attendee-identity",
+            "history-attendee-device",
+            b"history-attendee-external",
+            ConferenceParticipantRole::Attendee,
+        );
+
+        prepare_conference_runtime(
+            &store,
+            &PrepareConferenceRuntimeInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                idempotency_key: "history-prepare".to_owned(),
+            },
+            b"history-prepare-payload".to_vec(),
+        )
+        .expect("prepare runtime");
+
+        let group = store
+            .group(&scope(), &conference().conference_id)
+            .expect("group read")
+            .expect("group");
+        let owner_actor = ScopedPrincipal {
+            scope: scope(),
+            principal: owner.clone(),
+        };
+        let initial = store
+            .active_calls_for_group(&scope(), &conference().conference_id, 2)
+            .expect("initial active calls")
+            .into_iter()
+            .next()
+            .expect("initial call");
+        store
+            .apply_call_signal(
+                &owner_actor,
+                &CallSignal {
+                    event_id: EventId::from_opaque(oid("history-end-initial")),
+                    scope: scope(),
+                    call_id: initial.call_id,
+                    expected_revision: initial.revision,
+                    kind: CallSignalKind::Terminate {
+                        reason: CallTerminationReason::Completed,
+                    },
+                },
+            )
+            .expect("terminate initial call");
+
+        for index in 0..64_u32 {
+            let call = CallSession {
+                scope: scope(),
+                call_id: CallId::from_opaque(oid(&format!("history-call-{index:03}"))),
+                conversation: group.conversation.clone(),
+                initiated_by: owner.clone(),
+                participants: vec![
+                    CallParticipant {
+                        principal: owner.clone(),
+                        state: CallParticipantState::Accepted,
+                        joined_revision: 0,
+                        left_revision: None,
+                    },
+                    CallParticipant {
+                        principal: attendee.clone(),
+                        state: CallParticipantState::Invited,
+                        joined_revision: 0,
+                        left_revision: None,
+                    },
+                ],
+                signalling_state: CallSignallingState::Inviting,
+                reconnecting_participant: None,
+                media_negotiation_ref: None,
+                media_negotiation_generation: 0,
+                replication_generation: 0,
+                revision: 0,
+                termination_reason: None,
+            };
+            store.create_call(&owner_actor, &call).expect("history call");
+            store
+                .apply_call_signal(
+                    &owner_actor,
+                    &CallSignal {
+                        event_id: EventId::from_opaque(oid(&format!("history-end-{index:03}"))),
+                        scope: scope(),
+                        call_id: call.call_id.clone(),
+                        expected_revision: 0,
+                        kind: CallSignalKind::Terminate {
+                            reason: CallTerminationReason::Completed,
+                        },
+                    },
+                )
+                .expect("terminate history call");
+        }
+
+        let active_call_id = CallId::from_opaque(oid("zz-live-call"));
+        store
+            .create_call(
+                &owner_actor,
+                &CallSession {
+                    scope: scope(),
+                    call_id: active_call_id.clone(),
+                    conversation: group.conversation,
+                    initiated_by: owner,
+                    participants: vec![
+                        CallParticipant {
+                            principal: owner_actor.principal.clone(),
+                            state: CallParticipantState::Accepted,
+                            joined_revision: 0,
+                            left_revision: None,
+                        },
+                        CallParticipant {
+                            principal: attendee.clone(),
+                            state: CallParticipantState::Invited,
+                            joined_revision: 0,
+                            left_revision: None,
+                        },
+                    ],
+                    signalling_state: CallSignallingState::Inviting,
+                    reconnecting_participant: None,
+                    media_negotiation_ref: None,
+                    media_negotiation_generation: 0,
+                    replication_generation: 0,
+                    revision: 0,
+                    termination_reason: None,
+                },
+            )
+            .expect("live call");
+
+        assert_eq!(
+            store
+                .calls_for_group(&scope(), &conference().conference_id, 64)
+                .expect("bounded history")
+                .len(),
+            64
+        );
+        let active = store
+            .active_calls_for_group(&scope(), &conference().conference_id, 2)
+            .expect("active projection");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].call_id, active_call_id);
+        assert_eq!(
+            resolve_join_call(
+                &store,
+                &scope(),
+                &conference().conference_id,
+                &attendee,
+            )
+            .expect("join resolves current call"),
+            active_call_id
+        );
     }
 }
