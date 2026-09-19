@@ -367,6 +367,24 @@ pub trait DeviceLifecycleStore: StorageProvider {
     ) -> Result<Option<DeviceDescriptor>, DurableStoreError>;
 }
 
+/// Read-only reverse lookup over the canonical Device lifecycle owner.
+///
+/// This does not create a second device registry. It exists so integration-facing flows can
+/// resolve already-registered devices for one canonical Identity without exposing DeviceId to
+/// external products.
+pub trait IdentityDeviceLookupStore: StorageProvider {
+    /// Lists a bounded set of exact-scope canonical Devices owned by one Identity.
+    ///
+    /// # Errors
+    /// Rejects zero/unbounded limits and explicit durable-store failures.
+    fn devices_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<DeviceDescriptor>, DurableStoreError>;
+}
+
 /// Storage health is explicit and never inferred from successful construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageHealth {
