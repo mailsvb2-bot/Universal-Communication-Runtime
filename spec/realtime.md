@@ -10,6 +10,8 @@ The public realtime boundary is `ucr.v1.RealtimeService`. It exposes conference 
 
 A grant is bound to exact TenantScope, Call ID, participant, **active canonical Device ID**, session ID and expiry. Join issuance resolves the Device and its Principal→Identity association before signing; realtime attendance therefore never invents a synthetic source device. It cannot be widened by client-provided request fields. Expired, malformed, wrong-scope, wrong-call or wrong-session credentials fail closed. Production signing keys are deployment secrets, never protocol payloads.
 
+When a valid grant has a future `not_before`, the reference browser client enters a waiting-room state instead of treating the grant as an error. It keeps the bearer in the fragment, does not call realtime APIs early, and automatically attempts admission when the signed window opens. Expiry still fails closed.
+
 ## Media path
 
 `PublishMedia` accepts only `SfuForwardEnvelope`, whose payload is already endpoint-encrypted and source-signed. The runtime revalidates the authenticated session Principal/Device against the frame header and canonical Call/Group/MLS state before delegating to `SfuRuntime`.
