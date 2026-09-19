@@ -3195,7 +3195,7 @@ mod universal_runtime_tests {
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
         IssueJoinGrantInput, PrepareConferenceRuntimeInput, UpdateParticipantInput,
         ensure_participant, ensure_participant_device, issue_join_grant,
-        prepare_conference_runtime, resolve_join_call, update_participant,
+        prepare_conference_runtime, resolve_join_call, resolve_join_device, update_participant,
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -3775,4 +3775,60 @@ mod universal_runtime_tests {
             active_call_id
         );
     }
+
+    #[test]
+    fn active_device_projection_ignores_sixty_four_revoked_devices() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        store
+            .persist_universal_conference_profile(&conference())
+            .expect("conference profile");
+
+        let participant = principal("device-history-participant");
+        let identity_id = IdentityId::from_opaque(oid("device-history-identity"));
+        seed_participant(
+            &store,
+            participant.clone(),
+            "device-history-identity",
+            "zz-active-device",
+            b"device-history-external",
+            ConferenceParticipantRole::Attendee,
+        );
+
+        for index in 0..64_u32 {
+            store
+                .register_device(
+                    &scope(),
+                    &DeviceDescriptor {
+                        device_id: ucr_model::DeviceId::from_opaque(oid(&format!(
+                            "aa-revoked-{index:03}"
+                        ))),
+                        identity_id: identity_id.clone(),
+                        state: DeviceLifecycleState::Revoked,
+                    },
+                )
+                .expect("revoked history device");
+        }
+
+        assert_eq!(
+            store
+                .devices_for_identity(&scope(), &identity_id, 64)
+                .expect("bounded device history")
+                .len(),
+            64
+        );
+        let active = store
+            .active_devices_for_identity(&scope(), &identity_id, 2)
+            .expect("active devices");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].device_id.as_opaque().as_str(), "zz-active-device");
+        assert_eq!(
+            resolve_join_device(&store, &scope(), &participant)
+                .expect("join resolves active device")
+                .as_opaque()
+                .as_str(),
+            "zz-active-device"
+        );
+    }
+
 }
