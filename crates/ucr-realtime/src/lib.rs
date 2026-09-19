@@ -997,7 +997,7 @@ mod tests {
                 300,
                 JoinGrantUsePolicy::SingleUse,
                 Some(40_010),
-                Some(40_100),
+                Some(80_000),
                 40_000,
             )
             .expect("issue");
