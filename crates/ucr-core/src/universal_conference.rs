@@ -61,7 +61,8 @@ pub trait UniversalConferenceStore: StorageProvider {
     ///
     /// At most one active participant with role `Owner` may exist for a conference. Implementations
     /// must enforce that invariant atomically with the write rather than relying on a caller-side
-    /// read-before-write check.
+    /// read-before-write check. Live participant capacity is likewise an atomic storage invariant;
+    /// inactive historical participant projections do not consume that live capacity.
     ///
     /// # Errors
     /// Rejects malformed/conflicting participant records and explicit durable-store failures.
@@ -107,6 +108,23 @@ pub trait UniversalConferenceStore: StorageProvider {
         conference_id: &GroupId,
         max_items: usize,
     ) -> Result<Vec<UniversalConferenceParticipantProfile>, DurableStoreError>;
+
+    /// Lists a bounded active participant projection set for runtime reconciliation.
+    ///
+    /// Implementations must apply the active predicate inside the same storage read rather than
+    /// truncate an unfiltered participant set and filter it in the caller. This keeps historical
+    /// inactive participant tombstones from consuming the live Conference capacity budget.
+    ///
+    /// # Errors
+    /// Rejects invalid bounds and returns explicit durable-store failures.
+    fn active_universal_conference_participants(
+        &self,
+        _scope: &TenantScope,
+        _conference_id: &GroupId,
+        _max_items: usize,
+    ) -> Result<Vec<UniversalConferenceParticipantProfile>, DurableStoreError> {
+        Err(DurableStoreError::Unavailable)
+    }
 
     /// Replaces the conference-specific role/media policy under optimistic revision.
     ///
