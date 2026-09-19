@@ -26,7 +26,7 @@ Every conference read or mutation is scoped by both `TenantScope` and `Integrati
 
 ## Participant roles and media policy
 
-The public role vocabulary is `owner`, `host`, `moderator`, `speaker`, `attendee`. Role and media policy must be server-enforced; UI labels are never authorization evidence. Group membership remains canonical membership. Any role projection must fail closed if it conflicts with current membership.
+The public role vocabulary is `owner`, `host`, `moderator`, `speaker`, `attendee`. Role and media policy must be server-enforced; UI labels are never authorization evidence. Group membership remains canonical membership. Any role projection must fail closed if it conflicts with current membership. Exactly one active owner may exist. Ordinary participant ensure/update operations never transfer ownership: once a participant profile exists, changing into or out of `owner` is denied and ownership transfer requires a dedicated canonical operation.
 
 ## Participant removal and role reconciliation
 
