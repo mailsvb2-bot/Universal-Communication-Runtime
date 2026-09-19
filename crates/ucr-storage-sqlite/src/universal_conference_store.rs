@@ -66,9 +66,7 @@ CREATE TABLE universal_conference_participants (
 ) WITHOUT ROWID;
 "#;
 
-pub(super) fn create_v32_objects(
-    transaction: &Transaction<'_>,
-) -> Result<(), DurableStoreError> {
+pub(super) fn create_v32_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
     transaction
         .execute_batch(V32_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))
@@ -176,7 +174,8 @@ impl UniversalConferenceStore for SqliteLocalStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
 
-        if let Some(existing) = load_profile(&transaction, &profile.scope, &profile.conference_id)? {
+        if let Some(existing) = load_profile(&transaction, &profile.scope, &profile.conference_id)?
+        {
             return if existing == *profile {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
@@ -235,8 +234,8 @@ impl UniversalConferenceStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
-        let current = load_profile(&transaction, scope, conference_id)?
-            .ok_or(DurableStoreError::Conflict)?;
+        let current =
+            load_profile(&transaction, scope, conference_id)?.ok_or(DurableStoreError::Conflict)?;
 
         if current.revision == expected_revision.saturating_add(1)
             && current.lifecycle == lifecycle
@@ -244,9 +243,9 @@ impl UniversalConferenceStore for SqliteLocalStore {
         {
             return Ok(current);
         }
-        let lifecycle_change_allowed =
-            current.lifecycle == lifecycle && current.entry_open != entry_open
-                || valid_lifecycle_transition(current.lifecycle, lifecycle);
+        let lifecycle_change_allowed = current.lifecycle == lifecycle
+            && current.entry_open != entry_open
+            || valid_lifecycle_transition(current.lifecycle, lifecycle);
         if current.revision != expected_revision || !lifecycle_change_allowed {
             return Err(DurableStoreError::Conflict);
         }
