@@ -116,12 +116,16 @@ pub(super) fn verify_schema_v32(connection: &Connection) -> Result<(), DurableSt
             ("revision", "BLOB", 1, 0),
         ],
     )?;
-    let violation: bool = connection
-        .query_row("SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)", [], |row| {
-            row.get(0)
-        })
+    let mut foreign_key_check = connection
+        .prepare("PRAGMA foreign_key_check")
         .map_err(|error| map_sqlite_error(&error))?;
-    if violation {
+    if foreign_key_check
+        .query([])
+        .map_err(|error| map_sqlite_error(&error))?
+        .next()
+        .map_err(|error| map_sqlite_error(&error))?
+        .is_some()
+    {
         return Err(DurableStoreError::Corrupt);
     }
     Ok(())
