@@ -61,7 +61,10 @@ impl core::fmt::Debug for UniversalConferenceProfile {
             .field("conference_id", &self.conference_id)
             .field("integration_id", &self.integration_id)
             .field("external_conference_id", &"<opaque>")
-            .field("external_conference_id_len", &self.external_conference_id.len())
+            .field(
+                "external_conference_id_len",
+                &self.external_conference_id.len(),
+            )
             .field("mode", &self.mode)
             .field("lifecycle", &self.lifecycle)
             .field("schedule", &self.schedule)
