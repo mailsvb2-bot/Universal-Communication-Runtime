@@ -299,7 +299,10 @@ where
                         .device_id
                         .as_ref()
                         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
-                    self.require_universal_publish_allowed(&claims, envelope.frame.header.media_kind)?;
+                    self.require_universal_publish_allowed(
+                        &claims,
+                        envelope.frame.header.media_kind,
+                    )?;
                     let outcome = conference_runtime(self)
                         .forward(&actor_for(&claims), device_id, &envelope, &*self.registry)
                         .map_err(|error| map_conference_error(&error))?;
