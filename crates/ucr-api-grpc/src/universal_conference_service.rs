@@ -118,6 +118,23 @@ where
         })?;
         Ok(actor)
     }
+
+    fn admit_integration(
+        &self,
+        scope: &TenantScope,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ServiceCredentialSecret,
+        integration_id: &IntegrationId,
+        permission: &str,
+    ) -> Result<ScopedPrincipal, CanonicalError> {
+        let actor = self.admit(scope, credential_id, secret, permission)?;
+        if actor.principal.kind != PrincipalKind::ServiceAccount
+            || actor.principal.principal_id.as_opaque() != integration_id.as_opaque()
+        {
+            return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+        }
+        Ok(actor)
+    }
 }
 
 #[must_use]
@@ -178,10 +195,11 @@ where
         let decoded = decode_create(body);
         let result = match (credentials, decoded) {
             (Ok((credential_id, secret)), Ok(input)) => self
-                .admit(
+                .admit_integration(
                     &input.scope,
                     &credential_id,
                     &secret,
+                    &input.integration_id,
                     CONFERENCE_CREATE_PERMISSION,
                 )
                 .and_then(|_| create_or_resolve(&*self.store, input, command_payload)),
@@ -208,7 +226,13 @@ where
         let decoded = decode_resolve(request.into_inner());
         let result = match (credentials, decoded) {
             (Ok((credential_id, secret)), Ok((scope, integration_id, external_id))) => self
-                .admit(&scope, &credential_id, &secret, CONFERENCE_READ_PERMISSION)
+                .admit_integration(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    &integration_id,
+                    CONFERENCE_READ_PERMISSION,
+                )
                 .and_then(|_| {
                     self.store
                         .universal_conference_profile_for_external(
@@ -242,7 +266,13 @@ where
         let decoded = decode_get_conference(request.into_inner());
         let result = match (credentials, decoded) {
             (Ok((credential_id, secret)), Ok((scope, conference_id, integration_id))) => self
-                .admit(&scope, &credential_id, &secret, CONFERENCE_READ_PERMISSION)
+                .admit_integration(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    &integration_id,
+                    CONFERENCE_READ_PERMISSION,
+                )
                 .and_then(|_| {
                     conference_for_integration(
                         &*self.store,
@@ -276,10 +306,11 @@ where
                 Ok((credential_id, secret)),
                 Ok((scope, conference_id, integration_id, target, idempotency_key)),
             ) => self
-                .admit(
+                .admit_integration(
                     &scope,
                     &credential_id,
                     &secret,
+                    &integration_id,
                     CONFERENCE_MANAGE_PERMISSION,
                 )
                 .and_then(|_| {
@@ -336,10 +367,11 @@ where
                 Ok((credential_id, secret)),
                 Ok((scope, conference_id, integration_id, entry_open, idempotency_key)),
             ) => self
-                .admit(
+                .admit_integration(
                     &scope,
                     &credential_id,
                     &secret,
+                    &integration_id,
                     CONFERENCE_MANAGE_PERMISSION,
                 )
                 .and_then(|_| {
@@ -391,10 +423,11 @@ where
         let decoded = decode_ensure_participant(body);
         let result = match (credentials, decoded) {
             (Ok((credential_id, secret)), Ok(input)) => self
-                .admit(
+                .admit_integration(
                     &input.scope,
                     &credential_id,
                     &secret,
+                    &input.integration_id,
                     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION,
                 )
                 .and_then(|_| ensure_participant(&*self.store, input, payload)),
@@ -422,10 +455,11 @@ where
         let decoded = decode_update_participant(body);
         let result = match (credentials, decoded) {
             (Ok((credential_id, secret)), Ok(input)) => self
-                .admit(
+                .admit_integration(
                     &input.scope,
                     &credential_id,
                     &secret,
+                    &input.integration_id,
                     CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
                 )
                 .and_then(|_| update_participant(&*self.store, &input, payload)),
@@ -453,10 +487,11 @@ where
         let decoded = decode_remove_participant(body);
         let result = match (credentials, decoded) {
             (Ok((credential_id, secret)), Ok(input)) => self
-                .admit(
+                .admit_integration(
                     &input.scope,
                     &credential_id,
                     &secret,
+                    &input.integration_id,
                     CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
                 )
                 .and_then(|_| remove_participant(&*self.store, &input, payload)),
@@ -487,7 +522,13 @@ where
                 Ok((credential_id, secret)),
                 Ok((scope, conference_id, integration_id, max_items)),
             ) => self
-                .admit(&scope, &credential_id, &secret, CONFERENCE_READ_PERMISSION)
+                .admit_integration(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    &integration_id,
+                    CONFERENCE_READ_PERMISSION,
+                )
                 .and_then(|_| {
                     list_participants(
                         &*self.store,
@@ -521,10 +562,11 @@ where
         let decoded = decode_issue_join_grant(request.into_inner());
         let result = match (credentials, decoded) {
             (Ok((credential_id, secret)), Ok(input)) => self
-                .admit(
+                .admit_integration(
                     &input.scope,
                     &credential_id,
                     &secret,
+                    &input.integration_id,
                     CONFERENCE_JOIN_ISSUE_PERMISSION,
                 )
                 .and_then(|_| {
@@ -559,10 +601,11 @@ where
                 Ok((credential_id, secret)),
                 Ok((scope, conference_id, integration_id, session_id)),
             ) => self
-                .admit(
+                .admit_integration(
                     &scope,
                     &credential_id,
                     &secret,
+                    &integration_id,
                     CONFERENCE_JOIN_ISSUE_PERMISSION,
                 )
                 .and_then(|_| {
@@ -606,10 +649,11 @@ where
                 Ok((credential_id, secret)),
                 Ok((scope, conference_id, integration_id, external_user_id)),
             ) => self
-                .admit(
+                .admit_integration(
                     &scope,
                     &credential_id,
                     &secret,
+                    &integration_id,
                     CONFERENCE_ATTENDANCE_READ_PERMISSION,
                 )
                 .and_then(|_| {
