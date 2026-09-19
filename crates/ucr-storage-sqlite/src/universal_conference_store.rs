@@ -13,6 +13,8 @@ use super::{
 
 const MAX_EXTERNAL_REFERENCE_BYTES: usize = 512;
 const MAX_PARTICIPANTS: usize = 1024;
+const MAX_PARTICIPANTS_DB: i64 = 1024;
+const MAX_PARTICIPANT_SCAN_ITEMS: usize = MAX_PARTICIPANTS + 1;
 
 const V32_OBJECTS_SQL: &str = r"
 CREATE TABLE universal_conferences (
@@ -354,6 +356,11 @@ impl UniversalConferenceStore for SqliteLocalStore {
             };
         }
 
+        ensure_participant_capacity(
+            &transaction,
+            &participant.scope,
+            &participant.conference_id,
+        )?;
         ensure_unique_active_owner(
             &transaction,
             &participant.scope,
@@ -403,7 +410,7 @@ impl UniversalConferenceStore for SqliteLocalStore {
         conference_id: &GroupId,
         max_items: usize,
     ) -> Result<Vec<UniversalConferenceParticipantProfile>, DurableStoreError> {
-        if max_items == 0 || max_items > MAX_PARTICIPANTS {
+        if max_items == 0 || max_items > MAX_PARTICIPANT_SCAN_ITEMS {
             return Err(DurableStoreError::InvalidRecord);
         }
         let connection = self.lock_connection()?;
@@ -528,6 +535,33 @@ fn insert_profile(
         )
         .map_err(|error| map_sqlite_error(&error))?;
     Ok(())
+}
+
+fn ensure_participant_capacity(
+    connection: &Connection,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+) -> Result<(), DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let participant_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM universal_conference_participants
+             WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
+               AND conference_id = ?4",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                conference_id.as_opaque().as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if participant_count >= MAX_PARTICIPANTS_DB {
+        Err(DurableStoreError::Full)
+    } else {
+        Ok(())
+    }
 }
 
 fn ensure_unique_active_owner(
