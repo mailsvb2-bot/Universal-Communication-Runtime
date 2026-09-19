@@ -16,8 +16,8 @@ use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipantState, ConferenceMediaSubscription,
     ConferenceSubscriptionSet, CorrelationContext, CryptoSuite, DeviceId, DeviceLifecycleState,
     DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalKind,
-    ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope,
+    GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalKind, ScopedPrincipal,
+    SessionId, SfuForwardEnvelope, TenantScope,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for,
