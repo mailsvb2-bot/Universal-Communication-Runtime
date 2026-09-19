@@ -1786,15 +1786,12 @@ where
     S: CallStore + GroupCallLookupStore,
 {
     let calls = store
-        .calls_for_group(&removed.scope, &removed.conference_id, 64)
+        .active_calls_for_group(&removed.scope, &removed.conference_id, 2)
         .map_err(map_store_error)?;
-    if calls.len() == 64 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    if calls.len() > 1 {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
     }
-    for mut call in calls
-        .into_iter()
-        .filter(|call| call.signalling_state != CallSignallingState::Terminated)
-    {
+    for mut call in calls {
         let present = call.participants.iter().any(|participant| {
             participant.principal == removed.participant && participant.left_revision.is_none()
         });
@@ -2239,16 +2236,9 @@ fn reconcile_runtime_call<S>(
 where
     S: GroupStore + CallStore + GroupCallLookupStore,
 {
-    let calls = store
-        .calls_for_group(&input.scope, &input.conference_id, 64)
+    let mut live_calls = store
+        .active_calls_for_group(&input.scope, &input.conference_id, 2)
         .map_err(map_store_error)?;
-    if calls.len() == 64 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
-    }
-    let mut live_calls = calls
-        .into_iter()
-        .filter(|call| call.signalling_state != CallSignallingState::Terminated)
-        .collect::<Vec<_>>();
     if live_calls.len() > 1 {
         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
     }
@@ -2465,18 +2455,14 @@ fn resolve_join_call<S>(
 where
     S: GroupCallLookupStore,
 {
-    let calls = store
-        .calls_for_group(scope, conference_id, 64)
+    let active_calls = store
+        .active_calls_for_group(scope, conference_id, 2)
         .map_err(map_store_error)?;
-    if calls.len() == 64 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
-    }
-    let active_calls = calls
-        .into_iter()
-        .filter(|call| call.signalling_state != CallSignallingState::Terminated)
-        .collect::<Vec<_>>();
     if active_calls.is_empty() {
         return Err(CanonicalError::new(CanonicalErrorCode::CapabilityMismatch));
+    }
+    if active_calls.len() > 1 {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
     }
     let mut eligible = active_calls.into_iter().filter(|call| {
         call.participants.iter().any(|candidate| {
@@ -2584,13 +2570,10 @@ where
         .grant_claims(scope, session_id)
         .map_err(map_join_token_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
-    let calls = store
-        .calls_for_group(scope, conference_id, 64)
-        .map_err(map_store_error)?;
-    if calls.len() == 64 {
-        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
-    }
-    if !calls.iter().any(|call| call.call_id == claims.call_id) {
+    if !store
+        .call_belongs_to_group(scope, conference_id, &claims.call_id)
+        .map_err(map_store_error)?
+    {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
     issuer
