@@ -18,6 +18,8 @@ A grant is bound to exact TenantScope, Call ID, participant, **active canonical 
 
 The reference browser/mobile binding is `ucr-realtime-web`: it serves a self-contained join client plus bounded JSON/protobuf POST uplink and authenticated streaming/SSE downlink over a loopback listener. The public edge must terminate HTTPS and proxy only to that loopback boundary. The join client reads the signed grant from the URL fragment, derives only the non-secret routing coordinates needed for the request, and never places the bearer token in the request URL. A future WebRTC/ICE/TURN provider may implement the same service semantics without changing canonical owners.
 
+Browser-origin policy is fail-closed. Same-origin browser requests are accepted by exact `Origin` + `Host` match. Additional embedding/application origins must be enumerated in `UCR_REALTIME_ALLOWED_ORIGINS`; wildcard origins are rejected. Allowed cross-origin responses echo only the validated exact origin, include `Vary: Origin`, and expose only the bounded POST/OPTIONS + Authorization/Content-Type preflight surface. A disallowed browser origin is rejected before bearer-token or request-body processing.
+
 ## Attendance
 
 Successful realtime join, explicit leave, reconnect restoration and first media-ready transition append canonical `EventEnvelope` records using these versioned event types:
