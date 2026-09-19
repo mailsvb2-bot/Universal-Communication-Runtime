@@ -1695,6 +1695,24 @@ struct AttendanceSessionProjection {
     left_at_unix_ms: Option<i64>,
 }
 
+#[derive(Debug, Default)]
+struct AttendanceProjectionState {
+    sessions: Vec<AttendanceSessionProjection>,
+    first_join_at_unix_ms: Option<i64>,
+    last_leave_at_unix_ms: Option<i64>,
+    first_media_ready_at_unix_ms: Option<i64>,
+    join_count: u32,
+    reconnect_count: u32,
+    media_ready_count: u32,
+}
+
+#[derive(Debug)]
+struct AttendanceObservation {
+    session_id: SessionId,
+    kind: pb::ConferenceAttendanceKind,
+    occurred_at_unix_ms: i64,
+}
+
 fn participant_attendance<S>(
     store: &S,
     scope: &TenantScope,
@@ -1732,7 +1750,6 @@ where
     if call_ids.is_empty() {
         return Ok(empty_attendance(external_user_id));
     }
-
     let events = store
         .events_for_types(
             scope,
@@ -1744,145 +1761,179 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
     }
 
-    let mut sessions = Vec::<AttendanceSessionProjection>::new();
-    let mut first_join_at_unix_ms = None;
-    let mut last_leave_at_unix_ms = None;
-    let mut first_media_ready_at_unix_ms = None;
-    let mut join_count = 0_u32;
-    let mut reconnect_count = 0_u32;
-    let mut media_ready_count = 0_u32;
-
-    for event in events {
-        let attendance = pb::ConferenceAttendanceEvent::decode(event.payload.as_slice())
-            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
-        let event_scope = attendance
-            .scope
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
-            .and_then(|value| {
-                decode_scope(value).map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
-            })?;
-        let call_id = CallId::from_opaque(
-            decode_opaque(attendance.call_id)
-                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
-        );
-        let event_participant = attendance
-            .participant
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
-            .and_then(|value| {
-                super::decode_principal_ref(value)
-                    .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
-            })?;
-        if event_scope != *scope
-            || !call_ids.contains(&call_id)
-            || event_participant != participant.participant
+    let mut state = AttendanceProjectionState::default();
+    for event in &events {
+        if let Some(observation) =
+            decode_attendance_observation(event, scope, &participant.participant, &call_ids)?
         {
-            continue;
-        }
-        if attendance.occurred_at_unix_ms < 0
-            || attendance.occurred_at_unix_ms != event.wall_time_unix_ms
-        {
-            return Err(CanonicalError::new(CanonicalErrorCode::Internal));
-        }
-        let session_id = SessionId::from_opaque(
-            decode_opaque(attendance.session_id)
-                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
-        );
-        let kind = pb::ConferenceAttendanceKind::try_from(attendance.kind)
-            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
-        let expected_kind = match event.event_type.as_str() {
-            "ucr.conference.attendance.joined.v1" => pb::ConferenceAttendanceKind::Joined,
-            "ucr.conference.attendance.left.v1" => pb::ConferenceAttendanceKind::Left,
-            "ucr.conference.attendance.reconnected.v1" => pb::ConferenceAttendanceKind::Reconnected,
-            "ucr.conference.attendance.media_ready.v1" => pb::ConferenceAttendanceKind::MediaReady,
-            _ => return Err(CanonicalError::new(CanonicalErrorCode::Internal)),
-        };
-        if kind != expected_kind {
-            return Err(CanonicalError::new(CanonicalErrorCode::Internal));
-        }
-
-        match kind {
-            pb::ConferenceAttendanceKind::Joined => {
-                if sessions
-                    .iter()
-                    .any(|session| session.session_id == session_id)
-                {
-                    return Err(CanonicalError::new(CanonicalErrorCode::Internal));
-                }
-                sessions.push(AttendanceSessionProjection {
-                    session_id,
-                    joined_at_unix_ms: attendance.occurred_at_unix_ms,
-                    left_at_unix_ms: None,
-                });
-                join_count = join_count
-                    .checked_add(1)
-                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-                first_join_at_unix_ms = Some(
-                    first_join_at_unix_ms.map_or(attendance.occurred_at_unix_ms, |current: i64| {
-                        current.min(attendance.occurred_at_unix_ms)
-                    }),
-                );
-            }
-            pb::ConferenceAttendanceKind::Left => {
-                let session = sessions
-                    .iter_mut()
-                    .find(|session| session.session_id == session_id)
-                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-                if session.left_at_unix_ms.is_some()
-                    || attendance.occurred_at_unix_ms < session.joined_at_unix_ms
-                {
-                    return Err(CanonicalError::new(CanonicalErrorCode::Internal));
-                }
-                session.left_at_unix_ms = Some(attendance.occurred_at_unix_ms);
-                last_leave_at_unix_ms = Some(
-                    last_leave_at_unix_ms.map_or(attendance.occurred_at_unix_ms, |current: i64| {
-                        current.max(attendance.occurred_at_unix_ms)
-                    }),
-                );
-            }
-            pb::ConferenceAttendanceKind::Reconnected => {
-                let session = sessions
-                    .iter()
-                    .find(|session| session.session_id == session_id)
-                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-                if session.left_at_unix_ms.is_some()
-                    || attendance.occurred_at_unix_ms < session.joined_at_unix_ms
-                {
-                    return Err(CanonicalError::new(CanonicalErrorCode::Internal));
-                }
-                reconnect_count = reconnect_count
-                    .checked_add(1)
-                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-            }
-            pb::ConferenceAttendanceKind::MediaReady => {
-                let session = sessions
-                    .iter()
-                    .find(|session| session.session_id == session_id)
-                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-                if session.left_at_unix_ms.is_some()
-                    || attendance.occurred_at_unix_ms < session.joined_at_unix_ms
-                {
-                    return Err(CanonicalError::new(CanonicalErrorCode::Internal));
-                }
-                media_ready_count = media_ready_count
-                    .checked_add(1)
-                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-                first_media_ready_at_unix_ms = Some(
-                    first_media_ready_at_unix_ms
-                        .map_or(attendance.occurred_at_unix_ms, |current: i64| {
-                            current.min(attendance.occurred_at_unix_ms)
-                        }),
-                );
-            }
-            pb::ConferenceAttendanceKind::Unspecified => {
-                return Err(CanonicalError::new(CanonicalErrorCode::Internal));
-            }
+            apply_attendance_observation(&mut state, observation)?;
         }
     }
+    finalize_attendance(external_user_id, state, now_unix_ms)
+}
 
+fn decode_attendance_observation(
+    event: &ucr_model::EventEnvelope,
+    scope: &TenantScope,
+    participant: &PrincipalRef,
+    call_ids: &[CallId],
+) -> Result<Option<AttendanceObservation>, CanonicalError> {
+    let attendance = pb::ConferenceAttendanceEvent::decode(event.payload.as_slice())
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    let event_scope = attendance
+        .scope
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
+        .and_then(|value| {
+            decode_scope(value).map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+        })?;
+    let call_id = CallId::from_opaque(
+        decode_opaque(attendance.call_id)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+    );
+    let event_participant = attendance
+        .participant
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
+        .and_then(|value| {
+            super::decode_principal_ref(value)
+                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+        })?;
+    if event_scope != *scope || !call_ids.contains(&call_id) || event_participant != *participant {
+        return Ok(None);
+    }
+    if attendance.occurred_at_unix_ms < 0
+        || attendance.occurred_at_unix_ms != event.wall_time_unix_ms
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+    }
+    let session_id = SessionId::from_opaque(
+        decode_opaque(attendance.session_id)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+    );
+    let kind = pb::ConferenceAttendanceKind::try_from(attendance.kind)
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    if kind != expected_attendance_kind(&event.event_type)? {
+        return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+    }
+    Ok(Some(AttendanceObservation {
+        session_id,
+        kind,
+        occurred_at_unix_ms: attendance.occurred_at_unix_ms,
+    }))
+}
+
+fn expected_attendance_kind(
+    event_type: &str,
+) -> Result<pb::ConferenceAttendanceKind, CanonicalError> {
+    match event_type {
+        "ucr.conference.attendance.joined.v1" => Ok(pb::ConferenceAttendanceKind::Joined),
+        "ucr.conference.attendance.left.v1" => Ok(pb::ConferenceAttendanceKind::Left),
+        "ucr.conference.attendance.reconnected.v1" => Ok(pb::ConferenceAttendanceKind::Reconnected),
+        "ucr.conference.attendance.media_ready.v1" => Ok(pb::ConferenceAttendanceKind::MediaReady),
+        _ => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+    }
+}
+
+fn apply_attendance_observation(
+    state: &mut AttendanceProjectionState,
+    observation: AttendanceObservation,
+) -> Result<(), CanonicalError> {
+    match observation.kind {
+        pb::ConferenceAttendanceKind::Joined => {
+            if state
+                .sessions
+                .iter()
+                .any(|session| session.session_id == observation.session_id)
+            {
+                return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+            }
+            state.sessions.push(AttendanceSessionProjection {
+                session_id: observation.session_id,
+                joined_at_unix_ms: observation.occurred_at_unix_ms,
+                left_at_unix_ms: None,
+            });
+            state.join_count = checked_increment(state.join_count)?;
+            state.first_join_at_unix_ms = Some(
+                state
+                    .first_join_at_unix_ms
+                    .map_or(observation.occurred_at_unix_ms, |current| {
+                        current.min(observation.occurred_at_unix_ms)
+                    }),
+            );
+        }
+        pb::ConferenceAttendanceKind::Left => {
+            let session = state
+                .sessions
+                .iter_mut()
+                .find(|session| session.session_id == observation.session_id)
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+            if session.left_at_unix_ms.is_some()
+                || observation.occurred_at_unix_ms < session.joined_at_unix_ms
+            {
+                return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+            }
+            session.left_at_unix_ms = Some(observation.occurred_at_unix_ms);
+            state.last_leave_at_unix_ms = Some(
+                state
+                    .last_leave_at_unix_ms
+                    .map_or(observation.occurred_at_unix_ms, |current| {
+                        current.max(observation.occurred_at_unix_ms)
+                    }),
+            );
+        }
+        pb::ConferenceAttendanceKind::Reconnected => {
+            require_active_attendance_session(state, &observation)?;
+            state.reconnect_count = checked_increment(state.reconnect_count)?;
+        }
+        pb::ConferenceAttendanceKind::MediaReady => {
+            require_active_attendance_session(state, &observation)?;
+            state.media_ready_count = checked_increment(state.media_ready_count)?;
+            state.first_media_ready_at_unix_ms = Some(
+                state
+                    .first_media_ready_at_unix_ms
+                    .map_or(observation.occurred_at_unix_ms, |current| {
+                        current.min(observation.occurred_at_unix_ms)
+                    }),
+            );
+        }
+        pb::ConferenceAttendanceKind::Unspecified => {
+            return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+        }
+    }
+    Ok(())
+}
+
+fn require_active_attendance_session(
+    state: &AttendanceProjectionState,
+    observation: &AttendanceObservation,
+) -> Result<(), CanonicalError> {
+    let session = state
+        .sessions
+        .iter()
+        .find(|session| session.session_id == observation.session_id)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    if session.left_at_unix_ms.is_some()
+        || observation.occurred_at_unix_ms < session.joined_at_unix_ms
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+    }
+    Ok(())
+}
+
+fn checked_increment(value: u32) -> Result<u32, CanonicalError> {
+    value
+        .checked_add(1)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
+}
+
+fn finalize_attendance(
+    external_user_id: &[u8],
+    state: AttendanceProjectionState,
+    now_unix_ms: i64,
+) -> Result<pb::UniversalParticipantAttendance, CanonicalError> {
     let mut total_connected_ms = 0_u64;
     let mut current_connected_ms = 0_u64;
     let mut connected = false;
-    for session in sessions {
+    for session in state.sessions {
         let end = session.left_at_unix_ms.unwrap_or(now_unix_ms);
         if end < session.joined_at_unix_ms {
             return Err(CanonicalError::new(CanonicalErrorCode::Internal));
@@ -1899,17 +1950,16 @@ where
                 .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
         }
     }
-
     Ok(pb::UniversalParticipantAttendance {
         external_user_id: external_user_id.to_vec(),
-        first_join_at_unix_ms,
-        last_leave_at_unix_ms,
-        first_media_ready_at_unix_ms,
+        first_join_at_unix_ms: state.first_join_at_unix_ms,
+        last_leave_at_unix_ms: state.last_leave_at_unix_ms,
+        first_media_ready_at_unix_ms: state.first_media_ready_at_unix_ms,
         total_connected_seconds: total_connected_ms / 1000,
         current_connected_seconds: current_connected_ms / 1000,
-        join_count,
-        reconnect_count,
-        media_ready_count,
+        join_count: state.join_count,
+        reconnect_count: state.reconnect_count,
+        media_ready_count: state.media_ready_count,
         connected,
     })
 }
