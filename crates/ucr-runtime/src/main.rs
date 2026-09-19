@@ -75,8 +75,9 @@ async fn run() -> Result<(), String> {
                 .map_err(|error| format!("invalid --bind address: {error}"))?;
             let join_base_url = join_base_url
                 .ok_or_else(|| "--join-base-url is required for serve-realtime".to_owned())?;
-            let key_hex = std::env::var("UCR_REALTIME_JOIN_KEY_HEX")
-                .map_err(|_| "UCR_REALTIME_JOIN_KEY_HEX is required for serve-realtime".to_owned())?;
+            let key_hex = std::env::var("UCR_REALTIME_JOIN_KEY_HEX").map_err(|_| {
+                "UCR_REALTIME_JOIN_KEY_HEX is required for serve-realtime".to_owned()
+            })?;
             let config = RealtimeRuntimeConfig::new(join_base_url, decode_key_hex(&key_hex)?)?;
             Arc::new(ProductionRuntime::open_existing(&database)?)
                 .serve_realtime(bind, config)
@@ -88,7 +89,9 @@ async fn run() -> Result<(), String> {
 
 fn decode_key_hex(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 {
-        return Err("UCR_REALTIME_JOIN_KEY_HEX must contain exactly 64 hexadecimal characters".to_owned());
+        return Err(
+            "UCR_REALTIME_JOIN_KEY_HEX must contain exactly 64 hexadecimal characters".to_owned(),
+        );
     }
     let mut output = [0_u8; 32];
     let bytes = value.as_bytes();
