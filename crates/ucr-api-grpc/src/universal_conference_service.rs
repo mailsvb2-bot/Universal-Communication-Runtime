@@ -3189,9 +3189,13 @@ mod universal_runtime_tests {
         PrincipalKind, PrincipalRef, TenantId, TenantScope, UniversalConferenceLifecycle,
         UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
     };
+    use ucr_protocol::CanonicalErrorCode;
     use ucr_storage_sqlite::SqliteLocalStore;
 
-    use super::{GROUP_MLS_CAPABILITY, PrepareConferenceRuntimeInput, prepare_conference_runtime};
+    use super::{
+        GROUP_MLS_CAPABILITY, EnsureParticipantInput, PrepareConferenceRuntimeInput,
+        UpdateParticipantInput, ensure_participant, prepare_conference_runtime, update_participant,
+    };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -3307,6 +3311,93 @@ mod universal_runtime_tests {
                 revision: 1,
             })
             .expect("conference participant");
+    }
+
+    #[test]
+    fn participant_owner_transitions_fail_closed_in_real_sqlite_store() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        store
+            .persist_universal_conference_profile(&conference())
+            .expect("conference profile");
+
+        let owner = ensure_participant(
+            &store,
+            EnsureParticipantInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                external_user_id: b"owner-external".to_vec(),
+                role: ConferenceParticipantRole::Owner,
+                idempotency_key: "ensure-owner".to_owned(),
+            },
+            b"ensure-owner-payload".to_vec(),
+        )
+        .expect("first owner");
+        assert_eq!(owner.role, ConferenceParticipantRole::Owner);
+
+        let second_owner = ensure_participant(
+            &store,
+            EnsureParticipantInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                external_user_id: b"second-owner-external".to_vec(),
+                role: ConferenceParticipantRole::Owner,
+                idempotency_key: "ensure-second-owner".to_owned(),
+            },
+            b"ensure-second-owner-payload".to_vec(),
+        )
+        .expect_err("second owner must be rejected");
+        assert_eq!(second_owner.code, CanonicalErrorCode::Conflict);
+
+        let demote_owner = ensure_participant(
+            &store,
+            EnsureParticipantInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                external_user_id: b"owner-external".to_vec(),
+                role: ConferenceParticipantRole::Attendee,
+                idempotency_key: "demote-owner".to_owned(),
+            },
+            b"demote-owner-payload".to_vec(),
+        )
+        .expect_err("generic ensure must not demote owner");
+        assert_eq!(demote_owner.code, CanonicalErrorCode::PolicyDenied);
+
+        ensure_participant(
+            &store,
+            EnsureParticipantInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                external_user_id: b"attendee-external".to_vec(),
+                role: ConferenceParticipantRole::Attendee,
+                idempotency_key: "ensure-attendee".to_owned(),
+            },
+            b"ensure-attendee-payload".to_vec(),
+        )
+        .expect("attendee");
+
+        let promote_attendee = update_participant(
+            &store,
+            &UpdateParticipantInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                external_user_id: b"attendee-external".to_vec(),
+                role: Some(ConferenceParticipantRole::Owner),
+                audio_muted: None,
+                camera_allowed: None,
+                publish_audio_allowed: None,
+                publish_video_allowed: None,
+                idempotency_key: "promote-attendee".to_owned(),
+            },
+            b"promote-attendee-payload".to_vec(),
+        )
+        .expect_err("generic update must not promote owner");
+        assert_eq!(promote_attendee.code, CanonicalErrorCode::PolicyDenied);
     }
 
     #[test]
