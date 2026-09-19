@@ -3,18 +3,24 @@ use std::{fmt, sync::Arc};
 use prost::Message;
 use tonic::{Request, Response, Status};
 use ucr_core::{
-    AuthorizationEvaluator, CommandAcceptanceStore, DurableStoreError, ServiceAuditStore,
-    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
-    ServiceQuotaClock, ServiceQuotaStore, UniversalConferenceStore, generate_opaque_id,
+    AuthorizationEvaluator, CommandAcceptanceStore, DurableStoreError,
+    ExternalIdentityBindingStore, IdentityStore, PrincipalIdentityBindingStore,
+    PrincipalIdentityLookupStore, ServiceAuditStore, ServiceCredentialSecret,
+    ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
+    UniversalConferenceStore, generate_opaque_id,
 };
 use ucr_model::{
-    AuthorizationRequest, CommandEnvelope, CommandId, ConferenceScheduleMetadata,
-    CorrelationContext, GroupId, IntegrationId, ProtocolVersion, ScopedPrincipal, TenantScope,
-    UniversalConferenceLifecycle, UniversalConferenceMode, UniversalConferenceProfile,
+    AuthorizationRequest, CommandEnvelope, CommandId, ConferenceParticipantRole,
+    ConferenceScheduleMetadata, CorrelationContext, ExternalIdentityBinding, GroupId, IdentityEvidence,
+    IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, OpaqueId, PrincipalId,
+    PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal,
+    TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
+    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
-    CONFERENCE_CREATE_PERMISSION, CONFERENCE_MANAGE_PERMISSION, CONFERENCE_READ_PERMISSION,
-    CanonicalError, CanonicalErrorCode, CommandReceiptStatus,
+    CONFERENCE_CREATE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
+    CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_READ_PERMISSION, CanonicalError,
+    CanonicalErrorCode, CommandReceiptStatus,
 };
 
 use super::{
@@ -103,6 +109,10 @@ where
         + ServiceAuditStore
         + UniversalConferenceStore
         + CommandAcceptanceStore
+        + IdentityStore
+        + ExternalIdentityBindingStore
+        + PrincipalIdentityBindingStore
+        + PrincipalIdentityLookupStore
         + 'static,
 {
     pb::universal_conference_service_server::UniversalConferenceServiceServer::new(service)
@@ -121,6 +131,10 @@ where
         + ServiceAuditStore
         + UniversalConferenceStore
         + CommandAcceptanceStore
+        + IdentityStore
+        + ExternalIdentityBindingStore
+        + PrincipalIdentityBindingStore
+        + PrincipalIdentityLookupStore
         + 'static,
 {
     async fn create_conference(
@@ -309,12 +323,34 @@ where
 
     async fn ensure_participant(
         &self,
-        _request: Request<pb::UniversalEnsureParticipantRequest>,
+        request: Request<pb::UniversalEnsureParticipantRequest>,
     ) -> Result<Response<pb::UniversalEnsureParticipantResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let payload = body.encode_to_vec();
+        let decoded = decode_ensure_participant(body);
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok(input)) => self
+                .admit(
+                    &input.scope,
+                    &credential_id,
+                    &secret,
+                    CONFERENCE_PARTICIPANT_ENSURE_PERMISSION,
+                )
+                .and_then(|_| ensure_participant(&*self.store, input, payload)),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
         Ok(Response::new(pb::UniversalEnsureParticipantResponse {
-            result: Some(pb::universal_ensure_participant_response::Result::Error(
-                unsupported(),
-            )),
+            result: Some(match result {
+                Ok(participant) => {
+                    pb::universal_ensure_participant_response::Result::Participant(
+                        pb_participant(&participant),
+                    )
+                }
+                Err(error) => {
+                    pb::universal_ensure_participant_response::Result::Error(pb_error(error))
+                }
+            }),
         }))
     }
 
@@ -374,6 +410,15 @@ where
     }
 }
 
+struct EnsureParticipantInput {
+    scope: TenantScope,
+    conference_id: GroupId,
+    integration_id: IntegrationId,
+    external_user_id: Vec<u8>,
+    role: ConferenceParticipantRole,
+    idempotency_key: String,
+}
+
 struct CreateInput {
     scope: TenantScope,
     integration_id: IntegrationId,
@@ -400,6 +445,38 @@ fn decode_create(
         mode,
         schedule,
     })
+}
+
+fn decode_ensure_participant(
+    value: pb::UniversalEnsureParticipantRequest,
+) -> Result<EnsureParticipantInput, CanonicalError> {
+    let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
+    let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
+    if value.external_user_id.is_empty() || value.external_user_id.len() > 512 {
+        return Err(invalid_argument());
+    }
+    validate_idempotency_key(&value.idempotency_key)?;
+    let role = decode_participant_role(value.role)?;
+    Ok(EnsureParticipantInput {
+        scope,
+        conference_id,
+        integration_id,
+        external_user_id: value.external_user_id,
+        role,
+        idempotency_key: value.idempotency_key,
+    })
+}
+
+fn decode_participant_role(value: i32) -> Result<ConferenceParticipantRole, CanonicalError> {
+    match pb::ConferenceParticipantRole::try_from(value).map_err(|_| invalid_argument())? {
+        pb::ConferenceParticipantRole::Unspecified => Err(invalid_argument()),
+        pb::ConferenceParticipantRole::Owner => Ok(ConferenceParticipantRole::Owner),
+        pb::ConferenceParticipantRole::Host => Ok(ConferenceParticipantRole::Host),
+        pb::ConferenceParticipantRole::Moderator => Ok(ConferenceParticipantRole::Moderator),
+        pb::ConferenceParticipantRole::Speaker => Ok(ConferenceParticipantRole::Speaker),
+        pb::ConferenceParticipantRole::Attendee => Ok(ConferenceParticipantRole::Attendee),
+    }
 }
 
 fn decode_lifecycle_request(
@@ -478,13 +555,235 @@ fn decode_schedule(
     })
 }
 
-fn accept_mutation<S: CommandAcceptanceStore>(
+const EXTERNAL_PARTICIPANT_NAMESPACE: &str = "ucr.conference.participant.v1";
+
+fn ensure_participant<S>(
+    store: &S,
+    input: EnsureParticipantInput,
+    payload: Vec<u8>,
+) -> Result<UniversalConferenceParticipantProfile, CanonicalError>
+where
+    S: UniversalConferenceStore
+        + CommandAcceptanceStore
+        + IdentityStore
+        + ExternalIdentityBindingStore
+        + PrincipalIdentityBindingStore
+        + PrincipalIdentityLookupStore,
+{
+    let conference = store
+        .universal_conference_profile(&input.scope, &input.conference_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    if conference.integration_id != input.integration_id
+        || conference.lifecycle == UniversalConferenceLifecycle::Ended
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+
+    let stable_command_id = accept_mutation_id(
+        store,
+        &input.scope,
+        "ucr.conference.participant.ensure.v1",
+        &input.idempotency_key,
+        payload,
+    )?;
+
+    let binding = match store
+        .external_identity_binding(
+            &input.scope,
+            &input.integration_id,
+            EXTERNAL_PARTICIPANT_NAMESPACE,
+            &input.external_user_id,
+        )
+        .map_err(map_store_error)?
+    {
+        Some(binding) => binding,
+        None => {
+            let identity_id = IdentityId::from_opaque(derived_id("identity", &stable_command_id)?);
+            let identity = IdentityRecord {
+                scope: input.scope.clone(),
+                identity_id: identity_id.clone(),
+                ownership: IdentityOwnership::PlatformManaged,
+                evidence: IdentityEvidence::Unverified,
+                expires_at_unix_ms: None,
+            };
+            store.persist_identity(&identity).map_err(map_store_error)?;
+            let binding = ExternalIdentityBinding {
+                scope: input.scope.clone(),
+                integration_id: input.integration_id.clone(),
+                external_namespace: EXTERNAL_PARTICIPANT_NAMESPACE.to_owned(),
+                external_entity_id: input.external_user_id.clone(),
+                identity_id,
+            };
+            match store.persist_external_identity_binding(&binding) {
+                Ok(_) => binding,
+                Err(DurableStoreError::Conflict) => store
+                    .external_identity_binding(
+                        &input.scope,
+                        &input.integration_id,
+                        EXTERNAL_PARTICIPANT_NAMESPACE,
+                        &input.external_user_id,
+                    )
+                    .map_err(map_store_error)?
+                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?,
+                Err(error) => return Err(map_store_error(error)),
+            }
+        }
+    };
+
+    if store
+        .identity(&input.scope, &binding.identity_id)
+        .map_err(map_store_error)?
+        .is_none()
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+    }
+
+    let bindings = store
+        .principal_identity_bindings_for_identity(&input.scope, &binding.identity_id, 16)
+        .map_err(map_store_error)?;
+    let mut person_principals = bindings
+        .into_iter()
+        .filter(|candidate| candidate.principal.kind == PrincipalKind::Person);
+    let participant = match (person_principals.next(), person_principals.next()) {
+        (Some(existing), None) => existing.principal,
+        (Some(_), Some(_)) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+        (None, _) => {
+            let principal = PrincipalRef {
+                principal_id: PrincipalId::from_opaque(derived_id("principal", &stable_command_id)?),
+                kind: PrincipalKind::Person,
+            };
+            let principal_binding = PrincipalIdentityBinding {
+                scope: input.scope.clone(),
+                principal: principal.clone(),
+                identity_id: binding.identity_id.clone(),
+            };
+            store
+                .persist_principal_identity_binding(&principal_binding)
+                .map_err(map_store_error)?;
+            principal
+        }
+    };
+
+    let (audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed) =
+        participant_defaults(conference.mode, input.role);
+    let desired = UniversalConferenceParticipantProfile {
+        scope: input.scope.clone(),
+        conference_id: input.conference_id.clone(),
+        integration_id: input.integration_id,
+        external_user_id: input.external_user_id,
+        participant: participant.clone(),
+        role: input.role,
+        audio_muted,
+        camera_allowed,
+        publish_audio_allowed,
+        publish_video_allowed,
+        active: true,
+        revision: 1,
+    };
+
+    match store
+        .universal_conference_participant(&input.scope, &input.conference_id, &participant)
+        .map_err(map_store_error)?
+    {
+        None => {
+            store
+                .persist_universal_conference_participant(&desired)
+                .map_err(map_store_error)?;
+            Ok(desired)
+        }
+        Some(current)
+            if current.integration_id == desired.integration_id
+                && current.external_user_id == desired.external_user_id
+                && current.role == desired.role
+                && current.audio_muted == desired.audio_muted
+                && current.camera_allowed == desired.camera_allowed
+                && current.publish_audio_allowed == desired.publish_audio_allowed
+                && current.publish_video_allowed == desired.publish_video_allowed
+                && current.active =>
+        {
+            Ok(current)
+        }
+        Some(current)
+            if current.integration_id == desired.integration_id
+                && current.external_user_id == desired.external_user_id =>
+        {
+            store
+                .update_universal_conference_participant(
+                    &input.scope,
+                    &input.conference_id,
+                    &participant,
+                    current.revision,
+                    desired.role,
+                    desired.audio_muted,
+                    desired.camera_allowed,
+                    desired.publish_audio_allowed,
+                    desired.publish_video_allowed,
+                    true,
+                )
+                .map_err(map_store_error)
+        }
+        Some(_) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    }
+}
+
+fn derived_id(prefix: &str, command_id: &CommandId) -> Result<OpaqueId, CanonicalError> {
+    OpaqueId::new(format!("{prefix}-{}", command_id.as_opaque().as_str()))
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+}
+
+const fn participant_defaults(
+    mode: UniversalConferenceMode,
+    role: ConferenceParticipantRole,
+) -> (bool, bool, bool, bool) {
+    match role {
+        ConferenceParticipantRole::Owner
+        | ConferenceParticipantRole::Host
+        | ConferenceParticipantRole::Moderator
+        | ConferenceParticipantRole::Speaker => (
+            false,
+            !matches!(mode, UniversalConferenceMode::AudioRoom),
+            true,
+            !matches!(mode, UniversalConferenceMode::AudioRoom),
+        ),
+        ConferenceParticipantRole::Attendee => match mode {
+            UniversalConferenceMode::Meeting => (false, true, true, true),
+            UniversalConferenceMode::Webinar | UniversalConferenceMode::Broadcast => {
+                (true, false, false, false)
+            }
+            UniversalConferenceMode::AudioRoom => (true, false, false, false),
+        },
+    }
+}
+
+fn pb_participant(
+    value: &UniversalConferenceParticipantProfile,
+) -> pb::UniversalConferenceParticipant {
+    pb::UniversalConferenceParticipant {
+        participant_id: Some(pb_opaque(value.participant.principal_id.as_opaque())),
+        external_user_id: value.external_user_id.clone(),
+        role: (match value.role {
+            ConferenceParticipantRole::Owner => pb::ConferenceParticipantRole::Owner,
+            ConferenceParticipantRole::Host => pb::ConferenceParticipantRole::Host,
+            ConferenceParticipantRole::Moderator => pb::ConferenceParticipantRole::Moderator,
+            ConferenceParticipantRole::Speaker => pb::ConferenceParticipantRole::Speaker,
+            ConferenceParticipantRole::Attendee => pb::ConferenceParticipantRole::Attendee,
+        }) as i32,
+        audio_muted: value.audio_muted,
+        camera_allowed: value.camera_allowed,
+        publish_audio_allowed: value.publish_audio_allowed,
+        publish_video_allowed: value.publish_video_allowed,
+        active: value.active,
+    }
+}
+
+fn accept_mutation_id<S: CommandAcceptanceStore>(
     store: &S,
     scope: &TenantScope,
     command_type: &str,
     idempotency_key: &str,
     payload: Vec<u8>,
-) -> Result<(), CanonicalError> {
+) -> Result<CommandId, CanonicalError> {
     validate_idempotency_key(idempotency_key)?;
     let command_id = CommandId::from_opaque(
         generate_opaque_id().map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
@@ -502,8 +801,23 @@ fn accept_mutation<S: CommandAcceptanceStore>(
         schema_version: ProtocolVersion::new(1, 0),
         extensions: Vec::new(),
     };
-    store.accept_command(&command).map_err(map_store_error)?;
-    Ok(())
+    let receipt = store.accept_command(&command).map_err(map_store_error)?;
+    match receipt.status {
+        CommandReceiptStatus::Accepted => Ok(receipt.command_id),
+        CommandReceiptStatus::Duplicate => receipt
+            .original_command_id
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal)),
+    }
+}
+
+fn accept_mutation<S: CommandAcceptanceStore>(
+    store: &S,
+    scope: &TenantScope,
+    command_type: &str,
+    idempotency_key: &str,
+    payload: Vec<u8>,
+) -> Result<(), CanonicalError> {
+    accept_mutation_id(store, scope, command_type, idempotency_key, payload).map(|_| ())
 }
 
 fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
