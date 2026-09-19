@@ -139,8 +139,7 @@ where
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
                     self.require_accepted_conference_participant(&claims)?;
-                    let redeemed =
-                        self.redeemed_claims(&token, &scope, &call_id, &session_id)?;
+                    let redeemed = self.redeemed_claims(&token, &scope, &call_id, &session_id)?;
                     if redeemed != claims {
                         return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
                     }
