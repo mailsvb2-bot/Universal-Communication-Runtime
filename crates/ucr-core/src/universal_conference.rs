@@ -1,6 +1,7 @@
 use ucr_model::{
     ConferenceParticipantRole, GroupId, IntegrationId, PrincipalRef, TenantScope,
-    UniversalConferenceLifecycle, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
+    UniversalConferenceProfile,
 };
 
 use crate::{DurableRecordStatus, DurableStoreError, StorageProvider};
