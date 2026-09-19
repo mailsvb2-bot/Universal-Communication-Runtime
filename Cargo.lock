@@ -3123,7 +3123,9 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "ucr-api-grpc",
+ "ucr-conference",
  "ucr-core",
+ "ucr-realtime",
  "ucr-storage-sqlite",
 ]
 
