@@ -8012,9 +8012,10 @@ impl UniversalConferenceStore for MemoryLocalStore {
         {
             return Ok(current.clone());
         }
-        if current.revision != expected_revision
-            || !valid_universal_conference_transition(current.lifecycle, lifecycle)
-        {
+        let lifecycle_change_allowed =
+            current.lifecycle == lifecycle && current.entry_open != entry_open
+                || valid_universal_conference_transition(current.lifecycle, lifecycle);
+        if current.revision != expected_revision || !lifecycle_change_allowed {
             return Err(DurableStoreError::Conflict);
         }
         current.lifecycle = lifecycle;
