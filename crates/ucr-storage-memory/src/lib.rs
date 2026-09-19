@@ -19,10 +19,10 @@ use ucr_core::{
     DurableStoreError, EventAppendStatus, EventJournalStore, EventSubscriptionStore,
     ExternalIdentityBindingStore, FederationPeerStore, IdentityStore, MessageStore,
     PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
-    RecoveryAdmissionProof,
-    RecoveryDeviceStagingStore, RecoveryPlanStore, ReverifiedDeviceActivationStore,
-    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError, ServiceQuotaStore,
-    StorageHealth, StorageProvider, SyncStore, TrustedSigningKeyStore, UniversalConferenceStore,
+    RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
+    ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
+    ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth, StorageProvider, SyncStore,
+    TrustedSigningKeyStore, UniversalConferenceStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
