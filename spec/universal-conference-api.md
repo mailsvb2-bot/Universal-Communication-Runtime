@@ -6,7 +6,7 @@ This boundary exists so an external product can use UCR without understanding in
 
 ## External identity and room references
 
-The integration key is `(TenantScope, IntegrationId, external reference bytes)`. Conference room resolution reuses the existing durable `GroupBridgeMapping` owner. Participant identity resolution reuses the existing durable `ExternalIdentityBinding` owner. UCR must not create a second user registry or require an integrator to persist internal UCR IDs.
+The integration key is `(TenantScope, IntegrationId, external reference bytes)`. Conference room references are owned by the durable Universal Conference coordinator metadata and reserve the eventual canonical Group handle; they do not reuse `GroupBridgeMapping`, because bridge mappings require a real bridge registration and have different semantics. Participant identity resolution reuses the existing durable `ExternalIdentityBinding` owner. UCR must not create a second user registry or require an integrator to persist internal UCR IDs.
 
 `UniversalConferenceDescriptor.conference_id` is the stable UCR-facing conference handle. Internal Group/Call/MLS identifiers remain implementation details of the coordinator.
 
