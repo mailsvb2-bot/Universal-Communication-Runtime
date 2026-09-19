@@ -882,6 +882,9 @@ where
     let bindings = store
         .principal_identity_bindings_for_identity(scope, identity_id, 16)
         .map_err(map_store_error)?;
+    if bindings.len() == 16 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
     let mut person_principals = bindings
         .into_iter()
         .filter(|candidate| candidate.principal.kind == PrincipalKind::Person);
@@ -1360,6 +1363,9 @@ where
     let calls = store
         .calls_for_group(scope, conference_id, 64)
         .map_err(map_store_error)?;
+    if calls.len() == 64 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
     if !calls.iter().any(|call| call.call_id == claims.call_id) {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
