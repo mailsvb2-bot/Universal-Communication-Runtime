@@ -15,6 +15,7 @@ mod mesh;
 mod offline_group;
 mod organization;
 mod personal_node;
+mod recording;
 mod sfu;
 mod store_forward;
 mod transport_failover;
@@ -65,6 +66,9 @@ pub use organization::{
 pub use personal_node::{
     PersonalNodeObject, PersonalNodeObjectKind, PersonalNodeProfile, PersonalNodeService,
     PersonalNodeState,
+};
+pub use recording::{
+    RecordingConsent, RecordingConsentState, RecordingPolicy, RecordingSession, RecordingState,
 };
 pub use sfu::{SfuForwardEnvelope, SfuForwardTarget};
 pub use store_forward::{
@@ -212,6 +216,7 @@ id_type!(EventSubscriptionId);
 id_type!(IntentId);
 id_type!(KeyId);
 id_type!(RecoveryPlanId);
+id_type!(RecordingId);
 id_type!(ServiceCredentialId);
 id_type!(AuditRecordId);
 
