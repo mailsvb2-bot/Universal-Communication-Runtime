@@ -980,6 +980,24 @@ pub trait EventJournalStore: StorageProvider {
     /// Returns explicit validation/conflict/storage failures. Reusing one
     /// scoped event ID with different semantics is a conflict.
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError>;
+
+    /// Returns a bounded oldest-first projection of canonical events matching any requested type.
+    ///
+    /// This is a read-only view over the same append-only Event journal. Implementations must not
+    /// create a second Event owner or expose private journal positions. Callers that require a
+    /// complete projection must fail closed when the returned vector fills their requested bound.
+    ///
+    /// # Errors
+    /// Rejects empty/unbounded requests and returns explicit storage/corruption failures.
+    fn events_for_types(
+        &self,
+        scope: &TenantScope,
+        event_types: &[&str],
+        max_items: usize,
+    ) -> Result<Vec<EventEnvelope>, DurableStoreError> {
+        let _ = (scope, event_types, max_items);
+        Err(DurableStoreError::Unavailable)
+    }
 }
 
 /// Durable Phase-14 Event consumer state layered over the one canonical append-only Event journal.
