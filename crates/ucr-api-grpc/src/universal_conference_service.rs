@@ -1664,13 +1664,6 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
 
-    let stable_command_id = accept_mutation_id(
-        store,
-        &input.scope,
-        "ucr.conference.runtime.prepare.v1",
-        &input.idempotency_key,
-        payload,
-    )?;
     let participants = store
         .universal_conference_participants(&input.scope, &input.conference_id, 1024)
         .map_err(map_store_error)?;
@@ -1684,6 +1677,7 @@ where
     let owners = active
         .iter()
         .filter(|participant| participant.role == ConferenceParticipantRole::Owner)
+        .cloned()
         .collect::<Vec<_>>();
     let [owner] = owners.as_slice() else {
         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
@@ -1727,6 +1721,13 @@ where
         scope: input.scope.clone(),
         principal: owner_ready.profile.participant.clone(),
     };
+    let stable_command_id = accept_mutation_id(
+        store,
+        &input.scope,
+        "ucr.conference.runtime.prepare.v1",
+        &input.idempotency_key,
+        payload,
+    )?;
 
     let group = ensure_runtime_group(
         store,
@@ -1908,7 +1909,7 @@ where
             expected_revision: group.revision,
             kind: GroupChangeKind::AddMember {
                 member: participant.profile.participant.clone(),
-                role: runtime_group_role(participant.profile.role)?,
+                role: runtime_group_role(participant.profile.role),
             },
             next_crypto_state: None,
         };
@@ -1927,16 +1928,12 @@ where
     Ok(())
 }
 
-const fn runtime_group_role(
-    role: ConferenceParticipantRole,
-) -> Result<GroupRole, CanonicalError> {
+const fn runtime_group_role(role: ConferenceParticipantRole) -> GroupRole {
     match role {
-        ConferenceParticipantRole::Owner => Ok(GroupRole::Owner),
-        ConferenceParticipantRole::Host | ConferenceParticipantRole::Moderator => {
-            Ok(GroupRole::Admin)
-        }
+        ConferenceParticipantRole::Owner => GroupRole::Owner,
+        ConferenceParticipantRole::Host | ConferenceParticipantRole::Moderator => GroupRole::Admin,
         ConferenceParticipantRole::Speaker | ConferenceParticipantRole::Attendee => {
-            Ok(GroupRole::Member)
+            GroupRole::Member
         }
     }
 }
