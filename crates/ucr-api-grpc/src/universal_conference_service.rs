@@ -231,6 +231,37 @@ where
         }))
     }
 
+    async fn get_conference(
+        &self,
+        request: Request<pb::UniversalGetConferenceRequest>,
+    ) -> Result<Response<pb::UniversalGetConferenceResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let decoded = decode_get_conference(request.into_inner());
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok((scope, conference_id, integration_id))) => self
+                .admit(&scope, &credential_id, &secret, CONFERENCE_READ_PERMISSION)
+                .and_then(|_| {
+                    conference_for_integration(
+                        &*self.store,
+                        &scope,
+                        &conference_id,
+                        &integration_id,
+                    )
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::UniversalGetConferenceResponse {
+            result: Some(match result {
+                Ok(conference) => pb::universal_get_conference_response::Result::Conference(
+                    pb_conference(&conference),
+                ),
+                Err(error) => {
+                    pb::universal_get_conference_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
     async fn transition_conference(
         &self,
         request: Request<pb::UniversalConferenceLifecycleRequest>,
@@ -240,7 +271,10 @@ where
         let payload = body.encode_to_vec();
         let decoded = decode_lifecycle_request(body);
         let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok((scope, conference_id, target, idempotency_key))) => {
+            (
+                Ok((credential_id, secret)),
+                Ok((scope, conference_id, integration_id, target, idempotency_key)),
+            ) => {
                 self.admit(
                     &scope,
                     &credential_id,
@@ -255,11 +289,12 @@ where
                         &idempotency_key,
                         payload,
                     )?;
-                    let current = self
-                        .store
-                        .universal_conference_profile(&scope, &conference_id)
-                        .map_err(map_store_error)?
-                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+                    let current = conference_for_integration(
+                        &*self.store,
+                        &scope,
+                        &conference_id,
+                        &integration_id,
+                    )?;
                     if current.lifecycle == target {
                         return Ok(current);
                     }
@@ -299,7 +334,7 @@ where
         let result = match (credentials, decoded) {
             (
                 Ok((credential_id, secret)),
-                Ok((scope, conference_id, entry_open, idempotency_key)),
+                Ok((scope, conference_id, integration_id, entry_open, idempotency_key)),
             ) => self
                 .admit(
                     &scope,
@@ -315,11 +350,12 @@ where
                         &idempotency_key,
                         payload,
                     )?;
-                    let current = self
-                        .store
-                        .universal_conference_profile(&scope, &conference_id)
-                        .map_err(map_store_error)?
-                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+                    let current = conference_for_integration(
+                        &*self.store,
+                        &scope,
+                        &conference_id,
+                        &integration_id,
+                    )?;
                     if current.entry_open == entry_open {
                         return Ok(current);
                     }
@@ -447,9 +483,20 @@ where
         let credentials = decode_credentials(request.metadata());
         let decoded = decode_list_participants(request.into_inner());
         let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok((scope, conference_id, max_items))) => self
+            (
+                Ok((credential_id, secret)),
+                Ok((scope, conference_id, integration_id, max_items)),
+            ) => self
                 .admit(&scope, &credential_id, &secret, CONFERENCE_READ_PERMISSION)
-                .and_then(|_| list_participants(&*self.store, &scope, &conference_id, max_items)),
+                .and_then(|_| {
+                    list_participants(
+                        &*self.store,
+                        &scope,
+                        &conference_id,
+                        &integration_id,
+                        max_items,
+                    )
+                }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::UniversalListParticipantsResponse {
@@ -508,7 +555,10 @@ where
         let credentials = decode_credentials(request.metadata());
         let decoded = decode_revoke_join_grant(request.into_inner());
         let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok((scope, conference_id, session_id))) => self
+            (
+                Ok((credential_id, secret)),
+                Ok((scope, conference_id, integration_id, session_id)),
+            ) => self
                 .admit(
                     &scope,
                     &credential_id,
@@ -519,7 +569,14 @@ where
                     let issuer = self.join_issuer.as_deref().ok_or_else(|| {
                         CanonicalError::new(CanonicalErrorCode::CapabilityMismatch)
                     })?;
-                    revoke_join_grant(&*self.store, issuer, &scope, &conference_id, &session_id)?;
+                    revoke_join_grant(
+                        &*self.store,
+                        issuer,
+                        &scope,
+                        &conference_id,
+                        &integration_id,
+                        &session_id,
+                    )?;
                     Ok(session_id)
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
@@ -551,6 +608,7 @@ struct EnsureParticipantInput {
 struct UpdateParticipantInput {
     scope: TenantScope,
     conference_id: GroupId,
+    integration_id: IntegrationId,
     participant: PrincipalRef,
     role: Option<ConferenceParticipantRole>,
     audio_muted: Option<bool>,
@@ -563,6 +621,7 @@ struct UpdateParticipantInput {
 struct RemoveParticipantInput {
     scope: TenantScope,
     conference_id: GroupId,
+    integration_id: IntegrationId,
     participant: PrincipalRef,
     idempotency_key: String,
 }
@@ -650,12 +709,14 @@ fn decode_update_participant(
 ) -> Result<UpdateParticipantInput, CanonicalError> {
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     let participant = participant_ref(value.participant_id)?;
     validate_idempotency_key(&value.idempotency_key)?;
     let role = value.role.map(decode_participant_role).transpose()?;
     Ok(UpdateParticipantInput {
         scope,
         conference_id,
+        integration_id,
         participant,
         role,
         audio_muted: value.audio_muted,
@@ -671,11 +732,13 @@ fn decode_remove_participant(
 ) -> Result<RemoveParticipantInput, CanonicalError> {
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     let participant = participant_ref(value.participant_id)?;
     validate_idempotency_key(&value.idempotency_key)?;
     Ok(RemoveParticipantInput {
         scope,
         conference_id,
+        integration_id,
         participant,
         idempotency_key: value.idempotency_key,
     })
@@ -683,9 +746,10 @@ fn decode_remove_participant(
 
 fn decode_list_participants(
     value: pb::UniversalListParticipantsRequest,
-) -> Result<(TenantScope, GroupId, usize), CanonicalError> {
+) -> Result<(TenantScope, GroupId, IntegrationId, usize), CanonicalError> {
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     let max_items = if value.max_items == 0 {
         256
     } else {
@@ -694,7 +758,7 @@ fn decode_list_participants(
     if max_items > 1024 {
         return Err(invalid_argument());
     }
-    Ok((scope, conference_id, max_items))
+    Ok((scope, conference_id, integration_id, max_items))
 }
 
 fn decode_issue_join_grant(
@@ -726,19 +790,24 @@ fn decode_issue_join_grant(
 
 fn decode_revoke_join_grant(
     value: pb::UniversalRevokeJoinGrantRequest,
-) -> Result<(TenantScope, GroupId, SessionId), CanonicalError> {
+) -> Result<(TenantScope, GroupId, IntegrationId, SessionId), CanonicalError> {
     Ok((
         decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
         GroupId::from_opaque(decode_opaque(value.conference_id)?),
+        IntegrationId::from_opaque(decode_opaque(value.integration_id)?),
         SessionId::from_opaque(decode_opaque(value.session_id)?),
     ))
 }
 
 fn decode_lifecycle_request(
     value: pb::UniversalConferenceLifecycleRequest,
-) -> Result<(TenantScope, GroupId, UniversalConferenceLifecycle, String), CanonicalError> {
+) -> Result<
+    (TenantScope, GroupId, IntegrationId, UniversalConferenceLifecycle, String),
+    CanonicalError,
+> {
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     validate_idempotency_key(&value.idempotency_key)?;
     let target = match pb::UniversalConferenceLifecycle::try_from(value.target)
         .map_err(|_| invalid_argument())?
@@ -750,18 +819,26 @@ fn decode_lifecycle_request(
         pb::UniversalConferenceLifecycle::Ending => UniversalConferenceLifecycle::Ending,
         pb::UniversalConferenceLifecycle::Ended => UniversalConferenceLifecycle::Ended,
     };
-    Ok((scope, conference_id, target, value.idempotency_key))
+    Ok((
+        scope,
+        conference_id,
+        integration_id,
+        target,
+        value.idempotency_key,
+    ))
 }
 
 fn decode_entry_request(
     value: pb::UniversalSetEntryOpenRequest,
-) -> Result<(TenantScope, GroupId, bool, String), CanonicalError> {
+) -> Result<(TenantScope, GroupId, IntegrationId, bool, String), CanonicalError> {
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     validate_idempotency_key(&value.idempotency_key)?;
     Ok((
         scope,
         conference_id,
+        integration_id,
         value.entry_open,
         value.idempotency_key,
     ))
@@ -774,6 +851,16 @@ fn decode_resolve(
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     validate_external_id(&value.external_conference_id)?;
     Ok((scope, integration_id, value.external_conference_id))
+}
+
+fn decode_get_conference(
+    value: pb::UniversalGetConferenceRequest,
+) -> Result<(TenantScope, GroupId, IntegrationId), CanonicalError> {
+    Ok((
+        decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
+        GroupId::from_opaque(decode_opaque(value.conference_id)?),
+        IntegrationId::from_opaque(decode_opaque(value.integration_id)?),
+    ))
 }
 
 fn decode_mode(value: i32) -> Result<UniversalConferenceMode, CanonicalError> {
@@ -1017,10 +1104,12 @@ fn update_participant<S>(
 where
     S: UniversalConferenceStore + CommandAcceptanceStore,
 {
-    let conference = store
-        .universal_conference_profile(&input.scope, &input.conference_id)
-        .map_err(map_store_error)?
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    let conference = conference_for_integration(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+    )?;
     if conference.lifecycle == UniversalConferenceLifecycle::Ended {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
@@ -1098,10 +1187,12 @@ fn remove_participant<S>(
 where
     S: UniversalConferenceStore + CommandAcceptanceStore,
 {
-    let conference = store
-        .universal_conference_profile(&input.scope, &input.conference_id)
-        .map_err(map_store_error)?
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    let conference = conference_for_integration(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+    )?;
     if conference.lifecycle == UniversalConferenceLifecycle::Ended {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
@@ -1137,16 +1228,30 @@ where
     Ok(command_id)
 }
 
+fn conference_for_integration<S: UniversalConferenceStore>(
+    store: &S,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    integration_id: &IntegrationId,
+) -> Result<UniversalConferenceProfile, CanonicalError> {
+    let conference = store
+        .universal_conference_profile(scope, conference_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    if conference.integration_id != *integration_id {
+        return Err(CanonicalError::new(CanonicalErrorCode::NotFound));
+    }
+    Ok(conference)
+}
+
 fn list_participants<S: UniversalConferenceStore>(
     store: &S,
     scope: &TenantScope,
     conference_id: &GroupId,
+    integration_id: &IntegrationId,
     max_items: usize,
 ) -> Result<Vec<UniversalConferenceParticipantProfile>, CanonicalError> {
-    store
-        .universal_conference_profile(scope, conference_id)
-        .map_err(map_store_error)?
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    conference_for_integration(store, scope, conference_id, integration_id)?;
     store
         .universal_conference_participants(scope, conference_id, max_items)
         .map_err(map_store_error)
@@ -1347,15 +1452,13 @@ fn revoke_join_grant<S>(
     issuer: &JoinTokenIssuer,
     scope: &TenantScope,
     conference_id: &GroupId,
+    integration_id: &IntegrationId,
     session_id: &SessionId,
 ) -> Result<(), CanonicalError>
 where
     S: UniversalConferenceStore + GroupCallLookupStore,
 {
-    store
-        .universal_conference_profile(scope, conference_id)
-        .map_err(map_store_error)?
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    conference_for_integration(store, scope, conference_id, integration_id)?;
     let claims = issuer
         .grant_claims(scope, session_id)
         .map_err(map_join_token_error)?
