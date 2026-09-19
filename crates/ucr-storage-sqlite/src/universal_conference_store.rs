@@ -356,11 +356,13 @@ impl UniversalConferenceStore for SqliteLocalStore {
             };
         }
 
-        ensure_participant_capacity(
-            &transaction,
-            &participant.scope,
-            &participant.conference_id,
-        )?;
+        if participant.active {
+            ensure_participant_capacity(
+                &transaction,
+                &participant.scope,
+                &participant.conference_id,
+            )?;
+        }
         ensure_unique_active_owner(
             &transaction,
             &participant.scope,
@@ -417,6 +419,19 @@ impl UniversalConferenceStore for SqliteLocalStore {
         load_participants(&connection, scope, conference_id, max_items)
     }
 
+    fn active_universal_conference_participants(
+        &self,
+        scope: &TenantScope,
+        conference_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<UniversalConferenceParticipantProfile>, DurableStoreError> {
+        if max_items == 0 || max_items > MAX_PARTICIPANT_SCAN_ITEMS {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        load_active_participants(&connection, scope, conference_id, max_items)
+    }
+
     fn update_universal_conference_participant(
         &self,
         scope: &TenantScope,
@@ -449,6 +464,9 @@ impl UniversalConferenceStore for SqliteLocalStore {
         }
         if current.revision != expected_revision {
             return Err(DurableStoreError::Conflict);
+        }
+        if active && !current.active {
+            ensure_participant_capacity(&transaction, scope, conference_id)?;
         }
         ensure_unique_active_owner(
             &transaction,
@@ -547,7 +565,7 @@ fn ensure_participant_capacity(
         .query_row(
             "SELECT COUNT(*) FROM universal_conference_participants
              WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
-               AND conference_id = ?4",
+               AND conference_id = ?4 AND active = 1",
             params![
                 scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
@@ -825,6 +843,49 @@ fn load_participants(
              FROM universal_conference_participants
              WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
                AND conference_id = ?4
+             ORDER BY principal_kind, principal_id
+             LIMIT ?5",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map(
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                conference_id.as_opaque().as_str(),
+                limit,
+            ],
+            decode_stored_participant,
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(decode_participant(
+            scope,
+            conference_id,
+            row.map_err(|error| map_sqlite_error(&error))?,
+        )?);
+    }
+    Ok(result)
+}
+
+fn load_active_participants(
+    connection: &Connection,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    max_items: usize,
+) -> Result<Vec<UniversalConferenceParticipantProfile>, DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let limit = i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT integration_id, external_user_id, principal_kind, principal_id, role,
+                    audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed,
+                    active, revision
+             FROM universal_conference_participants
+             WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
+               AND conference_id = ?4 AND active = 1
              ORDER BY principal_kind, principal_id
              LIMIT ?5",
         )
