@@ -25,7 +25,7 @@ use ucr_model::{
     EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult, EventReconciliation,
     EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding,
     FederationPeerRecord, FederationTrustState, IdentityId, IdentityRecord, IntegrationId,
-    IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PrincipalIdentityBinding,
+    IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PrincipalIdentityBinding, PrincipalKind,
     PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
     ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
     ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
@@ -813,6 +813,21 @@ pub trait PrincipalIdentityLookupStore: StorageProvider {
         &self,
         scope: &TenantScope,
         identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<PrincipalIdentityBinding>, DurableStoreError>;
+
+    /// Lists bounded canonical Principal bindings of one exact kind for one Identity.
+    ///
+    /// Bindings of unrelated Principal kinds must not consume this bound. This remains a read-only
+    /// projection over the canonical Principal→Identity association owner.
+    ///
+    /// # Errors
+    /// Returns explicit invalid/storage/corrupt-state failures.
+    fn principal_identity_bindings_for_identity_kind(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        kind: PrincipalKind,
         max_items: usize,
     ) -> Result<Vec<PrincipalIdentityBinding>, DurableStoreError>;
 }
