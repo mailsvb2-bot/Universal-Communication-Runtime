@@ -186,3 +186,20 @@ fn universal_runtime_preparation_reuses_canonical_mls_group_and_call_owners() {
     assert!(service.contains("store.apply_call_signal(owner, &signal)"));
     assert!(spec.contains("does not create a second Group, MLS, or Call owner"));
 }
+
+#[test]
+fn universal_participant_policy_syncs_minimum_canonical_permissions() {
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    for required in [
+        "CALL_OBSERVE_PERMISSION",
+        "CONFERENCE_SUBSCRIBE_PERMISSION",
+        "AUDIO_RECEIVE_PERMISSION",
+        "VIDEO_RECEIVE_PERMISSION",
+        "AUDIO_SEND_PERMISSION",
+        "VIDEO_SEND_PERMISSION",
+        "sync_participant_permissions",
+    ] {
+        assert!(service.contains(required), "missing participant permission policy {required}");
+    }
+    assert!(service.contains("store.revoke_permission(&grant)"));
+}
