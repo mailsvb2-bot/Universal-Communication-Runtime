@@ -38,7 +38,7 @@ Enrollment is deliberately conservative: multiple active devices are a conflict,
 
 `IssueJoinGrant` accepts external user identity and resolves canonical Identity/Principal/Device inside UCR. The integrator is not required to submit `PrincipalRef` or `DeviceId`.
 
-Join grants are short-lived and conference-scoped. The contract reserves single-use/reusable policy, explicit not-before/not-after bounds and revocation. Runtime implementations must reject unsupported semantics rather than silently weakening them.
+Join grants are short-lived and conference-scoped. The contract reserves single-use/reusable policy, explicit not-before/not-after bounds and revocation. An eligible canonical Call participant may be `invited`, `ringing` or already `accepted` when a grant is issued; presenting a valid grant at the realtime join boundary performs the participant's canonical `Accept` transition before the media session is opened. Rejected, busy, left, inactive or removed participants remain denied. Runtime implementations must reject unsupported semantics rather than silently weakening them.
 
 ## Capability discovery
 
