@@ -117,8 +117,8 @@ async fn run() -> Result<(), String> {
         .connect()
         .await
         .map_err(|error| format!("connect realtime upstream: {error}"))?;
-    let allowed_origins =
-        parse_allowed_origins(std::env::var("UCR_REALTIME_ALLOWED_ORIGINS").unwrap_or_default())?;
+    let allowed_origins_raw = std::env::var("UCR_REALTIME_ALLOWED_ORIGINS").unwrap_or_default();
+    let allowed_origins = parse_allowed_origins(&allowed_origins_raw)?;
     let state = AppState {
         upstream: channel,
         allowed_origins,
@@ -230,7 +230,7 @@ async fn handle_request(
     Ok(with_cors(response, origin.as_deref()))
 }
 
-fn parse_allowed_origins(raw: String) -> Result<Vec<String>, String> {
+fn parse_allowed_origins(raw: &str) -> Result<Vec<String>, String> {
     let mut origins = Vec::new();
     for candidate in raw
         .split(',')
@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn allowed_origins_are_exact_and_wildcards_fail_closed() {
         let origins = parse_allowed_origins(
-            "https://app.example.test, http://localhost:5173,https://app.example.test".to_owned(),
+            "https://app.example.test, http://localhost:5173,https://app.example.test",
         )
         .expect("valid origins");
         assert_eq!(
@@ -710,8 +710,8 @@ mod tests {
                 "http://localhost:5173".to_owned()
             ]
         );
-        assert!(parse_allowed_origins("*".to_owned()).is_err());
-        assert!(parse_allowed_origins("http://example.test".to_owned()).is_err());
+        assert!(parse_allowed_origins("*").is_err());
+        assert!(parse_allowed_origins("http://example.test").is_err());
     }
 
     #[test]
