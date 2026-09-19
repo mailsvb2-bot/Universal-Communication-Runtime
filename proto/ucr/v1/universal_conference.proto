@@ -160,6 +160,28 @@ message UniversalEnsureParticipantResponse {
   }
 }
 
+// Ensures the participant has one canonical active UCR Device without exposing DeviceId.
+// This prepares canonical device/MLS lifecycle only; it is not a claim of browser WebRTC readiness.
+message UniversalEnsureParticipantDeviceRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId integration_id = 3;
+  bytes external_user_id = 4;
+  string idempotency_key = 5;
+}
+
+message UniversalParticipantDeviceStatus {
+  bytes external_user_id = 1;
+  bool active = 2;
+}
+
+message UniversalEnsureParticipantDeviceResponse {
+  oneof result {
+    UniversalParticipantDeviceStatus device = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 message UniversalUpdateParticipantRequest {
   TenantScope scope = 1;
   OpaqueId conference_id = 2;
@@ -303,6 +325,7 @@ service UniversalConferenceService {
   rpc TransitionConference(UniversalConferenceLifecycleRequest) returns (UniversalConferenceLifecycleResponse);
   rpc SetEntryOpen(UniversalSetEntryOpenRequest) returns (UniversalSetEntryOpenResponse);
   rpc EnsureParticipant(UniversalEnsureParticipantRequest) returns (UniversalEnsureParticipantResponse);
+  rpc EnsureParticipantDevice(UniversalEnsureParticipantDeviceRequest) returns (UniversalEnsureParticipantDeviceResponse);
   rpc UpdateParticipant(UniversalUpdateParticipantRequest) returns (UniversalUpdateParticipantResponse);
   rpc RemoveParticipant(UniversalRemoveParticipantRequest) returns (UniversalRemoveParticipantResponse);
   rpc ListParticipants(UniversalListParticipantsRequest) returns (UniversalListParticipantsResponse);
