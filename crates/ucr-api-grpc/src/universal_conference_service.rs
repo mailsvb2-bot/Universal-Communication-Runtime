@@ -13,8 +13,8 @@ use ucr_model::{
     UniversalConferenceLifecycle, UniversalConferenceMode, UniversalConferenceProfile,
 };
 use ucr_protocol::{
-    CONFERENCE_CREATE_PERMISSION, CONFERENCE_READ_PERMISSION, CanonicalError, CanonicalErrorCode,
-    CommandReceiptStatus,
+    CONFERENCE_CREATE_PERMISSION, CONFERENCE_MANAGE_PERMISSION, CONFERENCE_READ_PERMISSION,
+    CanonicalError, CanonicalErrorCode, CommandReceiptStatus,
 };
 
 use super::{
@@ -200,23 +200,119 @@ where
 
     async fn transition_conference(
         &self,
-        _request: Request<pb::UniversalConferenceLifecycleRequest>,
+        request: Request<pb::UniversalConferenceLifecycleRequest>,
     ) -> Result<Response<pb::UniversalConferenceLifecycleResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let payload = body.encode_to_vec();
+        let decoded = decode_lifecycle_request(body);
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok((scope, conference_id, target, idempotency_key))) => {
+                self.admit(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    CONFERENCE_MANAGE_PERMISSION,
+                )
+                .and_then(|_| {
+                    accept_mutation(
+                        &*self.store,
+                        &scope,
+                        "ucr.conference.lifecycle.v1",
+                        &idempotency_key,
+                        payload,
+                    )?;
+                    let current = self
+                        .store
+                        .universal_conference_profile(&scope, &conference_id)
+                        .map_err(map_store_error)?
+                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+                    if current.lifecycle == target {
+                        return Ok(current);
+                    }
+                    self.store
+                        .transition_universal_conference(
+                            &scope,
+                            &conference_id,
+                            current.revision,
+                            target,
+                            current.entry_open,
+                        )
+                        .map_err(map_store_error)
+                })
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
         Ok(Response::new(pb::UniversalConferenceLifecycleResponse {
-            result: Some(
-                pb::universal_conference_lifecycle_response::Result::Error(unsupported()),
-            ),
+            result: Some(match result {
+                Ok(conference) => {
+                    pb::universal_conference_lifecycle_response::Result::Conference(
+                        pb_conference(&conference),
+                    )
+                }
+                Err(error) => {
+                    pb::universal_conference_lifecycle_response::Result::Error(pb_error(error))
+                }
+            }),
         }))
     }
 
     async fn set_entry_open(
         &self,
-        _request: Request<pb::UniversalSetEntryOpenRequest>,
+        request: Request<pb::UniversalSetEntryOpenRequest>,
     ) -> Result<Response<pb::UniversalSetEntryOpenResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let payload = body.encode_to_vec();
+        let decoded = decode_entry_request(body);
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok((scope, conference_id, entry_open, idempotency_key))) => {
+                self.admit(
+                    &scope,
+                    &credential_id,
+                    &secret,
+                    CONFERENCE_MANAGE_PERMISSION,
+                )
+                .and_then(|_| {
+                    accept_mutation(
+                        &*self.store,
+                        &scope,
+                        "ucr.conference.entry.v1",
+                        &idempotency_key,
+                        payload,
+                    )?;
+                    let current = self
+                        .store
+                        .universal_conference_profile(&scope, &conference_id)
+                        .map_err(map_store_error)?
+                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+                    if current.entry_open == entry_open {
+                        return Ok(current);
+                    }
+                    self.store
+                        .transition_universal_conference(
+                            &scope,
+                            &conference_id,
+                            current.revision,
+                            current.lifecycle,
+                            entry_open,
+                        )
+                        .map_err(map_store_error)
+                })
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
         Ok(Response::new(pb::UniversalSetEntryOpenResponse {
-            result: Some(pb::universal_set_entry_open_response::Result::Error(
-                unsupported(),
-            )),
+            result: Some(match result {
+                Ok(conference) => {
+                    pb::universal_set_entry_open_response::Result::Conference(
+                        pb_conference(&conference),
+                    )
+                }
+                Err(error) => {
+                    pb::universal_set_entry_open_response::Result::Error(pb_error(error))
+                }
+            }),
         }))
     }
 
@@ -313,6 +409,39 @@ fn decode_create(value: pb::UniversalCreateConferenceRequest) -> Result<CreateIn
     })
 }
 
+fn decode_lifecycle_request(
+    value: pb::UniversalConferenceLifecycleRequest,
+) -> Result<(TenantScope, GroupId, UniversalConferenceLifecycle, String), CanonicalError> {
+    let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
+    let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    validate_idempotency_key(&value.idempotency_key)?;
+    let target = match pb::UniversalConferenceLifecycle::try_from(value.target)
+        .map_err(|_| invalid_argument())?
+    {
+        pb::UniversalConferenceLifecycle::Unspecified => return Err(invalid_argument()),
+        pb::UniversalConferenceLifecycle::Scheduled => UniversalConferenceLifecycle::Scheduled,
+        pb::UniversalConferenceLifecycle::Waiting => UniversalConferenceLifecycle::Waiting,
+        pb::UniversalConferenceLifecycle::Live => UniversalConferenceLifecycle::Live,
+        pb::UniversalConferenceLifecycle::Ending => UniversalConferenceLifecycle::Ending,
+        pb::UniversalConferenceLifecycle::Ended => UniversalConferenceLifecycle::Ended,
+    };
+    Ok((scope, conference_id, target, value.idempotency_key))
+}
+
+fn decode_entry_request(
+    value: pb::UniversalSetEntryOpenRequest,
+) -> Result<(TenantScope, GroupId, bool, String), CanonicalError> {
+    let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
+    let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    validate_idempotency_key(&value.idempotency_key)?;
+    Ok((
+        scope,
+        conference_id,
+        value.entry_open,
+        value.idempotency_key,
+    ))
+}
+
 fn decode_resolve(
     value: pb::UniversalResolveConferenceRequest,
 ) -> Result<(TenantScope, IntegrationId, Vec<u8>), CanonicalError> {
@@ -354,6 +483,34 @@ fn decode_schedule(
         join_after_seconds: value.join_after_seconds,
         timezone: value.timezone,
     })
+}
+
+fn accept_mutation<S: CommandAcceptanceStore>(
+    store: &S,
+    scope: &TenantScope,
+    command_type: &str,
+    idempotency_key: &str,
+    payload: Vec<u8>,
+) -> Result<(), CanonicalError> {
+    validate_idempotency_key(idempotency_key)?;
+    let command_id = CommandId::from_opaque(
+        generate_opaque_id().map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+    );
+    let command = CommandEnvelope {
+        command_id: command_id.clone(),
+        scope: scope.clone(),
+        command_type: command_type.to_owned(),
+        payload,
+        correlation: CorrelationContext {
+            correlation_id: command_id.as_opaque().clone(),
+            causation_id: None,
+            idempotency_key: Some(idempotency_key.to_owned()),
+        },
+        schema_version: ProtocolVersion::new(1, 0),
+        extensions: Vec::new(),
+    };
+    store.accept_command(&command).map_err(map_store_error)?;
+    Ok(())
 }
 
 fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
