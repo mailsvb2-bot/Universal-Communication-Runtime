@@ -3,16 +3,18 @@ use std::{fmt, sync::Arc};
 use prost::Message;
 use tonic::{Request, Response, Status};
 use ucr_core::{
-    AuthorizationEvaluator, CommandAcceptanceStore, DurableStoreError, EventJournalStore,
-    ExternalIdentityBindingStore, GroupCallLookupStore, IdentityDeviceLookupStore, IdentityStore,
+    AuthorizationEvaluator, CommandAcceptanceStore, DeviceLifecycleStore, DurableStoreError,
+    EventJournalStore, ExternalIdentityBindingStore, GroupCallLookupStore,
+    IdentityDeviceLookupStore, IdentityStore,
     PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, ServiceAuditStore,
     ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
     ServiceQuotaClock, ServiceQuotaStore, UniversalConferenceStore, generate_opaque_id,
 };
 use ucr_model::{
     AuthorizationRequest, CallId, CallParticipantState, CallSignallingState, CommandEnvelope,
-    CommandId, ConferenceParticipantRole, ConferenceScheduleMetadata, CorrelationContext, DeviceId,
-    DeviceLifecycleState, ExternalIdentityBinding, GroupId, IdentityEvidence, IdentityId,
+    CommandId, ConferenceParticipantRole, ConferenceScheduleMetadata, CorrelationContext,
+    DeviceDescriptor, DeviceId, DeviceLifecycleState, ExternalIdentityBinding, GroupId,
+    IdentityEvidence, IdentityId,
     IdentityOwnership, IdentityRecord, IntegrationId, OpaqueId, PrincipalId,
     PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal,
     SessionId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
@@ -22,8 +24,9 @@ use ucr_protocol::{
     CONFERENCE_ATTENDANCE_READ_PERMISSION, CONFERENCE_CREATE_PERMISSION,
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
-    CONFERENCE_READ_PERMISSION, CanonicalError, CanonicalErrorCode, CapabilityMaturity,
-    CommandReceiptStatus, MAX_CALL_PARTICIPANTS, acknowledgement_for, canonical_capabilities,
+    CONFERENCE_READ_PERMISSION, DEVICE_REGISTER_PERMISSION, CanonicalError, CanonicalErrorCode,
+    CapabilityMaturity, CommandReceiptStatus, MAX_CALL_PARTICIPANTS, acknowledgement_for,
+    canonical_capabilities,
     phase20_audio_capabilities, phase21_video_capabilities, phase22_media_e2ee_capabilities,
     phase29_sfu_capabilities, phase30_conference_capabilities,
 };
@@ -158,6 +161,7 @@ where
         + PrincipalIdentityBindingStore
         + PrincipalIdentityLookupStore
         + IdentityDeviceLookupStore
+        + DeviceLifecycleStore
         + GroupCallLookupStore
         + EventJournalStore
         + 'static,
@@ -183,6 +187,7 @@ where
         + PrincipalIdentityBindingStore
         + PrincipalIdentityLookupStore
         + IdentityDeviceLookupStore
+        + DeviceLifecycleStore
         + GroupCallLookupStore
         + EventJournalStore
         + 'static,
