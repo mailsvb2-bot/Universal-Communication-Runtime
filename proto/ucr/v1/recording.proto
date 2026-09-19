@@ -52,6 +52,7 @@ message RecordingSession {
   optional int64 started_at_unix_ms = 9;
   optional int64 stopped_at_unix_ms = 10;
   int64 expires_at_unix_ms = 11;
+  uint64 revision = 12;
 }
 
 message RecordingRequest {
@@ -80,10 +81,14 @@ message RecordingGetResponse {
   }
 }
 
+// Participant consent is authenticated with the same device-bound realtime bearer token used for
+// the Call session. The service MUST require token scope/call/participant claims to match the
+// recording and consent participant; a Service Account cannot assert consent on someone's behalf.
 message RecordingSetConsentRequest {
   TenantScope scope = 1;
   OpaqueId recording_id = 2;
   RecordingConsent consent = 3;
+  uint64 expected_revision = 4;
 }
 
 message RecordingSetConsentResponse {
@@ -96,6 +101,7 @@ message RecordingSetConsentResponse {
 message RecordingStartRequest {
   TenantScope scope = 1;
   OpaqueId recording_id = 2;
+  uint64 expected_revision = 3;
 }
 
 message RecordingStartResponse {
@@ -108,6 +114,7 @@ message RecordingStartResponse {
 message RecordingStopRequest {
   TenantScope scope = 1;
   OpaqueId recording_id = 2;
+  uint64 expected_revision = 3;
 }
 
 message RecordingStopResponse {
@@ -120,6 +127,7 @@ message RecordingStopResponse {
 message RecordingDeleteRequest {
   TenantScope scope = 1;
   OpaqueId recording_id = 2;
+  uint64 expected_revision = 3;
 }
 
 message RecordingDeleteResponse {
