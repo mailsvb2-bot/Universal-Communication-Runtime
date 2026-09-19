@@ -365,7 +365,6 @@ fn external_participant_reference_is_unique_within_integration_conference() {
     cleanup(&path);
 }
 
-
 #[test]
 fn durable_join_grant_redeem_and_revocation_survive_restart() {
     let path = db_path("universal-conference-join-grant-restart");

@@ -117,9 +117,8 @@ async fn run() -> Result<(), String> {
         .connect()
         .await
         .map_err(|error| format!("connect realtime upstream: {error}"))?;
-    let allowed_origins = parse_allowed_origins(
-        std::env::var("UCR_REALTIME_ALLOWED_ORIGINS").unwrap_or_default(),
-    )?;
+    let allowed_origins =
+        parse_allowed_origins(std::env::var("UCR_REALTIME_ALLOWED_ORIGINS").unwrap_or_default())?;
     let state = AppState {
         upstream: channel,
         allowed_origins,
@@ -233,9 +232,15 @@ async fn handle_request(
 
 fn parse_allowed_origins(raw: String) -> Result<Vec<String>, String> {
     let mut origins = Vec::new();
-    for candidate in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+    for candidate in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         if candidate == "*" {
-            return Err("UCR_REALTIME_ALLOWED_ORIGINS must not contain wildcard origins".to_owned());
+            return Err(
+                "UCR_REALTIME_ALLOWED_ORIGINS must not contain wildcard origins".to_owned(),
+            );
         }
         let valid_scheme = candidate.starts_with("https://")
             || candidate.starts_with("http://127.0.0.1:")
@@ -272,7 +277,9 @@ fn request_origin(
     let same_origin = headers
         .get(HOST)
         .and_then(|host| host.to_str().ok())
-        .is_some_and(|host| origin == format!("https://{host}") || origin == format!("http://{host}"));
+        .is_some_and(|host| {
+            origin == format!("https://{host}") || origin == format!("http://{host}")
+        });
     if same_origin || allowed_origins.iter().any(|allowed| allowed == origin) {
         Ok(Some(origin.to_owned()))
     } else {
@@ -288,7 +295,9 @@ fn with_cors(mut response: HttpResponse, origin: Option<&str>) -> HttpResponse {
     if let Some(origin) = origin
         && let Ok(value) = hyper::header::HeaderValue::from_str(origin)
     {
-        response.headers_mut().insert(ACCESS_CONTROL_ALLOW_ORIGIN, value);
+        response
+            .headers_mut()
+            .insert(ACCESS_CONTROL_ALLOW_ORIGIN, value);
         response
             .headers_mut()
             .insert(VARY, hyper::header::HeaderValue::from_static("Origin"));
@@ -736,8 +745,10 @@ mod tests {
             request_origin(&same_origin, &[]).expect("same origin"),
             Some("http://127.0.0.1:8080".to_owned())
         );
-        assert!(request_origin(&hyper::HeaderMap::new(), &allowed)
-            .expect("non-browser request")
-            .is_none());
+        assert!(
+            request_origin(&hyper::HeaderMap::new(), &allowed)
+                .expect("non-browser request")
+                .is_none()
+        );
     }
 }

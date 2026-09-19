@@ -176,8 +176,7 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
-        load_grant(&connection, scope, session_id)?
-            .ok_or(DurableStoreError::Corrupt)
+        load_grant(&connection, scope, session_id)?.ok_or(DurableStoreError::Corrupt)
     }
 
     fn redeem_conference_join_grant(
@@ -216,8 +215,7 @@ impl ConferenceJoinGrantStore for SqliteLocalStore {
         transaction
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
-        load_grant(&connection, scope, session_id)?
-            .ok_or(DurableStoreError::Corrupt)
+        load_grant(&connection, scope, session_id)?.ok_or(DurableStoreError::Corrupt)
     }
 }
 

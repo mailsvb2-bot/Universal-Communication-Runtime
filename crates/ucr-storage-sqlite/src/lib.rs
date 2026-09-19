@@ -3,8 +3,8 @@
 mod anti_entropy_store;
 mod bridge_store;
 mod call_store;
-mod conference_join_grant_store;
 mod command_store;
+mod conference_join_grant_store;
 mod delivery_store;
 mod device_store;
 mod event_journal;
