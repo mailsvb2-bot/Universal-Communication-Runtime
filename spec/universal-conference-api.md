@@ -28,6 +28,12 @@ Every conference read or mutation is scoped by both `TenantScope` and `Integrati
 
 The public role vocabulary is `owner`, `host`, `moderator`, `speaker`, `attendee`. Role and media policy must be server-enforced; UI labels are never authorization evidence. Group membership remains canonical membership. Any role projection must fail closed if it conflicts with current membership.
 
+## Runtime materialization
+
+`PrepareConferenceRuntime` is the integration-facing reconcile operation that turns coordinator metadata into canonical realtime state. It does not create a second Group, MLS, or Call owner: the stable `conference_id` is used as the canonical Group handle, OpenMLS state is created/advanced through `GroupMlsAtomicStore`, and signalling is created/updated through `CallStore`.
+
+Exactly one active Universal participant with role `owner` is required. Only active participants with exactly one active canonical Device are admitted into MLS/Call state. The owner becomes the real Person-owned Group owner and Call initiator; the authenticated integration Service Account authorizes orchestration but never becomes a media participant. A first Call requires at least two device-ready participants because canonical group-call creation requires an initiator plus at least one invitee. With only the owner ready, Group/MLS preparation may succeed while `call_ready=false`; a later reconcile can add newly device-ready participants and create the Call.
+
 ## Participant device enrollment
 
 `EnsureParticipantDevice` gives an already ensured external participant exactly one canonical active UCR Device when no device lifecycle exists yet. The public response exposes only the integration's `external_user_id` and readiness state; canonical `DeviceId` remains internal.
