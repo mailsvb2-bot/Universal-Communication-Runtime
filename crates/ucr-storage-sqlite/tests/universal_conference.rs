@@ -6,10 +6,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ucr_core::{DurableRecordStatus, StorageProvider, UniversalConferenceStore};
+use ucr_core::{
+    ConferenceJoinGrantStore, DurableRecordStatus, StorageProvider, UniversalConferenceStore,
+};
 use ucr_model::{
-    ConferenceParticipantRole, ConferenceScheduleMetadata, GroupId, IntegrationId, OpaqueId,
-    PrincipalId, PrincipalKind, PrincipalRef, TenantId, TenantScope, UniversalConferenceLifecycle,
+    CallId, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceParticipantRole,
+    ConferenceScheduleMetadata, DeviceId, GroupId, IntegrationId, OpaqueId, PrincipalId,
+    PrincipalKind, PrincipalRef, SessionId, TenantId, TenantScope, UniversalConferenceLifecycle,
     UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_storage_sqlite::{SQLITE_SCHEMA_VERSION, SqliteLocalStore};
@@ -43,6 +46,24 @@ fn conference() -> UniversalConferenceProfile {
         },
         entry_open: false,
         revision: 1,
+    }
+}
+
+fn join_grant() -> ConferenceJoinGrantRecord {
+    ConferenceJoinGrantRecord {
+        scope: scope(),
+        conference_id: conference().conference_id,
+        integration_id: conference().integration_id,
+        call_id: CallId::from_opaque(oid("call-durable-grant")),
+        participant: participant().participant,
+        device_id: DeviceId::from_opaque(oid("device-durable-grant")),
+        session_id: SessionId::from_opaque(oid("session-durable-grant")),
+        issued_at_unix_ms: 1_000,
+        not_before_unix_ms: 1_000,
+        expires_at_unix_ms: 61_000,
+        use_policy: ConferenceJoinGrantUsePolicy::SingleUse,
+        revoked: false,
+        redeemed: false,
     }
 }
 
@@ -341,5 +362,68 @@ fn external_participant_reference_is_unique_within_integration_conference() {
         Err(ucr_core::DurableStoreError::Conflict)
     );
 
+    cleanup(&path);
+}
+
+
+#[test]
+fn durable_join_grant_redeem_and_revocation_survive_restart() {
+    let path = db_path("universal-conference-join-grant-restart");
+    {
+        let store = SqliteLocalStore::open(&path).expect("open");
+        store
+            .persist_universal_conference_profile(&conference())
+            .expect("conference");
+        assert_eq!(
+            store.persist_conference_join_grant(&join_grant()),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.persist_conference_join_grant(&join_grant()),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+    }
+    {
+        let store = SqliteLocalStore::open(&path).expect("reopen before redeem");
+        let loaded = store
+            .conference_join_grant(&scope(), &join_grant().session_id)
+            .expect("load grant")
+            .expect("grant");
+        assert_eq!(loaded, join_grant());
+        let redeemed = store
+            .redeem_conference_join_grant(&scope(), &join_grant().session_id)
+            .expect("redeem");
+        assert!(redeemed.redeemed);
+        assert!(!redeemed.revoked);
+    }
+    {
+        let store = SqliteLocalStore::open(&path).expect("reopen after redeem");
+        let loaded = store
+            .conference_join_grant(&scope(), &join_grant().session_id)
+            .expect("load redeemed grant")
+            .expect("redeemed grant");
+        assert!(loaded.redeemed);
+        assert_eq!(
+            store.redeem_conference_join_grant(&scope(), &join_grant().session_id),
+            Err(ucr_core::DurableStoreError::Conflict)
+        );
+        let revoked = store
+            .revoke_conference_join_grant(&scope(), &join_grant().session_id)
+            .expect("revoke");
+        assert!(revoked.revoked);
+    }
+    {
+        let store = SqliteLocalStore::open(&path).expect("reopen after revoke");
+        let loaded = store
+            .conference_join_grant(&scope(), &join_grant().session_id)
+            .expect("load revoked grant")
+            .expect("revoked grant");
+        assert!(loaded.redeemed);
+        assert!(loaded.revoked);
+        assert_eq!(
+            store.redeem_conference_join_grant(&scope(), &join_grant().session_id),
+            Err(ucr_core::DurableStoreError::PermissionDenied)
+        );
+    }
     cleanup(&path);
 }

@@ -357,3 +357,27 @@ fn realtime_browser_waiting_room_uses_join_grant_window() {
     assert!(client.contains("setTimeout(()=>{waitTimer=null;ui.join.disabled=false;join();},delay)"));
     assert!(!client.contains("Join grant is not active yet"));
 }
+
+
+#[test]
+fn universal_join_grants_are_durable_idempotent_and_restart_safe() {
+    let proto = read("proto/ucr/v1/universal_conference.proto");
+    let core = read("crates/ucr-core/src/universal_conference.rs");
+    let sqlite = read("crates/ucr-storage-sqlite/src/conference_join_grant_store.rs");
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let spec = read("spec/universal-conference-api.md");
+
+    assert!(proto.contains("message UniversalIssueJoinGrantRequest"));
+    assert!(proto.contains("string idempotency_key = 9;"));
+    assert!(proto.contains("message UniversalRevokeJoinGrantRequest"));
+    assert!(proto.contains("string idempotency_key = 5;"));
+    assert!(core.contains("pub trait ConferenceJoinGrantStore"));
+    assert!(sqlite.contains("CREATE TABLE conference_join_grants"));
+    assert!(service.contains("ucr.conference.join.issue.v1"));
+    assert!(service.contains("ucr.conference.join.revoke.v1"));
+    assert!(service.contains("SessionId::from_opaque(stable_command_id.as_opaque().clone())"));
+    assert!(realtime.contains(".conference_join_grant(scope, session_id)"));
+    assert!(realtime.contains(".redeem_conference_join_grant(scope, session_id)"));
+    assert!(spec.contains("process restart does not reactivate a revoked grant"));
+}
