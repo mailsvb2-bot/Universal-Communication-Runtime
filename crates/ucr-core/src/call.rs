@@ -1,8 +1,26 @@
-use ucr_model::{CallId, CallSession, CallSignal, ScopedPrincipal, TenantScope};
+use ucr_model::{CallId, CallSession, CallSignal, GroupId, ScopedPrincipal, TenantScope};
 
 use crate::{
     ConversationStore, DurableRecordStatus, DurableStoreError, GroupStore, StorageProvider,
 };
+
+/// Read-only reverse lookup over canonical Group-backed Call sessions.
+///
+/// This is an index/view over `CallStore`, never a second lifecycle owner. It exists so
+/// integration-facing conference flows can resolve the current canonical Call without persisting
+/// a duplicate Call identifier in coordinator metadata.
+pub trait GroupCallLookupStore: StorageProvider {
+    /// Lists a bounded exact-scope set of Calls whose canonical conversation belongs to one Group.
+    ///
+    /// # Errors
+    /// Rejects invalid bounds and returns explicit durable-store failures or corruption evidence.
+    fn calls_for_group(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<CallSession>, DurableStoreError>;
+}
 
 /// Durable canonical `CallSession` owner.
 ///
