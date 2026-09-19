@@ -1,8 +1,8 @@
-use ucr_core::{CallStore, DurableRecordStatus, DurableStoreError};
+use ucr_core::{CallStore, DurableRecordStatus, DurableStoreError, GroupCallLookupStore};
 use ucr_model::{
     CallId, CallParticipantState, CallParticipantUpdateKind, CallSession, CallSignal,
-    CallSignalKind, CallSignallingState, ConversationKind, GroupMemberState, GroupMembership,
-    GroupRecord, PrincipalRef, ScopedPrincipal, TenantScope,
+    CallSignalKind, CallSignallingState, ConversationKind, GroupId, GroupMemberState,
+    GroupMembership, GroupRecord, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
     active_call_participant, apply_call_signal, call_creation_fingerprint, call_signal_fingerprint,
@@ -13,6 +13,46 @@ use super::{
     MemoryLocalStore, MemoryState, call_key, call_signal_key, conversation_key,
     event_key_from_parts,
 };
+
+impl GroupCallLookupStore for MemoryLocalStore {
+    fn calls_for_group(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<CallSession>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let Some(group) = state
+            .groups
+            .values()
+            .find(|group| group.scope == *scope && group.group_id == *group_id)
+        else {
+            return Ok(Vec::new());
+        };
+        let mut call_ids = state
+            .calls
+            .values()
+            .filter(|call| call.scope == *scope && call.conversation == group.conversation)
+            .map(|call| call.call_id.clone())
+            .collect::<Vec<_>>();
+        call_ids.sort_by(|left, right| {
+            left.as_opaque()
+                .as_str()
+                .cmp(right.as_opaque().as_str())
+        });
+        call_ids.truncate(max_items);
+        call_ids
+            .into_iter()
+            .map(|call_id| {
+                validated_call_from_state(&state, scope, &call_id)?
+                    .ok_or(DurableStoreError::Corrupt)
+            })
+            .collect()
+    }
+}
 
 impl CallStore for MemoryLocalStore {
     fn create_call(
