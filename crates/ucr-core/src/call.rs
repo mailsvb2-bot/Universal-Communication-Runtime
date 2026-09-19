@@ -20,6 +20,33 @@ pub trait GroupCallLookupStore: StorageProvider {
         group_id: &GroupId,
         max_items: usize,
     ) -> Result<Vec<CallSession>, DurableStoreError>;
+
+    /// Lists only non-terminated Calls for one canonical Group.
+    ///
+    /// Historical terminated Calls must not consume this bound. This projection is used by
+    /// conference runtime/join flows that care about the current Call set rather than durable
+    /// Call history.
+    ///
+    /// # Errors
+    /// Rejects invalid bounds and returns explicit durable-store failures or corruption evidence.
+    fn active_calls_for_group(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        max_items: usize,
+    ) -> Result<Vec<CallSession>, DurableStoreError>;
+
+    /// Tests whether one exact Call belongs to one canonical Group without enumerating Call
+    /// history.
+    ///
+    /// # Errors
+    /// Returns explicit durable-store failures or corruption evidence.
+    fn call_belongs_to_group(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        call_id: &CallId,
+    ) -> Result<bool, DurableStoreError>;
 }
 
 /// Durable canonical `CallSession` owner.
