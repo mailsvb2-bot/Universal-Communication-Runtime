@@ -452,6 +452,38 @@ where
         }))
     }
 
+    async fn ensure_participant_device(
+        &self,
+        request: Request<pb::UniversalEnsureParticipantDeviceRequest>,
+    ) -> Result<Response<pb::UniversalEnsureParticipantDeviceResponse>, Status> {
+        let credentials = decode_credentials(request.metadata());
+        let body = request.into_inner();
+        let payload = body.encode_to_vec();
+        let decoded = decode_ensure_participant_device(body);
+        let result = match (credentials, decoded) {
+            (Ok((credential_id, secret)), Ok(input)) => self
+                .admit_integration(
+                    &input.scope,
+                    &credential_id,
+                    &secret,
+                    &input.integration_id,
+                    DEVICE_REGISTER_PERMISSION,
+                )
+                .and_then(|_| ensure_participant_device(&*self.store, &input, payload)),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::UniversalEnsureParticipantDeviceResponse {
+            result: Some(match result {
+                Ok(device) => {
+                    pb::universal_ensure_participant_device_response::Result::Device(device)
+                }
+                Err(error) => {
+                    pb::universal_ensure_participant_device_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
     async fn update_participant(
         &self,
         request: Request<pb::UniversalUpdateParticipantRequest>,
@@ -734,6 +766,14 @@ struct EnsureParticipantInput {
     idempotency_key: String,
 }
 
+struct EnsureParticipantDeviceInput {
+    scope: TenantScope,
+    conference_id: GroupId,
+    integration_id: IntegrationId,
+    external_user_id: Vec<u8>,
+    idempotency_key: String,
+}
+
 struct UpdateParticipantInput {
     scope: TenantScope,
     conference_id: GroupId,
@@ -809,6 +849,23 @@ fn decode_ensure_participant(
         integration_id,
         external_user_id: value.external_user_id,
         role,
+        idempotency_key: value.idempotency_key,
+    })
+}
+
+fn decode_ensure_participant_device(
+    value: pb::UniversalEnsureParticipantDeviceRequest,
+) -> Result<EnsureParticipantDeviceInput, CanonicalError> {
+    let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
+    let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
+    validate_external_user_id(&value.external_user_id)?;
+    validate_idempotency_key(&value.idempotency_key)?;
+    Ok(EnsureParticipantDeviceInput {
+        scope,
+        conference_id,
+        integration_id,
+        external_user_id: value.external_user_id,
         idempotency_key: value.idempotency_key,
     })
 }
@@ -1238,6 +1295,87 @@ where
                 .map_err(map_store_error)
         }
         Some(_) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    }
+}
+
+fn ensure_participant_device<S>(
+    store: &S,
+    input: &EnsureParticipantDeviceInput,
+    payload: Vec<u8>,
+) -> Result<pb::UniversalParticipantDeviceStatus, CanonicalError>
+where
+    S: UniversalConferenceStore
+        + CommandAcceptanceStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + DeviceLifecycleStore,
+{
+    let conference = conference_for_integration(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+    )?;
+    if conference.lifecycle == UniversalConferenceLifecycle::Ended {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    let participant = participant_for_external(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+        &input.external_user_id,
+    )?;
+    if !participant.active {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    let binding = store
+        .principal_identity_binding(&input.scope, &participant.participant)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+
+    let stable_command_id = accept_mutation_id(
+        store,
+        &input.scope,
+        "ucr.conference.participant.device.ensure.v1",
+        &input.idempotency_key,
+        payload,
+    )?;
+    let devices = store
+        .devices_for_identity(&input.scope, &binding.identity_id, 64)
+        .map_err(map_store_error)?;
+    if devices.len() == 64 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    let active = devices
+        .iter()
+        .filter(|device| device.state == DeviceLifecycleState::Active)
+        .collect::<Vec<_>>();
+    match active.as_slice() {
+        [_] => Ok(participant_device_status(&input.external_user_id)),
+        [_, ..] => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+        [] if !devices.is_empty() => Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied)),
+        [] => {
+            let device_id = DeviceId::from_opaque(derived_id("device", &stable_command_id)?);
+            store
+                .register_device(
+                    &input.scope,
+                    &DeviceDescriptor {
+                        device_id,
+                        identity_id: binding.identity_id,
+                        state: DeviceLifecycleState::Active,
+                    },
+                )
+                .map_err(map_store_error)?;
+            Ok(participant_device_status(&input.external_user_id))
+        }
+    }
+}
+
+fn participant_device_status(external_user_id: &[u8]) -> pb::UniversalParticipantDeviceStatus {
+    pb::UniversalParticipantDeviceStatus {
+        external_user_id: external_user_id.to_vec(),
+        active: true,
     }
 }
 
