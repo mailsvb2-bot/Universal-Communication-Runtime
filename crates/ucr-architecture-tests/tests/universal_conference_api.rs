@@ -53,3 +53,32 @@ fn universal_conference_contract_reserves_required_roles_join_and_lifecycle_sema
         assert!(proto.contains(required), "missing {required}");
     }
 }
+
+
+#[test]
+fn universal_conference_management_is_integration_scoped() {
+    let proto = read("proto/ucr/v1/universal_conference.proto");
+    assert!(proto.contains("rpc GetConference"));
+    for message in [
+        "UniversalGetConferenceRequest",
+        "UniversalConferenceLifecycleRequest",
+        "UniversalSetEntryOpenRequest",
+        "UniversalUpdateParticipantRequest",
+        "UniversalRemoveParticipantRequest",
+        "UniversalListParticipantsRequest",
+        "UniversalRevokeJoinGrantRequest",
+    ] {
+        let start = format!("message {message} {{");
+        let block = proto
+            .split_once(&start)
+            .unwrap_or_else(|| panic!("missing {message}"))
+            .1
+            .split_once('}')
+            .unwrap_or_else(|| panic!("unterminated {message}"))
+            .0;
+        assert!(
+            block.contains("integration_id"),
+            "{message} must remain integration-scoped"
+        );
+    }
+}
