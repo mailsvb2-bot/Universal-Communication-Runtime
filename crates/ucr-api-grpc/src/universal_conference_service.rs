@@ -10,9 +10,9 @@ use ucr_core::{
     ServiceQuotaClock, ServiceQuotaStore, UniversalConferenceStore, generate_opaque_id,
 };
 use ucr_model::{
-    AuthorizationRequest, CallParticipantState, CallSignallingState, CommandEnvelope, CommandId,
-    ConferenceParticipantRole, ConferenceScheduleMetadata, CorrelationContext,
-    DeviceLifecycleState, ExternalIdentityBinding, GroupId, IdentityEvidence, IdentityId,
+    AuthorizationRequest, CallId, CallParticipantState, CallSignallingState, CommandEnvelope,
+    CommandId, ConferenceParticipantRole, ConferenceScheduleMetadata, CorrelationContext,
+    DeviceId, DeviceLifecycleState, ExternalIdentityBinding, GroupId, IdentityEvidence, IdentityId,
     IdentityOwnership, IdentityRecord, IntegrationId, OpaqueId, PrincipalId,
     PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal,
     SessionId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
@@ -1145,6 +1145,125 @@ fn list_participants<S: UniversalConferenceStore>(
         .map_err(map_store_error)
 }
 
+fn conference_join_window(
+    conference: &UniversalConferenceProfile,
+    now_unix_ms: i64,
+) -> Result<(i64, Option<i64>), CanonicalError> {
+    let join_before_ms = i64::from(conference.schedule.join_before_seconds)
+        .checked_mul(1000)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    let opens_at = conference
+        .schedule
+        .starts_at_unix_ms
+        .checked_sub(join_before_ms)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    let closes_at = conference
+        .schedule
+        .planned_end_unix_ms
+        .map(|planned_end| {
+            let join_after_ms = i64::from(conference.schedule.join_after_seconds)
+                .checked_mul(1000)
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+            planned_end
+                .checked_add(join_after_ms)
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
+        })
+        .transpose()?;
+    if now_unix_ms < opens_at || closes_at.is_some_and(|close| now_unix_ms >= close) {
+        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+    }
+    Ok((opens_at, closes_at))
+}
+
+fn resolve_join_participant<S>(
+    store: &S,
+    input: &IssueJoinGrantInput,
+) -> Result<UniversalConferenceParticipantProfile, CanonicalError>
+where
+    S: UniversalConferenceStore,
+{
+    let participants = store
+        .universal_conference_participants(&input.scope, &input.conference_id, 1024)
+        .map_err(map_store_error)?;
+    if participants.len() == 1024 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    let mut matching = participants.into_iter().filter(|candidate| {
+        candidate.active
+            && candidate.integration_id == input.integration_id
+            && candidate.external_user_id == input.external_user_id
+    });
+    match (matching.next(), matching.next()) {
+        (Some(participant), None) => Ok(participant),
+        (None, _) => Err(CanonicalError::new(CanonicalErrorCode::NotFound)),
+        (Some(_), Some(_)) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    }
+}
+
+fn resolve_join_device<S>(
+    store: &S,
+    scope: &TenantScope,
+    participant: &PrincipalRef,
+) -> Result<DeviceId, CanonicalError>
+where
+    S: PrincipalIdentityBindingStore + IdentityDeviceLookupStore,
+{
+    let identity_binding = store
+        .principal_identity_binding(scope, participant)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+    let devices = store
+        .devices_for_identity(scope, &identity_binding.identity_id, 64)
+        .map_err(map_store_error)?;
+    if devices.len() == 64 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    let mut active_devices = devices
+        .into_iter()
+        .filter(|device| device.state == DeviceLifecycleState::Active);
+    match (active_devices.next(), active_devices.next()) {
+        (Some(device), None) => Ok(device.device_id),
+        (None, _) => Err(CanonicalError::new(CanonicalErrorCode::NotFound)),
+        (Some(_), Some(_)) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    }
+}
+
+fn resolve_join_call<S>(
+    store: &S,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    participant: &PrincipalRef,
+) -> Result<CallId, CanonicalError>
+where
+    S: GroupCallLookupStore,
+{
+    let calls = store
+        .calls_for_group(scope, conference_id, 64)
+        .map_err(map_store_error)?;
+    if calls.len() == 64 {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    let active_calls = calls
+        .into_iter()
+        .filter(|call| call.signalling_state != CallSignallingState::Terminated)
+        .collect::<Vec<_>>();
+    if active_calls.is_empty() {
+        return Err(CanonicalError::new(CanonicalErrorCode::CapabilityMismatch));
+    }
+    let mut eligible = active_calls.into_iter().filter(|call| {
+        call.participants.iter().any(|candidate| {
+            candidate.principal == *participant
+                && candidate.state == CallParticipantState::Accepted
+                && candidate.left_revision.is_none()
+        })
+    });
+    match (eligible.next(), eligible.next()) {
+        (Some(call), None) => Ok(call.call_id),
+        (None, _) => Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied)),
+        (Some(_), Some(_)) => Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+    }
+}
+
 fn issue_join_grant<S>(
     store: &S,
     issuer: &JoinTokenIssuer,
@@ -1171,92 +1290,23 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
 
-    let join_before_ms = i64::from(conference.schedule.join_before_seconds)
-        .checked_mul(1000)
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-    let opens_at = conference
-        .schedule
-        .starts_at_unix_ms
-        .checked_sub(join_before_ms)
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-    if now_unix_ms < opens_at {
-        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
-    }
-    let closes_at = conference
-        .schedule
-        .planned_end_unix_ms
-        .map(|planned_end| {
-            let join_after_ms = i64::from(conference.schedule.join_after_seconds)
-                .checked_mul(1000)
-                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-            planned_end
-                .checked_add(join_after_ms)
-                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
-        })
-        .transpose()?;
-    if closes_at.is_some_and(|close| now_unix_ms >= close) {
-        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
-    }
-
-    let participants = store
-        .universal_conference_participants(&input.scope, &input.conference_id, 1024)
-        .map_err(map_store_error)?;
-    let mut matching = participants.into_iter().filter(|candidate| {
-        candidate.active
-            && candidate.integration_id == input.integration_id
-            && candidate.external_user_id == input.external_user_id
-    });
-    let participant = match (matching.next(), matching.next()) {
-        (Some(participant), None) => participant,
-        (None, _) => return Err(CanonicalError::new(CanonicalErrorCode::NotFound)),
-        (Some(_), Some(_)) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
-    };
-
-    let identity_binding = store
-        .principal_identity_binding(&input.scope, &participant.participant)
-        .map_err(map_store_error)?
-        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
-    let devices = store
-        .devices_for_identity(&input.scope, &identity_binding.identity_id, 16)
-        .map_err(map_store_error)?;
-    let mut active_devices = devices
-        .into_iter()
-        .filter(|device| device.state == DeviceLifecycleState::Active);
-    let device = match (active_devices.next(), active_devices.next()) {
-        (Some(device), None) => device,
-        (None, _) => return Err(CanonicalError::new(CanonicalErrorCode::NotFound)),
-        (Some(_), Some(_)) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
-    };
-
-    let calls = store
-        .calls_for_group(&input.scope, &input.conference_id, 64)
-        .map_err(map_store_error)?;
-    let active_calls = calls
-        .into_iter()
-        .filter(|call| call.signalling_state != CallSignallingState::Terminated)
-        .collect::<Vec<_>>();
-    if active_calls.is_empty() {
-        return Err(CanonicalError::new(CanonicalErrorCode::CapabilityMismatch));
-    }
-    let mut eligible_calls = active_calls.into_iter().filter(|call| {
-        call.participants.iter().any(|candidate| {
-            candidate.principal == participant.participant
-                && candidate.state == CallParticipantState::Accepted
-                && candidate.left_revision.is_none()
-        })
-    });
-    let call = match (eligible_calls.next(), eligible_calls.next()) {
-        (Some(call), None) => call,
-        (None, _) => return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied)),
-        (Some(_), Some(_)) => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
-    };
+    let (opens_at, closes_at) = conference_join_window(&conference, now_unix_ms)?;
+    let participant = resolve_join_participant(store, &input)?;
+    let device_id = resolve_join_device(store, &input.scope, &participant.participant)?;
+    let call_id = resolve_join_call(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &participant.participant,
+    )?;
 
     let ttl_ms = i64::from(input.ttl_seconds)
         .checked_mul(1000)
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
-    let requested_expiry = input
-        .not_after_unix_ms
-        .unwrap_or_else(|| now_unix_ms.saturating_add(ttl_ms));
+    let default_expiry = now_unix_ms
+        .checked_add(ttl_ms)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+    let requested_expiry = input.not_after_unix_ms.unwrap_or(default_expiry);
     if input
         .not_before_unix_ms
         .is_some_and(|not_before| not_before < opens_at)
@@ -1268,9 +1318,9 @@ where
     issuer
         .issue_with_policy(
             input.scope,
-            call.call_id,
+            call_id,
             participant.participant,
-            Some(device.device_id),
+            Some(device_id),
             input.ttl_seconds,
             input.use_policy,
             input.not_before_unix_ms,
