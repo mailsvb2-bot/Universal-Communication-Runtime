@@ -8018,6 +8018,10 @@ mod integration_api_tests {
     }
 }
 
+const MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS: usize = 1024;
+const MAX_UNIVERSAL_CONFERENCE_PARTICIPANT_SCAN_ITEMS: usize =
+    MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS + 1;
+
 fn has_conflicting_active_conference_owner(
     state: &MemoryState,
     scope: &TenantScope,
@@ -8202,6 +8206,17 @@ impl UniversalConferenceStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        let participant_count = state
+            .universal_conference_participants
+            .values()
+            .filter(|existing| {
+                existing.scope == participant.scope
+                    && existing.conference_id == participant.conference_id
+            })
+            .count();
+        if participant_count >= MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS {
+            return Err(DurableStoreError::Full);
+        }
         if participant.active
             && participant.role == ConferenceParticipantRole::Owner
             && has_conflicting_active_conference_owner(
@@ -8271,7 +8286,7 @@ impl UniversalConferenceStore for MemoryLocalStore {
         conference_id: &ucr_model::GroupId,
         max_items: usize,
     ) -> Result<Vec<UniversalConferenceParticipantProfile>, DurableStoreError> {
-        if max_items == 0 || max_items > 1024 {
+        if max_items == 0 || max_items > MAX_UNIVERSAL_CONFERENCE_PARTICIPANT_SCAN_ITEMS {
             return Err(DurableStoreError::InvalidRecord);
         }
         let scope_key_value = scope_key(scope);
