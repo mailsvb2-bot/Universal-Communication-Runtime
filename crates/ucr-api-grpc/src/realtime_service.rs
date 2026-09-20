@@ -18,8 +18,9 @@ use ucr_model::{
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
     ConferenceSubscriptionSet, CorrelationContext, CryptoSuite, DeviceId, DeviceLifecycleState,
     DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalKind, ScopedPrincipal,
-    SessionId, SfuForwardEnvelope, TenantScope,
+    GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind, OpaqueId, PrincipalKind,
+    ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope, WebRtcIceCandidate,
+    WebRtcSdpType, WebRtcSessionDescription,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for,
@@ -30,6 +31,9 @@ use ucr_realtime::{
     RealtimeRegistryError, RealtimeSessionClaims, RealtimeSessionRegistry,
 };
 use ucr_sfu::PreparedSfuCapabilities;
+use ucr_webrtc::{
+    PreparedWebRtcProvider, WebRtcProvider, WebRtcProviderError, WebRtcSessionConfigFactory,
+};
 
 use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_opaque,
@@ -48,17 +52,42 @@ pub struct GrpcRealtimeService<C, A, S> {
     join_issuer: Arc<JoinTokenIssuer>,
     registry: Arc<RealtimeSessionRegistry>,
     conference_state: Arc<ConferenceRuntimeState>,
+    webrtc_provider: Arc<dyn WebRtcProvider>,
+    webrtc_config: Arc<WebRtcSessionConfigFactory>,
 }
 
 impl<C, A, S> GrpcRealtimeService<C, A, S> {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         clock: Arc<C>,
         authorization: Arc<A>,
         store: Arc<S>,
         join_issuer: Arc<JoinTokenIssuer>,
         registry: Arc<RealtimeSessionRegistry>,
         conference_state: Arc<ConferenceRuntimeState>,
+    ) -> Self {
+        Self::with_webrtc(
+            clock,
+            authorization,
+            store,
+            join_issuer,
+            registry,
+            conference_state,
+            Arc::new(PreparedWebRtcProvider),
+            Arc::new(WebRtcSessionConfigFactory::default()),
+        )
+    }
+
+    #[must_use]
+    pub fn with_webrtc(
+        clock: Arc<C>,
+        authorization: Arc<A>,
+        store: Arc<S>,
+        join_issuer: Arc<JoinTokenIssuer>,
+        registry: Arc<RealtimeSessionRegistry>,
+        conference_state: Arc<ConferenceRuntimeState>,
+        webrtc_provider: Arc<dyn WebRtcProvider>,
+        webrtc_config: Arc<WebRtcSessionConfigFactory>,
     ) -> Self {
         Self {
             clock,
@@ -67,6 +96,8 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             join_issuer,
             registry,
             conference_state,
+            webrtc_provider,
+            webrtc_config,
         }
     }
 }
@@ -80,6 +111,8 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             join_issuer: Arc::clone(&self.join_issuer),
             registry: Arc::clone(&self.registry),
             conference_state: Arc::clone(&self.conference_state),
+            webrtc_provider: Arc::clone(&self.webrtc_provider),
+            webrtc_config: Arc::clone(&self.webrtc_config),
         }
     }
 }
