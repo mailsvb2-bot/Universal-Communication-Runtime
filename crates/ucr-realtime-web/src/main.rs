@@ -945,6 +945,8 @@ mod tests {
             "/v1/realtime/webrtc/ice",
             "/v1/realtime/webrtc/close",
             "scheduleWebRtcRetry",
+            "remoteDescriptionAccepted",
+            "pendingCandidates",
             "id=\"microphone\"",
             "id=\"camera\"",
             "id=\"mic-toggle\"",
