@@ -28,7 +28,11 @@ Replay is explicit and idempotent through an opaque replay ID. A new replay gene
 
 Webhook subscriptions use the same durable subscription/retry/cursor/DLQ owner as polling. The canonical subscription persists only a bounded HTTPS destination; credentials, bearer tokens, signing secrets, DNS results, and provider-specific state are not persisted in it. Userinfo, query strings, and fragments are rejected from the canonical URI.
 
-`EventWebhookDispatcher` is a reference dispatcher over an injected `EventWebhookSink`. It performs one bounded Event attempt and commits ACK/retry/DLQ only after the sink result. Phase 14 deliberately does not implement an HTTP client, DNS resolver, TLS/listener, Internet route, or egress policy. A production HTTP webhook sink remains a separate deployment/integration layer and must enforce its own SSRF/egress/DNS/TLS policy; the Phase-15 UCR TCP transport is not that HTTP client.
+`EventWebhookDispatcher` remains the single durable delivery owner over an injected `EventWebhookSink`. It performs one bounded Event attempt and commits ACK/retry/DLQ only after the sink result.
+
+`ucr-webhook::HardenedWebhookSink` now provides the transport-adapter security boundary for production HTTPS delivery without creating a second Event queue or journal. It accepts HTTPS endpoints only; rejects userinfo, query strings and fragments; resolves the destination for each attempt; rejects loopback, private, link-local, multicast, documentation, carrier-grade NAT and other non-public addresses; passes the exact resolved IP set to the executor; disables redirects; emits a deterministic JSON Event envelope; and signs the timestamp, subscription, Event ID and body digest with HMAC-SHA256. Signing secrets remain deployment-owned and are zeroized rather than persisted in the canonical subscription.
+
+The injected `WebhookHttpsExecutor` remains deployment-owned. Its contract requires connection only to the prevalidated IP set while preserving the original hostname for TLS SNI/HTTP Host, certificate validation for that hostname, and no redirect following. UCR still does not ship a built-in DNS/TLS socket executor in this phase, so public-Internet webhook networking is not yet claimed as an end-to-end Production capability. The Phase-15 UCR TCP transport is not reused as an HTTP client.
 
 ## Persistence
 
@@ -42,4 +46,4 @@ The reference Tonic binding derives a finite request decode budget from the maxi
 
 ## Nonclaims
 
-Phase 14 does not claim exactly-once side effects, HTTP webhook delivery over the public Internet, Internet transport, DNS safety, distributed queues, a globally ordered Event log, or production deployment. Effectively-once consumer behavior is obtained only from canonical Event IDs, durable cursor state, idempotent ACK/reject/replay operations, and consumer-side idempotency. Phase 15 is implemented separately as a Prepared UCR TCP transport; Event webhook networking remains unimplemented.
+Phase 14 does not claim exactly-once side effects, a built-in public-Internet HTTP/DNS/TLS executor, distributed queues, a globally ordered Event log, or production deployment. The hardened webhook adapter enforces endpoint, resolved-address, redirect and signing policy before a deployment-owned executor is invoked; end-to-end Internet delivery still depends on that executor satisfying its contract. Effectively-once consumer behavior is obtained only from canonical Event IDs, durable cursor state, idempotent ACK/reject/replay operations, and consumer-side idempotency. Phase 15 is implemented separately as a Prepared UCR TCP transport; Event webhook networking remains unimplemented.
