@@ -443,98 +443,121 @@ async fn run_live_webrtc_worker(
                 config,
                 deadline,
                 reply,
-            } => {
-                if command_expired(deadline) {
-                    let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
-                    continue;
-                }
-                let key = session_key(&config.session_id);
-                if sessions.contains_key(&key) {
-                    let _ = reply.send(Err(WebRtcProviderError::Conflict));
-                    continue;
-                }
-                if sessions.len() >= LIVE_WEBRTC_MAX_SESSIONS {
-                    let _ = reply.send(Err(WebRtcProviderError::CapacityExceeded));
-                    continue;
-                }
-                match create_live_peer_connection(&config).await {
-                    Ok((peer_connection, description)) => {
-                        if shutdown.load(Ordering::Acquire) || command_expired(deadline) {
-                            let _ = peer_connection.close().await;
-                            let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
-                            continue;
-                        }
-                        sessions.insert(key.clone(), Arc::clone(&peer_connection));
-                        if reply.send(Ok(description)).is_err() {
-                            sessions.remove(&key);
-                            let _ = peer_connection.close().await;
-                        }
-                    }
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
-                    }
-                }
-            }
+            } => handle_live_create(&mut sessions, &shutdown, config, deadline, reply).await,
             LiveWebRtcCommand::SetRemoteDescription {
                 description,
                 deadline,
                 reply,
-            } => {
-                if command_expired(deadline) {
-                    let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
-                    continue;
-                }
-                let key = session_key(&description.session_id);
-                let result = match sessions.get(&key) {
-                    Some(peer_connection) => {
-                        set_engine_remote_description(peer_connection, &description).await
-                    }
-                    None => Err(WebRtcProviderError::SessionUnavailable),
-                };
-                let _ = reply.send(result);
-            }
+            } => handle_live_remote_description(&sessions, description, deadline, reply).await,
             LiveWebRtcCommand::AddRemoteCandidate {
                 candidate,
                 deadline,
                 reply,
-            } => {
-                if command_expired(deadline) {
-                    let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
-                    continue;
-                }
-                let key = session_key(&candidate.session_id);
-                let result = match sessions.get(&key) {
-                    Some(peer_connection) => {
-                        add_engine_remote_candidate(peer_connection, &candidate).await
-                    }
-                    None => Err(WebRtcProviderError::SessionUnavailable),
-                };
-                let _ = reply.send(result);
-            }
+            } => handle_live_remote_candidate(&sessions, candidate, deadline, reply).await,
             LiveWebRtcCommand::Close {
                 session_id,
                 deadline,
                 reply,
-            } => {
-                if command_expired(deadline) {
-                    let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
-                    continue;
-                }
-                let result = match sessions.remove(&session_key(&session_id)) {
-                    Some(peer_connection) => peer_connection
-                        .close()
-                        .await
-                        .map_err(|_| WebRtcProviderError::Internal),
-                    None => Err(WebRtcProviderError::SessionUnavailable),
-                };
-                let _ = reply.send(result);
-            }
+            } => handle_live_close(&mut sessions, session_id, deadline, reply).await,
         }
     }
     commands.close();
     for (_, peer_connection) in sessions {
         let _ = peer_connection.close().await;
     }
+}
+
+async fn handle_live_create(
+    sessions: &mut HashMap<String, Arc<RTCPeerConnection>>,
+    shutdown: &AtomicBool,
+    config: WebRtcSessionConfig,
+    deadline: Instant,
+    reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
+) {
+    if command_expired(deadline) {
+        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+        return;
+    }
+    let key = session_key(&config.session_id);
+    if sessions.contains_key(&key) {
+        let _ = reply.send(Err(WebRtcProviderError::Conflict));
+        return;
+    }
+    if sessions.len() >= LIVE_WEBRTC_MAX_SESSIONS {
+        let _ = reply.send(Err(WebRtcProviderError::CapacityExceeded));
+        return;
+    }
+    match create_live_peer_connection(&config).await {
+        Ok((peer_connection, description)) => {
+            if shutdown.load(Ordering::Acquire) || command_expired(deadline) {
+                let _ = peer_connection.close().await;
+                let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+                return;
+            }
+            sessions.insert(key.clone(), Arc::clone(&peer_connection));
+            if reply.send(Ok(description)).is_err() {
+                sessions.remove(&key);
+                let _ = peer_connection.close().await;
+            }
+        }
+        Err(error) => {
+            let _ = reply.send(Err(error));
+        }
+    }
+}
+
+async fn handle_live_remote_description(
+    sessions: &HashMap<String, Arc<RTCPeerConnection>>,
+    description: WebRtcSessionDescription,
+    deadline: Instant,
+    reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
+) {
+    if command_expired(deadline) {
+        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+        return;
+    }
+    let result = match sessions.get(&session_key(&description.session_id)) {
+        Some(peer_connection) => set_engine_remote_description(peer_connection, &description).await,
+        None => Err(WebRtcProviderError::SessionUnavailable),
+    };
+    let _ = reply.send(result);
+}
+
+async fn handle_live_remote_candidate(
+    sessions: &HashMap<String, Arc<RTCPeerConnection>>,
+    candidate: WebRtcIceCandidate,
+    deadline: Instant,
+    reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
+) {
+    if command_expired(deadline) {
+        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+        return;
+    }
+    let result = match sessions.get(&session_key(&candidate.session_id)) {
+        Some(peer_connection) => add_engine_remote_candidate(peer_connection, &candidate).await,
+        None => Err(WebRtcProviderError::SessionUnavailable),
+    };
+    let _ = reply.send(result);
+}
+
+async fn handle_live_close(
+    sessions: &mut HashMap<String, Arc<RTCPeerConnection>>,
+    session_id: SessionId,
+    deadline: Instant,
+    reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
+) {
+    if command_expired(deadline) {
+        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+        return;
+    }
+    let result = match sessions.remove(&session_key(&session_id)) {
+        Some(peer_connection) => peer_connection
+            .close()
+            .await
+            .map_err(|_| WebRtcProviderError::Internal),
+        None => Err(WebRtcProviderError::SessionUnavailable),
+    };
+    let _ = reply.send(result);
 }
 
 fn command_expired(deadline: Instant) -> bool {
