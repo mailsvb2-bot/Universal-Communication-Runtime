@@ -4,7 +4,6 @@ use core::fmt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
-use zeroize::ZeroizeOnDrop;
 use ucr_model::{
     IceServerConfig, IceTransportPolicy, SessionId, WebRtcIceCandidate, WebRtcSessionDescription,
 };
@@ -180,8 +179,7 @@ impl TurnRestCredentialIssuer {
             "{expires_at_unix_seconds}:{}",
             session_id.as_opaque().as_str()
         );
-        let key =
-            PKey::hmac(&self.secret.0).map_err(|_| TurnCredentialError::CryptoUnavailable)?;
+        let key = PKey::hmac(&self.secret.0).map_err(|_| TurnCredentialError::CryptoUnavailable)?;
         let mut signer = Signer::new(MessageDigest::sha1(), &key)
             .map_err(|_| TurnCredentialError::CryptoUnavailable)?;
         signer
