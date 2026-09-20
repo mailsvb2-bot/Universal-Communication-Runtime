@@ -784,6 +784,41 @@ impl WebRtcSessionConfigFactory {
         session_id: &SessionId,
         now_unix_seconds: u64,
     ) -> Result<WebRtcSessionConfig, WebRtcProviderError> {
+        self.session_config_with_turn_ttl(session_id, now_unix_seconds, self.turn_ttl_seconds)
+    }
+
+    /// Creates one ephemeral ICE configuration whose TURN credential cannot outlive the
+    /// authenticated realtime session.
+    ///
+    /// # Errors
+    /// Refuses TURN issuance when the realtime session is expired or has less than the minimum
+    /// credential lifetime remaining.
+    pub fn session_config_until(
+        &self,
+        session_id: &SessionId,
+        now_unix_seconds: u64,
+        session_expires_at_unix_seconds: u64,
+    ) -> Result<WebRtcSessionConfig, WebRtcProviderError> {
+        if self.turn_issuer.is_none() {
+            return self.session_config(session_id, now_unix_seconds);
+        }
+        let remaining = session_expires_at_unix_seconds
+            .checked_sub(now_unix_seconds)
+            .ok_or(WebRtcProviderError::TemporarilyUnavailable)?;
+        let remaining = u32::try_from(remaining).unwrap_or(u32::MAX);
+        let effective_ttl = self.turn_ttl_seconds.min(remaining);
+        if effective_ttl < MIN_TURN_CREDENTIAL_TTL_SECONDS {
+            return Err(WebRtcProviderError::TemporarilyUnavailable);
+        }
+        self.session_config_with_turn_ttl(session_id, now_unix_seconds, effective_ttl)
+    }
+
+    fn session_config_with_turn_ttl(
+        &self,
+        session_id: &SessionId,
+        now_unix_seconds: u64,
+        turn_ttl_seconds: u32,
+    ) -> Result<WebRtcSessionConfig, WebRtcProviderError> {
         let mut ice_servers = Vec::with_capacity(self.stun_urls.len() + self.turn_urls.len());
         for url in &self.stun_urls {
             ice_servers.push(IceServerConfig {
@@ -795,7 +830,7 @@ impl WebRtcSessionConfigFactory {
         }
         if let Some(issuer) = &self.turn_issuer {
             let issued = issuer
-                .issue(session_id, self.turn_ttl_seconds, now_unix_seconds)
+                .issue(session_id, turn_ttl_seconds, now_unix_seconds)
                 .map_err(map_turn_credential_error)?;
             for url in &self.turn_urls {
                 ice_servers.push(IceServerConfig {
@@ -1026,6 +1061,33 @@ mod tests {
             second.ice_servers[1].credential
         );
         assert!(!format!("{factory:?}").contains("09090909"));
+    }
+
+    #[test]
+    fn turn_credentials_never_outlive_authenticated_realtime_session() {
+        let factory = WebRtcSessionConfigFactory::new(
+            Vec::new(),
+            vec!["turn:turn.example.test:3478?transport=udp".to_owned()],
+            Some(TurnRestCredentialIssuer::new(TurnRestSecret::from_bytes(
+                [7_u8; 32],
+            ))),
+            300,
+            IceTransportPolicy::All,
+        )
+        .expect("factory");
+        let session =
+            SessionId::from_opaque(OpaqueId::new("bounded-session").expect("session"));
+        let config = factory
+            .session_config_until(&session, 1_000, 1_090)
+            .expect("bounded config");
+        assert_eq!(
+            config.ice_servers[0].username.as_deref(),
+            Some("1090:bounded-session")
+        );
+        assert_eq!(
+            factory.session_config_until(&session, 1_000, 1_020),
+            Err(WebRtcProviderError::TemporarilyUnavailable)
+        );
     }
 
     #[test]
