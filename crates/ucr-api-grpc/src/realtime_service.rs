@@ -53,10 +53,7 @@ pub struct RealtimeWebRtcDependencies {
 
 impl RealtimeWebRtcDependencies {
     #[must_use]
-    pub fn new(
-        provider: Arc<dyn WebRtcProvider>,
-        config: Arc<WebRtcSessionConfigFactory>,
-    ) -> Self {
+    pub fn new(provider: Arc<dyn WebRtcProvider>, config: Arc<WebRtcSessionConfigFactory>) -> Self {
         Self { provider, config }
     }
 
