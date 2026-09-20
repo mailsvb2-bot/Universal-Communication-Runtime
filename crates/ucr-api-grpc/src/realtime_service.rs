@@ -656,7 +656,7 @@ where
     /// Routes one already-encrypted endpoint media envelope through the exact canonical
     /// Conference/SFU path after revalidating long-lived session control and publish policy.
     ///
-    /// This method is shared by gRPC media publication and the WebRTC E2EE DataChannel bridge.
+    /// This method is shared by gRPC media publication and the WebRTC E2EE `DataChannel` bridge.
     /// It never receives endpoint key material or media plaintext.
     ///
     /// # Errors
