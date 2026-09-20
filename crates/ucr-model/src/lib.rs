@@ -90,8 +90,8 @@ pub use universal_conference::{
 };
 pub use video::{EncodedVideoFrame, VideoCodecConfig, VideoSourceKind, VideoStreamDescriptor};
 pub use webrtc::{
-    IceCredentialType, IceServerConfig, IceTransportPolicy, WebRtcIceCandidate,
-    WebRtcSdpType, WebRtcSessionDescription,
+    IceCredentialType, IceServerConfig, IceTransportPolicy, WebRtcIceCandidate, WebRtcSdpType,
+    WebRtcSessionDescription,
 };
 
 /// Opaque canonical identifier value.
