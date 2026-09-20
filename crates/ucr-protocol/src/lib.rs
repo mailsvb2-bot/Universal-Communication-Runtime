@@ -47,6 +47,7 @@ mod transport_orchestrator;
 mod trusted_key;
 mod version;
 mod video;
+mod webrtc;
 
 pub use acknowledgement::{
     AcknowledgementEnvelope, AcknowledgementError, acknowledgement_for, canonical_acknowledgement,
@@ -351,6 +352,11 @@ pub use trusted_key::{TrustedSigningKeyError, validate_trusted_signing_key_descr
 pub use version::{
     ProtocolVersion, RUNTIME_ENVELOPE_SCHEMA_V1, VersionNegotiationError, VersionPolicy,
     VersionRange, negotiate_version, negotiate_version_sets,
+};
+pub use webrtc::{
+    WEBRTC_BROWSER_CAPABILITY, WEBRTC_ICE_CAPABILITY, WEBRTC_TURN_CAPABILITY,
+    WebRtcProtocolError, canonical_ice_server, canonical_webrtc_candidate,
+    canonical_webrtc_description, phase46_webrtc_capabilities,
 };
 pub use video::{
     H264_LEVEL_4_0_MAX_DPB_MACROBLOCKS, H264_MAX_REFERENCE_FRAMES, H264_VIDEO_CODEC_CAPABILITY,

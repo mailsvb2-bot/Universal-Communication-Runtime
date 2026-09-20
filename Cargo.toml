@@ -26,6 +26,7 @@ members = [
     "crates/ucr-sfu",
     "crates/ucr-realtime",
     "crates/ucr-realtime-web",
+    "crates/ucr-webrtc",
     "crates/ucr-webhook",
     "crates/ucr-conference",
     "crates/ucr-bridge",

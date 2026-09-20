@@ -3258,6 +3258,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-webrtc"
+version = "0.0.1"
+dependencies = [
+ "ucr-model",
+ "ucr-protocol",
+]
+
+[[package]]
 name = "ucr-video"
 version = "0.0.1"
 dependencies = [

@@ -22,6 +22,7 @@ mod transport_failover;
 mod transport_orchestrator;
 mod universal_conference;
 mod video;
+mod webrtc;
 pub use adaptive_media::{
     AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage, AdaptiveMediaTelemetry,
     DeferredMediaFallback, MediaThermalState,
@@ -88,6 +89,10 @@ pub use universal_conference::{
     UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 pub use video::{EncodedVideoFrame, VideoCodecConfig, VideoSourceKind, VideoStreamDescriptor};
+pub use webrtc::{
+    IceCredentialType, IceServerConfig, IceTransportPolicy, WebRtcIceCandidate,
+    WebRtcSdpType, WebRtcSessionDescription,
+};
 
 /// Opaque canonical identifier value.
 ///
