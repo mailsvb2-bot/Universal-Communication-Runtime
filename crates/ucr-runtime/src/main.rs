@@ -100,7 +100,30 @@ async fn run() -> Result<(), String> {
             let key_hex = std::env::var("UCR_REALTIME_JOIN_KEY_HEX").map_err(|_| {
                 "UCR_REALTIME_JOIN_KEY_HEX is required for serve-realtime".to_owned()
             })?;
-            let config = RealtimeRuntimeConfig::new(join_base_url, decode_key_hex(&key_hex)?)?;
+            let stun_urls = csv_env("UCR_WEBRTC_STUN_URLS");
+            let turn_urls = csv_env("UCR_WEBRTC_TURN_URLS");
+            let turn_rest_secret = std::env::var("UCR_WEBRTC_TURN_SECRET_HEX")
+                .ok()
+                .map(|value| decode_key_hex_named(&value, "UCR_WEBRTC_TURN_SECRET_HEX"))
+                .transpose()?;
+            let turn_ttl_seconds = std::env::var("UCR_WEBRTC_TURN_TTL_SECONDS")
+                .ok()
+                .map(|value| {
+                    value.parse::<u32>().map_err(|_| {
+                        "UCR_WEBRTC_TURN_TTL_SECONDS must be an unsigned integer".to_owned()
+                    })
+                })
+                .transpose()?
+                .unwrap_or(300);
+            let relay_only = bool_env("UCR_WEBRTC_RELAY_ONLY")?.unwrap_or(false);
+            let config = RealtimeRuntimeConfig::new(join_base_url, decode_key_hex(&key_hex)?)?
+                .with_webrtc_ice(
+                    stun_urls,
+                    turn_urls,
+                    turn_rest_secret,
+                    turn_ttl_seconds,
+                    relay_only,
+                )?;
             Arc::new(ProductionRuntime::open_existing(&database)?)
                 .serve_realtime(bind, config)
                 .await
@@ -151,6 +174,32 @@ fn dispatch_webhook_once(
         }
     }
     Ok(())
+}
+
+fn csv_env(variable: &str) -> Vec<String> {
+    std::env::var(variable)
+        .ok()
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn bool_env(variable: &str) -> Result<Option<bool>, String> {
+    let Ok(value) = std::env::var(variable) else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        "1" | "true" | "TRUE" => Ok(Some(true)),
+        "0" | "false" | "FALSE" => Ok(Some(false)),
+        _ => Err(format!("{variable} must be true/false or 1/0")),
+    }
 }
 
 fn decode_key_hex(value: &str) -> Result<[u8; 32], String> {
