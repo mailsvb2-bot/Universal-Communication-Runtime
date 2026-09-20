@@ -54,6 +54,8 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(provider.contains("STANDARD.encode(mac)"));
     assert!(provider.contains("MAX_TURN_CREDENTIAL_TTL_SECONDS"));
     assert!(provider.contains("pub struct WebRtcSessionConfigFactory"));
+    assert!(provider.contains("session_config_until"));
+    assert!(provider.contains("session_expires_at_unix_seconds"));
     assert!(realtime_proto.contains("rpc StartWebRtc"));
     assert!(realtime_proto.contains("rpc SetWebRtcRemoteDescription"));
     assert!(realtime_proto.contains("rpc AddWebRtcIceCandidate"));
