@@ -159,8 +159,8 @@ impl TurnRestCredentialIssuer {
     /// issuer and is not persisted by the WebRTC provider.
     ///
     /// # Errors
-    /// Returns InvalidTtl outside the bounded lifetime, ClockOverflow on expiry overflow, or
-    /// CryptoUnavailable if the platform crypto provider fails.
+    /// Returns `InvalidTtl` outside the bounded lifetime, `ClockOverflow` on expiry overflow, or
+    /// `CryptoUnavailable` if the platform crypto provider fails.
     pub fn issue(
         &self,
         session_id: &SessionId,
