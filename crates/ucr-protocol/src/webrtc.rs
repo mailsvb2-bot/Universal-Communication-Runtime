@@ -55,10 +55,7 @@ pub fn canonical_ice_server(
     }
     let mut has_turn = false;
     for url in &server.urls {
-        if url.is_empty()
-            || url.len() > MAX_ICE_URL_LEN
-            || url.chars().any(char::is_whitespace)
-        {
+        if url.is_empty() || url.len() > MAX_ICE_URL_LEN || url.chars().any(char::is_whitespace) {
             return Err(WebRtcProtocolError::InvalidIceUrl);
         }
         if url.starts_with("turn:") || url.starts_with("turns:") {
@@ -180,9 +177,6 @@ mod tests {
             sdp_mid: Some("0".to_owned()),
             sdp_mline_index: Some(0),
         };
-        assert_eq!(
-            canonical_webrtc_candidate(&candidate),
-            Ok(candidate)
-        );
+        assert_eq!(canonical_webrtc_candidate(&candidate), Ok(candidate));
     }
 }
