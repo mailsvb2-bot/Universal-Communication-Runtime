@@ -1,6 +1,11 @@
 #![forbid(unsafe_code)]
 
-use std::{net::SocketAddr, path::Path, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::Path,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -19,15 +24,18 @@ use ucr_core::{
     SystemServiceQuotaClock, WebhookDispatchOutcome,
 };
 use ucr_model::{
-    EventSubscriptionId, IceTransportPolicy, NamespaceId, OpaqueId, TenantId, TenantScope,
+    EventSubscriptionId, IceTransportPolicy, NamespaceId, OpaqueId, SfuForwardEnvelope, TenantId,
+    TenantScope,
 };
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
+use ucr_sfu::{SfuForwardSink, SfuForwardSinkError};
 use ucr_storage_sqlite::SqliteLocalStore;
 use ucr_webhook::{
     HardenedWebhookSink, NativeTlsWebhookExecutor, SystemWebhookDnsResolver, WebhookSigningSecret,
 };
 use ucr_webrtc::{
-    LiveWebRtcProvider, TurnRestCredentialIssuer, TurnRestSecret, WebRtcProvider,
+    LIVE_WEBRTC_E2EE_INGRESS_CAPACITY, LiveWebRtcProvider, TurnRestCredentialIssuer,
+    TurnRestSecret, WebRtcE2eeIngressFrame, WebRtcProvider, WebRtcProviderError,
     WebRtcSessionConfigFactory,
 };
 
@@ -337,9 +345,26 @@ impl ProductionRuntime {
         let store = Arc::clone(&self.store);
         let authorization = Arc::clone(&self.store);
         let conference_state = Arc::new(ConferenceRuntimeState::new());
-        let (join_issuer, registry, webrtc) = realtime_dependencies(config)?;
+        let dependencies = realtime_dependencies(config)?;
+        let join_issuer = Arc::clone(&dependencies.join_issuer);
+        let registry = Arc::clone(&dependencies.registry);
+        let realtime_service = GrpcRealtimeService::with_webrtc(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+            Arc::clone(&join_issuer),
+            Arc::clone(&registry),
+            Arc::clone(&conference_state),
+            dependencies.webrtc,
+        );
+        let bridge_task = tokio::spawn(run_webrtc_e2ee_bridge(
+            dependencies.e2ee_ingress,
+            Arc::clone(&dependencies.live_provider),
+            Arc::clone(&registry),
+            realtime_service.clone(),
+        ));
 
-        Server::builder()
+        let server_result = Server::builder()
             .add_service(integration_service_server(GrpcIntegrationService::new(
                 Arc::clone(&clock),
                 Arc::clone(&authorization),
@@ -374,15 +399,7 @@ impl ProductionRuntime {
                     Arc::clone(&join_issuer),
                 ),
             ))
-            .add_service(realtime_service_server(GrpcRealtimeService::with_webrtc(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-                Arc::clone(&join_issuer),
-                registry,
-                conference_state,
-                webrtc,
-            )))
+            .add_service(realtime_service_server(realtime_service))
             .add_service(universal_conference_service_server(
                 GrpcUniversalConferenceService::with_join_issuer(
                     Arc::clone(&clock),
@@ -403,21 +420,23 @@ impl ProductionRuntime {
                 store,
             )))
             .serve_with_incoming(incoming)
-            .await
-            .map_err(|error| format!("local realtime API server: {error}"))
+            .await;
+        bridge_task.abort();
+        server_result.map_err(|error| format!("local realtime API server: {error}"))
     }
+}
+
+struct RealtimeRuntimeDependencies {
+    join_issuer: Arc<JoinTokenIssuer>,
+    registry: Arc<RealtimeSessionRegistry>,
+    webrtc: RealtimeWebRtcDependencies,
+    live_provider: Arc<LiveWebRtcProvider>,
+    e2ee_ingress: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
 }
 
 fn realtime_dependencies(
     config: RealtimeRuntimeConfig,
-) -> Result<
-    (
-        Arc<JoinTokenIssuer>,
-        Arc<RealtimeSessionRegistry>,
-        RealtimeWebRtcDependencies,
-    ),
-    String,
-> {
+) -> Result<RealtimeRuntimeDependencies, String> {
     let RealtimeRuntimeConfig {
         join_base_url,
         join_token_key,
@@ -427,15 +446,102 @@ fn realtime_dependencies(
         JoinTokenIssuer::new(join_token_key, join_base_url)
             .map_err(|error| format!("configure realtime join issuer: {error:?}"))?,
     );
-    let provider: Arc<dyn WebRtcProvider> = Arc::new(
-        LiveWebRtcProvider::new()
+    let (e2ee_ingress_tx, e2ee_ingress) =
+        tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
+    let live_provider = Arc::new(
+        LiveWebRtcProvider::with_e2ee_ingress(e2ee_ingress_tx)
             .map_err(|error| format!("start live WebRTC provider: {error:?}"))?,
     );
-    Ok((
+    let provider: Arc<dyn WebRtcProvider> = live_provider.clone();
+    Ok(RealtimeRuntimeDependencies {
         join_issuer,
-        Arc::new(RealtimeSessionRegistry::default()),
-        RealtimeWebRtcDependencies::new(provider, webrtc_config),
-    ))
+        registry: Arc::new(RealtimeSessionRegistry::default()),
+        webrtc: RealtimeWebRtcDependencies::new(provider, webrtc_config),
+        live_provider,
+        e2ee_ingress,
+    })
+}
+
+#[derive(Debug)]
+struct WebRtcE2eeForwardSink {
+    registry: Arc<RealtimeSessionRegistry>,
+    provider: Arc<LiveWebRtcProvider>,
+    now_unix_ms: i64,
+}
+
+impl SfuForwardSink for WebRtcE2eeForwardSink {
+    fn forward_encrypted(
+        &self,
+        target: &ucr_model::SfuForwardTarget,
+        envelope: &SfuForwardEnvelope,
+    ) -> Result<(), SfuForwardSinkError> {
+        let sessions = self
+            .registry
+            .active_session_ids_for_recipient(
+                &envelope.frame.header.scope,
+                &envelope.frame.header.call_id,
+                &target.recipient,
+                self.now_unix_ms,
+            )
+            .map_err(|_| SfuForwardSinkError::Unavailable)?;
+        if sessions.is_empty() {
+            return Err(SfuForwardSinkError::Unavailable);
+        }
+        for session_id in sessions {
+            self.provider
+                .send_e2ee_envelope(&session_id, envelope)
+                .map_err(map_webrtc_sink_error)?;
+        }
+        Ok(())
+    }
+}
+
+async fn run_webrtc_e2ee_bridge(
+    mut ingress: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
+    provider: Arc<LiveWebRtcProvider>,
+    registry: Arc<RealtimeSessionRegistry>,
+    service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+) {
+    while let Some(frame) = ingress.recv().await {
+        let Ok(now_unix_ms) = runtime_now_unix_ms() else {
+            continue;
+        };
+        let header = &frame.envelope.frame.header;
+        let Ok(claims) = registry.active_claims_for_ingress(
+            &frame.session_id,
+            &header.scope,
+            &header.call_id,
+            now_unix_ms,
+        ) else {
+            continue;
+        };
+        let sink = WebRtcE2eeForwardSink {
+            registry: Arc::clone(&registry),
+            provider: Arc::clone(&provider),
+            now_unix_ms,
+        };
+        let _ = service.forward_authenticated_e2ee_media(&claims, &frame.envelope, &sink);
+    }
+}
+
+const fn map_webrtc_sink_error(error: WebRtcProviderError) -> SfuForwardSinkError {
+    match error {
+        WebRtcProviderError::CapacityExceeded => SfuForwardSinkError::Backpressure,
+        WebRtcProviderError::SessionUnavailable
+        | WebRtcProviderError::TemporarilyUnavailable
+        | WebRtcProviderError::Internal => SfuForwardSinkError::Unavailable,
+        WebRtcProviderError::InvalidProtocol(_) | WebRtcProviderError::Conflict => {
+            SfuForwardSinkError::Rejected
+        }
+    }
+}
+
+fn runtime_now_unix_ms() -> Result<i64, String> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock precedes unix epoch".to_owned())?
+        .as_millis();
+    i64::try_from(millis).map_err(|_| "system clock exceeds realtime range".to_owned())
 }
 
 /// Refuses plaintext remote exposure for the Phase-45 local-daemon production boundary.
