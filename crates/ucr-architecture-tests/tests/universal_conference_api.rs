@@ -277,7 +277,7 @@ fn universal_conference_current_call_flows_do_not_depend_on_bounded_call_history
     assert!(sqlite.contains("AND signalling_state<>?6"));
     assert!(service.contains(".active_calls_for_group(&input.scope, &input.conference_id, 2)"));
     assert!(service.contains(".active_calls_for_group(scope, conference_id, 2)"));
-    assert!(service.contains(".call_belongs_to_group(scope, conference_id, &claims.call_id)"));
+    assert!(service.contains(".call_belongs_to_group(scope, conference_id, &record.call_id)"));
     assert!(
         service.contains("active_call_projection_ignores_more_than_sixty_four_terminated_calls")
     );
