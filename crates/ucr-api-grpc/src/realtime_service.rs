@@ -362,11 +362,8 @@ where
             (Ok(token), Ok((scope, call_id, session_id)), Ok(envelope)) => self
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
-                    let accepted_recipients = self.forward_authenticated_e2ee_media(
-                        &claims,
-                        &envelope,
-                        &*self.registry,
-                    )?;
+                    let accepted_recipients =
+                        self.forward_authenticated_e2ee_media(&claims, &envelope, &*self.registry)?;
                     let accepted_recipient_count = u32::try_from(accepted_recipients)
                         .map_err(|_| CanonicalError::new(CanonicalErrorCode::ResourceExhausted))?;
                     Ok(pb::RealtimePublishMediaReceipt {
