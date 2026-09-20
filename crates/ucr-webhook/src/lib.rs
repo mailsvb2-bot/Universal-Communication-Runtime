@@ -2,11 +2,14 @@
 
 use std::{
     fmt,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    io::{Read, Write},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
+    time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use hmac::{Hmac, Mac};
+use native_tls::TlsConnector;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use ucr_core::{EventWebhookDeliveryError, EventWebhookSink};
@@ -87,6 +90,147 @@ pub trait WebhookHttpsExecutor: fmt::Debug + Send + Sync {
         &self,
         request: &HardenedWebhookRequest,
     ) -> Result<WebhookHttpResponse, WebhookTransportError>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NativeTlsWebhookExecutor {
+    timeout: Duration,
+}
+
+impl NativeTlsWebhookExecutor {
+    /// Creates a blocking HTTPS executor with one bounded timeout applied to connect/read/write.
+    ///
+    /// # Errors
+    /// Rejects a zero timeout because it would make delivery semantics platform-dependent.
+    pub fn new(timeout: Duration) -> Result<Self, WebhookTransportError> {
+        if timeout.is_zero() {
+            return Err(WebhookTransportError::Permanent);
+        }
+        Ok(Self { timeout })
+    }
+}
+
+impl Default for NativeTlsWebhookExecutor {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+impl WebhookHttpsExecutor for NativeTlsWebhookExecutor {
+    fn post(
+        &self,
+        request: &HardenedWebhookRequest,
+    ) -> Result<WebhookHttpResponse, WebhookTransportError> {
+        if request.follow_redirects || request.resolved_ips.is_empty() {
+            return Err(WebhookTransportError::Permanent);
+        }
+        let connector = TlsConnector::builder()
+            .build()
+            .map_err(|_| WebhookTransportError::Permanent)?;
+        let mut observed_tls_failure = false;
+        for address in &request.resolved_ips {
+            let socket = SocketAddr::new(*address, request.port);
+            let Ok(stream) = TcpStream::connect_timeout(&socket, self.timeout) else {
+                continue;
+            };
+            if stream.set_read_timeout(Some(self.timeout)).is_err()
+                || stream.set_write_timeout(Some(self.timeout)).is_err()
+            {
+                continue;
+            }
+            let Ok(mut tls) = connector.connect(&request.host, stream) else {
+                observed_tls_failure = true;
+                continue;
+            };
+            if write_http_request(&mut tls, request).is_err() {
+                continue;
+            }
+            return read_http_response(&mut tls);
+        }
+        if observed_tls_failure {
+            Err(WebhookTransportError::Permanent)
+        } else {
+            Err(WebhookTransportError::Retryable)
+        }
+    }
+}
+
+fn write_http_request(
+    stream: &mut impl Write,
+    request: &HardenedWebhookRequest,
+) -> Result<(), WebhookTransportError> {
+    let authority = if request.port == 443 {
+        request.host.clone()
+    } else {
+        format!("{}:{}", request.host, request.port)
+    };
+    let mut head = format!(
+        "POST {} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        request.path,
+        request.body.len()
+    );
+    for (name, value) in &request.headers {
+        if !header_token(name) || !header_value(value) {
+            return Err(WebhookTransportError::Permanent);
+        }
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(&request.body))
+        .and_then(|_| stream.flush())
+        .map_err(|_| WebhookTransportError::Retryable)
+}
+
+fn read_http_response(stream: &mut impl Read) -> Result<WebhookHttpResponse, WebhookTransportError> {
+    const MAX_STATUS_LINE: usize = 1024;
+    let mut bytes = Vec::with_capacity(64);
+    let mut one = [0_u8; 1];
+    while bytes.len() < MAX_STATUS_LINE {
+        let count = stream
+            .read(&mut one)
+            .map_err(|_| WebhookTransportError::Retryable)?;
+        if count == 0 {
+            return Err(WebhookTransportError::Retryable);
+        }
+        bytes.push(one[0]);
+        if one[0] == b'\n' {
+            break;
+        }
+    }
+    if bytes.last().copied() != Some(b'\n') {
+        return Err(WebhookTransportError::Permanent);
+    }
+    let line = std::str::from_utf8(&bytes).map_err(|_| WebhookTransportError::Permanent)?;
+    let line = line.trim_end_matches(['\r', '\n']);
+    let mut parts = line.splitn(3, ' ');
+    let version = parts.next().ok_or(WebhookTransportError::Permanent)?;
+    let status = parts
+        .next()
+        .ok_or(WebhookTransportError::Permanent)?
+        .parse::<u16>()
+        .map_err(|_| WebhookTransportError::Permanent)?;
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1") || !(100..=599).contains(&status) {
+        return Err(WebhookTransportError::Permanent);
+    }
+    Ok(WebhookHttpResponse { status })
+}
+
+fn header_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn header_value(value: &str) -> bool {
+    !value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
 }
 
 pub struct HardenedWebhookSink<R, X> {
@@ -492,6 +636,48 @@ mod tests {
             private.deliver(&subscription("https://example.com/events?token=x"), &event()),
             Err(EventWebhookDeliveryError::Permanent)
         );
+    }
+
+    #[test]
+    fn native_executor_rejects_zero_timeout_and_parses_bounded_status_line() {
+        assert_eq!(
+            NativeTlsWebhookExecutor::new(Duration::ZERO),
+            Err(WebhookTransportError::Permanent)
+        );
+        let mut success = &b"HTTP/1.1 204 No Content\r\n"[..];
+        assert_eq!(
+            read_http_response(&mut success),
+            Ok(WebhookHttpResponse { status: 204 })
+        );
+        let mut redirect = &b"HTTP/1.1 302 Found\r\n"[..];
+        assert_eq!(
+            read_http_response(&mut redirect),
+            Ok(WebhookHttpResponse { status: 302 })
+        );
+        let mut malformed = &b"NOTHTTP 200 OK\r\n"[..];
+        assert_eq!(
+            read_http_response(&mut malformed),
+            Err(WebhookTransportError::Permanent)
+        );
+    }
+
+    #[test]
+    fn rendered_http_request_contains_exact_host_and_no_implicit_redirect_behavior() {
+        let request = HardenedWebhookRequest {
+            host: "example.com".to_owned(),
+            port: 443,
+            path: "/events".to_owned(),
+            resolved_ips: vec![IpAddr::from_str("93.184.216.34").expect("public ip")],
+            headers: vec![("x-ucr-test".to_owned(), "safe".to_owned())],
+            body: b"{}".to_vec(),
+            follow_redirects: false,
+        };
+        let mut output = Vec::new();
+        write_http_request(&mut output, &request).expect("render request");
+        let text = String::from_utf8(output).expect("utf8 request");
+        assert!(text.starts_with("POST /events HTTP/1.1\r\nHost: example.com\r\n"));
+        assert!(text.contains("\r\nConnection: close\r\n"));
+        assert!(text.contains("\r\nContent-Length: 2\r\n"));
     }
 
     #[test]
