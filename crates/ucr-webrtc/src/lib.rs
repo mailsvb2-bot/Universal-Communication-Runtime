@@ -85,7 +85,6 @@ pub trait WebRtcProvider: fmt::Debug + Send + Sync {
     fn close_session(&self, session_id: &SessionId) -> Result<(), WebRtcProviderError>;
 }
 
-
 pub const MIN_TURN_CREDENTIAL_TTL_SECONDS: u32 = 30;
 pub const MAX_TURN_CREDENTIAL_TTL_SECONDS: u32 = 3_600;
 
