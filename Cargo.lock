@@ -3136,6 +3136,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-webhook"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "hmac 0.13.0",
+ "serde_json",
+ "sha2 0.11.0",
+ "ucr-core",
+ "ucr-model",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "ucr-runtime"
 version = "0.0.1"
 dependencies = [

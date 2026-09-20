@@ -1,0 +1,21 @@
+[package]
+name = "ucr-webhook"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64 = "=0.22.1"
+hmac = "=0.13.0"
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"
+ucr-core = { path = "../ucr-core" }
+ucr-model = { path = "../ucr-model" }
+url = "=2.5.8"
+zeroize = { version = "=1.9.0", features = ["derive"] }
+
+[lints]
+workspace = true
