@@ -22,6 +22,7 @@ ucr-model = { path = "../ucr-model" }
 ucr-realtime = { path = "../ucr-realtime" }
 ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
 ucr-webhook = { path = "../ucr-webhook" }
+ucr-webrtc = { path = "../ucr-webrtc" }
 
 [lints]
 workspace = true
