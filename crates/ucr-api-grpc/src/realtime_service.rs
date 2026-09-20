@@ -474,17 +474,18 @@ where
         let token = decode_bearer_token(request.metadata());
         let body = request.into_inner();
         let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
-        let description = body.description.ok_or_else(invalid_argument).and_then(
-            decode_webrtc_description,
-        );
+        let description = body
+            .description
+            .ok_or_else(invalid_argument)
+            .and_then(decode_webrtc_description);
         let result = match (token, lookup, description) {
             (Ok(token), Ok((scope, call_id, session_id)), Ok(description)) => {
                 match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
                     Ok(claims) => {
                         let description = WebRtcSessionDescription {
                             session_id: claims.session_id.clone(),
-                            sdp_type: description.sdp_type,
-                            sdp: description.sdp,
+                            sdp_type: description.0,
+                            sdp: description.1,
                         };
                         let provider = Arc::clone(&self.webrtc_provider);
                         match tokio::task::spawn_blocking(move || {
@@ -1327,7 +1328,7 @@ fn pb_webrtc_ice_server(server: &IceServerConfig) -> pb::WebRtcIceServer {
 
 fn decode_webrtc_description(
     description: pb::WebRtcDescription,
-) -> Result<WebRtcSessionDescription, CanonicalError> {
+) -> Result<(WebRtcSdpType, String), CanonicalError> {
     let sdp_type = match pb::WebRtcSdpType::try_from(description.sdp_type) {
         Ok(pb::WebRtcSdpType::Offer) => WebRtcSdpType::Offer,
         Ok(pb::WebRtcSdpType::Answer) => WebRtcSdpType::Answer,
@@ -1335,14 +1336,7 @@ fn decode_webrtc_description(
             return Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument));
         }
     };
-    Ok(WebRtcSessionDescription {
-        session_id: SessionId::from_opaque(
-            OpaqueId::new("pending-webrtc-session")
-                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
-        ),
-        sdp_type,
-        sdp: description.sdp,
-    })
+    Ok((sdp_type, description.sdp))
 }
 
 const fn map_webrtc_provider_error(error: WebRtcProviderError) -> CanonicalError {
