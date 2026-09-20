@@ -461,8 +461,7 @@ async fn run_live_webrtc_worker(
                     Ok((peer_connection, description)) => {
                         if shutdown.load(Ordering::Acquire) || command_expired(deadline) {
                             let _ = peer_connection.close().await;
-                            let _ =
-                                reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+                            let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
                             continue;
                         }
                         sessions.insert(key.clone(), Arc::clone(&peer_connection));
