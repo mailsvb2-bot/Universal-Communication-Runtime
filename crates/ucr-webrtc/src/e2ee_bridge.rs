@@ -2,10 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
-use webrtc::{
-    data_channel::RTCDataChannel,
-    peer_connection::RTCPeerConnection,
-};
+use webrtc::{data_channel::RTCDataChannel, peer_connection::RTCPeerConnection};
 
 use ucr_model::{
     CallId, CryptoSuite, DeviceId, EncryptedGroupMediaFrame, GroupId, GroupMediaFrameHeader,
@@ -141,10 +138,7 @@ impl WebRtcE2eeReassembler {
         if pending.next_chunk_index != pending.chunk_count {
             return Ok(None);
         }
-        let completed = self
-            .pending
-            .take()
-            .ok_or(WebRtcE2eeWireError::Malformed)?;
+        let completed = self.pending.take().ok_or(WebRtcE2eeWireError::Malformed)?;
         if completed.bytes.len() != completed.total_length {
             return Err(WebRtcE2eeWireError::Malformed);
         }
@@ -395,10 +389,7 @@ pub fn decode_webrtc_e2ee_envelope(
         .map_err(WebRtcE2eeWireError::InvalidEnvelope)
 }
 
-fn push_scope(
-    output: &mut Vec<u8>,
-    scope: &TenantScope,
-) -> Result<(), WebRtcE2eeWireError> {
+fn push_scope(output: &mut Vec<u8>, scope: &TenantScope) -> Result<(), WebRtcE2eeWireError> {
     push_id(output, scope.tenant_id.as_opaque())?;
     match &scope.namespace_id {
         Some(namespace_id) => {

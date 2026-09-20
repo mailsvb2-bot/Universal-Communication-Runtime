@@ -4095,6 +4095,7 @@ name = "ucr-webrtc"
 version = "0.0.1"
 dependencies = [
  "base64",
+ "bytes",
  "openssl",
  "tokio",
  "ucr-model",
