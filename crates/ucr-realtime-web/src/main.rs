@@ -869,9 +869,7 @@ fn webrtc_error(
             StatusCode::BAD_REQUEST
         }
         Ok(pb::ErrorCode::Unauthenticated) => StatusCode::UNAUTHORIZED,
-        Ok(pb::ErrorCode::PermissionDenied | pb::ErrorCode::PolicyDenied) => {
-            StatusCode::FORBIDDEN
-        }
+        Ok(pb::ErrorCode::PermissionDenied | pb::ErrorCode::PolicyDenied) => StatusCode::FORBIDDEN,
         Ok(pb::ErrorCode::RateLimited | pb::ErrorCode::ResourceExhausted) => {
             StatusCode::TOO_MANY_REQUESTS
         }
@@ -881,11 +879,15 @@ fn webrtc_error(
         Ok(pb::ErrorCode::TemporarilyUnavailable) => StatusCode::SERVICE_UNAVAILABLE,
         Ok(pb::ErrorCode::Conflict) => StatusCode::CONFLICT,
         Ok(pb::ErrorCode::NotFound) => StatusCode::NOT_FOUND,
-        Ok(pb::ErrorCode::UnsupportedProtocolVersion
-            | pb::ErrorCode::DowngradeRejected
-            | pb::ErrorCode::UnsupportedCriticalExtension
-            | pb::ErrorCode::CapabilityMismatch) => StatusCode::BAD_REQUEST,
-        Ok(pb::ErrorCode::IntegrityFailure | pb::ErrorCode::Internal | pb::ErrorCode::Unspecified)
+        Ok(
+            pb::ErrorCode::UnsupportedProtocolVersion
+                | pb::ErrorCode::DowngradeRejected
+                | pb::ErrorCode::UnsupportedCriticalExtension
+                | pb::ErrorCode::CapabilityMismatch,
+        ) => StatusCode::BAD_REQUEST,
+        Ok(
+            pb::ErrorCode::IntegrityFailure | pb::ErrorCode::Internal | pb::ErrorCode::Unspecified,
+        )
         | Err(_) => StatusCode::BAD_GATEWAY,
     };
     api_error(status, code, message)
