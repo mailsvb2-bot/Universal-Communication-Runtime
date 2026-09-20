@@ -17,6 +17,7 @@ fn webhook_adapter_preserves_single_event_owner_and_fails_closed() {
     let workspace = read("Cargo.toml");
     let adapter = read("crates/ucr-webhook/src/lib.rs");
     let core = read("crates/ucr-core/src/event_api.rs");
+    let runtime = read("crates/ucr-runtime/src/main.rs");
     let spec = read("spec/event-api.md");
 
     assert!(workspace.contains("\"crates/ucr-webhook\""));
@@ -33,5 +34,11 @@ fn webhook_adapter_preserves_single_event_owner_and_fails_closed() {
     assert!(adapter.contains("WebhookSigningSecret([u8; 32])"));
     assert!(adapter.contains("ZeroizeOnDrop"));
     assert!(adapter.contains("408 | 425 | 429 | 500..=599"));
-    assert!(spec.contains("does not ship a built-in DNS/TLS socket executor"));
+    assert!(adapter.contains("pub struct NativeTlsWebhookExecutor"));
+    assert!(adapter.contains("TcpStream::connect_timeout"));
+    assert!(adapter.contains("connector.connect(&request.host, stream)"));
+    assert!(adapter.contains("SystemWebhookDnsResolver"));
+    assert!(runtime.contains("\"dispatch-webhook-once\""));
+    assert!(runtime.contains("UCR_WEBHOOK_SIGNING_KEY_HEX"));
+    assert!(spec.contains("dispatch-webhook-once"));
 }
