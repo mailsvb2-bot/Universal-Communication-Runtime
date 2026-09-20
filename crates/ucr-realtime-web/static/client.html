@@ -179,22 +179,34 @@ async function startWebRtc(forceMedia=false){
   const offer=await response.json();
   const pc=new RTCPeerConnection({iceServers:offer.ice_servers||[]});
   peer=pc;remoteStream=new MediaStream();ui.remoteVideo.srcObject=remoteStream;
+  let remoteDescriptionAccepted=false;
+  const pendingCandidates=[];
+  const sendCandidate=async candidate=>{
+    if(!sessionActive||peer!==pc)return;
+    await api("/v1/realtime/webrtc/ice",{...body(),candidate:candidate.candidate,sdp_mid:candidate.sdpMid,sdp_mline_index:candidate.sdpMLineIndex});
+  };
   media.getTracks().forEach(track=>pc.addTrack(track,media));
   pc.ontrack=event=>{event.streams.forEach(stream=>stream.getTracks().forEach(track=>{if(!remoteStream.getTracks().some(existing=>existing.id===track.id))remoteStream.addTrack(track);}));};
   pc.onicecandidate=event=>{
     if(!event.candidate||!sessionActive)return;
-    api("/v1/realtime/webrtc/ice",{...body(),candidate:event.candidate.candidate,sdp_mid:event.candidate.sdpMid,sdp_mline_index:event.candidate.sdpMLineIndex}).catch(e=>{ui.status.textContent="ICE candidate rejected: "+e.message;});
+    if(!remoteDescriptionAccepted){pendingCandidates.push(event.candidate);return;}
+    sendCandidate(event.candidate).catch(e=>{ui.status.textContent="ICE candidate rejected: "+e.message;});
   };
   pc.onconnectionstatechange=()=>{
     if(peer!==pc)return;
     const state=pc.connectionState;ui.webrtcState.textContent=state||"Connecting";
-    if(state==="connected"){ui.state.textContent="Connected";ui.status.textContent="Camera and microphone are connected through WebRTC.";}
+    if(state==="connected"){
+      if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
+      ui.state.textContent="Connected";ui.status.textContent="Camera and microphone are connected through WebRTC.";
+    }
     if(state==="failed"||state==="disconnected")scheduleWebRtcRetry();
   };
   await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
   const answer=await pc.createAnswer();
   await pc.setLocalDescription(answer);
   await api("/v1/realtime/webrtc/remote-description",{...body(),sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp});
+  remoteDescriptionAccepted=true;
+  for(const candidate of pendingCandidates.splice(0)){await sendCandidate(candidate);}
   ui.webrtcState.textContent="Connecting";
 }
 async function restartWebRtc(forceMedia){
