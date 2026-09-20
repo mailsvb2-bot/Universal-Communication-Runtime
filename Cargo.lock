@@ -3665,6 +3665,7 @@ dependencies = [
  "ucr-storage-sqlite",
  "ucr-store-forward",
  "ucr-transport-internet",
+ "ucr-webrtc",
 ]
 
 [[package]]
@@ -3968,6 +3969,7 @@ dependencies = [
  "ucr-realtime",
  "ucr-storage-sqlite",
  "ucr-webhook",
+ "ucr-webrtc",
 ]
 
 [[package]]
