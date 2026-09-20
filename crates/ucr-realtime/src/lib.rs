@@ -531,6 +531,7 @@ pub struct RealtimeJoinOutcome {
     pub transition: AttendanceTransition,
 }
 
+#[derive(Debug)]
 pub struct RealtimeDownlinkAttachment {
     pub receiver: mpsc::Receiver<SfuForwardEnvelope>,
     pub transition: Option<AttendanceTransition>,
@@ -679,7 +680,7 @@ impl RealtimeSessionRegistry {
     /// Compatibility helper for internal callers that do not consume attendance transitions.
     ///
     /// # Errors
-    /// Returns the same bounded registry failures as attach_downlink.
+    /// Returns the same bounded registry failures as `attach_downlink`.
     pub fn take_downlink(
         &self,
         claims: &RealtimeSessionClaims,

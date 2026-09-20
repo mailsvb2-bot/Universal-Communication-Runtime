@@ -84,11 +84,11 @@ function scheduleStreamRetry(){
   streamRetryTimer=setTimeout(()=>{streamRetryTimer=null;openStream();},STREAM_RETRY_MS);
 }
 async function openStream(){
-  if(!sessionActive||Date.now()>=claims.expires)return;
-  if(streamAbort)streamAbort.abort();
-  streamAbort=new AbortController();
+  if(!sessionActive||Date.now()>=claims.expires||streamAbort)return;
+  const controller=new AbortController();
+  streamAbort=controller;
   try{
-    const r=await api("/v1/realtime/media/stream",body(),streamAbort.signal);
+    const r=await api("/v1/realtime/media/stream",body(),controller.signal);
     const reader=r.body.getReader(); const decoder=new TextDecoder(); let buffer="";
     ui.state.textContent="Connected";
     while(true){const {done,value}=await reader.read(); if(done)break; buffer+=decoder.decode(value,{stream:true});
@@ -100,8 +100,10 @@ async function openStream(){
   }catch(e){
     if(e.name!=="AbortError"&&sessionActive){ui.state.textContent="Reconnecting";ui.status.textContent="Media stream interrupted: "+e.message;}
   }finally{
-    streamAbort=null;
-    if(sessionActive)scheduleStreamRetry();
+    if(streamAbort===controller){
+      streamAbort=null;
+      if(sessionActive)scheduleStreamRetry();
+    }
   }
 }
 async function join(){
