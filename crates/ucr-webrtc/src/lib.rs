@@ -4,6 +4,7 @@ use core::fmt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
+use zeroize::ZeroizeOnDrop;
 use ucr_model::{
     IceServerConfig, IceTransportPolicy, SessionId, WebRtcIceCandidate, WebRtcSessionDescription,
 };
@@ -96,7 +97,7 @@ pub enum TurnCredentialError {
     CryptoUnavailable,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, ZeroizeOnDrop)]
 pub struct TurnRestSecret([u8; 32]);
 
 impl TurnRestSecret {
