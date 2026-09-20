@@ -71,6 +71,13 @@ const ui={
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null;
 let packetCount=0,sessionActive=false,peer=null,localStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false;
+let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
+const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
+const E2EE_CHUNK_MAGIC="UCRCHK01";
+const E2EE_CHUNK_HEADER_BYTES=24;
+const E2EE_DATA_MESSAGE_BYTES=16000;
+const E2EE_CHUNK_PAYLOAD_BYTES=E2EE_DATA_MESSAGE_BYTES-E2EE_CHUNK_HEADER_BYTES;
+const E2EE_MAX_WIRE_BYTES=2*1024*1024+8192;
 const ENTRY_RETRY_MS=2000;
 const STREAM_RETRY_MS=1500;
 const WEBRTC_RETRY_MS=2000;
@@ -102,6 +109,87 @@ async function api(path,payload,signal,keepalive=false){
     throw error;
   }
   return r;
+}
+function e2eeAdapter(){
+  const adapter=window.ucrE2eeEndpoint;
+  return adapter&&typeof adapter==="object"?adapter:null;
+}
+function closeE2eeTransport(){
+  const adapter=e2eeAdapter();
+  if(adapter&&typeof adapter.stop==="function"){try{adapter.stop();}catch(_){}}
+  if(e2eeChannel){
+    e2eeChannel.onopen=null;e2eeChannel.onmessage=null;e2eeChannel.onclose=null;e2eeChannel.onerror=null;
+    try{e2eeChannel.close();}catch(_){}
+  }
+  e2eeChannel=null;e2eePending=null;
+}
+function readAscii(bytes,start,length){
+  let value="";for(let i=0;i<length;i++)value+=String.fromCharCode(bytes[start+i]);return value;
+}
+function receiveE2eeChunk(data){
+  const bytes=data instanceof Uint8Array?data:new Uint8Array(data);
+  if(bytes.length<E2EE_CHUNK_HEADER_BYTES||bytes.length>E2EE_DATA_MESSAGE_BYTES)throw new Error("Invalid encrypted media chunk size");
+  if(readAscii(bytes,0,8)!==E2EE_CHUNK_MAGIC)throw new Error("Invalid encrypted media chunk");
+  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const messageId=view.getBigUint64(8,false);
+  const chunkIndex=view.getUint16(16,false),chunkCount=view.getUint16(18,false),totalLength=view.getUint32(20,false);
+  if(chunkCount===0||chunkIndex>=chunkCount||totalLength===0||totalLength>E2EE_MAX_WIRE_BYTES)throw new Error("Invalid encrypted media chunk header");
+  const payload=bytes.slice(E2EE_CHUNK_HEADER_BYTES);
+  if(chunkIndex===0){
+    if(e2eePending)throw new Error("Overlapping encrypted media messages");
+    e2eePending={messageId,chunkCount,totalLength,next:0,parts:[],received:0};
+  }
+  const pending=e2eePending;
+  if(!pending||pending.messageId!==messageId||pending.chunkCount!==chunkCount||pending.totalLength!==totalLength||pending.next!==chunkIndex)throw new Error("Out-of-order encrypted media chunk");
+  pending.parts.push(payload);pending.received+=payload.length;pending.next++;
+  if(pending.received>pending.totalLength){e2eePending=null;throw new Error("Oversized encrypted media message");}
+  if(pending.next!==pending.chunkCount)return null;
+  e2eePending=null;
+  if(pending.received!==pending.totalLength)throw new Error("Incomplete encrypted media message");
+  const wire=new Uint8Array(pending.totalLength);let offset=0;
+  for(const part of pending.parts){wire.set(part,offset);offset+=part.length;}
+  return wire;
+}
+function sendE2eeEnvelope(wire){
+  if(!e2eeChannel||e2eeChannel.readyState!=="open")throw new Error("Encrypted media channel is not open");
+  const bytes=wire instanceof Uint8Array?wire:new Uint8Array(wire);
+  if(bytes.length===0||bytes.length>E2EE_MAX_WIRE_BYTES)throw new Error("Encrypted media envelope exceeds transport bounds");
+  const count=Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES);
+  if(count>65535)throw new Error("Encrypted media envelope requires too many chunks");
+  const messageId=BigInt(e2eeMessageId++);
+  for(let index=0;index<count;index++){
+    const start=index*E2EE_CHUNK_PAYLOAD_BYTES,end=Math.min(bytes.length,start+E2EE_CHUNK_PAYLOAD_BYTES);
+    const chunk=new Uint8Array(E2EE_CHUNK_HEADER_BYTES+(end-start));
+    chunk.set(new TextEncoder().encode(E2EE_CHUNK_MAGIC),0);
+    const view=new DataView(chunk.buffer);
+    view.setBigUint64(8,messageId,false);view.setUint16(16,index,false);view.setUint16(18,count,false);view.setUint32(20,bytes.length,false);
+    chunk.set(bytes.subarray(start,end),E2EE_CHUNK_HEADER_BYTES);
+    e2eeChannel.send(chunk);
+  }
+}
+async function activateE2eeAdapter(){
+  const adapter=e2eeAdapter();
+  if(!adapter||typeof adapter.start!=="function"||typeof adapter.onEnvelope!=="function"){
+    ui.status.textContent="WebRTC transport connected. Encrypted endpoint media adapter is required before camera/microphone can be published.";
+    return;
+  }
+  await adapter.start({stream:localStream,sendEnvelope:sendE2eeEnvelope});
+  ui.status.textContent="Endpoint E2EE media transport active. Media keys remain on this endpoint.";
+}
+function attachE2eeDataChannel(channel){
+  if(channel.label!==E2EE_CHANNEL_LABEL){channel.close();return;}
+  closeE2eeTransport();e2eeChannel=channel;e2eeChannel.binaryType="arraybuffer";
+  channel.onopen=()=>{activateE2eeAdapter().catch(e=>{ui.status.textContent="Endpoint E2EE adapter failed: "+e.message;});};
+  channel.onmessage=event=>{
+    try{
+      const wire=receiveE2eeChunk(event.data);if(!wire)return;
+      packetCount++;ui.packets.textContent=String(packetCount);
+      const adapter=e2eeAdapter();if(!adapter||typeof adapter.onEnvelope!=="function")return;
+      Promise.resolve(adapter.onEnvelope(wire)).catch(e=>{ui.status.textContent="Encrypted media open failed: "+e.message;});
+    }catch(e){e2eePending=null;ui.status.textContent="Encrypted media transport rejected data: "+e.message;}
+  };
+  channel.onerror=()=>{ui.status.textContent="Encrypted media DataChannel failed.";};
+  channel.onclose=()=>{if(e2eeChannel===channel){closeE2eeTransport();}};
 }
 function scheduleStreamRetry(){
   if(!sessionActive||Date.now()>=claims.expires)return;
@@ -159,7 +247,8 @@ function applyToggleLabels(){
   ui.cameraToggle.textContent=video&&video.enabled?"Turn camera off":"Turn camera on";
 }
 function teardownPeer(){
-  if(peer){peer.onicecandidate=null;peer.ontrack=null;peer.onconnectionstatechange=null;peer.close();peer=null;}
+  closeE2eeTransport();
+  if(peer){peer.onicecandidate=null;peer.ontrack=null;peer.ondatachannel=null;peer.onconnectionstatechange=null;peer.close();peer=null;}
   remoteStream=null;ui.remoteVideo.srcObject=null;ui.webrtcState.textContent="Idle";
 }
 async function closeServerPeer(keepalive=false){
@@ -185,8 +274,8 @@ async function startWebRtc(forceMedia=false){
     if(!sessionActive||peer!==pc)return;
     await api("/v1/realtime/webrtc/ice",{...body(),candidate:candidate.candidate,sdp_mid:candidate.sdpMid,sdp_mline_index:candidate.sdpMLineIndex});
   };
-  media.getTracks().forEach(track=>pc.addTrack(track,media));
-  pc.ontrack=event=>{event.streams.forEach(stream=>stream.getTracks().forEach(track=>{if(!remoteStream.getTracks().some(existing=>existing.id===track.id))remoteStream.addTrack(track);}));};
+  pc.ondatachannel=event=>attachE2eeDataChannel(event.channel);
+  pc.ontrack=event=>{event.track.stop();ui.status.textContent="Unexpected RTP track rejected; conference media must use endpoint E2EE transport.";};
   pc.onicecandidate=event=>{
     if(!event.candidate||!sessionActive)return;
     if(!remoteDescriptionAccepted){pendingCandidates.push(event.candidate);return;}
@@ -197,7 +286,7 @@ async function startWebRtc(forceMedia=false){
     const state=pc.connectionState;ui.webrtcState.textContent=state||"Connecting";
     if(state==="connected"){
       if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
-      ui.state.textContent="Connected";ui.status.textContent="Camera and microphone are connected through WebRTC.";
+      ui.state.textContent="Connected";ui.status.textContent=e2eeChannel&&e2eeChannel.readyState==="open"?"Encrypted media transport connected.":"WebRTC signalling connected; waiting for encrypted media DataChannel.";
     }
     if(state==="failed"||state==="disconnected")scheduleWebRtcRetry();
   };
