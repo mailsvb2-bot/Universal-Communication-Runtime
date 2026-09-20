@@ -881,9 +881,9 @@ fn webrtc_error(
         Ok(pb::ErrorCode::NotFound) => StatusCode::NOT_FOUND,
         Ok(
             pb::ErrorCode::UnsupportedProtocolVersion
-                | pb::ErrorCode::DowngradeRejected
-                | pb::ErrorCode::UnsupportedCriticalExtension
-                | pb::ErrorCode::CapabilityMismatch,
+            | pb::ErrorCode::DowngradeRejected
+            | pb::ErrorCode::UnsupportedCriticalExtension
+            | pb::ErrorCode::CapabilityMismatch,
         ) => StatusCode::BAD_REQUEST,
         Ok(
             pb::ErrorCode::IntegrityFailure | pb::ErrorCode::Internal | pb::ErrorCode::Unspecified,
