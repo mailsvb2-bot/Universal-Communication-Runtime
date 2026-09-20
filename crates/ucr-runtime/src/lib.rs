@@ -487,12 +487,23 @@ impl SfuForwardSink for WebRtcE2eeForwardSink {
         if sessions.is_empty() {
             return Err(SfuForwardSinkError::Unavailable);
         }
+        let mut accepted = false;
+        let mut saw_backpressure = false;
         for session_id in sessions {
-            self.provider
-                .send_e2ee_envelope(&session_id, envelope)
-                .map_err(map_webrtc_sink_error)?;
+            match self.provider.send_e2ee_envelope(&session_id, envelope) {
+                Ok(()) => accepted = true,
+                Err(WebRtcProviderError::SessionUnavailable) => {}
+                Err(WebRtcProviderError::CapacityExceeded) => saw_backpressure = true,
+                Err(error) => return Err(map_webrtc_sink_error(error)),
+            }
         }
-        Ok(())
+        if accepted {
+            Ok(())
+        } else if saw_backpressure {
+            Err(SfuForwardSinkError::Backpressure)
+        } else {
+            Err(SfuForwardSinkError::Unavailable)
+        }
     }
 }
 
@@ -503,25 +514,40 @@ async fn run_webrtc_e2ee_bridge(
     service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
 ) {
     while let Some(frame) = ingress.recv().await {
-        let Ok(now_unix_ms) = runtime_now_unix_ms() else {
-            continue;
-        };
-        let header = &frame.envelope.frame.header;
-        let Ok(claims) = registry.active_claims_for_ingress(
+        let provider = Arc::clone(&provider);
+        let registry = Arc::clone(&registry);
+        let service = service.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            route_webrtc_e2ee_frame(&service, &registry, &provider, frame)
+        })
+        .await;
+    }
+}
+
+fn route_webrtc_e2ee_frame(
+    service: &GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+    registry: &Arc<RealtimeSessionRegistry>,
+    provider: &Arc<LiveWebRtcProvider>,
+    frame: WebRtcE2eeIngressFrame,
+) -> Result<usize, ()> {
+    let now_unix_ms = runtime_now_unix_ms().map_err(|_| ())?;
+    let header = &frame.envelope.frame.header;
+    let claims = registry
+        .active_claims_for_ingress(
             &frame.session_id,
             &header.scope,
             &header.call_id,
             now_unix_ms,
-        ) else {
-            continue;
-        };
-        let sink = WebRtcE2eeForwardSink {
-            registry: Arc::clone(&registry),
-            provider: Arc::clone(&provider),
-            now_unix_ms,
-        };
-        let _ = service.forward_authenticated_e2ee_media(&claims, &frame.envelope, &sink);
-    }
+        )
+        .map_err(|_| ())?;
+    let sink = WebRtcE2eeForwardSink {
+        registry: Arc::clone(registry),
+        provider: Arc::clone(provider),
+        now_unix_ms,
+    };
+    service
+        .forward_authenticated_e2ee_media(&claims, &frame.envelope, &sink)
+        .map_err(|_| ())
 }
 
 const fn map_webrtc_sink_error(error: WebRtcProviderError) -> SfuForwardSinkError {
