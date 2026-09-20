@@ -568,7 +568,7 @@ where
             && !conference.entry_open
         {
             return Err(
-                CanonicalError::new(CanonicalErrorCode::PolicyDenied).with_retry_after(2_000),
+                CanonicalError::new(CanonicalErrorCode::PolicyDenied).with_retry_after(2_000)
             );
         }
         Ok(())

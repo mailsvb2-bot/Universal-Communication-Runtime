@@ -3668,8 +3668,8 @@ mod universal_runtime_tests {
             .strip_prefix("https://join.example.test/join#ucr_join=")
             .expect("public join url token");
         let claims = issuer
-            .verify(token, now_unix_ms)
-            .expect("verify join token");
+            .verify_signed_claims(token, now_unix_ms)
+            .expect("verify durable join token");
         assert_eq!(claims.participant, attendee.participant);
         assert!(claims.device_id.is_some());
         assert_eq!(grant.expires_at_unix_ms, 1_300_000);
