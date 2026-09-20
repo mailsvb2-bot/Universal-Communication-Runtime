@@ -24,6 +24,7 @@ ucr-realtime = { path = "../ucr-realtime" }
 ucr-sfu = { path = "../ucr-sfu" }
 ucr-store-forward = { path = "../ucr-store-forward" }
 ucr-transport-internet = { path = "../ucr-transport-internet" }
+ucr-webrtc = { path = "../ucr-webrtc" }
 tokio = { version = "=1.53.1", features = ["rt"] }
 tokio-stream = "=0.1.17"
 
