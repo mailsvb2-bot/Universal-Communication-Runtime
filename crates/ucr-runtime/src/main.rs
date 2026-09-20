@@ -91,43 +91,7 @@ async fn run() -> Result<(), String> {
                 .serve(bind)
                 .await
         }
-        "serve-realtime" => {
-            let bind: SocketAddr = bind
-                .parse()
-                .map_err(|error| format!("invalid --bind address: {error}"))?;
-            let join_base_url = join_base_url
-                .ok_or_else(|| "--join-base-url is required for serve-realtime".to_owned())?;
-            let key_hex = std::env::var("UCR_REALTIME_JOIN_KEY_HEX").map_err(|_| {
-                "UCR_REALTIME_JOIN_KEY_HEX is required for serve-realtime".to_owned()
-            })?;
-            let stun_urls = csv_env("UCR_WEBRTC_STUN_URLS");
-            let turn_urls = csv_env("UCR_WEBRTC_TURN_URLS");
-            let turn_rest_secret = std::env::var("UCR_WEBRTC_TURN_SECRET_HEX")
-                .ok()
-                .map(|value| decode_key_hex_named(&value, "UCR_WEBRTC_TURN_SECRET_HEX"))
-                .transpose()?;
-            let turn_ttl_seconds = std::env::var("UCR_WEBRTC_TURN_TTL_SECONDS")
-                .ok()
-                .map(|value| {
-                    value.parse::<u32>().map_err(|_| {
-                        "UCR_WEBRTC_TURN_TTL_SECONDS must be an unsigned integer".to_owned()
-                    })
-                })
-                .transpose()?
-                .unwrap_or(300);
-            let relay_only = bool_env("UCR_WEBRTC_RELAY_ONLY")?.unwrap_or(false);
-            let config = RealtimeRuntimeConfig::new(join_base_url, decode_key_hex(&key_hex)?)?
-                .with_webrtc_ice(
-                    stun_urls,
-                    turn_urls,
-                    turn_rest_secret,
-                    turn_ttl_seconds,
-                    relay_only,
-                )?;
-            Arc::new(ProductionRuntime::open_existing(&database)?)
-                .serve_realtime(bind, config)
-                .await
-        }
+        "serve-realtime" => serve_realtime_command(&database, &bind, join_base_url).await
         "dispatch-webhook-once" => dispatch_webhook_once(
             &database,
             tenant_id,
@@ -136,6 +100,44 @@ async fn run() -> Result<(), String> {
         ),
         _ => Err(usage()),
     }
+}
+
+async fn serve_realtime_command(
+    database: &PathBuf,
+    bind: &str,
+    join_base_url: Option<String>,
+) -> Result<(), String> {
+    let bind: SocketAddr = bind
+        .parse()
+        .map_err(|error| format!("invalid --bind address: {error}"))?;
+    let join_base_url =
+        join_base_url.ok_or_else(|| "--join-base-url is required for serve-realtime".to_owned())?;
+    let key_hex = std::env::var("UCR_REALTIME_JOIN_KEY_HEX")
+        .map_err(|_| "UCR_REALTIME_JOIN_KEY_HEX is required for serve-realtime".to_owned())?;
+    let turn_rest_secret = std::env::var("UCR_WEBRTC_TURN_SECRET_HEX")
+        .ok()
+        .map(|value| decode_key_hex_named(&value, "UCR_WEBRTC_TURN_SECRET_HEX"))
+        .transpose()?;
+    let turn_ttl_seconds = std::env::var("UCR_WEBRTC_TURN_TTL_SECONDS")
+        .ok()
+        .map(|value| {
+            value.parse::<u32>().map_err(|_| {
+                "UCR_WEBRTC_TURN_TTL_SECONDS must be an unsigned integer".to_owned()
+            })
+        })
+        .transpose()?
+        .unwrap_or(300);
+    let config = RealtimeRuntimeConfig::new(join_base_url, decode_key_hex(&key_hex)?)?
+        .with_webrtc_ice(
+            csv_env("UCR_WEBRTC_STUN_URLS"),
+            csv_env("UCR_WEBRTC_TURN_URLS"),
+            turn_rest_secret,
+            turn_ttl_seconds,
+            bool_env("UCR_WEBRTC_RELAY_ONLY")?.unwrap_or(false),
+        )?;
+    Arc::new(ProductionRuntime::open_existing(database)?)
+        .serve_realtime(bind, config)
+        .await
 }
 
 fn dispatch_webhook_once(
