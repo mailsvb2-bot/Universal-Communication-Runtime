@@ -153,15 +153,11 @@ impl ProductionRuntime {
         let scope = TenantScope {
             tenant_id: TenantId::from_opaque(runtime_opaque(tenant_id, "tenant id")?),
             namespace_id: namespace_id
-                .map(|value| {
-                    runtime_opaque(value, "namespace id").map(NamespaceId::from_opaque)
-                })
+                .map(|value| runtime_opaque(value, "namespace id").map(NamespaceId::from_opaque))
                 .transpose()?,
         };
-        let subscription_id = EventSubscriptionId::from_opaque(runtime_opaque(
-            subscription_id,
-            "subscription id",
-        )?);
+        let subscription_id =
+            EventSubscriptionId::from_opaque(runtime_opaque(subscription_id, "subscription id")?);
         let clock = SystemEventDeliveryClock;
         let sink = HardenedWebhookSink::new(
             SystemWebhookDnsResolver,

@@ -49,16 +49,16 @@ async fn run() -> Result<(), String> {
                 );
             }
             "--namespace-id" => {
-                namespace_id = Some(
-                    args.next()
-                        .ok_or_else(|| "--namespace-id requires an opaque identifier".to_owned())?,
-                );
+                namespace_id =
+                    Some(args.next().ok_or_else(|| {
+                        "--namespace-id requires an opaque identifier".to_owned()
+                    })?);
             }
             "--subscription-id" => {
-                subscription_id = Some(
-                    args.next()
-                        .ok_or_else(|| "--subscription-id requires an opaque identifier".to_owned())?,
-                );
+                subscription_id =
+                    Some(args.next().ok_or_else(|| {
+                        "--subscription-id requires an opaque identifier".to_owned()
+                    })?);
             }
             _ => return Err(format!("unknown option: {argument}; {}", usage())),
         }
@@ -106,10 +106,11 @@ async fn run() -> Result<(), String> {
                 .await
         }
         "dispatch-webhook-once" => {
-            let tenant_id =
-                tenant_id.ok_or_else(|| "--tenant-id is required for dispatch-webhook-once".to_owned())?;
-            let subscription_id = subscription_id
-                .ok_or_else(|| "--subscription-id is required for dispatch-webhook-once".to_owned())?;
+            let tenant_id = tenant_id
+                .ok_or_else(|| "--tenant-id is required for dispatch-webhook-once".to_owned())?;
+            let subscription_id = subscription_id.ok_or_else(|| {
+                "--subscription-id is required for dispatch-webhook-once".to_owned()
+            })?;
             let key_hex = std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
                 "UCR_WEBHOOK_SIGNING_KEY_HEX is required for dispatch-webhook-once".to_owned()
             })?;
@@ -123,7 +124,9 @@ async fn run() -> Result<(), String> {
             match outcome {
                 WebhookDispatchOutcome::Idle => println!("UCR_WEBHOOK_DISPATCH outcome=idle"),
                 WebhookDispatchOutcome::RetryAfter { retry_after_ms } => {
-                    println!("UCR_WEBHOOK_DISPATCH outcome=retry_after retry_after_ms={retry_after_ms}")
+                    println!(
+                        "UCR_WEBHOOK_DISPATCH outcome=retry_after retry_after_ms={retry_after_ms}"
+                    )
                 }
                 WebhookDispatchOutcome::Delivered => {
                     println!("UCR_WEBHOOK_DISPATCH outcome=delivered")

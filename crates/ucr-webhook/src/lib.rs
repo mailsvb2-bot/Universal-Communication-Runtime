@@ -8,7 +8,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use native_tls::TlsConnector;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -211,7 +211,9 @@ fn write_http_request(
         .map_err(|_| WebhookTransportError::Retryable)
 }
 
-fn read_http_response(stream: &mut impl Read) -> Result<WebhookHttpResponse, WebhookTransportError> {
+fn read_http_response(
+    stream: &mut impl Read,
+) -> Result<WebhookHttpResponse, WebhookTransportError> {
     const MAX_STATUS_LINE: usize = 1024;
     let mut bytes = Vec::with_capacity(64);
     let mut one = [0_u8; 1];
@@ -264,11 +266,7 @@ pub struct HardenedWebhookSink<R, X> {
 
 impl<R, X> HardenedWebhookSink<R, X> {
     #[must_use]
-    pub const fn new(
-        resolver: R,
-        executor: X,
-        signing_secret: WebhookSigningSecret,
-    ) -> Self {
+    pub const fn new(resolver: R, executor: X, signing_secret: WebhookSigningSecret) -> Self {
         Self {
             resolver,
             executor,
@@ -301,10 +299,7 @@ where
         let request = self
             .prepare_request(subscription, event)
             .map_err(|error| error.delivery_error())?;
-        let response = self
-            .executor
-            .post(&request)
-            .map_err(map_transport_error)?;
+        let response = self.executor.post(&request).map_err(map_transport_error)?;
         classify_status(response.status)
     }
 }
@@ -379,7 +374,10 @@ where
         if resolved_ips.is_empty() {
             return Err(WebhookPolicyError::ResolutionUnavailable);
         }
-        if resolved_ips.iter().any(|address| !is_public_address(*address)) {
+        if resolved_ips
+            .iter()
+            .any(|address| !is_public_address(*address))
+        {
             return Err(WebhookPolicyError::PrivateEndpoint);
         }
 
@@ -413,10 +411,7 @@ where
                 ("user-agent".to_owned(), USER_AGENT.to_owned()),
                 (EVENT_ID_HEADER.to_owned(), event_id.to_owned()),
                 (EVENT_TIME_HEADER.to_owned(), timestamp),
-                (
-                    SIGNATURE_HEADER.to_owned(),
-                    format!("sha256={signature}"),
-                ),
+                (SIGNATURE_HEADER.to_owned(), format!("sha256={signature}")),
             ],
             body,
             follow_redirects: false,
@@ -656,7 +651,10 @@ mod tests {
             Err(EventWebhookDeliveryError::Permanent)
         );
         assert_eq!(
-            private.deliver(&subscription("https://example.com/events?token=x"), &event()),
+            private.deliver(
+                &subscription("https://example.com/events?token=x"),
+                &event()
+            ),
             Err(EventWebhookDeliveryError::Permanent)
         );
     }
