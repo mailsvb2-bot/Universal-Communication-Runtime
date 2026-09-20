@@ -481,11 +481,17 @@ fn validate_live_config(config: &WebRtcSessionConfig) -> Result<(), WebRtcProvid
     Ok(())
 }
 
+struct LiveWebRtcSession {
+    peer_connection: Arc<RTCPeerConnection>,
+    e2ee_channel: Option<LiveWebRtcE2eeChannel>,
+}
+
 async fn run_live_webrtc_worker(
     mut commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
     shutdown: Arc<AtomicBool>,
+    e2ee_ingress: Option<tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
 ) {
-    let mut sessions = HashMap::<String, Arc<RTCPeerConnection>>::new();
+    let mut sessions = HashMap::<String, LiveWebRtcSession>::new();
     while !shutdown.load(Ordering::Acquire) {
         let Some(command) = commands.recv().await else {
             break;
@@ -498,7 +504,17 @@ async fn run_live_webrtc_worker(
                 config,
                 deadline,
                 reply,
-            } => handle_live_create(&mut sessions, &shutdown, config, deadline, reply).await,
+            } => {
+                handle_live_create(
+                    &mut sessions,
+                    &shutdown,
+                    e2ee_ingress.as_ref(),
+                    config,
+                    deadline,
+                    reply,
+                )
+                .await;
+            }
             LiveWebRtcCommand::SetRemoteDescription {
                 description,
                 deadline,
@@ -509,6 +525,12 @@ async fn run_live_webrtc_worker(
                 deadline,
                 reply,
             } => handle_live_remote_candidate(&sessions, candidate, deadline, reply).await,
+            LiveWebRtcCommand::SendE2ee {
+                session_id,
+                envelope,
+                deadline,
+                reply,
+            } => handle_live_send_e2ee(&mut sessions, session_id, envelope, deadline, reply).await,
             LiveWebRtcCommand::Close {
                 session_id,
                 deadline,
@@ -517,14 +539,15 @@ async fn run_live_webrtc_worker(
         }
     }
     commands.close();
-    for (_, peer_connection) in sessions {
-        let _ = peer_connection.close().await;
+    for (_, session) in sessions {
+        let _ = session.peer_connection.close().await;
     }
 }
 
 async fn handle_live_create(
-    sessions: &mut HashMap<String, Arc<RTCPeerConnection>>,
+    sessions: &mut HashMap<String, LiveWebRtcSession>,
     shutdown: &AtomicBool,
+    e2ee_ingress: Option<&tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
     config: WebRtcSessionConfig,
     deadline: Instant,
     reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
@@ -542,14 +565,15 @@ async fn handle_live_create(
         let _ = reply.send(Err(WebRtcProviderError::CapacityExceeded));
         return;
     }
-    match create_live_peer_connection(&config).await {
-        Ok((peer_connection, description)) => {
+    match create_live_peer_connection(&config, e2ee_ingress.cloned()).await {
+        Ok((session, description)) => {
             if shutdown.load(Ordering::Acquire) || command_expired(deadline) {
-                let _ = peer_connection.close().await;
+                let _ = session.peer_connection.close().await;
                 let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
                 return;
             }
-            sessions.insert(key.clone(), Arc::clone(&peer_connection));
+            let peer_connection = Arc::clone(&session.peer_connection);
+            sessions.insert(key.clone(), session);
             if reply.send(Ok(description)).is_err() {
                 sessions.remove(&key);
                 let _ = peer_connection.close().await;
@@ -562,7 +586,7 @@ async fn handle_live_create(
 }
 
 async fn handle_live_remote_description(
-    sessions: &HashMap<String, Arc<RTCPeerConnection>>,
+    sessions: &HashMap<String, LiveWebRtcSession>,
     description: WebRtcSessionDescription,
     deadline: Instant,
     reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
@@ -572,7 +596,9 @@ async fn handle_live_remote_description(
         return;
     }
     let result = match sessions.get(&session_key(&description.session_id)) {
-        Some(peer_connection) => set_engine_remote_description(peer_connection, &description).await,
+        Some(session) => {
+            set_engine_remote_description(&session.peer_connection, &description).await
+        },
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
     let _ = reply.send(result);
@@ -589,14 +615,36 @@ async fn handle_live_remote_candidate(
         return;
     }
     let result = match sessions.get(&session_key(&candidate.session_id)) {
-        Some(peer_connection) => add_engine_remote_candidate(peer_connection, &candidate).await,
+        Some(session) => add_engine_remote_candidate(&session.peer_connection, &candidate).await,
+        None => Err(WebRtcProviderError::SessionUnavailable),
+    };
+    let _ = reply.send(result);
+}
+
+async fn handle_live_send_e2ee(
+    sessions: &mut HashMap<String, LiveWebRtcSession>,
+    session_id: SessionId,
+    envelope: SfuForwardEnvelope,
+    deadline: Instant,
+    reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
+) {
+    if command_expired(deadline) {
+        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+        return;
+    }
+    let result = match sessions.get_mut(&session_key(&session_id)) {
+        Some(LiveWebRtcSession {
+            e2ee_channel: Some(channel),
+            ..
+        }) => channel.send(&envelope, deadline).await,
+        Some(_) => Err(WebRtcProviderError::SessionUnavailable),
         None => Err(WebRtcProviderError::SessionUnavailable),
     };
     let _ = reply.send(result);
 }
 
 async fn handle_live_close(
-    sessions: &mut HashMap<String, Arc<RTCPeerConnection>>,
+    sessions: &mut HashMap<String, LiveWebRtcSession>,
     session_id: SessionId,
     deadline: Instant,
     reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
@@ -606,7 +654,8 @@ async fn handle_live_close(
         return;
     }
     let result = match sessions.remove(&session_key(&session_id)) {
-        Some(peer_connection) => peer_connection
+        Some(session) => session
+            .peer_connection
             .close()
             .await
             .map_err(|_| WebRtcProviderError::Internal),
@@ -621,7 +670,8 @@ fn command_expired(deadline: Instant) -> bool {
 
 async fn create_live_peer_connection(
     config: &WebRtcSessionConfig,
-) -> Result<(Arc<RTCPeerConnection>, WebRtcSessionDescription), WebRtcProviderError> {
+    e2ee_ingress: Option<tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
+) -> Result<(LiveWebRtcSession, WebRtcSessionDescription), WebRtcProviderError> {
     let mut media_engine = MediaEngine::default();
     media_engine
         .register_default_codecs()
@@ -649,6 +699,13 @@ async fn create_live_peer_connection(
             .await
             .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?,
     );
+
+    let e2ee_channel = match e2ee_ingress {
+        Some(ingress_tx) => Some(
+            create_live_e2ee_data_channel(&peer_connection, &config.session_id, ingress_tx).await?,
+        ),
+        None => None,
+    };
 
     let result = async {
         peer_connection
@@ -687,7 +744,13 @@ async fn create_live_peer_connection(
     .await;
 
     match result {
-        Ok(description) => Ok((peer_connection, description)),
+        Ok(description) => Ok((
+            LiveWebRtcSession {
+                peer_connection,
+                e2ee_channel,
+            },
+            description,
+        )),
         Err(error) => {
             let _ = peer_connection.close().await;
             Err(error)
