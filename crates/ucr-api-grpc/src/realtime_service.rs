@@ -18,8 +18,9 @@ use ucr_model::{
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
     ConferenceSubscriptionSet, CorrelationContext, CryptoSuite, DeviceId, DeviceLifecycleState,
     DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalKind, ScopedPrincipal,
-    SessionId, SfuForwardEnvelope, TenantScope,
+    GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind, OpaqueId, PrincipalKind,
+    ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope, WebRtcIceCandidate, WebRtcSdpType,
+    WebRtcSessionDescription,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for,
@@ -30,6 +31,9 @@ use ucr_realtime::{
     RealtimeRegistryError, RealtimeSessionClaims, RealtimeSessionRegistry,
 };
 use ucr_sfu::PreparedSfuCapabilities;
+use ucr_webrtc::{
+    PreparedWebRtcProvider, WebRtcProvider, WebRtcProviderError, WebRtcSessionConfigFactory,
+};
 
 use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_opaque,
@@ -41,6 +45,37 @@ pub const REALTIME_AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const REALTIME_BEARER_PREFIX: &str = "Bearer ";
 const REALTIME_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
 
+#[derive(Clone)]
+pub struct RealtimeWebRtcDependencies {
+    provider: Arc<dyn WebRtcProvider>,
+    config: Arc<WebRtcSessionConfigFactory>,
+}
+
+impl RealtimeWebRtcDependencies {
+    #[must_use]
+    pub fn new(provider: Arc<dyn WebRtcProvider>, config: Arc<WebRtcSessionConfigFactory>) -> Self {
+        Self { provider, config }
+    }
+
+    #[must_use]
+    pub fn prepared() -> Self {
+        Self::new(
+            Arc::new(PreparedWebRtcProvider),
+            Arc::new(WebRtcSessionConfigFactory::default()),
+        )
+    }
+}
+
+impl fmt::Debug for RealtimeWebRtcDependencies {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RealtimeWebRtcDependencies")
+            .field("provider", &self.provider)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
 pub struct GrpcRealtimeService<C, A, S> {
     clock: Arc<C>,
     authorization: Arc<A>,
@@ -48,17 +83,40 @@ pub struct GrpcRealtimeService<C, A, S> {
     join_issuer: Arc<JoinTokenIssuer>,
     registry: Arc<RealtimeSessionRegistry>,
     conference_state: Arc<ConferenceRuntimeState>,
+    webrtc_provider: Arc<dyn WebRtcProvider>,
+    webrtc_config: Arc<WebRtcSessionConfigFactory>,
 }
 
 impl<C, A, S> GrpcRealtimeService<C, A, S> {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         clock: Arc<C>,
         authorization: Arc<A>,
         store: Arc<S>,
         join_issuer: Arc<JoinTokenIssuer>,
         registry: Arc<RealtimeSessionRegistry>,
         conference_state: Arc<ConferenceRuntimeState>,
+    ) -> Self {
+        Self::with_webrtc(
+            clock,
+            authorization,
+            store,
+            join_issuer,
+            registry,
+            conference_state,
+            RealtimeWebRtcDependencies::prepared(),
+        )
+    }
+
+    #[must_use]
+    pub fn with_webrtc(
+        clock: Arc<C>,
+        authorization: Arc<A>,
+        store: Arc<S>,
+        join_issuer: Arc<JoinTokenIssuer>,
+        registry: Arc<RealtimeSessionRegistry>,
+        conference_state: Arc<ConferenceRuntimeState>,
+        webrtc: RealtimeWebRtcDependencies,
     ) -> Self {
         Self {
             clock,
@@ -67,6 +125,8 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             join_issuer,
             registry,
             conference_state,
+            webrtc_provider: webrtc.provider,
+            webrtc_config: webrtc.config,
         }
     }
 }
@@ -80,6 +140,8 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             join_issuer: Arc::clone(&self.join_issuer),
             registry: Arc::clone(&self.registry),
             conference_state: Arc::clone(&self.conference_state),
+            webrtc_provider: Arc::clone(&self.webrtc_provider),
+            webrtc_config: Arc::clone(&self.webrtc_config),
         }
     }
 }
@@ -368,6 +430,234 @@ where
         });
         Ok(Response::new(Box::pin(stream)))
     }
+
+    async fn start_web_rtc(
+        &self,
+        request: Request<pb::RealtimeStartWebRtcRequest>,
+    ) -> Result<Response<pb::RealtimeStartWebRtcResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let lookup = decode_realtime_lookup(request.into_inner());
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => {
+                match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
+                    Ok(claims) => {
+                        let now_ms = self.now();
+                        match now_ms.and_then(|value| {
+                            u64::try_from(value.div_euclid(1_000))
+                                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+                        }) {
+                            Ok(now_unix_seconds) => {
+                                let expires_at_unix_seconds =
+                                    u64::try_from(claims.expires_at_unix_ms.div_euclid(1_000))
+                                        .map_err(|_| {
+                                            CanonicalError::new(CanonicalErrorCode::Internal)
+                                        });
+                                match expires_at_unix_seconds.and_then(|expires_at_unix_seconds| {
+                                    self.webrtc_config
+                                        .session_config_until(
+                                            &claims.session_id,
+                                            now_unix_seconds,
+                                            expires_at_unix_seconds,
+                                        )
+                                        .map_err(map_webrtc_provider_error)
+                                }) {
+                                    Ok(config) => {
+                                        let ice_servers = config.ice_servers.clone();
+                                        let provider = Arc::clone(&self.webrtc_provider);
+                                        match tokio::task::spawn_blocking(move || {
+                                            provider.create_session(&config)
+                                        })
+                                        .await
+                                        {
+                                            Ok(Ok(description)) => Ok(pb::RealtimeWebRtcOffer {
+                                                description: Some(pb_webrtc_description(
+                                                    &description,
+                                                )),
+                                                ice_servers: ice_servers
+                                                    .iter()
+                                                    .map(pb_webrtc_ice_server)
+                                                    .collect(),
+                                            }),
+                                            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
+                                            Err(_) => Err(CanonicalError::new(
+                                                CanonicalErrorCode::Internal,
+                                            )),
+                                        }
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeStartWebRtcResponse {
+            result: Some(match result {
+                Ok(offer) => pb::realtime_start_web_rtc_response::Result::Offer(offer),
+                Err(error) => pb::realtime_start_web_rtc_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn set_web_rtc_remote_description(
+        &self,
+        request: Request<pb::RealtimeSetWebRtcRemoteDescriptionRequest>,
+    ) -> Result<Response<pb::RealtimeSetWebRtcRemoteDescriptionResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let description = body
+            .description
+            .ok_or_else(invalid_argument)
+            .and_then(decode_webrtc_description);
+        let result = match (token, lookup, description) {
+            (Ok(token), Ok((scope, call_id, session_id)), Ok(description)) => {
+                match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
+                    Ok(claims) => {
+                        let description = WebRtcSessionDescription {
+                            session_id: claims.session_id.clone(),
+                            sdp_type: description.0,
+                            sdp: description.1,
+                        };
+                        let provider = Arc::clone(&self.webrtc_provider);
+                        match tokio::task::spawn_blocking(move || {
+                            provider.set_remote_description(&description)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => Ok(pb_acknowledgement(acknowledgement_for(
+                                claims.session_id.as_opaque().clone(),
+                            ))),
+                            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
+                            Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeSetWebRtcRemoteDescriptionResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::realtime_set_web_rtc_remote_description_response::Result::Acknowledgement(
+                        acknowledgement,
+                    )
+                }
+                Err(error) => {
+                    pb::realtime_set_web_rtc_remote_description_response::Result::Error(pb_error(
+                        error,
+                    ))
+                }
+            }),
+        }))
+    }
+
+    async fn add_web_rtc_ice_candidate(
+        &self,
+        request: Request<pb::RealtimeAddWebRtcIceCandidateRequest>,
+    ) -> Result<Response<pb::RealtimeAddWebRtcIceCandidateResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => {
+                match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
+                    Ok(claims) => {
+                        let mline_index = body
+                            .sdp_mline_index
+                            .map(u16::try_from)
+                            .transpose()
+                            .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument));
+                        match mline_index {
+                            Ok(sdp_mline_index) => {
+                                let candidate = WebRtcIceCandidate {
+                                    session_id: claims.session_id.clone(),
+                                    candidate: body.candidate,
+                                    sdp_mid: body.sdp_mid,
+                                    sdp_mline_index,
+                                };
+                                let provider = Arc::clone(&self.webrtc_provider);
+                                match tokio::task::spawn_blocking(move || {
+                                    provider.add_remote_candidate(&candidate)
+                                })
+                                .await
+                                {
+                                    Ok(Ok(())) => Ok(pb_acknowledgement(acknowledgement_for(
+                                        claims.session_id.as_opaque().clone(),
+                                    ))),
+                                    Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
+                                    Err(_) => {
+                                        Err(CanonicalError::new(CanonicalErrorCode::Internal))
+                                    }
+                                }
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeAddWebRtcIceCandidateResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::realtime_add_web_rtc_ice_candidate_response::Result::Acknowledgement(
+                        acknowledgement,
+                    )
+                }
+                Err(error) => {
+                    pb::realtime_add_web_rtc_ice_candidate_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
+    async fn close_web_rtc(
+        &self,
+        request: Request<pb::RealtimeCloseWebRtcRequest>,
+    ) -> Result<Response<pb::RealtimeCloseWebRtcResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let lookup = decode_realtime_lookup(request.into_inner());
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => {
+                match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
+                    Ok(claims) => {
+                        let provider = Arc::clone(&self.webrtc_provider);
+                        let close_session_id = claims.session_id.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            provider.close_session(&close_session_id)
+                        })
+                        .await
+                        {
+                            Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => {
+                                Ok(pb_acknowledgement(acknowledgement_for(
+                                    claims.session_id.as_opaque().clone(),
+                                )))
+                            }
+                            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
+                            Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeCloseWebRtcResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::realtime_close_web_rtc_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::realtime_close_web_rtc_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
 }
 
 impl<C, A, S> GrpcRealtimeService<C, A, S>
@@ -387,6 +677,21 @@ where
         self.clock
             .now_unix_ms()
             .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))
+    }
+
+    fn authenticated_webrtc_claims(
+        &self,
+        token: &str,
+        scope: &TenantScope,
+        call_id: &CallId,
+        session_id: &SessionId,
+    ) -> Result<RealtimeSessionClaims, CanonicalError> {
+        let claims = self.authenticated_claims(token, scope, call_id, session_id)?;
+        self.require_accepted_conference_participant(&claims)?;
+        self.registry
+            .heartbeat(&claims, self.now()?)
+            .map_err(map_registry_error)?;
+        Ok(claims)
     }
 
     fn redeemed_claims(
@@ -697,6 +1002,26 @@ impl From<pb::RealtimeJoinRequest> for RealtimeLookupFields {
 
 impl From<pb::RealtimeLeaveRequest> for RealtimeLookupFields {
     fn from(value: pb::RealtimeLeaveRequest) -> Self {
+        Self {
+            scope: value.scope,
+            call_id: value.call_id,
+            session_id: value.session_id,
+        }
+    }
+}
+
+impl From<pb::RealtimeStartWebRtcRequest> for RealtimeLookupFields {
+    fn from(value: pb::RealtimeStartWebRtcRequest) -> Self {
+        Self {
+            scope: value.scope,
+            call_id: value.call_id,
+            session_id: value.session_id,
+        }
+    }
+}
+
+impl From<pb::RealtimeCloseWebRtcRequest> for RealtimeLookupFields {
+    fn from(value: pb::RealtimeCloseWebRtcRequest) -> Self {
         Self {
             scope: value.scope,
             call_id: value.call_id,
@@ -1033,6 +1358,56 @@ fn require_durable_grant_matches_claims(
         return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
     }
     Ok(())
+}
+
+fn pb_webrtc_description(description: &WebRtcSessionDescription) -> pb::WebRtcDescription {
+    pb::WebRtcDescription {
+        sdp_type: match description.sdp_type {
+            WebRtcSdpType::Offer => pb::WebRtcSdpType::Offer as i32,
+            WebRtcSdpType::Answer => pb::WebRtcSdpType::Answer as i32,
+        },
+        sdp: description.sdp.clone(),
+    }
+}
+
+fn pb_webrtc_ice_server(server: &IceServerConfig) -> pb::WebRtcIceServer {
+    pb::WebRtcIceServer {
+        urls: server.urls.clone(),
+        username: server.username.clone(),
+        credential: server.credential.clone(),
+    }
+}
+
+fn decode_webrtc_description(
+    description: pb::WebRtcDescription,
+) -> Result<(WebRtcSdpType, String), CanonicalError> {
+    let sdp_type = match pb::WebRtcSdpType::try_from(description.sdp_type) {
+        Ok(pb::WebRtcSdpType::Offer) => WebRtcSdpType::Offer,
+        Ok(pb::WebRtcSdpType::Answer) => WebRtcSdpType::Answer,
+        Ok(pb::WebRtcSdpType::Unspecified) | Err(_) => {
+            return Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument));
+        }
+    };
+    Ok((sdp_type, description.sdp))
+}
+
+const fn map_webrtc_provider_error(error: WebRtcProviderError) -> CanonicalError {
+    match error {
+        WebRtcProviderError::InvalidProtocol(_) => {
+            CanonicalError::new(CanonicalErrorCode::InvalidArgument)
+        }
+        WebRtcProviderError::SessionUnavailable => {
+            CanonicalError::new(CanonicalErrorCode::NotFound)
+        }
+        WebRtcProviderError::Conflict => CanonicalError::new(CanonicalErrorCode::Conflict),
+        WebRtcProviderError::CapacityExceeded => {
+            CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
+        }
+        WebRtcProviderError::TemporarilyUnavailable => {
+            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+        }
+        WebRtcProviderError::Internal => CanonicalError::new(CanonicalErrorCode::Internal),
+    }
 }
 
 fn map_join_token_error(error: JoinTokenError) -> CanonicalError {

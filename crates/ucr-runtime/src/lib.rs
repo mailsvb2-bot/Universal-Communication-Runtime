@@ -8,30 +8,48 @@ use tonic::transport::Server;
 use ucr_api_grpc::{
     GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
     GrpcIntegrationService, GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService,
-    GrpcUniversalConferenceService, call_service_server, conference_service_server,
-    device_service_server, event_service_server, group_service_server, integration_service_server,
-    realtime_service_server, store_forward_service_server, sync_service_server,
-    universal_conference_service_server,
+    GrpcUniversalConferenceService, RealtimeWebRtcDependencies, call_service_server,
+    conference_service_server, device_service_server, event_service_server, group_service_server,
+    integration_service_server, realtime_service_server, store_forward_service_server,
+    sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
     EventWebhookDispatcher, StorageHealth, StorageProvider, SystemEventDeliveryClock,
     SystemServiceQuotaClock, WebhookDispatchOutcome,
 };
-use ucr_model::{EventSubscriptionId, NamespaceId, OpaqueId, TenantId, TenantScope};
+use ucr_model::{
+    EventSubscriptionId, IceTransportPolicy, NamespaceId, OpaqueId, TenantId, TenantScope,
+};
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_storage_sqlite::SqliteLocalStore;
 use ucr_webhook::{
     HardenedWebhookSink, NativeTlsWebhookExecutor, SystemWebhookDnsResolver, WebhookSigningSecret,
 };
+use ucr_webrtc::{
+    LiveWebRtcProvider, TurnRestCredentialIssuer, TurnRestSecret, WebRtcProvider,
+    WebRtcSessionConfigFactory,
+};
 
 pub const DEFAULT_RUNTIME_BIND: &str = "127.0.0.1:50051";
 pub const RUNTIME_MODE: &str = "local-daemon";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct RealtimeRuntimeConfig {
     join_base_url: String,
     join_token_key: JoinTokenKey,
+    webrtc_config: Arc<WebRtcSessionConfigFactory>,
+}
+
+impl core::fmt::Debug for RealtimeRuntimeConfig {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("RealtimeRuntimeConfig")
+            .field("join_base_url", &self.join_base_url)
+            .field("join_token_key", &"<redacted>")
+            .field("webrtc_config", &self.webrtc_config)
+            .finish()
+    }
 }
 
 impl RealtimeRuntimeConfig {
@@ -48,7 +66,41 @@ impl RealtimeRuntimeConfig {
         Ok(Self {
             join_base_url,
             join_token_key,
+            webrtc_config: Arc::new(WebRtcSessionConfigFactory::default()),
         })
+    }
+
+    /// Adds deployment STUN/TURN configuration for browser/mobile peer connections.
+    ///
+    /// # Errors
+    /// Rejects invalid ICE URLs, TURN without a secret, invalid TTL, or excessive server counts.
+    pub fn with_webrtc_ice(
+        mut self,
+        stun_urls: Vec<String>,
+        turn_urls: Vec<String>,
+        turn_rest_secret: Option<[u8; 32]>,
+        turn_ttl_seconds: u32,
+        relay_only: bool,
+    ) -> Result<Self, String> {
+        let turn_issuer = turn_rest_secret
+            .map(TurnRestSecret::from_bytes)
+            .map(TurnRestCredentialIssuer::new);
+        let ice_transport_policy = if relay_only {
+            IceTransportPolicy::RelayOnly
+        } else {
+            IceTransportPolicy::All
+        };
+        self.webrtc_config = Arc::new(
+            WebRtcSessionConfigFactory::new(
+                stun_urls,
+                turn_urls,
+                turn_issuer,
+                turn_ttl_seconds,
+                ice_transport_policy,
+            )
+            .map_err(|error| format!("invalid WebRTC ICE configuration: {error:?}"))?,
+        );
+        Ok(self)
     }
 }
 
@@ -285,11 +337,7 @@ impl ProductionRuntime {
         let store = Arc::clone(&self.store);
         let authorization = Arc::clone(&self.store);
         let conference_state = Arc::new(ConferenceRuntimeState::new());
-        let join_issuer = Arc::new(
-            JoinTokenIssuer::new(config.join_token_key, config.join_base_url)
-                .map_err(|error| format!("configure realtime join issuer: {error:?}"))?,
-        );
-        let registry = Arc::new(RealtimeSessionRegistry::default());
+        let (join_issuer, registry, webrtc) = realtime_dependencies(config)?;
 
         Server::builder()
             .add_service(integration_service_server(GrpcIntegrationService::new(
@@ -326,13 +374,14 @@ impl ProductionRuntime {
                     Arc::clone(&join_issuer),
                 ),
             ))
-            .add_service(realtime_service_server(GrpcRealtimeService::new(
+            .add_service(realtime_service_server(GrpcRealtimeService::with_webrtc(
                 Arc::clone(&clock),
                 Arc::clone(&authorization),
                 Arc::clone(&store),
                 Arc::clone(&join_issuer),
                 registry,
                 conference_state,
+                webrtc,
             )))
             .add_service(universal_conference_service_server(
                 GrpcUniversalConferenceService::with_join_issuer(
@@ -357,6 +406,36 @@ impl ProductionRuntime {
             .await
             .map_err(|error| format!("local realtime API server: {error}"))
     }
+}
+
+fn realtime_dependencies(
+    config: RealtimeRuntimeConfig,
+) -> Result<
+    (
+        Arc<JoinTokenIssuer>,
+        Arc<RealtimeSessionRegistry>,
+        RealtimeWebRtcDependencies,
+    ),
+    String,
+> {
+    let RealtimeRuntimeConfig {
+        join_base_url,
+        join_token_key,
+        webrtc_config,
+    } = config;
+    let join_issuer = Arc::new(
+        JoinTokenIssuer::new(join_token_key, join_base_url)
+            .map_err(|error| format!("configure realtime join issuer: {error:?}"))?,
+    );
+    let provider: Arc<dyn WebRtcProvider> = Arc::new(
+        LiveWebRtcProvider::new()
+            .map_err(|error| format!("start live WebRTC provider: {error:?}"))?,
+    );
+    Ok((
+        join_issuer,
+        Arc::new(RealtimeSessionRegistry::default()),
+        RealtimeWebRtcDependencies::new(provider, webrtc_config),
+    ))
 }
 
 /// Refuses plaintext remote exposure for the Phase-45 local-daemon production boundary.

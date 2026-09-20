@@ -68,7 +68,8 @@ pub use conference_service::{GrpcConferenceService, conference_service_server};
 
 mod realtime_service;
 pub use realtime_service::{
-    GrpcRealtimeService, REALTIME_AUTHORIZATION_METADATA_KEY, realtime_service_server,
+    GrpcRealtimeService, REALTIME_AUTHORIZATION_METADATA_KEY, RealtimeWebRtcDependencies,
+    realtime_service_server,
 };
 
 mod universal_conference_service;

@@ -108,6 +108,85 @@ message RealtimeSetSubscriptionsResponse {
   }
 }
 
+
+enum WebRtcSdpType {
+  WEB_RTC_SDP_TYPE_UNSPECIFIED = 0;
+  WEB_RTC_SDP_TYPE_OFFER = 1;
+  WEB_RTC_SDP_TYPE_ANSWER = 2;
+}
+
+message WebRtcIceServer {
+  repeated string urls = 1;
+  optional string username = 2;
+  optional string credential = 3;
+}
+
+message WebRtcDescription {
+  WebRtcSdpType sdp_type = 1;
+  string sdp = 2;
+}
+
+message RealtimeStartWebRtcRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+}
+
+message RealtimeWebRtcOffer {
+  WebRtcDescription description = 1;
+  repeated WebRtcIceServer ice_servers = 2;
+}
+
+message RealtimeStartWebRtcResponse {
+  oneof result {
+    RealtimeWebRtcOffer offer = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeSetWebRtcRemoteDescriptionRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  WebRtcDescription description = 4;
+}
+
+message RealtimeSetWebRtcRemoteDescriptionResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeAddWebRtcIceCandidateRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  string candidate = 4;
+  optional string sdp_mid = 5;
+  optional uint32 sdp_mline_index = 6;
+}
+
+message RealtimeAddWebRtcIceCandidateResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeCloseWebRtcRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+}
+
+message RealtimeCloseWebRtcResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 service RealtimeService {
   rpc JoinRealtime(RealtimeJoinRequest) returns (RealtimeJoinResponse);
   rpc HeartbeatRealtime(RealtimeHeartbeatRequest) returns (RealtimeHeartbeatResponse);
@@ -115,4 +194,8 @@ service RealtimeService {
   rpc SetSubscriptions(RealtimeSetSubscriptionsRequest) returns (RealtimeSetSubscriptionsResponse);
   rpc PublishMedia(RealtimePublishMediaRequest) returns (RealtimePublishMediaResponse);
   rpc SubscribeMedia(RealtimeSubscribeMediaRequest) returns (stream RealtimeDownlinkMedia);
+  rpc StartWebRtc(RealtimeStartWebRtcRequest) returns (RealtimeStartWebRtcResponse);
+  rpc SetWebRtcRemoteDescription(RealtimeSetWebRtcRemoteDescriptionRequest) returns (RealtimeSetWebRtcRemoteDescriptionResponse);
+  rpc AddWebRtcIceCandidate(RealtimeAddWebRtcIceCandidateRequest) returns (RealtimeAddWebRtcIceCandidateResponse);
+  rpc CloseWebRtc(RealtimeCloseWebRtcRequest) returns (RealtimeCloseWebRtcResponse);
 }

@@ -8,19 +8,27 @@
 <style>
 :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:dark}
 body{margin:0;background:#0b1020;color:#f8fafc;min-height:100vh;display:grid;place-items:center}
-main{width:min(92vw,720px);padding:24px}
+main{width:min(94vw,980px);padding:24px}
 .card{background:#111827;border:1px solid #334155;border-radius:18px;padding:22px;box-shadow:0 20px 60px #0008}
 h1{margin:0 0 10px;font-size:clamp(1.6rem,5vw,2.4rem)}
 p{color:#cbd5e1;line-height:1.45}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:16px 0}
 .metric{background:#0f172a;border-radius:12px;padding:12px}
 .metric b{display:block;font-size:1.2rem}
-button{border:0;border-radius:12px;padding:12px 16px;font:inherit;font-weight:700;cursor:pointer}
+.media{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:16px 0}
+.video-card{background:#020617;border:1px solid #334155;border-radius:14px;overflow:hidden}
+.video-card header{padding:8px 10px;color:#cbd5e1;font-size:.85rem}
+video{display:block;width:100%;aspect-ratio:16/9;background:#000;object-fit:cover}
+.controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
+select,button{border:0;border-radius:12px;padding:12px 14px;font:inherit}
+select{background:#0f172a;color:#f8fafc;border:1px solid #334155;min-width:0}
+button{font-weight:700;cursor:pointer}
 button.primary{background:#f8fafc;color:#0f172a}
 button.secondary{background:#334155;color:#f8fafc}
-button:disabled{opacity:.45;cursor:not-allowed}
+button:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 #status{white-space:pre-wrap;background:#020617;border-radius:12px;padding:12px;min-height:48px}
 .small{font-size:.85rem;color:#94a3b8}
+.hidden{display:none}
 </style>
 </head>
 <body>
@@ -30,45 +38,63 @@ button:disabled{opacity:.45;cursor:not-allowed}
 <p id="intro">Secure realtime session. Join credentials remain in this page fragment and are never placed in the request URL.</p>
 <div class="grid">
 <div class="metric"><span>State</span><b id="state">Ready</b></div>
+<div class="metric"><span>WebRTC</span><b id="webrtc-state">Idle</b></div>
 <div class="metric"><span>Encrypted packets</span><b id="packets">0</b></div>
 <div class="metric"><span>Expires</span><b id="expires">—</b></div>
+</div>
+<div class="media">
+<div class="video-card"><header>You</header><video id="local-video" autoplay muted playsinline></video></div>
+<div class="video-card"><header>Remote</header><video id="remote-video" autoplay playsinline></video></div>
+</div>
+<div class="controls">
+<select id="microphone" aria-label="Microphone"><option value="">Default microphone</option></select>
+<select id="camera" aria-label="Camera"><option value="">Default camera</option></select>
+<button id="mic-toggle" class="secondary" disabled>Mute microphone</button>
+<button id="camera-toggle" class="secondary" disabled>Turn camera off</button>
 </div>
 <div class="grid">
 <button id="join" class="primary">Join conference</button>
 <button id="leave" class="secondary" disabled>Leave</button>
 </div>
 <div id="status" role="status" aria-live="polite">Reading signed join grant…</div>
-<p class="small">This transport client never records media. Recording is a separate explicit UCR capability with consent and retention policy.</p>
+<p class="small">Media permission is requested only after joining. Recording is a separate explicit UCR capability with consent and retention policy.</p>
 </section>
 </main>
 <script>
 "use strict";
 const $=id=>document.getElementById(id);
-const ui={join:$("join"),leave:$("leave"),state:$("state"),packets:$("packets"),expires:$("expires"),status:$("status")};
-let token="", claims=null, heartbeatTimer=null, waitTimer=null, entryRetryTimer=null, streamAbort=null, streamRetryTimer=null, packetCount=0, sessionActive=false;
+const ui={
+  join:$("join"),leave:$("leave"),state:$("state"),webrtcState:$("webrtc-state"),
+  packets:$("packets"),expires:$("expires"),status:$("status"),
+  localVideo:$("local-video"),remoteVideo:$("remote-video"),
+  mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle")
+};
+let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null;
+let packetCount=0,sessionActive=false,peer=null,localStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false;
 const ENTRY_RETRY_MS=2000;
 const STREAM_RETRY_MS=1500;
+const WEBRTC_RETRY_MS=2000;
 
 function fail(message){ui.state.textContent="Error";ui.status.textContent=message;ui.join.disabled=true;}
 function b64url(s){s=s.replace(/-/g,"+").replace(/_/g,"/");while(s.length%4)s+="=";return Uint8Array.from(atob(s),c=>c.charCodeAt(0));}
 function readGrant(raw){
-  const payload=raw.split(".")[0]; if(!payload) throw new Error("Malformed join token");
-  const b=b64url(payload); let p=0;
+  const payload=raw.split(".")[0];if(!payload)throw new Error("Malformed join token");
+  const b=b64url(payload);let p=0;
   const u8=()=>{if(p>=b.length)throw new Error("Malformed grant");return b[p++];};
   const id=()=>{if(p+2>b.length)throw new Error("Malformed grant");const n=(b[p]<<8)|b[p+1];p+=2;if(p+n>b.length)throw new Error("Malformed grant");const v=new TextDecoder().decode(b.slice(p,p+n));p+=n;return v;};
-  const version=u8(); if(version!==1&&version!==2) throw new Error("Unsupported join token version");
-  const tenant_id=id(); const hasNs=u8(); const namespace_id=hasNs===1?id():null;
-  const call_id=id(); u8(); id(); const hasDevice=u8(); if(hasDevice===1) id();
-  const session_id=id(); const remaining=b.length-p;
-  if((version===1&&remaining!==16)||(version===2&&remaining!==25)) throw new Error("Malformed grant");
+  const version=u8();if(version!==1&&version!==2)throw new Error("Unsupported join token version");
+  const tenant_id=id();const hasNs=u8();const namespace_id=hasNs===1?id():null;
+  const call_id=id();u8();id();const hasDevice=u8();if(hasDevice===1)id();
+  const session_id=id();const remaining=b.length-p;
+  if((version===1&&remaining!==16)||(version===2&&remaining!==25))throw new Error("Malformed grant");
   const view=new DataView(b.buffer,b.byteOffset+p,remaining);
-  const issued=Number(view.getBigInt64(0,false)); const expires=Number(view.getBigInt64(8,false));
+  const issued=Number(view.getBigInt64(0,false));const expires=Number(view.getBigInt64(8,false));
   const not_before=version===2?Number(view.getBigInt64(16,false)):issued;
   return {tenant_id,namespace_id,call_id,session_id,issued,not_before,expires};
 }
 function body(){return {tenant_id:claims.tenant_id,namespace_id:claims.namespace_id,call_id:claims.call_id,session_id:claims.session_id};}
-async function api(path,payload,signal){
-  const r=await fetch(path,{method:"POST",headers:{"Authorization":"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify(payload),signal});
+async function api(path,payload,signal,keepalive=false){
+  const r=await fetch(path,{method:"POST",headers:{"Authorization":"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify(payload),signal,keepalive});
   if(!r.ok){
     let detail=null;try{detail=await r.clone().json();}catch(_){}
     const error=new Error(detail&&detail.message?detail.message:"Request failed: "+r.status);
@@ -79,47 +105,138 @@ async function api(path,payload,signal){
 }
 function scheduleStreamRetry(){
   if(!sessionActive||Date.now()>=claims.expires)return;
-  if(!navigator.onLine){ui.state.textContent="Reconnecting";ui.status.textContent="Network unavailable. Media will reconnect automatically.";return;}
+  if(!navigator.onLine){ui.state.textContent="Reconnecting";ui.status.textContent="Network unavailable. Realtime streams will reconnect automatically.";return;}
   if(streamRetryTimer)clearTimeout(streamRetryTimer);
   streamRetryTimer=setTimeout(()=>{streamRetryTimer=null;openStream();},STREAM_RETRY_MS);
 }
 async function openStream(){
   if(!sessionActive||Date.now()>=claims.expires||streamAbort)return;
-  const controller=new AbortController();
-  streamAbort=controller;
+  const controller=new AbortController();streamAbort=controller;
   try{
     const r=await api("/v1/realtime/media/stream",body(),controller.signal);
-    const reader=r.body.getReader(); const decoder=new TextDecoder(); let buffer="";
-    ui.state.textContent="Connected";
-    while(true){const {done,value}=await reader.read(); if(done)break; buffer+=decoder.decode(value,{stream:true});
-      let cut; while((cut=buffer.indexOf("\n\n"))>=0){const event=buffer.slice(0,cut);buffer=buffer.slice(cut+2);
+    const reader=r.body.getReader();const decoder=new TextDecoder();let buffer="";
+    while(true){
+      const {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});
+      let cut;while((cut=buffer.indexOf("\n\n"))>=0){const event=buffer.slice(0,cut);buffer=buffer.slice(cut+2);
         if(event.startsWith("event: media")){packetCount++;ui.packets.textContent=String(packetCount);}
       }
     }
-    if(sessionActive){ui.state.textContent="Reconnecting";ui.status.textContent="Media stream interrupted. Reconnecting…";}
   }catch(e){
-    if(e.name!=="AbortError"&&sessionActive){ui.state.textContent="Reconnecting";ui.status.textContent="Media stream interrupted: "+e.message;}
+    if(e.name!=="AbortError"&&sessionActive)ui.status.textContent="Realtime stream interrupted: "+e.message;
   }finally{
-    if(streamAbort===controller){
-      streamAbort=null;
-      if(sessionActive)scheduleStreamRetry();
-    }
+    if(streamAbort===controller){streamAbort=null;if(sessionActive)scheduleStreamRetry();}
   }
+}
+async function ensureLocalMedia(force=false){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error("Camera/microphone access is unavailable in this browser");
+  if(localStream&&!force)return localStream;
+  if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;}
+  const audio=ui.mic.value?{deviceId:{exact:ui.mic.value}}:true;
+  const video=ui.camera.value?{deviceId:{exact:ui.camera.value}}:true;
+  localStream=await navigator.mediaDevices.getUserMedia({audio,video});
+  ui.localVideo.srcObject=localStream;
+  ui.micToggle.disabled=false;ui.cameraToggle.disabled=false;
+  applyToggleLabels();
+  await refreshDevices();
+  return localStream;
+}
+async function refreshDevices(){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.enumerateDevices)return;
+  const devices=await navigator.mediaDevices.enumerateDevices();
+  const selectedMic=ui.mic.value,selectedCamera=ui.camera.value;
+  fillDevices(ui.mic,devices.filter(d=>d.kind==="audioinput"),"Default microphone",selectedMic);
+  fillDevices(ui.camera,devices.filter(d=>d.kind==="videoinput"),"Default camera",selectedCamera);
+}
+function fillDevices(select,devices,fallback,selected){
+  select.textContent="";
+  const first=document.createElement("option");first.value="";first.textContent=fallback;select.appendChild(first);
+  devices.forEach((device,index)=>{const option=document.createElement("option");option.value=device.deviceId;option.textContent=device.label||fallback+" "+(index+1);select.appendChild(option);});
+  if([...select.options].some(option=>option.value===selected))select.value=selected;
+}
+function applyToggleLabels(){
+  const audio=localStream&&localStream.getAudioTracks()[0],video=localStream&&localStream.getVideoTracks()[0];
+  ui.micToggle.textContent=audio&&audio.enabled?"Mute microphone":"Unmute microphone";
+  ui.cameraToggle.textContent=video&&video.enabled?"Turn camera off":"Turn camera on";
+}
+function teardownPeer(){
+  if(peer){peer.onicecandidate=null;peer.ontrack=null;peer.onconnectionstatechange=null;peer.close();peer=null;}
+  remoteStream=null;ui.remoteVideo.srcObject=null;ui.webrtcState.textContent="Idle";
+}
+async function closeServerPeer(keepalive=false){
+  if(!sessionActive)return;
+  try{await api("/v1/realtime/webrtc/close",body(),undefined,keepalive);}catch(_){}
+}
+function scheduleWebRtcRetry(){
+  if(!sessionActive||Date.now()>=claims.expires||restarting)return;
+  if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);
+  ui.webrtcState.textContent="Reconnecting";
+  webrtcRetryTimer=setTimeout(()=>{webrtcRetryTimer=null;restartWebRtc(false);},WEBRTC_RETRY_MS);
+}
+async function startWebRtc(forceMedia=false){
+  if(!sessionActive||!navigator.onLine)return;
+  const media=await ensureLocalMedia(forceMedia);
+  const response=await api("/v1/realtime/webrtc/start",body());
+  const offer=await response.json();
+  const pc=new RTCPeerConnection({iceServers:offer.ice_servers||[]});
+  peer=pc;remoteStream=new MediaStream();ui.remoteVideo.srcObject=remoteStream;
+  let remoteDescriptionAccepted=false;
+  const pendingCandidates=[];
+  const sendCandidate=async candidate=>{
+    if(!sessionActive||peer!==pc)return;
+    await api("/v1/realtime/webrtc/ice",{...body(),candidate:candidate.candidate,sdp_mid:candidate.sdpMid,sdp_mline_index:candidate.sdpMLineIndex});
+  };
+  media.getTracks().forEach(track=>pc.addTrack(track,media));
+  pc.ontrack=event=>{event.streams.forEach(stream=>stream.getTracks().forEach(track=>{if(!remoteStream.getTracks().some(existing=>existing.id===track.id))remoteStream.addTrack(track);}));};
+  pc.onicecandidate=event=>{
+    if(!event.candidate||!sessionActive)return;
+    if(!remoteDescriptionAccepted){pendingCandidates.push(event.candidate);return;}
+    sendCandidate(event.candidate).catch(e=>{ui.status.textContent="ICE candidate rejected: "+e.message;});
+  };
+  pc.onconnectionstatechange=()=>{
+    if(peer!==pc)return;
+    const state=pc.connectionState;ui.webrtcState.textContent=state||"Connecting";
+    if(state==="connected"){
+      if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
+      ui.state.textContent="Connected";ui.status.textContent="Camera and microphone are connected through WebRTC.";
+    }
+    if(state==="failed"||state==="disconnected")scheduleWebRtcRetry();
+  };
+  await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
+  const answer=await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  await api("/v1/realtime/webrtc/remote-description",{...body(),sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp});
+  remoteDescriptionAccepted=true;
+  for(const candidate of pendingCandidates.splice(0)){await sendCandidate(candidate);}
+  ui.webrtcState.textContent="Connecting";
+}
+async function restartWebRtc(forceMedia){
+  if(restarting||!sessionActive)return;
+  restarting=true;
+  try{
+    if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
+    await closeServerPeer();
+    teardownPeer();
+    await startWebRtc(forceMedia);
+  }catch(e){
+    ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC reconnect failed: "+e.message;
+    setTimeout(()=>{restarting=false;scheduleWebRtcRetry();},WEBRTC_RETRY_MS);
+    return;
+  }
+  restarting=false;
 }
 async function join(){
   try{
-    if(Date.now()<claims.not_before){
-      scheduleWaitingRoom();
-      return;
-    }
+    if(Date.now()<claims.not_before){scheduleWaitingRoom();return;}
     ui.join.disabled=true;ui.state.textContent="Joining";ui.status.textContent="Authenticating signed session grant…";
-    const r=await api("/v1/realtime/join",body()); const data=await r.json();
-    if(!data.ok) throw new Error(data.message||"Join rejected");
-    sessionActive=true;ui.state.textContent="Connected";ui.leave.disabled=false;ui.status.textContent="Realtime session active. Encrypted SFU downlink connected.";
-    if(data.expires_at_unix_ms) ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
+    const r=await api("/v1/realtime/join",body());const data=await r.json();
+    if(!data.ok)throw new Error(data.message||"Join rejected");
+    sessionActive=true;ui.state.textContent="Connected";ui.leave.disabled=false;
+    ui.status.textContent="Realtime session active. Requesting camera and microphone…";
+    if(data.expires_at_unix_ms)ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
     heartbeatTimer=setInterval(async()=>{try{await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});}catch(e){ui.status.textContent="Heartbeat failed: "+e.message;}},interval);
-    openStream().catch(e=>{if(e.name!=="AbortError")ui.status.textContent="Media stream closed: "+e.message;});
+    openStream().catch(e=>{if(e.name!=="AbortError")ui.status.textContent="Realtime stream closed: "+e.message;});
+    try{await startWebRtc(false);}catch(e){ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC start failed: "+e.message;scheduleWebRtcRetry();}
   }catch(e){
     if(e.code==="waiting_room"){scheduleEntryRetry();return;}
     ui.state.textContent="Rejected";ui.status.textContent=e.message;ui.join.disabled=false;
@@ -127,38 +244,44 @@ async function join(){
 }
 function scheduleEntryRetry(){
   if(Date.now()>=claims.expires){fail("Join grant has expired");return;}
-  ui.state.textContent="Waiting";ui.join.disabled=true;
-  ui.status.textContent="Waiting for the host to open conference entry…";
+  ui.state.textContent="Waiting";ui.join.disabled=true;ui.status.textContent="Waiting for the host to open conference entry…";
   if(entryRetryTimer)clearTimeout(entryRetryTimer);
   entryRetryTimer=setTimeout(()=>{entryRetryTimer=null;join();},ENTRY_RETRY_MS);
 }
 async function leave(){
-  sessionActive=false;ui.leave.disabled=true;if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
-  try{await api("/v1/realtime/leave",body());}catch(_){}
+  const wasActive=sessionActive;
+  if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);
+  if(wasActive)await closeServerPeer();
+  teardownPeer();
+  if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;ui.localVideo.srcObject=null;}
+  sessionActive=false;ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;
+  if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
+  if(wasActive){try{await api("/v1/realtime/leave",body());}catch(_){}}
   ui.state.textContent="Left";ui.status.textContent="Conference session closed.";ui.join.disabled=false;
 }
 function scheduleWaitingRoom(){
   const delay=claims.not_before-Date.now();
   if(delay<=0){ui.state.textContent="Ready";ui.status.textContent="Signed grant active. Ready to join.";ui.join.disabled=false;return false;}
-  ui.state.textContent="Waiting";ui.join.disabled=true;
-  ui.status.textContent="The conference has not started yet. This page will join automatically when entry opens.";
+  ui.state.textContent="Waiting";ui.join.disabled=true;ui.status.textContent="The conference has not started yet. This page will join automatically when entry opens.";
   if(waitTimer)clearTimeout(waitTimer);
   waitTimer=setTimeout(()=>{waitTimer=null;ui.join.disabled=false;join();},delay);
   return true;
 }
-
+ui.micToggle.addEventListener("click",()=>{const track=localStream&&localStream.getAudioTracks()[0];if(track){track.enabled=!track.enabled;applyToggleLabels();}});
+ui.cameraToggle.addEventListener("click",()=>{const track=localStream&&localStream.getVideoTracks()[0];if(track){track.enabled=!track.enabled;applyToggleLabels();}});
+ui.mic.addEventListener("change",()=>{if(sessionActive)restartWebRtc(true);});
+ui.camera.addEventListener("change",()=>{if(sessionActive)restartWebRtc(true);});
 try{
   const params=new URLSearchParams(location.hash.slice(1));token=params.get("ucr_join")||"";
-  if(!token) throw new Error("Missing #ucr_join grant");
-  claims=readGrant(token);
-  if(Date.now()>=claims.expires) throw new Error("Join grant has expired");
+  if(!token)throw new Error("Missing #ucr_join grant");
+  claims=readGrant(token);if(Date.now()>=claims.expires)throw new Error("Join grant has expired");
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
-  if(!scheduleWaitingRoom()) ui.status.textContent="Signed grant loaded. Ready to join.";
+  if(!scheduleWaitingRoom())ui.status.textContent="Signed grant loaded. Ready to join.";
 }catch(e){fail(e.message);}
 ui.join.addEventListener("click",join);ui.leave.addEventListener("click",leave);
-window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.status.textContent="Network unavailable. Media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
-window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting encrypted media…";scheduleStreamRetry();}});
-window.addEventListener("pagehide",()=>{sessionActive=false;if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();});
+window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
+window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry();}});
+window.addEventListener("pagehide",()=>{if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 </body>
 </html>
