@@ -9,10 +9,9 @@ use ucr_api_grpc::{
     GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
     GrpcIntegrationService, GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService,
     GrpcUniversalConferenceService, RealtimeWebRtcDependencies, call_service_server,
-    conference_service_server,
-    device_service_server, event_service_server, group_service_server, integration_service_server,
-    realtime_service_server, store_forward_service_server, sync_service_server,
-    universal_conference_service_server,
+    conference_service_server, device_service_server, event_service_server, group_service_server,
+    integration_service_server, realtime_service_server, store_forward_service_server,
+    sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
