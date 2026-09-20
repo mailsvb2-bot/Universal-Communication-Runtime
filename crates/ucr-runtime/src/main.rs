@@ -105,9 +105,12 @@ async fn run() -> Result<(), String> {
                 .serve_realtime(bind, config)
                 .await
         }
-        "dispatch-webhook-once" => {
-            dispatch_webhook_once(&database, tenant_id, namespace_id, subscription_id)
-        }
+        "dispatch-webhook-once" => dispatch_webhook_once(
+            &database,
+            tenant_id,
+            namespace_id,
+            subscription_id,
+        ),
         _ => Err(usage()),
     }
 }
@@ -115,7 +118,7 @@ async fn run() -> Result<(), String> {
 fn dispatch_webhook_once(
     database: &PathBuf,
     tenant_id: Option<String>,
-    namespace_id: Option<String>,
+    namespace_id: Option<&str>,
     subscription_id: Option<String>,
 ) -> Result<(), String> {
     let tenant_id =
