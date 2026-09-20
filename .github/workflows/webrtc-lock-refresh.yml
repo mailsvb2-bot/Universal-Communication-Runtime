@@ -40,3 +40,5 @@ jobs:
         run: cargo check -p ucr-webrtc
       - name: Clippy live WebRTC slice
         run: cargo clippy -p ucr-webrtc --all-targets -- -D warnings
+      - name: Test live WebRTC peer lifecycle
+        run: cargo test -p ucr-webrtc -- --nocapture
