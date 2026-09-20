@@ -1075,8 +1075,7 @@ mod tests {
             IceTransportPolicy::All,
         )
         .expect("factory");
-        let session =
-            SessionId::from_opaque(OpaqueId::new("bounded-session").expect("session"));
+        let session = SessionId::from_opaque(OpaqueId::new("bounded-session").expect("session"));
         let config = factory
             .session_config_until(&session, 1_000, 1_090)
             .expect("bounded config");
