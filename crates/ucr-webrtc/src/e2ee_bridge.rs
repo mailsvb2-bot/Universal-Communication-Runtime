@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -161,6 +161,7 @@ impl LiveWebRtcE2eeChannel {
     pub(crate) async fn send(
         &mut self,
         envelope: &SfuForwardEnvelope,
+        deadline: Instant,
     ) -> Result<(), crate::WebRtcProviderError> {
         if self.channel.buffered_amount().await > MAX_WEBRTC_E2EE_BUFFERED_BYTES {
             return Err(crate::WebRtcProviderError::CapacityExceeded);
@@ -173,6 +174,9 @@ impl LiveWebRtcE2eeChannel {
         let chunks = encode_webrtc_e2ee_chunks(envelope, message_id)
             .map_err(|_| crate::WebRtcProviderError::Internal)?;
         for chunk in chunks {
+            if Instant::now() >= deadline {
+                return Err(crate::WebRtcProviderError::TemporarilyUnavailable);
+            }
             self.channel
                 .send(&Bytes::from(chunk))
                 .await
