@@ -803,7 +803,7 @@ mod tests {
             .expect("command sender")
             .clone();
         let deadline = Instant::now()
-            .checked_add(Duration::from_secs(60))
+            .checked_add(Duration::from_mins(1))
             .expect("future deadline");
         for index in 0..LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY {
             let (reply, _receiver) = std_mpsc::channel();
