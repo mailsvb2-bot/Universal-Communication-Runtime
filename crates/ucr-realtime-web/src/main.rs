@@ -936,6 +936,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn browser_client_exposes_live_webrtc_media_and_reconnect_flow() {
+        for required in [
+            "navigator.mediaDevices.getUserMedia",
+            "new RTCPeerConnection",
+            "/v1/realtime/webrtc/start",
+            "/v1/realtime/webrtc/remote-description",
+            "/v1/realtime/webrtc/ice",
+            "/v1/realtime/webrtc/close",
+            "scheduleWebRtcRetry",
+            "id=\"microphone\"",
+            "id=\"camera\"",
+            "id=\"mic-toggle\"",
+            "id=\"camera-toggle\"",
+        ] {
+            assert!(CLIENT_HTML.contains(required), "missing browser WebRTC proof: {required}");
+        }
+        assert!(!CLIENT_HTML.contains("UCR_WEBRTC_TURN_SECRET"));
+    }
+
+    #[test]
+    fn webrtc_offer_response_is_no_store() {
+        let response = json_response(
+            StatusCode::OK,
+            &WebRtcOfferResponse {
+                ok: true,
+                code: "webrtc_offer",
+                message: "WebRTC offer ready",
+                sdp_type: "offer",
+                sdp: "v=0\r\n".to_owned(),
+                ice_servers: vec![WebRtcIceServerResponse {
+                    urls: vec!["turns:turn.example.test:5349?transport=tcp".to_owned()],
+                    username: Some("ephemeral".to_owned()),
+                    credential: Some("secret".to_owned()),
+                }],
+            },
+        );
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL),
+            Some(&hyper::header::HeaderValue::from_static("no-store"))
+        );
+    }
+
+    #[test]
     fn browser_gateway_refuses_non_loopback_bind() {
         let local: SocketAddr = "127.0.0.1:8080".parse().expect("loopback");
         let remote: SocketAddr = "0.0.0.0:8080".parse().expect("remote");
