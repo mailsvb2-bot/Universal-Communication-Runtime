@@ -266,7 +266,7 @@ impl LiveWebRtcProvider {
     /// prevents synchronous callers from creating an unbounded amount of transport work.
     ///
     /// # Errors
-    /// Returns TemporarilyUnavailable if the worker runtime cannot be started.
+    /// Returns `TemporarilyUnavailable` if the worker runtime cannot be started.
     pub fn new() -> Result<Self, WebRtcProviderError> {
         let (command_tx, command_rx) =
             tokio::sync::mpsc::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
@@ -649,6 +649,28 @@ mod tests {
         assert_eq!(
             issuer.issue(&session_id, MAX_TURN_CREDENTIAL_TTL_SECONDS + 1, 1_000),
             Err(TurnCredentialError::InvalidTtl)
+        );
+    }
+
+    #[test]
+    fn live_provider_creates_audio_video_offer_and_closes_ephemeral_session() {
+        let provider = LiveWebRtcProvider::new().expect("live provider");
+        let session_id = SessionId::from_opaque(OpaqueId::new("live-session").expect("id"));
+        let config = WebRtcSessionConfig {
+            session_id: session_id.clone(),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        let offer = provider.create_session(&config).expect("live offer");
+        assert_eq!(offer.session_id, session_id);
+        assert_eq!(offer.sdp_type, ucr_model::WebRtcSdpType::Offer);
+        assert!(offer.sdp.starts_with("v=0"));
+        assert!(offer.sdp.contains("m=audio"));
+        assert!(offer.sdp.contains("m=video"));
+        assert_eq!(provider.close_session(&session_id), Ok(()));
+        assert_eq!(
+            provider.close_session(&session_id),
+            Err(WebRtcProviderError::SessionUnavailable)
         );
     }
 
