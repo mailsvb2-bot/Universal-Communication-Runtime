@@ -52,7 +52,7 @@ impl WebRtcE2eeReassembler {
         Self { pending: None }
     }
 
-    /// Accepts one ordered reliable DataChannel chunk and returns a complete canonical envelope
+    /// Accepts one ordered reliable `DataChannel` chunk and returns a complete canonical envelope
     /// only after the final bounded chunk arrives.
     ///
     /// # Errors
@@ -275,7 +275,7 @@ pub fn encode_webrtc_e2ee_envelope(
     Ok(output)
 }
 
-/// Splits one canonical encrypted SFU envelope into ordered DataChannel messages below the
+/// Splits one canonical encrypted SFU envelope into ordered `DataChannel` messages below the
 /// WebRTC-rs/browser per-message compatibility ceiling.
 ///
 /// # Errors
