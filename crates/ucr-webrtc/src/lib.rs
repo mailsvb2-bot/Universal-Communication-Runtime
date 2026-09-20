@@ -126,7 +126,7 @@ impl fmt::Debug for IssuedTurnCredential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("IssuedTurnCredential")
-            .field("username", &self.username)
+            .field("username", &"<redacted>")
             .field("credential", &"<redacted>")
             .field("expires_at_unix_seconds", &self.expires_at_unix_seconds)
             .finish()
@@ -256,7 +256,10 @@ mod tests {
         assert_eq!(first.expires_at_unix_seconds, 1_300);
         assert_eq!(first.username, "1300:session");
         assert!(!first.credential.is_empty());
-        assert!(!format!("{first:?}").contains(&first.credential));
+        let debug = format!("{first:?}");
+        assert!(!debug.contains(&first.username));
+        assert!(!debug.contains("session"));
+        assert!(!debug.contains(&first.credential));
         assert!(!format!("{issuer:?}").contains("07070707"));
         assert_eq!(
             issuer.issue(&session_id, MIN_TURN_CREDENTIAL_TTL_SECONDS - 1, 1_000),
