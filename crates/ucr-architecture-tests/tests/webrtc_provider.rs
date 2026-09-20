@@ -80,6 +80,13 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(runtime_main.contains("UCR_WEBRTC_TURN_SECRET_HEX"));
     assert!(browser.contains("navigator.mediaDevices.getUserMedia"));
     assert!(browser.contains("new RTCPeerConnection"));
+    assert!(browser.contains("pc.ondatachannel"));
+    assert!(browser.contains("ucr.e2ee.media.v1"));
+    assert!(browser.contains("window.ucrE2eeEndpoint"));
+    assert!(browser.contains("sendE2eeEnvelope"));
+    assert!(browser.contains("receiveE2eeChunk"));
+    assert!(!browser.contains("pc.addTrack("));
+    assert!(browser.contains("Unexpected RTP track rejected"));
     assert!(browser.contains("/v1/realtime/webrtc/start"));
     assert!(browser.contains("/v1/realtime/webrtc/remote-description"));
     assert!(browser.contains("/v1/realtime/webrtc/ice"));
