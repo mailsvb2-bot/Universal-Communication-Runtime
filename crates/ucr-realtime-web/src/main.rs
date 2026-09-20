@@ -950,7 +950,10 @@ mod tests {
             "id=\"mic-toggle\"",
             "id=\"camera-toggle\"",
         ] {
-            assert!(CLIENT_HTML.contains(required), "missing browser WebRTC proof: {required}");
+            assert!(
+                CLIENT_HTML.contains(required),
+                "missing browser WebRTC proof: {required}"
+            );
         }
         assert!(!CLIENT_HTML.contains("UCR_WEBRTC_TURN_SECRET"));
     }
