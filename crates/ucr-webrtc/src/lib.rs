@@ -11,6 +11,7 @@ use ucr_protocol::{
     CapabilityDescriptor, WebRtcProtocolError, canonical_ice_server, canonical_webrtc_candidate,
     canonical_webrtc_description, phase46_webrtc_capabilities,
 };
+use zeroize::ZeroizeOnDrop;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebRtcProviderError {
