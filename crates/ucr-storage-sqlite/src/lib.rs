@@ -4,6 +4,7 @@ mod anti_entropy_store;
 mod bridge_store;
 mod call_store;
 mod command_store;
+mod conference_join_grant_store;
 mod delivery_store;
 mod device_store;
 mod event_journal;
@@ -21,6 +22,7 @@ mod organization_store;
 mod permission_store;
 mod personal_node_store;
 mod principal_identity_binding_store;
+mod recording_store;
 mod recovery_plan;
 mod replay;
 mod service_control_store;
@@ -28,6 +30,7 @@ mod service_credential_store;
 mod store_forward_store;
 mod sync_store;
 mod trusted_key_store;
+mod universal_conference_store;
 
 use std::{fmt, path::Path, sync::Mutex, time::Duration};
 
@@ -71,7 +74,10 @@ const SQLITE_SCHEMA_V27: u32 = 27;
 const SQLITE_SCHEMA_V28: u32 = 28;
 const SQLITE_SCHEMA_V29: u32 = 29;
 const SQLITE_SCHEMA_V30: u32 = 30;
-pub const SQLITE_SCHEMA_VERSION: u32 = 31;
+const SQLITE_SCHEMA_V31: u32 = 31;
+const SQLITE_SCHEMA_V32: u32 = 32;
+const SQLITE_SCHEMA_V33: u32 = 33;
+pub const SQLITE_SCHEMA_VERSION: u32 = 34;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -453,7 +459,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return organization_store::verify_schema_v31(connection);
+        return conference_join_grant_store::verify_schema_v34(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -494,11 +500,14 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V28 => migrate_v28_to_v29(connection)?,
             SQLITE_SCHEMA_V29 => migrate_v29_to_v30(connection)?,
             SQLITE_SCHEMA_V30 => migrate_v30_to_v31(connection)?,
+            SQLITE_SCHEMA_V31 => migrate_v31_to_v32(connection)?,
+            SQLITE_SCHEMA_V32 => migrate_v32_to_v33(connection)?,
+            SQLITE_SCHEMA_V33 => migrate_v33_to_v34(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    organization_store::verify_schema_v31(connection)
+    conference_join_grant_store::verify_schema_v34(connection)
 }
 
 fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -558,6 +567,9 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     federation_store::create_v29_objects(&transaction)?;
     personal_node_store::create_v30_objects(&transaction)?;
     organization_store::create_v31_objects(&transaction)?;
+    universal_conference_store::create_v32_objects(&transaction)?;
+    recording_store::create_v33_objects(&transaction)?;
+    conference_join_grant_store::create_v34_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1019,12 +1031,57 @@ fn migrate_v30_to_v31(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     organization_store::create_v31_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V31)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     organization_store::verify_schema_v31(connection)
+}
+
+fn migrate_v31_to_v32(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    organization_store::verify_schema_v31(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    universal_conference_store::create_v32_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V32)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    universal_conference_store::verify_schema_v32(connection)
+}
+
+fn migrate_v32_to_v33(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    universal_conference_store::verify_schema_v32(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    recording_store::create_v33_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V33)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    recording_store::verify_schema_v33(connection)
+}
+
+fn migrate_v33_to_v34(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    recording_store::verify_schema_v33(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    conference_join_grant_store::create_v34_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    conference_join_grant_store::verify_schema_v34(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1319,7 +1376,34 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v34_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "DROP INDEX IF EXISTS conference_join_grants_conference;
+         DROP TABLE IF EXISTS conference_join_grants;",
+    )
+}
+
+#[cfg(test)]
+fn test_remove_v33_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v34_objects(connection)?;
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS recording_consents;
+         DROP TABLE IF EXISTS recordings;",
+    )
+}
+
+#[cfg(test)]
+fn test_remove_v32_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v33_objects(connection)?;
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS universal_conference_participants;
+         DROP TABLE IF EXISTS universal_conferences;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v31_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v32_objects(connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS organization_managed_devices;
          DROP TABLE IF EXISTS organization_managed_identities;
@@ -2313,6 +2397,51 @@ mod tests {
             reopened.append_event(&changed),
             Err(DurableStoreError::Conflict)
         );
+    }
+
+    #[test]
+    fn principal_event_projection_filters_unrelated_history_before_bound() {
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open store");
+        let event_type = "ucr.conference.attendance.joined.v1";
+        let target = PrincipalRef {
+            principal_id: PrincipalId::from_opaque(opaque("attendance-target")),
+            kind: PrincipalKind::Person,
+        };
+        let other = PrincipalRef {
+            principal_id: PrincipalId::from_opaque(opaque("attendance-other")),
+            kind: PrincipalKind::Person,
+        };
+
+        for id in [
+            "attendance-other-a",
+            "attendance-other-b",
+            "attendance-other-c",
+        ] {
+            let mut unrelated = event(id, "attendance-unrelated", b"unrelated");
+            unrelated.event_type = event_type.to_owned();
+            unrelated.actor = ActorRef {
+                actor_id: ActorId::from_opaque(other.principal_id.as_opaque().clone()),
+                kind: ActorKind::Person,
+                on_behalf_of: None,
+            };
+            store.append_event(&unrelated).expect("append unrelated");
+        }
+
+        let mut relevant = event("attendance-target-a", "attendance-target", b"target");
+        relevant.event_type = event_type.to_owned();
+        relevant.actor = ActorRef {
+            actor_id: ActorId::from_opaque(target.principal_id.as_opaque().clone()),
+            kind: ActorKind::Person,
+            on_behalf_of: None,
+        };
+        store.append_event(&relevant).expect("append target");
+
+        let projected = store
+            .events_for_types_by_principal(&relevant.scope, &[event_type], &target, 2)
+            .expect("principal projection");
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].event_id, relevant.event_id);
     }
 
     #[test]

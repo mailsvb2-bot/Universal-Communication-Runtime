@@ -65,6 +65,14 @@ jobs:
           "$runtime" check --database "$database" >"$check_out"
           "$runtime" metrics --database "$database" >"$metrics_out"
 
+          webhook_out="$RUNNER_TEMP/ucr-phase45-webhook.txt"
+          if "$runtime" dispatch-webhook-once --database "$database" \
+            --tenant-id phase45-tenant --subscription-id phase45-subscription >"$webhook_out" 2>&1; then
+            echo 'production webhook dispatch unexpectedly accepted missing signing key' >&2
+            exit 1
+          fi
+          grep -F 'UCR_WEBHOOK_SIGNING_KEY_HEX is required for dispatch-webhook-once' "$webhook_out"
+
           grep -F 'UCR_RUNTIME_INITIALIZED' "$init_out"
           grep -F 'UCR_RUNTIME_CHECK_OK' "$check_out"
           grep -F '"runtime_mode":"local-daemon"' "$check_out"
@@ -73,7 +81,7 @@ jobs:
           grep -F 'ucr_storage_schema_version' "$metrics_out"
           grep -F 'ucr_storage_healthy 1' "$metrics_out"
 
-          if cat "$init_out" "$check_out" "$metrics_out" | grep -Eiq 'credential|secret|private[_ -]?key|recovery[_ -]?secret|plaintext|message[_ -]?payload'; then
+          if cat "$init_out" "$check_out" "$metrics_out" "$webhook_out" | grep -Eiq 'credential|secret|private[_ -]?key|recovery[_ -]?secret|plaintext|message[_ -]?payload'; then
             echo 'production observability leaked a forbidden sensitive-data marker' >&2
             exit 1
           fi

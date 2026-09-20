@@ -1372,6 +1372,36 @@ mod tests {
     }
 
     #[test]
+    fn canonical_event_projection_filters_types_and_preserves_journal_order() {
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open projection store");
+        let first = event("event-projection-a", b"a");
+        let mut ignored = event("event-projection-ignored", b"ignored");
+        ignored.event_type = "ucr.other.event.v1".to_owned();
+        let third = event("event-projection-b", b"b");
+        store.append_event(&first).expect("append first");
+        store.append_event(&ignored).expect("append ignored");
+        store.append_event(&third).expect("append third");
+
+        let projected = store
+            .events_for_types(&scope(), &["ucr.message.created"], 8)
+            .expect("project events");
+        assert_eq!(projected.len(), 2);
+        assert_eq!(
+            projected[0].event_id.as_opaque().as_str(),
+            "event-projection-a"
+        );
+        assert_eq!(
+            projected[1].event_id.as_opaque().as_str(),
+            "event-projection-b"
+        );
+        assert_eq!(
+            store.events_for_types(&scope(), &["ucr.message.created"], 0),
+            Err(DurableStoreError::InvalidRecord)
+        );
+    }
+
+    #[test]
     fn v19_to_v20_migration_preserves_events_and_invents_no_subscriptions() {
         let db = TestDbPath::new();
         {

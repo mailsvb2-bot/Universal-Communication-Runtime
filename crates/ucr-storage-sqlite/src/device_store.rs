@@ -1,6 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{
-    DeviceLifecycleStore, DeviceReverificationProof, DurableStoreError,
+    DeviceLifecycleStore, DeviceReverificationProof, DurableStoreError, IdentityDeviceLookupStore,
     ReverifiedDeviceActivationStore,
 };
 use ucr_model::{
@@ -132,6 +132,102 @@ impl DeviceLifecycleStore for SqliteLocalStore {
     ) -> Result<Option<DeviceDescriptor>, DurableStoreError> {
         let connection = self.lock_connection()?;
         load_device(&connection, scope, device_id)
+    }
+}
+
+impl IdentityDeviceLookupStore for SqliteLocalStore {
+    fn devices_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<DeviceDescriptor>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        let namespace = namespace_storage_key(scope);
+        let limit = i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT device_id, state FROM devices
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND identity_id=?4
+                 ORDER BY device_id
+                 LIMIT ?5",
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    identity_id.as_opaque().as_str(),
+                    limit,
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let mut devices = Vec::new();
+        for row in rows {
+            let (device_id, state) = row.map_err(|error| map_sqlite_error(&error))?;
+            devices.push(DeviceDescriptor {
+                device_id: DeviceId::from_opaque(decode_id(&device_id)?),
+                identity_id: identity_id.clone(),
+                state: decode_state(&state)?,
+            });
+        }
+        Ok(devices)
+    }
+
+    fn active_devices_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<DeviceDescriptor>, DurableStoreError> {
+        if max_items == 0 || max_items > 64 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        let namespace = namespace_storage_key(scope);
+        let limit = i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT device_id, state FROM devices
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND identity_id=?4 AND state='active'
+                 ORDER BY device_id
+                 LIMIT ?5",
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    identity_id.as_opaque().as_str(),
+                    limit,
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let mut devices = Vec::new();
+        for row in rows {
+            let (device_id, state) = row.map_err(|error| map_sqlite_error(&error))?;
+            let state = decode_state(&state)?;
+            if state != DeviceLifecycleState::Active {
+                return Err(DurableStoreError::Corrupt);
+            }
+            devices.push(DeviceDescriptor {
+                device_id: DeviceId::from_opaque(decode_id(&device_id)?),
+                identity_id: identity_id.clone(),
+                state,
+            });
+        }
+        Ok(devices)
     }
 }
 
@@ -376,8 +472,9 @@ mod tests {
     use rusqlite::Connection;
     use ucr_core::{
         DeviceLifecycleStore, DeviceReverificationGate, DeviceReverificationVerificationError,
-        DeviceReverificationVerifier, DurableStoreError, ReverifiedDeviceActivationStore,
-        StorageProvider, TrustedSigningKeyStore, authorize_and_activate_reverified_device,
+        DeviceReverificationVerifier, DurableStoreError, IdentityDeviceLookupStore,
+        ReverifiedDeviceActivationStore, StorageProvider, TrustedSigningKeyStore,
+        authorize_and_activate_reverified_device,
     };
     use ucr_crypto::{TrustedKeyResolutionError, TrustedSigningKeyResolver};
     use ucr_model::{
@@ -456,6 +553,29 @@ mod tests {
         ) -> Result<(), DeviceReverificationVerificationError> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn identity_device_lookup_is_bounded_and_scope_exact() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        let scope = scope();
+        let active = device(DeviceLifecycleState::Active);
+        store.register_device(&scope, &active).expect("register");
+        assert_eq!(
+            store
+                .devices_for_identity(&scope, &active.identity_id, 4)
+                .expect("lookup"),
+            vec![active]
+        );
+        assert_eq!(
+            store.devices_for_identity(&scope, &IdentityId::from_opaque(oid("missing")), 4),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            store.devices_for_identity(&scope, &IdentityId::from_opaque(oid("identity-a")), 0),
+            Err(DurableStoreError::InvalidRecord)
+        );
     }
 
     #[test]

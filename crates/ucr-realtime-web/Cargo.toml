@@ -1,0 +1,29 @@
+[package]
+name = "ucr-realtime-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "ucr-realtime-web"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "=0.22.1"
+bytes = "=1.12.1"
+http-body-util = "=0.1.5"
+hyper = { version = "=1.11.1", features = ["http1", "server"] }
+hyper-util = { version = "=0.1.20", features = ["tokio"] }
+prost = "=0.14.4"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "sync"] }
+tokio-stream = "=0.1.17"
+tonic = { version = "=0.14.6", features = ["transport"] }
+ucr-api-grpc = { path = "../ucr-api-grpc" }
+
+[lints]
+workspace = true

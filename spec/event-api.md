@@ -28,7 +28,13 @@ Replay is explicit and idempotent through an opaque replay ID. A new replay gene
 
 Webhook subscriptions use the same durable subscription/retry/cursor/DLQ owner as polling. The canonical subscription persists only a bounded HTTPS destination; credentials, bearer tokens, signing secrets, DNS results, and provider-specific state are not persisted in it. Userinfo, query strings, and fragments are rejected from the canonical URI.
 
-`EventWebhookDispatcher` is a reference dispatcher over an injected `EventWebhookSink`. It performs one bounded Event attempt and commits ACK/retry/DLQ only after the sink result. Phase 14 deliberately does not implement an HTTP client, DNS resolver, TLS/listener, Internet route, or egress policy. A production HTTP webhook sink remains a separate deployment/integration layer and must enforce its own SSRF/egress/DNS/TLS policy; the Phase-15 UCR TCP transport is not that HTTP client.
+`EventWebhookDispatcher` remains the single durable delivery owner over an injected `EventWebhookSink`. It performs one bounded Event attempt and commits ACK/retry/DLQ only after the sink result.
+
+`ucr-webhook::HardenedWebhookSink` now provides the transport-adapter security boundary for production HTTPS delivery without creating a second Event queue or journal. It accepts HTTPS endpoints only; rejects userinfo, query strings and fragments; resolves the destination for each attempt; rejects loopback, private, link-local, multicast, documentation, carrier-grade NAT and other non-public addresses; passes the exact resolved IP set to the executor; disables redirects; emits a deterministic JSON Event envelope; and signs the timestamp, subscription, Event ID and body digest with HMAC-SHA256. Signing secrets remain deployment-owned and are zeroized rather than persisted in the canonical subscription.
+
+`ucr-webhook::NativeTlsWebhookExecutor` now provides the built-in blocking HTTPS executor. It connects only to the prevalidated exact IP set, preserves the original hostname for TLS SNI/HTTP Host and certificate validation, applies bounded connect/read/write timeouts, sends a bounded HTTP/1.1 POST, never follows redirects, and classifies the returned status back into the canonical retry/DLQ path. `SystemWebhookDnsResolver` performs per-attempt resolution before the SSRF policy is applied.
+
+`ucr-runtime dispatch-webhook-once` wires this path to the existing durable SQLite Event subscription owner. Tenant/subscription coordinates are explicit operator inputs, while `UCR_WEBHOOK_SIGNING_KEY_HEX` is process environment only and is never persisted or printed. One invocation performs exactly one bounded dispatch iteration; scheduling/continuous worker orchestration remains deployment-owned. The Phase-15 UCR TCP transport is not reused as an HTTP client.
 
 ## Persistence
 
@@ -42,4 +48,4 @@ The reference Tonic binding derives a finite request decode budget from the maxi
 
 ## Nonclaims
 
-Phase 14 does not claim exactly-once side effects, HTTP webhook delivery over the public Internet, Internet transport, DNS safety, distributed queues, a globally ordered Event log, or production deployment. Effectively-once consumer behavior is obtained only from canonical Event IDs, durable cursor state, idempotent ACK/reject/replay operations, and consumer-side idempotency. Phase 15 is implemented separately as a Prepared UCR TCP transport; Event webhook networking remains unimplemented.
+Phase 14 does not claim exactly-once side effects, an always-running webhook scheduler, distributed queues, a globally ordered Event log, or automatic deployment. The shipped one-shot runtime path provides real HTTPS delivery with DNS/TLS/SSRF/signature policy and canonical retry/DLQ state; continuous dispatch cadence remains an operator/deployment concern. Effectively-once consumer behavior is obtained only from canonical Event IDs, durable cursor state, idempotent ACK/reject/replay operations, and consumer-side idempotency. Phase 15 is implemented separately as a Prepared UCR TCP transport; Event webhook networking remains unimplemented.

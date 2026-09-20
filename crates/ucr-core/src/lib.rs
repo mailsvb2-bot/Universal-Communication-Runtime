@@ -9,10 +9,12 @@ mod integration_api;
 mod mesh;
 mod organization;
 mod personal_node;
+mod recording;
 mod recovery_workflow;
 mod service_auth;
 mod service_request;
 mod store_forward;
+mod universal_conference;
 
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, BridgeActionId, BridgeActionRecord,
@@ -24,15 +26,15 @@ use ucr_model::{
     EventSubscription, EventSubscriptionId, EventSummary, ExternalIdentityBinding,
     FederationPeerRecord, FederationTrustState, IdentityId, IdentityRecord, IntegrationId,
     IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PrincipalIdentityBinding,
-    PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
-    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
-    ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord,
+    PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
+    ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
+    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
+    TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
 pub use authorized_runtime::AuthorizedDurableRuntime;
-pub use call::CallStore;
+pub use call::{CallStore, GroupCallLookupStore};
 pub use event_api::{
     EventApiIngress, EventCursorRejection, EventDeliveryClock, EventDeliveryClockError,
     EventWebhookDeliveryError, EventWebhookDispatcher, EventWebhookSink, SystemEventDeliveryClock,
@@ -46,6 +48,7 @@ pub use integration_api::{
 pub use mesh::MeshGroupStore;
 pub use organization::OrganizationModeStore;
 pub use personal_node::PersonalNodeStore;
+pub use recording::RecordingStore;
 pub use recovery_workflow::{
     DeviceReverificationGate, DeviceReverificationProof, DeviceReverificationVerificationError,
     DeviceReverificationVerifier, RecoveryAdmissionProof, RecoveryAuthorityVerificationError,
@@ -63,6 +66,7 @@ pub use service_request::{
     SystemServiceQuotaClock,
 };
 pub use store_forward::StoreForwardStore;
+pub use universal_conference::{ConferenceJoinGrantStore, UniversalConferenceStore};
 
 /// A route candidate is transient runtime state, never canonical identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,6 +367,39 @@ pub trait DeviceLifecycleStore: StorageProvider {
         scope: &TenantScope,
         device_id: &DeviceId,
     ) -> Result<Option<DeviceDescriptor>, DurableStoreError>;
+}
+
+/// Read-only reverse lookup over the canonical Device lifecycle owner.
+///
+/// This does not create a second device registry. It exists so integration-facing flows can
+/// resolve already-registered devices for one canonical Identity without exposing `DeviceId` to
+/// external products.
+pub trait IdentityDeviceLookupStore: StorageProvider {
+    /// Lists a bounded set of exact-scope canonical Devices owned by one Identity.
+    ///
+    /// # Errors
+    /// Rejects zero/unbounded limits and explicit durable-store failures.
+    fn devices_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<DeviceDescriptor>, DurableStoreError>;
+
+    /// Lists only active canonical Devices owned by one Identity.
+    ///
+    /// Revoked and reverification-required history must not consume this bound. Integration-facing
+    /// conference flows use this projection when they need the current device set rather than
+    /// durable lifecycle history.
+    ///
+    /// # Errors
+    /// Rejects zero/unbounded limits and explicit durable-store failures.
+    fn active_devices_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<DeviceDescriptor>, DurableStoreError>;
 }
 
 /// Storage health is explicit and never inferred from successful construction.
@@ -763,6 +800,38 @@ pub trait PrincipalIdentityBindingStore: StorageProvider {
     ) -> Result<Option<PrincipalIdentityBinding>, DurableStoreError>;
 }
 
+/// Read-only reverse index over the canonical Principal→Identity association owner.
+///
+/// This does not create a second identity or principal registry. It exists for integration layers
+/// that start from an already-resolved Identity and must reuse an existing Principal when present.
+pub trait PrincipalIdentityLookupStore: StorageProvider {
+    /// Lists bounded canonical Principal bindings for one exact Root Identity.
+    ///
+    /// # Errors
+    /// Returns explicit invalid/storage/corrupt-state failures.
+    fn principal_identity_bindings_for_identity(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        max_items: usize,
+    ) -> Result<Vec<PrincipalIdentityBinding>, DurableStoreError>;
+
+    /// Lists bounded canonical Principal bindings of one exact kind for one Identity.
+    ///
+    /// Bindings of unrelated Principal kinds must not consume this bound. This remains a read-only
+    /// projection over the canonical Principal→Identity association owner.
+    ///
+    /// # Errors
+    /// Returns explicit invalid/storage/corrupt-state failures.
+    fn principal_identity_bindings_for_identity_kind(
+        &self,
+        scope: &TenantScope,
+        identity_id: &IdentityId,
+        kind: PrincipalKind,
+        max_items: usize,
+    ) -> Result<Vec<PrincipalIdentityBinding>, DurableStoreError>;
+}
+
 pub trait ExternalIdentityBindingStore: StorageProvider {
     /// Persists or deduplicates one canonical external Identity binding.
     ///
@@ -943,6 +1012,44 @@ pub trait EventJournalStore: StorageProvider {
     /// Returns explicit validation/conflict/storage failures. Reusing one
     /// scoped event ID with different semantics is a conflict.
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError>;
+
+    /// Returns a bounded oldest-first projection of canonical events matching any requested type.
+    ///
+    /// This is a read-only view over the same append-only Event journal. Implementations must not
+    /// create a second Event owner or expose private journal positions. Callers that require a
+    /// complete projection must fail closed when the returned vector fills their requested bound.
+    ///
+    /// # Errors
+    /// Rejects empty/unbounded requests and returns explicit storage/corruption failures.
+    fn events_for_types(
+        &self,
+        scope: &TenantScope,
+        event_types: &[&str],
+        max_items: usize,
+    ) -> Result<Vec<EventEnvelope>, DurableStoreError> {
+        let _ = (scope, event_types, max_items);
+        Err(DurableStoreError::Unavailable)
+    }
+
+    /// Returns a bounded oldest-first projection of matching canonical events attributed to one
+    /// exact Principal.
+    ///
+    /// Principal attribution filtering must happen before `max_items` is applied so unrelated
+    /// event history cannot exhaust a caller's bounded projection. This remains a read-only view
+    /// over the same canonical Event journal and must not create a second event owner.
+    ///
+    /// # Errors
+    /// Rejects invalid/unbounded requests and returns explicit storage/corruption failures.
+    fn events_for_types_by_principal(
+        &self,
+        scope: &TenantScope,
+        event_types: &[&str],
+        principal: &PrincipalRef,
+        max_items: usize,
+    ) -> Result<Vec<EventEnvelope>, DurableStoreError> {
+        let _ = (scope, event_types, principal, max_items);
+        Err(DurableStoreError::Unavailable)
+    }
 }
 
 /// Durable Phase-14 Event consumer state layered over the one canonical append-only Event journal.

@@ -11,15 +11,21 @@ build = "build.rs"
 prost = "=0.14.4"
 tonic = { version = "=0.14.6", features = ["transport"] }
 tonic-prost = "=0.14.6"
+ucr-conference = { path = "../ucr-conference" }
 ucr-core = { path = "../ucr-core" }
 ucr-crypto = { path = "../ucr-crypto" }
+ucr-group-mls = { path = "../ucr-group-mls" }
+ucr-media-e2ee = { path = "../ucr-media-e2ee" }
 ucr-mesh = { path = "../ucr-mesh" }
 ucr-model = { path = "../ucr-model" }
 ucr-offline-groups = { path = "../ucr-offline-groups" }
 ucr-protocol = { path = "../ucr-protocol" }
+ucr-realtime = { path = "../ucr-realtime" }
+ucr-sfu = { path = "../ucr-sfu" }
 ucr-store-forward = { path = "../ucr-store-forward" }
 ucr-transport-internet = { path = "../ucr-transport-internet" }
 tokio = { version = "=1.53.1", features = ["rt"] }
+tokio-stream = "=0.1.17"
 
 [build-dependencies]
 prost-build = "=0.14.4"
@@ -31,6 +37,7 @@ ucr-crypto = { path = "../ucr-crypto" }
 tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "time"] }
 tokio-stream = { version = "=0.1.17", features = ["net"] }
 ucr-storage-memory = { path = "../ucr-storage-memory" }
+ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
 
 [lints]
 workspace = true

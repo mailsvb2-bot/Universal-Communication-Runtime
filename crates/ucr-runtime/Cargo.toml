@@ -17,7 +17,11 @@ tokio-stream = { version = "=0.1.17", features = ["net"] }
 tonic = { version = "=0.14.6", features = ["transport"] }
 ucr-api-grpc = { path = "../ucr-api-grpc" }
 ucr-core = { path = "../ucr-core" }
+ucr-conference = { path = "../ucr-conference" }
+ucr-model = { path = "../ucr-model" }
+ucr-realtime = { path = "../ucr-realtime" }
 ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
+ucr-webhook = { path = "../ucr-webhook" }
 
 [lints]
 workspace = true

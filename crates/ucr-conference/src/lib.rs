@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use core::fmt;
 
@@ -85,6 +85,25 @@ struct RecipientSubscriptionState {
     subscriptions: Vec<ConferenceMediaSubscription>,
 }
 
+/// Shared bounded non-durable Conference routing preferences.
+///
+/// Network/service adapters may create a short-lived `ConferenceRuntime` per request while
+/// reusing this state across requests. This state is intentionally in-memory only: restart drops
+/// routing preferences and clients re-establish them; canonical Call/Group/MLS state stays durable.
+#[derive(Debug, Default)]
+pub struct ConferenceRuntimeState {
+    subscriptions: Mutex<Vec<RecipientSubscriptionState>>,
+}
+
+impl ConferenceRuntimeState {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            subscriptions: Mutex::new(Vec::new()),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ConferenceRuntime<'a, A, S, E, F, C> {
     authorization: &'a A,
@@ -92,7 +111,7 @@ pub struct ConferenceRuntime<'a, A, S, E, F, C> {
     group_e2ee_capabilities: &'a E,
     sfu_capabilities: &'a F,
     conference_capabilities: &'a C,
-    subscriptions: Mutex<Vec<RecipientSubscriptionState>>,
+    state: Arc<ConferenceRuntimeState>,
 }
 
 impl<'a, A, S, E, F, C> ConferenceRuntime<'a, A, S, E, F, C> {
@@ -104,14 +123,38 @@ impl<'a, A, S, E, F, C> ConferenceRuntime<'a, A, S, E, F, C> {
         sfu_capabilities: &'a F,
         conference_capabilities: &'a C,
     ) -> Self {
+        Self::with_state(
+            authorization,
+            store,
+            group_e2ee_capabilities,
+            sfu_capabilities,
+            conference_capabilities,
+            Arc::new(ConferenceRuntimeState::new()),
+        )
+    }
+
+    #[must_use]
+    pub const fn with_state(
+        authorization: &'a A,
+        store: &'a S,
+        group_e2ee_capabilities: &'a E,
+        sfu_capabilities: &'a F,
+        conference_capabilities: &'a C,
+        state: Arc<ConferenceRuntimeState>,
+    ) -> Self {
         Self {
             authorization,
             store,
             group_e2ee_capabilities,
             sfu_capabilities,
             conference_capabilities,
-            subscriptions: Mutex::new(Vec::new()),
+            state,
         }
+    }
+
+    #[must_use]
+    pub fn shared_state(&self) -> Arc<ConferenceRuntimeState> {
+        Arc::clone(&self.state)
     }
 }
 
@@ -285,6 +328,7 @@ where
             )?;
         }
         let mut state = self
+            .state
             .subscriptions
             .lock()
             .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
@@ -369,6 +413,7 @@ where
         media_kind: MediaKind,
     ) -> Result<Vec<PrincipalRef>, ConferenceError> {
         let state = self
+            .state
             .subscriptions
             .lock()
             .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
@@ -394,6 +439,7 @@ where
     ) -> Result<(), ConferenceError> {
         let call = self.store.call(scope, call_id)?;
         let mut state = self
+            .state
             .subscriptions
             .lock()
             .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;

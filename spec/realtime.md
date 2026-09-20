@@ -1,0 +1,48 @@
+# Realtime Conference Transport
+
+Status: **contract-stable / bounded runtime and browser-mobile transport implemented; Production certification pending**.
+
+The public realtime boundary is `ucr.v1.RealtimeService`. It exposes conference join/session liveness plus uplink/downlink of already-encrypted MLS group-media frames. It is a transport/service boundary over the canonical Conference/SFU implementation, not a new Call, Group, membership, authorization, crypto, Delivery or recording owner.
+
+## Join URL and authentication
+
+`ConferenceService.IssueJoinUrl` issues a short-lived, single-participant session grant only after current Call/Group authorization succeeds. The join URL carries the signed credential in its URL fragment, not the query string. Browser clients extract the fragment locally and present the credential through Authorization metadata when calling the realtime boundary. Gateways must redact the credential and full join URL from access logs, metrics, errors and traces.
+
+A grant is bound to exact TenantScope, Call ID, participant, **active canonical Device ID**, session ID and expiry. Join issuance resolves the Device and its Principal→Identity association before signing; realtime attendance therefore never invents a synthetic source device. It cannot be widened by client-provided request fields. Expired, malformed, wrong-scope, wrong-call or wrong-session credentials fail closed. Production signing keys are deployment secrets, never protocol payloads.
+
+When a valid grant has a future `not_before`, the reference browser client enters a waiting-room state instead of treating the grant as an error. It keeps the bearer in the fragment, does not call realtime APIs early, and automatically attempts admission when the signed window opens. Universal grant issuance is intentionally separate from the operator `entry_open` gate: a personalized attendee grant may be created while entry is closed. At realtime admission, active Attendees receive a retryable temporary-unavailable result until `entry_open=true`; Owner/Host/Moderator/Speaker roles are not held by the attendee gate so they can enter and operate the room. The browser maps that retryable result to `waiting_room` and retries at a bounded interval without redeeming a single-use grant before admission succeeds. Expiry, removal, revocation and other policy failures still fail closed.
+
+## Media path
+
+`PublishMedia` accepts only `SfuForwardEnvelope`, whose payload is already endpoint-encrypted and source-signed. The runtime revalidates the authenticated session Principal/Device against the frame header and canonical Call/Group/MLS state before delegating to `SfuRuntime`.
+
+`SubscribeMedia` streams only encrypted envelopes selected for the authenticated recipient. Subscription preference remains owned by `ConferenceSubscriptionSet`; receiving a stream never grants membership or media permission. Backpressure is bounded and explicit. A full per-session queue rejects new forwarding work rather than buffering without bound.
+
+The reference browser/mobile binding is `ucr-realtime-web`: it serves a self-contained join client plus bounded JSON/protobuf POST uplink and authenticated streaming/SSE downlink over a loopback listener. The public edge must terminate HTTPS and proxy only to that loopback boundary. The join client reads the signed grant from the URL fragment, derives only the non-secret routing coordinates needed for the request, and never places the bearer token in the request URL.
+
+A dropped browser downlink may be reattached to the exact still-authenticated realtime session without redeeming the join grant again. The registry creates a fresh bounded queue only after the prior receiver is actually closed, advances the session sequence, and emits the canonical `reconnected` attendance transition; a competing live second consumer is rejected. The browser retries the media stream after temporary network loss and `offline -> online` transitions while the signed session remains valid. This preserves one-time join-grant semantics while allowing transport reconnection. A future WebRTC/ICE/TURN provider may implement the same service semantics without changing canonical owners.
+
+Browser-origin policy is fail-closed. Same-origin browser requests are accepted by exact `Origin` + `Host` match. Additional embedding/application origins must be enumerated in `UCR_REALTIME_ALLOWED_ORIGINS`; wildcard origins are rejected. Allowed cross-origin responses echo only the validated exact origin, include `Vary: Origin`, and expose only the bounded POST/OPTIONS + Authorization/Content-Type preflight surface. A disallowed browser origin is rejected before bearer-token or request-body processing.
+
+## Attendance
+
+Successful realtime join, explicit leave, reconnect restoration and first media-ready transition append canonical `EventEnvelope` records using these versioned event types:
+
+- `ucr.conference.attendance.joined.v1`
+- `ucr.conference.attendance.left.v1`
+- `ucr.conference.attendance.reconnected.v1`
+- `ucr.conference.attendance.media_ready.v1`
+
+The payload is `ConferenceAttendanceEvent`. Attendance uses the canonical Event journal/subscription pipeline; no second attendance database is introduced. Heartbeats are liveness input and need not become durable attendance events by default.
+
+## WebRTC / ICE / TURN provider boundary
+
+`ucr-webrtc` defines the universal WebRTC transport provider boundary without becoming a second Call, Conference, SFU, membership or authorization owner. It models bounded SDP offer/answer exchange, trickle ICE candidates, ICE transport policy and deployment-supplied STUN/TURN server configuration. TURN usernames and credentials are transport secrets: model debug output redacts credential material and the provider contract does not persist them.
+
+The canonical protocol exposes three capability identifiers: `ucr.realtime.webrtc.browser`, `ucr.realtime.webrtc.ice`, and `ucr.realtime.webrtc.turn`. They are currently reported as `Prepared`, not `Production`. `PreparedWebRtcProvider` validates the contract and fails closed with `TemporarilyUnavailable`; it deliberately does not pretend that a live peer connection exists.
+
+The provider lifecycle is ephemeral: create session, apply remote description, add remote candidate, and close session. Closing provider state does not end the canonical Call. A concrete WebRTC engine adapter must remain beneath this boundary and must preserve UCR ownership of signalling policy, authorization, Conference lifecycle and encrypted media routing.
+
+## Production boundary
+
+A Production claim requires: bounded session/queue limits, authenticated public TLS edge, secret rotation, expiry/replay tests, concurrent join/leave tests, SFU backpressure evidence, restart behavior, browser/mobile interoperability tests, real ICE/STUN/TURN connectivity and protected release evidence. Contract presence alone is not a Production claim.
