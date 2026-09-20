@@ -617,10 +617,15 @@ async fn start_webrtc(state: &AppState, token: &str, input: SessionRequest) -> H
                     },
                 )
             }
-            Some(pb::realtime_start_web_rtc_response::Result::Error(_)) | None => api_error(
-                StatusCode::CONFLICT,
+            Some(pb::realtime_start_web_rtc_response::Result::Error(error)) => webrtc_error(
+                &error,
                 "webrtc_start_rejected",
                 "WebRTC session start rejected",
+            ),
+            None => api_error(
+                StatusCode::BAD_GATEWAY,
+                "invalid_webrtc_response",
+                "realtime upstream returned an invalid WebRTC response",
             ),
         },
         Err(status) => grpc_error(&status),
@@ -667,13 +672,18 @@ async fn set_webrtc_remote_description(
                 None,
                 None,
             ),
-            Some(pb::realtime_set_web_rtc_remote_description_response::Result::Error(_)) | None => {
-                api_error(
-                    StatusCode::CONFLICT,
+            Some(pb::realtime_set_web_rtc_remote_description_response::Result::Error(error)) => {
+                webrtc_error(
+                    &error,
                     "webrtc_remote_rejected",
                     "WebRTC remote description rejected",
                 )
             }
+            None => api_error(
+                StatusCode::BAD_GATEWAY,
+                "invalid_webrtc_response",
+                "realtime upstream returned an invalid WebRTC response",
+            ),
         },
         Err(status) => grpc_error(&status),
     }
@@ -707,13 +717,18 @@ async fn add_webrtc_ice_candidate(
                     None,
                 )
             }
-            Some(pb::realtime_add_web_rtc_ice_candidate_response::Result::Error(_)) | None => {
-                api_error(
-                    StatusCode::CONFLICT,
+            Some(pb::realtime_add_web_rtc_ice_candidate_response::Result::Error(error)) => {
+                webrtc_error(
+                    &error,
                     "webrtc_ice_rejected",
                     "WebRTC ICE candidate rejected",
                 )
             }
+            None => api_error(
+                StatusCode::BAD_GATEWAY,
+                "invalid_webrtc_response",
+                "realtime upstream returned an invalid WebRTC response",
+            ),
         },
         Err(status) => grpc_error(&status),
     }
@@ -734,10 +749,15 @@ async fn close_webrtc(state: &AppState, token: &str, input: SessionRequest) -> H
             Some(pb::realtime_close_web_rtc_response::Result::Acknowledgement(_)) => {
                 api_ok("webrtc_closed", "WebRTC session closed", None, None, None)
             }
-            Some(pb::realtime_close_web_rtc_response::Result::Error(_)) | None => api_error(
-                StatusCode::CONFLICT,
+            Some(pb::realtime_close_web_rtc_response::Result::Error(error)) => webrtc_error(
+                &error,
                 "webrtc_close_rejected",
                 "WebRTC session close rejected",
+            ),
+            None => api_error(
+                StatusCode::BAD_GATEWAY,
+                "invalid_webrtc_response",
+                "realtime upstream returned an invalid WebRTC response",
             ),
         },
         Err(status) => grpc_error(&status),
@@ -837,6 +857,38 @@ fn pb_id(value: &str) -> pb::OpaqueId {
     pb::OpaqueId {
         value: value.as_bytes().to_vec(),
     }
+}
+
+fn webrtc_error(
+    error: &pb::ErrorEnvelope,
+    code: &'static str,
+    message: &'static str,
+) -> HttpResponse {
+    let status = match pb::ErrorCode::try_from(error.code) {
+        Ok(pb::ErrorCode::InvalidArgument | pb::ErrorCode::MalformedFrame) => {
+            StatusCode::BAD_REQUEST
+        }
+        Ok(pb::ErrorCode::Unauthenticated) => StatusCode::UNAUTHORIZED,
+        Ok(pb::ErrorCode::PermissionDenied | pb::ErrorCode::PolicyDenied) => {
+            StatusCode::FORBIDDEN
+        }
+        Ok(pb::ErrorCode::RateLimited | pb::ErrorCode::ResourceExhausted) => {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+        Ok(pb::ErrorCode::DeadlineExceeded | pb::ErrorCode::Cancelled) => {
+            StatusCode::REQUEST_TIMEOUT
+        }
+        Ok(pb::ErrorCode::TemporarilyUnavailable) => StatusCode::SERVICE_UNAVAILABLE,
+        Ok(pb::ErrorCode::Conflict) => StatusCode::CONFLICT,
+        Ok(pb::ErrorCode::NotFound) => StatusCode::NOT_FOUND,
+        Ok(pb::ErrorCode::UnsupportedProtocolVersion
+            | pb::ErrorCode::DowngradeRejected
+            | pb::ErrorCode::UnsupportedCriticalExtension
+            | pb::ErrorCode::CapabilityMismatch) => StatusCode::BAD_REQUEST,
+        Ok(pb::ErrorCode::IntegrityFailure | pb::ErrorCode::Internal | pb::ErrorCode::Unspecified)
+        | Err(_) => StatusCode::BAD_GATEWAY,
+    };
+    api_error(status, code, message)
 }
 
 fn grpc_error(status: &tonic::Status) -> HttpResponse {
@@ -958,6 +1010,35 @@ mod tests {
             );
         }
         assert!(!CLIENT_HTML.contains("UCR_WEBRTC_TURN_SECRET"));
+    }
+
+    #[test]
+    fn webrtc_domain_errors_preserve_http_semantics() {
+        let cases = [
+            (pb::ErrorCode::Unauthenticated, StatusCode::UNAUTHORIZED),
+            (pb::ErrorCode::PermissionDenied, StatusCode::FORBIDDEN),
+            (pb::ErrorCode::RateLimited, StatusCode::TOO_MANY_REQUESTS),
+            (
+                pb::ErrorCode::TemporarilyUnavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (pb::ErrorCode::NotFound, StatusCode::NOT_FOUND),
+            (pb::ErrorCode::Conflict, StatusCode::CONFLICT),
+        ];
+        for (code, expected) in cases {
+            let response = webrtc_error(
+                &pb::ErrorEnvelope {
+                    code: code as i32,
+                    retryable: false,
+                    retry_after_ms: None,
+                    diagnostic_domain: "ucr.grpc.binding".to_owned(),
+                    extensions: Vec::new(),
+                },
+                "webrtc_rejected",
+                "WebRTC request rejected",
+            );
+            assert_eq!(response.status(), expected);
+        }
     }
 
     #[test]
