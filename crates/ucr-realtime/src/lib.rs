@@ -357,6 +357,27 @@ impl JoinTokenIssuer {
         Ok(claims)
     }
 
+    /// Revalidates already-authenticated claims against current temporal and legacy control state.
+    ///
+    /// This is used by long-lived transports after initial token authentication so revocation
+    /// remains effective without resending bearer credentials on every encrypted media frame.
+    ///
+    /// # Errors
+    /// Rejects not-yet-valid, expired, missing, changed or revoked controlled claims.
+    pub fn validate_live_claims(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<(), JoinTokenError> {
+        if now_unix_ms < claims.not_before_unix_ms {
+            return Err(JoinTokenError::NotYetValid);
+        }
+        if now_unix_ms >= claims.expires_at_unix_ms {
+            return Err(JoinTokenError::Expired);
+        }
+        self.require_live_grant(claims)
+    }
+
     /// Returns immutable claims for one exact scoped controlled grant.
     ///
     /// # Errors
