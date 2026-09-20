@@ -121,9 +121,9 @@ async fn serve_realtime_command(
     let turn_ttl_seconds = std::env::var("UCR_WEBRTC_TURN_TTL_SECONDS")
         .ok()
         .map(|value| {
-            value.parse::<u32>().map_err(|_| {
-                "UCR_WEBRTC_TURN_TTL_SECONDS must be an unsigned integer".to_owned()
-            })
+            value
+                .parse::<u32>()
+                .map_err(|_| "UCR_WEBRTC_TURN_TTL_SECONDS must be an unsigned integer".to_owned())
         })
         .transpose()?
         .unwrap_or(300);
