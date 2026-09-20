@@ -23,8 +23,8 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use ucr_model::{
-    IceCredentialType, IceServerConfig, IceTransportPolicy, SessionId, WebRtcIceCandidate,
-    WebRtcSessionDescription,
+    IceCredentialType, IceServerConfig, IceTransportPolicy, SessionId, SfuForwardEnvelope,
+    WebRtcIceCandidate, WebRtcSessionDescription,
 };
 use ucr_protocol::{
     CapabilityDescriptor, WebRtcProtocolError, canonical_ice_server, canonical_webrtc_candidate,
@@ -44,6 +44,8 @@ use webrtc::{
     rtp_transceiver::rtp_codec::RTPCodecType,
 };
 use zeroize::ZeroizeOnDrop;
+
+use crate::e2ee_bridge::{LiveWebRtcE2eeChannel, create_live_e2ee_data_channel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebRtcProviderError {
@@ -249,6 +251,12 @@ enum LiveWebRtcCommand {
         deadline: Instant,
         reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
     },
+    SendE2ee {
+        session_id: SessionId,
+        envelope: SfuForwardEnvelope,
+        deadline: Instant,
+        reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
+    },
     Close {
         session_id: SessionId,
         deadline: Instant,
@@ -285,6 +293,22 @@ impl LiveWebRtcProvider {
     /// # Errors
     /// Returns `TemporarilyUnavailable` if the worker runtime cannot be started.
     pub fn new() -> Result<Self, WebRtcProviderError> {
+        Self::start(None)
+    }
+
+    /// Starts the live peer engine with one bounded ciphertext-only E2EE ingress queue.
+    ///
+    /// # Errors
+    /// Returns a temporary-unavailable error if the isolated worker runtime cannot be started.
+    pub fn with_e2ee_ingress(
+        ingress_tx: tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>,
+    ) -> Result<Self, WebRtcProviderError> {
+        Self::start(Some(ingress_tx))
+    }
+
+    fn start(
+        e2ee_ingress: Option<tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
+    ) -> Result<Self, WebRtcProviderError> {
         let (command_tx, command_rx) =
             tokio::sync::mpsc::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
@@ -300,7 +324,11 @@ impl LiveWebRtcProvider {
                 match runtime {
                     Ok(runtime) => {
                         let _ = ready_tx.send(Ok(()));
-                        runtime.block_on(run_live_webrtc_worker(command_rx, worker_shutdown));
+                        runtime.block_on(run_live_webrtc_worker(
+                            command_rx,
+                            worker_shutdown,
+                            e2ee_ingress,
+                        ));
                     }
                     Err(_) => {
                         let _ = ready_tx.send(Err(WebRtcProviderError::TemporarilyUnavailable));
@@ -358,6 +386,24 @@ impl LiveWebRtcProvider {
         reply_rx
             .recv_timeout(self.request_timeout)
             .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?
+    }
+
+    /// Sends one already-encrypted canonical SFU envelope through the session E2EE DataChannel.
+    /// No endpoint keys or plaintext enter this provider.
+    ///
+    /// # Errors
+    /// Returns bounded session, backpressure or transport failures.
+    pub fn send_e2ee_envelope(
+        &self,
+        session_id: &SessionId,
+        envelope: &SfuForwardEnvelope,
+    ) -> Result<(), WebRtcProviderError> {
+        self.request(|reply, deadline| LiveWebRtcCommand::SendE2ee {
+            session_id: session_id.clone(),
+            envelope: envelope.clone(),
+            deadline,
+            reply,
+        })
     }
 }
 
