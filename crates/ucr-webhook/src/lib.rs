@@ -513,8 +513,8 @@ mod tests {
     use super::*;
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CorrelationContext, DeviceId, DeviceRef, EventId,
-        EventSubscriptionId, EventSubscriptionStart, OpaqueId, ProtocolVersion, TenantId,
-        TenantScope,
+        EventSubscriptionId, EventSubscriptionStart, IdentityId, OpaqueId, ProtocolVersion,
+        TenantId, TenantScope,
     };
 
     #[derive(Debug)]
@@ -578,11 +578,12 @@ mod tests {
             payload: b"payload".to_vec(),
             actor: ActorRef {
                 actor_id: ActorId::from_opaque(oid("actor-webhook")),
-                kind: ActorKind::Service,
+                kind: ActorKind::System,
+                on_behalf_of: None,
             },
             source_device: DeviceRef {
                 device_id: DeviceId::from_opaque(oid("device-webhook")),
-                identity_id: None,
+                identity_id: IdentityId::from_opaque(oid("identity-webhook")),
             },
             wall_time_unix_ms: 1_000,
             logical_order: 7,
@@ -661,10 +662,10 @@ mod tests {
 
     #[test]
     fn native_executor_rejects_zero_timeout_and_parses_bounded_status_line() {
-        assert_eq!(
+        assert!(matches!(
             NativeTlsWebhookExecutor::new(Duration::ZERO),
             Err(WebhookTransportError::Permanent)
-        );
+        ));
         let mut success = &b"HTTP/1.1 204 No Content\r\n"[..];
         assert_eq!(
             read_http_response(&mut success),
