@@ -45,6 +45,40 @@ pub const REALTIME_AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const REALTIME_BEARER_PREFIX: &str = "Bearer ";
 const REALTIME_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
 
+#[derive(Clone)]
+pub struct RealtimeWebRtcDependencies {
+    provider: Arc<dyn WebRtcProvider>,
+    config: Arc<WebRtcSessionConfigFactory>,
+}
+
+impl RealtimeWebRtcDependencies {
+    #[must_use]
+    pub fn new(
+        provider: Arc<dyn WebRtcProvider>,
+        config: Arc<WebRtcSessionConfigFactory>,
+    ) -> Self {
+        Self { provider, config }
+    }
+
+    #[must_use]
+    pub fn prepared() -> Self {
+        Self::new(
+            Arc::new(PreparedWebRtcProvider),
+            Arc::new(WebRtcSessionConfigFactory::default()),
+        )
+    }
+}
+
+impl fmt::Debug for RealtimeWebRtcDependencies {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RealtimeWebRtcDependencies")
+            .field("provider", &self.provider)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
 pub struct GrpcRealtimeService<C, A, S> {
     clock: Arc<C>,
     authorization: Arc<A>,
@@ -73,8 +107,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             join_issuer,
             registry,
             conference_state,
-            Arc::new(PreparedWebRtcProvider),
-            Arc::new(WebRtcSessionConfigFactory::default()),
+            RealtimeWebRtcDependencies::prepared(),
         )
     }
 
@@ -86,8 +119,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         join_issuer: Arc<JoinTokenIssuer>,
         registry: Arc<RealtimeSessionRegistry>,
         conference_state: Arc<ConferenceRuntimeState>,
-        webrtc_provider: Arc<dyn WebRtcProvider>,
-        webrtc_config: Arc<WebRtcSessionConfigFactory>,
+        webrtc: RealtimeWebRtcDependencies,
     ) -> Self {
         Self {
             clock,
@@ -96,8 +128,8 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             join_issuer,
             registry,
             conference_state,
-            webrtc_provider,
-            webrtc_config,
+            webrtc_provider: webrtc.provider,
+            webrtc_config: webrtc.config,
         }
     }
 }
