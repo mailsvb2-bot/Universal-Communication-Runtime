@@ -972,6 +972,26 @@ impl From<pb::RealtimeLeaveRequest> for RealtimeLookupFields {
     }
 }
 
+impl From<pb::RealtimeStartWebRtcRequest> for RealtimeLookupFields {
+    fn from(value: pb::RealtimeStartWebRtcRequest) -> Self {
+        Self {
+            scope: value.scope,
+            call_id: value.call_id,
+            session_id: value.session_id,
+        }
+    }
+}
+
+impl From<pb::RealtimeCloseWebRtcRequest> for RealtimeLookupFields {
+    fn from(value: pb::RealtimeCloseWebRtcRequest) -> Self {
+        Self {
+            scope: value.scope,
+            call_id: value.call_id,
+            session_id: value.session_id,
+        }
+    }
+}
+
 impl From<pb::RealtimeSubscribeMediaRequest> for RealtimeLookupFields {
     fn from(value: pb::RealtimeSubscribeMediaRequest) -> Self {
         Self {
