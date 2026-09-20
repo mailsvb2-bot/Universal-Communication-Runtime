@@ -685,7 +685,6 @@ fn session_key(session_id: &SessionId) -> String {
     session_id.as_opaque().as_str().to_owned()
 }
 
-
 #[derive(Clone)]
 pub struct WebRtcSessionConfigFactory {
     stun_urls: Vec<String>,
