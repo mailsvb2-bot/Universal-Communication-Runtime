@@ -3261,6 +3261,8 @@ dependencies = [
 name = "ucr-webrtc"
 version = "0.0.1"
 dependencies = [
+ "base64",
+ "openssl",
  "ucr-model",
  "ucr-protocol",
 ]
