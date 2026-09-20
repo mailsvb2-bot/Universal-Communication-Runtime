@@ -352,12 +352,16 @@ where
             .map_err(status_from_canonical)?;
         self.require_accepted_conference_participant(&claims)
             .map_err(status_from_canonical)?;
-        let receiver = self
+        let attachment = self
             .registry
-            .take_downlink(&claims, self.now().map_err(status_from_canonical)?)
+            .attach_downlink(&claims, self.now().map_err(status_from_canonical)?)
             .map_err(map_registry_error)
             .map_err(status_from_canonical)?;
-        let stream = ReceiverStream::new(receiver).map(|envelope| {
+        if let Some(transition) = &attachment.transition {
+            self.append_attendance(transition)
+                .map_err(status_from_canonical)?;
+        }
+        let stream = ReceiverStream::new(attachment.receiver).map(|envelope| {
             Ok(pb::RealtimeDownlinkMedia {
                 envelope: Some(pb_sfu_forward_envelope(&envelope)),
             })

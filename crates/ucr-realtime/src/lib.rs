@@ -531,6 +531,11 @@ pub struct RealtimeJoinOutcome {
     pub transition: AttendanceTransition,
 }
 
+pub struct RealtimeDownlinkAttachment {
+    pub receiver: mpsc::Receiver<SfuForwardEnvelope>,
+    pub transition: Option<AttendanceTransition>,
+}
+
 impl Default for RealtimeSessionRegistry {
     fn default() -> Self {
         Self::new(MAX_REALTIME_SESSIONS, DEFAULT_REALTIME_QUEUE_CAPACITY)
@@ -614,16 +619,19 @@ impl RealtimeSessionRegistry {
 
     /// Attaches the one downlink consumer for the current connection.
     ///
-    /// The receiver is single-consumer. A second subscribe attempt fails until an authenticated
-    /// reconnect replaces the connection queue.
+    /// The first attachment consumes the prepared receiver. If that receiver was later dropped by
+    /// a broken browser/network stream, the exact authenticated session may attach a fresh bounded
+    /// queue without redeeming its join grant a second time. A still-live receiver remains
+    /// single-consumer and rejects a competing attachment.
     ///
     /// # Errors
-    /// Fails for expiry, claim mismatch, missing session/downlink, or unavailable state.
-    pub fn take_downlink(
+    /// Fails for expiry, claim mismatch, missing session/downlink, unavailable state, or sequence
+    /// overflow.
+    pub fn attach_downlink(
         &self,
         claims: &RealtimeSessionClaims,
         now_unix_ms: i64,
-    ) -> Result<mpsc::Receiver<SfuForwardEnvelope>, RealtimeRegistryError> {
+    ) -> Result<RealtimeDownlinkAttachment, RealtimeRegistryError> {
         if now_unix_ms >= claims.expires_at_unix_ms {
             return Err(RealtimeRegistryError::Expired);
         }
@@ -639,10 +647,46 @@ impl RealtimeSessionRegistry {
         if entry.claims != *claims {
             return Err(RealtimeRegistryError::ClaimMismatch);
         }
-        entry
-            .receiver
-            .take()
-            .ok_or(RealtimeRegistryError::SessionUnavailable)
+        if let Some(receiver) = entry.receiver.take() {
+            return Ok(RealtimeDownlinkAttachment {
+                receiver,
+                transition: None,
+            });
+        }
+        if !entry.sender.is_closed() {
+            return Err(RealtimeRegistryError::SessionUnavailable);
+        }
+
+        entry.sequence = entry
+            .sequence
+            .checked_add(1)
+            .ok_or(RealtimeRegistryError::SequenceOverflow)?;
+        entry.media_ready = false;
+        let (sender, receiver) = mpsc::channel(self.queue_capacity);
+        entry.sender = sender;
+        let transition = AttendanceTransition {
+            kind: AttendanceTransitionKind::Reconnected,
+            claims: claims.clone(),
+            session_sequence: entry.sequence,
+            occurred_at_unix_ms: now_unix_ms,
+        };
+        Ok(RealtimeDownlinkAttachment {
+            receiver,
+            transition: Some(transition),
+        })
+    }
+
+    /// Compatibility helper for internal callers that do not consume attendance transitions.
+    ///
+    /// # Errors
+    /// Returns the same bounded registry failures as attach_downlink.
+    pub fn take_downlink(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<mpsc::Receiver<SfuForwardEnvelope>, RealtimeRegistryError> {
+        self.attach_downlink(claims, now_unix_ms)
+            .map(|attachment| attachment.receiver)
     }
 
     /// Verifies liveness for the exact session and returns its current attendance sequence.
@@ -1153,6 +1197,41 @@ mod tests {
         assert_eq!(registry.active_session_count(), 1);
         assert!(first_downlink.try_recv().is_err());
         assert!(registry.take_downlink(&claims, 30_002).is_ok());
+    }
+
+    #[test]
+    fn dropped_downlink_resumes_without_redeeming_the_join_grant() {
+        let issuer = issuer();
+        let claims = issuer
+            .issue_with_policy(
+                scope(),
+                CallId::from_opaque(id("call")),
+                participant(),
+                None,
+                300,
+                JoinGrantUsePolicy::SingleUse,
+                None,
+                None,
+                31_000,
+            )
+            .expect("issue")
+            .claims;
+        let registry = RealtimeSessionRegistry::new(8, 2);
+        registry.join(claims.clone(), 31_001).expect("join");
+
+        let first = registry
+            .attach_downlink(&claims, 31_001)
+            .expect("first downlink");
+        assert!(first.transition.is_none());
+        drop(first.receiver);
+
+        let resumed = registry
+            .attach_downlink(&claims, 31_002)
+            .expect("resumed downlink");
+        let transition = resumed.transition.expect("reconnect transition");
+        assert_eq!(transition.kind, AttendanceTransitionKind::Reconnected);
+        assert_eq!(transition.session_sequence, 2);
+        assert_eq!(registry.active_session_count(), 1);
     }
 
     #[test]

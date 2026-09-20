@@ -45,8 +45,9 @@ button:disabled{opacity:.45;cursor:not-allowed}
 "use strict";
 const $=id=>document.getElementById(id);
 const ui={join:$("join"),leave:$("leave"),state:$("state"),packets:$("packets"),expires:$("expires"),status:$("status")};
-let token="", claims=null, heartbeatTimer=null, waitTimer=null, entryRetryTimer=null, streamAbort=null, packetCount=0;
+let token="", claims=null, heartbeatTimer=null, waitTimer=null, entryRetryTimer=null, streamAbort=null, streamRetryTimer=null, packetCount=0, sessionActive=false;
 const ENTRY_RETRY_MS=2000;
+const STREAM_RETRY_MS=1500;
 
 function fail(message){ui.state.textContent="Error";ui.status.textContent=message;ui.join.disabled=true;}
 function b64url(s){s=s.replace(/-/g,"+").replace(/_/g,"/");while(s.length%4)s+="=";return Uint8Array.from(atob(s),c=>c.charCodeAt(0));}
@@ -76,14 +77,31 @@ async function api(path,payload,signal){
   }
   return r;
 }
+function scheduleStreamRetry(){
+  if(!sessionActive||Date.now()>=claims.expires)return;
+  if(!navigator.onLine){ui.state.textContent="Reconnecting";ui.status.textContent="Network unavailable. Media will reconnect automatically.";return;}
+  if(streamRetryTimer)clearTimeout(streamRetryTimer);
+  streamRetryTimer=setTimeout(()=>{streamRetryTimer=null;openStream();},STREAM_RETRY_MS);
+}
 async function openStream(){
+  if(!sessionActive||Date.now()>=claims.expires)return;
+  if(streamAbort)streamAbort.abort();
   streamAbort=new AbortController();
-  const r=await api("/v1/realtime/media/stream",body(),streamAbort.signal);
-  const reader=r.body.getReader(); const decoder=new TextDecoder(); let buffer="";
-  while(true){const {done,value}=await reader.read(); if(done)break; buffer+=decoder.decode(value,{stream:true});
-    let cut; while((cut=buffer.indexOf("\n\n"))>=0){const event=buffer.slice(0,cut);buffer=buffer.slice(cut+2);
-      if(event.startsWith("event: media")){packetCount++;ui.packets.textContent=String(packetCount);}
+  try{
+    const r=await api("/v1/realtime/media/stream",body(),streamAbort.signal);
+    const reader=r.body.getReader(); const decoder=new TextDecoder(); let buffer="";
+    ui.state.textContent="Connected";
+    while(true){const {done,value}=await reader.read(); if(done)break; buffer+=decoder.decode(value,{stream:true});
+      let cut; while((cut=buffer.indexOf("\n\n"))>=0){const event=buffer.slice(0,cut);buffer=buffer.slice(cut+2);
+        if(event.startsWith("event: media")){packetCount++;ui.packets.textContent=String(packetCount);}
+      }
     }
+    if(sessionActive){ui.state.textContent="Reconnecting";ui.status.textContent="Media stream interrupted. Reconnecting…";}
+  }catch(e){
+    if(e.name!=="AbortError"&&sessionActive){ui.state.textContent="Reconnecting";ui.status.textContent="Media stream interrupted: "+e.message;}
+  }finally{
+    streamAbort=null;
+    if(sessionActive)scheduleStreamRetry();
   }
 }
 async function join(){
@@ -95,7 +113,7 @@ async function join(){
     ui.join.disabled=true;ui.state.textContent="Joining";ui.status.textContent="Authenticating signed session grant…";
     const r=await api("/v1/realtime/join",body()); const data=await r.json();
     if(!data.ok) throw new Error(data.message||"Join rejected");
-    ui.state.textContent="Connected";ui.leave.disabled=false;ui.status.textContent="Realtime session active. Encrypted SFU downlink connected.";
+    sessionActive=true;ui.state.textContent="Connected";ui.leave.disabled=false;ui.status.textContent="Realtime session active. Encrypted SFU downlink connected.";
     if(data.expires_at_unix_ms) ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
     heartbeatTimer=setInterval(async()=>{try{await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});}catch(e){ui.status.textContent="Heartbeat failed: "+e.message;}},interval);
@@ -113,7 +131,7 @@ function scheduleEntryRetry(){
   entryRetryTimer=setTimeout(()=>{entryRetryTimer=null;join();},ENTRY_RETRY_MS);
 }
 async function leave(){
-  ui.leave.disabled=true;if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamAbort)streamAbort.abort();
+  sessionActive=false;ui.leave.disabled=true;if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
   try{await api("/v1/realtime/leave",body());}catch(_){}
   ui.state.textContent="Left";ui.status.textContent="Conference session closed.";ui.join.disabled=false;
 }
@@ -135,7 +153,10 @@ try{
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
   if(!scheduleWaitingRoom()) ui.status.textContent="Signed grant loaded. Ready to join.";
 }catch(e){fail(e.message);}
-ui.join.addEventListener("click",join);ui.leave.addEventListener("click",leave);window.addEventListener("pagehide",()=>{if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamAbort)streamAbort.abort();});
+ui.join.addEventListener("click",join);ui.leave.addEventListener("click",leave);
+window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.status.textContent="Network unavailable. Media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
+window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting encrypted media…";scheduleStreamRetry();}});
+window.addEventListener("pagehide",()=>{sessionActive=false;if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();});
 </script>
 </body>
 </html>
