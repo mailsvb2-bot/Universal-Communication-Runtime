@@ -401,6 +401,230 @@ where
         });
         Ok(Response::new(Box::pin(stream)))
     }
+
+    async fn start_web_rtc(
+        &self,
+        request: Request<pb::RealtimeStartWebRtcRequest>,
+    ) -> Result<Response<pb::RealtimeStartWebRtcResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let lookup = decode_realtime_lookup(request.into_inner());
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => {
+                match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
+                    Ok(claims) => {
+                        let now_ms = self.now();
+                        match now_ms.and_then(|value| {
+                            u64::try_from(value.div_euclid(1_000))
+                                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+                        }) {
+                            Ok(now_unix_seconds) => {
+                                match self
+                                    .webrtc_config
+                                    .session_config(&claims.session_id, now_unix_seconds)
+                                    .map_err(map_webrtc_provider_error)
+                                {
+                                    Ok(config) => {
+                                        let ice_servers = config.ice_servers.clone();
+                                        let provider = Arc::clone(&self.webrtc_provider);
+                                        match tokio::task::spawn_blocking(move || {
+                                            provider.create_session(&config)
+                                        })
+                                        .await
+                                        {
+                                            Ok(Ok(description)) => Ok(pb::RealtimeWebRtcOffer {
+                                                description: Some(pb_webrtc_description(
+                                                    &description,
+                                                )),
+                                                ice_servers: ice_servers
+                                                    .iter()
+                                                    .map(pb_webrtc_ice_server)
+                                                    .collect(),
+                                            }),
+                                            Ok(Err(error)) => {
+                                                Err(map_webrtc_provider_error(error))
+                                            }
+                                            Err(_) => Err(CanonicalError::new(
+                                                CanonicalErrorCode::Internal,
+                                            )),
+                                        }
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeStartWebRtcResponse {
+            result: Some(match result {
+                Ok(offer) => pb::realtime_start_web_rtc_response::Result::Offer(offer),
+                Err(error) => pb::realtime_start_web_rtc_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn set_web_rtc_remote_description(
+        &self,
+        request: Request<pb::RealtimeSetWebRtcRemoteDescriptionRequest>,
+    ) -> Result<Response<pb::RealtimeSetWebRtcRemoteDescriptionResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let description = body.description.ok_or_else(invalid_argument).and_then(
+            decode_webrtc_description,
+        );
+        let result = match (token, lookup, description) {
+            (Ok(token), Ok((scope, call_id, session_id)), Ok(description)) => {
+                match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
+                    Ok(claims) => {
+                        let description = WebRtcSessionDescription {
+                            session_id: claims.session_id.clone(),
+                            sdp_type: description.sdp_type,
+                            sdp: description.sdp,
+                        };
+                        let provider = Arc::clone(&self.webrtc_provider);
+                        match tokio::task::spawn_blocking(move || {
+                            provider.set_remote_description(&description)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => Ok(pb_acknowledgement(acknowledgement_for(
+                                claims.session_id.as_opaque().clone(),
+                            ))),
+                            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
+                            Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeSetWebRtcRemoteDescriptionResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::realtime_set_web_rtc_remote_description_response::Result::Acknowledgement(
+                        acknowledgement,
+                    )
+                }
+                Err(error) => {
+                    pb::realtime_set_web_rtc_remote_description_response::Result::Error(pb_error(
+                        error,
+                    ))
+                }
+            }),
+        }))
+    }
+
+    async fn add_web_rtc_ice_candidate(
+        &self,
+        request: Request<pb::RealtimeAddWebRtcIceCandidateRequest>,
+    ) -> Result<Response<pb::RealtimeAddWebRtcIceCandidateResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => {
+                match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
+                    Ok(claims) => {
+                        let mline_index = body
+                            .sdp_mline_index
+                            .map(u16::try_from)
+                            .transpose()
+                            .map_err(|_| {
+                                CanonicalError::new(CanonicalErrorCode::InvalidArgument)
+                            });
+                        match mline_index {
+                            Ok(sdp_mline_index) => {
+                                let candidate = WebRtcIceCandidate {
+                                    session_id: claims.session_id.clone(),
+                                    candidate: body.candidate,
+                                    sdp_mid: body.sdp_mid,
+                                    sdp_mline_index,
+                                };
+                                let provider = Arc::clone(&self.webrtc_provider);
+                                match tokio::task::spawn_blocking(move || {
+                                    provider.add_remote_candidate(&candidate)
+                                })
+                                .await
+                                {
+                                    Ok(Ok(())) => Ok(pb_acknowledgement(acknowledgement_for(
+                                        claims.session_id.as_opaque().clone(),
+                                    ))),
+                                    Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
+                                    Err(_) => {
+                                        Err(CanonicalError::new(CanonicalErrorCode::Internal))
+                                    }
+                                }
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeAddWebRtcIceCandidateResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::realtime_add_web_rtc_ice_candidate_response::Result::Acknowledgement(
+                        acknowledgement,
+                    )
+                }
+                Err(error) => {
+                    pb::realtime_add_web_rtc_ice_candidate_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
+    async fn close_web_rtc(
+        &self,
+        request: Request<pb::RealtimeCloseWebRtcRequest>,
+    ) -> Result<Response<pb::RealtimeCloseWebRtcResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let lookup = decode_realtime_lookup(request.into_inner());
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => {
+                match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
+                    Ok(claims) => {
+                        let provider = Arc::clone(&self.webrtc_provider);
+                        let close_session_id = claims.session_id.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            provider.close_session(&close_session_id)
+                        })
+                        .await
+                        {
+                            Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => {
+                                Ok(pb_acknowledgement(acknowledgement_for(
+                                    claims.session_id.as_opaque().clone(),
+                                )))
+                            }
+                            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
+                            Err(_) => Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeCloseWebRtcResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::realtime_close_web_rtc_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => {
+                    pb::realtime_close_web_rtc_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
 }
 
 impl<C, A, S> GrpcRealtimeService<C, A, S>
