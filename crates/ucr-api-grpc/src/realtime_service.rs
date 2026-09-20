@@ -646,6 +646,21 @@ where
             .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))
     }
 
+    fn authenticated_webrtc_claims(
+        &self,
+        token: &str,
+        scope: &TenantScope,
+        call_id: &CallId,
+        session_id: &SessionId,
+    ) -> Result<RealtimeSessionClaims, CanonicalError> {
+        let claims = self.authenticated_claims(token, scope, call_id, session_id)?;
+        self.require_accepted_conference_participant(&claims)?;
+        self.registry
+            .heartbeat(&claims, self.now()?)
+            .map_err(map_registry_error)?;
+        Ok(claims)
+    }
+
     fn redeemed_claims(
         &self,
         token: &str,
@@ -1290,6 +1305,63 @@ fn require_durable_grant_matches_claims(
         return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
     }
     Ok(())
+}
+
+fn pb_webrtc_description(description: &WebRtcSessionDescription) -> pb::WebRtcDescription {
+    pb::WebRtcDescription {
+        sdp_type: match description.sdp_type {
+            WebRtcSdpType::Offer => pb::WebRtcSdpType::Offer as i32,
+            WebRtcSdpType::Answer => pb::WebRtcSdpType::Answer as i32,
+        },
+        sdp: description.sdp.clone(),
+    }
+}
+
+fn pb_webrtc_ice_server(server: &IceServerConfig) -> pb::WebRtcIceServer {
+    pb::WebRtcIceServer {
+        urls: server.urls.clone(),
+        username: server.username.clone(),
+        credential: server.credential.clone(),
+    }
+}
+
+fn decode_webrtc_description(
+    description: pb::WebRtcDescription,
+) -> Result<WebRtcSessionDescription, CanonicalError> {
+    let sdp_type = match pb::WebRtcSdpType::try_from(description.sdp_type) {
+        Ok(pb::WebRtcSdpType::Offer) => WebRtcSdpType::Offer,
+        Ok(pb::WebRtcSdpType::Answer) => WebRtcSdpType::Answer,
+        Ok(pb::WebRtcSdpType::Unspecified) | Err(_) => {
+            return Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument));
+        }
+    };
+    Ok(WebRtcSessionDescription {
+        session_id: SessionId::from_opaque(
+            OpaqueId::new("pending-webrtc-session")
+                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+        ),
+        sdp_type,
+        sdp: description.sdp,
+    })
+}
+
+const fn map_webrtc_provider_error(error: WebRtcProviderError) -> CanonicalError {
+    match error {
+        WebRtcProviderError::InvalidProtocol(_) => {
+            CanonicalError::new(CanonicalErrorCode::InvalidArgument)
+        }
+        WebRtcProviderError::SessionUnavailable => {
+            CanonicalError::new(CanonicalErrorCode::NotFound)
+        }
+        WebRtcProviderError::Conflict => CanonicalError::new(CanonicalErrorCode::Conflict),
+        WebRtcProviderError::CapacityExceeded => {
+            CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
+        }
+        WebRtcProviderError::TemporarilyUnavailable => {
+            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+        }
+        WebRtcProviderError::Internal => CanonicalError::new(CanonicalErrorCode::Internal),
+    }
 }
 
 fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
