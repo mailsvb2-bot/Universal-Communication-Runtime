@@ -91,7 +91,7 @@ async fn run() -> Result<(), String> {
                 .serve(bind)
                 .await
         }
-        "serve-realtime" => serve_realtime_command(&database, &bind, join_base_url).await
+        "serve-realtime" => serve_realtime_command(&database, &bind, join_base_url).await,
         "dispatch-webhook-once" => dispatch_webhook_once(
             &database,
             tenant_id,
