@@ -431,8 +431,7 @@ where
                                             expires_at_unix_seconds,
                                         )
                                         .map_err(map_webrtc_provider_error)
-                                })
-                                {
+                                }) {
                                     Ok(config) => {
                                         let ice_servers = config.ice_servers.clone();
                                         let provider = Arc::clone(&self.webrtc_provider);
