@@ -34,6 +34,10 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(provider.contains("pub struct LiveWebRtcProvider"));
     assert!(provider.contains("LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY"));
     assert!(provider.contains("LIVE_WEBRTC_MAX_SESSIONS"));
+    assert!(provider.contains("deadline: Instant"));
+    assert!(provider.contains("command_expired(deadline)"));
+    assert!(provider.contains("shutdown: Arc<AtomicBool>"));
+    assert!(provider.contains("shutdown.store(true, Ordering::Release)"));
     assert!(provider.contains("api.new_peer_connection(engine_config)"));
     assert!(provider.contains("add_transceiver_from_kind(RTPCodecType::Audio, None)"));
     assert!(provider.contains("add_transceiver_from_kind(RTPCodecType::Video, None)"));
