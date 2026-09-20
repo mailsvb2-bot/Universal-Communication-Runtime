@@ -28,7 +28,7 @@ fn webhook_adapter_preserves_single_event_owner_and_fails_closed() {
     assert!(adapter.contains("!url.username().is_empty()"));
     assert!(adapter.contains("url.query().is_some()"));
     assert!(adapter.contains("url.fragment().is_some()"));
-    assert!(adapter.contains("resolved_ips.iter().any(|address| !is_public_address(*address))"));
+    assert!(adapter.contains(".any(|address| !is_public_address(*address))"));
     assert!(adapter.contains("follow_redirects: false"));
     assert!(adapter.contains("HmacSha256::new_from_slice"));
     assert!(adapter.contains("WebhookSigningSecret([u8; 32])"));

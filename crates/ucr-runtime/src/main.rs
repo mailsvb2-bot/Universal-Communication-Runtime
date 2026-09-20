@@ -105,12 +105,9 @@ async fn run() -> Result<(), String> {
                 .serve_realtime(bind, config)
                 .await
         }
-        "dispatch-webhook-once" => dispatch_webhook_once(
-            &database,
-            tenant_id,
-            namespace_id,
-            subscription_id,
-        ),
+        "dispatch-webhook-once" => {
+            dispatch_webhook_once(&database, tenant_id, namespace_id, subscription_id)
+        }
         _ => Err(usage()),
     }
 }
