@@ -518,7 +518,7 @@ async fn run_webrtc_e2ee_bridge(
         let registry = Arc::clone(&registry);
         let service = service.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            route_webrtc_e2ee_frame(&service, &registry, &provider, frame)
+            route_webrtc_e2ee_frame(&service, &registry, &provider, &frame)
         })
         .await;
     }
@@ -528,7 +528,7 @@ fn route_webrtc_e2ee_frame(
     service: &GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
     registry: &Arc<RealtimeSessionRegistry>,
     provider: &Arc<LiveWebRtcProvider>,
-    frame: WebRtcE2eeIngressFrame,
+    frame: &WebRtcE2eeIngressFrame,
 ) -> Result<usize, ()> {
     let now_unix_ms = runtime_now_unix_ms().map_err(|_| ())?;
     let header = &frame.envelope.frame.header;
