@@ -3413,6 +3413,27 @@ mod universal_runtime_tests {
             .expect("conference participant");
     }
 
+    fn ensure_flow_device(
+        store: &SqliteLocalStore,
+        external_user_id: &[u8],
+        idempotency_key: &str,
+    ) {
+        let status = ensure_participant_device(
+            store,
+            &EnsureParticipantDeviceInput {
+                scope: scope(),
+                conference_id: conference().conference_id,
+                integration_id: conference().integration_id,
+                external_user_id: external_user_id.to_vec(),
+                idempotency_key: idempotency_key.to_owned(),
+            },
+            format!("{idempotency_key}-payload").into_bytes(),
+        )
+        .expect("participant device");
+        assert!(status.active);
+        assert_eq!(status.external_user_id, external_user_id);
+    }
+
     fn history_call(
         conversation: ucr_model::ConversationRef,
         call_id: CallId,
@@ -3592,25 +3613,8 @@ mod universal_runtime_tests {
         )
         .expect("attendee");
 
-        for (external_user_id, idempotency_key) in [
-            (b"flow-owner".as_slice(), "flow-owner-device"),
-            (b"flow-attendee".as_slice(), "flow-attendee-device"),
-        ] {
-            let status = ensure_participant_device(
-                &store,
-                &EnsureParticipantDeviceInput {
-                    scope: scope(),
-                    conference_id: conference().conference_id,
-                    integration_id: conference().integration_id,
-                    external_user_id: external_user_id.to_vec(),
-                    idempotency_key: idempotency_key.to_owned(),
-                },
-                format!("{idempotency_key}-payload").into_bytes(),
-            )
-            .expect("participant device");
-            assert!(status.active);
-            assert_eq!(status.external_user_id, external_user_id);
-        }
+        ensure_flow_device(&store, b"flow-owner", "flow-owner-device");
+        ensure_flow_device(&store, b"flow-attendee", "flow-attendee-device");
 
         let runtime = prepare_conference_runtime(
             &store,
