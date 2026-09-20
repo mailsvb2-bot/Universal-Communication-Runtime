@@ -30,6 +30,12 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(provider.contains("pub trait WebRtcProvider"));
     assert!(provider.contains("pub struct PreparedWebRtcProvider"));
     assert!(provider.contains("Err(WebRtcProviderError::TemporarilyUnavailable)"));
+    assert!(provider.contains("pub struct TurnRestCredentialIssuer"));
+    assert!(provider.contains("TurnRestSecret([u8; 32])"));
+    assert!(provider.contains("ZeroizeOnDrop"));
+    assert!(provider.contains("MessageDigest::sha1()"));
+    assert!(provider.contains("STANDARD.encode(mac)"));
+    assert!(provider.contains("MAX_TURN_CREDENTIAL_TTL_SECONDS"));
     assert!(!provider.contains("UniversalConferenceStore"));
     assert!(!provider.contains("CallStore"));
     assert!(realtime_spec.contains("PreparedWebRtcProvider"));
