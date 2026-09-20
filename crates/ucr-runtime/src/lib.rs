@@ -337,20 +337,7 @@ impl ProductionRuntime {
         let store = Arc::clone(&self.store);
         let authorization = Arc::clone(&self.store);
         let conference_state = Arc::new(ConferenceRuntimeState::new());
-        let RealtimeRuntimeConfig {
-            join_base_url,
-            join_token_key,
-            webrtc_config,
-        } = config;
-        let join_issuer = Arc::new(
-            JoinTokenIssuer::new(join_token_key, join_base_url)
-                .map_err(|error| format!("configure realtime join issuer: {error:?}"))?,
-        );
-        let registry = Arc::new(RealtimeSessionRegistry::default());
-        let webrtc_provider: Arc<dyn WebRtcProvider> = Arc::new(
-            LiveWebRtcProvider::new()
-                .map_err(|error| format!("start live WebRTC provider: {error:?}"))?,
-        );
+        let (join_issuer, registry, webrtc) = realtime_dependencies(config)?;
 
         Server::builder()
             .add_service(integration_service_server(GrpcIntegrationService::new(
@@ -394,7 +381,7 @@ impl ProductionRuntime {
                 Arc::clone(&join_issuer),
                 registry,
                 conference_state,
-                RealtimeWebRtcDependencies::new(webrtc_provider, webrtc_config),
+                webrtc,
             )))
             .add_service(universal_conference_service_server(
                 GrpcUniversalConferenceService::with_join_issuer(
@@ -419,6 +406,36 @@ impl ProductionRuntime {
             .await
             .map_err(|error| format!("local realtime API server: {error}"))
     }
+}
+
+fn realtime_dependencies(
+    config: RealtimeRuntimeConfig,
+) -> Result<
+    (
+        Arc<JoinTokenIssuer>,
+        Arc<RealtimeSessionRegistry>,
+        RealtimeWebRtcDependencies,
+    ),
+    String,
+> {
+    let RealtimeRuntimeConfig {
+        join_base_url,
+        join_token_key,
+        webrtc_config,
+    } = config;
+    let join_issuer = Arc::new(
+        JoinTokenIssuer::new(join_token_key, join_base_url)
+            .map_err(|error| format!("configure realtime join issuer: {error:?}"))?,
+    );
+    let provider: Arc<dyn WebRtcProvider> = Arc::new(
+        LiveWebRtcProvider::new()
+            .map_err(|error| format!("start live WebRTC provider: {error:?}"))?,
+    );
+    Ok((
+        join_issuer,
+        Arc::new(RealtimeSessionRegistry::default()),
+        RealtimeWebRtcDependencies::new(provider, webrtc_config),
+    ))
 }
 
 /// Refuses plaintext remote exposure for the Phase-45 local-daemon production boundary.
