@@ -3,7 +3,7 @@
 use std::{
     fmt,
     io::{Read, Write},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs},
     time::Duration,
 };
 
@@ -69,6 +69,29 @@ pub trait WebhookDnsResolver: fmt::Debug + Send + Sync {
     /// # Errors
     /// Must fail closed when DNS is unavailable or returns no usable addresses.
     fn resolve(&self, hostname: &str) -> Result<Vec<IpAddr>, WebhookResolveError>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemWebhookDnsResolver;
+
+impl WebhookDnsResolver for SystemWebhookDnsResolver {
+    fn resolve(&self, hostname: &str) -> Result<Vec<IpAddr>, WebhookResolveError> {
+        let addresses = (hostname, 443)
+            .to_socket_addrs()
+            .map_err(|_| WebhookResolveError::Unavailable)?;
+        let mut output = Vec::new();
+        for address in addresses {
+            let ip = address.ip();
+            if !output.contains(&ip) {
+                output.push(ip);
+            }
+        }
+        if output.is_empty() {
+            Err(WebhookResolveError::Empty)
+        } else {
+            Ok(output)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
