@@ -1,5 +1,11 @@
 #![forbid(unsafe_code)]
 
+mod e2ee_bridge;
+pub use e2ee_bridge::{
+    MAX_WEBRTC_E2EE_WIRE_BYTES, WEBRTC_E2EE_DATA_CHANNEL_LABEL, WebRtcE2eeIngressFrame,
+    WebRtcE2eeWireError, decode_webrtc_e2ee_envelope, encode_webrtc_e2ee_envelope,
+};
+
 use core::fmt;
 use std::{
     collections::HashMap,
