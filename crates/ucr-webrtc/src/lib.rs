@@ -253,7 +253,7 @@ enum LiveWebRtcCommand {
     },
     SendE2ee {
         session_id: SessionId,
-        envelope: SfuForwardEnvelope,
+        envelope: Box<SfuForwardEnvelope>,
         deadline: Instant,
         reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
     },
@@ -388,7 +388,7 @@ impl LiveWebRtcProvider {
             .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?
     }
 
-    /// Sends one already-encrypted canonical SFU envelope through the session E2EE DataChannel.
+    /// Sends one already-encrypted canonical SFU envelope through the session E2EE `DataChannel`.
     /// No endpoint keys or plaintext enter this provider.
     ///
     /// # Errors
@@ -400,7 +400,7 @@ impl LiveWebRtcProvider {
     ) -> Result<(), WebRtcProviderError> {
         self.request(|reply, deadline| LiveWebRtcCommand::SendE2ee {
             session_id: session_id.clone(),
-            envelope: envelope.clone(),
+            envelope: Box::new(envelope.clone()),
             deadline,
             reply,
         })
@@ -530,7 +530,9 @@ async fn run_live_webrtc_worker(
                 envelope,
                 deadline,
                 reply,
-            } => handle_live_send_e2ee(&mut sessions, session_id, envelope, deadline, reply).await,
+            } => {
+                handle_live_send_e2ee(&mut sessions, session_id, *envelope, deadline, reply).await;
+            }
             LiveWebRtcCommand::Close {
                 session_id,
                 deadline,
@@ -637,8 +639,7 @@ async fn handle_live_send_e2ee(
             e2ee_channel: Some(channel),
             ..
         }) => channel.send(&envelope, deadline).await,
-        Some(_) => Err(WebRtcProviderError::SessionUnavailable),
-        None => Err(WebRtcProviderError::SessionUnavailable),
+        Some(_) | None => Err(WebRtcProviderError::SessionUnavailable),
     };
     let _ = reply.send(result);
 }
