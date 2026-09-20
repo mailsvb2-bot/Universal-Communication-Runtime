@@ -108,7 +108,7 @@ async fn run() -> Result<(), String> {
         "dispatch-webhook-once" => dispatch_webhook_once(
             &database,
             tenant_id,
-            namespace_id,
+            namespace_id.as_deref(),
             subscription_id,
         ),
         _ => Err(usage()),
@@ -131,7 +131,7 @@ fn dispatch_webhook_once(
     let runtime = ProductionRuntime::open_existing(database)?;
     let outcome = runtime.dispatch_webhook_once(
         &tenant_id,
-        namespace_id.as_deref(),
+        namespace_id,
         &subscription_id,
         decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
     )?;
