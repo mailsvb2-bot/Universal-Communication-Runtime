@@ -3160,8 +3160,10 @@ dependencies = [
  "ucr-api-grpc",
  "ucr-conference",
  "ucr-core",
+ "ucr-model",
  "ucr-realtime",
  "ucr-storage-sqlite",
+ "ucr-webhook",
 ]
 
 [[package]]

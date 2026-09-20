@@ -14,9 +14,16 @@ use ucr_api_grpc::{
     universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
-use ucr_core::{StorageHealth, StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock};
+use ucr_core::{
+    EventWebhookDispatcher, StorageHealth, StorageProvider, SystemEventDeliveryClock,
+    SystemServiceQuotaClock, WebhookDispatchOutcome,
+};
+use ucr_model::{EventSubscriptionId, NamespaceId, OpaqueId, TenantId, TenantScope};
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_storage_sqlite::SqliteLocalStore;
+use ucr_webhook::{
+    HardenedWebhookSink, NativeTlsWebhookExecutor, SystemWebhookDnsResolver, WebhookSigningSecret,
+};
 
 pub const DEFAULT_RUNTIME_BIND: &str = "127.0.0.1:50051";
 pub const RUNTIME_MODE: &str = "local-daemon";
@@ -126,6 +133,44 @@ impl ProductionRuntime {
     /// Returns explicit durable-store health/metadata failures.
     pub fn diagnostics(&self) -> Result<RuntimeDiagnostics, String> {
         diagnostics_for(self.store.as_ref())
+    }
+
+    /// Executes one durable webhook-delivery attempt for an existing Event subscription.
+    ///
+    /// The canonical Event subscription remains the sole owner of retry/cursor/DLQ state. The
+    /// signing key is supplied by the operator for this process invocation and is never persisted.
+    ///
+    /// # Errors
+    /// Rejects invalid identifiers, missing/corrupt subscriptions, unsafe destinations, DNS/TLS
+    /// failures and durable-store failures without exposing payloads or signing material.
+    pub fn dispatch_webhook_once(
+        &self,
+        tenant_id: &str,
+        namespace_id: Option<&str>,
+        subscription_id: &str,
+        signing_key: [u8; 32],
+    ) -> Result<WebhookDispatchOutcome, String> {
+        let scope = TenantScope {
+            tenant_id: TenantId::from_opaque(runtime_opaque(tenant_id, "tenant id")?),
+            namespace_id: namespace_id
+                .map(|value| {
+                    runtime_opaque(value, "namespace id").map(NamespaceId::from_opaque)
+                })
+                .transpose()?,
+        };
+        let subscription_id = EventSubscriptionId::from_opaque(runtime_opaque(
+            subscription_id,
+            "subscription id",
+        )?);
+        let clock = SystemEventDeliveryClock;
+        let sink = HardenedWebhookSink::new(
+            SystemWebhookDnsResolver,
+            NativeTlsWebhookExecutor::default(),
+            WebhookSigningSecret::from_bytes(signing_key),
+        );
+        EventWebhookDispatcher::new(&clock, self.store.as_ref(), &sink)
+            .dispatch_once(&scope, &subscription_id)
+            .map_err(|error| format!("dispatch durable webhook: {error:?}"))
     }
 
     /// Serves the existing public UCR gRPC contract as a durable local daemon.
@@ -328,6 +373,10 @@ pub fn validate_local_bind(bind: SocketAddr) -> Result<(), String> {
     } else {
         Err("production local-daemon API requires a loopback bind".to_owned())
     }
+}
+
+fn runtime_opaque(value: &str, label: &str) -> Result<OpaqueId, String> {
+    OpaqueId::new(value.to_owned()).map_err(|_| format!("invalid {label}"))
 }
 
 fn diagnostics_for(store: &SqliteLocalStore) -> Result<RuntimeDiagnostics, String> {

@@ -2,6 +2,7 @@
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
+use ucr_core::WebhookDispatchOutcome;
 use ucr_runtime::{DEFAULT_RUNTIME_BIND, ProductionRuntime, RealtimeRuntimeConfig};
 
 #[tokio::main]
@@ -18,6 +19,9 @@ async fn run() -> Result<(), String> {
     let mut database = None;
     let mut bind = DEFAULT_RUNTIME_BIND.to_owned();
     let mut join_base_url = None;
+    let mut tenant_id = None;
+    let mut namespace_id = None;
+    let mut subscription_id = None;
 
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -36,6 +40,24 @@ async fn run() -> Result<(), String> {
                 join_base_url = Some(
                     args.next()
                         .ok_or_else(|| "--join-base-url requires an HTTPS URL".to_owned())?,
+                );
+            }
+            "--tenant-id" => {
+                tenant_id = Some(
+                    args.next()
+                        .ok_or_else(|| "--tenant-id requires an opaque identifier".to_owned())?,
+                );
+            }
+            "--namespace-id" => {
+                namespace_id = Some(
+                    args.next()
+                        .ok_or_else(|| "--namespace-id requires an opaque identifier".to_owned())?,
+                );
+            }
+            "--subscription-id" => {
+                subscription_id = Some(
+                    args.next()
+                        .ok_or_else(|| "--subscription-id requires an opaque identifier".to_owned())?,
                 );
             }
             _ => return Err(format!("unknown option: {argument}; {}", usage())),
@@ -83,15 +105,51 @@ async fn run() -> Result<(), String> {
                 .serve_realtime(bind, config)
                 .await
         }
+        "dispatch-webhook-once" => {
+            let tenant_id =
+                tenant_id.ok_or_else(|| "--tenant-id is required for dispatch-webhook-once".to_owned())?;
+            let subscription_id = subscription_id
+                .ok_or_else(|| "--subscription-id is required for dispatch-webhook-once".to_owned())?;
+            let key_hex = std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
+                "UCR_WEBHOOK_SIGNING_KEY_HEX is required for dispatch-webhook-once".to_owned()
+            })?;
+            let runtime = ProductionRuntime::open_existing(&database)?;
+            let outcome = runtime.dispatch_webhook_once(
+                &tenant_id,
+                namespace_id.as_deref(),
+                &subscription_id,
+                decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
+            )?;
+            match outcome {
+                WebhookDispatchOutcome::Idle => println!("UCR_WEBHOOK_DISPATCH outcome=idle"),
+                WebhookDispatchOutcome::RetryAfter { retry_after_ms } => {
+                    println!("UCR_WEBHOOK_DISPATCH outcome=retry_after retry_after_ms={retry_after_ms}")
+                }
+                WebhookDispatchOutcome::Delivered => {
+                    println!("UCR_WEBHOOK_DISPATCH outcome=delivered")
+                }
+                WebhookDispatchOutcome::RetryScheduled => {
+                    println!("UCR_WEBHOOK_DISPATCH outcome=retry_scheduled")
+                }
+                WebhookDispatchOutcome::DeadLettered => {
+                    println!("UCR_WEBHOOK_DISPATCH outcome=dead_lettered")
+                }
+            }
+            Ok(())
+        }
         _ => Err(usage()),
     }
 }
 
 fn decode_key_hex(value: &str) -> Result<[u8; 32], String> {
+    decode_key_hex_named(value, "UCR_REALTIME_JOIN_KEY_HEX")
+}
+
+fn decode_key_hex_named(value: &str, variable: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 {
-        return Err(
-            "UCR_REALTIME_JOIN_KEY_HEX must contain exactly 64 hexadecimal characters".to_owned(),
-        );
+        return Err(format!(
+            "{variable} must contain exactly 64 hexadecimal characters"
+        ));
     }
     let mut output = [0_u8; 32];
     let bytes = value.as_bytes();
@@ -108,11 +166,11 @@ fn hex_nibble(byte: u8) -> Result<u8, String> {
         b'0'..=b'9' => Ok(byte - b'0'),
         b'a'..=b'f' => Ok(byte - b'a' + 10),
         b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err("UCR_REALTIME_JOIN_KEY_HEX contains a non-hexadecimal character".to_owned()),
+        _ => Err("key contains a non-hexadecimal character".to_owned()),
     }
 }
 
 fn usage() -> String {
-    "usage: ucr-runtime <init|check|metrics|serve|serve-realtime> --database PATH [--bind 127.0.0.1:50051] [--join-base-url https://host/conference]"
+    "usage: ucr-runtime <init|check|metrics|serve|serve-realtime|dispatch-webhook-once> --database PATH [--bind 127.0.0.1:50051] [--join-base-url https://host/conference] [--tenant-id ID] [--namespace-id ID] [--subscription-id ID]"
         .to_owned()
 }
