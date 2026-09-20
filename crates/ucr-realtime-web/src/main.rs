@@ -660,13 +660,20 @@ async fn set_webrtc_remote_description(
         Ok(response) => match response.into_inner().result {
             Some(
                 pb::realtime_set_web_rtc_remote_description_response::Result::Acknowledgement(_),
-            ) => api_ok("webrtc_remote_set", "WebRTC remote description accepted", None, None, None),
-            Some(pb::realtime_set_web_rtc_remote_description_response::Result::Error(_))
-            | None => api_error(
-                StatusCode::CONFLICT,
-                "webrtc_remote_rejected",
-                "WebRTC remote description rejected",
+            ) => api_ok(
+                "webrtc_remote_set",
+                "WebRTC remote description accepted",
+                None,
+                None,
+                None,
             ),
+            Some(pb::realtime_set_web_rtc_remote_description_response::Result::Error(_)) | None => {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "webrtc_remote_rejected",
+                    "WebRTC remote description rejected",
+                )
+            }
         },
         Err(status) => grpc_error(&status),
     }
@@ -692,7 +699,13 @@ async fn add_webrtc_ice_candidate(
     match client.add_web_rtc_ice_candidate(request).await {
         Ok(response) => match response.into_inner().result {
             Some(pb::realtime_add_web_rtc_ice_candidate_response::Result::Acknowledgement(_)) => {
-                api_ok("webrtc_ice_added", "WebRTC ICE candidate accepted", None, None, None)
+                api_ok(
+                    "webrtc_ice_added",
+                    "WebRTC ICE candidate accepted",
+                    None,
+                    None,
+                    None,
+                )
             }
             Some(pb::realtime_add_web_rtc_ice_candidate_response::Result::Error(_)) | None => {
                 api_error(
