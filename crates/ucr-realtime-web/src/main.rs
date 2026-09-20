@@ -85,6 +85,40 @@ struct PublishRequest {
     envelope_base64: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct WebRtcRemoteDescriptionRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    sdp_type: String,
+    sdp: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebRtcIceCandidateRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    candidate: String,
+    sdp_mid: Option<String>,
+    sdp_mline_index: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct WebRtcIceServerResponse {
+    urls: Vec<String>,
+    username: Option<String>,
+    credential: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WebRtcOfferResponse {
+    ok: bool,
+    code: &'static str,
+    message: &'static str,
+    sdp_type: &'static str,
+    sdp: String,
+    ice_servers: Vec<WebRtcIceServerResponse>,
+}
+
 #[derive(Debug, Serialize)]
 struct ApiResponse {
     ok: bool,
@@ -218,6 +252,24 @@ async fn handle_request(
         },
         "/v1/realtime/media/stream" => match decode_json::<SessionRequest>(&body) {
             Ok(input) => subscribe_media(&state, &token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/webrtc/start" => match decode_json::<SessionRequest>(&body) {
+            Ok(input) => start_webrtc(&state, &token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/webrtc/remote-description" => {
+            match decode_json::<WebRtcRemoteDescriptionRequest>(&body) {
+                Ok(input) => set_webrtc_remote_description(&state, &token, input).await,
+                Err(error) => error.into_response(),
+            }
+        }
+        "/v1/realtime/webrtc/ice" => match decode_json::<WebRtcIceCandidateRequest>(&body) {
+            Ok(input) => add_webrtc_ice_candidate(&state, &token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/webrtc/close" => match decode_json::<SessionRequest>(&body) {
+            Ok(input) => close_webrtc(&state, &token, input).await,
             Err(error) => error.into_response(),
         },
         _ => api_error(
@@ -514,6 +566,171 @@ async fn subscribe_media(state: &AppState, token: &str, input: SessionRequest) -
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
+async fn start_webrtc(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeStartWebRtcRequest {
+        scope: Some(pb_scope(&input)),
+        call_id: Some(pb_id(&input.call)),
+        session_id: Some(pb_id(&input.session)),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.start_web_rtc(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_start_web_rtc_response::Result::Offer(offer)) => {
+                let Some(description) = offer.description else {
+                    return api_error(
+                        StatusCode::BAD_GATEWAY,
+                        "invalid_webrtc_offer",
+                        "realtime upstream returned an invalid WebRTC offer",
+                    );
+                };
+                let sdp_type = match pb::WebRtcSdpType::try_from(description.sdp_type) {
+                    Ok(pb::WebRtcSdpType::Offer) => "offer",
+                    _ => {
+                        return api_error(
+                            StatusCode::BAD_GATEWAY,
+                            "invalid_webrtc_offer",
+                            "realtime upstream returned an invalid WebRTC offer",
+                        );
+                    }
+                };
+                json_response(
+                    StatusCode::OK,
+                    &WebRtcOfferResponse {
+                        ok: true,
+                        code: "webrtc_offer",
+                        message: "WebRTC offer ready",
+                        sdp_type,
+                        sdp: description.sdp,
+                        ice_servers: offer
+                            .ice_servers
+                            .into_iter()
+                            .map(|server| WebRtcIceServerResponse {
+                                urls: server.urls,
+                                username: server.username,
+                                credential: server.credential,
+                            })
+                            .collect(),
+                    },
+                )
+            }
+            Some(pb::realtime_start_web_rtc_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "webrtc_start_rejected",
+                "WebRTC session start rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn set_webrtc_remote_description(
+    state: &AppState,
+    token: &str,
+    input: WebRtcRemoteDescriptionRequest,
+) -> HttpResponse {
+    let sdp_type = match input.sdp_type.as_str() {
+        "offer" => pb::WebRtcSdpType::Offer as i32,
+        "answer" => pb::WebRtcSdpType::Answer as i32,
+        _ => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_sdp_type",
+                "WebRTC SDP type must be offer or answer",
+            );
+        }
+    };
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeSetWebRtcRemoteDescriptionRequest {
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        description: Some(pb::WebRtcDescription {
+            sdp_type,
+            sdp: input.sdp,
+        }),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+    match client.set_web_rtc_remote_description(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(
+                pb::realtime_set_web_rtc_remote_description_response::Result::Acknowledgement(_),
+            ) => api_ok("webrtc_remote_set", "WebRTC remote description accepted", None, None, None),
+            Some(pb::realtime_set_web_rtc_remote_description_response::Result::Error(_))
+            | None => api_error(
+                StatusCode::CONFLICT,
+                "webrtc_remote_rejected",
+                "WebRTC remote description rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn add_webrtc_ice_candidate(
+    state: &AppState,
+    token: &str,
+    input: WebRtcIceCandidateRequest,
+) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeAddWebRtcIceCandidateRequest {
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        candidate: input.candidate,
+        sdp_mid: input.sdp_mid,
+        sdp_mline_index: input.sdp_mline_index,
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+    match client.add_web_rtc_ice_candidate(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_add_web_rtc_ice_candidate_response::Result::Acknowledgement(_)) => {
+                api_ok("webrtc_ice_added", "WebRTC ICE candidate accepted", None, None, None)
+            }
+            Some(pb::realtime_add_web_rtc_ice_candidate_response::Result::Error(_)) | None => {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "webrtc_ice_rejected",
+                    "WebRTC ICE candidate rejected",
+                )
+            }
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn close_webrtc(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeCloseWebRtcRequest {
+        scope: Some(pb_scope(&input)),
+        call_id: Some(pb_id(&input.call)),
+        session_id: Some(pb_id(&input.session)),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+    match client.close_web_rtc(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_close_web_rtc_response::Result::Acknowledgement(_)) => {
+                api_ok("webrtc_closed", "WebRTC session closed", None, None, None)
+            }
+            Some(pb::realtime_close_web_rtc_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "webrtc_close_rejected",
+                "WebRTC session close rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
 async fn bounded_body(body: Incoming) -> Result<Bytes, GatewayFailure> {
     let collected = body.collect().await.map_err(|_| {
         GatewayFailure::new(
@@ -660,7 +877,7 @@ fn api_error(status: StatusCode, code: &'static str, message: impl Into<String>)
     )
 }
 
-fn json_response(status: StatusCode, payload: &ApiResponse) -> HttpResponse {
+fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> HttpResponse {
     let bytes = serde_json::to_vec(payload).unwrap_or_else(|_| {
         b"{\"ok\":false,\"code\":\"internal\",\"message\":\"response encoding failed\",\"expires_at_unix_ms\":null,\"heartbeat_interval_ms\":null,\"accepted_recipient_count\":null}".to_vec()
     });
