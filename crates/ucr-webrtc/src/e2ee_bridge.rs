@@ -9,7 +9,12 @@ use ucr_protocol::{
 
 pub const WEBRTC_E2EE_DATA_CHANNEL_LABEL: &str = "ucr.e2ee.media.v1";
 pub const MAX_WEBRTC_E2EE_WIRE_BYTES: usize = MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES + 8_192;
+pub const MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES: usize = 16_000;
 const WEBRTC_E2EE_WIRE_MAGIC: &[u8; 8] = b"UCRE2EE1";
+const WEBRTC_E2EE_CHUNK_MAGIC: &[u8; 8] = b"UCRCHK01";
+const WEBRTC_E2EE_CHUNK_HEADER_BYTES: usize = 24;
+const WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES: usize =
+    MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES - WEBRTC_E2EE_CHUNK_HEADER_BYTES;
 const WEBRTC_E2EE_WIRE_VERSION: u8 = 1;
 const MAX_WIRE_STRING_BYTES: usize = 256;
 
@@ -17,6 +22,123 @@ const MAX_WIRE_STRING_BYTES: usize = 256;
 pub struct WebRtcE2eeIngressFrame {
     pub session_id: SessionId,
     pub envelope: SfuForwardEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingWebRtcE2eeMessage {
+    message_id: u64,
+    total_length: usize,
+    chunk_count: u16,
+    next_chunk_index: u16,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Default)]
+pub struct WebRtcE2eeReassembler {
+    pending: Option<PendingWebRtcE2eeMessage>,
+}
+
+impl WebRtcE2eeReassembler {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { pending: None }
+    }
+
+    /// Accepts one ordered reliable DataChannel chunk and returns a complete canonical envelope
+    /// only after the final bounded chunk arrives.
+    ///
+    /// # Errors
+    /// Rejects malformed/out-of-order/oversized chunk sequences and clears partial state.
+    pub fn push_chunk(
+        &mut self,
+        chunk: &[u8],
+    ) -> Result<Option<SfuForwardEnvelope>, WebRtcE2eeWireError> {
+        let result = self.push_chunk_impl(chunk);
+        if result.is_err() {
+            self.pending = None;
+        }
+        result
+    }
+
+    fn push_chunk_impl(
+        &mut self,
+        chunk: &[u8],
+    ) -> Result<Option<SfuForwardEnvelope>, WebRtcE2eeWireError> {
+        if chunk.len() > MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES
+            || chunk.len() < WEBRTC_E2EE_CHUNK_HEADER_BYTES
+        {
+            return Err(WebRtcE2eeWireError::Malformed);
+        }
+        let mut reader = WireReader::new(chunk);
+        if reader.take(WEBRTC_E2EE_CHUNK_MAGIC.len())? != WEBRTC_E2EE_CHUNK_MAGIC {
+            return Err(WebRtcE2eeWireError::Malformed);
+        }
+        let message_id = reader.u64()?;
+        let chunk_index = reader.u16()?;
+        let chunk_count = reader.u16()?;
+        let total_length =
+            usize::try_from(reader.u32()?).map_err(|_| WebRtcE2eeWireError::TooLarge)?;
+        if chunk_count == 0
+            || chunk_index >= chunk_count
+            || total_length == 0
+            || total_length > MAX_WEBRTC_E2EE_WIRE_BYTES
+        {
+            return Err(WebRtcE2eeWireError::Malformed);
+        }
+        let payload = reader.take(chunk.len().saturating_sub(reader.cursor))?;
+        if payload.len() > WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES {
+            return Err(WebRtcE2eeWireError::TooLarge);
+        }
+
+        if chunk_index == 0 {
+            if self.pending.is_some() {
+                return Err(WebRtcE2eeWireError::Malformed);
+            }
+            self.pending = Some(PendingWebRtcE2eeMessage {
+                message_id,
+                total_length,
+                chunk_count,
+                next_chunk_index: 0,
+                bytes: Vec::with_capacity(total_length),
+            });
+        }
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or(WebRtcE2eeWireError::Malformed)?;
+        if pending.message_id != message_id
+            || pending.total_length != total_length
+            || pending.chunk_count != chunk_count
+            || pending.next_chunk_index != chunk_index
+        {
+            return Err(WebRtcE2eeWireError::Malformed);
+        }
+        let new_length = pending
+            .bytes
+            .len()
+            .checked_add(payload.len())
+            .ok_or(WebRtcE2eeWireError::TooLarge)?;
+        if new_length > pending.total_length {
+            return Err(WebRtcE2eeWireError::Malformed);
+        }
+        pending.bytes.extend_from_slice(payload);
+        pending.next_chunk_index = pending
+            .next_chunk_index
+            .checked_add(1)
+            .ok_or(WebRtcE2eeWireError::Malformed)?;
+
+        if pending.next_chunk_index != pending.chunk_count {
+            return Ok(None);
+        }
+        let completed = self
+            .pending
+            .take()
+            .ok_or(WebRtcE2eeWireError::Malformed)?;
+        if completed.bytes.len() != completed.total_length {
+            return Err(WebRtcE2eeWireError::Malformed);
+        }
+        decode_webrtc_e2ee_envelope(&completed.bytes).map(Some)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +196,38 @@ pub fn encode_webrtc_e2ee_envelope(
         return Err(WebRtcE2eeWireError::TooLarge);
     }
     Ok(output)
+}
+
+/// Splits one canonical encrypted SFU envelope into ordered DataChannel messages below the
+/// WebRTC-rs/browser per-message compatibility ceiling.
+///
+/// # Errors
+/// Rejects an invalid envelope, impossible message identifier arithmetic, or excessive chunk count.
+pub fn encode_webrtc_e2ee_chunks(
+    envelope: &SfuForwardEnvelope,
+    message_id: u64,
+) -> Result<Vec<Vec<u8>>, WebRtcE2eeWireError> {
+    let wire = encode_webrtc_e2ee_envelope(envelope)?;
+    let chunk_count_usize = wire.len().div_ceil(WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES);
+    let chunk_count =
+        u16::try_from(chunk_count_usize).map_err(|_| WebRtcE2eeWireError::TooLarge)?;
+    let total_length = u32::try_from(wire.len()).map_err(|_| WebRtcE2eeWireError::TooLarge)?;
+    let mut chunks = Vec::with_capacity(chunk_count_usize);
+    for (index, payload) in wire.chunks(WEBRTC_E2EE_CHUNK_PAYLOAD_BYTES).enumerate() {
+        let chunk_index = u16::try_from(index).map_err(|_| WebRtcE2eeWireError::TooLarge)?;
+        let mut chunk = Vec::with_capacity(WEBRTC_E2EE_CHUNK_HEADER_BYTES + payload.len());
+        chunk.extend_from_slice(WEBRTC_E2EE_CHUNK_MAGIC);
+        chunk.extend_from_slice(&message_id.to_be_bytes());
+        chunk.extend_from_slice(&chunk_index.to_be_bytes());
+        chunk.extend_from_slice(&chunk_count.to_be_bytes());
+        chunk.extend_from_slice(&total_length.to_be_bytes());
+        chunk.extend_from_slice(payload);
+        if chunk.len() > MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES {
+            return Err(WebRtcE2eeWireError::TooLarge);
+        }
+        chunks.push(chunk);
+    }
+    Ok(chunks)
 }
 
 /// Decodes and revalidates one WebRTC E2EE data-channel message as a canonical SFU envelope.
@@ -413,6 +567,41 @@ mod tests {
         assert_eq!(
             decode_webrtc_e2ee_envelope(&version),
             Err(WebRtcE2eeWireError::UnsupportedVersion)
+        );
+    }
+
+    #[test]
+    fn chunking_round_trips_large_video_envelope_below_datachannel_ceiling() {
+        let mut expected = envelope();
+        expected.frame.ciphertext = vec![9_u8; 128 * 1024];
+        let chunks = encode_webrtc_e2ee_chunks(&expected, 77).expect("chunks");
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.len() <= MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES)
+        );
+        let mut reassembler = WebRtcE2eeReassembler::new();
+        let mut completed = None;
+        for chunk in chunks {
+            let next = reassembler.push_chunk(&chunk).expect("chunk");
+            if next.is_some() {
+                completed = next;
+            }
+        }
+        assert_eq!(completed, Some(expected));
+    }
+
+    #[test]
+    fn reassembler_fails_closed_on_out_of_order_chunks() {
+        let mut expected = envelope();
+        expected.frame.ciphertext = vec![8_u8; 64 * 1024];
+        let mut chunks = encode_webrtc_e2ee_chunks(&expected, 88).expect("chunks");
+        chunks.swap(0, 1);
+        let mut reassembler = WebRtcE2eeReassembler::new();
+        assert_eq!(
+            reassembler.push_chunk(&chunks[0]),
+            Err(WebRtcE2eeWireError::Malformed)
         );
     }
 
