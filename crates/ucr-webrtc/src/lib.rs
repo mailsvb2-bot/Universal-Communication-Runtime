@@ -738,6 +738,76 @@ mod tests {
     }
 
     #[test]
+    fn expired_queued_create_cannot_leave_an_orphan_session() {
+        let provider = LiveWebRtcProvider::new().expect("live provider");
+        let session_id = SessionId::from_opaque(OpaqueId::new("expired-session").expect("id"));
+        let config = WebRtcSessionConfig {
+            session_id: session_id.clone(),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        let expired = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("expired deadline");
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        provider
+            .command_tx
+            .as_ref()
+            .expect("command sender")
+            .try_send(LiveWebRtcCommand::Create {
+                config: config.clone(),
+                deadline: expired,
+                reply: reply_tx,
+            })
+            .expect("queue expired create");
+        assert_eq!(
+            reply_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("expired response"),
+            Err(WebRtcProviderError::TemporarilyUnavailable)
+        );
+
+        let offer = provider.create_session(&config).expect("retry live offer");
+        assert_eq!(offer.session_id, session_id);
+        assert_eq!(provider.close_session(&session_id), Ok(()));
+    }
+
+    #[test]
+    fn shutdown_flag_bypasses_buffered_commands() {
+        let mut provider = LiveWebRtcProvider::new().expect("live provider");
+        let sender = provider
+            .command_tx
+            .as_ref()
+            .expect("command sender")
+            .clone();
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(60))
+            .expect("future deadline");
+        for index in 0..LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY {
+            let (reply, _receiver) = std_mpsc::channel();
+            let session_id =
+                SessionId::from_opaque(OpaqueId::new(format!("queued-{index}")).expect("id"));
+            match sender.try_send(LiveWebRtcCommand::Close {
+                session_id,
+                deadline,
+                reply,
+            }) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    panic!("worker closed unexpectedly")
+                }
+            }
+        }
+        provider.shutdown.store(true, Ordering::Release);
+        provider.command_tx.take();
+        let worker = provider.worker.take().expect("worker");
+        let started = Instant::now();
+        worker.join().expect("worker shutdown");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
     fn live_provider_creates_audio_video_offer_and_closes_ephemeral_session() {
         let provider = LiveWebRtcProvider::new().expect("live provider");
         let session_id = SessionId::from_opaque(OpaqueId::new("live-session").expect("id"));
