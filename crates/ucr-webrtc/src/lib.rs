@@ -604,7 +604,7 @@ async fn handle_live_remote_description(
 }
 
 async fn handle_live_remote_candidate(
-    sessions: &HashMap<String, Arc<RTCPeerConnection>>,
+    sessions: &HashMap<String, LiveWebRtcSession>,
     candidate: WebRtcIceCandidate,
     deadline: Instant,
     reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
