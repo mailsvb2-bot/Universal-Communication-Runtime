@@ -10,7 +10,7 @@ repository.workspace = true
 [dependencies]
 base64 = "=0.22.1"
 openssl = "=0.10.81"
-zeroize = { version = "=1.8.2", features = ["zeroize_derive"] }
+zeroize = { version = "=1.9.0", features = ["zeroize_derive"] }
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
 
