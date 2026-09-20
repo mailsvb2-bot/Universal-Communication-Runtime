@@ -33,6 +33,14 @@ Successful realtime join, explicit leave, reconnect restoration and first media-
 
 The payload is `ConferenceAttendanceEvent`. Attendance uses the canonical Event journal/subscription pipeline; no second attendance database is introduced. Heartbeats are liveness input and need not become durable attendance events by default.
 
+## WebRTC / ICE / TURN provider boundary
+
+`ucr-webrtc` defines the universal WebRTC transport provider boundary without becoming a second Call, Conference, SFU, membership or authorization owner. It models bounded SDP offer/answer exchange, trickle ICE candidates, ICE transport policy and deployment-supplied STUN/TURN server configuration. TURN usernames and credentials are transport secrets: model debug output redacts credential material and the provider contract does not persist them.
+
+The canonical protocol exposes three capability identifiers: `ucr.realtime.webrtc.browser`, `ucr.realtime.webrtc.ice`, and `ucr.realtime.webrtc.turn`. They are currently reported as `Prepared`, not `Production`. `PreparedWebRtcProvider` validates the contract and fails closed with `TemporarilyUnavailable`; it deliberately does not pretend that a live peer connection exists.
+
+The provider lifecycle is ephemeral: create session, apply remote description, add remote candidate, and close session. Closing provider state does not end the canonical Call. A concrete WebRTC engine adapter must remain beneath this boundary and must preserve UCR ownership of signalling policy, authorization, Conference lifecycle and encrypted media routing.
+
 ## Production boundary
 
-A Production claim requires: bounded session/queue limits, authenticated public TLS edge, secret rotation, expiry/replay tests, concurrent join/leave tests, SFU backpressure evidence, restart behavior, browser/mobile interoperability tests and protected release evidence. Contract presence alone is not a Production claim.
+A Production claim requires: bounded session/queue limits, authenticated public TLS edge, secret rotation, expiry/replay tests, concurrent join/leave tests, SFU backpressure evidence, restart behavior, browser/mobile interoperability tests, real ICE/STUN/TURN connectivity and protected release evidence. Contract presence alone is not a Production claim.
