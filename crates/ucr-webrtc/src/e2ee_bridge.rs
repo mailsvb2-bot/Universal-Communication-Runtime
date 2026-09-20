@@ -1,3 +1,12 @@
+use std::sync::Arc;
+
+use bytes::Bytes;
+use tokio::sync::mpsc;
+use webrtc::{
+    data_channel::RTCDataChannel,
+    peer_connection::RTCPeerConnection,
+};
+
 use ucr_model::{
     CallId, CryptoSuite, DeviceId, EncryptedGroupMediaFrame, GroupId, GroupMediaFrameHeader,
     GroupMediaSourceSignature, KeyId, MediaKind, NamespaceId, OpaqueId, PrincipalId, PrincipalKind,
@@ -8,6 +17,8 @@ use ucr_protocol::{
 };
 
 pub const WEBRTC_E2EE_DATA_CHANNEL_LABEL: &str = "ucr.e2ee.media.v1";
+pub const LIVE_WEBRTC_E2EE_INGRESS_CAPACITY: usize = 128;
+pub const MAX_WEBRTC_E2EE_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_WEBRTC_E2EE_WIRE_BYTES: usize = MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES + 8_192;
 pub const MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES: usize = 16_000;
 const WEBRTC_E2EE_WIRE_MAGIC: &[u8; 8] = b"UCRE2EE1";
@@ -139,6 +150,74 @@ impl WebRtcE2eeReassembler {
         }
         decode_webrtc_e2ee_envelope(&completed.bytes).map(Some)
     }
+}
+
+pub(crate) struct LiveWebRtcE2eeChannel {
+    channel: Arc<RTCDataChannel>,
+    next_message_id: u64,
+}
+
+impl LiveWebRtcE2eeChannel {
+    pub(crate) async fn send(
+        &mut self,
+        envelope: &SfuForwardEnvelope,
+    ) -> Result<(), crate::WebRtcProviderError> {
+        if self.channel.buffered_amount().await > MAX_WEBRTC_E2EE_BUFFERED_BYTES {
+            return Err(crate::WebRtcProviderError::CapacityExceeded);
+        }
+        let message_id = self.next_message_id;
+        self.next_message_id = self
+            .next_message_id
+            .checked_add(1)
+            .ok_or(crate::WebRtcProviderError::CapacityExceeded)?;
+        let chunks = encode_webrtc_e2ee_chunks(envelope, message_id)
+            .map_err(|_| crate::WebRtcProviderError::Internal)?;
+        for chunk in chunks {
+            self.channel
+                .send(&Bytes::from(chunk))
+                .await
+                .map_err(|_| crate::WebRtcProviderError::TemporarilyUnavailable)?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) async fn create_live_e2ee_data_channel(
+    peer_connection: &RTCPeerConnection,
+    session_id: &SessionId,
+    ingress_tx: mpsc::Sender<WebRtcE2eeIngressFrame>,
+) -> Result<LiveWebRtcE2eeChannel, crate::WebRtcProviderError> {
+    let channel = peer_connection
+        .create_data_channel(WEBRTC_E2EE_DATA_CHANNEL_LABEL, None)
+        .await
+        .map_err(|_| crate::WebRtcProviderError::Internal)?;
+    let reassembler = Arc::new(tokio::sync::Mutex::new(WebRtcE2eeReassembler::new()));
+    let callback_reassembler = Arc::clone(&reassembler);
+    let callback_session_id = session_id.clone();
+    channel.on_message(Box::new(move |message| {
+        let reassembler = Arc::clone(&callback_reassembler);
+        let ingress_tx = ingress_tx.clone();
+        let session_id = callback_session_id.clone();
+        Box::pin(async move {
+            if message.is_string {
+                return;
+            }
+            let decoded = {
+                let mut reassembler = reassembler.lock().await;
+                reassembler.push_chunk(&message.data)
+            };
+            if let Ok(Some(envelope)) = decoded {
+                let _ = ingress_tx.try_send(WebRtcE2eeIngressFrame {
+                    session_id,
+                    envelope,
+                });
+            }
+        })
+    }));
+    Ok(LiveWebRtcE2eeChannel {
+        channel,
+        next_message_id: 1,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
