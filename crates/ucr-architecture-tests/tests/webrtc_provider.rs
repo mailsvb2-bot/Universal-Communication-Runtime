@@ -25,6 +25,7 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     let runtime_main = read("crates/ucr-runtime/src/main.rs");
     let browser = read("crates/ucr-realtime-web/static/client.html");
     let realtime_spec = read("spec/realtime.md");
+    let typescript_e2ee = read("sdk/typescript/src/webrtc_e2ee.ts");
 
     assert!(workspace.contains("\"crates/ucr-webrtc\""));
     assert!(model.contains("pub struct IceServerConfig"));
@@ -87,6 +88,11 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(browser.contains("receiveE2eeChunk"));
     assert!(!browser.contains("pc.addTrack("));
     assert!(browser.contains("Unexpected RTP track rejected"));
+    assert!(typescript_e2ee.contains("export class UcrWebRtcE2eeTransport"));
+    assert!(typescript_e2ee.contains("ucr.e2ee.media.v1"));
+    assert!(typescript_e2ee.contains("encrypted media envelope exceeds transport bounds"));
+    assert!(!typescript_e2ee.contains("CryptoKey"));
+    assert!(!typescript_e2ee.contains("exporter_secret"));
     assert!(browser.contains("/v1/realtime/webrtc/start"));
     assert!(browser.contains("/v1/realtime/webrtc/remote-description"));
     assert!(browser.contains("/v1/realtime/webrtc/ice"));
