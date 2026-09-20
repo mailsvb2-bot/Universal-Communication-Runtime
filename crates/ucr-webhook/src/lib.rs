@@ -206,8 +206,8 @@ fn write_http_request(
     head.push_str("\r\n");
     stream
         .write_all(head.as_bytes())
-        .and_then(|_| stream.write_all(&request.body))
-        .and_then(|_| stream.flush())
+        .and_then(|()| stream.write_all(&request.body))
+        .and_then(|()| stream.flush())
         .map_err(|_| WebhookTransportError::Retryable)
 }
 
@@ -298,7 +298,7 @@ where
     ) -> Result<(), EventWebhookDeliveryError> {
         let request = self
             .prepare_request(subscription, event)
-            .map_err(|error| error.delivery_error())?;
+            .map_err(WebhookPolicyError::delivery_error)?;
         let response = self.executor.post(&request).map_err(map_transport_error)?;
         classify_status(response.status)
     }
