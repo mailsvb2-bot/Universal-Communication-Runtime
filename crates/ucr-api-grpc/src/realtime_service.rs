@@ -418,10 +418,20 @@ where
                                 .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
                         }) {
                             Ok(now_unix_seconds) => {
-                                match self
-                                    .webrtc_config
-                                    .session_config(&claims.session_id, now_unix_seconds)
-                                    .map_err(map_webrtc_provider_error)
+                                let expires_at_unix_seconds =
+                                    u64::try_from(claims.expires_at_unix_ms.div_euclid(1_000))
+                                        .map_err(|_| {
+                                            CanonicalError::new(CanonicalErrorCode::Internal)
+                                        });
+                                match expires_at_unix_seconds.and_then(|expires_at_unix_seconds| {
+                                    self.webrtc_config
+                                        .session_config_until(
+                                            &claims.session_id,
+                                            now_unix_seconds,
+                                            expires_at_unix_seconds,
+                                        )
+                                        .map_err(map_webrtc_provider_error)
+                                })
                                 {
                                     Ok(config) => {
                                         let ice_servers = config.ice_servers.clone();
