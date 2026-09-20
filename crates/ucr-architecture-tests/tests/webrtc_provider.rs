@@ -18,6 +18,7 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     let model = read("crates/ucr-model/src/webrtc.rs");
     let protocol = read("crates/ucr-protocol/src/webrtc.rs");
     let provider = read("crates/ucr-webrtc/src/lib.rs");
+    let e2ee_bridge = read("crates/ucr-webrtc/src/e2ee_bridge.rs");
     let realtime_proto = read("proto/ucr/v1/realtime.proto");
     let realtime_service = read("crates/ucr-api-grpc/src/realtime_service.rs");
     let runtime = read("crates/ucr-runtime/src/lib.rs");
@@ -62,7 +63,17 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(realtime_proto.contains("rpc CloseWebRtc"));
     assert!(realtime_service.contains("authenticated_webrtc_claims"));
     assert!(realtime_service.contains("spawn_blocking"));
-    assert!(runtime.contains("LiveWebRtcProvider::new()"));
+    assert!(runtime.contains("LiveWebRtcProvider::with_e2ee_ingress"));
+    assert!(runtime.contains("run_webrtc_e2ee_bridge"));
+    assert!(runtime.contains("forward_authenticated_e2ee_media"));
+    assert!(runtime.contains("spawn_blocking"));
+    assert!(e2ee_bridge.contains("WEBRTC_E2EE_DATA_CHANNEL_LABEL"));
+    assert!(e2ee_bridge.contains("ucr.e2ee.media.v1"));
+    assert!(e2ee_bridge.contains("MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES"));
+    assert!(e2ee_bridge.contains("WebRtcE2eeReassembler"));
+    assert!(e2ee_bridge.contains("canonical_sfu_forward_envelope"));
+    assert!(!e2ee_bridge.contains("exporter_secret"));
+    assert!(!e2ee_bridge.contains("plaintext"));
     assert!(runtime.contains("GrpcRealtimeService::with_webrtc"));
     assert!(runtime_main.contains("UCR_WEBRTC_STUN_URLS"));
     assert!(runtime_main.contains("UCR_WEBRTC_TURN_URLS"));
