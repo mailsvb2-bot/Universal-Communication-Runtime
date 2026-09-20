@@ -43,6 +43,10 @@ The canonical protocol exposes three capability identifiers: `ucr.realtime.webrt
 
 The provider lifecycle is ephemeral: create session, apply remote description, add remote candidate, and close session. Closing provider state does not end the canonical Call. A concrete WebRTC engine adapter must remain beneath this boundary and must preserve UCR ownership of signalling policy, authorization, Conference lifecycle and encrypted media routing.
 
+`LiveWebRtcProvider` is the first concrete engine adapter. It runs `webrtc-rs 0.17.2` on an isolated bounded worker, caps both queued commands and live peer sessions, maps deployment STUN/TURN settings into the engine, creates receive-only audio and video transceivers, emits a fully gathered SDP offer, applies a remote offer/answer and trickle ICE candidates, and closes ephemeral peer state deterministically. The synchronous provider contract never calls `block_on` inside an application Tokio runtime.
+
+This engine proof does **not** promote the public WebRTC capabilities above `Prepared`. Production maturity still requires the authenticated RealtimeService signalling surface, browser camera/microphone integration, real TURN traversal, reconnect/ICE-restart behavior, browser/mobile interoperability and protected release evidence.
+
 TURN credentials are issued per realtime session through `TurnRestCredentialIssuer`, never as a repository/static client password. The issuer follows coturn TURN REST shared-secret semantics: the username is `expiry_unix_seconds:session_id`, the credential is Base64(HMAC-SHA1(shared_secret, username)), TTL is bounded to 30–3600 seconds, and the in-memory shared secret is zeroized on drop. Credential/debug output is redacted. This closes credential issuance semantics but does not by itself make ICE/TURN connectivity Production; that still requires a live TURN deployment and interoperability evidence.
 
 ## Production boundary

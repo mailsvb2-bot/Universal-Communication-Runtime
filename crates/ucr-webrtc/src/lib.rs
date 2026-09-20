@@ -1,6 +1,16 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc as std_mpsc,
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
@@ -10,6 +20,19 @@ use ucr_model::{
 use ucr_protocol::{
     CapabilityDescriptor, WebRtcProtocolError, canonical_ice_server, canonical_webrtc_candidate,
     canonical_webrtc_description, phase46_webrtc_capabilities,
+};
+use webrtc::{
+    api::{
+        APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
+    },
+    ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
+    interceptor::registry::Registry,
+    peer_connection::{
+        RTCPeerConnection, configuration::RTCConfiguration,
+        policy::ice_transport_policy::RTCIceTransportPolicy,
+        sdp::session_description::RTCSessionDescription as EngineSessionDescription,
+    },
+    rtp_transceiver::rtp_codec::RTPCodecType,
 };
 use zeroize::ZeroizeOnDrop;
 
@@ -196,6 +219,471 @@ impl TurnRestCredentialIssuer {
     }
 }
 
+pub const LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY: usize = 256;
+pub const LIVE_WEBRTC_MAX_SESSIONS: usize = 1_024;
+pub const LIVE_WEBRTC_REQUEST_TIMEOUT_SECONDS: u64 = 20;
+pub const LIVE_WEBRTC_ICE_GATHER_TIMEOUT_SECONDS: u64 = 12;
+
+enum LiveWebRtcCommand {
+    Create {
+        config: WebRtcSessionConfig,
+        deadline: Instant,
+        reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
+    },
+    SetRemoteDescription {
+        description: WebRtcSessionDescription,
+        deadline: Instant,
+        reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
+    },
+    AddRemoteCandidate {
+        candidate: WebRtcIceCandidate,
+        deadline: Instant,
+        reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
+    },
+    Close {
+        session_id: SessionId,
+        deadline: Instant,
+        reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
+    },
+}
+
+pub struct LiveWebRtcProvider {
+    command_tx: Option<tokio::sync::mpsc::Sender<LiveWebRtcCommand>>,
+    worker: Option<thread::JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
+    request_timeout: Duration,
+}
+
+impl fmt::Debug for LiveWebRtcProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LiveWebRtcProvider")
+            .field(
+                "command_queue_capacity",
+                &LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY,
+            )
+            .field("max_sessions", &LIVE_WEBRTC_MAX_SESSIONS)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LiveWebRtcProvider {
+    /// Starts one isolated Tokio worker that owns all ephemeral peer-connection state.
+    ///
+    /// Canonical Call/Conference/SFU state never enters this worker. The bounded command queue
+    /// prevents synchronous callers from creating an unbounded amount of transport work.
+    ///
+    /// # Errors
+    /// Returns `TemporarilyUnavailable` if the worker runtime cannot be started.
+    pub fn new() -> Result<Self, WebRtcProviderError> {
+        let (command_tx, command_rx) =
+            tokio::sync::mpsc::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
+        let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
+        let worker = thread::Builder::new()
+            .name("ucr-webrtc-peer-engine".to_owned())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build();
+                match runtime {
+                    Ok(runtime) => {
+                        let _ = ready_tx.send(Ok(()));
+                        runtime.block_on(run_live_webrtc_worker(command_rx, worker_shutdown));
+                    }
+                    Err(_) => {
+                        let _ = ready_tx.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+                    }
+                }
+            })
+            .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?;
+        match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => Ok(Self {
+                command_tx: Some(command_tx),
+                worker: Some(worker),
+                shutdown,
+                request_timeout: Duration::from_secs(LIVE_WEBRTC_REQUEST_TIMEOUT_SECONDS),
+            }),
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                Err(error)
+            }
+            Err(_) => {
+                drop(command_tx);
+                let _ = worker.join();
+                Err(WebRtcProviderError::TemporarilyUnavailable)
+            }
+        }
+    }
+
+    fn request<T>(
+        &self,
+        command: impl FnOnce(
+            std_mpsc::Sender<Result<T, WebRtcProviderError>>,
+            Instant,
+        ) -> LiveWebRtcCommand,
+    ) -> Result<T, WebRtcProviderError> {
+        let sender = self
+            .command_tx
+            .as_ref()
+            .ok_or(WebRtcProviderError::TemporarilyUnavailable)?;
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(WebRtcProviderError::TemporarilyUnavailable);
+        }
+        let deadline = Instant::now()
+            .checked_add(self.request_timeout)
+            .ok_or(WebRtcProviderError::TemporarilyUnavailable)?;
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        sender
+            .try_send(command(reply_tx, deadline))
+            .map_err(|error| match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    WebRtcProviderError::CapacityExceeded
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    WebRtcProviderError::TemporarilyUnavailable
+                }
+            })?;
+        reply_rx
+            .recv_timeout(self.request_timeout)
+            .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?
+    }
+}
+
+impl Drop for LiveWebRtcProvider {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.command_tx.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl WebRtcProvider for LiveWebRtcProvider {
+    fn current_capabilities(&self) -> Vec<CapabilityDescriptor> {
+        // The engine is real, but UCR keeps these capabilities Prepared until public signalling,
+        // browser/mobile interoperability and production TURN evidence pass their release gates.
+        phase46_webrtc_capabilities()
+    }
+
+    fn create_session(
+        &self,
+        config: &WebRtcSessionConfig,
+    ) -> Result<WebRtcSessionDescription, WebRtcProviderError> {
+        validate_live_config(config)?;
+        self.request(|reply, deadline| LiveWebRtcCommand::Create {
+            config: config.clone(),
+            deadline,
+            reply,
+        })
+    }
+
+    fn set_remote_description(
+        &self,
+        description: &WebRtcSessionDescription,
+    ) -> Result<(), WebRtcProviderError> {
+        let description = canonical_webrtc_description(description)?;
+        self.request(|reply, deadline| LiveWebRtcCommand::SetRemoteDescription {
+            description,
+            deadline,
+            reply,
+        })
+    }
+
+    fn add_remote_candidate(
+        &self,
+        candidate: &WebRtcIceCandidate,
+    ) -> Result<(), WebRtcProviderError> {
+        let candidate = canonical_webrtc_candidate(candidate)?;
+        self.request(|reply, deadline| LiveWebRtcCommand::AddRemoteCandidate {
+            candidate,
+            deadline,
+            reply,
+        })
+    }
+
+    fn close_session(&self, session_id: &SessionId) -> Result<(), WebRtcProviderError> {
+        self.request(|reply, deadline| LiveWebRtcCommand::Close {
+            session_id: session_id.clone(),
+            deadline,
+            reply,
+        })
+    }
+}
+
+fn validate_live_config(config: &WebRtcSessionConfig) -> Result<(), WebRtcProviderError> {
+    if config.ice_servers.len() > ucr_protocol::MAX_ICE_SERVERS {
+        return Err(WebRtcProviderError::InvalidProtocol(
+            WebRtcProtocolError::TooManyIceServers,
+        ));
+    }
+    for server in &config.ice_servers {
+        canonical_ice_server(server)?;
+    }
+    Ok(())
+}
+
+async fn run_live_webrtc_worker(
+    mut commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
+    shutdown: Arc<AtomicBool>,
+) {
+    let mut sessions = HashMap::<String, Arc<RTCPeerConnection>>::new();
+    while !shutdown.load(Ordering::Acquire) {
+        let Some(command) = commands.recv().await else {
+            break;
+        };
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        match command {
+            LiveWebRtcCommand::Create {
+                config,
+                deadline,
+                reply,
+            } => handle_live_create(&mut sessions, &shutdown, config, deadline, reply).await,
+            LiveWebRtcCommand::SetRemoteDescription {
+                description,
+                deadline,
+                reply,
+            } => handle_live_remote_description(&sessions, description, deadline, reply).await,
+            LiveWebRtcCommand::AddRemoteCandidate {
+                candidate,
+                deadline,
+                reply,
+            } => handle_live_remote_candidate(&sessions, candidate, deadline, reply).await,
+            LiveWebRtcCommand::Close {
+                session_id,
+                deadline,
+                reply,
+            } => handle_live_close(&mut sessions, session_id, deadline, reply).await,
+        }
+    }
+    commands.close();
+    for (_, peer_connection) in sessions {
+        let _ = peer_connection.close().await;
+    }
+}
+
+async fn handle_live_create(
+    sessions: &mut HashMap<String, Arc<RTCPeerConnection>>,
+    shutdown: &AtomicBool,
+    config: WebRtcSessionConfig,
+    deadline: Instant,
+    reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
+) {
+    if command_expired(deadline) {
+        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+        return;
+    }
+    let key = session_key(&config.session_id);
+    if sessions.contains_key(&key) {
+        let _ = reply.send(Err(WebRtcProviderError::Conflict));
+        return;
+    }
+    if sessions.len() >= LIVE_WEBRTC_MAX_SESSIONS {
+        let _ = reply.send(Err(WebRtcProviderError::CapacityExceeded));
+        return;
+    }
+    match create_live_peer_connection(&config).await {
+        Ok((peer_connection, description)) => {
+            if shutdown.load(Ordering::Acquire) || command_expired(deadline) {
+                let _ = peer_connection.close().await;
+                let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+                return;
+            }
+            sessions.insert(key.clone(), Arc::clone(&peer_connection));
+            if reply.send(Ok(description)).is_err() {
+                sessions.remove(&key);
+                let _ = peer_connection.close().await;
+            }
+        }
+        Err(error) => {
+            let _ = reply.send(Err(error));
+        }
+    }
+}
+
+async fn handle_live_remote_description(
+    sessions: &HashMap<String, Arc<RTCPeerConnection>>,
+    description: WebRtcSessionDescription,
+    deadline: Instant,
+    reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
+) {
+    if command_expired(deadline) {
+        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+        return;
+    }
+    let result = match sessions.get(&session_key(&description.session_id)) {
+        Some(peer_connection) => set_engine_remote_description(peer_connection, &description).await,
+        None => Err(WebRtcProviderError::SessionUnavailable),
+    };
+    let _ = reply.send(result);
+}
+
+async fn handle_live_remote_candidate(
+    sessions: &HashMap<String, Arc<RTCPeerConnection>>,
+    candidate: WebRtcIceCandidate,
+    deadline: Instant,
+    reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
+) {
+    if command_expired(deadline) {
+        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+        return;
+    }
+    let result = match sessions.get(&session_key(&candidate.session_id)) {
+        Some(peer_connection) => add_engine_remote_candidate(peer_connection, &candidate).await,
+        None => Err(WebRtcProviderError::SessionUnavailable),
+    };
+    let _ = reply.send(result);
+}
+
+async fn handle_live_close(
+    sessions: &mut HashMap<String, Arc<RTCPeerConnection>>,
+    session_id: SessionId,
+    deadline: Instant,
+    reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
+) {
+    if command_expired(deadline) {
+        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+        return;
+    }
+    let result = match sessions.remove(&session_key(&session_id)) {
+        Some(peer_connection) => peer_connection
+            .close()
+            .await
+            .map_err(|_| WebRtcProviderError::Internal),
+        None => Err(WebRtcProviderError::SessionUnavailable),
+    };
+    let _ = reply.send(result);
+}
+
+fn command_expired(deadline: Instant) -> bool {
+    Instant::now() >= deadline
+}
+
+async fn create_live_peer_connection(
+    config: &WebRtcSessionConfig,
+) -> Result<(Arc<RTCPeerConnection>, WebRtcSessionDescription), WebRtcProviderError> {
+    let mut media_engine = MediaEngine::default();
+    media_engine
+        .register_default_codecs()
+        .map_err(|_| WebRtcProviderError::Internal)?;
+    let registry = register_default_interceptors(Registry::new(), &mut media_engine)
+        .map_err(|_| WebRtcProviderError::Internal)?;
+    let api = APIBuilder::new()
+        .with_media_engine(media_engine)
+        .with_interceptor_registry(registry)
+        .build();
+    let engine_config = RTCConfiguration {
+        ice_servers: config
+            .ice_servers
+            .iter()
+            .map(engine_ice_server)
+            .collect::<Vec<_>>(),
+        ice_transport_policy: match config.ice_transport_policy {
+            IceTransportPolicy::All => RTCIceTransportPolicy::All,
+            IceTransportPolicy::RelayOnly => RTCIceTransportPolicy::Relay,
+        },
+        ..Default::default()
+    };
+    let peer_connection = Arc::new(
+        api.new_peer_connection(engine_config)
+            .await
+            .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?,
+    );
+
+    let result = async {
+        peer_connection
+            .add_transceiver_from_kind(RTPCodecType::Audio, None)
+            .await
+            .map_err(|_| WebRtcProviderError::Internal)?;
+        peer_connection
+            .add_transceiver_from_kind(RTPCodecType::Video, None)
+            .await
+            .map_err(|_| WebRtcProviderError::Internal)?;
+        let offer = peer_connection
+            .create_offer(None)
+            .await
+            .map_err(|_| WebRtcProviderError::Internal)?;
+        let mut gathering_complete = peer_connection.gathering_complete_promise().await;
+        peer_connection
+            .set_local_description(offer)
+            .await
+            .map_err(|_| WebRtcProviderError::Internal)?;
+        tokio::time::timeout(
+            Duration::from_secs(LIVE_WEBRTC_ICE_GATHER_TIMEOUT_SECONDS),
+            gathering_complete.recv(),
+        )
+        .await
+        .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?;
+        let local = peer_connection
+            .local_description()
+            .await
+            .ok_or(WebRtcProviderError::Internal)?;
+        Ok(WebRtcSessionDescription {
+            session_id: config.session_id.clone(),
+            sdp_type: ucr_model::WebRtcSdpType::Offer,
+            sdp: local.sdp,
+        })
+    }
+    .await;
+
+    match result {
+        Ok(description) => Ok((peer_connection, description)),
+        Err(error) => {
+            let _ = peer_connection.close().await;
+            Err(error)
+        }
+    }
+}
+
+fn engine_ice_server(server: &IceServerConfig) -> RTCIceServer {
+    RTCIceServer {
+        urls: server.urls.clone(),
+        username: server.username.clone().unwrap_or_default(),
+        credential: server.credential.clone().unwrap_or_default(),
+    }
+}
+
+async fn set_engine_remote_description(
+    peer_connection: &RTCPeerConnection,
+    description: &WebRtcSessionDescription,
+) -> Result<(), WebRtcProviderError> {
+    let engine_description = match description.sdp_type {
+        ucr_model::WebRtcSdpType::Offer => EngineSessionDescription::offer(description.sdp.clone()),
+        ucr_model::WebRtcSdpType::Answer => {
+            EngineSessionDescription::answer(description.sdp.clone())
+        }
+    }
+    .map_err(|_| WebRtcProviderError::InvalidProtocol(WebRtcProtocolError::InvalidSdp))?;
+    peer_connection
+        .set_remote_description(engine_description)
+        .await
+        .map_err(|_| WebRtcProviderError::Conflict)
+}
+
+async fn add_engine_remote_candidate(
+    peer_connection: &RTCPeerConnection,
+    candidate: &WebRtcIceCandidate,
+) -> Result<(), WebRtcProviderError> {
+    peer_connection
+        .add_ice_candidate(RTCIceCandidateInit {
+            candidate: candidate.candidate.clone(),
+            sdp_mid: candidate.sdp_mid.clone(),
+            sdp_mline_index: candidate.sdp_mline_index,
+            ..Default::default()
+        })
+        .await
+        .map_err(|_| WebRtcProviderError::Conflict)
+}
+
+fn session_key(session_id: &SessionId) -> String {
+    session_id.as_opaque().as_str().to_owned()
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PreparedWebRtcProvider;
 
@@ -268,6 +756,98 @@ mod tests {
         assert_eq!(
             issuer.issue(&session_id, MAX_TURN_CREDENTIAL_TTL_SECONDS + 1, 1_000),
             Err(TurnCredentialError::InvalidTtl)
+        );
+    }
+
+    #[test]
+    fn expired_queued_create_cannot_leave_an_orphan_session() {
+        let provider = LiveWebRtcProvider::new().expect("live provider");
+        let session_id = SessionId::from_opaque(OpaqueId::new("expired-session").expect("id"));
+        let config = WebRtcSessionConfig {
+            session_id: session_id.clone(),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        let expired = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("expired deadline");
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        provider
+            .command_tx
+            .as_ref()
+            .expect("command sender")
+            .try_send(LiveWebRtcCommand::Create {
+                config: config.clone(),
+                deadline: expired,
+                reply: reply_tx,
+            })
+            .expect("queue expired create");
+        assert_eq!(
+            reply_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("expired response"),
+            Err(WebRtcProviderError::TemporarilyUnavailable)
+        );
+
+        let offer = provider.create_session(&config).expect("retry live offer");
+        assert_eq!(offer.session_id, session_id);
+        assert_eq!(provider.close_session(&session_id), Ok(()));
+    }
+
+    #[test]
+    fn shutdown_flag_bypasses_buffered_commands() {
+        let mut provider = LiveWebRtcProvider::new().expect("live provider");
+        let sender = provider
+            .command_tx
+            .as_ref()
+            .expect("command sender")
+            .clone();
+        let deadline = Instant::now()
+            .checked_add(Duration::from_mins(1))
+            .expect("future deadline");
+        for index in 0..LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY {
+            let (reply, _receiver) = std_mpsc::channel();
+            let session_id =
+                SessionId::from_opaque(OpaqueId::new(format!("queued-{index}")).expect("id"));
+            match sender.try_send(LiveWebRtcCommand::Close {
+                session_id,
+                deadline,
+                reply,
+            }) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => break,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    panic!("worker closed unexpectedly")
+                }
+            }
+        }
+        provider.shutdown.store(true, Ordering::Release);
+        provider.command_tx.take();
+        let worker = provider.worker.take().expect("worker");
+        let started = Instant::now();
+        worker.join().expect("worker shutdown");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn live_provider_creates_audio_video_offer_and_closes_ephemeral_session() {
+        let provider = LiveWebRtcProvider::new().expect("live provider");
+        let session_id = SessionId::from_opaque(OpaqueId::new("live-session").expect("id"));
+        let config = WebRtcSessionConfig {
+            session_id: session_id.clone(),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        let offer = provider.create_session(&config).expect("live offer");
+        assert_eq!(offer.session_id, session_id);
+        assert_eq!(offer.sdp_type, ucr_model::WebRtcSdpType::Offer);
+        assert!(offer.sdp.starts_with("v=0"));
+        assert!(offer.sdp.contains("m=audio"));
+        assert!(offer.sdp.contains("m=video"));
+        assert_eq!(provider.close_session(&session_id), Ok(()));
+        assert_eq!(
+            provider.close_session(&session_id),
+            Err(WebRtcProviderError::SessionUnavailable)
         );
     }
 
