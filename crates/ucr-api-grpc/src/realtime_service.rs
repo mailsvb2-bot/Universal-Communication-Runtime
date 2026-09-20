@@ -19,8 +19,8 @@ use ucr_model::{
     ConferenceSubscriptionSet, CorrelationContext, CryptoSuite, DeviceId, DeviceLifecycleState,
     DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
     GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind, OpaqueId, PrincipalKind,
-    ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope, WebRtcIceCandidate,
-    WebRtcSdpType, WebRtcSessionDescription,
+    ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope, WebRtcIceCandidate, WebRtcSdpType,
+    WebRtcSessionDescription,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for,
@@ -440,9 +440,7 @@ where
                                                     .map(pb_webrtc_ice_server)
                                                     .collect(),
                                             }),
-                                            Ok(Err(error)) => {
-                                                Err(map_webrtc_provider_error(error))
-                                            }
+                                            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
                                             Err(_) => Err(CanonicalError::new(
                                                 CanonicalErrorCode::Internal,
                                             )),
@@ -536,9 +534,7 @@ where
                             .sdp_mline_index
                             .map(u16::try_from)
                             .transpose()
-                            .map_err(|_| {
-                                CanonicalError::new(CanonicalErrorCode::InvalidArgument)
-                            });
+                            .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument));
                         match mline_index {
                             Ok(sdp_mline_index) => {
                                 let candidate = WebRtcIceCandidate {
@@ -620,9 +616,7 @@ where
                 Ok(acknowledgement) => {
                     pb::realtime_close_web_rtc_response::Result::Acknowledgement(acknowledgement)
                 }
-                Err(error) => {
-                    pb::realtime_close_web_rtc_response::Result::Error(pb_error(error))
-                }
+                Err(error) => pb::realtime_close_web_rtc_response::Result::Error(pb_error(error)),
             }),
         }))
     }
