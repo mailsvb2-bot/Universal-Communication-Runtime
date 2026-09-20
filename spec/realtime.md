@@ -43,6 +43,8 @@ The canonical protocol exposes three capability identifiers: `ucr.realtime.webrt
 
 The provider lifecycle is ephemeral: create session, apply remote description, add remote candidate, and close session. Closing provider state does not end the canonical Call. A concrete WebRTC engine adapter must remain beneath this boundary and must preserve UCR ownership of signalling policy, authorization, Conference lifecycle and encrypted media routing.
 
+TURN credentials are issued per realtime session through `TurnRestCredentialIssuer`, never as a repository/static client password. The issuer follows coturn TURN REST shared-secret semantics: the username is `expiry_unix_seconds:session_id`, the credential is Base64(HMAC-SHA1(shared_secret, username)), TTL is bounded to 30–3600 seconds, and the in-memory shared secret is zeroized on drop. Credential/debug output is redacted. This closes credential issuance semantics but does not by itself make ICE/TURN connectivity Production; that still requires a live TURN deployment and interoperability evidence.
+
 ## Production boundary
 
 A Production claim requires: bounded session/queue limits, authenticated public TLS edge, secret rotation, expiry/replay tests, concurrent join/leave tests, SFU backpressure evidence, restart behavior, browser/mobile interoperability tests, real ICE/STUN/TURN connectivity and protected release evidence. Contract presence alone is not a Production claim.
