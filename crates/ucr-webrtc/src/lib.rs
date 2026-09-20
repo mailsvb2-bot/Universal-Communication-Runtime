@@ -18,7 +18,9 @@ use ucr_protocol::{
     canonical_webrtc_description, phase46_webrtc_capabilities,
 };
 use webrtc::{
-    api::{APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine},
+    api::{
+        APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
+    },
     ice_transport::{ice_candidate::RTCIceCandidateInit, ice_server::RTCIceServer},
     interceptor::registry::Registry,
     peer_connection::{
@@ -213,7 +215,6 @@ impl TurnRestCredentialIssuer {
     }
 }
 
-
 pub const LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY: usize = 256;
 pub const LIVE_WEBRTC_MAX_SESSIONS: usize = 1_024;
 pub const LIVE_WEBRTC_REQUEST_TIMEOUT_SECONDS: u64 = 20;
@@ -249,7 +250,10 @@ impl fmt::Debug for LiveWebRtcProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LiveWebRtcProvider")
-            .field("command_queue_capacity", &LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY)
+            .field(
+                "command_queue_capacity",
+                &LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY,
+            )
             .field("max_sessions", &LIVE_WEBRTC_MAX_SESSIONS)
             .finish_non_exhaustive()
     }
@@ -312,14 +316,16 @@ impl LiveWebRtcProvider {
             .as_ref()
             .ok_or(WebRtcProviderError::TemporarilyUnavailable)?;
         let (reply_tx, reply_rx) = std_mpsc::channel();
-        sender.try_send(command(reply_tx)).map_err(|error| match error {
-            tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                WebRtcProviderError::CapacityExceeded
-            }
-            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                WebRtcProviderError::TemporarilyUnavailable
-            }
-        })?;
+        sender
+            .try_send(command(reply_tx))
+            .map_err(|error| match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    WebRtcProviderError::CapacityExceeded
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    WebRtcProviderError::TemporarilyUnavailable
+                }
+            })?;
         reply_rx
             .recv_timeout(self.request_timeout)
             .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?
@@ -392,9 +398,7 @@ fn validate_live_config(config: &WebRtcSessionConfig) -> Result<(), WebRtcProvid
     Ok(())
 }
 
-async fn run_live_webrtc_worker(
-    mut commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
-) {
+async fn run_live_webrtc_worker(mut commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>) {
     let mut sessions = HashMap::<String, Arc<RTCPeerConnection>>::new();
     while let Some(command) = commands.recv().await {
         match command {
