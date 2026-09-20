@@ -3,9 +3,13 @@
 use core::fmt;
 use std::{
     collections::HashMap,
-    sync::{Arc, mpsc as std_mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc as std_mpsc,
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -223,26 +227,30 @@ pub const LIVE_WEBRTC_ICE_GATHER_TIMEOUT_SECONDS: u64 = 12;
 enum LiveWebRtcCommand {
     Create {
         config: WebRtcSessionConfig,
+        deadline: Instant,
         reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
     },
     SetRemoteDescription {
         description: WebRtcSessionDescription,
+        deadline: Instant,
         reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
     },
     AddRemoteCandidate {
         candidate: WebRtcIceCandidate,
+        deadline: Instant,
         reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
     },
     Close {
         session_id: SessionId,
+        deadline: Instant,
         reply: std_mpsc::Sender<Result<(), WebRtcProviderError>>,
     },
-    Shutdown,
 }
 
 pub struct LiveWebRtcProvider {
     command_tx: Option<tokio::sync::mpsc::Sender<LiveWebRtcCommand>>,
     worker: Option<thread::JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
     request_timeout: Duration,
 }
 
@@ -271,6 +279,8 @@ impl LiveWebRtcProvider {
         let (command_tx, command_rx) =
             tokio::sync::mpsc::channel(LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
         let worker = thread::Builder::new()
             .name("ucr-webrtc-peer-engine".to_owned())
             .spawn(move || {
@@ -281,7 +291,7 @@ impl LiveWebRtcProvider {
                 match runtime {
                     Ok(runtime) => {
                         let _ = ready_tx.send(Ok(()));
-                        runtime.block_on(run_live_webrtc_worker(command_rx));
+                        runtime.block_on(run_live_webrtc_worker(command_rx, worker_shutdown));
                     }
                     Err(_) => {
                         let _ = ready_tx.send(Err(WebRtcProviderError::TemporarilyUnavailable));
@@ -293,6 +303,7 @@ impl LiveWebRtcProvider {
             Ok(Ok(())) => Ok(Self {
                 command_tx: Some(command_tx),
                 worker: Some(worker),
+                shutdown,
                 request_timeout: Duration::from_secs(LIVE_WEBRTC_REQUEST_TIMEOUT_SECONDS),
             }),
             Ok(Err(error)) => {
@@ -309,15 +320,24 @@ impl LiveWebRtcProvider {
 
     fn request<T>(
         &self,
-        command: impl FnOnce(std_mpsc::Sender<Result<T, WebRtcProviderError>>) -> LiveWebRtcCommand,
+        command: impl FnOnce(
+            std_mpsc::Sender<Result<T, WebRtcProviderError>>,
+            Instant,
+        ) -> LiveWebRtcCommand,
     ) -> Result<T, WebRtcProviderError> {
         let sender = self
             .command_tx
             .as_ref()
             .ok_or(WebRtcProviderError::TemporarilyUnavailable)?;
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(WebRtcProviderError::TemporarilyUnavailable);
+        }
+        let deadline = Instant::now()
+            .checked_add(self.request_timeout)
+            .ok_or(WebRtcProviderError::TemporarilyUnavailable)?;
         let (reply_tx, reply_rx) = std_mpsc::channel();
         sender
-            .try_send(command(reply_tx))
+            .try_send(command(reply_tx, deadline))
             .map_err(|error| match error {
                 tokio::sync::mpsc::error::TrySendError::Full(_) => {
                     WebRtcProviderError::CapacityExceeded
@@ -334,10 +354,8 @@ impl LiveWebRtcProvider {
 
 impl Drop for LiveWebRtcProvider {
     fn drop(&mut self) {
-        if let Some(sender) = self.command_tx.take() {
-            let _ = sender.try_send(LiveWebRtcCommand::Shutdown);
-            drop(sender);
-        }
+        self.shutdown.store(true, Ordering::Release);
+        self.command_tx.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -356,8 +374,9 @@ impl WebRtcProvider for LiveWebRtcProvider {
         config: &WebRtcSessionConfig,
     ) -> Result<WebRtcSessionDescription, WebRtcProviderError> {
         validate_live_config(config)?;
-        self.request(|reply| LiveWebRtcCommand::Create {
+        self.request(|reply, deadline| LiveWebRtcCommand::Create {
             config: config.clone(),
+            deadline,
             reply,
         })
     }
@@ -367,7 +386,11 @@ impl WebRtcProvider for LiveWebRtcProvider {
         description: &WebRtcSessionDescription,
     ) -> Result<(), WebRtcProviderError> {
         let description = canonical_webrtc_description(description)?;
-        self.request(|reply| LiveWebRtcCommand::SetRemoteDescription { description, reply })
+        self.request(|reply, deadline| LiveWebRtcCommand::SetRemoteDescription {
+            description,
+            deadline,
+            reply,
+        })
     }
 
     fn add_remote_candidate(
@@ -375,12 +398,17 @@ impl WebRtcProvider for LiveWebRtcProvider {
         candidate: &WebRtcIceCandidate,
     ) -> Result<(), WebRtcProviderError> {
         let candidate = canonical_webrtc_candidate(candidate)?;
-        self.request(|reply| LiveWebRtcCommand::AddRemoteCandidate { candidate, reply })
+        self.request(|reply, deadline| LiveWebRtcCommand::AddRemoteCandidate {
+            candidate,
+            deadline,
+            reply,
+        })
     }
 
     fn close_session(&self, session_id: &SessionId) -> Result<(), WebRtcProviderError> {
-        self.request(|reply| LiveWebRtcCommand::Close {
+        self.request(|reply, deadline| LiveWebRtcCommand::Close {
             session_id: session_id.clone(),
+            deadline,
             reply,
         })
     }
@@ -398,28 +426,65 @@ fn validate_live_config(config: &WebRtcSessionConfig) -> Result<(), WebRtcProvid
     Ok(())
 }
 
-async fn run_live_webrtc_worker(mut commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>) {
+async fn run_live_webrtc_worker(
+    mut commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
+    shutdown: Arc<AtomicBool>,
+) {
     let mut sessions = HashMap::<String, Arc<RTCPeerConnection>>::new();
-    while let Some(command) = commands.recv().await {
+    while !shutdown.load(Ordering::Acquire) {
+        let Some(command) = commands.recv().await else {
+            break;
+        };
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
         match command {
-            LiveWebRtcCommand::Create { config, reply } => {
+            LiveWebRtcCommand::Create {
+                config,
+                deadline,
+                reply,
+            } => {
+                if command_expired(deadline) {
+                    let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+                    continue;
+                }
                 let key = session_key(&config.session_id);
-                let result = if sessions.contains_key(&key) {
-                    Err(WebRtcProviderError::Conflict)
-                } else if sessions.len() >= LIVE_WEBRTC_MAX_SESSIONS {
-                    Err(WebRtcProviderError::CapacityExceeded)
-                } else {
-                    match create_live_peer_connection(&config).await {
-                        Ok((peer_connection, description)) => {
-                            sessions.insert(key, peer_connection);
-                            Ok(description)
+                if sessions.contains_key(&key) {
+                    let _ = reply.send(Err(WebRtcProviderError::Conflict));
+                    continue;
+                }
+                if sessions.len() >= LIVE_WEBRTC_MAX_SESSIONS {
+                    let _ = reply.send(Err(WebRtcProviderError::CapacityExceeded));
+                    continue;
+                }
+                match create_live_peer_connection(&config).await {
+                    Ok((peer_connection, description)) => {
+                        if shutdown.load(Ordering::Acquire) || command_expired(deadline) {
+                            let _ = peer_connection.close().await;
+                            let _ =
+                                reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+                            continue;
                         }
-                        Err(error) => Err(error),
+                        sessions.insert(key.clone(), Arc::clone(&peer_connection));
+                        if reply.send(Ok(description)).is_err() {
+                            sessions.remove(&key);
+                            let _ = peer_connection.close().await;
+                        }
                     }
-                };
-                let _ = reply.send(result);
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
             }
-            LiveWebRtcCommand::SetRemoteDescription { description, reply } => {
+            LiveWebRtcCommand::SetRemoteDescription {
+                description,
+                deadline,
+                reply,
+            } => {
+                if command_expired(deadline) {
+                    let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+                    continue;
+                }
                 let key = session_key(&description.session_id);
                 let result = match sessions.get(&key) {
                     Some(peer_connection) => {
@@ -429,7 +494,15 @@ async fn run_live_webrtc_worker(mut commands: tokio::sync::mpsc::Receiver<LiveWe
                 };
                 let _ = reply.send(result);
             }
-            LiveWebRtcCommand::AddRemoteCandidate { candidate, reply } => {
+            LiveWebRtcCommand::AddRemoteCandidate {
+                candidate,
+                deadline,
+                reply,
+            } => {
+                if command_expired(deadline) {
+                    let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+                    continue;
+                }
                 let key = session_key(&candidate.session_id);
                 let result = match sessions.get(&key) {
                     Some(peer_connection) => {
@@ -439,7 +512,15 @@ async fn run_live_webrtc_worker(mut commands: tokio::sync::mpsc::Receiver<LiveWe
                 };
                 let _ = reply.send(result);
             }
-            LiveWebRtcCommand::Close { session_id, reply } => {
+            LiveWebRtcCommand::Close {
+                session_id,
+                deadline,
+                reply,
+            } => {
+                if command_expired(deadline) {
+                    let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+                    continue;
+                }
                 let result = match sessions.remove(&session_key(&session_id)) {
                     Some(peer_connection) => peer_connection
                         .close()
@@ -449,12 +530,16 @@ async fn run_live_webrtc_worker(mut commands: tokio::sync::mpsc::Receiver<LiveWe
                 };
                 let _ = reply.send(result);
             }
-            LiveWebRtcCommand::Shutdown => break,
         }
     }
+    commands.close();
     for (_, peer_connection) in sessions {
         let _ = peer_connection.close().await;
     }
+}
+
+fn command_expired(deadline: Instant) -> bool {
+    Instant::now() >= deadline
 }
 
 async fn create_live_peer_connection(
