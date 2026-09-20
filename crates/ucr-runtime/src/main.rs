@@ -105,43 +105,52 @@ async fn run() -> Result<(), String> {
                 .serve_realtime(bind, config)
                 .await
         }
-        "dispatch-webhook-once" => {
-            let tenant_id = tenant_id
-                .ok_or_else(|| "--tenant-id is required for dispatch-webhook-once".to_owned())?;
-            let subscription_id = subscription_id.ok_or_else(|| {
-                "--subscription-id is required for dispatch-webhook-once".to_owned()
-            })?;
-            let key_hex = std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
-                "UCR_WEBHOOK_SIGNING_KEY_HEX is required for dispatch-webhook-once".to_owned()
-            })?;
-            let runtime = ProductionRuntime::open_existing(&database)?;
-            let outcome = runtime.dispatch_webhook_once(
-                &tenant_id,
-                namespace_id.as_deref(),
-                &subscription_id,
-                decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
-            )?;
-            match outcome {
-                WebhookDispatchOutcome::Idle => println!("UCR_WEBHOOK_DISPATCH outcome=idle"),
-                WebhookDispatchOutcome::RetryAfter { retry_after_ms } => {
-                    println!(
-                        "UCR_WEBHOOK_DISPATCH outcome=retry_after retry_after_ms={retry_after_ms}"
-                    )
-                }
-                WebhookDispatchOutcome::Delivered => {
-                    println!("UCR_WEBHOOK_DISPATCH outcome=delivered")
-                }
-                WebhookDispatchOutcome::RetryScheduled => {
-                    println!("UCR_WEBHOOK_DISPATCH outcome=retry_scheduled")
-                }
-                WebhookDispatchOutcome::DeadLettered => {
-                    println!("UCR_WEBHOOK_DISPATCH outcome=dead_lettered")
-                }
-            }
-            Ok(())
-        }
+        "dispatch-webhook-once" => dispatch_webhook_once(
+            &database,
+            tenant_id,
+            namespace_id,
+            subscription_id,
+        ),
         _ => Err(usage()),
     }
+}
+
+fn dispatch_webhook_once(
+    database: &PathBuf,
+    tenant_id: Option<String>,
+    namespace_id: Option<String>,
+    subscription_id: Option<String>,
+) -> Result<(), String> {
+    let tenant_id =
+        tenant_id.ok_or_else(|| "--tenant-id is required for dispatch-webhook-once".to_owned())?;
+    let subscription_id = subscription_id
+        .ok_or_else(|| "--subscription-id is required for dispatch-webhook-once".to_owned())?;
+    let key_hex = std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
+        "UCR_WEBHOOK_SIGNING_KEY_HEX is required for dispatch-webhook-once".to_owned()
+    })?;
+    let runtime = ProductionRuntime::open_existing(database)?;
+    let outcome = runtime.dispatch_webhook_once(
+        &tenant_id,
+        namespace_id.as_deref(),
+        &subscription_id,
+        decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
+    )?;
+    match outcome {
+        WebhookDispatchOutcome::Idle => println!("UCR_WEBHOOK_DISPATCH outcome=idle"),
+        WebhookDispatchOutcome::RetryAfter { retry_after_ms } => {
+            println!("UCR_WEBHOOK_DISPATCH outcome=retry_after retry_after_ms={retry_after_ms}");
+        }
+        WebhookDispatchOutcome::Delivered => {
+            println!("UCR_WEBHOOK_DISPATCH outcome=delivered");
+        }
+        WebhookDispatchOutcome::RetryScheduled => {
+            println!("UCR_WEBHOOK_DISPATCH outcome=retry_scheduled");
+        }
+        WebhookDispatchOutcome::DeadLettered => {
+            println!("UCR_WEBHOOK_DISPATCH outcome=dead_lettered");
+        }
+    }
+    Ok(())
 }
 
 fn decode_key_hex(value: &str) -> Result<[u8; 32], String> {
