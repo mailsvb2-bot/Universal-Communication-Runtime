@@ -3264,6 +3264,7 @@ dependencies = [
  "base64",
  "openssl",
  "ucr-model",
+ "zeroize",
  "ucr-protocol",
 ]
 
