@@ -4,6 +4,8 @@ use ucr_model::{
     MediaKind, OpaqueId, PrincipalKind, PrincipalRef, TenantScope, VideoSourceKind,
 };
 
+use crate::{NegotiatedSession, SCREEN_SHARE_VIDEO_CAPABILITY};
+
 pub const GROUP_MEDIA_E2EE_CAPABILITY: &str = "ucr.media.e2ee.group.mls";
 pub const GROUP_MEDIA_CONTEXT_V1_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-CONTEXT-V1\0";
 pub const GROUP_MEDIA_FRAME_AAD_V1_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-FRAME-AAD-V1\0";
@@ -27,7 +29,35 @@ pub enum GroupMediaE2eeProtocolError {
     InvalidAudioHeader,
     UnsupportedFrameHeaderVersion,
     InvalidMediaSourceKind,
+    ScreenShareCapabilityNotNegotiated,
     InvalidSourceSignature,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenShareV2Negotiation {
+    _private: (),
+}
+
+/// Produces a screen-share v2 proof only from a capability-intersection negotiation result.
+///
+/// This type is intentionally opaque so media emitters cannot replace negotiation with a caller
+/// boolean. The surrounding handshake still owns transcript authentication; this helper proves
+/// only that the canonical negotiated session contains the screen-share capability.
+///
+/// # Errors
+/// Rejects sessions where screen sharing was not mutually negotiated.
+pub fn screen_share_v2_negotiation(
+    session: &NegotiatedSession,
+) -> Result<ScreenShareV2Negotiation, GroupMediaE2eeProtocolError> {
+    if session
+        .capabilities
+        .iter()
+        .any(|capability| capability.id == SCREEN_SHARE_VIDEO_CAPABILITY)
+    {
+        Ok(ScreenShareV2Negotiation { _private: () })
+    } else {
+        Err(GroupMediaE2eeProtocolError::ScreenShareCapabilityNotNegotiated)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
