@@ -231,6 +231,7 @@ fn universal_conference_live_capacity_uses_active_storage_projection() {
 fn universal_media_subscriptions_reuse_canonical_conference_runtime_state() {
     let proto = read("proto/ucr/v1/universal_conference.proto");
     let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    let conference = read("crates/ucr-api-grpc/src/conference_service.rs");
     let runtime = read("crates/ucr-runtime/src/lib.rs");
     let spec = read("spec/universal-conference-api.md");
 
@@ -252,8 +253,19 @@ fn universal_media_subscriptions_reuse_canonical_conference_runtime_state() {
     assert!(service.contains("fn set_universal_subscriptions"));
     assert!(service.contains("participant_for_external("));
     assert!(service.contains("resolve_join_call("));
-    assert!(service.contains("ConferenceRuntime::with_state("));
+    assert!(service.contains("prepared_conference_runtime("));
     assert!(service.contains("CONFERENCE_SUBSCRIBE_PERMISSION"));
+    assert!(conference.contains("pub(crate) fn prepared_conference_runtime"));
+    assert!(conference.contains("ConferenceRuntime::with_state("));
+    let method = service
+        .split_once("async fn set_subscriptions(")
+        .expect("universal subscription method")
+        .1
+        .split_once("async fn prepare_conference_runtime(")
+        .expect("universal subscription method close")
+        .0;
+    assert!(method.contains("CONFERENCE_MANAGE_PERMISSION"));
+    assert!(!method.contains("CONFERENCE_SUBSCRIBE_PERMISSION"));
     assert!(runtime.contains("GrpcConferenceService::with_state("));
     assert!(runtime.contains("GrpcUniversalConferenceService::with_state("));
     assert!(runtime.contains("GrpcUniversalConferenceService::with_state_and_join_issuer("));
