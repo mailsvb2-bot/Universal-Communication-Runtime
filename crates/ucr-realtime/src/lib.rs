@@ -574,6 +574,28 @@ impl RealtimeSessionRegistry {
         }
     }
 
+    /// Returns whether the exact signed session is already active.
+    ///
+    /// This is used by admission policy to distinguish a first entry from a reconnect when a
+    /// Conference host closes entry after participants are already present.
+    ///
+    /// # Errors
+    /// Fails only when bounded registry state is unavailable.
+    pub fn contains_active_session(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<bool, RealtimeRegistryError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        prune_expired(&mut entries, now_unix_ms);
+        Ok(entries
+            .iter()
+            .any(|entry| same_session(entry, claims) && entry.claims == *claims))
+    }
+
     /// Opens or reconnects the exact signed session. Reconnect replaces the old downlink sender,
     /// causing the prior receiver to close rather than keeping two consumers for one session ID.
     ///
