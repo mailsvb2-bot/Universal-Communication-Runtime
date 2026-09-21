@@ -6,6 +6,7 @@ The canonical schemas stay in `proto/ucr/v1`; generated language files are deriv
 The five required language surfaces are Rust, Python, TypeScript, Kotlin and Swift.
 Rust has the compiled reference client in `crates/ucr-sdk`.
 The other language directories define the same code-generation boundary and exact credential helper.
+`UniversalConferenceService` is part of that Service Principal SDK contract; `RealtimeService` remains a separate participant-session boundary authenticated by join/session credentials.
 
 All SDKs use binary gRPC metadata keys `ucr-service-credential-id-bin` and
 `ucr-service-credential-secret-bin`. Credential secrets must be redacted from diagnostics.
