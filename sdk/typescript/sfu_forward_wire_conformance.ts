@@ -69,6 +69,39 @@ requireCondition(
   "TypeScript wire codec rejected canonical MLS epoch zero",
 );
 
+for (const malformedId of [
+  JSON.parse('"\\ud800"') as string,
+  JSON.parse('"\\udc00"') as string,
+]) {
+  let malformedIdRejected = false;
+  try {
+    encodeSfuForwardEnvelopeWire({
+      ...envelope,
+      frame: {
+        ...envelope.frame,
+        header: { ...envelope.frame.header, tenantId: malformedId },
+      },
+    });
+  } catch {
+    malformedIdRejected = true;
+  }
+  requireCondition(malformedIdRejected, "TypeScript encoder accepted ill-formed UTF-16 canonical ID");
+}
+
+const supplementaryPlaneId = "tenant-😀";
+requireCondition(
+  decodeSfuForwardEnvelopeWire(
+    encodeSfuForwardEnvelopeWire({
+      ...envelope,
+      frame: {
+        ...envelope.frame,
+        header: { ...envelope.frame.header, tenantId: supplementaryPlaneId },
+      },
+    }),
+  ).frame.header.tenantId === supplementaryPlaneId,
+  "TypeScript codec rejected a valid UTF-16 surrogate pair",
+);
+
 let trailingRejected = false;
 try {
   decodeSfuForwardEnvelopeWire(Uint8Array.from([...wire, 0]));
