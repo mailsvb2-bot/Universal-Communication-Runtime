@@ -17,11 +17,11 @@ use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipantState, CallSignal, CallSignalKind,
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
     ConferenceParticipantRole, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
-    DeviceId, DeviceLifecycleState,
-    DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind, OpaqueId, PrincipalKind,
-    ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope, UniversalConferenceLifecycle,
-    VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType, WebRtcSessionDescription,
+    DeviceId, DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId,
+    GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind,
+    OpaqueId, PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope,
+    UniversalConferenceLifecycle, VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
+    WebRtcSessionDescription,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
@@ -977,9 +977,9 @@ where
     ) -> Result<(), CanonicalError> {
         match self.realtime_admission_state(claims)? {
             pb::RealtimeAdmissionState::Admitted => Ok(()),
-            pb::RealtimeAdmissionState::WaitingRoom => Err(
-                CanonicalError::new(CanonicalErrorCode::PolicyDenied).with_retry_after(2_000),
-            ),
+            pb::RealtimeAdmissionState::WaitingRoom => {
+                Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied).with_retry_after(2_000))
+            }
             pb::RealtimeAdmissionState::Closed | pb::RealtimeAdmissionState::Unspecified => {
                 Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
             }
