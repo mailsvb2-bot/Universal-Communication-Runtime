@@ -550,8 +550,7 @@ fn screen_share_source_kind_is_authenticated_before_sfu_fan_out() {
 
     let envelope = SfuForwardEnvelope { frame };
     let sfu = PreparedSfuCapabilities;
-    let denied_runtime =
-        SfuRuntime::new(&DenyScreenShareSend, &fixture.store, &capabilities, &sfu);
+    let denied_runtime = SfuRuntime::new(&DenyScreenShareSend, &fixture.store, &capabilities, &sfu);
     let denied_sink = CaptureSink::default();
     assert!(matches!(
         denied_runtime.forward(
