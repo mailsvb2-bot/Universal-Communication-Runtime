@@ -95,10 +95,13 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
         .split_once("function scheduleWaitingRoom(){")
         .expect("leave function close")
         .0;
-    assert!(
-        leave.find("await stopScreenShare(false)")
-            < leave.find("await closeServerPeer()")
-    );
+    let local_screen_stop = leave
+        .find("await stopScreenShare(false)")
+        .expect("leave stops local screen capture");
+    let server_close = leave
+        .find("await closeServerPeer()")
+        .expect("leave requests server peer close");
+    assert!(local_screen_stop < server_close);
     assert!(browser.contains("new RTCPeerConnection"));
     assert!(browser.contains("pc.ondatachannel"));
     assert!(browser.contains("ucr.e2ee.media.v1"));
