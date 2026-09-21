@@ -2,17 +2,19 @@ use ucr_model::{
     CallId, CapabilityDescriptor, CapabilityMaturity, CryptoSuite, DeviceId,
     EncryptedGroupMediaFrame, GroupId, GroupMediaE2eeContext, GroupMediaFrameHeader,
     GroupMediaSourceSignature, KeyId, MediaKind, NamespaceId, OpaqueId, PrincipalId, PrincipalKind,
-    PrincipalRef, SfuForwardEnvelope, TenantId, TenantScope,
+    PrincipalRef, SfuForwardEnvelope, TenantId, TenantScope, VideoSourceKind,
 };
 
 use crate::{
-    GroupMediaE2eeProtocolError, MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES,
-    group_media_context_from_frame, validate_encrypted_group_media_frame,
+    GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2, GroupMediaE2eeProtocolError,
+    MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES, group_media_context_from_frame,
+    validate_encrypted_group_media_frame,
 };
 
 pub const SFU_MEDIA_CAPABILITY: &str = "ucr.media.sfu";
 pub const SFU_FORWARD_WIRE_MAGIC: &[u8; 8] = b"UCRE2EE1";
-pub const SFU_FORWARD_WIRE_VERSION: u8 = 1;
+pub const SFU_FORWARD_WIRE_V1: u8 = 1;
+pub const SFU_FORWARD_WIRE_VERSION: u8 = 2;
 pub const MAX_SFU_FORWARD_WIRE_BYTES: usize = MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES + 8_192;
 const MAX_SFU_FORWARD_WIRE_STRING_BYTES: usize = 256;
 
@@ -77,7 +79,7 @@ pub fn encode_sfu_forward_envelope(
     let frame = &envelope.frame;
     let mut output = Vec::with_capacity(frame.ciphertext.len().saturating_add(1_024));
     output.extend_from_slice(SFU_FORWARD_WIRE_MAGIC);
-    output.push(SFU_FORWARD_WIRE_VERSION);
+    output.push(frame.header.header_version);
     push_scope(&mut output, &frame.header.scope)?;
     push_id(&mut output, frame.header.call_id.as_opaque())?;
     push_id(&mut output, frame.header.group_id.as_opaque())?;
@@ -91,6 +93,12 @@ pub fn encode_sfu_forward_envelope(
     push_id(&mut output, &frame.header.crypto_state_ref)?;
     output.push(crypto_suite_code(frame.header.crypto_suite));
     output.push(media_kind_code(frame.header.media_kind));
+    if frame.header.header_version == SFU_FORWARD_WIRE_VERSION {
+        output.push(video_source_kind_code(
+            frame.header.media_kind,
+            frame.header.video_source_kind,
+        )?);
+    }
     output.extend_from_slice(&frame.header.sequence.to_be_bytes());
     output.extend_from_slice(&frame.header.media_timestamp.to_be_bytes());
     output.push(u8::from(frame.header.keyframe));
@@ -120,7 +128,8 @@ pub fn decode_sfu_forward_envelope(
     if reader.take(SFU_FORWARD_WIRE_MAGIC.len())? != SFU_FORWARD_WIRE_MAGIC {
         return Err(SfuForwardWireError::Malformed);
     }
-    if reader.u8()? != SFU_FORWARD_WIRE_VERSION {
+    let wire_version = reader.u8()?;
+    if !matches!(wire_version, SFU_FORWARD_WIRE_V1 | SFU_FORWARD_WIRE_VERSION) {
         return Err(SfuForwardWireError::UnsupportedVersion);
     }
     let scope = reader.scope()?;
@@ -138,6 +147,11 @@ pub fn decode_sfu_forward_envelope(
     let crypto_state_ref = reader.id()?;
     let crypto_suite = crypto_suite_from_code(reader.u8()?)?;
     let media_kind = media_kind_from_code(reader.u8()?)?;
+    let video_source_kind = match wire_version {
+        SFU_FORWARD_WIRE_V1 => legacy_video_source_kind(media_kind),
+        SFU_FORWARD_WIRE_VERSION => video_source_kind_from_code(reader.u8()?, media_kind)?,
+        _ => return Err(SfuForwardWireError::UnsupportedVersion),
+    };
     let sequence = reader.u64()?;
     let media_timestamp = reader.u64()?;
     let keyframe = match reader.u8()? {
@@ -168,7 +182,9 @@ pub fn decode_sfu_forward_envelope(
                 crypto_epoch,
                 crypto_state_ref,
                 crypto_suite,
+                header_version: wire_version,
                 media_kind,
+                video_source_kind,
                 sequence,
                 media_timestamp,
                 keyframe,
@@ -276,6 +292,37 @@ const fn media_kind_from_code(code: u8) -> Result<MediaKind, SfuForwardWireError
     match code {
         1 => Ok(MediaKind::Audio),
         2 => Ok(MediaKind::Video),
+        _ => Err(SfuForwardWireError::Malformed),
+    }
+}
+
+const fn legacy_video_source_kind(media_kind: MediaKind) -> Option<VideoSourceKind> {
+    match media_kind {
+        MediaKind::Audio => None,
+        MediaKind::Video => Some(VideoSourceKind::Camera),
+    }
+}
+
+const fn video_source_kind_code(
+    media_kind: MediaKind,
+    video_source_kind: Option<VideoSourceKind>,
+) -> Result<u8, SfuForwardWireError> {
+    match (media_kind, video_source_kind) {
+        (MediaKind::Audio, None) => Ok(0),
+        (MediaKind::Video, Some(VideoSourceKind::Camera)) => Ok(1),
+        (MediaKind::Video, Some(VideoSourceKind::ScreenShare)) => Ok(2),
+        _ => Err(SfuForwardWireError::Malformed),
+    }
+}
+
+const fn video_source_kind_from_code(
+    code: u8,
+    media_kind: MediaKind,
+) -> Result<Option<VideoSourceKind>, SfuForwardWireError> {
+    match (media_kind, code) {
+        (MediaKind::Audio, 0) => Ok(None),
+        (MediaKind::Video, 1) => Ok(Some(VideoSourceKind::Camera)),
+        (MediaKind::Video, 2) => Ok(Some(VideoSourceKind::ScreenShare)),
         _ => Err(SfuForwardWireError::Malformed),
     }
 }
@@ -403,7 +450,9 @@ mod tests {
                     crypto_epoch: 9,
                     crypto_state_ref: id("crypto-state"),
                     crypto_suite: CryptoSuite::UcrV1,
+                    header_version: GROUP_MEDIA_FRAME_HEADER_V1,
                     media_kind: MediaKind::Video,
+                    video_source_kind: Some(VideoSourceKind::Camera),
                     sequence: 44,
                     media_timestamp: 90_000,
                     keyframe: true,
@@ -437,6 +486,29 @@ mod tests {
             decode_sfu_forward_envelope(&wire).expect("decode"),
             expected
         );
+    }
+
+    #[test]
+    fn wire_v2_authenticates_explicit_screen_share_source() {
+        let mut expected = envelope();
+        expected.frame.header.header_version = GROUP_MEDIA_FRAME_HEADER_V2;
+        expected.frame.header.video_source_kind = Some(VideoSourceKind::ScreenShare);
+        let wire = encode_sfu_forward_envelope(&expected).expect("encode");
+        assert_eq!(wire[SFU_FORWARD_WIRE_MAGIC.len()], SFU_FORWARD_WIRE_VERSION);
+        assert_eq!(
+            decode_sfu_forward_envelope(&wire).expect("decode"),
+            expected
+        );
+    }
+
+    #[test]
+    fn wire_v1_cannot_claim_screen_share_source() {
+        let mut invalid = envelope();
+        invalid.frame.header.video_source_kind = Some(VideoSourceKind::ScreenShare);
+        assert!(matches!(
+            encode_sfu_forward_envelope(&invalid),
+            Err(SfuForwardWireError::InvalidEnvelope(_))
+        ));
     }
 
     #[test]
