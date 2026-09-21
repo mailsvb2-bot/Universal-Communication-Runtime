@@ -50,6 +50,9 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(provider.contains("add_transceiver_from_kind(RTPCodecType::Video, None)"));
     assert!(provider.contains("gathering_complete_promise()"));
     assert!(provider.contains("add_ice_candidate(RTCIceCandidateInit"));
+    assert!(provider.contains("restart_ice()"));
+    assert!(provider.contains("restart_live_peer_connection"));
+    assert!(provider.contains("set_configuration(RTCConfiguration"));
     assert!(provider.contains("TurnRestSecret([u8; 32])"));
     assert!(provider.contains("ZeroizeOnDrop"));
     assert!(provider.contains("MessageDigest::sha1()"));
@@ -61,6 +64,7 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(realtime_proto.contains("rpc StartWebRtc"));
     assert!(realtime_proto.contains("rpc SetWebRtcRemoteDescription"));
     assert!(realtime_proto.contains("rpc AddWebRtcIceCandidate"));
+    assert!(realtime_proto.contains("rpc RestartWebRtc"));
     assert!(realtime_proto.contains("rpc CloseWebRtc"));
     assert!(realtime_service.contains("authenticated_webrtc_claims"));
     assert!(realtime_service.contains("spawn_blocking"));
@@ -95,6 +99,9 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(browser.contains("/v1/realtime/webrtc/start"));
     assert!(browser.contains("/v1/realtime/webrtc/remote-description"));
     assert!(browser.contains("/v1/realtime/webrtc/ice"));
+    assert!(browser.contains("/v1/realtime/webrtc/restart"));
+    assert!(browser.contains("async function restartIce()"));
+    assert!(browser.contains("async function recoverWebRtc()"));
     assert!(browser.contains("/v1/realtime/webrtc/close"));
     assert!(!browser.contains("UCR_WEBRTC_TURN_SECRET"));
     assert!(provider.contains(".field(\"username\", &\"<redacted>\")"));
