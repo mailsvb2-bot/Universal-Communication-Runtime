@@ -52,8 +52,8 @@ pub use group::{
     GroupRecord, GroupRole, PublicGroupDiscovery, PublicGroupJoinPolicy, PublicGroupPolicy,
 };
 pub use group_media_e2ee::{
-    EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader,
-    GroupMediaSourceSignature,
+    EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameAuthVersion,
+    GroupMediaFrameHeader, GroupMediaSourceKind, GroupMediaSourceSignature,
 };
 pub use media_e2ee::{EncryptedMediaFrame, MediaE2eeContext, MediaE2eeFrameHeader, MediaKind};
 pub use offline_group::{
