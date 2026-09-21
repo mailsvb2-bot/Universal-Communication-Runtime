@@ -1011,7 +1011,7 @@ where
             .map_err(map_store_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
         if participant.role == ConferenceParticipantRole::Attendee && !conference.entry_open {
-            Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
+            Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied).with_retry_after(2_000))
         } else {
             Ok(())
         }
