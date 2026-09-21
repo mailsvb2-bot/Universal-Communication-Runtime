@@ -12,6 +12,9 @@ import {
 const WIRE_V1_VECTOR_HEX =
   "554352453245453101000674656e616e740100096e616d657370616365000463616c6c000567726f7570000a766964656f2d6d61696e010005616c696365000c616c6963652d646576696365000b6e65676f74696174696f6e00000000000000020000000000000009000c63727970746f2d73746174650102000000000000002c0000000000015f900103030303030303030303030303030303030303030303030300000003070809000b7369676e696e672d6b657900076564323535313900000001004005050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505";
 
+const WIRE_V2_SCREEN_SHARE_VECTOR_HEX =
+  "554352453245453102000674656e616e740100096e616d657370616365000463616c6c000567726f7570000a766964656f2d6d61696e010005616c696365000c616c6963652d646576696365000b6e65676f74696174696f6e00000000000000020000000000000009000c63727970746f2d7374617465010202000000000000002c0000000000015f900103030303030303030303030303030303030303030303030300000003070809000b7369676e696e672d6b657900076564323535313900000001004005050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505";
+
 function requireCondition(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
@@ -31,7 +34,9 @@ const envelope: SfuForwardEnvelopeWire = {
       cryptoEpoch: 9n,
       cryptoStateRef: "crypto-state",
       cryptoSuite: "ucr.v1",
+      headerVersion: 1,
       mediaKind: "video",
+      videoSourceKind: "camera",
       sequence: 44n,
       mediaTimestamp: 90_000n,
       keyframe: true,
@@ -56,6 +61,40 @@ requireCondition(decoded.frame.header.mediaKind === "video", "media kind drifted
 requireCondition(decoded.frame.header.sequence === 44n, "sequence drifted");
 requireCondition(decoded.frame.header.mediaTimestamp === 90_000n, "timestamp drifted");
 requireCondition(Buffer.from(decoded.frame.ciphertext).equals(Buffer.from([7, 8, 9])), "ciphertext drifted");
+
+const screenEnvelope: SfuForwardEnvelopeWire = {
+  ...envelope,
+  frame: {
+    ...envelope.frame,
+    header: {
+      ...envelope.frame.header,
+      headerVersion: 2,
+      videoSourceKind: "screen_share",
+    },
+  },
+};
+const screenWire = encodeSfuForwardEnvelopeWire(screenEnvelope);
+requireCondition(
+  Buffer.from(screenWire).toString("hex") === WIRE_V2_SCREEN_SHARE_VECTOR_HEX,
+  "Rust/TypeScript SFU wire v2 screen-share drifted",
+);
+const decodedScreen = decodeSfuForwardEnvelopeWire(screenWire);
+requireCondition(decodedScreen.frame.header.headerVersion === 2, "v2 header version drifted");
+requireCondition(decodedScreen.frame.header.videoSourceKind === "screen_share", "screen source kind drifted");
+
+let legacyScreenRejected = false;
+try {
+  encodeSfuForwardEnvelopeWire({
+    ...screenEnvelope,
+    frame: {
+      ...screenEnvelope.frame,
+      header: { ...screenEnvelope.frame.header, headerVersion: 1 },
+    },
+  });
+} catch {
+  legacyScreenRejected = true;
+}
+requireCondition(legacyScreenRejected, "wire v1 accepted unauthenticated screen-share source kind");
 
 const epochZeroEnvelope: SfuForwardEnvelopeWire = {
   ...envelope,
@@ -123,7 +162,7 @@ class FakeDataChannel implements BinaryDataChannel {
 
 const senderChannel = new FakeDataChannel();
 const sender = new UcrWebRtcE2eeTransport(senderChannel, () => {});
-sender.sendCanonicalEnvelope(envelope);
+sender.sendCanonicalEnvelope(screenEnvelope);
 requireCondition(senderChannel.sent.length > 0, "WebRTC E2EE transport emitted no chunks");
 
 const receiverChannel = new FakeDataChannel();
@@ -136,8 +175,8 @@ for (const chunk of senderChannel.sent) {
 }
 requireCondition(received !== null, "WebRTC E2EE transport did not reassemble canonical envelope");
 requireCondition(
-  Buffer.from(received!).toString("hex") === WIRE_V1_VECTOR_HEX,
-  "WebRTC E2EE transport changed canonical envelope bytes",
+  Buffer.from(received!).toString("hex") === WIRE_V2_SCREEN_SHARE_VECTOR_HEX,
+  "WebRTC E2EE transport changed canonical v2 screen-share envelope bytes",
 );
 
 console.log("UCR_SFU_FORWARD_WIRE_TYPESCRIPT_OK");
