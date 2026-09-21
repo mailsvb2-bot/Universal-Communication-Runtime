@@ -36,6 +36,7 @@ jobs:
               ;;
             typescript)
               node --experimental-strip-types sdk/typescript/phase41_conformance.ts
+              node --experimental-strip-types sdk/typescript/sfu_forward_wire_conformance.ts
               ;;
             kotlin)
               kotlinc \

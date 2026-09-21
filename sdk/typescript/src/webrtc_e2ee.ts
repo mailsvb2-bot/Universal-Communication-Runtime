@@ -1,3 +1,8 @@
+import {
+  encodeSfuForwardEnvelopeWire,
+  type SfuForwardEnvelopeWire,
+} from "./sfu_forward_wire.ts";
+
 export const UCR_WEBRTC_E2EE_DATA_CHANNEL_LABEL = "ucr.e2ee.media.v1" as const;
 export const UCR_WEBRTC_E2EE_DATA_MESSAGE_BYTES = 16_000;
 export const UCR_WEBRTC_E2EE_MAX_WIRE_BYTES = 2 * 1024 * 1024 + 8_192;
@@ -46,6 +51,10 @@ export class UcrWebRtcE2eeTransport {
     if ("binaryType" in channel) {
       channel.binaryType = "arraybuffer";
     }
+  }
+
+  sendCanonicalEnvelope(envelope: SfuForwardEnvelopeWire): void {
+    this.sendEnvelope(encodeSfuForwardEnvelopeWire(envelope));
   }
 
   sendEnvelope(wireEnvelope: Uint8Array): void {

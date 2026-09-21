@@ -72,7 +72,6 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(e2ee_bridge.contains("ucr.e2ee.media.v1"));
     assert!(e2ee_bridge.contains("MAX_WEBRTC_E2EE_DATA_MESSAGE_BYTES"));
     assert!(e2ee_bridge.contains("WebRtcE2eeReassembler"));
-    assert!(e2ee_bridge.contains("canonical_sfu_forward_envelope"));
     assert!(!e2ee_bridge.contains("exporter_secret"));
     assert!(!e2ee_bridge.contains("plaintext"));
     assert!(runtime.contains("GrpcRealtimeService::with_webrtc"));
@@ -108,4 +107,26 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(realtime_spec.contains("Cache-Control: no-store"));
     assert!(realtime_spec.contains("UCR_WEBRTC_RELAY_ONLY"));
     assert!(realtime_spec.contains("does not end the canonical Call"));
+}
+
+#[test]
+fn webrtc_e2ee_uses_protocol_owned_sfu_wire_codec() {
+    let sfu_protocol = read("crates/ucr-protocol/src/sfu.rs");
+    let e2ee_bridge = read("crates/ucr-webrtc/src/e2ee_bridge.rs");
+    let typescript_e2ee = read("sdk/typescript/src/webrtc_e2ee.ts");
+    let typescript_sfu_wire = read("sdk/typescript/src/sfu_forward_wire.ts");
+    let conformance_workflow = read(".github/workflows/conformance.yml");
+
+    assert!(sfu_protocol.contains("SFU_FORWARD_WIRE_MAGIC"));
+    assert!(sfu_protocol.contains("encode_sfu_forward_envelope"));
+    assert!(sfu_protocol.contains("decode_sfu_forward_envelope"));
+    assert!(sfu_protocol.contains("WIRE_V1_VECTOR_HEX"));
+    assert!(e2ee_bridge.contains("encode_sfu_forward_envelope"));
+    assert!(e2ee_bridge.contains("decode_sfu_forward_envelope"));
+    assert!(!e2ee_bridge.contains("UCRE2EE1"));
+    assert!(typescript_e2ee.contains("sendCanonicalEnvelope"));
+    assert!(typescript_sfu_wire.contains("SFU_FORWARD_WIRE_MAGIC"));
+    assert!(typescript_sfu_wire.contains("encodeSfuForwardEnvelopeWire"));
+    assert!(typescript_sfu_wire.contains("decodeSfuForwardEnvelopeWire"));
+    assert!(conformance_workflow.contains("sfu_forward_wire_conformance.ts"));
 }

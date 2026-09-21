@@ -321,8 +321,9 @@ pub use service_control::{
     validate_service_audit_record, validate_service_quota_policy,
 };
 pub use sfu::{
-    SFU_MEDIA_CAPABILITY, SfuProtocolError, canonical_sfu_forward_envelope,
-    phase29_sfu_capabilities,
+    MAX_SFU_FORWARD_WIRE_BYTES, SFU_FORWARD_WIRE_MAGIC, SFU_FORWARD_WIRE_VERSION,
+    SFU_MEDIA_CAPABILITY, SfuForwardWireError, SfuProtocolError, canonical_sfu_forward_envelope,
+    decode_sfu_forward_envelope, encode_sfu_forward_envelope, phase29_sfu_capabilities,
 };
 pub use store_forward::{
     MAX_STORE_FORWARD_DELIVERY_ATTEMPTS, MAX_STORE_FORWARD_LEASE_MS, MAX_STORE_FORWARD_PAGE_ITEMS,
