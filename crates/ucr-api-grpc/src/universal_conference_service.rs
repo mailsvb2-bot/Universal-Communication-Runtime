@@ -2,9 +2,7 @@ use std::{fmt, sync::Arc};
 
 use prost::Message;
 use tonic::{Request, Response, Status};
-use ucr_conference::{
-    ConferenceRuntime, ConferenceRuntimeState, PreparedConferenceCapabilities,
-};
+use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
     AuthorizationEvaluator, CallStore, CommandAcceptanceStore, ConferenceJoinGrantStore,
     DeviceLifecycleStore, DurableStoreError, EventJournalStore, ExternalIdentityBindingStore,
@@ -16,7 +14,6 @@ use ucr_core::{
 };
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
-use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     AuthorizationRequest, CallId, CallParticipant, CallParticipantState, CallParticipantUpdateKind,
     CallSession, CallSignal, CallSignalKind, CallSignallingState, CommandEnvelope, CommandId,
@@ -48,10 +45,8 @@ use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
     RealtimeSessionClaims,
 };
-use ucr_sfu::PreparedSfuCapabilities;
-
 use super::{
-    conference_service::map_conference_error,
+    conference_service::{map_conference_error, prepared_conference_runtime},
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_credentials,
     decode_opaque, decode_scope, invalid_argument, pb, pb_acknowledgement, pb_error, pb_opaque,
     pb_scope,
@@ -2114,7 +2109,11 @@ where
         scope: input.scope.clone(),
         principal: subscriber.participant,
     };
-    universal_conference_runtime(service)
+    prepared_conference_runtime(
+        &*service.authorization,
+        &*service.store,
+        Arc::clone(&service.state),
+    )
         .set_subscriptions(
             &actor,
             &ConferenceSubscriptionSet {
@@ -2125,37 +2124,6 @@ where
         )
         .map_err(|error| map_conference_error(&error))?;
     Ok(call_id)
-}
-
-fn universal_conference_runtime<C, A, S>(
-    service: &GrpcUniversalConferenceService<C, A, S>,
-) -> ConferenceRuntime<
-    '_,
-    A,
-    S,
-    PreparedGroupMediaE2eeCapabilities,
-    PreparedSfuCapabilities,
-    PreparedConferenceCapabilities,
->
-where
-    A: AuthorizationEvaluator,
-    S: CallStore
-        + GroupStore
-        + DeviceLifecycleStore
-        + PrincipalIdentityBindingStore
-        + TrustedSigningKeyResolver,
-{
-    static GROUP_MEDIA: PreparedGroupMediaE2eeCapabilities = PreparedGroupMediaE2eeCapabilities;
-    static SFU: PreparedSfuCapabilities = PreparedSfuCapabilities;
-    static CONFERENCE: PreparedConferenceCapabilities = PreparedConferenceCapabilities;
-    ConferenceRuntime::with_state(
-        &*service.authorization,
-        &*service.store,
-        &GROUP_MEDIA,
-        &SFU,
-        &CONFERENCE,
-        Arc::clone(&service.state),
-    )
 }
 
 #[derive(Debug, Clone)]
