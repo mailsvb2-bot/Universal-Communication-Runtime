@@ -8692,6 +8692,7 @@ impl UniversalConferenceStore for MemoryLocalStore {
         camera_allowed: bool,
         publish_audio_allowed: bool,
         publish_video_allowed: bool,
+        screen_share_allowed: bool,
         active: bool,
     ) -> Result<UniversalConferenceParticipantProfile, DurableStoreError> {
         let key = universal_conference_participant_key(scope, conference_id, participant);
@@ -8733,6 +8734,7 @@ impl UniversalConferenceStore for MemoryLocalStore {
             && current.camera_allowed == camera_allowed
             && current.publish_audio_allowed == publish_audio_allowed
             && current.publish_video_allowed == publish_video_allowed
+            && current.screen_share_allowed == screen_share_allowed
             && current.active == active
         {
             return Ok(current.clone());
@@ -8745,6 +8747,7 @@ impl UniversalConferenceStore for MemoryLocalStore {
         current.camera_allowed = camera_allowed;
         current.publish_audio_allowed = publish_audio_allowed;
         current.publish_video_allowed = publish_video_allowed;
+        current.screen_share_allowed = screen_share_allowed;
         current.active = active;
         current.revision = current
             .revision

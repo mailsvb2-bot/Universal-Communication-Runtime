@@ -289,6 +289,7 @@ fn universal_participant_policy_syncs_minimum_canonical_permissions() {
         "VIDEO_RECEIVE_PERMISSION",
         "AUDIO_SEND_PERMISSION",
         "VIDEO_SEND_PERMISSION",
+        "SCREEN_SHARE_SEND_PERMISSION",
         "sync_participant_permissions",
     ] {
         assert!(
@@ -297,6 +298,12 @@ fn universal_participant_policy_syncs_minimum_canonical_permissions() {
         );
     }
     assert!(service.contains("store.revoke_permission(&grant)"));
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let sfu = read("crates/ucr-sfu/src/lib.rs");
+    assert!(realtime.contains("participant.screen_share_allowed"));
+    assert!(realtime.contains("VideoSourceKind::ScreenShare"));
+    assert!(sfu.contains("SCREEN_SHARE_SEND_PERMISSION"));
+    assert!(sfu.contains("VideoSourceKind::ScreenShare"));
 }
 
 #[test]

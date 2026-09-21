@@ -82,6 +82,7 @@ fn participant() -> UniversalConferenceParticipantProfile {
         camera_allowed: true,
         publish_audio_allowed: true,
         publish_video_allowed: true,
+        screen_share_allowed: true,
         active: true,
         revision: 1,
     }
@@ -276,6 +277,7 @@ fn active_owner_is_unique_at_the_atomic_storage_boundary() {
             attendee.camera_allowed,
             attendee.publish_audio_allowed,
             attendee.publish_video_allowed,
+            attendee.screen_share_allowed,
             true,
         ),
         Err(ucr_core::DurableStoreError::Conflict)

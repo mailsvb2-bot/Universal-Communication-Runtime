@@ -70,6 +70,10 @@ pub(super) fn create_v33_objects(transaction: &Transaction<'_>) -> Result<(), Du
 
 pub(super) fn verify_schema_v33(connection: &Connection) -> Result<(), DurableStoreError> {
     universal_conference_store::verify_schema_v32(connection)?;
+    verify_v33_objects(connection)
+}
+
+pub(super) fn verify_v33_objects(connection: &Connection) -> Result<(), DurableStoreError> {
     verify_table_columns(
         connection,
         "recordings",
@@ -807,9 +811,9 @@ mod tests {
                 .expect("set v32");
         }
 
-        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v32 to v33");
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v32 to current");
         assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
         let connection = migrated.lock_connection().expect("connection");
-        verify_schema_v33(&connection).expect("verify v33");
+        verify_v33_objects(&connection).expect("verify migrated recording objects");
     }
 }

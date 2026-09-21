@@ -44,7 +44,7 @@ Exactly one active Universal participant with role `owner` is required. Only act
 
 ## Participant authorization projection
 
-Universal participant role/media policy is projected into the existing canonical Permission Grant owner after the participant profile is persisted. Active participants receive only the exact-scope permissions needed to observe the Call, manage their receive subscriptions and receive supported media; audio/video send grants exist only while the participant profile allows the corresponding publish direction. Managed grants are revoked when policy removes that authority or the participant becomes inactive.
+Universal participant role/media policy is projected into the existing canonical Permission Grant owner after the participant profile is persisted. Active participants receive only the exact-scope permissions needed to observe the Call, manage their receive subscriptions and receive supported media; audio, camera-video and screen-share send grants exist only while the participant profile allows the corresponding publish direction. Screen sharing is an independent server-side policy: `screen_share_allowed` projects to `ucr.call.screen_share.send`, and neither `camera_allowed` nor `ucr.call.video.send` authorizes an authenticated `screen_share` source. Managed grants are revoked when policy removes that authority or the participant becomes inactive.
 
 The ordering is fail-closed: profile/policy is written before permission synchronization. A grant failure can therefore leave a participant unable to perform an allowed action, but cannot make a disallowed or removed participant usable because Universal profile checks remain mandatory at realtime boundaries.
 

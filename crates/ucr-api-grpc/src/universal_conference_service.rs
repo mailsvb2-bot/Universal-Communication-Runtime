@@ -42,9 +42,10 @@ use ucr_protocol::{
     CONFERENCE_READ_PERMISSION, CONFERENCE_SUBSCRIBE_PERMISSION, CanonicalError,
     CanonicalErrorCode, CapabilityMaturity, CommandReceiptStatus, DEVICE_REGISTER_PERMISSION,
     GROUP_MLS_CAPABILITY, MAX_CALL_PARTICIPANTS, MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT,
-    VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, acknowledgement_for, canonical_capabilities,
-    phase20_audio_capabilities, phase21_video_capabilities, phase22_media_e2ee_capabilities,
-    phase29_sfu_capabilities, phase30_conference_capabilities,
+    SCREEN_SHARE_SEND_PERMISSION, VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
+    acknowledgement_for, canonical_capabilities, phase20_audio_capabilities,
+    phase21_video_capabilities, phase22_media_e2ee_capabilities, phase29_sfu_capabilities,
+    phase30_conference_capabilities,
 };
 use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
@@ -927,6 +928,7 @@ struct UpdateParticipantInput {
     camera_allowed: Option<bool>,
     publish_audio_allowed: Option<bool>,
     publish_video_allowed: Option<bool>,
+    screen_share_allowed: Option<bool>,
     idempotency_key: String,
 }
 
@@ -1051,6 +1053,7 @@ fn decode_update_participant(
         camera_allowed: value.camera_allowed,
         publish_audio_allowed: value.publish_audio_allowed,
         publish_video_allowed: value.publish_video_allowed,
+        screen_share_allowed: value.screen_share_allowed,
         idempotency_key: value.idempotency_key,
     })
 }
@@ -1535,8 +1538,13 @@ where
         &stable_command_id,
     )?;
 
-    let (audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed) =
-        participant_defaults(conference.mode, input.role);
+    let (
+        audio_muted,
+        camera_allowed,
+        publish_audio_allowed,
+        publish_video_allowed,
+        screen_share_allowed,
+    ) = participant_defaults(conference.mode, input.role);
     let desired = UniversalConferenceParticipantProfile {
         scope: input.scope.clone(),
         conference_id: input.conference_id.clone(),
@@ -1548,6 +1556,7 @@ where
         camera_allowed,
         publish_audio_allowed,
         publish_video_allowed,
+        screen_share_allowed,
         active: true,
         revision: 1,
     };
@@ -1570,6 +1579,7 @@ where
                 && current.camera_allowed == desired.camera_allowed
                 && current.publish_audio_allowed == desired.publish_audio_allowed
                 && current.publish_video_allowed == desired.publish_video_allowed
+                && current.screen_share_allowed == desired.screen_share_allowed
                 && current.active =>
         {
             current
@@ -1589,6 +1599,7 @@ where
                     desired.camera_allowed,
                     desired.publish_audio_allowed,
                     desired.publish_video_allowed,
+                    desired.screen_share_allowed,
                     true,
                 )
                 .map_err(map_store_error)?
@@ -1722,13 +1733,19 @@ where
         payload,
     )?;
 
-    let (required_muted, camera_ceiling, audio_publish_ceiling, video_publish_ceiling) =
-        participant_defaults(conference.mode, role);
+    let (
+        required_muted,
+        camera_ceiling,
+        audio_publish_ceiling,
+        video_publish_ceiling,
+        screen_share_ceiling,
+    ) = participant_defaults(conference.mode, role);
 
     if input.audio_muted == Some(false) && required_muted
         || input.camera_allowed == Some(true) && !camera_ceiling
         || input.publish_audio_allowed == Some(true) && !audio_publish_ceiling
         || input.publish_video_allowed == Some(true) && !video_publish_ceiling
+        || input.screen_share_allowed == Some(true) && !screen_share_ceiling
     {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
@@ -1743,6 +1760,10 @@ where
         .publish_video_allowed
         .unwrap_or(current.publish_video_allowed)
         && video_publish_ceiling;
+    let screen_share_allowed = input
+        .screen_share_allowed
+        .unwrap_or(current.screen_share_allowed)
+        && screen_share_ceiling;
 
     if publish_video_allowed && !camera_allowed {
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
@@ -1753,6 +1774,7 @@ where
         && current.camera_allowed == camera_allowed
         && current.publish_audio_allowed == publish_audio_allowed
         && current.publish_video_allowed == publish_video_allowed
+        && current.screen_share_allowed == screen_share_allowed
         && current.active
     {
         sync_participant_permissions(store, &current, conference.mode)?;
@@ -1770,6 +1792,7 @@ where
             camera_allowed,
             publish_audio_allowed,
             publish_video_allowed,
+            screen_share_allowed,
             true,
         )
         .map_err(map_store_error)?;
@@ -1831,6 +1854,7 @@ where
                 current.revision,
                 current.role,
                 true,
+                false,
                 false,
                 false,
                 false,
@@ -1953,13 +1977,14 @@ where
     Ok(())
 }
 
-const MANAGED_PARTICIPANT_PERMISSIONS: [&str; 6] = [
+const MANAGED_PARTICIPANT_PERMISSIONS: [&str; 7] = [
     CALL_OBSERVE_PERMISSION,
     CONFERENCE_SUBSCRIBE_PERMISSION,
     AUDIO_RECEIVE_PERMISSION,
     VIDEO_RECEIVE_PERMISSION,
     AUDIO_SEND_PERMISSION,
     VIDEO_SEND_PERMISSION,
+    SCREEN_SHARE_SEND_PERMISSION,
 ];
 
 fn sync_participant_permissions<S: PermissionGrantStore>(
@@ -1984,6 +2009,9 @@ fn sync_participant_permissions<S: PermissionGrantStore>(
         }
         if profile.publish_video_allowed {
             desired.push(VIDEO_SEND_PERMISSION);
+        }
+        if profile.screen_share_allowed {
+            desired.push(SCREEN_SHARE_SEND_PERMISSION);
         }
     }
     let existing = store
@@ -3239,7 +3267,7 @@ fn derived_id(prefix: &str, command_id: &CommandId) -> Result<OpaqueId, Canonica
 const fn participant_defaults(
     mode: UniversalConferenceMode,
     role: ConferenceParticipantRole,
-) -> (bool, bool, bool, bool) {
+) -> (bool, bool, bool, bool, bool) {
     match role {
         ConferenceParticipantRole::Owner
         | ConferenceParticipantRole::Host
@@ -3249,12 +3277,13 @@ const fn participant_defaults(
             !matches!(mode, UniversalConferenceMode::AudioRoom),
             true,
             !matches!(mode, UniversalConferenceMode::AudioRoom),
+            !matches!(mode, UniversalConferenceMode::AudioRoom),
         ),
         ConferenceParticipantRole::Attendee => match mode {
-            UniversalConferenceMode::Meeting => (false, true, true, true),
+            UniversalConferenceMode::Meeting => (false, true, true, true, true),
             UniversalConferenceMode::Webinar
             | UniversalConferenceMode::Broadcast
-            | UniversalConferenceMode::AudioRoom => (true, false, false, false),
+            | UniversalConferenceMode::AudioRoom => (true, false, false, false, false),
         },
     }
 }
@@ -3276,6 +3305,7 @@ fn pb_participant(
         publish_audio_allowed: value.publish_audio_allowed,
         publish_video_allowed: value.publish_video_allowed,
         active: value.active,
+        screen_share_allowed: value.screen_share_allowed,
     }
 }
 
@@ -3590,8 +3620,13 @@ mod universal_runtime_tests {
                 },
             )
             .expect("device");
-        let (audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed) =
-            super::participant_defaults(UniversalConferenceMode::Webinar, role);
+        let (
+            audio_muted,
+            camera_allowed,
+            publish_audio_allowed,
+            publish_video_allowed,
+            screen_share_allowed,
+        ) = super::participant_defaults(UniversalConferenceMode::Webinar, role);
         store
             .persist_universal_conference_participant(&UniversalConferenceParticipantProfile {
                 scope: scope(),
@@ -3604,6 +3639,7 @@ mod universal_runtime_tests {
                 camera_allowed,
                 publish_audio_allowed,
                 publish_video_allowed,
+                screen_share_allowed,
                 active: true,
                 revision: 1,
             })
@@ -3767,6 +3803,7 @@ mod universal_runtime_tests {
                 camera_allowed: None,
                 publish_audio_allowed: None,
                 publish_video_allowed: None,
+                screen_share_allowed: None,
                 idempotency_key: "promote-attendee".to_owned(),
             },
             b"promote-attendee-payload".to_vec(),

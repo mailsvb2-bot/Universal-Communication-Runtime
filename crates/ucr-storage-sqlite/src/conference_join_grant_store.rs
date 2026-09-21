@@ -50,6 +50,10 @@ pub(super) fn create_v34_objects(transaction: &Transaction<'_>) -> Result<(), Du
 
 pub(super) fn verify_schema_v34(connection: &Connection) -> Result<(), DurableStoreError> {
     super::recording_store::verify_schema_v33(connection)?;
+    verify_v34_objects(connection)
+}
+
+pub(super) fn verify_v34_objects(connection: &Connection) -> Result<(), DurableStoreError> {
     verify_table_columns(
         connection,
         "conference_join_grants",

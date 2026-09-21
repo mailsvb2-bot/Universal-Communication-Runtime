@@ -77,7 +77,8 @@ const SQLITE_SCHEMA_V30: u32 = 30;
 const SQLITE_SCHEMA_V31: u32 = 31;
 const SQLITE_SCHEMA_V32: u32 = 32;
 const SQLITE_SCHEMA_V33: u32 = 33;
-pub const SQLITE_SCHEMA_VERSION: u32 = 34;
+const SQLITE_SCHEMA_V34: u32 = 34;
+pub const SQLITE_SCHEMA_VERSION: u32 = 35;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -459,7 +460,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return conference_join_grant_store::verify_schema_v34(connection);
+        return verify_schema_v35(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -503,11 +504,18 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V31 => migrate_v31_to_v32(connection)?,
             SQLITE_SCHEMA_V32 => migrate_v32_to_v33(connection)?,
             SQLITE_SCHEMA_V33 => migrate_v33_to_v34(connection)?,
+            SQLITE_SCHEMA_V34 => migrate_v34_to_v35(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    conference_join_grant_store::verify_schema_v34(connection)
+    verify_schema_v35(connection)
+}
+
+fn verify_schema_v35(connection: &Connection) -> Result<(), DurableStoreError> {
+    universal_conference_store::verify_schema_v35(connection)?;
+    recording_store::verify_v33_objects(connection)?;
+    conference_join_grant_store::verify_v34_objects(connection)
 }
 
 fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -570,6 +578,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     universal_conference_store::create_v32_objects(&transaction)?;
     recording_store::create_v33_objects(&transaction)?;
     conference_join_grant_store::create_v34_objects(&transaction)?;
+    universal_conference_store::create_v35_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1076,12 +1085,27 @@ fn migrate_v33_to_v34(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     conference_join_grant_store::create_v34_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V34)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     conference_join_grant_store::verify_schema_v34(connection)
+}
+
+fn migrate_v34_to_v35(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    conference_join_grant_store::verify_schema_v34(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    universal_conference_store::create_v35_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v35(connection)
 }
 
 fn verify_schema_v2(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -1376,7 +1400,16 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v35_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "ALTER TABLE universal_conference_participants
+         DROP COLUMN screen_share_allowed;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v34_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v35_objects(connection)?;
     connection.execute_batch(
         "DROP INDEX IF EXISTS conference_join_grants_conference;
          DROP TABLE IF EXISTS conference_join_grants;",
