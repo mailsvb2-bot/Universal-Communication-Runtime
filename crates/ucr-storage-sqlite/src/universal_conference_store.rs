@@ -219,8 +219,8 @@ pub(super) fn verify_schema_v35(connection: &Connection) -> Result<(), DurableSt
             ("publish_audio_allowed", "INTEGER", 1, 0),
             ("publish_video_allowed", "INTEGER", 1, 0),
             ("active", "INTEGER", 1, 0),
-            ("screen_share_allowed", "INTEGER", 1, 0),
             ("revision", "BLOB", 1, 0),
+            ("screen_share_allowed", "INTEGER", 1, 0),
         ],
     )?;
     let external_participant_index_exists: bool = connection
