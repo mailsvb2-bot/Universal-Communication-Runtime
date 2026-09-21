@@ -388,9 +388,12 @@ class WireWriter {
 }
 
 class WireReader {
+  readonly bytes: Uint8Array;
   #cursor = 0;
 
-  constructor(readonly bytes: Uint8Array) {}
+  constructor(bytes: Uint8Array) {
+    this.bytes = bytes;
+  }
 
   take(length: number): Uint8Array {
     const end = this.#cursor + length;
