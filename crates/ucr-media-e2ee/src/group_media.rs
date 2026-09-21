@@ -13,8 +13,9 @@ use ucr_crypto::{
 use ucr_model::{
     AuthorizationRequest, CallParticipantState, CallSession, CallSignallingState,
     CapabilityDescriptor, CapabilityMaturity, ConversationKind, DeviceDescriptor, DeviceId,
-    EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, GroupMemberState, KeyId, KeyPurpose, MediaKind, OpaqueId,
+    EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameAuthVersion,
+    GroupMediaFrameHeader, GroupMediaSourceKind, GroupMediaSourceSignature, GroupMemberState, KeyId,
+    KeyPurpose, MediaKind, OpaqueId,
     PrincipalKind, PrincipalRef, ScopedPrincipal,
 };
 use ucr_protocol::{
@@ -230,6 +231,41 @@ where
         signing_key_id: &KeyId,
         signer: &impl GroupMediaSigningKeyHandle,
     ) -> Result<EncryptedGroupMediaFrame, GroupMediaE2eeError> {
+        let source_kind = match media_kind {
+            MediaKind::Audio => GroupMediaSourceKind::Microphone,
+            MediaKind::Video => GroupMediaSourceKind::Camera,
+        };
+        self.seal_payload_with_source_kind(
+            media_kind,
+            source_kind,
+            stream_id,
+            sequence,
+            media_timestamp,
+            keyframe,
+            plaintext,
+            signing_key_id,
+            signer,
+        )
+    }
+
+    /// Encrypts one local group-media payload with an explicit authenticated capture source.
+    ///
+    /// # Errors
+    /// Fails closed when the source kind is incompatible with the media kind or any normal
+    /// group-media authority, crypto, signing, sequence, or capacity check fails.
+    #[allow(clippy::too_many_arguments)]
+    pub fn seal_payload_with_source_kind(
+        &mut self,
+        media_kind: MediaKind,
+        source_kind: GroupMediaSourceKind,
+        stream_id: &OpaqueId,
+        sequence: u64,
+        media_timestamp: u64,
+        keyframe: bool,
+        plaintext: &[u8],
+        signing_key_id: &KeyId,
+        signer: &impl GroupMediaSigningKeyHandle,
+    ) -> Result<EncryptedGroupMediaFrame, GroupMediaE2eeError> {
         require_group_media_capability(self.capabilities)?;
         validate_group_media_e2ee_authority(
             self.store,
@@ -265,6 +301,8 @@ where
             crypto_state_ref: self.context.crypto_state_ref.clone(),
             crypto_suite: self.context.crypto_suite,
             media_kind,
+            source_kind,
+            auth_version: GroupMediaFrameAuthVersion::V2,
             sequence,
             media_timestamp,
             keyframe,
