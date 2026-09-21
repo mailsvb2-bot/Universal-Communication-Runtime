@@ -13,11 +13,13 @@ use ucr_media_e2ee::{
 use ucr_model::{
     AuthorizationRequest, CallParticipantState, CapabilityDescriptor, CapabilityMaturity, DeviceId,
     GroupMemberState, MediaKind, ScopedPrincipal, SfuForwardEnvelope, SfuForwardTarget,
+    VideoSourceKind,
 };
 use ucr_protocol::{
     AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CanonicalError, GROUP_MEDIA_E2EE_CAPABILITY,
-    MAX_CALL_PARTICIPANTS, SFU_MEDIA_CAPABILITY, SfuProtocolError, VIDEO_RECEIVE_PERMISSION,
-    VIDEO_SEND_PERMISSION, canonical_capabilities, canonical_sfu_forward_envelope,
+    MAX_CALL_PARTICIPANTS, SCREEN_SHARE_SEND_PERMISSION, SFU_MEDIA_CAPABILITY, SfuProtocolError,
+    VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, canonical_capabilities,
+    canonical_sfu_forward_envelope,
     phase29_sfu_capabilities,
 };
 
@@ -206,7 +208,10 @@ where
         require_sfu_capability(self.sfu_capabilities)?;
         require_group_e2ee_capability(self.group_e2ee_capabilities)?;
         let call = validate_group_media_source_frame(self.store, &context, &canonical.frame)?;
-        let (send, receive) = permissions(canonical.frame.header.media_kind);
+        let (send, receive) = permissions(
+            canonical.frame.header.media_kind,
+            canonical.frame.header.video_source_kind,
+        );
         self.authorization
             .authorize(&AuthorizationRequest {
                 subject: authenticated_source.clone(),
@@ -341,9 +346,15 @@ fn require_capability(
     }
 }
 
-const fn permissions(media_kind: MediaKind) -> (&'static str, &'static str) {
-    match media_kind {
-        MediaKind::Audio => (AUDIO_SEND_PERMISSION, AUDIO_RECEIVE_PERMISSION),
-        MediaKind::Video => (VIDEO_SEND_PERMISSION, VIDEO_RECEIVE_PERMISSION),
+const fn permissions(
+    media_kind: MediaKind,
+    video_source_kind: Option<VideoSourceKind>,
+) -> (&'static str, &'static str) {
+    match (media_kind, video_source_kind) {
+        (MediaKind::Video, Some(VideoSourceKind::ScreenShare)) => {
+            (SCREEN_SHARE_SEND_PERMISSION, VIDEO_RECEIVE_PERMISSION)
+        }
+        (MediaKind::Video, _) => (VIDEO_SEND_PERMISSION, VIDEO_RECEIVE_PERMISSION),
+        (MediaKind::Audio, _) => (AUDIO_SEND_PERMISSION, AUDIO_RECEIVE_PERMISSION),
     }
 }
