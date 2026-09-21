@@ -1,5 +1,11 @@
 use std::{fmt, sync::Arc};
 
+use super::{
+    GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE,
+    conference_service::{map_conference_error, prepared_conference_runtime},
+    decode_credentials, decode_opaque, decode_scope, invalid_argument, pb, pb_acknowledgement,
+    pb_error, pb_opaque, pb_scope,
+};
 use prost::Message;
 use tonic::{Request, Response, Status};
 use ucr_conference::ConferenceRuntimeState;
@@ -19,15 +25,14 @@ use ucr_model::{
     CallSession, CallSignal, CallSignalKind, CallSignallingState, CommandEnvelope, CommandId,
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
     ConferenceParticipantRole, ConferenceScheduleMetadata, ConferenceSubscriptionSet,
-    ConversationId, ConversationKind, ConversationRecord,
-    ConversationRef, CorrelationContext, DeliveryPolicy, DeviceDescriptor, DeviceId,
-    DeviceLifecycleState, EventId, ExternalIdentityBinding, GroupChange, GroupChangeKind,
-    GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState, GroupOwnership, GroupRecord,
-    GroupRole, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord, IntegrationId,
-    MediaKind, OpaqueId, PermissionGrant, PermissionScope, PrincipalId, PrincipalIdentityBinding,
-    PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal, SessionId, TenantScope,
-    UniversalConferenceLifecycle, UniversalConferenceMode, UniversalConferenceParticipantProfile,
-    UniversalConferenceProfile,
+    ConversationId, ConversationKind, ConversationRecord, ConversationRef, CorrelationContext,
+    DeliveryPolicy, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventId,
+    ExternalIdentityBinding, GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy,
+    GroupId, GroupMediaState, GroupOwnership, GroupRecord, GroupRole, IdentityEvidence, IdentityId,
+    IdentityOwnership, IdentityRecord, IntegrationId, MediaKind, OpaqueId, PermissionGrant,
+    PermissionScope, PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef,
+    ProtocolVersion, ScopedPrincipal, SessionId, TenantScope, UniversalConferenceLifecycle,
+    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
     AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CALL_OBSERVE_PERMISSION,
@@ -36,7 +41,8 @@ use ucr_protocol::{
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
     CONFERENCE_READ_PERMISSION, CONFERENCE_SUBSCRIBE_PERMISSION, CanonicalError,
     CanonicalErrorCode, CapabilityMaturity, CommandReceiptStatus, DEVICE_REGISTER_PERMISSION,
-    GROUP_MLS_CAPABILITY, MAX_CALL_PARTICIPANTS, VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
+    GROUP_MLS_CAPABILITY, MAX_CALL_PARTICIPANTS, MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT,
+    VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
     acknowledgement_for, canonical_capabilities, phase20_audio_capabilities,
     phase21_video_capabilities, phase22_media_e2ee_capabilities, phase29_sfu_capabilities,
     phase30_conference_capabilities,
@@ -45,13 +51,6 @@ use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
     RealtimeSessionClaims,
 };
-use super::{
-    conference_service::{map_conference_error, prepared_conference_runtime},
-    GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_credentials,
-    decode_opaque, decode_scope, invalid_argument, pb, pb_acknowledgement, pb_error, pb_opaque,
-    pb_scope,
-};
-
 const MAX_EXTERNAL_CONFERENCE_ID_BYTES: usize = 512;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 const MAX_TIMEZONE_BYTES: usize = 128;
@@ -677,9 +676,9 @@ where
         };
         Ok(Response::new(pb::UniversalSetSubscriptionsResponse {
             result: Some(match result {
-                Ok(call_id) => {
+                Ok(conference_id) => {
                     pb::universal_set_subscriptions_response::Result::Acknowledgement(
-                        pb_acknowledgement(acknowledgement_for(call_id.as_opaque().clone())),
+                        pb_acknowledgement(acknowledgement_for(conference_id.as_opaque().clone())),
                     )
                 }
                 Err(error) => {
@@ -1098,6 +1097,9 @@ fn decode_set_subscriptions(
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     validate_external_user_id(&value.external_user_id)?;
+    if value.subscriptions.len() > MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
     let subscriptions = value
         .subscriptions
         .into_iter()
@@ -2055,7 +2057,7 @@ fn list_participants<S: UniversalConferenceStore>(
 fn set_universal_subscriptions<C, A, S>(
     service: &GrpcUniversalConferenceService<C, A, S>,
     input: &SetSubscriptionsInput,
-) -> Result<CallId, CanonicalError>
+) -> Result<GroupId, CanonicalError>
 where
     A: AuthorizationEvaluator,
     S: UniversalConferenceStore
@@ -2114,16 +2116,16 @@ where
         &*service.store,
         Arc::clone(&service.state),
     )
-        .set_subscriptions(
-            &actor,
-            &ConferenceSubscriptionSet {
-                scope: input.scope.clone(),
-                call_id: call_id.clone(),
-                subscriptions,
-            },
-        )
-        .map_err(|error| map_conference_error(&error))?;
-    Ok(call_id)
+    .set_subscriptions(
+        &actor,
+        &ConferenceSubscriptionSet {
+            scope: input.scope.clone(),
+            call_id,
+            subscriptions,
+        },
+    )
+    .map_err(|error| map_conference_error(&error))?;
+    Ok(input.conference_id.clone())
 }
 
 #[derive(Debug, Clone)]
