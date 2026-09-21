@@ -1,12 +1,14 @@
 use sha2::{Digest, Sha256};
 use ucr_model::{
-    CryptoSuite, DeviceId, EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader,
-    MediaKind, OpaqueId, PrincipalKind, PrincipalRef, TenantScope,
+    CryptoSuite, DeviceId, EncryptedGroupMediaFrame, GroupMediaE2eeContext,
+    GroupMediaFrameAuthVersion, GroupMediaFrameHeader, GroupMediaSourceKind, MediaKind, OpaqueId,
+    PrincipalKind, PrincipalRef, TenantScope,
 };
 
 pub const GROUP_MEDIA_E2EE_CAPABILITY: &str = "ucr.media.e2ee.group.mls";
 pub const GROUP_MEDIA_CONTEXT_V1_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-CONTEXT-V1\0";
 pub const GROUP_MEDIA_FRAME_AAD_V1_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-FRAME-AAD-V1\0";
+pub const GROUP_MEDIA_FRAME_AAD_V2_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-FRAME-AAD-V2\0";
 pub const GROUP_MEDIA_KEY_CONTEXT_V1_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-KEY-CONTEXT-V1\0";
 pub const GROUP_MEDIA_SOURCE_SIGNATURE_V1_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-SOURCE-SIGNATURE-V1\0";
 pub const MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES: usize = 2 * 1024 * 1024 + 16;
@@ -21,6 +23,7 @@ pub enum GroupMediaE2eeProtocolError {
     EmptyCiphertext,
     CiphertextTooLarge,
     InvalidAudioHeader,
+    InvalidSourceKind,
     InvalidSourceSignature,
 }
 
@@ -138,8 +141,12 @@ pub fn group_media_frame_aad(
     if header.media_kind == MediaKind::Audio && header.keyframe {
         return Err(GroupMediaE2eeProtocolError::InvalidAudioHeader);
     }
+    validate_group_media_source_kind(header)?;
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(GROUP_MEDIA_FRAME_AAD_V1_DOMAIN);
+    bytes.extend_from_slice(match header.auth_version {
+        GroupMediaFrameAuthVersion::V1 => GROUP_MEDIA_FRAME_AAD_V1_DOMAIN,
+        GroupMediaFrameAuthVersion::V2 => GROUP_MEDIA_FRAME_AAD_V2_DOMAIN,
+    });
     push_scope(&mut bytes, &header.scope);
     push_bytes(&mut bytes, header.call_id.as_opaque().as_wire_bytes());
     push_bytes(&mut bytes, header.group_id.as_opaque().as_wire_bytes());
@@ -155,6 +162,9 @@ pub fn group_media_frame_aad(
     push_bytes(&mut bytes, header.crypto_state_ref.as_wire_bytes());
     bytes.extend_from_slice(&(header.crypto_suite as u32).to_be_bytes());
     bytes.push(header.media_kind as u8);
+    if header.auth_version == GroupMediaFrameAuthVersion::V2 {
+        bytes.push(group_media_source_kind_code(header.source_kind));
+    }
     bytes.extend_from_slice(&header.sequence.to_be_bytes());
     bytes.extend_from_slice(&header.media_timestamp.to_be_bytes());
     bytes.push(u8::from(header.keyframe));
@@ -216,6 +226,33 @@ pub fn validate_encrypted_group_media_frame(
         return Err(GroupMediaE2eeProtocolError::ContextMismatch);
     }
     Ok(())
+}
+
+fn validate_group_media_source_kind(
+    header: &GroupMediaFrameHeader,
+) -> Result<(), GroupMediaE2eeProtocolError> {
+    let expected_v1 = match header.media_kind {
+        MediaKind::Audio => GroupMediaSourceKind::Microphone,
+        MediaKind::Video => GroupMediaSourceKind::Camera,
+    };
+    if header.auth_version == GroupMediaFrameAuthVersion::V1 && header.source_kind != expected_v1 {
+        return Err(GroupMediaE2eeProtocolError::InvalidSourceKind);
+    }
+    match (header.media_kind, header.source_kind) {
+        (MediaKind::Audio, GroupMediaSourceKind::Microphone)
+        | (MediaKind::Video, GroupMediaSourceKind::Camera | GroupMediaSourceKind::ScreenShare) => {
+            Ok(())
+        }
+        _ => Err(GroupMediaE2eeProtocolError::InvalidSourceKind),
+    }
+}
+
+const fn group_media_source_kind_code(kind: GroupMediaSourceKind) -> u8 {
+    match kind {
+        GroupMediaSourceKind::Microphone => 1,
+        GroupMediaSourceKind::Camera => 2,
+        GroupMediaSourceKind::ScreenShare => 3,
+    }
 }
 
 fn push_scope(bytes: &mut Vec<u8>, scope: &TenantScope) {
