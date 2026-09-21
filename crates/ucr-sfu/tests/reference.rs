@@ -8,8 +8,10 @@ use ucr_crypto::{GroupMediaEpochSecret, SigningKeyMaterial};
 use ucr_media_e2ee::{GroupMediaE2eeRuntime, PreparedGroupMediaE2eeCapabilities};
 use ucr_model::*;
 use ucr_protocol::{
-    ALGORITHM_VERSION, CanonicalError, CanonicalErrorCode, GROUP_MLS_CAPABILITY,
-    KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID,
+    ALGORITHM_VERSION, CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V1,
+    GROUP_MEDIA_FRAME_HEADER_V2, GROUP_MLS_CAPABILITY, KEY_FORMAT_VERSION,
+    SCREEN_SHARE_VIDEO_CAPABILITY, SIGNATURE_ALGORITHM_ID, NegotiatedSession,
+    screen_share_v2_negotiation,
 };
 use ucr_sfu::{
     PreparedSfuCapabilities, SfuError, SfuForwardOutcome, SfuForwardSink, SfuForwardSinkError,
@@ -493,10 +495,33 @@ fn screen_share_source_kind_is_authenticated_before_sfu_fan_out() {
             GroupMediaEpochSecret::from_exporter_bytes([42; 32]),
         )
         .expect("screen-share media session");
-    let frame = session
-        .seal_payload_with_source(
+    assert_eq!(
+        session.seal_payload_with_source(
             MediaKind::Video,
             Some(VideoSourceKind::ScreenShare),
+            &oid("screen-share-without-proof"),
+            1,
+            90_000,
+            true,
+            b"must-not-seal",
+            &fixture.signing_key_id,
+            &fixture.signer,
+        ),
+        Err(ucr_media_e2ee::GroupMediaE2eeError::ScreenShareNegotiationRequired)
+    );
+    let negotiated = screen_share_v2_negotiation(&NegotiatedSession {
+        version: ProtocolVersion::new(1, 0),
+        crypto_suite: CryptoSuite::UcrV1,
+        capabilities: vec![CapabilityDescriptor {
+            id: SCREEN_SHARE_VIDEO_CAPABILITY.to_owned(),
+            maturity: CapabilityMaturity::Prepared,
+            extensions: Vec::new(),
+        }],
+    })
+    .expect("screen-share negotiation proof");
+    let frame = session
+        .seal_negotiated_screen_share(
+            &negotiated,
             &oid("screen-share-alice"),
             1,
             90_000,
@@ -505,11 +530,8 @@ fn screen_share_source_kind_is_authenticated_before_sfu_fan_out() {
             &fixture.signing_key_id,
             &fixture.signer,
         )
-        .expect("seal screen-share frame");
-    assert_eq!(
-        frame.header.header_version,
-        ucr_protocol::GROUP_MEDIA_FRAME_HEADER_VERSION
-    );
+        .expect("seal negotiated screen-share frame");
+    assert_eq!(frame.header.header_version, GROUP_MEDIA_FRAME_HEADER_V2);
     assert_eq!(
         frame.header.video_source_kind,
         Some(VideoSourceKind::ScreenShare)
