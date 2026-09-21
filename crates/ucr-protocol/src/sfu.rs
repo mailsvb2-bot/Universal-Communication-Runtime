@@ -489,15 +489,24 @@ mod tests {
         let expected = envelope();
         let wire = encode_sfu_forward_envelope(&expected).expect("encode");
         assert_eq!(lower_hex(&wire), WIRE_V2_SCREEN_VECTOR_HEX);
-        assert_eq!(decode_sfu_forward_envelope(&wire).expect("decode"), expected);
+        assert_eq!(
+            decode_sfu_forward_envelope(&wire).expect("decode"),
+            expected
+        );
     }
 
     #[test]
     fn wire_v1_remains_readable_and_byte_preserving() {
         let legacy = hex_bytes(WIRE_V1_VECTOR_HEX);
         let decoded = decode_sfu_forward_envelope(&legacy).expect("decode legacy");
-        assert_eq!(decoded.frame.header.auth_version, GroupMediaFrameAuthVersion::V1);
-        assert_eq!(decoded.frame.header.source_kind, GroupMediaSourceKind::Camera);
+        assert_eq!(
+            decoded.frame.header.auth_version,
+            GroupMediaFrameAuthVersion::V1
+        );
+        assert_eq!(
+            decoded.frame.header.source_kind,
+            GroupMediaSourceKind::Camera
+        );
         assert_eq!(
             lower_hex(&encode_sfu_forward_envelope(&decoded).expect("re-encode legacy")),
             WIRE_V1_VECTOR_HEX
