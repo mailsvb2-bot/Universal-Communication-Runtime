@@ -408,16 +408,43 @@ where
         + PrincipalIdentityBindingStore
         + TrustedSigningKeyResolver,
 {
+    prepared_conference_runtime(
+        &*service.authorization,
+        &*service.store,
+        Arc::clone(&service.state),
+    )
+}
+
+pub(crate) fn prepared_conference_runtime<A, S>(
+    authorization: &A,
+    store: &S,
+    state: Arc<ConferenceRuntimeState>,
+) -> ConferenceRuntime<
+    '_,
+    A,
+    S,
+    PreparedGroupMediaE2eeCapabilities,
+    PreparedSfuCapabilities,
+    PreparedConferenceCapabilities,
+>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore
+        + GroupStore
+        + DeviceLifecycleStore
+        + PrincipalIdentityBindingStore
+        + TrustedSigningKeyResolver,
+{
     static GROUP_MEDIA: PreparedGroupMediaE2eeCapabilities = PreparedGroupMediaE2eeCapabilities;
     static SFU: PreparedSfuCapabilities = PreparedSfuCapabilities;
     static CONFERENCE: PreparedConferenceCapabilities = PreparedConferenceCapabilities;
     ConferenceRuntime::with_state(
-        &*service.authorization,
-        &*service.store,
+        authorization,
+        store,
         &GROUP_MEDIA,
         &SFU,
         &CONFERENCE,
-        Arc::clone(&service.state),
+        state,
     )
 }
 
