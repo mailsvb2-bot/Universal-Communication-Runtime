@@ -29,8 +29,9 @@ fuzz_target!(|data: &[u8]| {
     };
     let video_source_kind = match media_kind {
         MediaKind::Audio => None,
-        MediaKind::Video if header_version == GROUP_MEDIA_FRAME_HEADER_V2
-            && data.get(3).is_some_and(|value| value & 4 == 4) =>
+        MediaKind::Video
+            if header_version == GROUP_MEDIA_FRAME_HEADER_V2
+                && data.get(3).is_some_and(|value| value & 4 == 4) =>
         {
             Some(VideoSourceKind::ScreenShare)
         }
