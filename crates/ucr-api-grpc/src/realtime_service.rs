@@ -1217,10 +1217,10 @@ fn pb_sfu_forward_envelope(value: &SfuForwardEnvelope) -> pb::SfuForwardEnvelope
                 keyframe: value.frame.header.keyframe,
                 header_version: u32::from(value.frame.header.header_version),
                 video_source_kind: value.frame.header.video_source_kind.map(|source| {
-                    match source {
+                    (match source {
                         VideoSourceKind::Camera => pb::VideoSourceKind::Camera,
                         VideoSourceKind::ScreenShare => pb::VideoSourceKind::ScreenShare,
-                    } as i32
+                    }) as i32
                 }),
             }),
             nonce: value.frame.nonce.to_vec(),
