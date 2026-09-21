@@ -26,7 +26,9 @@ fn phase39_rust_sdk_is_a_client_only_public_contract_binding() {
     assert!(sdk.contains("ucr-service-credential-id-bin"));
     assert!(sdk.contains("ucr-service-credential-secret-bin"));
     assert!(sdk.contains("[REDACTED]"));
-    assert!(sdk.contains("pb::universal_conference_service_client::UniversalConferenceServiceClient<Channel>"));
+    assert!(sdk.contains(
+        "pb::universal_conference_service_client::UniversalConferenceServiceClient<Channel>"
+    ));
     for method in [
         "submit_command",
         "create_identity",
