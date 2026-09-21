@@ -418,7 +418,10 @@ impl<'a> WireReader<'a> {
 mod tests {
     use core::fmt::Write as _;
 
-    use crate::{ALGORITHM_VERSION, SIGNATURE_ALGORITHM_ID};
+    use crate::{
+        ALGORITHM_VERSION, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
+        SIGNATURE_ALGORITHM_ID,
+    };
 
     use super::*;
 
