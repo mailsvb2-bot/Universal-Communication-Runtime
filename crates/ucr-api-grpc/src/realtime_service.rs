@@ -19,12 +19,12 @@ use ucr_model::{
     ConferenceSubscriptionSet, CorrelationContext, CryptoSuite, DeviceId, DeviceLifecycleState,
     DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
     GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind, OpaqueId, PrincipalKind,
-    ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope, WebRtcIceCandidate, WebRtcSdpType,
-    WebRtcSessionDescription,
+    ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope, VideoSourceKind,
+    WebRtcIceCandidate, WebRtcSdpType, WebRtcSessionDescription,
 };
 use ucr_protocol::{
-    CanonicalError, CanonicalErrorCode, RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for,
-    canonical_event,
+    CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V1,
+    GROUP_MEDIA_FRAME_HEADER_V2, RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for, canonical_event,
 };
 use ucr_realtime::{
     AttendanceTransition, AttendanceTransitionKind, JoinTokenError, JoinTokenIssuer,
@@ -1117,6 +1117,10 @@ fn decode_sfu_forward_envelope(
     let header = frame.header.ok_or_else(invalid_argument)?;
     let nonce: [u8; 24] = frame.nonce.try_into().map_err(|_| invalid_argument())?;
     let signature = frame.source_signature.ok_or_else(invalid_argument)?;
+    let media_kind = decode_media_kind(header.media_kind)?;
+    let header_version = decode_group_media_header_version(header.header_version)?;
+    let video_source_kind =
+        decode_group_media_video_source(header_version, media_kind, header.video_source_kind)?;
     Ok(SfuForwardEnvelope {
         frame: EncryptedGroupMediaFrame {
             header: GroupMediaFrameHeader {
@@ -1131,7 +1135,9 @@ fn decode_sfu_forward_envelope(
                 crypto_epoch: header.crypto_epoch,
                 crypto_state_ref: decode_opaque(header.crypto_state_ref)?,
                 crypto_suite: decode_crypto_suite(header.crypto_suite)?,
-                media_kind: decode_media_kind(header.media_kind)?,
+                header_version,
+                media_kind,
+                video_source_kind,
                 sequence: header.sequence,
                 media_timestamp: header.media_timestamp,
                 keyframe: header.keyframe,
@@ -1146,6 +1152,38 @@ fn decode_sfu_forward_envelope(
             },
         },
     })
+}
+
+fn decode_group_media_header_version(value: u32) -> Result<u8, CanonicalError> {
+    match value {
+        0 | 1 => Ok(GROUP_MEDIA_FRAME_HEADER_V1),
+        2 => Ok(GROUP_MEDIA_FRAME_HEADER_V2),
+        _ => Err(invalid_argument()),
+    }
+}
+
+fn decode_group_media_video_source(
+    header_version: u8,
+    media_kind: MediaKind,
+    value: Option<i32>,
+) -> Result<Option<VideoSourceKind>, CanonicalError> {
+    match (header_version, media_kind, value) {
+        (GROUP_MEDIA_FRAME_HEADER_V1, MediaKind::Audio, None)
+        | (GROUP_MEDIA_FRAME_HEADER_V2, MediaKind::Audio, None) => Ok(None),
+        (GROUP_MEDIA_FRAME_HEADER_V1, MediaKind::Video, None) => Ok(Some(VideoSourceKind::Camera)),
+        (
+            GROUP_MEDIA_FRAME_HEADER_V1 | GROUP_MEDIA_FRAME_HEADER_V2,
+            MediaKind::Video,
+            Some(value),
+        ) => match pb::VideoSourceKind::try_from(value).map_err(|_| invalid_argument())? {
+            pb::VideoSourceKind::Camera => Ok(Some(VideoSourceKind::Camera)),
+            pb::VideoSourceKind::ScreenShare if header_version == GROUP_MEDIA_FRAME_HEADER_V2 => {
+                Ok(Some(VideoSourceKind::ScreenShare))
+            }
+            _ => Err(invalid_argument()),
+        },
+        _ => Err(invalid_argument()),
+    }
 }
 
 fn decode_crypto_suite(value: i32) -> Result<CryptoSuite, CanonicalError> {
@@ -1177,6 +1215,13 @@ fn pb_sfu_forward_envelope(value: &SfuForwardEnvelope) -> pb::SfuForwardEnvelope
                 sequence: value.frame.header.sequence,
                 media_timestamp: value.frame.header.media_timestamp,
                 keyframe: value.frame.header.keyframe,
+                header_version: u32::from(value.frame.header.header_version),
+                video_source_kind: value.frame.header.video_source_kind.map(|source| {
+                    match source {
+                        VideoSourceKind::Camera => pb::VideoSourceKind::Camera,
+                        VideoSourceKind::ScreenShare => pb::VideoSourceKind::ScreenShare,
+                    } as i32
+                }),
             }),
             nonce: value.frame.nonce.to_vec(),
             ciphertext: value.frame.ciphertext.clone(),
