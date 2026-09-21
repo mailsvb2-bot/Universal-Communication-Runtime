@@ -623,6 +623,80 @@ where
         }))
     }
 
+    async fn restart_web_rtc(
+        &self,
+        request: Request<pb::RealtimeRestartWebRtcRequest>,
+    ) -> Result<Response<pb::RealtimeRestartWebRtcResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let lookup = decode_realtime_lookup(request.into_inner());
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => {
+                match self.authenticated_webrtc_claims(&token, &scope, &call_id, &session_id) {
+                    Ok(claims) => {
+                        let now_ms = self.now();
+                        match now_ms.and_then(|value| {
+                            u64::try_from(value.div_euclid(1_000))
+                                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+                        }) {
+                            Ok(now_unix_seconds) => {
+                                let expires_at_unix_seconds =
+                                    u64::try_from(claims.expires_at_unix_ms.div_euclid(1_000))
+                                        .map_err(|_| {
+                                            CanonicalError::new(CanonicalErrorCode::Internal)
+                                        });
+                                match expires_at_unix_seconds.and_then(|expires_at_unix_seconds| {
+                                    self.webrtc_config
+                                        .session_config_until(
+                                            &claims.session_id,
+                                            now_unix_seconds,
+                                            expires_at_unix_seconds,
+                                        )
+                                        .map_err(map_webrtc_provider_error)
+                                }) {
+                                    Ok(config) => {
+                                        let ice_servers = config.ice_servers.clone();
+                                        let provider = Arc::clone(&self.webrtc_provider);
+                                        match tokio::task::spawn_blocking(move || {
+                                            provider.restart_session(&config)
+                                        })
+                                        .await
+                                        {
+                                            Ok(Ok(description)) => Ok(pb::RealtimeWebRtcOffer {
+                                                description: Some(pb_webrtc_description(
+                                                    &description,
+                                                )),
+                                                ice_servers: ice_servers
+                                                    .iter()
+                                                    .map(pb_webrtc_ice_server)
+                                                    .collect(),
+                                            }),
+                                            Ok(Err(error)) => Err(map_webrtc_provider_error(error)),
+                                            Err(_) => Err(CanonicalError::new(
+                                                CanonicalErrorCode::Internal,
+                                            )),
+                                        }
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeRestartWebRtcResponse {
+            result: Some(match result {
+                Ok(offer) => pb::realtime_restart_web_rtc_response::Result::Offer(offer),
+                Err(error) => {
+                    pb::realtime_restart_web_rtc_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
     async fn close_web_rtc(
         &self,
         request: Request<pb::RealtimeCloseWebRtcRequest>,
@@ -1155,6 +1229,16 @@ impl From<pb::RealtimeLeaveRequest> for RealtimeLookupFields {
 
 impl From<pb::RealtimeStartWebRtcRequest> for RealtimeLookupFields {
     fn from(value: pb::RealtimeStartWebRtcRequest) -> Self {
+        Self {
+            scope: value.scope,
+            call_id: value.call_id,
+            session_id: value.session_id,
+        }
+    }
+}
+
+impl From<pb::RealtimeRestartWebRtcRequest> for RealtimeLookupFields {
+    fn from(value: pb::RealtimeRestartWebRtcRequest) -> Self {
         Self {
             scope: value.scope,
             call_id: value.call_id,
