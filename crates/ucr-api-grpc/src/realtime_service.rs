@@ -676,7 +676,11 @@ where
             .device_id
             .as_ref()
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
-        self.require_universal_publish_allowed(claims, envelope.frame.header.media_kind)?;
+        self.require_universal_publish_allowed(
+            claims,
+            envelope.frame.header.media_kind,
+            envelope.frame.header.video_source_kind,
+        )?;
         let outcome = conference_runtime(self)
             .forward(&actor_for(claims), device_id, envelope, sink)
             .map_err(|error| map_conference_error(&error))?;
@@ -928,6 +932,7 @@ where
         &self,
         claims: &RealtimeSessionClaims,
         media_kind: MediaKind,
+        video_source_kind: Option<VideoSourceKind>,
     ) -> Result<(), CanonicalError> {
         let actor = actor_for(claims);
         let snapshot = conference_runtime(self)
@@ -952,9 +957,17 @@ where
         if !participant.active {
             return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
         }
-        let allowed = match media_kind {
-            MediaKind::Audio => !participant.audio_muted && participant.publish_audio_allowed,
-            MediaKind::Video => participant.camera_allowed && participant.publish_video_allowed,
+        let allowed = match (media_kind, video_source_kind) {
+            (MediaKind::Audio, None) => {
+                !participant.audio_muted && participant.publish_audio_allowed
+            }
+            (MediaKind::Video, Some(VideoSourceKind::Camera)) => {
+                participant.camera_allowed && participant.publish_video_allowed
+            }
+            (MediaKind::Video, Some(VideoSourceKind::ScreenShare)) => {
+                participant.screen_share_allowed
+            }
+            _ => false,
         };
         if allowed {
             Ok(())
