@@ -43,9 +43,9 @@ use ucr_protocol::{
     CanonicalErrorCode, CapabilityMaturity, CommandReceiptStatus, DEVICE_REGISTER_PERMISSION,
     GROUP_MLS_CAPABILITY, MAX_CALL_PARTICIPANTS, MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT,
     SCREEN_SHARE_SEND_PERMISSION, VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
-    acknowledgement_for, canonical_capabilities,
-    phase20_audio_capabilities, phase21_video_capabilities, phase22_media_e2ee_capabilities,
-    phase29_sfu_capabilities, phase30_conference_capabilities,
+    acknowledgement_for, canonical_capabilities, phase20_audio_capabilities,
+    phase21_video_capabilities, phase22_media_e2ee_capabilities, phase29_sfu_capabilities,
+    phase30_conference_capabilities,
 };
 use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
