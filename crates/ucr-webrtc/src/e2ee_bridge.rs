@@ -329,10 +329,10 @@ impl<'a> WireReader<'a> {
 mod tests {
     use super::*;
     use ucr_model::{
-        CallId, CryptoSuite, DeviceId, EncryptedGroupMediaFrame, GroupId, GroupMediaFrameHeader,
-        GroupMediaFrameAuthVersion, GroupMediaSourceKind, GroupMediaSourceSignature, KeyId,
-        MediaKind, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, TenantId,
-        TenantScope,
+        CallId, CryptoSuite, DeviceId, EncryptedGroupMediaFrame, GroupId,
+        GroupMediaFrameAuthVersion, GroupMediaFrameHeader, GroupMediaSourceKind,
+        GroupMediaSourceSignature, KeyId, MediaKind, NamespaceId, OpaqueId, PrincipalId,
+        PrincipalKind, PrincipalRef, TenantId, TenantScope,
     };
     use ucr_protocol::{ALGORITHM_VERSION, SFU_FORWARD_WIRE_MAGIC, SIGNATURE_ALGORITHM_ID};
 
