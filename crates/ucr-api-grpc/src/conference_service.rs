@@ -552,7 +552,7 @@ const fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
     CanonicalError::new(code)
 }
 
-fn map_conference_error(error: &ConferenceError) -> CanonicalError {
+pub(crate) fn map_conference_error(error: &ConferenceError) -> CanonicalError {
     match error {
         ConferenceError::Protocol(error) => map_conference_protocol_error(*error),
         ConferenceError::Authorization(error) => *error,
