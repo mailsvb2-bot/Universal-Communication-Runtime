@@ -246,7 +246,7 @@ const fn principal_kind_from_code(code: u8) -> Result<PrincipalKind, SfuForwardW
         4 => Ok(PrincipalKind::AiAgent),
         5 => Ok(PrincipalKind::Bot),
         6 => Ok(PrincipalKind::Organization),
-        7 => Ok(PrincipalKind::ExternalPlatform),
+        7 => Ok(PrincipalKind::Automation),
         8 => Ok(PrincipalKind::ExternalPlatform),
         _ => Err(SfuForwardWireError::Malformed),
     }
