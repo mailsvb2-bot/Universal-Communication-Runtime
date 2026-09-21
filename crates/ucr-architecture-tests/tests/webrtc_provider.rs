@@ -156,6 +156,9 @@ fn webrtc_e2ee_uses_protocol_owned_sfu_wire_codec() {
     assert!(sfu_protocol.contains("encode_sfu_forward_envelope"));
     assert!(sfu_protocol.contains("decode_sfu_forward_envelope"));
     assert!(sfu_protocol.contains("WIRE_V1_VECTOR_HEX"));
+    assert!(sfu_protocol.contains("WIRE_V2_SCREEN_SHARE_VECTOR_HEX"));
+    assert!(sfu_protocol.contains("SFU_FORWARD_WIRE_V1"));
+    assert!(sfu_protocol.contains("SFU_FORWARD_WIRE_VERSION: u8 = 2"));
     assert!(e2ee_bridge.contains("encode_sfu_forward_envelope"));
     assert!(e2ee_bridge.contains("decode_sfu_forward_envelope"));
     assert!(!e2ee_bridge.contains("UCRE2EE1"));
@@ -163,5 +166,7 @@ fn webrtc_e2ee_uses_protocol_owned_sfu_wire_codec() {
     assert!(typescript_sfu_wire.contains("SFU_FORWARD_WIRE_MAGIC"));
     assert!(typescript_sfu_wire.contains("encodeSfuForwardEnvelopeWire"));
     assert!(typescript_sfu_wire.contains("decodeSfuForwardEnvelopeWire"));
+    assert!(typescript_sfu_wire.contains("videoSourceKind"));
+    assert!(typescript_sfu_wire.contains("\"screen_share\""));
     assert!(conformance_workflow.contains("sfu_forward_wire_conformance.ts"));
 }
