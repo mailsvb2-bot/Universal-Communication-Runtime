@@ -1,8 +1,9 @@
 use ucr_model::{
     CallId, CapabilityDescriptor, CapabilityMaturity, CryptoSuite, DeviceId,
-    EncryptedGroupMediaFrame, GroupId, GroupMediaE2eeContext, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, KeyId, MediaKind, NamespaceId, OpaqueId, PrincipalId, PrincipalKind,
-    PrincipalRef, SfuForwardEnvelope, TenantId, TenantScope,
+    EncryptedGroupMediaFrame, GroupId, GroupMediaE2eeContext, GroupMediaFrameAuthVersion,
+    GroupMediaFrameHeader, GroupMediaSourceKind, GroupMediaSourceSignature, KeyId, MediaKind,
+    NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, SfuForwardEnvelope, TenantId,
+    TenantScope,
 };
 
 use crate::{
@@ -12,7 +13,8 @@ use crate::{
 
 pub const SFU_MEDIA_CAPABILITY: &str = "ucr.media.sfu";
 pub const SFU_FORWARD_WIRE_MAGIC: &[u8; 8] = b"UCRE2EE1";
-pub const SFU_FORWARD_WIRE_VERSION: u8 = 1;
+pub const SFU_FORWARD_WIRE_LEGACY_VERSION: u8 = 1;
+pub const SFU_FORWARD_WIRE_VERSION: u8 = 2;
 pub const MAX_SFU_FORWARD_WIRE_BYTES: usize = MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES + 8_192;
 const MAX_SFU_FORWARD_WIRE_STRING_BYTES: usize = 256;
 
@@ -77,7 +79,10 @@ pub fn encode_sfu_forward_envelope(
     let frame = &envelope.frame;
     let mut output = Vec::with_capacity(frame.ciphertext.len().saturating_add(1_024));
     output.extend_from_slice(SFU_FORWARD_WIRE_MAGIC);
-    output.push(SFU_FORWARD_WIRE_VERSION);
+    output.push(match frame.header.auth_version {
+        GroupMediaFrameAuthVersion::V1 => SFU_FORWARD_WIRE_LEGACY_VERSION,
+        GroupMediaFrameAuthVersion::V2 => SFU_FORWARD_WIRE_VERSION,
+    });
     push_scope(&mut output, &frame.header.scope)?;
     push_id(&mut output, frame.header.call_id.as_opaque())?;
     push_id(&mut output, frame.header.group_id.as_opaque())?;
@@ -91,6 +96,9 @@ pub fn encode_sfu_forward_envelope(
     push_id(&mut output, &frame.header.crypto_state_ref)?;
     output.push(crypto_suite_code(frame.header.crypto_suite));
     output.push(media_kind_code(frame.header.media_kind));
+    if frame.header.auth_version == GroupMediaFrameAuthVersion::V2 {
+        output.push(group_media_source_kind_code(frame.header.source_kind));
+    }
     output.extend_from_slice(&frame.header.sequence.to_be_bytes());
     output.extend_from_slice(&frame.header.media_timestamp.to_be_bytes());
     output.push(u8::from(frame.header.keyframe));
@@ -120,9 +128,11 @@ pub fn decode_sfu_forward_envelope(
     if reader.take(SFU_FORWARD_WIRE_MAGIC.len())? != SFU_FORWARD_WIRE_MAGIC {
         return Err(SfuForwardWireError::Malformed);
     }
-    if reader.u8()? != SFU_FORWARD_WIRE_VERSION {
-        return Err(SfuForwardWireError::UnsupportedVersion);
-    }
+    let auth_version = match reader.u8()? {
+        SFU_FORWARD_WIRE_LEGACY_VERSION => GroupMediaFrameAuthVersion::V1,
+        SFU_FORWARD_WIRE_VERSION => GroupMediaFrameAuthVersion::V2,
+        _ => return Err(SfuForwardWireError::UnsupportedVersion),
+    };
     let scope = reader.scope()?;
     let call_id = CallId::from_opaque(reader.id()?);
     let group_id = GroupId::from_opaque(reader.id()?);
@@ -138,6 +148,10 @@ pub fn decode_sfu_forward_envelope(
     let crypto_state_ref = reader.id()?;
     let crypto_suite = crypto_suite_from_code(reader.u8()?)?;
     let media_kind = media_kind_from_code(reader.u8()?)?;
+    let source_kind = match auth_version {
+        GroupMediaFrameAuthVersion::V1 => legacy_source_kind(media_kind),
+        GroupMediaFrameAuthVersion::V2 => group_media_source_kind_from_code(reader.u8()?)?,
+    };
     let sequence = reader.u64()?;
     let media_timestamp = reader.u64()?;
     let keyframe = match reader.u8()? {
@@ -169,6 +183,8 @@ pub fn decode_sfu_forward_envelope(
                 crypto_state_ref,
                 crypto_suite,
                 media_kind,
+                source_kind,
+                auth_version,
                 sequence,
                 media_timestamp,
                 keyframe,
@@ -261,6 +277,32 @@ const fn crypto_suite_code(suite: CryptoSuite) -> u8 {
 const fn crypto_suite_from_code(code: u8) -> Result<CryptoSuite, SfuForwardWireError> {
     match code {
         1 => Ok(CryptoSuite::UcrV1),
+        _ => Err(SfuForwardWireError::Malformed),
+    }
+}
+
+const fn legacy_source_kind(kind: MediaKind) -> GroupMediaSourceKind {
+    match kind {
+        MediaKind::Audio => GroupMediaSourceKind::Microphone,
+        MediaKind::Video => GroupMediaSourceKind::Camera,
+    }
+}
+
+const fn group_media_source_kind_code(kind: GroupMediaSourceKind) -> u8 {
+    match kind {
+        GroupMediaSourceKind::Microphone => 1,
+        GroupMediaSourceKind::Camera => 2,
+        GroupMediaSourceKind::ScreenShare => 3,
+    }
+}
+
+const fn group_media_source_kind_from_code(
+    code: u8,
+) -> Result<GroupMediaSourceKind, SfuForwardWireError> {
+    match code {
+        1 => Ok(GroupMediaSourceKind::Microphone),
+        2 => Ok(GroupMediaSourceKind::Camera),
+        3 => Ok(GroupMediaSourceKind::ScreenShare),
         _ => Err(SfuForwardWireError::Malformed),
     }
 }
@@ -377,6 +419,7 @@ mod tests {
     use super::*;
 
     const WIRE_V1_VECTOR_HEX: &str = "554352453245453101000674656e616e740100096e616d657370616365000463616c6c000567726f7570000a766964656f2d6d61696e010005616c696365000c616c6963652d646576696365000b6e65676f74696174696f6e00000000000000020000000000000009000c63727970746f2d73746174650102000000000000002c0000000000015f900103030303030303030303030303030303030303030303030300000003070809000b7369676e696e672d6b657900076564323535313900000001004005050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505";
+    const WIRE_V2_SCREEN_VECTOR_HEX: &str = "554352453245453102000674656e616e740100096e616d657370616365000463616c6c000567726f7570000a766964656f2d6d61696e010005616c696365000c616c6963652d646576696365000b6e65676f74696174696f6e00000000000000020000000000000009000c63727970746f2d7374617465010203000000000000002c0000000000015f900103030303030303030303030303030303030303030303030300000003070809000b7369676e696e672d6b657900076564323535313900000001004005050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505";
 
     fn id(value: &str) -> OpaqueId {
         OpaqueId::new(value).expect("id")
@@ -404,6 +447,8 @@ mod tests {
                     crypto_state_ref: id("crypto-state"),
                     crypto_suite: CryptoSuite::UcrV1,
                     media_kind: MediaKind::Video,
+                    source_kind: GroupMediaSourceKind::ScreenShare,
+                    auth_version: GroupMediaFrameAuthVersion::V2,
                     sequence: 44,
                     media_timestamp: 90_000,
                     keyframe: true,
@@ -428,14 +473,34 @@ mod tests {
         value
     }
 
+    fn hex_bytes(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let text = core::str::from_utf8(pair).expect("hex utf8");
+                u8::from_str_radix(text, 16).expect("hex byte")
+            })
+            .collect()
+    }
+
     #[test]
-    fn wire_v1_matches_cross_language_test_vector() {
+    fn wire_v2_matches_cross_language_screen_share_vector() {
         let expected = envelope();
         let wire = encode_sfu_forward_envelope(&expected).expect("encode");
-        assert_eq!(lower_hex(&wire), WIRE_V1_VECTOR_HEX);
+        assert_eq!(lower_hex(&wire), WIRE_V2_SCREEN_VECTOR_HEX);
+        assert_eq!(decode_sfu_forward_envelope(&wire).expect("decode"), expected);
+    }
+
+    #[test]
+    fn wire_v1_remains_readable_and_byte_preserving() {
+        let legacy = hex_bytes(WIRE_V1_VECTOR_HEX);
+        let decoded = decode_sfu_forward_envelope(&legacy).expect("decode legacy");
+        assert_eq!(decoded.frame.header.auth_version, GroupMediaFrameAuthVersion::V1);
+        assert_eq!(decoded.frame.header.source_kind, GroupMediaSourceKind::Camera);
         assert_eq!(
-            decode_sfu_forward_envelope(&wire).expect("decode"),
-            expected
+            lower_hex(&encode_sfu_forward_envelope(&decoded).expect("re-encode legacy")),
+            WIRE_V1_VECTOR_HEX
         );
     }
 
