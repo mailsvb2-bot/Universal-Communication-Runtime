@@ -16,11 +16,12 @@ use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipantState, CallSignal, CallSignalKind,
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
-    ConferenceSubscriptionSet, CorrelationContext, CryptoSuite, DeviceId, DeviceLifecycleState,
-    DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind, OpaqueId, PrincipalKind,
-    ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope, VideoSourceKind,
-    WebRtcIceCandidate, WebRtcSdpType, WebRtcSessionDescription,
+    ConferenceParticipantRole, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
+    DeviceId, DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId,
+    GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind,
+    OpaqueId, PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope,
+    UniversalConferenceLifecycle, VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
+    WebRtcSessionDescription,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
@@ -204,12 +205,23 @@ where
             (Ok(token), Ok((scope, call_id, session_id))) => self
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
+                    let now = self.now()?;
+                    let admission = self.realtime_admission_state(&claims)?;
+                    if admission == pb::RealtimeAdmissionState::Closed {
+                        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+                    }
+                    let reconnect = self
+                        .registry
+                        .contains_active_session(&claims, now)
+                        .map_err(map_registry_error)?;
+                    if !reconnect {
+                        self.require_entry_open_for_join(&claims)?;
+                    }
                     self.ensure_accepted_conference_participant_for_join(&claims)?;
                     let redeemed = self.redeemed_claims(&token, &scope, &call_id, &session_id)?;
                     if redeemed != claims {
                         return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
                     }
-                    let now = self.now()?;
                     let outcome = self
                         .registry
                         .join(claims.clone(), now)
@@ -218,7 +230,7 @@ where
                         let _ = self.registry.leave(&claims, now);
                         return Err(error);
                     }
-                    Ok(pb_realtime_session(&claims))
+                    Ok(pb_realtime_session(&claims, admission))
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
@@ -252,19 +264,29 @@ where
                     {
                         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
                     }
-                    Ok(pb_acknowledgement(acknowledgement_for(
-                        claims.session_id.as_opaque().clone(),
-                    )))
+                    let admission = self.realtime_admission_state(&claims)?;
+                    Ok((
+                        pb_acknowledgement(acknowledgement_for(
+                            claims.session_id.as_opaque().clone(),
+                        )),
+                        admission,
+                    ))
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
+        let (result, admission_state) = match result {
+            Ok((acknowledgement, admission)) => (
+                pb::realtime_heartbeat_response::Result::Acknowledgement(acknowledgement),
+                admission as i32,
+            ),
+            Err(error) => (
+                pb::realtime_heartbeat_response::Result::Error(pb_error(error)),
+                pb::RealtimeAdmissionState::Unspecified as i32,
+            ),
+        };
         Ok(Response::new(pb::RealtimeHeartbeatResponse {
-            result: Some(match result {
-                Ok(acknowledgement) => {
-                    pb::realtime_heartbeat_response::Result::Acknowledgement(acknowledgement)
-                }
-                Err(error) => pb::realtime_heartbeat_response::Result::Error(pb_error(error)),
-            }),
+            result: Some(result),
+            admission_state,
         }))
     }
 
@@ -318,6 +340,7 @@ where
                     self.registry
                         .heartbeat(&claims, self.now()?)
                         .map_err(map_registry_error)?;
+                    self.require_live_universal_conference(&claims)?;
                     let actor = actor_for(&claims);
                     let set = ConferenceSubscriptionSet {
                         scope,
@@ -393,6 +416,8 @@ where
             .authenticated_claims(&token, &scope, &call_id, &session_id)
             .map_err(status_from_canonical)?;
         self.require_accepted_conference_participant(&claims)
+            .map_err(status_from_canonical)?;
+        self.require_live_universal_conference(&claims)
             .map_err(status_from_canonical)?;
         let attachment = self
             .registry
@@ -715,7 +740,8 @@ where
                 .map_err(map_join_token_error)?;
         }
         validate_device_claim(&*self.store, claims)?;
-        self.require_accepted_conference_participant(claims)
+        self.require_accepted_conference_participant(claims)?;
+        self.require_live_universal_conference(claims)
     }
 
     fn now(&self) -> Result<i64, CanonicalError> {
@@ -733,6 +759,7 @@ where
     ) -> Result<RealtimeSessionClaims, CanonicalError> {
         let claims = self.authenticated_claims(token, scope, call_id, session_id)?;
         self.require_accepted_conference_participant(&claims)?;
+        self.require_live_universal_conference(&claims)?;
         self.registry
             .heartbeat(&claims, self.now()?)
             .map_err(map_registry_error)?;
@@ -900,32 +927,94 @@ where
         claims: &RealtimeSessionClaims,
         group_id: &GroupId,
     ) -> Result<(), CanonicalError> {
-        let Some(conference) = self
+        let Some(_) = self
             .store
             .universal_conference_profile(&claims.scope, group_id)
             .map_err(map_store_error)?
         else {
             return Ok(());
         };
-        if conference.lifecycle == ucr_model::UniversalConferenceLifecycle::Ended {
-            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
-        }
         let participant = self
             .store
             .universal_conference_participant(&claims.scope, group_id, &claims.participant)
             .map_err(map_store_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
-        if !participant.active {
-            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        if participant.active {
+            Ok(())
+        } else {
+            Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
         }
-        if participant.role == ucr_model::ConferenceParticipantRole::Attendee
-            && !conference.entry_open
-        {
-            return Err(
-                CanonicalError::new(CanonicalErrorCode::PolicyDenied).with_retry_after(2_000)
-            );
+    }
+
+    fn realtime_admission_state(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<pb::RealtimeAdmissionState, CanonicalError> {
+        let actor = actor_for(claims);
+        let snapshot = conference_runtime(self)
+            .snapshot(&actor, &claims.scope, &claims.call_id)
+            .map_err(|error| map_conference_error(&error))?;
+        let Some(conference) = self
+            .store
+            .universal_conference_profile(&claims.scope, &snapshot.group_id)
+            .map_err(map_store_error)?
+        else {
+            return Ok(pb::RealtimeAdmissionState::Admitted);
+        };
+        self.require_active_universal_participant(claims, &snapshot.group_id)?;
+        Ok(match conference.lifecycle {
+            UniversalConferenceLifecycle::Waiting => pb::RealtimeAdmissionState::WaitingRoom,
+            UniversalConferenceLifecycle::Live => pb::RealtimeAdmissionState::Admitted,
+            UniversalConferenceLifecycle::Scheduled
+            | UniversalConferenceLifecycle::Ending
+            | UniversalConferenceLifecycle::Ended => pb::RealtimeAdmissionState::Closed,
+        })
+    }
+
+    fn require_live_universal_conference(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<(), CanonicalError> {
+        match self.realtime_admission_state(claims)? {
+            pb::RealtimeAdmissionState::Admitted => Ok(()),
+            pb::RealtimeAdmissionState::WaitingRoom => {
+                Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied).with_retry_after(2_000))
+            }
+            pb::RealtimeAdmissionState::Closed | pb::RealtimeAdmissionState::Unspecified => {
+                Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
+            }
         }
-        Ok(())
+    }
+
+    fn require_entry_open_for_join(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<(), CanonicalError> {
+        let actor = actor_for(claims);
+        let snapshot = conference_runtime(self)
+            .snapshot(&actor, &claims.scope, &claims.call_id)
+            .map_err(|error| map_conference_error(&error))?;
+        let Some(conference) = self
+            .store
+            .universal_conference_profile(&claims.scope, &snapshot.group_id)
+            .map_err(map_store_error)?
+        else {
+            return Ok(());
+        };
+        let participant = self
+            .store
+            .universal_conference_participant(
+                &claims.scope,
+                &snapshot.group_id,
+                &claims.participant,
+            )
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+        if participant.role == ConferenceParticipantRole::Attendee && !conference.entry_open {
+            Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied).with_retry_after(2_000))
+        } else {
+            Ok(())
+        }
     }
 
     fn require_universal_publish_allowed(
@@ -1249,7 +1338,10 @@ fn pb_sfu_forward_envelope(value: &SfuForwardEnvelope) -> pb::SfuForwardEnvelope
     }
 }
 
-fn pb_realtime_session(claims: &RealtimeSessionClaims) -> pb::RealtimeSession {
+fn pb_realtime_session(
+    claims: &RealtimeSessionClaims,
+    admission: pb::RealtimeAdmissionState,
+) -> pb::RealtimeSession {
     pb::RealtimeSession {
         scope: Some(pb_scope(&claims.scope)),
         call_id: Some(pb_opaque(claims.call_id.as_opaque())),
@@ -1261,6 +1353,7 @@ fn pb_realtime_session(claims: &RealtimeSessionClaims) -> pb::RealtimeSession {
             .map(|device_id| pb_opaque(device_id.as_opaque())),
         expires_at_unix_ms: claims.expires_at_unix_ms,
         heartbeat_interval_ms: REALTIME_HEARTBEAT_INTERVAL_MS,
+        admission_state: admission as i32,
     }
 }
 

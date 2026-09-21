@@ -127,6 +127,8 @@ struct ApiResponse {
     expires_at_unix_ms: Option<i64>,
     heartbeat_interval_ms: Option<u64>,
     accepted_recipient_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    admission_state: Option<&'static str>,
 }
 
 #[tokio::main]
@@ -383,12 +385,13 @@ async fn join(state: &AppState, token: &str, input: SessionRequest) -> HttpRespo
 
     match client.join_realtime(request).await {
         Ok(response) => match response.into_inner().result {
-            Some(pb::realtime_join_response::Result::Session(session)) => api_ok(
+            Some(pb::realtime_join_response::Result::Session(session)) => api_ok_with_admission(
                 "joined",
                 "realtime session joined",
                 Some(session.expires_at_unix_ms),
                 Some(session.heartbeat_interval_ms),
                 None,
+                admission_state_name(session.admission_state),
             ),
             Some(pb::realtime_join_response::Result::Error(error)) => join_error(&error),
             None => api_error(
@@ -429,16 +432,26 @@ async fn heartbeat(state: &AppState, token: &str, input: HeartbeatRequest) -> Ht
     }
 
     match client.heartbeat_realtime(request).await {
-        Ok(response) => match response.into_inner().result {
-            Some(pb::realtime_heartbeat_response::Result::Acknowledgement(_)) => {
-                api_ok("alive", "realtime heartbeat accepted", None, None, None)
+        Ok(response) => {
+            let response = response.into_inner();
+            match response.result {
+                Some(pb::realtime_heartbeat_response::Result::Acknowledgement(_)) => {
+                    api_ok_with_admission(
+                        "alive",
+                        "realtime heartbeat accepted",
+                        None,
+                        None,
+                        None,
+                        admission_state_name(response.admission_state),
+                    )
+                }
+                Some(pb::realtime_heartbeat_response::Result::Error(_)) | None => api_error(
+                    StatusCode::CONFLICT,
+                    "heartbeat_rejected",
+                    "realtime heartbeat rejected",
+                ),
             }
-            Some(pb::realtime_heartbeat_response::Result::Error(_)) | None => api_error(
-                StatusCode::CONFLICT,
-                "heartbeat_rejected",
-                "realtime heartbeat rejected",
-            ),
-        },
+        }
         Err(status) => grpc_error(&status),
     }
 }
@@ -917,6 +930,24 @@ fn api_ok(
     heartbeat_interval_ms: Option<u64>,
     accepted_recipient_count: Option<u32>,
 ) -> HttpResponse {
+    api_ok_with_admission(
+        code,
+        message,
+        expires_at_unix_ms,
+        heartbeat_interval_ms,
+        accepted_recipient_count,
+        None,
+    )
+}
+
+fn api_ok_with_admission(
+    code: &'static str,
+    message: impl Into<String>,
+    expires_at_unix_ms: Option<i64>,
+    heartbeat_interval_ms: Option<u64>,
+    accepted_recipient_count: Option<u32>,
+    admission_state: Option<&'static str>,
+) -> HttpResponse {
     json_response(
         StatusCode::OK,
         &ApiResponse {
@@ -926,8 +957,18 @@ fn api_ok(
             expires_at_unix_ms,
             heartbeat_interval_ms,
             accepted_recipient_count,
+            admission_state,
         },
     )
+}
+
+fn admission_state_name(value: i32) -> Option<&'static str> {
+    match pb::RealtimeAdmissionState::try_from(value).ok()? {
+        pb::RealtimeAdmissionState::WaitingRoom => Some("waiting_room"),
+        pb::RealtimeAdmissionState::Admitted => Some("admitted"),
+        pb::RealtimeAdmissionState::Closed => Some("closed"),
+        pb::RealtimeAdmissionState::Unspecified => None,
+    }
 }
 
 fn api_error(status: StatusCode, code: &'static str, message: impl Into<String>) -> HttpResponse {
@@ -940,6 +981,7 @@ fn api_error(status: StatusCode, code: &'static str, message: impl Into<String>)
             expires_at_unix_ms: None,
             heartbeat_interval_ms: None,
             accepted_recipient_count: None,
+            admission_state: None,
         },
     )
 }

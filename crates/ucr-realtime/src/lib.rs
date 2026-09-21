@@ -574,6 +574,28 @@ impl RealtimeSessionRegistry {
         }
     }
 
+    /// Returns whether the exact signed session is already active.
+    ///
+    /// This is used by admission policy to distinguish a first entry from a reconnect when a
+    /// Conference host closes entry after participants are already present.
+    ///
+    /// # Errors
+    /// Fails only when bounded registry state is unavailable.
+    pub fn contains_active_session(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<bool, RealtimeRegistryError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        prune_expired(&mut entries, now_unix_ms);
+        Ok(entries
+            .iter()
+            .any(|entry| same_session(entry, claims) && entry.claims == *claims))
+    }
+
     /// Opens or reconnects the exact signed session. Reconnect replaces the old downlink sender,
     /// causing the prior receiver to close rather than keeping two consumers for one session ID.
     ///
@@ -1199,6 +1221,39 @@ mod tests {
                 10_002
             ),
             Err(RealtimeRegistryError::SessionUnavailable)
+        );
+    }
+
+    #[test]
+    fn active_session_lookup_distinguishes_first_join_from_reconnect() {
+        let registry = RealtimeSessionRegistry::default();
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("call-active-session")),
+                participant(),
+                Some(DeviceId::from_opaque(id("device-active-session"))),
+                300,
+                15_000,
+            )
+            .expect("issue")
+            .claims;
+
+        assert!(
+            !registry
+                .contains_active_session(&claims, 15_001)
+                .expect("lookup before join")
+        );
+        registry.join(claims.clone(), 15_002).expect("join");
+        assert!(
+            registry
+                .contains_active_session(&claims, 15_003)
+                .expect("lookup after join")
+        );
+        assert!(
+            !registry
+                .contains_active_session(&claims, claims.expires_at_unix_ms)
+                .expect("expired lookup")
         );
     }
 

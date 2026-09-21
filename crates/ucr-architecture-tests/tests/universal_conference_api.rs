@@ -419,23 +419,35 @@ fn realtime_browser_waiting_room_uses_join_grant_window() {
 }
 
 #[test]
-fn waiting_room_separates_grant_issuance_from_attendee_admission() {
+fn waiting_room_separates_entry_from_media_admission_and_auto_promotes_on_live() {
     let universal = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    let realtime_proto = read("proto/ucr/v1/realtime.proto");
     let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let registry = read("crates/ucr-realtime/src/lib.rs");
     let gateway = read("crates/ucr-realtime-web/src/main.rs");
     let client = read("crates/ucr-realtime-web/static/client.html");
 
     assert!(!universal.contains("|| !conference.entry_open\n        || !matches!("));
-    assert!(
-        realtime.contains("participant.role == ucr_model::ConferenceParticipantRole::Attendee")
-    );
-    assert!(realtime.contains("CanonicalErrorCode::PolicyDenied"));
+    assert!(realtime_proto.contains("REALTIME_ADMISSION_STATE_WAITING_ROOM"));
+    assert!(realtime_proto.contains("RealtimeAdmissionState admission_state = 8;"));
+    assert!(realtime_proto.contains("RealtimeAdmissionState admission_state = 3;"));
+    assert!(realtime.contains("fn require_entry_open_for_join"));
+    assert!(realtime.contains("participant.role == ConferenceParticipantRole::Attendee"));
+    assert!(realtime.contains("fn require_live_universal_conference"));
+    assert!(realtime.contains("UniversalConferenceLifecycle::Waiting"));
+    assert!(realtime.contains("pb::RealtimeAdmissionState::WaitingRoom"));
+    assert!(realtime.contains("pb::RealtimeAdmissionState::Admitted"));
     assert!(realtime.contains(".with_retry_after(2_000)"));
+    assert!(registry.contains("contains_active_session"));
+    assert!(gateway.contains("admission_state_name"));
     assert!(gateway.contains("\"waiting_room\""));
     assert!(gateway.contains("StatusCode::TOO_EARLY"));
+    assert!(client.contains("applyAdmissionState"));
+    assert!(client.contains("activateAdmittedMedia"));
+    assert!(client.contains("You are in the waiting room"));
+    assert!(client.contains("The host has started the conference"));
     assert!(client.contains("scheduleEntryRetry"));
     assert!(client.contains("ENTRY_RETRY_MS=2000"));
-    assert!(client.contains("e.code===\"waiting_room\""));
 }
 
 #[test]

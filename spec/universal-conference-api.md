@@ -74,6 +74,25 @@ Universal join issuance and revocation are durable idempotent mutations. The acc
 
 `GetCapabilities` exposes the canonical prepared media/conference capabilities plus explicit runtime-readiness flags. Capability discovery must not claim production readiness for browser realtime, WebRTC, TURN, recording, or horizontal SFU until the corresponding implementation and conformance evidence exist. A prepared protocol capability is not the same thing as a production deployment feature.
 
+## Waiting room and admission
+
+A participant may establish the authenticated realtime session while a Universal Conference is in
+`waiting`, but Conference media is not admitted until the lifecycle reaches `live`. The realtime
+contract exposes `WAITING_ROOM`, `ADMITTED` and `CLOSED` admission states on join and heartbeat,
+so a browser can render “the broadcast will start soon” and automatically begin media after the host
+starts the Conference without minting a second business-specific room concept.
+
+`entry_open` is an entry gate, not a retroactive media kill switch. A first attendee join is denied
+while entry is closed, with bounded retry guidance. A session that was already admitted to the
+realtime registry is not invalidated merely because the host later closes entry; removal/revocation
+remain the explicit mechanisms for ejecting a participant. Host/moderator/speaker access continues
+to be governed by canonical participant role and lifecycle policy.
+
+WebRTC start, encrypted publish, downlink subscription and media-subscription mutation all fail
+closed before `live`. Heartbeat remains available in the waiting room and reports the lifecycle
+projection so clients can observe the transition to `ADMITTED`. Legacy non-Universal Conference
+calls keep their existing behavior.
+
 ## Attendance
 
 `GetParticipantAttendance` is integration-scoped and addressed by `external_user_id`. It returns first join, last leave, first media-ready time, join/reconnect/media-ready counts, current connection duration and total connected duration.
