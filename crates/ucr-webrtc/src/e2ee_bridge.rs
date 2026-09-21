@@ -333,7 +333,7 @@ mod tests {
         GroupMediaSourceSignature, KeyId, MediaKind, NamespaceId, OpaqueId, PrincipalId,
         PrincipalKind, PrincipalRef, TenantId, TenantScope,
     };
-    use ucr_protocol::{ALGORITHM_VERSION, SIGNATURE_ALGORITHM_ID};
+    use ucr_protocol::{ALGORITHM_VERSION, SFU_FORWARD_WIRE_MAGIC, SIGNATURE_ALGORITHM_ID};
 
     fn id(value: &str) -> OpaqueId {
         OpaqueId::new(value).expect("id")
@@ -398,7 +398,7 @@ mod tests {
         );
 
         let mut version = encode_webrtc_e2ee_envelope(&envelope()).expect("encode");
-        version[WEBRTC_E2EE_WIRE_MAGIC.len()] = 99;
+        version[SFU_FORWARD_WIRE_MAGIC.len()] = 99;
         assert_eq!(
             decode_webrtc_e2ee_envelope(&version),
             Err(WebRtcE2eeWireError::UnsupportedVersion)
