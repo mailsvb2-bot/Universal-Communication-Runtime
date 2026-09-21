@@ -6,9 +6,8 @@ use ucr_model::{
 };
 
 use crate::{
-    GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2, GroupMediaE2eeProtocolError,
-    MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES, group_media_context_from_frame,
-    validate_encrypted_group_media_frame,
+    GroupMediaE2eeProtocolError, MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES,
+    group_media_context_from_frame, validate_encrypted_group_media_frame,
 };
 
 pub const SFU_MEDIA_CAPABILITY: &str = "ucr.media.sfu";
