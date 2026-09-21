@@ -70,6 +70,10 @@ pub(super) fn create_v33_objects(transaction: &Transaction<'_>) -> Result<(), Du
 
 pub(super) fn verify_schema_v33(connection: &Connection) -> Result<(), DurableStoreError> {
     universal_conference_store::verify_schema_v32(connection)?;
+    verify_v33_objects(connection)
+}
+
+pub(super) fn verify_v33_objects(connection: &Connection) -> Result<(), DurableStoreError> {
     verify_table_columns(
         connection,
         "recordings",
