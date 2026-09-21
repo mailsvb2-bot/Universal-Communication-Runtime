@@ -74,6 +74,19 @@ requireCondition(
   "legacy SFU wire v1 was not byte-preserving",
 );
 
+const { sourceKind: _sourceKind, authVersion: _authVersion, ...legacyHeader } = envelope.frame.header;
+const legacyOmittedMetadata: SfuForwardEnvelopeWire = {
+  ...envelope,
+  frame: {
+    ...envelope.frame,
+    header: legacyHeader,
+  },
+};
+requireCondition(
+  Buffer.from(encodeSfuForwardEnvelopeWire(legacyOmittedMetadata)).toString("hex") === WIRE_V1_VECTOR_HEX,
+  "omitted auth metadata no longer preserves legacy SFU wire v1",
+);
+
 const epochZeroEnvelope: SfuForwardEnvelopeWire = {
   ...envelope,
   frame: {
