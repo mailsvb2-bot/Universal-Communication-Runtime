@@ -72,7 +72,7 @@ const ui={
   mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle")
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null;
-let packetCount=0,sessionActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false;
+let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_CHUNK_MAGIC="UCRCHK01";
@@ -263,13 +263,13 @@ function attachE2eeDataChannel(channel){
   channel.onclose=()=>{if(e2eeChannel===channel){closeE2eeTransport();}};
 }
 function scheduleStreamRetry(){
-  if(!sessionActive||Date.now()>=claims.expires)return;
+  if(!sessionActive||!mediaActive||Date.now()>=claims.expires)return;
   if(!navigator.onLine){ui.state.textContent="Reconnecting";ui.status.textContent="Network unavailable. Realtime streams will reconnect automatically.";return;}
   if(streamRetryTimer)clearTimeout(streamRetryTimer);
   streamRetryTimer=setTimeout(()=>{streamRetryTimer=null;openStream();},STREAM_RETRY_MS);
 }
 async function openStream(){
-  if(!sessionActive||Date.now()>=claims.expires||streamAbort)return;
+  if(!sessionActive||!mediaActive||Date.now()>=claims.expires||streamAbort)return;
   const controller=new AbortController();streamAbort=controller;
   try{
     const r=await api("/v1/realtime/media/stream",body(),controller.signal);
@@ -327,13 +327,13 @@ async function closeServerPeer(keepalive=false){
   try{await api("/v1/realtime/webrtc/close",body(),undefined,keepalive);}catch(_){}
 }
 function scheduleWebRtcRetry(){
-  if(!sessionActive||Date.now()>=claims.expires||restarting)return;
+  if(!sessionActive||!mediaActive||Date.now()>=claims.expires||restarting)return;
   if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);
   ui.webrtcState.textContent="Reconnecting";
   webrtcRetryTimer=setTimeout(()=>{webrtcRetryTimer=null;restartWebRtc(false);},WEBRTC_RETRY_MS);
 }
 async function startWebRtc(forceMedia=false){
-  if(!sessionActive||!navigator.onLine)return;
+  if(!sessionActive||!mediaActive||!navigator.onLine)return;
   const media=await ensureLocalMedia(forceMedia);
   const response=await api("/v1/realtime/webrtc/start",body());
   const offer=await response.json();
@@ -384,19 +384,46 @@ async function restartWebRtc(forceMedia){
   }
   restarting=false;
 }
+async function activateAdmittedMedia(){
+  if(!sessionActive||mediaActive)return;
+  mediaActive=true;ui.state.textContent="Connected";
+  ui.status.textContent="The host has started the conference. Requesting camera and microphone…";
+  openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive)ui.status.textContent="Realtime stream closed: "+e.message;});
+  try{await startWebRtc(false);}catch(e){ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC start failed: "+e.message;scheduleWebRtcRetry();}
+}
+async function applyAdmissionState(state){
+  if(state==="waiting_room"){
+    mediaActive=false;ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
+    ui.status.textContent="You are in the waiting room. Media will start automatically when the host starts the conference.";
+    return;
+  }
+  if(state==="closed"){
+    mediaActive=false;
+    if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
+    if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
+    if(streamAbort){streamAbort.abort();streamAbort=null;}
+    teardownPeer();
+    ui.state.textContent="Ended";ui.status.textContent="The conference is no longer accepting realtime media.";
+    return;
+  }
+  if(state==="admitted"||!state)await activateAdmittedMedia();
+}
+async function heartbeat(){
+  const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});
+  const data=await r.json();
+  await applyAdmissionState(data.admission_state);
+}
 async function join(){
   try{
     if(Date.now()<claims.not_before){scheduleWaitingRoom();return;}
     ui.join.disabled=true;ui.state.textContent="Joining";ui.status.textContent="Authenticating signed session grant…";
     const r=await api("/v1/realtime/join",body());const data=await r.json();
     if(!data.ok)throw new Error(data.message||"Join rejected");
-    sessionActive=true;ui.state.textContent="Connected";ui.leave.disabled=false;
-    ui.status.textContent="Realtime session active. Requesting camera and microphone…";
+    sessionActive=true;ui.leave.disabled=false;
     if(data.expires_at_unix_ms)ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
-    heartbeatTimer=setInterval(async()=>{try{await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});}catch(e){ui.status.textContent="Heartbeat failed: "+e.message;}},interval);
-    openStream().catch(e=>{if(e.name!=="AbortError")ui.status.textContent="Realtime stream closed: "+e.message;});
-    try{await startWebRtc(false);}catch(e){ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC start failed: "+e.message;scheduleWebRtcRetry();}
+    heartbeatTimer=setInterval(()=>{heartbeat().catch(e=>{ui.status.textContent="Heartbeat failed: "+e.message;});},interval);
+    await applyAdmissionState(data.admission_state);
   }catch(e){
     if(e.code==="waiting_room"){scheduleEntryRetry();return;}
     ui.state.textContent="Rejected";ui.status.textContent=e.message;ui.join.disabled=false;
@@ -415,7 +442,7 @@ async function leave(){
   teardownPeer();
   if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;ui.localVideo.srcObject=null;}
   if(wasActive)await closeServerPeer();
-  sessionActive=false;ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;
+  sessionActive=false;mediaActive=false;ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
   if(wasActive){try{await api("/v1/realtime/leave",body());}catch(_){}}
   ui.state.textContent="Left";ui.status.textContent="Conference session closed.";ui.join.disabled=false;
