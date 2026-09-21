@@ -207,9 +207,10 @@ pub use group_media_e2ee::{
     GROUP_MEDIA_FRAME_HEADER_VERSION, GROUP_MEDIA_KEY_CONTEXT_V1_DOMAIN,
     GROUP_MEDIA_SOURCE_SIGNATURE_V1_DOMAIN, GroupMediaE2eeProtocolError, GroupMediaSigningBinding,
     MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES, ScreenShareV2Negotiation,
-    canonical_group_media_e2ee_context, group_media_context_binding, group_media_context_from_frame,
-    group_media_frame_aad, group_media_key_context, group_media_source_signing_binding,
-    screen_share_v2_negotiation, validate_encrypted_group_media_frame,
+    canonical_group_media_e2ee_context, group_media_context_binding,
+    group_media_context_from_frame, group_media_frame_aad, group_media_key_context,
+    group_media_source_signing_binding, screen_share_v2_negotiation,
+    validate_encrypted_group_media_frame,
 };
 pub use handshake::{
     HandshakeError, NegotiatedSession, NegotiationPolicy, NegotiationResultEnvelope,
