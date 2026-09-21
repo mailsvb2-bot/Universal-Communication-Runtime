@@ -138,3 +138,34 @@ fn phase29_hpke_rustsec_patch_is_machine_locked() {
     assert!(patch.contains("same SHAKE256 algorithm"));
     assert!(license.contains("Mozilla Public License Version 2.0"));
 }
+
+#[test]
+fn phase29_media_source_auth_v2_is_backward_compatible_and_transport_complete() {
+    let root = workspace();
+    let model =
+        fs::read_to_string(root.join("crates/ucr-model/src/group_media_e2ee.rs")).expect("model");
+    let protocol = fs::read_to_string(root.join("crates/ucr-protocol/src/group_media_e2ee.rs"))
+        .expect("group media protocol");
+    let sfu = fs::read_to_string(root.join("crates/ucr-protocol/src/sfu.rs")).expect("sfu");
+    let proto = fs::read_to_string(root.join("proto/ucr/v1/group_media_e2ee.proto"))
+        .expect("group media proto");
+    let realtime =
+        fs::read_to_string(root.join("crates/ucr-api-grpc/src/realtime_service.rs"))
+            .expect("realtime service");
+    let typescript =
+        fs::read_to_string(root.join("sdk/typescript/src/sfu_forward_wire.ts"))
+            .expect("typescript wire");
+
+    assert!(model.contains("pub enum GroupMediaSourceKind"));
+    assert!(model.contains("pub enum GroupMediaFrameAuthVersion"));
+    assert!(protocol.contains("GROUP_MEDIA_FRAME_AAD_V2_DOMAIN"));
+    assert!(protocol.contains("group_media_source_kind_code(header.source_kind)"));
+    assert!(sfu.contains("SFU_FORWARD_WIRE_LEGACY_VERSION"));
+    assert!(sfu.contains("wire_v1_remains_readable_and_byte_preserving"));
+    assert!(proto.contains("GroupMediaSourceKind source_kind = 16;"));
+    assert!(proto.contains("GroupMediaFrameAuthVersion auth_version = 17;"));
+    assert!(realtime.contains("decode_group_media_auth_version"));
+    assert!(realtime.contains("decode_group_media_source_kind"));
+    assert!(typescript.contains("SFU_FORWARD_WIRE_LEGACY_VERSION"));
+    assert!(typescript.contains("frame.header.authVersion ?? SFU_FORWARD_WIRE_LEGACY_VERSION"));
+}
