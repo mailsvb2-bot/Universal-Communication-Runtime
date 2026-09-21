@@ -286,12 +286,14 @@ impl ProductionRuntime {
                 Arc::clone(&authorization),
                 Arc::clone(&store),
             )))
-            .add_service(conference_service_server(GrpcConferenceService::with_state(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-                Arc::clone(&conference_state),
-            )))
+            .add_service(conference_service_server(
+                GrpcConferenceService::with_state(
+                    Arc::clone(&clock),
+                    Arc::clone(&authorization),
+                    Arc::clone(&store),
+                    Arc::clone(&conference_state),
+                ),
+            ))
             .add_service(universal_conference_service_server(
                 GrpcUniversalConferenceService::with_state(
                     Arc::clone(&clock),
