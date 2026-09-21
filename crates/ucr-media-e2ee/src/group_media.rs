@@ -14,9 +14,8 @@ use ucr_model::{
     AuthorizationRequest, CallParticipantState, CallSession, CallSignallingState,
     CapabilityDescriptor, CapabilityMaturity, ConversationKind, DeviceDescriptor, DeviceId,
     EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameAuthVersion,
-    GroupMediaFrameHeader, GroupMediaSourceKind, GroupMediaSourceSignature, GroupMemberState, KeyId,
-    KeyPurpose, MediaKind, OpaqueId,
-    PrincipalKind, PrincipalRef, ScopedPrincipal,
+    GroupMediaFrameHeader, GroupMediaSourceKind, GroupMediaSourceSignature, GroupMemberState,
+    KeyId, KeyPurpose, MediaKind, OpaqueId, PrincipalKind, PrincipalRef, ScopedPrincipal,
 };
 use ucr_protocol::{
     ALGORITHM_VERSION, AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CanonicalError,
