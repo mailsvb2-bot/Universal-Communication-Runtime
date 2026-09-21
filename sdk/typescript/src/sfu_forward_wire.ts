@@ -216,6 +216,9 @@ function validateEnvelopeShape(envelope: SfuForwardEnvelopeWire): void {
   }
   principalKindCode(frame.header.source.kind);
   mediaKindCode(frame.header.mediaKind);
+  if (frame.header.mediaKind === "audio" && frame.header.keyframe) {
+    throw new Error("audio SFU forward frames cannot be keyframes");
+  }
   if (frame.nonce.byteLength !== NONCE_BYTES) {
     throw new Error("invalid SFU forward nonce length");
   }
@@ -265,6 +268,8 @@ function principalKindCode(kind: PrincipalKind): number {
       return 7;
     case "external_platform":
       return 8;
+    default:
+      throw new Error("invalid SFU forward principal kind");
   }
 }
 
@@ -292,7 +297,9 @@ function principalKindFromCode(code: number): PrincipalKind {
 }
 
 function mediaKindCode(kind: MediaKind): number {
-  return kind === "audio" ? 1 : 2;
+  if (kind === "audio") return 1;
+  if (kind === "video") return 2;
+  throw new Error("invalid SFU forward media kind");
 }
 
 function mediaKindFromCode(code: number): MediaKind {
@@ -315,6 +322,9 @@ class WireWriter {
   }
 
   u8(value: number): void {
+    if (!Number.isInteger(value) || value < 0 || value > 0xff) {
+      throw new Error("wire byte exceeds u8 range");
+    }
     this.raw(Uint8Array.of(value));
   }
 
