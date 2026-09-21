@@ -86,6 +86,19 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(browser.contains("updateSources"));
     assert!(browser.contains("e2eeChannel.readyState!==\"open\""));
     assert!(browser.contains("track.addEventListener(\"ended\""));
+    assert!(browser.contains("if(screenStream){"));
+    assert!(browser.contains("current.getTracks().forEach(track=>track.stop())"));
+    let leave = browser
+        .split_once("async function leave(){")
+        .expect("leave function")
+        .1
+        .split_once("function scheduleWaitingRoom(){")
+        .expect("leave function close")
+        .0;
+    assert!(
+        leave.find("await stopScreenShare(false)")
+            < leave.find("await closeServerPeer()")
+    );
     assert!(browser.contains("new RTCPeerConnection"));
     assert!(browser.contains("pc.ondatachannel"));
     assert!(browser.contains("ucr.e2ee.media.v1"));
