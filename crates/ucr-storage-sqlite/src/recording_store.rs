@@ -811,9 +811,9 @@ mod tests {
                 .expect("set v32");
         }
 
-        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v32 to v33");
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v32 to current");
         assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
         let connection = migrated.lock_connection().expect("connection");
-        verify_schema_v33(&connection).expect("verify v33");
+        verify_v33_objects(&connection).expect("verify migrated recording objects");
     }
 }
