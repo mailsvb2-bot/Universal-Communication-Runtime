@@ -133,7 +133,7 @@ export function decodeSfuForwardEnvelopeWire(bytes: Uint8Array): SfuForwardEnvel
   const callId = reader.id();
   const groupId = reader.id();
   const streamId = reader.id();
-  const sourceKind = principalKindFromCode(reader.u8());
+  const principalKind = principalKindFromCode(reader.u8());
   const sourcePrincipalId = reader.id();
   const sourceDeviceId = reader.id();
   const negotiationRef = reader.id();
@@ -178,7 +178,7 @@ export function decodeSfuForwardEnvelopeWire(bytes: Uint8Array): SfuForwardEnvel
         callId,
         groupId,
         streamId,
-        source: { principalId: sourcePrincipalId, kind: sourceKind },
+        source: { principalId: sourcePrincipalId, kind: principalKind },
         sourceDeviceId,
         negotiationRef,
         negotiationGeneration,
