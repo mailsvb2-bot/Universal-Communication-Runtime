@@ -57,6 +57,18 @@ requireCondition(decoded.frame.header.sequence === 44n, "sequence drifted");
 requireCondition(decoded.frame.header.mediaTimestamp === 90_000n, "timestamp drifted");
 requireCondition(Buffer.from(decoded.frame.ciphertext).equals(Buffer.from([7, 8, 9])), "ciphertext drifted");
 
+const epochZeroEnvelope: SfuForwardEnvelopeWire = {
+  ...envelope,
+  frame: {
+    ...envelope.frame,
+    header: { ...envelope.frame.header, cryptoEpoch: 0n },
+  },
+};
+requireCondition(
+  decodeSfuForwardEnvelopeWire(encodeSfuForwardEnvelopeWire(epochZeroEnvelope)).frame.header.cryptoEpoch === 0n,
+  "TypeScript wire codec rejected canonical MLS epoch zero",
+);
+
 let trailingRejected = false;
 try {
   decodeSfuForwardEnvelopeWire(Uint8Array.from([...wire, 0]));
