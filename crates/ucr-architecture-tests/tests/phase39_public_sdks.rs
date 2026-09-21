@@ -26,6 +26,7 @@ fn phase39_rust_sdk_is_a_client_only_public_contract_binding() {
     assert!(sdk.contains("ucr-service-credential-id-bin"));
     assert!(sdk.contains("ucr-service-credential-secret-bin"));
     assert!(sdk.contains("[REDACTED]"));
+    assert!(sdk.contains("pb::universal_conference_service_client::UniversalConferenceServiceClient<Channel>"));
     for method in [
         "submit_command",
         "create_identity",
@@ -46,6 +47,22 @@ fn phase39_rust_sdk_is_a_client_only_public_contract_binding() {
         "reject_events",
         "replay_subscription",
         "list_dead_letters",
+        "create_conference",
+        "resolve_conference",
+        "get_conference",
+        "transition_conference",
+        "set_entry_open",
+        "ensure_participant",
+        "ensure_participant_device",
+        "update_participant",
+        "remove_participant",
+        "list_participants",
+        "set_subscriptions",
+        "prepare_conference_runtime",
+        "issue_join_grant",
+        "revoke_join_grant",
+        "get_participant_attendance",
+        "get_conference_capabilities",
     ] {
         assert!(sdk.contains(&format!("pub async fn {method}")));
     }
@@ -66,6 +83,7 @@ fn phase39_all_required_languages_share_one_auth_and_semantic_manifest() {
     assert!(manifest.contains("\"automatic_application_retry\": false"));
     assert!(manifest.contains("\"event_cursor\": \"opaque\""));
     assert!(manifest.contains("\"direct_database_access\": false"));
+    assert!(manifest.contains("\"UniversalConferenceService\""));
     for path in helpers {
         let source = read(path);
         assert!(source.contains("ucr-service-credential-id-bin"));
