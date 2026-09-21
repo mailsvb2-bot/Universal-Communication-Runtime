@@ -19,8 +19,7 @@ use ucr_protocol::{
     AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CanonicalError, GROUP_MEDIA_E2EE_CAPABILITY,
     MAX_CALL_PARTICIPANTS, SCREEN_SHARE_SEND_PERMISSION, SFU_MEDIA_CAPABILITY, SfuProtocolError,
     VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, canonical_capabilities,
-    canonical_sfu_forward_envelope,
-    phase29_sfu_capabilities,
+    canonical_sfu_forward_envelope, phase29_sfu_capabilities,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
