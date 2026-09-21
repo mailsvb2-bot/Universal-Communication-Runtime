@@ -20,6 +20,19 @@ pub struct GroupMediaE2eeContext {
     pub crypto_suite: CryptoSuite,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GroupMediaSourceKind {
+    Microphone,
+    Camera,
+    ScreenShare,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GroupMediaFrameAuthVersion {
+    V1,
+    V2,
+}
+
 /// Clear group-media routing metadata authenticated as AEAD associated data.
 ///
 /// `source_device_id` is explicit because MLS membership and revocation are device-sensitive.
@@ -37,6 +50,8 @@ pub struct GroupMediaFrameHeader {
     pub crypto_state_ref: OpaqueId,
     pub crypto_suite: CryptoSuite,
     pub media_kind: MediaKind,
+    pub source_kind: GroupMediaSourceKind,
+    pub auth_version: GroupMediaFrameAuthVersion,
     pub sequence: u64,
     pub media_timestamp: u64,
     pub keyframe: bool,
