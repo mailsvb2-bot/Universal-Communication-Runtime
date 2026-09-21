@@ -23,8 +23,8 @@ use ucr_model::{
     WebRtcIceCandidate, WebRtcSdpType, WebRtcSessionDescription,
 };
 use ucr_protocol::{
-    CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V1,
-    GROUP_MEDIA_FRAME_HEADER_V2, RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for, canonical_event,
+    CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
+    RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for, canonical_event,
 };
 use ucr_realtime::{
     AttendanceTransition, AttendanceTransitionKind, JoinTokenError, JoinTokenIssuer,
