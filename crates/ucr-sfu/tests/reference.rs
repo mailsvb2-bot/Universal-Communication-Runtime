@@ -480,6 +480,74 @@ fn encrypted_group_frame_fans_out_bit_exactly_to_current_call_recipients() {
 }
 
 #[test]
+fn screen_share_source_kind_is_authenticated_before_sfu_fan_out() {
+    let fixture = build_fixture();
+    let context = group_media_context(&fixture.group, &fixture.call);
+    let capabilities = PreparedGroupMediaE2eeCapabilities;
+    let media_runtime = GroupMediaE2eeRuntime::new(&AllowAll, &fixture.store, &capabilities);
+    let mut session = media_runtime
+        .open_session(
+            &fixture.alice,
+            &fixture.alice_device,
+            &context,
+            GroupMediaEpochSecret::from_exporter_bytes([42; 32]),
+        )
+        .expect("screen-share media session");
+    let frame = session
+        .seal_payload_with_source(
+            MediaKind::Video,
+            Some(VideoSourceKind::ScreenShare),
+            &oid("screen-share-alice"),
+            1,
+            90_000,
+            true,
+            b"opaque-screen-share-payload",
+            &fixture.signing_key_id,
+            &fixture.signer,
+        )
+        .expect("seal screen-share frame");
+    assert_eq!(
+        frame.header.header_version,
+        ucr_protocol::GROUP_MEDIA_FRAME_HEADER_VERSION
+    );
+    assert_eq!(
+        frame.header.video_source_kind,
+        Some(VideoSourceKind::ScreenShare)
+    );
+
+    let envelope = SfuForwardEnvelope { frame };
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&AllowAll, &fixture.store, &capabilities, &sfu);
+    let sink = CaptureSink::default();
+    assert_eq!(
+        runtime.forward(&fixture.alice, &fixture.alice_device, &envelope, &sink),
+        Ok(SfuForwardOutcome {
+            accepted_recipients: 2
+        })
+    );
+    assert!(
+        sink.forwarded()
+            .iter()
+            .all(|(_, forwarded)| forwarded.frame.header.video_source_kind
+                == Some(VideoSourceKind::ScreenShare))
+    );
+
+    let mut relabelled = envelope;
+    relabelled.frame.header.video_source_kind = Some(VideoSourceKind::Camera);
+    let tampered_sink = CaptureSink::default();
+    assert!(matches!(
+        runtime.forward(
+            &fixture.alice,
+            &fixture.alice_device,
+            &relabelled,
+            &tampered_sink
+        ),
+        Err(SfuError::MediaE2ee(_))
+    ));
+    assert!(tampered_sink.forwarded().is_empty());
+}
+
+#[test]
 fn selected_encrypted_forwarding_reaches_only_explicit_current_recipient() {
     let fixture = build_fixture();
     let e2ee = PreparedGroupMediaE2eeCapabilities;
