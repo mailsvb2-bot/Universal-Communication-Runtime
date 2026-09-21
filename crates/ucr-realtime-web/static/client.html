@@ -117,8 +117,12 @@ function e2eeAdapter(){
   return adapter&&typeof adapter==="object"?adapter:null;
 }
 function closeE2eeTransport(){
-  const adapter=e2eeAdapter();
   ui.screenToggle.disabled=true;
+  if(screenStream){
+    const current=screenStream;screenStream=null;setScreenUi(false);
+    current.getTracks().forEach(track=>track.stop());
+  }
+  const adapter=e2eeAdapter();
   if(adapter&&typeof adapter.stop==="function"){try{adapter.stop();}catch(_){}}
   if(e2eeChannel){
     e2eeChannel.onopen=null;e2eeChannel.onmessage=null;e2eeChannel.onclose=null;e2eeChannel.onerror=null;
@@ -197,9 +201,9 @@ async function stopScreenShare(notifyAdapter=true,alreadyBusy=false){
   try{
     if(!current){setScreenUi(false);return;}
     screenStream=null;setScreenUi(false);
+    current.getTracks().forEach(track=>track.stop());
     if(notifyAdapter)await syncEndpointMediaSources();
   }finally{
-    if(current)current.getTracks().forEach(track=>track.stop());
     if(!alreadyBusy){screenShareBusy=false;refreshScreenShareControl();}
   }
 }
@@ -407,10 +411,10 @@ function scheduleEntryRetry(){
 async function leave(){
   const wasActive=sessionActive;
   if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);
-  if(wasActive)await closeServerPeer();
+  await stopScreenShare(false);
   teardownPeer();
   if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;ui.localVideo.srcObject=null;}
-  await stopScreenShare(false);
+  if(wasActive)await closeServerPeer();
   sessionActive=false;ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
   if(wasActive){try{await api("/v1/realtime/leave",body());}catch(_){}}
