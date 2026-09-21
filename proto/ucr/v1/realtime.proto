@@ -17,6 +17,13 @@ message RealtimeJoinRequest {
   OpaqueId session_id = 3;
 }
 
+enum RealtimeAdmissionState {
+  REALTIME_ADMISSION_STATE_UNSPECIFIED = 0;
+  REALTIME_ADMISSION_STATE_WAITING_ROOM = 1;
+  REALTIME_ADMISSION_STATE_ADMITTED = 2;
+  REALTIME_ADMISSION_STATE_CLOSED = 3;
+}
+
 message RealtimeSession {
   TenantScope scope = 1;
   OpaqueId call_id = 2;
@@ -25,6 +32,7 @@ message RealtimeSession {
   optional OpaqueId device_id = 5;
   int64 expires_at_unix_ms = 6;
   uint64 heartbeat_interval_ms = 7;
+  RealtimeAdmissionState admission_state = 8;
 }
 
 message RealtimeJoinResponse {
@@ -46,6 +54,7 @@ message RealtimeHeartbeatResponse {
     AcknowledgementEnvelope acknowledgement = 1;
     ErrorEnvelope error = 2;
   }
+  RealtimeAdmissionState admission_state = 3;
 }
 
 message RealtimeLeaveRequest {
