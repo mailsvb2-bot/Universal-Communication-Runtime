@@ -675,7 +675,7 @@ where
                     &credential_id,
                     &secret,
                     &input.integration_id,
-                    CONFERENCE_SUBSCRIBE_PERMISSION,
+                    CONFERENCE_MANAGE_PERMISSION,
                 )
                 .and_then(|_| set_universal_subscriptions(self, &input)),
             (Err(error), _) | (_, Err(error)) => Err(error),
