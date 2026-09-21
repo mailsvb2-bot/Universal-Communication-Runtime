@@ -202,13 +202,14 @@ pub use group::{
     group_permissions_for_role, is_group_conversation_kind, validate_group_member_list_limit,
 };
 pub use group_media_e2ee::{
-    GROUP_MEDIA_CONTEXT_V1_DOMAIN, GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MEDIA_FRAME_AAD_V2_DOMAIN, GROUP_MEDIA_FRAME_HEADER_V1,
-    GROUP_MEDIA_FRAME_HEADER_V2, GROUP_MEDIA_FRAME_HEADER_VERSION, GROUP_MEDIA_FRAME_AAD_V1_DOMAIN,
-    GROUP_MEDIA_KEY_CONTEXT_V1_DOMAIN, GROUP_MEDIA_SOURCE_SIGNATURE_V1_DOMAIN,
-    GroupMediaE2eeProtocolError, GroupMediaSigningBinding, MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES,
-    canonical_group_media_e2ee_context, group_media_context_binding,
-    group_media_context_from_frame, group_media_frame_aad, group_media_key_context,
-    group_media_source_signing_binding, validate_encrypted_group_media_frame,
+    GROUP_MEDIA_CONTEXT_V1_DOMAIN, GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MEDIA_FRAME_AAD_V1_DOMAIN,
+    GROUP_MEDIA_FRAME_AAD_V2_DOMAIN, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
+    GROUP_MEDIA_FRAME_HEADER_VERSION, GROUP_MEDIA_KEY_CONTEXT_V1_DOMAIN,
+    GROUP_MEDIA_SOURCE_SIGNATURE_V1_DOMAIN, GroupMediaE2eeProtocolError, GroupMediaSigningBinding,
+    MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES, canonical_group_media_e2ee_context,
+    group_media_context_binding, group_media_context_from_frame, group_media_frame_aad,
+    group_media_key_context, group_media_source_signing_binding,
+    validate_encrypted_group_media_frame,
 };
 pub use handshake::{
     HandshakeError, NegotiatedSession, NegotiationPolicy, NegotiationResultEnvelope,
@@ -323,9 +324,9 @@ pub use service_control::{
 };
 pub use sfu::{
     MAX_SFU_FORWARD_WIRE_BYTES, SFU_FORWARD_WIRE_MAGIC, SFU_FORWARD_WIRE_V1,
-    SFU_FORWARD_WIRE_VERSION,
-    SFU_MEDIA_CAPABILITY, SfuForwardWireError, SfuProtocolError, canonical_sfu_forward_envelope,
-    decode_sfu_forward_envelope, encode_sfu_forward_envelope, phase29_sfu_capabilities,
+    SFU_FORWARD_WIRE_VERSION, SFU_MEDIA_CAPABILITY, SfuForwardWireError, SfuProtocolError,
+    canonical_sfu_forward_envelope, decode_sfu_forward_envelope, encode_sfu_forward_envelope,
+    phase29_sfu_capabilities,
 };
 pub use store_forward::{
     MAX_STORE_FORWARD_DELIVERY_ATTEMPTS, MAX_STORE_FORWARD_LEASE_MS, MAX_STORE_FORWARD_PAGE_ITEMS,
