@@ -82,7 +82,9 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(browser.contains("navigator.mediaDevices.getDisplayMedia"));
     assert!(browser.contains("screen-toggle"));
     assert!(browser.contains("screenStream"));
+    assert!(browser.contains("screenShareBusy"));
     assert!(browser.contains("updateSources"));
+    assert!(browser.contains("e2eeChannel.readyState!==\"open\""));
     assert!(browser.contains("track.addEventListener(\"ended\""));
     assert!(browser.contains("new RTCPeerConnection"));
     assert!(browser.contains("pc.ondatachannel"));
