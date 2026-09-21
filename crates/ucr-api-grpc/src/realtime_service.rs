@@ -17,7 +17,8 @@ use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipantState, CallSignal, CallSignalKind,
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
     ConferenceSubscriptionSet, CorrelationContext, CryptoSuite, DeviceId, DeviceLifecycleState,
-    DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
+    DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId,
+    GroupMediaFrameAuthVersion, GroupMediaFrameHeader, GroupMediaSourceKind,
     GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind, OpaqueId, PrincipalKind,
     ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope, WebRtcIceCandidate, WebRtcSdpType,
     WebRtcSessionDescription,
@@ -1115,6 +1116,10 @@ fn decode_sfu_forward_envelope(
 ) -> Result<SfuForwardEnvelope, CanonicalError> {
     let frame = value.frame.ok_or_else(invalid_argument)?;
     let header = frame.header.ok_or_else(invalid_argument)?;
+    let media_kind = decode_media_kind(header.media_kind)?;
+    let auth_version = decode_group_media_auth_version(header.auth_version)?;
+    let source_kind =
+        decode_group_media_source_kind(header.source_kind, media_kind, auth_version)?;
     let nonce: [u8; 24] = frame.nonce.try_into().map_err(|_| invalid_argument())?;
     let signature = frame.source_signature.ok_or_else(invalid_argument)?;
     Ok(SfuForwardEnvelope {
@@ -1131,7 +1136,9 @@ fn decode_sfu_forward_envelope(
                 crypto_epoch: header.crypto_epoch,
                 crypto_state_ref: decode_opaque(header.crypto_state_ref)?,
                 crypto_suite: decode_crypto_suite(header.crypto_suite)?,
-                media_kind: decode_media_kind(header.media_kind)?,
+                media_kind,
+                source_kind,
+                auth_version,
                 sequence: header.sequence,
                 media_timestamp: header.media_timestamp,
                 keyframe: header.keyframe,
@@ -1146,6 +1153,44 @@ fn decode_sfu_forward_envelope(
             },
         },
     })
+}
+
+fn decode_group_media_auth_version(
+    value: i32,
+) -> Result<GroupMediaFrameAuthVersion, CanonicalError> {
+    match pb::GroupMediaFrameAuthVersion::try_from(value).map_err(|_| invalid_argument())? {
+        pb::GroupMediaFrameAuthVersion::Unspecified | pb::GroupMediaFrameAuthVersion::V1 => {
+            Ok(GroupMediaFrameAuthVersion::V1)
+        }
+        pb::GroupMediaFrameAuthVersion::V2 => Ok(GroupMediaFrameAuthVersion::V2),
+    }
+}
+
+fn decode_group_media_source_kind(
+    value: i32,
+    media_kind: MediaKind,
+    auth_version: GroupMediaFrameAuthVersion,
+) -> Result<GroupMediaSourceKind, CanonicalError> {
+    let source_kind = match pb::GroupMediaSourceKind::try_from(value).map_err(|_| invalid_argument())?
+    {
+        pb::GroupMediaSourceKind::Unspecified if auth_version == GroupMediaFrameAuthVersion::V1 => {
+            match media_kind {
+                MediaKind::Audio => GroupMediaSourceKind::Microphone,
+                MediaKind::Video => GroupMediaSourceKind::Camera,
+            }
+        }
+        pb::GroupMediaSourceKind::Unspecified => return Err(invalid_argument()),
+        pb::GroupMediaSourceKind::Microphone => GroupMediaSourceKind::Microphone,
+        pb::GroupMediaSourceKind::Camera => GroupMediaSourceKind::Camera,
+        pb::GroupMediaSourceKind::ScreenShare => GroupMediaSourceKind::ScreenShare,
+    };
+    match (media_kind, source_kind) {
+        (MediaKind::Audio, GroupMediaSourceKind::Microphone)
+        | (MediaKind::Video, GroupMediaSourceKind::Camera | GroupMediaSourceKind::ScreenShare) => {
+            Ok(source_kind)
+        }
+        _ => Err(invalid_argument()),
+    }
 }
 
 fn decode_crypto_suite(value: i32) -> Result<CryptoSuite, CanonicalError> {
@@ -1173,6 +1218,15 @@ fn pb_sfu_forward_envelope(value: &SfuForwardEnvelope) -> pb::SfuForwardEnvelope
                 media_kind: (match value.frame.header.media_kind {
                     MediaKind::Audio => pb::MediaKind::Audio,
                     MediaKind::Video => pb::MediaKind::Video,
+                }) as i32,
+                source_kind: (match value.frame.header.source_kind {
+                    GroupMediaSourceKind::Microphone => pb::GroupMediaSourceKind::Microphone,
+                    GroupMediaSourceKind::Camera => pb::GroupMediaSourceKind::Camera,
+                    GroupMediaSourceKind::ScreenShare => pb::GroupMediaSourceKind::ScreenShare,
+                }) as i32,
+                auth_version: (match value.frame.header.auth_version {
+                    GroupMediaFrameAuthVersion::V1 => pb::GroupMediaFrameAuthVersion::V1,
+                    GroupMediaFrameAuthVersion::V2 => pb::GroupMediaFrameAuthVersion::V2,
                 }) as i32,
                 sequence: value.frame.header.sequence,
                 media_timestamp: value.frame.header.media_timestamp,
