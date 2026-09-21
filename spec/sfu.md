@@ -22,6 +22,12 @@ Because all current MLS members can derive the epoch exporter, key derivation al
 
 The SFU receives no MLS exporter secret, stream traffic key or plaintext. Endpoint AEAD and replay state remain authoritative.
 
+The transport-neutral SFU envelope has a backward-compatible wire version. Wire v1 is retained for
+legacy authenticated frames and canonicalizes audio to microphone and video to camera. Wire v2 adds
+one authenticated source-kind byte for microphone, camera, or screen share. Decoders accept both
+versions; a decoded v1 envelope re-encodes byte-for-byte as v1, while newly explicit screen-share
+frames use v2. The same metadata is preserved through the public realtime protobuf binding.
+
 ## SFU fan-out authority
 
 Before any sink side effect, the runtime revalidates the current active Group-backed Call, media-negotiation reference/generation, exact Group MLS epoch/state reference, source active Group membership, Principal→Identity→Active Device association, current trusted source Device signing key/signature, source send permission, and every selected recipient's current membership/receive permission.
