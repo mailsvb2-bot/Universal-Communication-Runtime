@@ -42,6 +42,6 @@ The existing loopback plaintext local daemon remains local-only. A remotely reac
 
 SFU forwarding state is ephemeral. Durable additions exist only in canonical stores such as Principal→Identity association, Call/Group/MLS state and canonical attendance Events. There is no durable SFU route topology, conference roster, implicit ciphertext archive or Delivery owner.
 
-The SFU may observe only exact scope, Group/Call/stream identifiers, source/recipient routing principals, source Device ID, current MLS epoch/state reference, media kind, sequence/timing/keyframe metadata, signature metadata and encrypted packet size/timing required for routing. It must not receive media plaintext, MLS exporter/traffic/private keys, recovery/authentication secrets, unrelated Group roster/history, Message plaintext or provider credentials.
+The SFU may observe only exact scope, Group/Call/stream identifiers, source/recipient routing principals, source Device ID, current MLS epoch/state reference, media kind, authenticated camera/screen-share source kind where the current wire version carries it, sequence/timing/keyframe metadata, signature metadata and encrypted packet size/timing required for routing. It must not receive media plaintext, MLS exporter/traffic/private keys, recovery/authentication secrets, unrelated Group roster/history, Message plaintext or provider credentials.
 
 Recording is a separate explicit capability and service. Realtime forwarding must not enable it implicitly.
