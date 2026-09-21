@@ -3965,8 +3965,10 @@ dependencies = [
  "ucr-api-grpc",
  "ucr-conference",
  "ucr-core",
+ "ucr-media-e2ee",
  "ucr-model",
  "ucr-realtime",
+ "ucr-sfu",
  "ucr-storage-sqlite",
  "ucr-webhook",
  "ucr-webrtc",
@@ -4095,6 +4097,7 @@ name = "ucr-webrtc"
 version = "0.0.1"
 dependencies = [
  "base64",
+ "bytes",
  "openssl",
  "tokio",
  "ucr-model",

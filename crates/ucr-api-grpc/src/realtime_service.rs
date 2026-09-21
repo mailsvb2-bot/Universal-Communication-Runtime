@@ -30,7 +30,7 @@ use ucr_realtime::{
     AttendanceTransition, AttendanceTransitionKind, JoinTokenError, JoinTokenIssuer,
     RealtimeRegistryError, RealtimeSessionClaims, RealtimeSessionRegistry,
 };
-use ucr_sfu::PreparedSfuCapabilities;
+use ucr_sfu::{PreparedSfuCapabilities, SfuForwardSink};
 use ucr_webrtc::{
     PreparedWebRtcProvider, WebRtcProvider, WebRtcProviderError, WebRtcSessionConfigFactory,
 };
@@ -362,29 +362,9 @@ where
             (Ok(token), Ok((scope, call_id, session_id)), Ok(envelope)) => self
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
-                    self.registry
-                        .heartbeat(&claims, self.now()?)
-                        .map_err(map_registry_error)?;
-                    let device_id = claims
-                        .device_id
-                        .as_ref()
-                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
-                    self.require_universal_publish_allowed(
-                        &claims,
-                        envelope.frame.header.media_kind,
-                    )?;
-                    let outcome = conference_runtime(self)
-                        .forward(&actor_for(&claims), device_id, &envelope, &*self.registry)
-                        .map_err(|error| map_conference_error(&error))?;
-                    if outcome.accepted_recipients > 0
-                        && let Some(transition) = self
-                            .registry
-                            .mark_media_ready(&claims, self.now()?)
-                            .map_err(map_registry_error)?
-                    {
-                        self.append_attendance(&transition)?;
-                    }
-                    let accepted_recipient_count = u32::try_from(outcome.accepted_recipients)
+                    let accepted_recipients =
+                        self.forward_authenticated_e2ee_media(&claims, &envelope, &*self.registry)?;
+                    let accepted_recipient_count = u32::try_from(accepted_recipients)
                         .map_err(|_| CanonicalError::new(CanonicalErrorCode::ResourceExhausted))?;
                     Ok(pb::RealtimePublishMediaReceipt {
                         call_id: Some(pb_opaque(claims.call_id.as_opaque())),
@@ -673,6 +653,67 @@ where
         + UniversalConferenceStore
         + ConferenceJoinGrantStore,
 {
+    /// Routes one already-encrypted endpoint media envelope through the exact canonical
+    /// Conference/SFU path after revalidating long-lived session control and publish policy.
+    ///
+    /// This method is shared by gRPC media publication and the WebRTC E2EE `DataChannel` bridge.
+    /// It never receives endpoint key material or media plaintext.
+    ///
+    /// # Errors
+    /// Fails closed for revoked/expired sessions, invalid Device/source bindings, policy denial,
+    /// malformed ciphertext, SFU validation failures or unavailable bounded routing state.
+    pub fn forward_authenticated_e2ee_media(
+        &self,
+        claims: &RealtimeSessionClaims,
+        envelope: &SfuForwardEnvelope,
+        sink: &dyn SfuForwardSink,
+    ) -> Result<usize, CanonicalError> {
+        self.require_live_transport_claims(claims)?;
+        self.registry
+            .heartbeat(claims, self.now()?)
+            .map_err(map_registry_error)?;
+        let device_id = claims
+            .device_id
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
+        self.require_universal_publish_allowed(claims, envelope.frame.header.media_kind)?;
+        let outcome = conference_runtime(self)
+            .forward(&actor_for(claims), device_id, envelope, sink)
+            .map_err(|error| map_conference_error(&error))?;
+        if outcome.accepted_recipients > 0
+            && let Some(transition) = self
+                .registry
+                .mark_media_ready(claims, self.now()?)
+                .map_err(map_registry_error)?
+        {
+            self.append_attendance(&transition)?;
+        }
+        Ok(outcome.accepted_recipients)
+    }
+
+    fn require_live_transport_claims(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<(), CanonicalError> {
+        let now = self.now()?;
+        if let Some(record) = self
+            .store
+            .conference_join_grant(&claims.scope, &claims.session_id)
+            .map_err(map_store_error)?
+        {
+            require_durable_grant_matches_claims(&record, claims)?;
+            if record.revoked || now >= record.expires_at_unix_ms {
+                return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+            }
+        } else {
+            self.join_issuer
+                .validate_live_claims(claims, now)
+                .map_err(map_join_token_error)?;
+        }
+        validate_device_claim(&*self.store, claims)?;
+        self.require_accepted_conference_participant(claims)
+    }
+
     fn now(&self) -> Result<i64, CanonicalError> {
         self.clock
             .now_unix_ms()

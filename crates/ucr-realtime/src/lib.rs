@@ -357,6 +357,27 @@ impl JoinTokenIssuer {
         Ok(claims)
     }
 
+    /// Revalidates already-authenticated claims against current temporal and legacy control state.
+    ///
+    /// This is used by long-lived transports after initial token authentication so revocation
+    /// remains effective without resending bearer credentials on every encrypted media frame.
+    ///
+    /// # Errors
+    /// Rejects not-yet-valid, expired, missing, changed or revoked controlled claims.
+    pub fn validate_live_claims(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<(), JoinTokenError> {
+        if now_unix_ms < claims.not_before_unix_ms {
+            return Err(JoinTokenError::NotYetValid);
+        }
+        if now_unix_ms >= claims.expires_at_unix_ms {
+            return Err(JoinTokenError::Expired);
+        }
+        self.require_live_grant(claims)
+    }
+
     /// Returns immutable claims for one exact scoped controlled grant.
     ///
     /// # Errors
@@ -688,6 +709,68 @@ impl RealtimeSessionRegistry {
     ) -> Result<mpsc::Receiver<SfuForwardEnvelope>, RealtimeRegistryError> {
         self.attach_downlink(claims, now_unix_ms)
             .map(|attachment| attachment.receiver)
+    }
+
+    /// Resolves exact active claims for one ciphertext ingress binding.
+    ///
+    /// Scope and Call are taken from the encrypted envelope routing header and must match the
+    /// session that owns the WebRTC peer. Ambiguous session IDs fail closed.
+    ///
+    /// # Errors
+    /// Fails for expiry, missing/ambiguous bindings, or unavailable registry state.
+    pub fn active_claims_for_ingress(
+        &self,
+        session_id: &SessionId,
+        scope: &TenantScope,
+        call_id: &CallId,
+        now_unix_ms: i64,
+    ) -> Result<RealtimeSessionClaims, RealtimeRegistryError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        prune_expired(&mut entries, now_unix_ms);
+        let mut matching = entries.iter().filter(|entry| {
+            entry.claims.session_id == *session_id
+                && entry.claims.scope == *scope
+                && entry.claims.call_id == *call_id
+        });
+        let claims = matching
+            .next()
+            .ok_or(RealtimeRegistryError::SessionUnavailable)?
+            .claims
+            .clone();
+        if matching.next().is_some() || now_unix_ms >= claims.expires_at_unix_ms {
+            return Err(RealtimeRegistryError::SessionUnavailable);
+        }
+        Ok(claims)
+    }
+
+    /// Returns active WebRTC session IDs for one exact current SFU recipient.
+    ///
+    /// # Errors
+    /// Fails only when bounded registry state is unavailable.
+    pub fn active_session_ids_for_recipient(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        participant: &PrincipalRef,
+        now_unix_ms: i64,
+    ) -> Result<Vec<SessionId>, RealtimeRegistryError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        prune_expired(&mut entries, now_unix_ms);
+        Ok(entries
+            .iter()
+            .filter(|entry| {
+                entry.claims.scope == *scope
+                    && entry.claims.call_id == *call_id
+                    && entry.claims.participant == *participant
+            })
+            .map(|entry| entry.claims.session_id.clone())
+            .collect())
     }
 
     /// Verifies liveness for the exact session and returns its current attendance sequence.
@@ -1078,6 +1161,80 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn e2ee_ingress_lookup_requires_exact_session_scope_and_call_binding() {
+        let registry = RealtimeSessionRegistry::default();
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("device"))),
+                300,
+                10_000,
+            )
+            .expect("issue")
+            .claims;
+        registry.join(claims.clone(), 10_001).expect("join");
+        assert_eq!(
+            registry
+                .active_claims_for_ingress(
+                    &claims.session_id,
+                    &claims.scope,
+                    &claims.call_id,
+                    10_002
+                )
+                .expect("lookup"),
+            claims
+        );
+        assert_eq!(
+            registry.active_claims_for_ingress(
+                &claims.session_id,
+                &claims.scope,
+                &CallId::from_opaque(id("other-call")),
+                10_002
+            ),
+            Err(RealtimeRegistryError::SessionUnavailable)
+        );
+    }
+
+    #[test]
+    fn e2ee_egress_lookup_returns_only_exact_active_recipient_sessions() {
+        let registry = RealtimeSessionRegistry::default();
+        let alice = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("call-egress")),
+                participant(),
+                Some(DeviceId::from_opaque(id("alice-device"))),
+                300,
+                20_000,
+            )
+            .expect("alice")
+            .claims;
+        registry.join(alice.clone(), 20_001).expect("join alice");
+        let sessions = registry
+            .active_session_ids_for_recipient(
+                &alice.scope,
+                &alice.call_id,
+                &alice.participant,
+                20_002,
+            )
+            .expect("sessions");
+        assert_eq!(sessions, vec![alice.session_id]);
+        assert!(
+            registry
+                .active_session_ids_for_recipient(
+                    &alice.scope,
+                    &CallId::from_opaque(id("other-call")),
+                    &alice.participant,
+                    20_002,
+                )
+                .expect("other")
+                .is_empty()
+        );
     }
 
     #[test]

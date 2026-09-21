@@ -7,3 +7,11 @@ The helper clones credential bytes, redacts diagnostics and owns no UCR domain, 
 Generated code is derivative build output; canonical request/response envelopes remain defined by protobuf.
 
 Phase 39 does not publish an npm artifact or select a permanent generator plugin; that is later release hardening.
+
+
+## WebRTC endpoint E2EE transport
+
+`src/webrtc_e2ee.ts` provides the bounded ordered DataChannel framing for already-encrypted
+canonical media envelopes on `ucr.e2ee.media.v1`. It owns no MLS keys, encryption/decryption,
+Conference policy or SFU routing. Applications connect it to their endpoint crypto adapter and keep
+all group-media key material on the endpoint.
