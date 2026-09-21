@@ -190,12 +190,18 @@ async function syncEndpointMediaSources(){
   if(!adapter||typeof adapter.updateSources!=="function")throw new Error("Endpoint E2EE adapter does not support screen source updates");
   await adapter.updateSources(endpointMediaSources());
 }
-async function stopScreenShare(notifyAdapter=true){
+async function stopScreenShare(notifyAdapter=true,alreadyBusy=false){
+  if(screenShareBusy&&!alreadyBusy)return;
+  if(!alreadyBusy){screenShareBusy=true;refreshScreenShareControl();}
   const current=screenStream;
-  if(!current){setScreenUi(false);return;}
-  screenStream=null;setScreenUi(false);
-  try{if(notifyAdapter)await syncEndpointMediaSources();}
-  finally{current.getTracks().forEach(track=>track.stop());}
+  try{
+    if(!current){setScreenUi(false);return;}
+    screenStream=null;setScreenUi(false);
+    if(notifyAdapter)await syncEndpointMediaSources();
+  }finally{
+    if(current)current.getTracks().forEach(track=>track.stop());
+    if(!alreadyBusy){screenShareBusy=false;refreshScreenShareControl();}
+  }
 }
 async function startScreenShare(){
   if(!sessionActive)throw new Error("Join the conference before sharing your screen");
@@ -212,12 +218,15 @@ async function startScreenShare(){
     screenStream=captured;setScreenUi(true);
     await syncEndpointMediaSources();
     if(track.readyState==="ended"||screenStream!==captured){
-      await stopScreenShare(true);
+      await stopScreenShare(true,true);
       throw new Error("Screen sharing ended before publication became active");
     }
     track.addEventListener("ended",()=>{if(screenStream===captured)stopScreenShare(true).catch(e=>{ui.status.textContent="Screen-share cleanup failed: "+e.message;});},{once:true});
   }catch(e){
-    if(screenStream===captured){screenStream=null;setScreenUi(false);}
+    if(screenStream===captured){
+      screenStream=null;setScreenUi(false);
+      try{await syncEndpointMediaSources();}catch(_){}
+    }
     if(captured)captured.getTracks().forEach(value=>value.stop());
     throw e;
   }finally{
