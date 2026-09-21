@@ -44,6 +44,7 @@ button:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 </div>
 <div class="media">
 <div class="video-card"><header>You</header><video id="local-video" autoplay muted playsinline></video></div>
+<div id="screen-card" class="video-card hidden"><header>Your screen</header><video id="screen-video" autoplay muted playsinline></video></div>
 <div class="video-card"><header>Remote</header><video id="remote-video" autoplay playsinline></video></div>
 </div>
 <div class="controls">
@@ -51,6 +52,7 @@ button:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 <select id="camera" aria-label="Camera"><option value="">Default camera</option></select>
 <button id="mic-toggle" class="secondary" disabled>Mute microphone</button>
 <button id="camera-toggle" class="secondary" disabled>Turn camera off</button>
+<button id="screen-toggle" class="secondary" disabled>Share screen</button>
 </div>
 <div class="grid">
 <button id="join" class="primary">Join conference</button>
@@ -66,11 +68,11 @@ const $=id=>document.getElementById(id);
 const ui={
   join:$("join"),leave:$("leave"),state:$("state"),webrtcState:$("webrtc-state"),
   packets:$("packets"),expires:$("expires"),status:$("status"),
-  localVideo:$("local-video"),remoteVideo:$("remote-video"),
-  mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle")
+  localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),
+  mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle")
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null;
-let packetCount=0,sessionActive=false,peer=null,localStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false;
+let packetCount=0,sessionActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_CHUNK_MAGIC="UCRCHK01";
@@ -116,6 +118,7 @@ function e2eeAdapter(){
 }
 function closeE2eeTransport(){
   const adapter=e2eeAdapter();
+  ui.screenToggle.disabled=true;
   if(adapter&&typeof adapter.stop==="function"){try{adapter.stop();}catch(_){}}
   if(e2eeChannel){
     e2eeChannel.onopen=null;e2eeChannel.onmessage=null;e2eeChannel.onclose=null;e2eeChannel.onerror=null;
@@ -167,13 +170,49 @@ function sendE2eeEnvelope(wire){
     e2eeChannel.send(chunk);
   }
 }
+function endpointMediaSources(){
+  return {stream:localStream,cameraStream:localStream,screenStream};
+}
+function screenShareSupported(){
+  const adapter=e2eeAdapter();
+  return !!(navigator.mediaDevices&&typeof navigator.mediaDevices.getDisplayMedia==="function"&&adapter&&typeof adapter.updateSources==="function");
+}
+function setScreenUi(active){
+  ui.screenCard.classList.toggle("hidden",!active);
+  ui.screenVideo.srcObject=active?screenStream:null;
+  ui.screenToggle.textContent=active?"Stop sharing":"Share screen";
+}
+async function syncEndpointMediaSources(){
+  const adapter=e2eeAdapter();
+  if(!adapter||typeof adapter.updateSources!=="function")throw new Error("Endpoint E2EE adapter does not support screen source updates");
+  await adapter.updateSources(endpointMediaSources());
+}
+async function stopScreenShare(notifyAdapter=true){
+  const current=screenStream;
+  if(!current){setScreenUi(false);return;}
+  screenStream=null;setScreenUi(false);
+  try{if(notifyAdapter)await syncEndpointMediaSources();}
+  finally{current.getTracks().forEach(track=>track.stop());}
+}
+async function startScreenShare(){
+  if(!sessionActive)throw new Error("Join the conference before sharing your screen");
+  if(!screenShareSupported())throw new Error("Screen sharing is unavailable in this browser or endpoint E2EE adapter");
+  const captured=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
+  const track=captured.getVideoTracks()[0];
+  if(!track){captured.getTracks().forEach(value=>value.stop());throw new Error("Screen capture returned no video track");}
+  screenStream=captured;setScreenUi(true);
+  track.addEventListener("ended",()=>{if(screenStream===captured)stopScreenShare(true).catch(e=>{ui.status.textContent="Screen-share cleanup failed: "+e.message;});},{once:true});
+  try{await syncEndpointMediaSources();}
+  catch(e){screenStream=null;setScreenUi(false);captured.getTracks().forEach(value=>value.stop());throw e;}
+}
 async function activateE2eeAdapter(){
   const adapter=e2eeAdapter();
   if(!adapter||typeof adapter.start!=="function"||typeof adapter.onEnvelope!=="function"){
-    ui.status.textContent="WebRTC transport connected. Encrypted endpoint media adapter is required before camera/microphone can be published.";
+    ui.status.textContent="WebRTC transport connected. Encrypted endpoint media adapter is required before camera/microphone/screen media can be published.";
     return;
   }
-  await adapter.start({stream:localStream,sendEnvelope:sendE2eeEnvelope});
+  await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
+  ui.screenToggle.disabled=!screenShareSupported();
   ui.status.textContent="Endpoint E2EE media transport active. Media keys remain on this endpoint.";
 }
 function attachE2eeDataChannel(channel){
@@ -343,7 +382,8 @@ async function leave(){
   if(wasActive)await closeServerPeer();
   teardownPeer();
   if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;ui.localVideo.srcObject=null;}
-  sessionActive=false;ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;
+  await stopScreenShare(false);
+  sessionActive=false;ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
   if(wasActive){try{await api("/v1/realtime/leave",body());}catch(_){}}
   ui.state.textContent="Left";ui.status.textContent="Conference session closed.";ui.join.disabled=false;
@@ -358,6 +398,7 @@ function scheduleWaitingRoom(){
 }
 ui.micToggle.addEventListener("click",()=>{const track=localStream&&localStream.getAudioTracks()[0];if(track){track.enabled=!track.enabled;applyToggleLabels();}});
 ui.cameraToggle.addEventListener("click",()=>{const track=localStream&&localStream.getVideoTracks()[0];if(track){track.enabled=!track.enabled;applyToggleLabels();}});
+ui.screenToggle.addEventListener("click",async()=>{try{if(screenStream){await stopScreenShare(true);ui.status.textContent="Screen sharing stopped.";}else{await startScreenShare();ui.status.textContent="Screen sharing active through the endpoint E2EE adapter.";}}catch(e){ui.status.textContent="Screen sharing failed: "+e.message;}});
 ui.mic.addEventListener("change",()=>{if(sessionActive)restartWebRtc(true);});
 ui.camera.addEventListener("change",()=>{if(sessionActive)restartWebRtc(true);});
 try{
@@ -370,7 +411,7 @@ try{
 ui.join.addEventListener("click",join);ui.leave.addEventListener("click",leave);
 window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry();}});
-window.addEventListener("pagehide",()=>{if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(localStream)localStream.getTracks().forEach(track=>track.stop());});
+window.addEventListener("pagehide",()=>{if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 </body>
 </html>
