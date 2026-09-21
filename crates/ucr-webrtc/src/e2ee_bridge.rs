@@ -6,8 +6,8 @@ use webrtc::{data_channel::RTCDataChannel, peer_connection::RTCPeerConnection};
 
 use ucr_model::{SessionId, SfuForwardEnvelope};
 use ucr_protocol::{
-    MAX_SFU_FORWARD_WIRE_BYTES, SfuForwardWireError, SfuProtocolError,
-    decode_sfu_forward_envelope, encode_sfu_forward_envelope,
+    MAX_SFU_FORWARD_WIRE_BYTES, SfuForwardWireError, SfuProtocolError, decode_sfu_forward_envelope,
+    encode_sfu_forward_envelope,
 };
 
 pub const WEBRTC_E2EE_DATA_CHANNEL_LABEL: &str = "ucr.e2ee.media.v1";
