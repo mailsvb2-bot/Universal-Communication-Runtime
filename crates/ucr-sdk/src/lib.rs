@@ -73,7 +73,7 @@ impl fmt::Debug for ServiceCredential {
     }
 }
 
-/// Prepared public SDK client over the generated Integration and Event services.
+/// Prepared public SDK client over the generated Service Principal integration services.
 ///
 /// The SDK performs no automatic application retry and owns no canonical domain state.
 pub struct UcrSdkClient {
@@ -101,7 +101,7 @@ impl fmt::Debug for UcrSdkClient {
     }
 }
 impl UcrSdkClient {
-    /// Connects both external-consumer services to one UCR gRPC endpoint.
+    /// Connects the Service Principal external-consumer services to one UCR gRPC endpoint.
     ///
     /// # Errors
     /// Returns the transport error from endpoint parsing or connection establishment.
