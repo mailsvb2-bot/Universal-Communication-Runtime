@@ -206,6 +206,7 @@ async function startScreenShare(){
   try{
     captured=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
     if(!sessionActive)throw new Error("Conference session ended while screen capture was being selected");
+    if(!e2eeChannel||e2eeChannel.readyState!=="open")throw new Error("Encrypted media transport changed while screen capture was being selected");
     const track=captured.getVideoTracks()[0];
     if(!track)throw new Error("Screen capture returned no video track");
     screenStream=captured;setScreenUi(true);
