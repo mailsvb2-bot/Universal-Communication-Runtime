@@ -252,7 +252,7 @@ where
 
     /// Encrypts one local group-media payload with an explicit authenticated video source.
     ///
-    /// None is canonical only for audio. Video must use Camera or ScreenShare, and the source
+    /// `None` is canonical only for audio. Video must use `Camera` or `ScreenShare`, and the source
     /// kind is authenticated by the current group-media frame header before SFU routing.
     ///
     /// # Errors
