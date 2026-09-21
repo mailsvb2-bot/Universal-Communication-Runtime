@@ -235,6 +235,28 @@ message UniversalListParticipantsResponse {
   }
 }
 
+// Replaces one participant's complete ephemeral receive-subscription set. Both subscriber and
+// sources use integration-owned external user IDs; internal PrincipalRef/CallId/DeviceId remain hidden.
+message UniversalConferenceMediaSubscription {
+  bytes source_external_user_id = 1;
+  MediaKind media_kind = 2;
+}
+
+message UniversalSetSubscriptionsRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId integration_id = 3;
+  bytes external_user_id = 4;
+  repeated UniversalConferenceMediaSubscription subscriptions = 5;
+}
+
+message UniversalSetSubscriptionsResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 message UniversalPrepareConferenceRuntimeRequest {
   TenantScope scope = 1;
   OpaqueId conference_id = 2;
@@ -351,6 +373,7 @@ service UniversalConferenceService {
   rpc UpdateParticipant(UniversalUpdateParticipantRequest) returns (UniversalUpdateParticipantResponse);
   rpc RemoveParticipant(UniversalRemoveParticipantRequest) returns (UniversalRemoveParticipantResponse);
   rpc ListParticipants(UniversalListParticipantsRequest) returns (UniversalListParticipantsResponse);
+  rpc SetSubscriptions(UniversalSetSubscriptionsRequest) returns (UniversalSetSubscriptionsResponse);
   rpc PrepareConferenceRuntime(UniversalPrepareConferenceRuntimeRequest) returns (UniversalPrepareConferenceRuntimeResponse);
   rpc IssueJoinGrant(UniversalIssueJoinGrantRequest) returns (UniversalIssueJoinGrantResponse);
   rpc RevokeJoinGrant(UniversalRevokeJoinGrantRequest) returns (UniversalRevokeJoinGrantResponse);
