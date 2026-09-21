@@ -254,6 +254,8 @@ fn universal_media_subscriptions_reuse_canonical_conference_runtime_state() {
     assert!(service.contains("resolve_join_call("));
     assert!(service.contains("ConferenceRuntime::with_state("));
     assert!(service.contains("CONFERENCE_SUBSCRIBE_PERMISSION"));
+    assert!(runtime.contains("GrpcConferenceService::with_state("));
+    assert!(runtime.contains("GrpcUniversalConferenceService::with_state("));
     assert!(runtime.contains("GrpcUniversalConferenceService::with_state_and_join_issuer("));
     assert!(runtime.contains("Arc::clone(&conference_state)"));
     assert!(spec.contains("Subscription state remains intentionally ephemeral"));
