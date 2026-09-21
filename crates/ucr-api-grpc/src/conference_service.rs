@@ -438,14 +438,7 @@ where
     static GROUP_MEDIA: PreparedGroupMediaE2eeCapabilities = PreparedGroupMediaE2eeCapabilities;
     static SFU: PreparedSfuCapabilities = PreparedSfuCapabilities;
     static CONFERENCE: PreparedConferenceCapabilities = PreparedConferenceCapabilities;
-    ConferenceRuntime::with_state(
-        authorization,
-        store,
-        &GROUP_MEDIA,
-        &SFU,
-        &CONFERENCE,
-        state,
-    )
+    ConferenceRuntime::with_state(authorization, store, &GROUP_MEDIA, &SFU, &CONFERENCE, state)
 }
 
 fn decode_conference_start(value: pb::ConferenceStart) -> Result<ConferenceStart, CanonicalError> {
