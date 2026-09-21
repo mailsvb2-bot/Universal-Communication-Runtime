@@ -79,6 +79,11 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(runtime_main.contains("UCR_WEBRTC_TURN_URLS"));
     assert!(runtime_main.contains("UCR_WEBRTC_TURN_SECRET_HEX"));
     assert!(browser.contains("navigator.mediaDevices.getUserMedia"));
+    assert!(browser.contains("navigator.mediaDevices.getDisplayMedia"));
+    assert!(browser.contains("screen-toggle"));
+    assert!(browser.contains("screenStream"));
+    assert!(browser.contains("updateSources"));
+    assert!(browser.contains("track.addEventListener(\"ended\""));
     assert!(browser.contains("new RTCPeerConnection"));
     assert!(browser.contains("pc.ondatachannel"));
     assert!(browser.contains("ucr.e2ee.media.v1"));
@@ -87,6 +92,8 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(browser.contains("receiveE2eeChunk"));
     assert!(!browser.contains("pc.addTrack("));
     assert!(browser.contains("Unexpected RTP track rejected"));
+    assert!(realtime_spec.contains("endpoint-only screen capture"));
+    assert!(realtime_spec.contains("getDisplayMedia"));
     assert!(typescript_e2ee.contains("export class UcrWebRtcE2eeTransport"));
     assert!(typescript_e2ee.contains("ucr.e2ee.media.v1"));
     assert!(typescript_e2ee.contains("encrypted media envelope exceeds transport bounds"));
