@@ -144,6 +144,7 @@ pub trait UniversalConferenceStore: StorageProvider {
         camera_allowed: bool,
         publish_audio_allowed: bool,
         publish_video_allowed: bool,
+        screen_share_allowed: bool,
         active: bool,
     ) -> Result<UniversalConferenceParticipantProfile, DurableStoreError>;
 }
