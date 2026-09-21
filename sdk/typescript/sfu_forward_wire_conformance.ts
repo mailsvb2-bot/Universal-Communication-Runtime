@@ -11,6 +11,8 @@ import {
 
 const WIRE_V1_VECTOR_HEX =
   "554352453245453101000674656e616e740100096e616d657370616365000463616c6c000567726f7570000a766964656f2d6d61696e010005616c696365000c616c6963652d646576696365000b6e65676f74696174696f6e00000000000000020000000000000009000c63727970746f2d73746174650102000000000000002c0000000000015f900103030303030303030303030303030303030303030303030300000003070809000b7369676e696e672d6b657900076564323535313900000001004005050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505";
+const WIRE_V2_SCREEN_VECTOR_HEX =
+  "554352453245453102000674656e616e740100096e616d657370616365000463616c6c000567726f7570000a766964656f2d6d61696e010005616c696365000c616c6963652d646576696365000b6e65676f74696174696f6e00000000000000020000000000000009000c63727970746f2d7374617465010203000000000000002c0000000000015f900103030303030303030303030303030303030303030303030300000003070809000b7369676e696e672d6b657900076564323535313900000001004005050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505";
 
 function requireCondition(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -32,6 +34,8 @@ const envelope: SfuForwardEnvelopeWire = {
       cryptoStateRef: "crypto-state",
       cryptoSuite: "ucr.v1",
       mediaKind: "video",
+      sourceKind: "screen_share",
+      authVersion: 2,
       sequence: 44n,
       mediaTimestamp: 90_000n,
       keyframe: true,
@@ -48,14 +52,27 @@ const envelope: SfuForwardEnvelopeWire = {
 };
 
 const wire = encodeSfuForwardEnvelopeWire(envelope);
-requireCondition(Buffer.from(wire).toString("hex") === WIRE_V1_VECTOR_HEX, "Rust/TypeScript SFU wire v1 drifted");
+requireCondition(
+  Buffer.from(wire).toString("hex") === WIRE_V2_SCREEN_VECTOR_HEX,
+  "Rust/TypeScript SFU wire v2 drifted",
+);
 
 const decoded = decodeSfuForwardEnvelopeWire(wire);
 requireCondition(decoded.frame.header.source.kind === "person", "principal kind drifted");
 requireCondition(decoded.frame.header.mediaKind === "video", "media kind drifted");
+requireCondition(decoded.frame.header.sourceKind === "screen_share", "media source kind drifted");
+requireCondition(decoded.frame.header.authVersion === 2, "media auth version drifted");
 requireCondition(decoded.frame.header.sequence === 44n, "sequence drifted");
 requireCondition(decoded.frame.header.mediaTimestamp === 90_000n, "timestamp drifted");
 requireCondition(Buffer.from(decoded.frame.ciphertext).equals(Buffer.from([7, 8, 9])), "ciphertext drifted");
+
+const legacy = decodeSfuForwardEnvelopeWire(Uint8Array.from(Buffer.from(WIRE_V1_VECTOR_HEX, "hex")));
+requireCondition(legacy.frame.header.authVersion === 1, "legacy SFU wire auth version drifted");
+requireCondition(legacy.frame.header.sourceKind === "camera", "legacy video must canonicalize to camera");
+requireCondition(
+  Buffer.from(encodeSfuForwardEnvelopeWire(legacy)).toString("hex") === WIRE_V1_VECTOR_HEX,
+  "legacy SFU wire v1 was not byte-preserving",
+);
 
 const epochZeroEnvelope: SfuForwardEnvelopeWire = {
   ...envelope,
@@ -136,7 +153,7 @@ for (const chunk of senderChannel.sent) {
 }
 requireCondition(received !== null, "WebRTC E2EE transport did not reassemble canonical envelope");
 requireCondition(
-  Buffer.from(received!).toString("hex") === WIRE_V1_VECTOR_HEX,
+  Buffer.from(received!).toString("hex") === WIRE_V2_SCREEN_VECTOR_HEX,
   "WebRTC E2EE transport changed canonical envelope bytes",
 );
 
