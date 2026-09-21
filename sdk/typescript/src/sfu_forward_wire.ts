@@ -208,8 +208,8 @@ function validateEnvelopeShape(envelope: SfuForwardEnvelopeWire): void {
   requireU64(frame.header.cryptoEpoch);
   requireU64(frame.header.sequence);
   requireU64(frame.header.mediaTimestamp);
-  if (frame.header.negotiationGeneration === 0n || frame.header.cryptoEpoch === 0n) {
-    throw new Error("invalid SFU forward epoch/negotiation");
+  if (frame.header.negotiationGeneration === 0n) {
+    throw new Error("invalid SFU forward negotiation generation");
   }
   if (frame.header.cryptoSuite !== "ucr.v1") {
     throw new Error("unsupported SFU forward crypto suite");
