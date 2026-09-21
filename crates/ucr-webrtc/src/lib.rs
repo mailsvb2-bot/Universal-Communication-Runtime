@@ -95,6 +95,18 @@ pub trait WebRtcProvider: fmt::Debug + Send + Sync {
         config: &WebRtcSessionConfig,
     ) -> Result<WebRtcSessionDescription, WebRtcProviderError>;
 
+    /// Restarts ICE for one existing peer session and returns a fresh local offer.
+    ///
+    /// The configuration may contain freshly issued TURN credentials for the same authenticated
+    /// realtime session. Canonical Call/Conference state is unchanged.
+    ///
+    /// # Errors
+    /// Returns bounded provider/protocol failures or SessionUnavailable for an unknown session.
+    fn restart_session(
+        &self,
+        config: &WebRtcSessionConfig,
+    ) -> Result<WebRtcSessionDescription, WebRtcProviderError>;
+
     /// Applies the remote offer/answer for an existing provider session.
     ///
     /// # Errors
@@ -237,6 +249,11 @@ pub const LIVE_WEBRTC_ICE_GATHER_TIMEOUT_SECONDS: u64 = 12;
 
 enum LiveWebRtcCommand {
     Create {
+        config: WebRtcSessionConfig,
+        deadline: Instant,
+        reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
+    },
+    Restart {
         config: WebRtcSessionConfig,
         deadline: Instant,
         reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
@@ -436,6 +453,18 @@ impl WebRtcProvider for LiveWebRtcProvider {
         })
     }
 
+    fn restart_session(
+        &self,
+        config: &WebRtcSessionConfig,
+    ) -> Result<WebRtcSessionDescription, WebRtcProviderError> {
+        validate_live_config(config)?;
+        self.request(|reply, deadline| LiveWebRtcCommand::Restart {
+            config: config.clone(),
+            deadline,
+            reply,
+        })
+    }
+
     fn set_remote_description(
         &self,
         description: &WebRtcSessionDescription,
@@ -515,6 +544,11 @@ async fn run_live_webrtc_worker(
                 )
                 .await;
             }
+            LiveWebRtcCommand::Restart {
+                config,
+                deadline,
+                reply,
+            } => handle_live_restart(&sessions, config, deadline, reply).await,
             LiveWebRtcCommand::SetRemoteDescription {
                 description,
                 deadline,
@@ -585,6 +619,23 @@ async fn handle_live_create(
             let _ = reply.send(Err(error));
         }
     }
+}
+
+async fn handle_live_restart(
+    sessions: &HashMap<String, LiveWebRtcSession>,
+    config: WebRtcSessionConfig,
+    deadline: Instant,
+    reply: std_mpsc::Sender<Result<WebRtcSessionDescription, WebRtcProviderError>>,
+) {
+    if command_expired(deadline) {
+        let _ = reply.send(Err(WebRtcProviderError::TemporarilyUnavailable));
+        return;
+    }
+    let result = match sessions.get(&session_key(&config.session_id)) {
+        Some(session) => restart_live_peer_connection(&session.peer_connection, &config).await,
+        None => Err(WebRtcProviderError::SessionUnavailable),
+    };
+    let _ = reply.send(result);
 }
 
 async fn handle_live_remote_description(
@@ -757,6 +808,55 @@ async fn create_live_peer_connection(
             Err(error)
         }
     }
+}
+
+async fn restart_live_peer_connection(
+    peer_connection: &RTCPeerConnection,
+    config: &WebRtcSessionConfig,
+) -> Result<WebRtcSessionDescription, WebRtcProviderError> {
+    peer_connection
+        .set_configuration(RTCConfiguration {
+            ice_servers: config
+                .ice_servers
+                .iter()
+                .map(engine_ice_server)
+                .collect::<Vec<_>>(),
+            ice_transport_policy: match config.ice_transport_policy {
+                IceTransportPolicy::All => RTCIceTransportPolicy::All,
+                IceTransportPolicy::RelayOnly => RTCIceTransportPolicy::Relay,
+            },
+            ..Default::default()
+        })
+        .await
+        .map_err(|_| WebRtcProviderError::Conflict)?;
+    peer_connection
+        .restart_ice()
+        .await
+        .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?;
+    let offer = peer_connection
+        .create_offer(None)
+        .await
+        .map_err(|_| WebRtcProviderError::Internal)?;
+    let mut gathering_complete = peer_connection.gathering_complete_promise().await;
+    peer_connection
+        .set_local_description(offer)
+        .await
+        .map_err(|_| WebRtcProviderError::Conflict)?;
+    tokio::time::timeout(
+        Duration::from_secs(LIVE_WEBRTC_ICE_GATHER_TIMEOUT_SECONDS),
+        gathering_complete.recv(),
+    )
+    .await
+    .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?;
+    let local = peer_connection
+        .local_description()
+        .await
+        .ok_or(WebRtcProviderError::Internal)?;
+    Ok(WebRtcSessionDescription {
+        session_id: config.session_id.clone(),
+        sdp_type: ucr_model::WebRtcSdpType::Offer,
+        sdp: local.sdp,
+    })
 }
 
 fn engine_ice_server(server: &IceServerConfig) -> RTCIceServer {
@@ -1001,6 +1101,14 @@ impl WebRtcProvider for PreparedWebRtcProvider {
         Err(WebRtcProviderError::TemporarilyUnavailable)
     }
 
+    fn restart_session(
+        &self,
+        config: &WebRtcSessionConfig,
+    ) -> Result<WebRtcSessionDescription, WebRtcProviderError> {
+        validate_live_config(config)?;
+        Err(WebRtcProviderError::TemporarilyUnavailable)
+    }
+
     fn set_remote_description(
         &self,
         description: &WebRtcSessionDescription,
@@ -1143,6 +1251,25 @@ mod tests {
             provider.close_session(&session_id),
             Err(WebRtcProviderError::SessionUnavailable)
         );
+    }
+
+    #[test]
+    fn live_provider_ice_restart_preserves_session_and_emits_fresh_offer() {
+        let provider = LiveWebRtcProvider::new().expect("live provider");
+        let session_id =
+            SessionId::from_opaque(OpaqueId::new("restart-session").expect("id"));
+        let config = WebRtcSessionConfig {
+            session_id: session_id.clone(),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        let initial = provider.create_session(&config).expect("initial offer");
+        let restarted = provider.restart_session(&config).expect("restart offer");
+        assert_eq!(restarted.session_id, session_id);
+        assert_eq!(restarted.sdp_type, ucr_model::WebRtcSdpType::Offer);
+        assert!(restarted.sdp.starts_with("v=0"));
+        assert_ne!(initial.sdp, restarted.sdp);
+        assert_eq!(provider.close_session(&session_id), Ok(()));
     }
 
     #[test]
