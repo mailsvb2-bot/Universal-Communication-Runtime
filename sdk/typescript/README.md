@@ -30,5 +30,8 @@ changes use an explicit `updateSources({stream, cameraStream, screenStream})` ho
 does not expose `getDisplayMedia` or the adapter does not expose `updateSources`, the reference
 client keeps the Share screen control disabled rather than pretending screen media is published.
 No captured track is attached to WebRTC RTP; the adapter remains responsible for producing
-canonical endpoint-encrypted envelopes. The reference browser stops display capture locally before
-awaiting server-side Leave cleanup and also stops it if the encrypted media DataChannel closes.
+canonical endpoint-encrypted envelopes. A display-capture envelope must use the current v2 header
+with `mediaKind: "video"` and `videoSourceKind: "screen_share"`; a legacy v1 video envelope is
+camera-only and cannot assert screen-share authority. The reference browser stops display capture
+locally before awaiting server-side Leave cleanup and also stops it if the encrypted media
+DataChannel closes.
