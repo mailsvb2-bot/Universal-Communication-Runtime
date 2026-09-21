@@ -9,8 +9,8 @@ use ucr_media_e2ee::{GroupMediaE2eeRuntime, PreparedGroupMediaE2eeCapabilities};
 use ucr_model::*;
 use ucr_protocol::{
     ALGORITHM_VERSION, CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V2,
-    GROUP_MLS_CAPABILITY, KEY_FORMAT_VERSION, NegotiatedSession, SCREEN_SHARE_VIDEO_CAPABILITY,
-    SIGNATURE_ALGORITHM_ID, screen_share_v2_negotiation,
+    GROUP_MLS_CAPABILITY, KEY_FORMAT_VERSION, NegotiatedSession, SCREEN_SHARE_SEND_PERMISSION,
+    SCREEN_SHARE_VIDEO_CAPABILITY, SIGNATURE_ALGORITHM_ID, screen_share_v2_negotiation,
 };
 use ucr_sfu::{
     PreparedSfuCapabilities, SfuError, SfuForwardOutcome, SfuForwardSink, SfuForwardSinkError,
@@ -31,6 +31,18 @@ struct DenyReceive;
 impl AuthorizationEvaluator for DenyReceive {
     fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError> {
         if request.permission.ends_with(".receive") {
+            Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DenyScreenShareSend;
+impl AuthorizationEvaluator for DenyScreenShareSend {
+    fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError> {
+        if request.permission == SCREEN_SHARE_SEND_PERMISSION {
             Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied))
         } else {
             Ok(())
@@ -538,6 +550,21 @@ fn screen_share_source_kind_is_authenticated_before_sfu_fan_out() {
 
     let envelope = SfuForwardEnvelope { frame };
     let sfu = PreparedSfuCapabilities;
+    let denied_runtime =
+        SfuRuntime::new(&DenyScreenShareSend, &fixture.store, &capabilities, &sfu);
+    let denied_sink = CaptureSink::default();
+    assert!(matches!(
+        denied_runtime.forward(
+            &fixture.alice,
+            &fixture.alice_device,
+            &envelope,
+            &denied_sink
+        ),
+        Err(SfuError::Authorization(error))
+            if error.code == CanonicalErrorCode::PermissionDenied
+    ));
+    assert!(denied_sink.forwarded().is_empty());
+
     let runtime = SfuRuntime::new(&AllowAll, &fixture.store, &capabilities, &sfu);
     let sink = CaptureSink::default();
     assert_eq!(
