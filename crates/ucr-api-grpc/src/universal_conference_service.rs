@@ -3620,8 +3620,13 @@ mod universal_runtime_tests {
                 },
             )
             .expect("device");
-        let (audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed) =
-            super::participant_defaults(UniversalConferenceMode::Webinar, role);
+        let (
+            audio_muted,
+            camera_allowed,
+            publish_audio_allowed,
+            publish_video_allowed,
+            screen_share_allowed,
+        ) = super::participant_defaults(UniversalConferenceMode::Webinar, role);
         store
             .persist_universal_conference_participant(&UniversalConferenceParticipantProfile {
                 scope: scope(),
@@ -3634,6 +3639,7 @@ mod universal_runtime_tests {
                 camera_allowed,
                 publish_audio_allowed,
                 publish_video_allowed,
+                screen_share_allowed,
                 active: true,
                 revision: 1,
             })
@@ -3797,6 +3803,7 @@ mod universal_runtime_tests {
                 camera_allowed: None,
                 publish_audio_allowed: None,
                 publish_video_allowed: None,
+                screen_share_allowed: None,
                 idempotency_key: "promote-attendee".to_owned(),
             },
             b"promote-attendee-payload".to_vec(),
