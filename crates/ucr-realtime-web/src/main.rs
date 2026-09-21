@@ -270,6 +270,10 @@ async fn handle_request(
             Ok(input) => add_webrtc_ice_candidate(&state, &token, input).await,
             Err(error) => error.into_response(),
         },
+        "/v1/realtime/webrtc/restart" => match decode_json::<SessionRequest>(&body) {
+            Ok(input) => restart_webrtc(&state, &token, input).await,
+            Err(error) => error.into_response(),
+        },
         "/v1/realtime/webrtc/close" => match decode_json::<SessionRequest>(&body) {
             Ok(input) => close_webrtc(&state, &token, input).await,
             Err(error) => error.into_response(),
@@ -741,6 +745,35 @@ async fn add_webrtc_ice_candidate(
                 StatusCode::BAD_GATEWAY,
                 "invalid_webrtc_response",
                 "realtime upstream returned an invalid WebRTC response",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn restart_webrtc(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeRestartWebRtcRequest {
+        scope: Some(pb_scope(&input)),
+        call_id: Some(pb_id(&input.call)),
+        session_id: Some(pb_id(&input.session)),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.restart_web_rtc(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_restart_web_rtc_response::Result::Offer(offer)) => {
+                webrtc_offer_response("webrtc_restarted", "WebRTC ICE restart offer ready", offer)
+            }
+            Some(pb::realtime_restart_web_rtc_response::Result::Error(error)) => {
+                webrtc_error(&error, "webrtc_restart_rejected", "WebRTC ICE restart rejected")
+            }
+            None => api_error(
+                StatusCode::BAD_GATEWAY,
+                "webrtc_restart_rejected",
+                "WebRTC ICE restart rejected",
             ),
         },
         Err(status) => grpc_error(&status),
