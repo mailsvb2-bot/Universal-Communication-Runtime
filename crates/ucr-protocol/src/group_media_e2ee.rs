@@ -235,7 +235,11 @@ pub fn validate_encrypted_group_media_frame(
 fn validate_media_source_kind(
     header: &GroupMediaFrameHeader,
 ) -> Result<(), GroupMediaE2eeProtocolError> {
-    match (header.header_version, header.media_kind, header.video_source_kind) {
+    match (
+        header.header_version,
+        header.media_kind,
+        header.video_source_kind,
+    ) {
         (GROUP_MEDIA_FRAME_HEADER_V1, MediaKind::Audio, None)
         | (GROUP_MEDIA_FRAME_HEADER_V1, MediaKind::Video, Some(VideoSourceKind::Camera))
         | (GROUP_MEDIA_FRAME_HEADER_V2, MediaKind::Audio, None)
