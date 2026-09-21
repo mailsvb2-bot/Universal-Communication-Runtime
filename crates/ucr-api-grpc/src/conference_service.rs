@@ -408,17 +408,37 @@ where
         + PrincipalIdentityBindingStore
         + TrustedSigningKeyResolver,
 {
+    prepared_conference_runtime(
+        &*service.authorization,
+        &*service.store,
+        Arc::clone(&service.state),
+    )
+}
+
+pub(crate) fn prepared_conference_runtime<'a, A, S>(
+    authorization: &'a A,
+    store: &'a S,
+    state: Arc<ConferenceRuntimeState>,
+) -> ConferenceRuntime<
+    'a,
+    A,
+    S,
+    PreparedGroupMediaE2eeCapabilities,
+    PreparedSfuCapabilities,
+    PreparedConferenceCapabilities,
+>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore
+        + GroupStore
+        + DeviceLifecycleStore
+        + PrincipalIdentityBindingStore
+        + TrustedSigningKeyResolver,
+{
     static GROUP_MEDIA: PreparedGroupMediaE2eeCapabilities = PreparedGroupMediaE2eeCapabilities;
     static SFU: PreparedSfuCapabilities = PreparedSfuCapabilities;
     static CONFERENCE: PreparedConferenceCapabilities = PreparedConferenceCapabilities;
-    ConferenceRuntime::with_state(
-        &*service.authorization,
-        &*service.store,
-        &GROUP_MEDIA,
-        &SFU,
-        &CONFERENCE,
-        Arc::clone(&service.state),
-    )
+    ConferenceRuntime::with_state(authorization, store, &GROUP_MEDIA, &SFU, &CONFERENCE, state)
 }
 
 fn decode_conference_start(value: pb::ConferenceStart) -> Result<ConferenceStart, CanonicalError> {
@@ -552,7 +572,7 @@ const fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
     CanonicalError::new(code)
 }
 
-fn map_conference_error(error: &ConferenceError) -> CanonicalError {
+pub(crate) fn map_conference_error(error: &ConferenceError) -> CanonicalError {
     match error {
         ConferenceError::Protocol(error) => map_conference_protocol_error(*error),
         ConferenceError::Authorization(error) => *error,

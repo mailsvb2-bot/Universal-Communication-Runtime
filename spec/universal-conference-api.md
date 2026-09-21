@@ -48,6 +48,14 @@ Universal participant role/media policy is projected into the existing canonical
 
 The ordering is fail-closed: profile/policy is written before permission synchronization. A grant failure can therefore leave a participant unable to perform an allowed action, but cannot make a disallowed or removed participant usable because Universal profile checks remain mandatory at realtime boundaries.
 
+## Media subscriptions
+
+`SetSubscriptions` exposes the existing Conference receive-subscription owner through the universal facade. The subscriber and every requested media source are addressed only by integration-owned `external_user_id`; UCR resolves those references to the current canonical participants and active Call internally. The integrator never supplies `PrincipalRef`, `CallId` or `DeviceId`.
+
+The operation replaces the subscriber's complete bounded receive-subscription set. An empty set clears it. Canonical Conference validation still requires an accepted subscriber, a current accepted source, active Group membership and the exact audio/video receive permissions before routing can change. A subscription is routing preference only and never creates membership, publish authority or media permission.
+
+Subscription state remains intentionally ephemeral in the existing shared `ConferenceRuntimeState`, not a second durable Conference store. Repeating the same full replacement is safe, but a process restart drops routing preferences and clients must re-establish them after reconnect. The low-level Conference API, universal facade, RealtimeService and SFU must share that same runtime state so a successful universal mutation changes the actual encrypted SFU routing path.
+
 ## Participant device enrollment
 
 `EnsureParticipantDevice` gives an already ensured external participant exactly one canonical active UCR Device when no device lifecycle exists yet. The public response exposes only the integration's `external_user_id` and readiness state; canonical `DeviceId` remains internal.

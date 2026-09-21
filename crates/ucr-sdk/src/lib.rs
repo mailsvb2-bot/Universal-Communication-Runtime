@@ -73,7 +73,7 @@ impl fmt::Debug for ServiceCredential {
     }
 }
 
-/// Prepared public SDK client over the generated Integration and Event services.
+/// Prepared public SDK client over the generated Service Principal integration services.
 ///
 /// The SDK performs no automatic application retry and owns no canonical domain state.
 pub struct UcrSdkClient {
@@ -88,6 +88,8 @@ pub struct UcrSdkClient {
     local_transport: pb::local_transport_service_client::LocalTransportServiceClient<Channel>,
     mesh: pb::mesh_service_client::MeshServiceClient<Channel>,
     recovery: pb::recovery_service_client::RecoveryServiceClient<Channel>,
+    universal_conference:
+        pb::universal_conference_service_client::UniversalConferenceServiceClient<Channel>,
 }
 
 impl fmt::Debug for UcrSdkClient {
@@ -99,7 +101,7 @@ impl fmt::Debug for UcrSdkClient {
     }
 }
 impl UcrSdkClient {
-    /// Connects both external-consumer services to one UCR gRPC endpoint.
+    /// Connects the Service Principal external-consumer services to one UCR gRPC endpoint.
     ///
     /// # Errors
     /// Returns the transport error from endpoint parsing or connection establishment.
@@ -140,9 +142,13 @@ impl UcrSdkClient {
         let mesh = pb::mesh_service_client::MeshServiceClient::new(channel.clone())
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
-        let recovery = pb::recovery_service_client::RecoveryServiceClient::new(channel)
+        let recovery = pb::recovery_service_client::RecoveryServiceClient::new(channel.clone())
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+        let universal_conference =
+            pb::universal_conference_service_client::UniversalConferenceServiceClient::new(channel)
+                .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+                .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         Ok(Self {
             credential,
             integration,
@@ -155,6 +161,7 @@ impl UcrSdkClient {
             local_transport,
             mesh,
             recovery,
+            universal_conference,
         })
     }
     /// Creates one authenticated request without changing its protobuf body.
@@ -779,6 +786,262 @@ impl UcrSdkClient {
         Ok(self
             .recovery
             .activate_recovered_device(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Creates or resolves one integration-owned universal Conference.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn create_conference(
+        &mut self,
+        message: pb::UniversalCreateConferenceRequest,
+    ) -> Result<pb::UniversalCreateConferenceResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .create_conference(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Resolves one universal Conference from the integration's external reference.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn resolve_conference(
+        &mut self,
+        message: pb::UniversalResolveConferenceRequest,
+    ) -> Result<pb::UniversalResolveConferenceResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .resolve_conference(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Reads one integration-scoped universal Conference.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_conference(
+        &mut self,
+        message: pb::UniversalGetConferenceRequest,
+    ) -> Result<pb::UniversalGetConferenceResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .get_conference(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Applies one universal Conference lifecycle transition.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn transition_conference(
+        &mut self,
+        message: pb::UniversalConferenceLifecycleRequest,
+    ) -> Result<pb::UniversalConferenceLifecycleResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .transition_conference(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Opens or closes attendee entry for one universal Conference.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn set_entry_open(
+        &mut self,
+        message: pb::UniversalSetEntryOpenRequest,
+    ) -> Result<pb::UniversalSetEntryOpenResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .set_entry_open(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Ensures one integration-owned participant without exposing UCR internal identifiers.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn ensure_participant(
+        &mut self,
+        message: pb::UniversalEnsureParticipantRequest,
+    ) -> Result<pb::UniversalEnsureParticipantResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .ensure_participant(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Ensures one canonical active Device for an integration-owned participant.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn ensure_participant_device(
+        &mut self,
+        message: pb::UniversalEnsureParticipantDeviceRequest,
+    ) -> Result<pb::UniversalEnsureParticipantDeviceResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .ensure_participant_device(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Updates one participant's role and media policy through the universal facade.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn update_participant(
+        &mut self,
+        message: pb::UniversalUpdateParticipantRequest,
+    ) -> Result<pb::UniversalUpdateParticipantResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .update_participant(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Removes one integration-owned participant through the universal facade.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn remove_participant(
+        &mut self,
+        message: pb::UniversalRemoveParticipantRequest,
+    ) -> Result<pb::UniversalRemoveParticipantResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .remove_participant(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Lists bounded integration-owned participant projections.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn list_participants(
+        &mut self,
+        message: pb::UniversalListParticipantsRequest,
+    ) -> Result<pb::UniversalListParticipantsResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .list_participants(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Replaces one participant's bounded receive-subscription preference.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn set_subscriptions(
+        &mut self,
+        message: pb::UniversalSetSubscriptionsRequest,
+    ) -> Result<pb::UniversalSetSubscriptionsResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .set_subscriptions(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Reconciles universal Conference metadata into the canonical Group/Call runtime.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn prepare_conference_runtime(
+        &mut self,
+        message: pb::UniversalPrepareConferenceRuntimeRequest,
+    ) -> Result<pb::UniversalPrepareConferenceRuntimeResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .prepare_conference_runtime(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Issues one short-lived integration-facing Conference join grant.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn issue_join_grant(
+        &mut self,
+        message: pb::UniversalIssueJoinGrantRequest,
+    ) -> Result<pb::UniversalIssueJoinGrantResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .issue_join_grant(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Revokes one previously issued universal Conference join grant.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn revoke_join_grant(
+        &mut self,
+        message: pb::UniversalRevokeJoinGrantRequest,
+    ) -> Result<pb::UniversalRevokeJoinGrantResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .revoke_join_grant(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Reads the canonical attendance projection for one integration-owned participant.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_participant_attendance(
+        &mut self,
+        message: pb::UniversalGetParticipantAttendanceRequest,
+    ) -> Result<pb::UniversalGetParticipantAttendanceResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .get_participant_attendance(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Reads integration-visible universal Conference capabilities.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_conference_capabilities(
+        &mut self,
+        message: pb::UniversalGetCapabilitiesRequest,
+    ) -> Result<pb::UniversalGetCapabilitiesResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .get_capabilities(request)
             .await?
             .into_inner())
     }
