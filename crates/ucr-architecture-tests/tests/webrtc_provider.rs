@@ -110,6 +110,41 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
 }
 
 #[test]
+fn browser_screen_sharing_stays_endpoint_only_and_privacy_first() {
+    let browser = read("crates/ucr-realtime-web/static/client.html");
+    let realtime_spec = read("spec/realtime.md");
+
+    assert!(browser.contains("navigator.mediaDevices.getDisplayMedia"));
+    assert!(browser.contains("screen-toggle"));
+    assert!(browser.contains("screenStream"));
+    assert!(browser.contains("screenShareBusy"));
+    assert!(browser.contains("updateSources"));
+    assert!(browser.contains("e2eeChannel.readyState!==\"open\""));
+    assert!(browser.contains("track.addEventListener(\"ended\""));
+    assert!(browser.contains("if(screenStream){"));
+    assert!(browser.contains("current.getTracks().forEach(track=>track.stop())"));
+
+    let leave = browser
+        .split_once("async function leave(){")
+        .expect("leave function")
+        .1
+        .split_once("function scheduleWaitingRoom(){")
+        .expect("leave function close")
+        .0;
+    let local_screen_stop = leave
+        .find("await stopScreenShare(false)")
+        .expect("leave stops local screen capture");
+    let server_close = leave
+        .find("await closeServerPeer()")
+        .expect("leave requests server peer close");
+    assert!(local_screen_stop < server_close);
+
+    assert!(!browser.contains("pc.addTrack("));
+    assert!(realtime_spec.contains("endpoint-only screen capture"));
+    assert!(realtime_spec.contains("getDisplayMedia"));
+}
+
+#[test]
 fn webrtc_e2ee_uses_protocol_owned_sfu_wire_codec() {
     let sfu_protocol = read("crates/ucr-protocol/src/sfu.rs");
     let e2ee_bridge = read("crates/ucr-webrtc/src/e2ee_bridge.rs");

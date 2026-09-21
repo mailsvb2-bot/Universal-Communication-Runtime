@@ -18,3 +18,13 @@ implementation by the Conformance workflow. The WebRTC transport owns only bound
 reassembly; it owns no MLS keys, encryption/decryption, Conference policy or SFU routing.
 Applications connect it to their endpoint crypto adapter and keep all group-media key material on
 the endpoint.
+
+The reference browser keeps camera/microphone and display capture endpoint-only. An adapter started
+by `window.ucrE2eeEndpoint.start(...)` receives `stream` (the backwards-compatible camera/mic
+stream), `cameraStream`, optional `screenStream`, and `sendEnvelope`. Live screen-share
+changes use an explicit `updateSources({stream, cameraStream, screenStream})` hook. If the browser
+does not expose `getDisplayMedia` or the adapter does not expose `updateSources`, the reference
+client keeps the Share screen control disabled rather than pretending screen media is published.
+No captured track is attached to WebRTC RTP; the adapter remains responsible for producing
+canonical endpoint-encrypted envelopes. The reference browser stops display capture locally before
+awaiting server-side Leave cleanup and also stops it if the encrypted media DataChannel closes.
