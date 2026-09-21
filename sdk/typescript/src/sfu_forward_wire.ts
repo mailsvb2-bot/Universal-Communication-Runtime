@@ -64,7 +64,7 @@ export function encodeSfuForwardEnvelopeWire(envelope: SfuForwardEnvelopeWire): 
   const frame = envelope.frame;
   const writer = new WireWriter();
   writer.raw(textEncoder.encode(SFU_FORWARD_WIRE_MAGIC));
-  const authVersion = frame.header.authVersion ?? SFU_FORWARD_WIRE_VERSION;
+  const authVersion = frame.header.authVersion ?? SFU_FORWARD_WIRE_LEGACY_VERSION;
   const sourceKind = frame.header.sourceKind ?? legacySourceKind(frame.header.mediaKind);
   writer.u8(authVersion);
   writer.id(frame.header.tenantId);
@@ -236,7 +236,7 @@ function validateEnvelopeShape(envelope: SfuForwardEnvelopeWire): void {
   }
   principalKindCode(frame.header.source.kind);
   mediaKindCode(frame.header.mediaKind);
-  const authVersion = frame.header.authVersion ?? SFU_FORWARD_WIRE_VERSION;
+  const authVersion = frame.header.authVersion ?? SFU_FORWARD_WIRE_LEGACY_VERSION;
   const sourceKind = frame.header.sourceKind ?? legacySourceKind(frame.header.mediaKind);
   if (authVersion !== SFU_FORWARD_WIRE_LEGACY_VERSION && authVersion !== SFU_FORWARD_WIRE_VERSION) {
     throw new Error("unsupported SFU forward wire version");
