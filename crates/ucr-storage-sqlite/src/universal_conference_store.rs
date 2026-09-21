@@ -79,6 +79,16 @@ pub(super) fn create_v32_objects(transaction: &Transaction<'_>) -> Result<(), Du
         .map_err(|error| map_schema_change_error(&error))
 }
 
+pub(super) fn create_v35_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(
+            "ALTER TABLE universal_conference_participants
+             ADD COLUMN screen_share_allowed INTEGER NOT NULL DEFAULT 0
+             CHECK(screen_share_allowed IN (0, 1));",
+        )
+        .map_err(|error| map_schema_change_error(&error))
+}
+
 pub(super) fn verify_schema_v32(connection: &Connection) -> Result<(), DurableStoreError> {
     super::organization_store::verify_schema_v31(connection)?;
     verify_table_columns(
@@ -167,6 +177,95 @@ pub(super) fn verify_schema_v32(connection: &Connection) -> Result<(), DurableSt
     Ok(())
 }
 
+pub(super) fn verify_schema_v35(connection: &Connection) -> Result<(), DurableStoreError> {
+    super::organization_store::verify_schema_v31(connection)?;
+    verify_table_columns(
+        connection,
+        "universal_conferences",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("conference_id", "TEXT", 1, 4),
+            ("integration_id", "TEXT", 1, 0),
+            ("external_conference_id", "BLOB", 1, 0),
+            ("create_idempotency_key", "TEXT", 1, 0),
+            ("mode", "TEXT", 1, 0),
+            ("lifecycle", "TEXT", 1, 0),
+            ("starts_at_unix_ms", "INTEGER", 1, 0),
+            ("planned_end_unix_ms", "INTEGER", 0, 0),
+            ("join_before_seconds", "INTEGER", 1, 0),
+            ("join_after_seconds", "INTEGER", 1, 0),
+            ("timezone", "TEXT", 0, 0),
+            ("entry_open", "INTEGER", 1, 0),
+            ("revision", "BLOB", 1, 0),
+        ],
+    )?;
+    verify_table_columns(
+        connection,
+        "universal_conference_participants",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("conference_id", "TEXT", 1, 4),
+            ("integration_id", "TEXT", 1, 0),
+            ("external_user_id", "BLOB", 1, 0),
+            ("principal_kind", "TEXT", 1, 5),
+            ("principal_id", "TEXT", 1, 6),
+            ("role", "TEXT", 1, 0),
+            ("audio_muted", "INTEGER", 1, 0),
+            ("camera_allowed", "INTEGER", 1, 0),
+            ("publish_audio_allowed", "INTEGER", 1, 0),
+            ("publish_video_allowed", "INTEGER", 1, 0),
+            ("active", "INTEGER", 1, 0),
+            ("screen_share_allowed", "INTEGER", 1, 0),
+            ("revision", "BLOB", 1, 0),
+        ],
+    )?;
+    let external_participant_index_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'index' AND name = 'universal_conference_participants_external_user'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if !external_participant_index_exists {
+        return Err(DurableStoreError::Corrupt);
+    }
+    let duplicate_active_owner_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM universal_conference_participants
+                WHERE active = 1 AND role = 'owner'
+                GROUP BY tenant_id, namespace_present, namespace_id, conference_id
+                HAVING COUNT(*) > 1
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if duplicate_active_owner_exists {
+        return Err(DurableStoreError::Corrupt);
+    }
+    let mut foreign_key_check = connection
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(|error| map_sqlite_error(&error))?;
+    if foreign_key_check
+        .query([])
+        .map_err(|error| map_sqlite_error(&error))?
+        .next()
+        .map_err(|error| map_sqlite_error(&error))?
+        .is_some()
+    {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct StoredConference {
     integration_id: String,
@@ -195,6 +294,7 @@ struct StoredParticipant {
     publish_audio_allowed: i64,
     publish_video_allowed: i64,
     active: i64,
+    screen_share_allowed: i64,
     revision: Vec<u8>,
 }
 
@@ -443,6 +543,7 @@ impl UniversalConferenceStore for SqliteLocalStore {
         camera_allowed: bool,
         publish_audio_allowed: bool,
         publish_video_allowed: bool,
+        screen_share_allowed: bool,
         active: bool,
     ) -> Result<UniversalConferenceParticipantProfile, DurableStoreError> {
         let mut connection = self.lock_connection()?;
@@ -458,6 +559,7 @@ impl UniversalConferenceStore for SqliteLocalStore {
             && current.camera_allowed == camera_allowed
             && current.publish_audio_allowed == publish_audio_allowed
             && current.publish_video_allowed == publish_video_allowed
+            && current.screen_share_allowed == screen_share_allowed
             && current.active == active
         {
             return Ok(current);
@@ -485,10 +587,11 @@ impl UniversalConferenceStore for SqliteLocalStore {
             .execute(
                 "UPDATE universal_conference_participants \
                  SET role = ?1, audio_muted = ?2, camera_allowed = ?3, \
-                     publish_audio_allowed = ?4, publish_video_allowed = ?5, active = ?6, revision = ?7 \
-                 WHERE tenant_id = ?8 AND namespace_present = ?9 AND namespace_id = ?10 \
-                   AND conference_id = ?11 AND principal_kind = ?12 AND principal_id = ?13 \
-                   AND revision = ?14",
+                     publish_audio_allowed = ?4, publish_video_allowed = ?5, active = ?6, \
+                     revision = ?7, screen_share_allowed = ?8 \
+                 WHERE tenant_id = ?9 AND namespace_present = ?10 AND namespace_id = ?11 \
+                   AND conference_id = ?12 AND principal_kind = ?13 AND principal_id = ?14 \
+                   AND revision = ?15",
                 params![
                     role_text(role),
                     bool_to_i64(audio_muted),
@@ -497,6 +600,7 @@ impl UniversalConferenceStore for SqliteLocalStore {
                     bool_to_i64(publish_video_allowed),
                     bool_to_i64(active),
                     encode_u64(next_revision).as_slice(),
+                    bool_to_i64(screen_share_allowed),
                     scope.tenant_id.as_opaque().as_str(),
                     namespace.present,
                     namespace.value,
@@ -630,8 +734,8 @@ fn insert_participant(
             "INSERT INTO universal_conference_participants (
                 tenant_id, namespace_present, namespace_id, conference_id, integration_id,
                 external_user_id, principal_kind, principal_id, role, audio_muted, camera_allowed,
-                publish_audio_allowed, publish_video_allowed, active, revision
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                publish_audio_allowed, publish_video_allowed, active, revision, screen_share_allowed
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 participant.scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
@@ -648,6 +752,7 @@ fn insert_participant(
                 bool_to_i64(participant.publish_video_allowed),
                 bool_to_i64(participant.active),
                 encode_u64(participant.revision).as_slice(),
+                bool_to_i64(participant.screen_share_allowed),
             ],
         )
         .map_err(|error| map_sqlite_error(&error))?;
@@ -773,7 +878,7 @@ fn load_participant(
         .query_row(
             "SELECT integration_id, external_user_id, principal_kind, principal_id, role,
                     audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed,
-                    active, revision
+                    active, revision, screen_share_allowed
              FROM universal_conference_participants
              WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
                AND conference_id = ?4 AND principal_kind = ?5 AND principal_id = ?6",
@@ -806,7 +911,7 @@ fn load_participant_for_external(
         .query_row(
             "SELECT integration_id, external_user_id, principal_kind, principal_id, role,
                     audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed,
-                    active, revision
+                    active, revision, screen_share_allowed
              FROM universal_conference_participants
              WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
                AND conference_id = ?4 AND integration_id = ?5 AND external_user_id = ?6",
@@ -839,7 +944,7 @@ fn load_participants(
         .prepare(
             "SELECT integration_id, external_user_id, principal_kind, principal_id, role,
                     audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed,
-                    active, revision
+                    active, revision, screen_share_allowed
              FROM universal_conference_participants
              WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
                AND conference_id = ?4
@@ -882,7 +987,7 @@ fn load_active_participants(
         .prepare(
             "SELECT integration_id, external_user_id, principal_kind, principal_id, role,
                     audio_muted, camera_allowed, publish_audio_allowed, publish_video_allowed,
-                    active, revision
+                    active, revision, screen_share_allowed
              FROM universal_conference_participants
              WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
                AND conference_id = ?4 AND active = 1
@@ -926,6 +1031,7 @@ fn decode_stored_participant(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stored
         publish_video_allowed: row.get(8)?,
         active: row.get(9)?,
         revision: row.get(10)?,
+        screen_share_allowed: row.get(11)?,
     })
 }
 
@@ -954,6 +1060,7 @@ fn decode_participant(
         publish_video_allowed: parse_bool(row.publish_video_allowed)?,
         active: parse_bool(row.active)?,
         revision: decode_u64(&row.revision)?,
+        screen_share_allowed: parse_bool(row.screen_share_allowed)?,
     };
     validate_participant(&profile)?;
     Ok(profile)
