@@ -1,12 +1,18 @@
 use sha2::{Digest, Sha256};
 use ucr_model::{
     CryptoSuite, DeviceId, EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader,
-    MediaKind, OpaqueId, PrincipalKind, PrincipalRef, TenantScope,
+    MediaKind, OpaqueId, PrincipalKind, PrincipalRef, TenantScope, VideoSourceKind,
 };
+
+use crate::{NegotiatedSession, SCREEN_SHARE_VIDEO_CAPABILITY};
 
 pub const GROUP_MEDIA_E2EE_CAPABILITY: &str = "ucr.media.e2ee.group.mls";
 pub const GROUP_MEDIA_CONTEXT_V1_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-CONTEXT-V1\0";
 pub const GROUP_MEDIA_FRAME_AAD_V1_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-FRAME-AAD-V1\0";
+pub const GROUP_MEDIA_FRAME_AAD_V2_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-FRAME-AAD-V2\0";
+pub const GROUP_MEDIA_FRAME_HEADER_V1: u8 = 1;
+pub const GROUP_MEDIA_FRAME_HEADER_V2: u8 = 2;
+pub const GROUP_MEDIA_FRAME_HEADER_VERSION: u8 = GROUP_MEDIA_FRAME_HEADER_V2;
 pub const GROUP_MEDIA_KEY_CONTEXT_V1_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-KEY-CONTEXT-V1\0";
 pub const GROUP_MEDIA_SOURCE_SIGNATURE_V1_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-SOURCE-SIGNATURE-V1\0";
 pub const MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES: usize = 2 * 1024 * 1024 + 16;
@@ -21,7 +27,37 @@ pub enum GroupMediaE2eeProtocolError {
     EmptyCiphertext,
     CiphertextTooLarge,
     InvalidAudioHeader,
+    UnsupportedFrameHeaderVersion,
+    InvalidMediaSourceKind,
+    ScreenShareCapabilityNotNegotiated,
     InvalidSourceSignature,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenShareV2Negotiation {
+    _private: (),
+}
+
+/// Produces a screen-share v2 proof only from a capability-intersection negotiation result.
+///
+/// This type is intentionally opaque so media emitters cannot replace negotiation with a caller
+/// boolean. The surrounding handshake still owns transcript authentication; this helper proves
+/// only that the canonical negotiated session contains the screen-share capability.
+///
+/// # Errors
+/// Rejects sessions where screen sharing was not mutually negotiated.
+pub fn screen_share_v2_negotiation(
+    session: &NegotiatedSession,
+) -> Result<ScreenShareV2Negotiation, GroupMediaE2eeProtocolError> {
+    if session
+        .capabilities
+        .iter()
+        .any(|capability| capability.id == SCREEN_SHARE_VIDEO_CAPABILITY)
+    {
+        Ok(ScreenShareV2Negotiation { _private: () })
+    } else {
+        Err(GroupMediaE2eeProtocolError::ScreenShareCapabilityNotNegotiated)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,8 +174,13 @@ pub fn group_media_frame_aad(
     if header.media_kind == MediaKind::Audio && header.keyframe {
         return Err(GroupMediaE2eeProtocolError::InvalidAudioHeader);
     }
+    validate_media_source_kind(header)?;
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(GROUP_MEDIA_FRAME_AAD_V1_DOMAIN);
+    match header.header_version {
+        GROUP_MEDIA_FRAME_HEADER_V1 => bytes.extend_from_slice(GROUP_MEDIA_FRAME_AAD_V1_DOMAIN),
+        GROUP_MEDIA_FRAME_HEADER_V2 => bytes.extend_from_slice(GROUP_MEDIA_FRAME_AAD_V2_DOMAIN),
+        _ => return Err(GroupMediaE2eeProtocolError::UnsupportedFrameHeaderVersion),
+    }
     push_scope(&mut bytes, &header.scope);
     push_bytes(&mut bytes, header.call_id.as_opaque().as_wire_bytes());
     push_bytes(&mut bytes, header.group_id.as_opaque().as_wire_bytes());
@@ -155,6 +196,9 @@ pub fn group_media_frame_aad(
     push_bytes(&mut bytes, header.crypto_state_ref.as_wire_bytes());
     bytes.extend_from_slice(&(header.crypto_suite as u32).to_be_bytes());
     bytes.push(header.media_kind as u8);
+    if header.header_version == GROUP_MEDIA_FRAME_HEADER_V2 {
+        bytes.push(media_source_kind_code(header));
+    }
     bytes.extend_from_slice(&header.sequence.to_be_bytes());
     bytes.extend_from_slice(&header.media_timestamp.to_be_bytes());
     bytes.push(u8::from(header.keyframe));
@@ -216,6 +260,39 @@ pub fn validate_encrypted_group_media_frame(
         return Err(GroupMediaE2eeProtocolError::ContextMismatch);
     }
     Ok(())
+}
+
+fn validate_media_source_kind(
+    header: &GroupMediaFrameHeader,
+) -> Result<(), GroupMediaE2eeProtocolError> {
+    match (
+        header.header_version,
+        header.media_kind,
+        header.video_source_kind,
+    ) {
+        (GROUP_MEDIA_FRAME_HEADER_V1 | GROUP_MEDIA_FRAME_HEADER_V2, MediaKind::Audio, None)
+        | (
+            GROUP_MEDIA_FRAME_HEADER_V1 | GROUP_MEDIA_FRAME_HEADER_V2,
+            MediaKind::Video,
+            Some(VideoSourceKind::Camera),
+        )
+        | (GROUP_MEDIA_FRAME_HEADER_V2, MediaKind::Video, Some(VideoSourceKind::ScreenShare)) => {
+            Ok(())
+        }
+        (GROUP_MEDIA_FRAME_HEADER_V1 | GROUP_MEDIA_FRAME_HEADER_V2, _, _) => {
+            Err(GroupMediaE2eeProtocolError::InvalidMediaSourceKind)
+        }
+        _ => Err(GroupMediaE2eeProtocolError::UnsupportedFrameHeaderVersion),
+    }
+}
+
+const fn media_source_kind_code(header: &GroupMediaFrameHeader) -> u8 {
+    match (header.media_kind, header.video_source_kind) {
+        (MediaKind::Audio, None) => 0,
+        (MediaKind::Video, Some(VideoSourceKind::Camera)) => 1,
+        (MediaKind::Video, Some(VideoSourceKind::ScreenShare)) => 2,
+        _ => 255,
+    }
 }
 
 fn push_scope(bytes: &mut Vec<u8>, scope: &TenantScope) {

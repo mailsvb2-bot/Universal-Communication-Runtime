@@ -15,12 +15,13 @@ use ucr_model::{
     CapabilityDescriptor, CapabilityMaturity, ConversationKind, DeviceDescriptor, DeviceId,
     EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader,
     GroupMediaSourceSignature, GroupMemberState, KeyId, KeyPurpose, MediaKind, OpaqueId,
-    PrincipalKind, PrincipalRef, ScopedPrincipal,
+    PrincipalKind, PrincipalRef, ScopedPrincipal, VideoSourceKind,
 };
 use ucr_protocol::{
     ALGORITHM_VERSION, AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CanonicalError,
-    CryptoContractError, GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MLS_CAPABILITY,
-    GroupMediaE2eeProtocolError, MAX_MEDIA_STREAMS_PER_EPOCH, SIGNATURE_ALGORITHM_ID,
+    CryptoContractError, GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MEDIA_FRAME_HEADER_V1,
+    GROUP_MEDIA_FRAME_HEADER_V2, GROUP_MLS_CAPABILITY, GroupMediaE2eeProtocolError,
+    MAX_MEDIA_STREAMS_PER_EPOCH, SIGNATURE_ALGORITHM_ID, ScreenShareV2Negotiation,
     VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, canonical_group_media_e2ee_context,
     device_allows_protected_access, group_media_frame_aad, group_media_source_signing_binding,
     validate_encrypted_group_media_frame, validate_public_key_descriptor,
@@ -58,6 +59,7 @@ pub enum GroupMediaE2eeError {
     SourceNotAccepted,
     SourceNotMember,
     MediaKindMismatch,
+    ScreenShareNegotiationRequired,
     Replay,
     OutboundSequenceRegression,
     StreamCapacityExceeded,
@@ -230,6 +232,107 @@ where
         signing_key_id: &KeyId,
         signer: &impl GroupMediaSigningKeyHandle,
     ) -> Result<EncryptedGroupMediaFrame, GroupMediaE2eeError> {
+        let video_source_kind = match media_kind {
+            MediaKind::Audio => None,
+            MediaKind::Video => Some(VideoSourceKind::Camera),
+        };
+        self.seal_payload_versioned(
+            GROUP_MEDIA_FRAME_HEADER_V1,
+            media_kind,
+            video_source_kind,
+            stream_id,
+            sequence,
+            media_timestamp,
+            keyframe,
+            plaintext,
+            signing_key_id,
+            signer,
+        )
+    }
+
+    /// Encrypts one local group-media payload with an explicit authenticated video source.
+    ///
+    /// `None` is canonical only for audio. Video must use `Camera` or `ScreenShare`, and the source
+    /// kind is authenticated by the current group-media frame header before SFU routing.
+    ///
+    /// # Errors
+    /// Fails closed on invalid media/source pairing, stale authority, sequence regression or crypto
+    /// failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn seal_payload_with_source(
+        &mut self,
+        media_kind: MediaKind,
+        video_source_kind: Option<VideoSourceKind>,
+        stream_id: &OpaqueId,
+        sequence: u64,
+        media_timestamp: u64,
+        keyframe: bool,
+        plaintext: &[u8],
+        signing_key_id: &KeyId,
+        signer: &impl GroupMediaSigningKeyHandle,
+    ) -> Result<EncryptedGroupMediaFrame, GroupMediaE2eeError> {
+        if video_source_kind == Some(VideoSourceKind::ScreenShare) {
+            return Err(GroupMediaE2eeError::ScreenShareNegotiationRequired);
+        }
+        self.seal_payload_versioned(
+            GROUP_MEDIA_FRAME_HEADER_V1,
+            media_kind,
+            video_source_kind,
+            stream_id,
+            sequence,
+            media_timestamp,
+            keyframe,
+            plaintext,
+            signing_key_id,
+            signer,
+        )
+    }
+
+    /// Encrypts an explicitly negotiated screen-share frame using authenticated header/wire v2.
+    ///
+    /// # Errors
+    /// Requires an opaque proof produced from canonical capability negotiation, then applies all
+    /// normal group-media authority, permission, sequence, crypto and signing checks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn seal_negotiated_screen_share(
+        &mut self,
+        _negotiation: &ScreenShareV2Negotiation,
+        stream_id: &OpaqueId,
+        sequence: u64,
+        media_timestamp: u64,
+        keyframe: bool,
+        plaintext: &[u8],
+        signing_key_id: &KeyId,
+        signer: &impl GroupMediaSigningKeyHandle,
+    ) -> Result<EncryptedGroupMediaFrame, GroupMediaE2eeError> {
+        self.seal_payload_versioned(
+            GROUP_MEDIA_FRAME_HEADER_V2,
+            MediaKind::Video,
+            Some(VideoSourceKind::ScreenShare),
+            stream_id,
+            sequence,
+            media_timestamp,
+            keyframe,
+            plaintext,
+            signing_key_id,
+            signer,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seal_payload_versioned(
+        &mut self,
+        header_version: u8,
+        media_kind: MediaKind,
+        video_source_kind: Option<VideoSourceKind>,
+        stream_id: &OpaqueId,
+        sequence: u64,
+        media_timestamp: u64,
+        keyframe: bool,
+        plaintext: &[u8],
+        signing_key_id: &KeyId,
+        signer: &impl GroupMediaSigningKeyHandle,
+    ) -> Result<EncryptedGroupMediaFrame, GroupMediaE2eeError> {
         require_group_media_capability(self.capabilities)?;
         validate_group_media_e2ee_authority(
             self.store,
@@ -264,7 +367,9 @@ where
             crypto_epoch: self.context.crypto_epoch,
             crypto_state_ref: self.context.crypto_state_ref.clone(),
             crypto_suite: self.context.crypto_suite,
+            header_version,
             media_kind,
+            video_source_kind,
             sequence,
             media_timestamp,
             keyframe,

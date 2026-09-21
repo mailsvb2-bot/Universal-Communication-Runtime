@@ -2,7 +2,10 @@
 
 use libfuzzer_sys::fuzz_target;
 use ucr_model::*;
-use ucr_protocol::{ALGORITHM_VERSION, SIGNATURE_ALGORITHM_ID, canonical_sfu_forward_envelope};
+use ucr_protocol::{
+    ALGORITHM_VERSION, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
+    SIGNATURE_ALGORITHM_ID, canonical_sfu_forward_envelope,
+};
 
 fn oid(prefix: &str, value: u8) -> OpaqueId {
     OpaqueId::new(format!("{prefix}-{value:02x}")).expect("bounded fuzz id")
@@ -18,6 +21,21 @@ fuzz_target!(|data: &[u8]| {
         MediaKind::Audio
     } else {
         MediaKind::Video
+    };
+    let header_version = if data.get(3).is_some_and(|value| value & 2 == 2) {
+        GROUP_MEDIA_FRAME_HEADER_V1
+    } else {
+        GROUP_MEDIA_FRAME_HEADER_V2
+    };
+    let video_source_kind = match media_kind {
+        MediaKind::Audio => None,
+        MediaKind::Video
+            if header_version == GROUP_MEDIA_FRAME_HEADER_V2
+                && data.get(3).is_some_and(|value| value & 4 == 4) =>
+        {
+            Some(VideoSourceKind::ScreenShare)
+        }
+        MediaKind::Video => Some(VideoSourceKind::Camera),
     };
     let source = PrincipalRef {
         principal_id: PrincipalId::from_opaque(oid("sfu-person", a)),
@@ -50,7 +68,9 @@ fuzz_target!(|data: &[u8]| {
                 crypto_epoch: u64::from(data.get(6).copied().unwrap_or(0)),
                 crypto_state_ref: oid("sfu-mls-state", data.get(6).copied().unwrap_or(0)),
                 crypto_suite: CryptoSuite::UcrV1,
+                header_version,
                 media_kind,
+                video_source_kind,
                 sequence: u64::from(a),
                 media_timestamp: u64::from(b),
                 keyframe: data.get(7).is_some_and(|value| value & 1 == 1),

@@ -2,6 +2,7 @@ use core::fmt;
 
 use crate::{
     CallId, CryptoSuite, DeviceId, GroupId, KeyId, MediaKind, OpaqueId, PrincipalRef, TenantScope,
+    VideoSourceKind,
 };
 
 /// Immutable security context for one MLS-backed group-media epoch.
@@ -36,7 +37,9 @@ pub struct GroupMediaFrameHeader {
     pub crypto_epoch: u64,
     pub crypto_state_ref: OpaqueId,
     pub crypto_suite: CryptoSuite,
+    pub header_version: u8,
     pub media_kind: MediaKind,
+    pub video_source_kind: Option<VideoSourceKind>,
     pub sequence: u64,
     pub media_timestamp: u64,
     pub keyframe: bool,

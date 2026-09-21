@@ -13,9 +13,13 @@ Phase 39 does not publish an npm artifact or select a permanent generator plugin
 
 `src/webrtc_e2ee.ts` provides the bounded ordered DataChannel framing for already-encrypted
 canonical media envelopes on `ucr.e2ee.media.v1`. `src/sfu_forward_wire.ts` mirrors the
-protocol-owned `SfuForwardEnvelope` wire v1 codec and is locked byte-for-byte against the Rust
-implementation by the Conformance workflow. The WebRTC transport owns only bounded chunking and
-reassembly; it owns no MLS keys, encryption/decryption, Conference policy or SFU routing.
+protocol-owned `SfuForwardEnvelope` wire codec and is locked byte-for-byte against the Rust
+implementation by the Conformance workflow. The decoder preserves legacy wire v1 compatibility
+(`video` means camera there); the current wire v2 adds `headerVersion` plus authenticated
+`videoSourceKind`, allowing `camera` and `screen_share` to remain distinct through the
+ciphertext-only SFU path. Wire v1 is deliberately unable to claim `screen_share`. The WebRTC
+transport owns only bounded chunking and reassembly; it owns no MLS keys, encryption/decryption,
+Conference policy or SFU routing.
 Applications connect it to their endpoint crypto adapter and keep all group-media key material on
 the endpoint.
 
@@ -26,5 +30,8 @@ changes use an explicit `updateSources({stream, cameraStream, screenStream})` ho
 does not expose `getDisplayMedia` or the adapter does not expose `updateSources`, the reference
 client keeps the Share screen control disabled rather than pretending screen media is published.
 No captured track is attached to WebRTC RTP; the adapter remains responsible for producing
-canonical endpoint-encrypted envelopes. The reference browser stops display capture locally before
-awaiting server-side Leave cleanup and also stops it if the encrypted media DataChannel closes.
+canonical endpoint-encrypted envelopes. A display-capture envelope must use the current v2 header
+with `mediaKind: "video"` and `videoSourceKind: "screen_share"`; a legacy v1 video envelope is
+camera-only and cannot assert screen-share authority. The reference browser stops display capture
+locally before awaiting server-side Leave cleanup and also stops it if the encrypted media
+DataChannel closes.

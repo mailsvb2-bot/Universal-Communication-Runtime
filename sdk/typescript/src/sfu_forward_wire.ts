@@ -1,5 +1,6 @@
 export const SFU_FORWARD_WIRE_MAGIC = "UCRE2EE1" as const;
-export const SFU_FORWARD_WIRE_VERSION = 1 as const;
+export const SFU_FORWARD_WIRE_V1 = 1 as const;
+export const SFU_FORWARD_WIRE_VERSION = 2 as const;
 export const MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES = 2 * 1024 * 1024 + 16;
 export const MAX_SFU_FORWARD_WIRE_BYTES = MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES + 8_192;
 
@@ -20,6 +21,7 @@ export type PrincipalKind =
   | "automation"
   | "external_platform";
 export type MediaKind = "audio" | "video";
+export type VideoSourceKind = "camera" | "screen_share";
 
 export interface SfuForwardEnvelopeWire {
   readonly frame: {
@@ -39,7 +41,9 @@ export interface SfuForwardEnvelopeWire {
       readonly cryptoEpoch: bigint;
       readonly cryptoStateRef: string;
       readonly cryptoSuite: "ucr.v1";
+      readonly headerVersion: 1 | 2;
       readonly mediaKind: MediaKind;
+      readonly videoSourceKind: VideoSourceKind | null;
       readonly sequence: bigint;
       readonly mediaTimestamp: bigint;
       readonly keyframe: boolean;
@@ -60,7 +64,7 @@ export function encodeSfuForwardEnvelopeWire(envelope: SfuForwardEnvelopeWire): 
   const frame = envelope.frame;
   const writer = new WireWriter();
   writer.raw(textEncoder.encode(SFU_FORWARD_WIRE_MAGIC));
-  writer.u8(SFU_FORWARD_WIRE_VERSION);
+  writer.u8(frame.header.headerVersion);
   writer.id(frame.header.tenantId);
   if (frame.header.namespaceId === null) {
     writer.u8(0);
@@ -80,6 +84,9 @@ export function encodeSfuForwardEnvelopeWire(envelope: SfuForwardEnvelopeWire): 
   writer.id(frame.header.cryptoStateRef);
   writer.u8(1);
   writer.u8(mediaKindCode(frame.header.mediaKind));
+  if (frame.header.headerVersion === SFU_FORWARD_WIRE_VERSION) {
+    writer.u8(videoSourceKindCode(frame.header.mediaKind, frame.header.videoSourceKind));
+  }
   writer.u64(frame.header.sequence);
   writer.u64(frame.header.mediaTimestamp);
   writer.u8(frame.header.keyframe ? 1 : 0);
@@ -105,7 +112,8 @@ export function decodeSfuForwardEnvelopeWire(bytes: Uint8Array): SfuForwardEnvel
   if (magic !== SFU_FORWARD_WIRE_MAGIC) {
     throw new Error("invalid SFU forward wire magic");
   }
-  if (reader.u8() !== SFU_FORWARD_WIRE_VERSION) {
+  const wireVersion = reader.u8();
+  if (wireVersion !== SFU_FORWARD_WIRE_V1 && wireVersion !== SFU_FORWARD_WIRE_VERSION) {
     throw new Error("unsupported SFU forward wire version");
   }
   const tenantId = reader.id();
@@ -119,7 +127,7 @@ export function decodeSfuForwardEnvelopeWire(bytes: Uint8Array): SfuForwardEnvel
   const callId = reader.id();
   const groupId = reader.id();
   const streamId = reader.id();
-  const sourceKind = principalKindFromCode(reader.u8());
+  const principalSourceKind = principalKindFromCode(reader.u8());
   const sourcePrincipalId = reader.id();
   const sourceDeviceId = reader.id();
   const negotiationRef = reader.id();
@@ -130,6 +138,10 @@ export function decodeSfuForwardEnvelopeWire(bytes: Uint8Array): SfuForwardEnvel
     throw new Error("unsupported SFU forward crypto suite");
   }
   const mediaKind = mediaKindFromCode(reader.u8());
+  const videoSourceKind =
+    wireVersion === SFU_FORWARD_WIRE_V1
+      ? legacyVideoSourceKind(mediaKind)
+      : videoSourceKindFromCode(reader.u8(), mediaKind);
   const sequence = reader.u64();
   const mediaTimestamp = reader.u64();
   const keyframeCode = reader.u8();
@@ -160,14 +172,16 @@ export function decodeSfuForwardEnvelopeWire(bytes: Uint8Array): SfuForwardEnvel
         callId,
         groupId,
         streamId,
-        source: { principalId: sourcePrincipalId, kind: sourceKind },
+        source: { principalId: sourcePrincipalId, kind: principalSourceKind },
         sourceDeviceId,
         negotiationRef,
         negotiationGeneration,
         cryptoEpoch,
         cryptoStateRef,
         cryptoSuite: "ucr.v1",
+        headerVersion: wireVersion,
         mediaKind,
+        videoSourceKind,
         sequence,
         mediaTimestamp,
         keyframe: keyframeCode === 1,
@@ -216,6 +230,11 @@ function validateEnvelopeShape(envelope: SfuForwardEnvelopeWire): void {
   }
   principalKindCode(frame.header.source.kind);
   mediaKindCode(frame.header.mediaKind);
+  validateMediaSourceKind(
+    frame.header.headerVersion,
+    frame.header.mediaKind,
+    frame.header.videoSourceKind,
+  );
   if (frame.header.mediaKind === "audio" && frame.header.keyframe) {
     throw new Error("audio SFU forward frames cannot be keyframes");
   }
@@ -324,6 +343,45 @@ function mediaKindFromCode(code: number): MediaKind {
   if (code === 1) return "audio";
   if (code === 2) return "video";
   throw new Error("invalid SFU forward media kind");
+}
+
+function legacyVideoSourceKind(mediaKind: MediaKind): VideoSourceKind | null {
+  return mediaKind === "audio" ? null : "camera";
+}
+
+function validateMediaSourceKind(
+  headerVersion: 1 | 2,
+  mediaKind: MediaKind,
+  videoSourceKind: VideoSourceKind | null,
+): void {
+  if (headerVersion !== SFU_FORWARD_WIRE_V1 && headerVersion !== SFU_FORWARD_WIRE_VERSION) {
+    throw new Error("unsupported group-media frame header version");
+  }
+  if (mediaKind === "audio") {
+    if (videoSourceKind !== null) throw new Error("audio cannot carry a video source kind");
+    return;
+  }
+  if (videoSourceKind === "camera") return;
+  if (headerVersion === SFU_FORWARD_WIRE_VERSION && videoSourceKind === "screen_share") return;
+  throw new Error("invalid video source kind for group-media header version");
+}
+
+function videoSourceKindCode(
+  mediaKind: MediaKind,
+  videoSourceKind: VideoSourceKind | null,
+): number {
+  validateMediaSourceKind(SFU_FORWARD_WIRE_VERSION, mediaKind, videoSourceKind);
+  if (mediaKind === "audio") return 0;
+  if (videoSourceKind === "camera") return 1;
+  if (videoSourceKind === "screen_share") return 2;
+  throw new Error("invalid SFU forward video source kind");
+}
+
+function videoSourceKindFromCode(code: number, mediaKind: MediaKind): VideoSourceKind | null {
+  if (mediaKind === "audio" && code === 0) return null;
+  if (mediaKind === "video" && code === 1) return "camera";
+  if (mediaKind === "video" && code === 2) return "screen_share";
+  throw new Error("invalid SFU forward video source kind");
 }
 
 function fail(message: string): never {

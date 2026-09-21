@@ -20,6 +20,8 @@ Endpoints derive a group-media epoch secret through the MLS exporter. UCR derive
 
 Because all current MLS members can derive the epoch exporter, key derivation alone is not source authentication. Every encrypted group-media frame therefore carries a separate Ed25519 signature from the claimed source Device over the authenticated header, nonce and ciphertext. The runtime resolves that key through the existing Active Device/trusted-signing-key owner.
 
+The authenticated group-media header is versioned. Legacy **wire v1** remains readable byte-for-byte: audio is interpreted with no video source kind and legacy video is canonically interpreted as camera. Wire v1 can never claim screen-share authority because that distinction was not present in its authenticated header. The **wire v2** format uses a distinct AEAD associated-data domain and carries an explicit authenticated video source kind: camera or screen-share. Relabelling a v2 screen-share frame as camera (or the reverse) invalidates the Device signature/AEAD binding before SFU fan-out. For rolling-upgrade compatibility, ordinary audio/camera endpoint sealing remains on v1. Emitting a v2 screen-share frame is a separate fail-closed path that requires an opaque proof from canonical capability negotiation containing `ucr.media.video.screen_share`; callers cannot substitute a boolean flag. New decoders accept both versions under those narrower semantics.
+
 The SFU receives no MLS exporter secret, stream traffic key or plaintext. Endpoint AEAD and replay state remain authoritative.
 
 ## SFU fan-out authority
@@ -40,6 +42,6 @@ The existing loopback plaintext local daemon remains local-only. A remotely reac
 
 SFU forwarding state is ephemeral. Durable additions exist only in canonical stores such as Principal→Identity association, Call/Group/MLS state and canonical attendance Events. There is no durable SFU route topology, conference roster, implicit ciphertext archive or Delivery owner.
 
-The SFU may observe only exact scope, Group/Call/stream identifiers, source/recipient routing principals, source Device ID, current MLS epoch/state reference, media kind, sequence/timing/keyframe metadata, signature metadata and encrypted packet size/timing required for routing. It must not receive media plaintext, MLS exporter/traffic/private keys, recovery/authentication secrets, unrelated Group roster/history, Message plaintext or provider credentials.
+The SFU may observe only exact scope, Group/Call/stream identifiers, source/recipient routing principals, source Device ID, current MLS epoch/state reference, media kind, authenticated camera/screen-share source kind where the current wire version carries it, sequence/timing/keyframe metadata, signature metadata and encrypted packet size/timing required for routing. It must not receive media plaintext, MLS exporter/traffic/private keys, recovery/authentication secrets, unrelated Group roster/history, Message plaintext or provider credentials.
 
 Recording is a separate explicit capability and service. Realtime forwarding must not enable it implicitly.

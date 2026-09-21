@@ -57,6 +57,8 @@ fn phase29_sqlite_public_privacy_and_atomicity_boundaries_are_machine_locked() {
     assert!(atomic.contains("merge_pending"));
     assert!(group_proto.contains("message EncryptedGroupMediaFrame"));
     assert!(group_proto.contains("message GroupMediaSourceSignature"));
+    assert!(group_proto.contains("uint32 header_version = 16"));
+    assert!(group_proto.contains("optional VideoSourceKind video_source_kind = 17"));
     assert!(sfu_proto.contains("EncryptedGroupMediaFrame frame = 1"));
     assert!(identity_proto.contains("message PrincipalIdentityBinding"));
     assert!(!sfu_proto.contains("service Sfu"));
@@ -64,6 +66,9 @@ fn phase29_sqlite_public_privacy_and_atomicity_boundaries_are_machine_locked() {
     assert!(!sfu_proto.contains("bytes private_key ="));
     assert!(!sfu_proto.contains("message Conference"));
     assert!(spec.contains("OpenMLS (RFC 9420)"));
+    assert!(spec.contains("wire v1"));
+    assert!(spec.contains("wire v2"));
+    assert!(spec.contains("screen-share"));
     assert!(spec.contains("one `BEGIN IMMEDIATE` transaction"));
     assert!(spec.contains(
         "does not infer that every Device owned by an Identity is automatically an MLS member"

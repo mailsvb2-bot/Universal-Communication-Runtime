@@ -8,8 +8,9 @@ use ucr_crypto::{GroupMediaEpochSecret, SigningKeyMaterial};
 use ucr_media_e2ee::{GroupMediaE2eeRuntime, PreparedGroupMediaE2eeCapabilities};
 use ucr_model::*;
 use ucr_protocol::{
-    ALGORITHM_VERSION, CanonicalError, CanonicalErrorCode, GROUP_MLS_CAPABILITY,
-    KEY_FORMAT_VERSION, SIGNATURE_ALGORITHM_ID,
+    ALGORITHM_VERSION, CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V2,
+    GROUP_MLS_CAPABILITY, KEY_FORMAT_VERSION, NegotiatedSession, SCREEN_SHARE_VIDEO_CAPABILITY,
+    SIGNATURE_ALGORITHM_ID, screen_share_v2_negotiation,
 };
 use ucr_sfu::{
     PreparedSfuCapabilities, SfuError, SfuForwardOutcome, SfuForwardSink, SfuForwardSinkError,
@@ -477,6 +478,94 @@ fn encrypted_group_frame_fans_out_bit_exactly_to_current_call_recipients() {
         .collect::<Vec<_>>();
     assert!(recipients.contains(&fixture.bob.principal));
     assert!(recipients.contains(&fixture.charlie.principal));
+}
+
+#[test]
+fn screen_share_source_kind_is_authenticated_before_sfu_fan_out() {
+    let fixture = build_fixture();
+    let context = group_media_context(&fixture.group, &fixture.call);
+    let capabilities = PreparedGroupMediaE2eeCapabilities;
+    let media_runtime = GroupMediaE2eeRuntime::new(&AllowAll, &fixture.store, &capabilities);
+    let mut session = media_runtime
+        .open_session(
+            &fixture.alice,
+            &fixture.alice_device,
+            &context,
+            GroupMediaEpochSecret::from_exporter_bytes([42; 32]),
+        )
+        .expect("screen-share media session");
+    assert_eq!(
+        session.seal_payload_with_source(
+            MediaKind::Video,
+            Some(VideoSourceKind::ScreenShare),
+            &oid("screen-share-without-proof"),
+            1,
+            90_000,
+            true,
+            b"must-not-seal",
+            &fixture.signing_key_id,
+            &fixture.signer,
+        ),
+        Err(ucr_media_e2ee::GroupMediaE2eeError::ScreenShareNegotiationRequired)
+    );
+    let negotiated = screen_share_v2_negotiation(&NegotiatedSession {
+        version: ProtocolVersion::new(1, 0),
+        crypto_suite: CryptoSuite::UcrV1,
+        capabilities: vec![CapabilityDescriptor {
+            id: SCREEN_SHARE_VIDEO_CAPABILITY.to_owned(),
+            maturity: CapabilityMaturity::Prepared,
+            extensions: Vec::new(),
+        }],
+    })
+    .expect("screen-share negotiation proof");
+    let frame = session
+        .seal_negotiated_screen_share(
+            &negotiated,
+            &oid("screen-share-alice"),
+            1,
+            90_000,
+            true,
+            b"opaque-screen-share-payload",
+            &fixture.signing_key_id,
+            &fixture.signer,
+        )
+        .expect("seal negotiated screen-share frame");
+    assert_eq!(frame.header.header_version, GROUP_MEDIA_FRAME_HEADER_V2);
+    assert_eq!(
+        frame.header.video_source_kind,
+        Some(VideoSourceKind::ScreenShare)
+    );
+
+    let envelope = SfuForwardEnvelope { frame };
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&AllowAll, &fixture.store, &capabilities, &sfu);
+    let sink = CaptureSink::default();
+    assert_eq!(
+        runtime.forward(&fixture.alice, &fixture.alice_device, &envelope, &sink),
+        Ok(SfuForwardOutcome {
+            accepted_recipients: 2
+        })
+    );
+    assert!(
+        sink.forwarded()
+            .iter()
+            .all(|(_, forwarded)| forwarded.frame.header.video_source_kind
+                == Some(VideoSourceKind::ScreenShare))
+    );
+
+    let mut relabelled = envelope;
+    relabelled.frame.header.video_source_kind = Some(VideoSourceKind::Camera);
+    let tampered_sink = CaptureSink::default();
+    assert!(matches!(
+        runtime.forward(
+            &fixture.alice,
+            &fixture.alice_device,
+            &relabelled,
+            &tampered_sink
+        ),
+        Err(SfuError::MediaE2ee(_))
+    ));
+    assert!(tampered_sink.forwarded().is_empty());
 }
 
 #[test]
