@@ -1168,8 +1168,11 @@ fn decode_group_media_video_source(
     value: Option<i32>,
 ) -> Result<Option<VideoSourceKind>, CanonicalError> {
     match (header_version, media_kind, value) {
-        (GROUP_MEDIA_FRAME_HEADER_V1, MediaKind::Audio, None)
-        | (GROUP_MEDIA_FRAME_HEADER_V2, MediaKind::Audio, None) => Ok(None),
+        (
+            GROUP_MEDIA_FRAME_HEADER_V1 | GROUP_MEDIA_FRAME_HEADER_V2,
+            MediaKind::Audio,
+            None,
+        ) => Ok(None),
         (GROUP_MEDIA_FRAME_HEADER_V1, MediaKind::Video, None) => Ok(Some(VideoSourceKind::Camera)),
         (
             GROUP_MEDIA_FRAME_HEADER_V1 | GROUP_MEDIA_FRAME_HEADER_V2,
