@@ -19,6 +19,19 @@ message GroupMediaE2eeContext {
   CryptoSuite crypto_suite = 8;
 }
 
+enum GroupMediaSourceKind {
+  GROUP_MEDIA_SOURCE_KIND_UNSPECIFIED = 0;
+  GROUP_MEDIA_SOURCE_KIND_MICROPHONE = 1;
+  GROUP_MEDIA_SOURCE_KIND_CAMERA = 2;
+  GROUP_MEDIA_SOURCE_KIND_SCREEN_SHARE = 3;
+}
+
+enum GroupMediaFrameAuthVersion {
+  GROUP_MEDIA_FRAME_AUTH_VERSION_UNSPECIFIED = 0;
+  GROUP_MEDIA_FRAME_AUTH_VERSION_V1 = 1;
+  GROUP_MEDIA_FRAME_AUTH_VERSION_V2 = 2;
+}
+
 // Authenticated clear routing header. Principal and Device are deliberately separate identities;
 // their association is revalidated through canonical Device/PrincipalIdentityBinding state.
 message GroupMediaFrameHeader {
@@ -37,6 +50,8 @@ message GroupMediaFrameHeader {
   uint64 sequence = 13;
   uint64 media_timestamp = 14;
   bool keyframe = 15;
+  GroupMediaSourceKind source_kind = 16;
+  GroupMediaFrameAuthVersion auth_version = 17;
 }
 
 message GroupMediaSourceSignature {
