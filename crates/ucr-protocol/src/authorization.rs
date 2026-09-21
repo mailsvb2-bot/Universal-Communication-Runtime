@@ -57,6 +57,7 @@ pub const CONFERENCE_RECORDING_MANAGE_PERMISSION: &str = "ucr.conference.recordi
 pub const AUDIO_SEND_PERMISSION: &str = "ucr.call.audio.send";
 pub const AUDIO_RECEIVE_PERMISSION: &str = "ucr.call.audio.receive";
 pub const VIDEO_SEND_PERMISSION: &str = "ucr.call.video.send";
+pub const SCREEN_SHARE_SEND_PERMISSION: &str = "ucr.call.screen_share.send";
 pub const VIDEO_RECEIVE_PERMISSION: &str = "ucr.call.video.receive";
 pub const COMMUNICATION_INTENT_READ_PERMISSION: &str = "ucr.intent.read";
 pub const COMMUNICATION_INTENT_WRITE_PERMISSION: &str = "ucr.intent.write";
@@ -146,6 +147,7 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     AUDIO_SEND_PERMISSION,
     AUDIO_RECEIVE_PERMISSION,
     VIDEO_SEND_PERMISSION,
+    SCREEN_SHARE_SEND_PERMISSION,
     VIDEO_RECEIVE_PERMISSION,
     COMMUNICATION_INTENT_READ_PERMISSION,
     COMMUNICATION_INTENT_WRITE_PERMISSION,
