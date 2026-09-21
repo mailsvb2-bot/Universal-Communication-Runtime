@@ -1256,8 +1256,7 @@ mod tests {
     #[test]
     fn live_provider_ice_restart_preserves_session_and_emits_fresh_offer() {
         let provider = LiveWebRtcProvider::new().expect("live provider");
-        let session_id =
-            SessionId::from_opaque(OpaqueId::new("restart-session").expect("id"));
+        let session_id = SessionId::from_opaque(OpaqueId::new("restart-session").expect("id"));
         let config = WebRtcSessionConfig {
             session_id: session_id.clone(),
             ice_servers: Vec::new(),
