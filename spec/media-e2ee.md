@@ -48,6 +48,16 @@ Phase 22 deliberately did **not** invent pairwise full-mesh group crypto, a home
 
 Phase 29 adds Prepared RFC-9420/OpenMLS-backed group-media E2EE and encrypted SFU fan-out without plaintext/key access. Phase 30 now composes that boundary into Conference coordination while retaining the same no-plaintext/no-key SFU rule; an SFU never automatically gains plaintext media access.
 
+Group-media frames now distinguish the authenticated capture source independently from the coarse
+audio/video media kind. `GroupMediaSourceKind` is `Microphone`, `Camera`, or `ScreenShare`.
+Legacy frame-auth version V1 remains readable and has fixed canonical meaning
+(audio→microphone, video→camera). V2 binds the source kind into a new
+`UCR-GROUP-MEDIA-FRAME-AAD-V2` domain, so relabelling camera media as screen share, or the reverse,
+invalidates authentication. The group-media traffic-key derivation context remains unchanged for
+wire/key compatibility; source-kind authorization is an authenticated policy fact, not a second key
+or media owner. Public gRPC transport carries the source kind and auth version in additive protobuf
+fields; absent fields decode as legacy V1, while V2 requires an explicit valid source kind.
+
 ## Explicit nonclaims
 
 Phase 22 itself does not implement OS microphone/camera capture, speaker/display output, RTP/SRTP/WebRTC, a media network data plane, Adaptive Media, Transport Orchestrator, Automatic Failover, group MLS key establishment, SFU, conferences, production OS/hardware-backed key providers, or production deployment. Group MLS/SFU are implemented by the separate Phase-29 layer; they do not widen Phase-22 direct-call semantics. Prepared is not Production.
