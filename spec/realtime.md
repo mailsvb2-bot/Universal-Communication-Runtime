@@ -52,12 +52,14 @@ The authenticated RealtimeService signalling surface and reference browser camer
 The reference browser also supports endpoint-only screen capture through `getDisplayMedia` when
 the browser and endpoint E2EE adapter both support live source updates. Screen capture is previewed
 locally and handed to the adapter as `screenStream`; it is stopped deterministically when the
-browser ends sharing, the participant leaves, or the page is torn down. The screen track is never
-attached to server-visible RTP. Browsers without display-capture support (including mobile
-environments where the API is unavailable) keep the control disabled. This browser capture
-boundary does not by itself claim a distinct canonical screen-share authorization policy; server
-authorization still applies to every encrypted video envelope and a later public policy layer must
-differentiate screen-share authority before that part of the capability can be promoted.
+browser ends sharing, the participant leaves, the E2EE DataChannel closes, or the page is torn
+down. Explicit Leave stops local display capture before any best-effort server shutdown request, so
+a stalled network cleanup cannot keep the screen capture alive. The screen track is never attached
+to server-visible RTP. Browsers without display-capture support (including mobile environments
+where the API is unavailable) keep the control disabled. This browser capture boundary does not by
+itself claim a distinct canonical screen-share authorization policy; server authorization still
+applies to every encrypted video envelope and a later public policy layer must differentiate
+screen-share authority before that part of the capability can be promoted.
 
 Conference media uses the server-created ordered DataChannel `ucr.e2ee.media.v1`, not raw browser RTP. The transport-neutral `SfuForwardEnvelope` wire v1 codec is owned by `ucr-protocol`; WebRTC owns only bounded 16,000-byte chunking/reassembly and delegates envelope encode/decode back to that protocol owner. The TypeScript endpoint mirror is byte-for-byte locked to the Rust codec by a fixed cross-language Conformance vector. The server canonical-validates the reassembled envelope, binds it to the active scope/call/session, revalidates current grant/device/publish policy, and routes the unchanged ciphertext through the existing `ConferenceRuntime -> SfuRuntime` path. Downlink ciphertext is chunked through the same DataChannel. The reference browser deliberately does not call `pc.addTrack(...)` and rejects unexpected RTP tracks, so endpoint camera/microphone samples are not exposed to the server merely because WebRTC signalling is connected.
 
