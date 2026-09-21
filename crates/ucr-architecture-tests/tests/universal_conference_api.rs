@@ -254,6 +254,9 @@ fn universal_media_subscriptions_reuse_canonical_conference_runtime_state() {
     assert!(service.contains("participant_for_external("));
     assert!(service.contains("resolve_join_call("));
     assert!(service.contains("prepared_conference_runtime("));
+    assert!(service.contains("value.subscriptions.len() > MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT"));
+    assert!(service.contains("acknowledgement_for(conference_id.as_opaque().clone())"));
+    assert!(!service.contains("acknowledgement_for(call_id.as_opaque().clone())"));
     assert!(service.contains("CONFERENCE_SUBSCRIBE_PERMISSION"));
     assert!(conference.contains("pub(crate) fn prepared_conference_runtime"));
     assert!(conference.contains("ConferenceRuntime::with_state("));
