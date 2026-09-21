@@ -12,6 +12,9 @@ Phase 39 does not publish an npm artifact or select a permanent generator plugin
 ## WebRTC endpoint E2EE transport
 
 `src/webrtc_e2ee.ts` provides the bounded ordered DataChannel framing for already-encrypted
-canonical media envelopes on `ucr.e2ee.media.v1`. It owns no MLS keys, encryption/decryption,
-Conference policy or SFU routing. Applications connect it to their endpoint crypto adapter and keep
-all group-media key material on the endpoint.
+canonical media envelopes on `ucr.e2ee.media.v1`. `src/sfu_forward_wire.ts` mirrors the
+protocol-owned `SfuForwardEnvelope` wire v1 codec and is locked byte-for-byte against the Rust
+implementation by the Conformance workflow. The WebRTC transport owns only bounded chunking and
+reassembly; it owns no MLS keys, encryption/decryption, Conference policy or SFU routing.
+Applications connect it to their endpoint crypto adapter and keep all group-media key material on
+the endpoint.
