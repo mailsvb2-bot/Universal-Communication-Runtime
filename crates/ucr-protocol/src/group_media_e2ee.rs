@@ -276,11 +276,9 @@ fn validate_media_source_kind(
             MediaKind::Video,
             Some(VideoSourceKind::Camera),
         )
-        | (
-            GROUP_MEDIA_FRAME_HEADER_V2,
-            MediaKind::Video,
-            Some(VideoSourceKind::ScreenShare),
-        ) => Ok(()),
+        | (GROUP_MEDIA_FRAME_HEADER_V2, MediaKind::Video, Some(VideoSourceKind::ScreenShare)) => {
+            Ok(())
+        }
         (GROUP_MEDIA_FRAME_HEADER_V1 | GROUP_MEDIA_FRAME_HEADER_V2, _, _) => {
             Err(GroupMediaE2eeProtocolError::InvalidMediaSourceKind)
         }
