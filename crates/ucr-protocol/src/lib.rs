@@ -202,7 +202,8 @@ pub use group::{
     group_permissions_for_role, is_group_conversation_kind, validate_group_member_list_limit,
 };
 pub use group_media_e2ee::{
-    GROUP_MEDIA_CONTEXT_V1_DOMAIN, GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MEDIA_FRAME_AAD_V1_DOMAIN,
+    GROUP_MEDIA_CONTEXT_V1_DOMAIN, GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MEDIA_FRAME_AAD_V2_DOMAIN, GROUP_MEDIA_FRAME_HEADER_V1,
+    GROUP_MEDIA_FRAME_HEADER_V2, GROUP_MEDIA_FRAME_HEADER_VERSION, GROUP_MEDIA_FRAME_AAD_V1_DOMAIN,
     GROUP_MEDIA_KEY_CONTEXT_V1_DOMAIN, GROUP_MEDIA_SOURCE_SIGNATURE_V1_DOMAIN,
     GroupMediaE2eeProtocolError, GroupMediaSigningBinding, MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES,
     canonical_group_media_e2ee_context, group_media_context_binding,
