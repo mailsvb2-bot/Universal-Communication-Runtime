@@ -258,6 +258,7 @@ impl ProductionRuntime {
         let event_clock = Arc::new(SystemEventDeliveryClock);
         let store = Arc::clone(&self.store);
         let authorization = Arc::clone(&self.store);
+        let conference_state = Arc::new(ConferenceRuntimeState::new());
 
         Server::builder()
             .add_service(integration_service_server(GrpcIntegrationService::new(
@@ -285,16 +286,18 @@ impl ProductionRuntime {
                 Arc::clone(&authorization),
                 Arc::clone(&store),
             )))
-            .add_service(conference_service_server(GrpcConferenceService::new(
+            .add_service(conference_service_server(GrpcConferenceService::with_state(
                 Arc::clone(&clock),
                 Arc::clone(&authorization),
                 Arc::clone(&store),
+                Arc::clone(&conference_state),
             )))
             .add_service(universal_conference_service_server(
-                GrpcUniversalConferenceService::new(
+                GrpcUniversalConferenceService::with_state(
                     Arc::clone(&clock),
                     Arc::clone(&authorization),
                     Arc::clone(&store),
+                    conference_state,
                 ),
             ))
             .add_service(event_service_server(GrpcEventService::new(
@@ -401,10 +404,11 @@ impl ProductionRuntime {
             ))
             .add_service(realtime_service_server(realtime_service))
             .add_service(universal_conference_service_server(
-                GrpcUniversalConferenceService::with_join_issuer(
+                GrpcUniversalConferenceService::with_state_and_join_issuer(
                     Arc::clone(&clock),
                     Arc::clone(&authorization),
                     Arc::clone(&store),
+                    Arc::clone(&conference_state),
                     join_issuer,
                 ),
             ))
