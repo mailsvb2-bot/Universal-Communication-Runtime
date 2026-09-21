@@ -183,6 +183,19 @@ message RealtimeAddWebRtcIceCandidateResponse {
   }
 }
 
+message RealtimeRestartWebRtcRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+}
+
+message RealtimeRestartWebRtcResponse {
+  oneof result {
+    RealtimeWebRtcOffer offer = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 message RealtimeCloseWebRtcRequest {
   TenantScope scope = 1;
   OpaqueId call_id = 2;
@@ -206,5 +219,6 @@ service RealtimeService {
   rpc StartWebRtc(RealtimeStartWebRtcRequest) returns (RealtimeStartWebRtcResponse);
   rpc SetWebRtcRemoteDescription(RealtimeSetWebRtcRemoteDescriptionRequest) returns (RealtimeSetWebRtcRemoteDescriptionResponse);
   rpc AddWebRtcIceCandidate(RealtimeAddWebRtcIceCandidateRequest) returns (RealtimeAddWebRtcIceCandidateResponse);
+  rpc RestartWebRtc(RealtimeRestartWebRtcRequest) returns (RealtimeRestartWebRtcResponse);
   rpc CloseWebRtc(RealtimeCloseWebRtcRequest) returns (RealtimeCloseWebRtcResponse);
 }
