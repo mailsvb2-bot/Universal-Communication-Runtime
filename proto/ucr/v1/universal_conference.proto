@@ -5,6 +5,7 @@ package ucr.v1;
 import "ucr/v1/common.proto";
 import "ucr/v1/conference_api.proto";
 import "ucr/v1/errors.proto";
+import "ucr/v1/media_e2ee.proto";
 import "ucr/v1/runtime.proto";
 
 // High-level integration contract for external products. Integrators use their own stable
