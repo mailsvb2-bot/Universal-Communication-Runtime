@@ -415,12 +415,12 @@ where
     )
 }
 
-pub(crate) fn prepared_conference_runtime<A, S>(
-    authorization: &A,
-    store: &S,
+pub(crate) fn prepared_conference_runtime<'a, A, S>(
+    authorization: &'a A,
+    store: &'a S,
     state: Arc<ConferenceRuntimeState>,
 ) -> ConferenceRuntime<
-    '_,
+    'a,
     A,
     S,
     PreparedGroupMediaE2eeCapabilities,
