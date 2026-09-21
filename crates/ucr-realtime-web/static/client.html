@@ -72,7 +72,7 @@ const ui={
   mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle")
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null;
-let packetCount=0,sessionActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false;
+let packetCount=0,sessionActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_CHUNK_MAGIC="UCRCHK01";
@@ -177,6 +177,9 @@ function screenShareSupported(){
   const adapter=e2eeAdapter();
   return !!(navigator.mediaDevices&&typeof navigator.mediaDevices.getDisplayMedia==="function"&&adapter&&typeof adapter.updateSources==="function");
 }
+function refreshScreenShareControl(){
+  ui.screenToggle.disabled=screenShareBusy||!sessionActive||!e2eeChannel||e2eeChannel.readyState!=="open"||!screenShareSupported();
+}
 function setScreenUi(active){
   ui.screenCard.classList.toggle("hidden",!active);
   ui.screenVideo.srcObject=active?screenStream:null;
@@ -196,14 +199,29 @@ async function stopScreenShare(notifyAdapter=true){
 }
 async function startScreenShare(){
   if(!sessionActive)throw new Error("Join the conference before sharing your screen");
+  if(screenShareBusy)throw new Error("Screen sharing is already changing");
   if(!screenShareSupported())throw new Error("Screen sharing is unavailable in this browser or endpoint E2EE adapter");
-  const captured=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
-  const track=captured.getVideoTracks()[0];
-  if(!track){captured.getTracks().forEach(value=>value.stop());throw new Error("Screen capture returned no video track");}
-  screenStream=captured;setScreenUi(true);
-  track.addEventListener("ended",()=>{if(screenStream===captured)stopScreenShare(true).catch(e=>{ui.status.textContent="Screen-share cleanup failed: "+e.message;});},{once:true});
-  try{await syncEndpointMediaSources();}
-  catch(e){screenStream=null;setScreenUi(false);captured.getTracks().forEach(value=>value.stop());throw e;}
+  screenShareBusy=true;refreshScreenShareControl();
+  let captured=null;
+  try{
+    captured=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
+    if(!sessionActive)throw new Error("Conference session ended while screen capture was being selected");
+    const track=captured.getVideoTracks()[0];
+    if(!track)throw new Error("Screen capture returned no video track");
+    screenStream=captured;setScreenUi(true);
+    await syncEndpointMediaSources();
+    if(track.readyState==="ended"||screenStream!==captured){
+      await stopScreenShare(true);
+      throw new Error("Screen sharing ended before publication became active");
+    }
+    track.addEventListener("ended",()=>{if(screenStream===captured)stopScreenShare(true).catch(e=>{ui.status.textContent="Screen-share cleanup failed: "+e.message;});},{once:true});
+  }catch(e){
+    if(screenStream===captured){screenStream=null;setScreenUi(false);}
+    if(captured)captured.getTracks().forEach(value=>value.stop());
+    throw e;
+  }finally{
+    screenShareBusy=false;refreshScreenShareControl();
+  }
 }
 async function activateE2eeAdapter(){
   const adapter=e2eeAdapter();
@@ -212,7 +230,7 @@ async function activateE2eeAdapter(){
     return;
   }
   await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
-  ui.screenToggle.disabled=!screenShareSupported();
+  refreshScreenShareControl();
   ui.status.textContent="Endpoint E2EE media transport active. Media keys remain on this endpoint.";
 }
 function attachE2eeDataChannel(channel){
