@@ -1,5 +1,6 @@
 export const SFU_FORWARD_WIRE_MAGIC = "UCRE2EE1" as const;
-export const SFU_FORWARD_WIRE_VERSION = 1 as const;
+export const SFU_FORWARD_WIRE_LEGACY_VERSION = 1 as const;
+export const SFU_FORWARD_WIRE_VERSION = 2 as const;
 export const MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES = 2 * 1024 * 1024 + 16;
 export const MAX_SFU_FORWARD_WIRE_BYTES = MAX_ENCRYPTED_GROUP_MEDIA_PAYLOAD_BYTES + 8_192;
 
@@ -20,6 +21,7 @@ export type PrincipalKind =
   | "automation"
   | "external_platform";
 export type MediaKind = "audio" | "video";
+export type MediaSourceKind = "microphone" | "camera" | "screen_share";
 
 export interface SfuForwardEnvelopeWire {
   readonly frame: {
@@ -40,6 +42,8 @@ export interface SfuForwardEnvelopeWire {
       readonly cryptoStateRef: string;
       readonly cryptoSuite: "ucr.v1";
       readonly mediaKind: MediaKind;
+      readonly sourceKind?: MediaSourceKind;
+      readonly authVersion?: 1 | 2;
       readonly sequence: bigint;
       readonly mediaTimestamp: bigint;
       readonly keyframe: boolean;
@@ -60,7 +64,9 @@ export function encodeSfuForwardEnvelopeWire(envelope: SfuForwardEnvelopeWire): 
   const frame = envelope.frame;
   const writer = new WireWriter();
   writer.raw(textEncoder.encode(SFU_FORWARD_WIRE_MAGIC));
-  writer.u8(SFU_FORWARD_WIRE_VERSION);
+  const authVersion = frame.header.authVersion ?? SFU_FORWARD_WIRE_VERSION;
+  const sourceKind = frame.header.sourceKind ?? legacySourceKind(frame.header.mediaKind);
+  writer.u8(authVersion);
   writer.id(frame.header.tenantId);
   if (frame.header.namespaceId === null) {
     writer.u8(0);
@@ -80,6 +86,9 @@ export function encodeSfuForwardEnvelopeWire(envelope: SfuForwardEnvelopeWire): 
   writer.id(frame.header.cryptoStateRef);
   writer.u8(1);
   writer.u8(mediaKindCode(frame.header.mediaKind));
+  if (authVersion === SFU_FORWARD_WIRE_VERSION) {
+    writer.u8(mediaSourceKindCode(sourceKind));
+  }
   writer.u64(frame.header.sequence);
   writer.u64(frame.header.mediaTimestamp);
   writer.u8(frame.header.keyframe ? 1 : 0);
@@ -105,9 +114,14 @@ export function decodeSfuForwardEnvelopeWire(bytes: Uint8Array): SfuForwardEnvel
   if (magic !== SFU_FORWARD_WIRE_MAGIC) {
     throw new Error("invalid SFU forward wire magic");
   }
-  if (reader.u8() !== SFU_FORWARD_WIRE_VERSION) {
+  const authVersionCode = reader.u8();
+  if (
+    authVersionCode !== SFU_FORWARD_WIRE_LEGACY_VERSION &&
+    authVersionCode !== SFU_FORWARD_WIRE_VERSION
+  ) {
     throw new Error("unsupported SFU forward wire version");
   }
+  const authVersion = authVersionCode as 1 | 2;
   const tenantId = reader.id();
   const namespaceMarker = reader.u8();
   const namespaceId =
@@ -130,6 +144,10 @@ export function decodeSfuForwardEnvelopeWire(bytes: Uint8Array): SfuForwardEnvel
     throw new Error("unsupported SFU forward crypto suite");
   }
   const mediaKind = mediaKindFromCode(reader.u8());
+  const sourceKind =
+    authVersion === SFU_FORWARD_WIRE_LEGACY_VERSION
+      ? legacySourceKind(mediaKind)
+      : mediaSourceKindFromCode(reader.u8());
   const sequence = reader.u64();
   const mediaTimestamp = reader.u64();
   const keyframeCode = reader.u8();
@@ -168,6 +186,8 @@ export function decodeSfuForwardEnvelopeWire(bytes: Uint8Array): SfuForwardEnvel
         cryptoStateRef,
         cryptoSuite: "ucr.v1",
         mediaKind,
+        sourceKind,
+        authVersion,
         sequence,
         mediaTimestamp,
         keyframe: keyframeCode === 1,
@@ -216,6 +236,12 @@ function validateEnvelopeShape(envelope: SfuForwardEnvelopeWire): void {
   }
   principalKindCode(frame.header.source.kind);
   mediaKindCode(frame.header.mediaKind);
+  const authVersion = frame.header.authVersion ?? SFU_FORWARD_WIRE_VERSION;
+  const sourceKind = frame.header.sourceKind ?? legacySourceKind(frame.header.mediaKind);
+  if (authVersion !== SFU_FORWARD_WIRE_LEGACY_VERSION && authVersion !== SFU_FORWARD_WIRE_VERSION) {
+    throw new Error("unsupported SFU forward wire version");
+  }
+  validateMediaSourceKind(frame.header.mediaKind, sourceKind, authVersion);
   if (frame.header.mediaKind === "audio" && frame.header.keyframe) {
     throw new Error("audio SFU forward frames cannot be keyframes");
   }
@@ -312,6 +338,40 @@ function principalKindFromCode(code: number): PrincipalKind {
     default:
       throw new Error("invalid SFU forward principal kind");
   }
+}
+
+function legacySourceKind(kind: MediaKind): MediaSourceKind {
+  return kind === "audio" ? "microphone" : "camera";
+}
+
+function validateMediaSourceKind(
+  mediaKind: MediaKind,
+  sourceKind: MediaSourceKind,
+  authVersion: 1 | 2,
+): void {
+  if (authVersion === SFU_FORWARD_WIRE_LEGACY_VERSION && sourceKind !== legacySourceKind(mediaKind)) {
+    throw new Error("legacy SFU wire cannot authenticate this media source kind");
+  }
+  if (
+    (mediaKind === "audio" && sourceKind !== "microphone") ||
+    (mediaKind === "video" && sourceKind !== "camera" && sourceKind !== "screen_share")
+  ) {
+    throw new Error("invalid SFU forward media source kind");
+  }
+}
+
+function mediaSourceKindCode(kind: MediaSourceKind): number {
+  if (kind === "microphone") return 1;
+  if (kind === "camera") return 2;
+  if (kind === "screen_share") return 3;
+  throw new Error("invalid SFU forward media source kind");
+}
+
+function mediaSourceKindFromCode(code: number): MediaSourceKind {
+  if (code === 1) return "microphone";
+  if (code === 2) return "camera";
+  if (code === 3) return "screen_share";
+  throw new Error("invalid SFU forward media source kind");
 }
 
 function mediaKindCode(kind: MediaKind): number {
