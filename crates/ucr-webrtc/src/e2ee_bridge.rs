@@ -331,9 +331,12 @@ mod tests {
     use ucr_model::{
         CallId, CryptoSuite, DeviceId, EncryptedGroupMediaFrame, GroupId, GroupMediaFrameHeader,
         GroupMediaSourceSignature, KeyId, MediaKind, NamespaceId, OpaqueId, PrincipalId,
-        PrincipalKind, PrincipalRef, TenantId, TenantScope,
+        PrincipalKind, PrincipalRef, TenantId, TenantScope, VideoSourceKind,
     };
-    use ucr_protocol::{ALGORITHM_VERSION, SFU_FORWARD_WIRE_MAGIC, SIGNATURE_ALGORITHM_ID};
+    use ucr_protocol::{
+        ALGORITHM_VERSION, GROUP_MEDIA_FRAME_HEADER_VERSION, SFU_FORWARD_WIRE_MAGIC,
+        SIGNATURE_ALGORITHM_ID,
+    };
 
     fn id(value: &str) -> OpaqueId {
         OpaqueId::new(value).expect("id")
@@ -360,7 +363,9 @@ mod tests {
                     crypto_epoch: 9,
                     crypto_state_ref: id("crypto-state"),
                     crypto_suite: CryptoSuite::UcrV1,
+                    header_version: GROUP_MEDIA_FRAME_HEADER_VERSION,
                     media_kind: MediaKind::Video,
+                    video_source_kind: Some(VideoSourceKind::Camera),
                     sequence: 44,
                     media_timestamp: 90_000,
                     keyframe: true,
