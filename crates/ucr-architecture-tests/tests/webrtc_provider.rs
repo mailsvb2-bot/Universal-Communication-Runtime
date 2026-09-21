@@ -79,29 +79,6 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(runtime_main.contains("UCR_WEBRTC_TURN_URLS"));
     assert!(runtime_main.contains("UCR_WEBRTC_TURN_SECRET_HEX"));
     assert!(browser.contains("navigator.mediaDevices.getUserMedia"));
-    assert!(browser.contains("navigator.mediaDevices.getDisplayMedia"));
-    assert!(browser.contains("screen-toggle"));
-    assert!(browser.contains("screenStream"));
-    assert!(browser.contains("screenShareBusy"));
-    assert!(browser.contains("updateSources"));
-    assert!(browser.contains("e2eeChannel.readyState!==\"open\""));
-    assert!(browser.contains("track.addEventListener(\"ended\""));
-    assert!(browser.contains("if(screenStream){"));
-    assert!(browser.contains("current.getTracks().forEach(track=>track.stop())"));
-    let leave = browser
-        .split_once("async function leave(){")
-        .expect("leave function")
-        .1
-        .split_once("function scheduleWaitingRoom(){")
-        .expect("leave function close")
-        .0;
-    let local_screen_stop = leave
-        .find("await stopScreenShare(false)")
-        .expect("leave stops local screen capture");
-    let server_close = leave
-        .find("await closeServerPeer()")
-        .expect("leave requests server peer close");
-    assert!(local_screen_stop < server_close);
     assert!(browser.contains("new RTCPeerConnection"));
     assert!(browser.contains("pc.ondatachannel"));
     assert!(browser.contains("ucr.e2ee.media.v1"));
@@ -110,8 +87,6 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(browser.contains("receiveE2eeChunk"));
     assert!(!browser.contains("pc.addTrack("));
     assert!(browser.contains("Unexpected RTP track rejected"));
-    assert!(realtime_spec.contains("endpoint-only screen capture"));
-    assert!(realtime_spec.contains("getDisplayMedia"));
     assert!(typescript_e2ee.contains("export class UcrWebRtcE2eeTransport"));
     assert!(typescript_e2ee.contains("ucr.e2ee.media.v1"));
     assert!(typescript_e2ee.contains("encrypted media envelope exceeds transport bounds"));
@@ -132,6 +107,41 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(realtime_spec.contains("Cache-Control: no-store"));
     assert!(realtime_spec.contains("UCR_WEBRTC_RELAY_ONLY"));
     assert!(realtime_spec.contains("does not end the canonical Call"));
+}
+
+#[test]
+fn browser_screen_sharing_stays_endpoint_only_and_privacy_first() {
+    let browser = read("crates/ucr-realtime-web/static/client.html");
+    let realtime_spec = read("spec/realtime.md");
+
+    assert!(browser.contains("navigator.mediaDevices.getDisplayMedia"));
+    assert!(browser.contains("screen-toggle"));
+    assert!(browser.contains("screenStream"));
+    assert!(browser.contains("screenShareBusy"));
+    assert!(browser.contains("updateSources"));
+    assert!(browser.contains("e2eeChannel.readyState!==\"open\""));
+    assert!(browser.contains("track.addEventListener(\"ended\""));
+    assert!(browser.contains("if(screenStream){"));
+    assert!(browser.contains("current.getTracks().forEach(track=>track.stop())"));
+
+    let leave = browser
+        .split_once("async function leave(){")
+        .expect("leave function")
+        .1
+        .split_once("function scheduleWaitingRoom(){")
+        .expect("leave function close")
+        .0;
+    let local_screen_stop = leave
+        .find("await stopScreenShare(false)")
+        .expect("leave stops local screen capture");
+    let server_close = leave
+        .find("await closeServerPeer()")
+        .expect("leave requests server peer close");
+    assert!(local_screen_stop < server_close);
+
+    assert!(!browser.contains("pc.addTrack("));
+    assert!(realtime_spec.contains("endpoint-only screen capture"));
+    assert!(realtime_spec.contains("getDisplayMedia"));
 }
 
 #[test]
