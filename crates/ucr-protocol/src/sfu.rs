@@ -433,7 +433,10 @@ mod tests {
         let expected = envelope();
         let wire = encode_sfu_forward_envelope(&expected).expect("encode");
         assert_eq!(lower_hex(&wire), WIRE_V1_VECTOR_HEX);
-        assert_eq!(decode_sfu_forward_envelope(&wire).expect("decode"), expected);
+        assert_eq!(
+            decode_sfu_forward_envelope(&wire).expect("decode"),
+            expected
+        );
     }
 
     #[test]
