@@ -690,9 +690,7 @@ where
         Ok(Response::new(pb::RealtimeRestartWebRtcResponse {
             result: Some(match result {
                 Ok(offer) => pb::realtime_restart_web_rtc_response::Result::Offer(offer),
-                Err(error) => {
-                    pb::realtime_restart_web_rtc_response::Result::Error(pb_error(error))
-                }
+                Err(error) => pb::realtime_restart_web_rtc_response::Result::Error(pb_error(error)),
             }),
         }))
     }
