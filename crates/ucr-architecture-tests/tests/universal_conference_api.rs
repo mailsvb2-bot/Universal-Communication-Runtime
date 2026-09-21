@@ -74,6 +74,7 @@ fn universal_conference_management_is_integration_scoped() {
         "UniversalUpdateParticipantRequest",
         "UniversalRemoveParticipantRequest",
         "UniversalListParticipantsRequest",
+        "UniversalSetSubscriptionsRequest",
         "UniversalRevokeJoinGrantRequest",
         "UniversalGetParticipantAttendanceRequest",
         "UniversalEnsureParticipantDeviceRequest",
@@ -224,6 +225,39 @@ fn universal_conference_live_capacity_uses_active_storage_projection() {
     assert!(core.contains("fn active_universal_conference_participants"));
     assert!(spec.contains("1024 active participants"));
     assert!(spec.contains("Inactive historical participant projections"));
+}
+
+#[test]
+fn universal_media_subscriptions_reuse_canonical_conference_runtime_state() {
+    let proto = read("proto/ucr/v1/universal_conference.proto");
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let spec = read("spec/universal-conference-api.md");
+
+    assert!(proto.contains("rpc SetSubscriptions"));
+    let request = proto
+        .split_once("message UniversalSetSubscriptionsRequest {")
+        .expect("subscription request")
+        .1
+        .split_once('}')
+        .expect("subscription request close")
+        .0;
+    assert!(request.contains("integration_id"));
+    assert!(request.contains("external_user_id"));
+    assert!(request.contains("UniversalConferenceMediaSubscription"));
+    assert!(!request.contains("PrincipalRef"));
+    assert!(!request.contains("CallId"));
+    assert!(!request.contains("DeviceId"));
+
+    assert!(service.contains("fn set_universal_subscriptions"));
+    assert!(service.contains("participant_for_external("));
+    assert!(service.contains("resolve_join_call("));
+    assert!(service.contains("ConferenceRuntime::with_state("));
+    assert!(service.contains("CONFERENCE_SUBSCRIBE_PERMISSION"));
+    assert!(runtime.contains("GrpcUniversalConferenceService::with_state_and_join_issuer("));
+    assert!(runtime.contains("Arc::clone(&conference_state)"));
+    assert!(spec.contains("Subscription state remains intentionally ephemeral"));
+    assert!(spec.contains("actual encrypted SFU routing path"));
 }
 
 #[test]
