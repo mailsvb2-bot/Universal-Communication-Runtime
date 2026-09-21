@@ -1225,6 +1225,39 @@ mod tests {
     }
 
     #[test]
+    fn active_session_lookup_distinguishes_first_join_from_reconnect() {
+        let registry = RealtimeSessionRegistry::default();
+        let claims = issuer()
+            .issue(
+                scope(),
+                CallId::from_opaque(id("call-active-session")),
+                participant(),
+                Some(DeviceId::from_opaque(id("device-active-session"))),
+                300,
+                15_000,
+            )
+            .expect("issue")
+            .claims;
+
+        assert!(
+            !registry
+                .contains_active_session(&claims, 15_001)
+                .expect("lookup before join")
+        );
+        registry.join(claims.clone(), 15_002).expect("join");
+        assert!(
+            registry
+                .contains_active_session(&claims, 15_003)
+                .expect("lookup after join")
+        );
+        assert!(
+            !registry
+                .contains_active_session(&claims, claims.expires_at_unix_ms)
+                .expect("expired lookup")
+        );
+    }
+
+    #[test]
     fn e2ee_egress_lookup_returns_only_exact_active_recipient_sessions() {
         let registry = RealtimeSessionRegistry::default();
         let alice = issuer()
