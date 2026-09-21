@@ -6,6 +6,7 @@ import "ucr/v1/common.proto";
 import "ucr/v1/crypto.proto";
 import "ucr/v1/identity.proto";
 import "ucr/v1/media_e2ee.proto";
+import "ucr/v1/video.proto";
 
 // Exact MLS-backed group-media security context. Contains no key material.
 message GroupMediaE2eeContext {
@@ -37,6 +38,10 @@ message GroupMediaFrameHeader {
   uint64 sequence = 13;
   uint64 media_timestamp = 14;
   bool keyframe = 15;
+  // Version 0 is accepted only at legacy decode boundaries and canonicalized to v1.
+  uint32 header_version = 16;
+  // Absent for audio and legacy v1. V2 video must explicitly identify camera vs screen share.
+  optional VideoSourceKind video_source_kind = 17;
 }
 
 message GroupMediaSourceSignature {
