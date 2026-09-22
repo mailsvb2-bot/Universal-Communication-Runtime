@@ -36,8 +36,22 @@ jobs:
         if: matrix.browser == 'safari'
         run: sudo safaridriver --enable
       - name: Probe reference browser contract
+        shell: bash
         run: |
-          python3 tools/browser_compatibility_probe.py             --browser "${{ matrix.browser }}"             --output "dist/browser-compatibility/${{ matrix.browser }}.json"
+          set -euo pipefail
+          for attempt in 1 2; do
+            if python3 tools/browser_compatibility_probe.py \
+              --browser "${{ matrix.browser }}" \
+              --output "dist/browser-compatibility/${{ matrix.browser }}.json"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              echo "browser compatibility probe failed twice" >&2
+              exit 1
+            fi
+            echo "browser WebDriver probe failed during startup/session creation; retrying once" >&2
+            sleep 2
+          done
       - name: Upload browser evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

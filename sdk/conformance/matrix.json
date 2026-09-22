@@ -14,44 +14,95 @@
     "errors",
     "idempotency"
   ],
-  "required_languages": ["rust", "python", "typescript", "kotlin", "swift"],
-  "evidence_levels": ["contract", "host-probe", "runtime-binding"],
+  "required_languages": [
+    "rust",
+    "python",
+    "typescript",
+    "kotlin",
+    "swift"
+  ],
+  "evidence_levels": [
+    "contract",
+    "host-probe",
+    "runtime-binding"
+  ],
   "languages": {
     "rust": {
-      "levels": ["contract", "host-probe", "runtime-binding"],
+      "levels": [
+        "contract",
+        "host-probe",
+        "runtime-binding"
+      ],
       "helper": "crates/ucr-sdk/src/lib.rs",
       "probe": "crates/ucr-sdk/tests/phase41_conformance.rs"
     },
     "python": {
-      "levels": ["contract", "host-probe"],
+      "levels": [
+        "contract",
+        "host-probe"
+      ],
       "helper": "sdk/python/ucr_sdk/auth.py",
       "probe": "sdk/python/phase41_conformance.py"
     },
     "typescript": {
-      "levels": ["contract", "host-probe"],
+      "levels": [
+        "contract",
+        "host-probe"
+      ],
       "helper": "sdk/typescript/src/auth.ts",
       "probe": "sdk/typescript/phase41_conformance.ts"
     },
     "kotlin": {
-      "levels": ["contract", "host-probe"],
+      "levels": [
+        "contract",
+        "host-probe"
+      ],
       "helper": "sdk/kotlin/src/main/kotlin/org/ucr/sdk/ServiceCredential.kt",
       "probe": "sdk/kotlin/src/test/kotlin/org/ucr/sdk/Phase41Conformance.kt"
     },
     "swift": {
-      "levels": ["contract", "host-probe"],
+      "levels": [
+        "contract",
+        "host-probe"
+      ],
       "helper": "sdk/swift/Sources/UCRSDK/ServiceCredential.swift",
       "probe": "sdk/swift/Tests/main.swift"
     }
   },
   "canonical_evidence": {
-    "auth": ["sdk/contract.json", "sdk/* credential helper"],
-    "commands": ["proto/ucr/v1/integration.proto", "proto/ucr/v1/runtime.proto"],
-    "events": ["proto/ucr/v1/event_api.proto", "proto/ucr/v1/runtime.proto"],
-    "retries": ["sdk/contract.json", "spec/public-sdks.md"],
-    "permissions": ["proto/ucr/v1/errors.proto", "spec/public-sdks.md"],
-    "version_negotiation": ["proto/ucr/v1/runtime.proto"],
-    "errors": ["proto/ucr/v1/errors.proto", "proto/ucr/v1/integration.proto", "proto/ucr/v1/event_api.proto"],
-    "idempotency": ["proto/ucr/v1/runtime.proto", "proto/ucr/v1/integration.proto", "proto/ucr/v1/event_api.proto"]
+    "auth": [
+      "sdk/contract.json",
+      "sdk/* credential helper"
+    ],
+    "commands": [
+      "proto/ucr/v1/integration.proto",
+      "proto/ucr/v1/runtime.proto"
+    ],
+    "events": [
+      "proto/ucr/v1/event_api.proto",
+      "proto/ucr/v1/runtime.proto"
+    ],
+    "retries": [
+      "sdk/contract.json",
+      "spec/public-sdks.md"
+    ],
+    "permissions": [
+      "proto/ucr/v1/errors.proto",
+      "spec/public-sdks.md"
+    ],
+    "version_negotiation": [
+      "proto/ucr/v1/runtime.proto"
+    ],
+    "errors": [
+      "proto/ucr/v1/errors.proto",
+      "proto/ucr/v1/integration.proto",
+      "proto/ucr/v1/event_api.proto"
+    ],
+    "idempotency": [
+      "proto/ucr/v1/runtime.proto",
+      "proto/ucr/v1/integration.proto",
+      "proto/ucr/v1/event_api.proto"
+    ]
   },
   "forbidden_claims": [
     "production-certification",
@@ -59,5 +110,59 @@
     "package-signing",
     "supply-chain-complete",
     "production-sla"
-  ]
+  ],
+  "integration_profile": {
+    "required_categories": [
+      "auth",
+      "create",
+      "join",
+      "leave",
+      "webhook",
+      "idempotency",
+      "expiry",
+      "permissions",
+      "tenant_isolation"
+    ],
+    "evidence_levels": [
+      "contract",
+      "runtime-binding"
+    ],
+    "canonical_evidence": {
+      "auth": [
+        "proto/ucr/v1/universal_conference.proto",
+        "crates/ucr-api-grpc/src/universal_conference_service.rs"
+      ],
+      "create": [
+        "proto/ucr/v1/universal_conference.proto"
+      ],
+      "join": [
+        "proto/ucr/v1/universal_conference.proto",
+        "proto/ucr/v1/realtime.proto"
+      ],
+      "leave": [
+        "proto/ucr/v1/universal_conference.proto",
+        "proto/ucr/v1/realtime.proto"
+      ],
+      "webhook": [
+        "proto/ucr/v1/event_api.proto",
+        "spec/universal-conference-api.md"
+      ],
+      "idempotency": [
+        "proto/ucr/v1/universal_conference.proto",
+        "crates/ucr-storage-sqlite/src/universal_conference_store.rs"
+      ],
+      "expiry": [
+        "proto/ucr/v1/universal_conference.proto",
+        "crates/ucr-storage-sqlite/src/conference_join_grant_store.rs"
+      ],
+      "permissions": [
+        "proto/ucr/v1/universal_conference.proto",
+        "crates/ucr-api-grpc/src/universal_conference_service.rs"
+      ],
+      "tenant_isolation": [
+        "proto/ucr/v1/universal_conference.proto",
+        "crates/ucr-api-grpc/src/universal_conference_service.rs"
+      ]
+    }
+  }
 }

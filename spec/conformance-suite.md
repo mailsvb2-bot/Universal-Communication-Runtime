@@ -25,6 +25,24 @@ The Phase-41 SDK profile applies to Rust, Python, TypeScript, Kotlin, and Swift 
 7. **errors** — canonical `ErrorEnvelope` values remain observable and are not translated into successful application outcomes.
 8. **idempotency** — caller/canonical identifiers are preserved. SDKs do not mint replacement command/event/message identities during a retry path.
 
+## Integration profile
+
+The integration profile is the fail-closed contract used by an external SaaS or other product before it is treated as a compatible UCR consumer. It is separate from the language SDK profile and does not create new runtime owners.
+
+It requires evidence for nine areas:
+
+1. **auth** — the integration authenticates as the exact canonical Service Account / integration identity;
+2. **create** — conference creation uses the stable Universal Conference contract and external reference IDs;
+3. **join** — participant resolution and join-grant issuance use the canonical integration-scoped boundary;
+4. **leave** — participant removal/revocation and realtime leave semantics remain canonical operations;
+5. **webhook** — integrations use the canonical Event/Webhook subscription surface; current executable conference evidence includes attendance `joined`, `left`, `reconnected`, and `media_ready` events. The full conference lifecycle webhook set remains required before Production integration certification;
+6. **idempotency** — create and mutate retries preserve exact idempotency semantics and changed-request conflicts;
+7. **expiry** — join grants remain bounded by their canonical expiry and event schedule constraints;
+8. **permissions** — integration permissions remain server-owned and fail closed;
+9. **tenant isolation** — one integration cannot read, mutate, join, or subscribe to another integration's conference state.
+
+Prepared evidence for this profile is `contract + runtime-binding`. Static contract anchors alone cannot certify tenant isolation or expiry behavior as Production evidence; executable runtime proofs remain required before a deployment may claim full integration certification.
+
 ## Evidence levels
 
 Phase 41 uses cumulative evidence levels:
@@ -53,7 +71,8 @@ The suite may use deterministic test vectors and binding doubles, but those doub
 
 The suite fails if:
 
-- a required language or one of the eight categories disappears;
+- a required language or one of the eight SDK categories disappears;
+- one of the required integration-profile categories disappears;
 - a host probe is missing;
 - credential metadata names drift;
 - secret redaction disappears;
