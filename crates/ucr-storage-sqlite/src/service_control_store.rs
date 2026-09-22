@@ -579,29 +579,8 @@ impl ServiceQuotaStore for SqliteLocalStore {
         let window_ms = i64::try_from(policy.window_ms)
             .map_err(|_| ServiceQuotaConsumeError::Store(DurableStoreError::Corrupt))?;
         let window_start = now_unix_ms - now_unix_ms.rem_euclid(window_ms);
-        let usage = transaction
-            .query_row(
-                "SELECT window_start_unix_ms, used_requests, last_observed_unix_ms
-                 FROM service_rate_limit_usage
-                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
-                   AND principal_id=?4 AND rate_class=?5",
-                params![
-                    subject.scope.tenant_id.as_opaque().as_str(),
-                    namespace.present,
-                    namespace.value,
-                    subject.principal.principal_id.as_opaque().as_str(),
-                    rate_class_text(rate_class),
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| ServiceQuotaConsumeError::Store(map_sqlite_error(&error)))?;
+        let usage = load_rate_limit_usage(&transaction, subject, rate_class)
+            .map_err(ServiceQuotaConsumeError::Store)?;
         let (mut stored_window, mut used, last_observed) =
             usage.unwrap_or((window_start, 0, now_unix_ms));
         if now_unix_ms < last_observed || window_start < stored_window {
@@ -820,6 +799,37 @@ const fn rate_class_text(rate_class: ServiceRequestRateClass) -> &'static str {
         ServiceRequestRateClass::Signaling => "signaling",
         ServiceRequestRateClass::MediaTransport => "media_transport",
     }
+}
+
+fn load_rate_limit_usage(
+    connection: &Connection,
+    subject: &ScopedPrincipal,
+    rate_class: ServiceRequestRateClass,
+) -> Result<Option<(i64, i64, i64)>, DurableStoreError> {
+    let namespace = namespace_storage_key(&subject.scope);
+    connection
+        .query_row(
+            "SELECT window_start_unix_ms, used_requests, last_observed_unix_ms
+             FROM service_rate_limit_usage
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+               AND principal_id=?4 AND rate_class=?5",
+            params![
+                subject.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                subject.principal.principal_id.as_opaque().as_str(),
+                rate_class_text(rate_class),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(&error))
 }
 
 fn load_rate_limit_policy(
