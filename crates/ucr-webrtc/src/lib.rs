@@ -101,7 +101,7 @@ pub trait WebRtcProvider: fmt::Debug + Send + Sync {
     /// realtime session. Canonical Call/Conference state is unchanged.
     ///
     /// # Errors
-    /// Returns bounded provider/protocol failures or SessionUnavailable for an unknown session.
+    /// Returns bounded provider/protocol failures or `SessionUnavailable` for an unknown session.
     fn restart_session(
         &self,
         config: &WebRtcSessionConfig,
