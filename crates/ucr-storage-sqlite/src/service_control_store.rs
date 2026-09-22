@@ -1319,13 +1319,15 @@ mod tests {
     use ucr_model::{
         AuditRecordId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuditOperationRef,
-        ServiceAuditOutcome, ServiceAuditRecord, ServiceQuotaPolicy, TenantId, TenantScope,
+        ServiceAuditOutcome, ServiceAuditRecord, ServiceQuotaPolicy, ServiceRateLimitPolicy,
+        ServiceRequestRateClass, TenantId, TenantScope,
     };
     use ucr_protocol::{CONVERSATION_READ_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND};
 
     use super::SqliteLocalStore;
     use crate::{
-        SQLITE_SCHEMA_V13, SQLITE_SCHEMA_V16, SQLITE_SCHEMA_VERSION, UCR_SQLITE_APPLICATION_ID,
+        SQLITE_SCHEMA_V13, SQLITE_SCHEMA_V16, SQLITE_SCHEMA_V36, SQLITE_SCHEMA_VERSION,
+        UCR_SQLITE_APPLICATION_ID,
     };
 
     static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(80_000);
@@ -1446,6 +1448,138 @@ mod tests {
             reopened.consume_service_request(&subject, 10_999),
             Err(ServiceQuotaConsumeError::ClockRollback)
         );
+    }
+
+    #[test]
+    fn class_specific_quota_accounting_survives_restart_without_cross_starvation() {
+        let db = TestDb::new();
+        let subject = service("service-rate-class-sqlite");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open");
+            store
+                .set_service_quota_policy(&ServiceQuotaPolicy {
+                    subject: subject.clone(),
+                    max_requests: 1,
+                    window_ms: 1_000,
+                })
+                .expect("install legacy template");
+            store
+                .set_service_rate_limit_policy(&ServiceRateLimitPolicy {
+                    subject: subject.clone(),
+                    rate_class: ServiceRequestRateClass::JoinIssuance,
+                    max_requests: 2,
+                    window_ms: 1_000,
+                })
+                .expect("override join class");
+            store
+                .consume_service_request_for_class(
+                    &subject,
+                    ServiceRequestRateClass::Management,
+                    10_000,
+                )
+                .expect("management request");
+            store
+                .consume_service_request_for_class(
+                    &subject,
+                    ServiceRequestRateClass::JoinIssuance,
+                    10_000,
+                )
+                .expect("first join request");
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert_eq!(
+            reopened.consume_service_request_for_class(
+                &subject,
+                ServiceRequestRateClass::Management,
+                10_000,
+            ),
+            Err(ServiceQuotaConsumeError::RateLimited {
+                retry_after_ms: 1_000
+            })
+        );
+        reopened
+            .consume_service_request_for_class(
+                &subject,
+                ServiceRequestRateClass::JoinIssuance,
+                10_000,
+            )
+            .expect("second join request remains available");
+        assert_eq!(
+            reopened.consume_service_request_for_class(
+                &subject,
+                ServiceRequestRateClass::JoinIssuance,
+                10_000,
+            ),
+            Err(ServiceQuotaConsumeError::RateLimited {
+                retry_after_ms: 1_000
+            })
+        );
+        reopened
+            .consume_service_request_for_class(
+                &subject,
+                ServiceRequestRateClass::Signaling,
+                10_000,
+            )
+            .expect("signaling bucket remains independent");
+    }
+
+    #[test]
+    fn v36_to_v37_migration_conservatively_copies_legacy_usage_into_every_class() {
+        let db = TestDb::new();
+        let subject = service("service-rate-migration");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("initialize current");
+            store
+                .set_service_quota_policy(&ServiceQuotaPolicy {
+                    subject: subject.clone(),
+                    max_requests: 2,
+                    window_ms: 1_000,
+                })
+                .expect("install base policy");
+        }
+
+        let connection = Connection::open(db.path()).expect("open raw sqlite");
+        let namespace = super::namespace_storage_key(&subject.scope);
+        connection
+            .execute(
+                "INSERT INTO service_quota_usage (
+                    tenant_id, namespace_present, namespace_id, principal_id,
+                    window_start_unix_ms, used_requests, last_observed_unix_ms
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                rusqlite::params![
+                    subject.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    subject.principal.principal_id.as_opaque().as_str(),
+                    10_000_i64,
+                    2_i64,
+                    10_000_i64,
+                ],
+            )
+            .expect("seed legacy v36 usage");
+        connection
+            .execute_batch(
+                "DROP TABLE service_rate_limit_usage;
+                 DROP TABLE service_rate_limit_policies;",
+            )
+            .expect("restore exact v36 quota shape");
+        connection
+            .pragma_update(None, "user_version", SQLITE_SCHEMA_V36)
+            .expect("set v36 version");
+        drop(connection);
+
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v36 to v37");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        for rate_class in ServiceRequestRateClass::ALL {
+            assert_eq!(
+                migrated.consume_service_request_for_class(&subject, rate_class, 10_000),
+                Err(ServiceQuotaConsumeError::RateLimited {
+                    retry_after_ms: 1_000
+                }),
+                "migration must not reset usage for {rate_class:?}"
+            );
+        }
     }
 
     #[test]
