@@ -656,11 +656,7 @@ impl UniversalConferenceStore for SqliteLocalStore {
         }
         if active && !current.active {
             ensure_participant_capacity(&transaction, scope, conference_id)?;
-            ensure_integration_participant_quota(
-                &transaction,
-                scope,
-                &current.integration_id,
-            )?;
+            ensure_integration_participant_quota(&transaction, scope, &current.integration_id)?;
         }
         ensure_unique_active_owner(
             &transaction,
