@@ -12,6 +12,12 @@ fn read(path: &str) -> String {
     fs::read_to_string(root().join(path)).expect("architecture source")
 }
 
+fn assert_publisher_quota_boundary(realtime_service: &str, runtime: &str) {
+    assert!(realtime_service.contains("claim_universal_publisher_quota"));
+    assert!(realtime_service.contains("claim_publisher_slot"));
+    assert!(runtime.contains("forward_authenticated_e2ee_media"));
+}
+
 #[test]
 fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     let workspace = read("Cargo.toml");
@@ -70,9 +76,7 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(realtime_service.contains("spawn_blocking"));
     assert!(runtime.contains("LiveWebRtcProvider::with_e2ee_ingress"));
     assert!(runtime.contains("run_webrtc_e2ee_bridge"));
-    assert!(runtime.contains("forward_authenticated_e2ee_media"));
-    assert!(realtime_service.contains("claim_universal_publisher_quota"));
-    assert!(realtime_service.contains("claim_publisher_slot"));
+    assert_publisher_quota_boundary(&realtime_service, &runtime);
     assert!(runtime.contains("spawn_blocking"));
     assert!(e2ee_bridge.contains("WEBRTC_E2EE_DATA_CHANNEL_LABEL"));
     assert!(e2ee_bridge.contains("ucr.e2ee.media.v1"));
