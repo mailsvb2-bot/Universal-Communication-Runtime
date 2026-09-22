@@ -4392,7 +4392,11 @@ mod universal_runtime_tests {
         assert_eq!(persisted.lifecycle, UniversalConferenceLifecycle::Ended);
         assert_eq!(persisted.revision, 4);
         let events = reopened
-            .events_for_types(&scope(), &["ucr.conference.started", "ucr.conference.ended"], 8)
+            .events_for_types(
+                &scope(),
+                &["ucr.conference.started", "ucr.conference.ended"],
+                8,
+            )
             .expect("lifecycle events after restart");
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, "ucr.conference.started");
