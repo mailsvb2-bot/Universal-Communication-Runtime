@@ -1472,14 +1472,14 @@ mod tests {
         AuditRecordId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuditOperationRef,
         ServiceAuditOutcome, ServiceAuditRecord, ServiceQuotaPolicy, ServiceRateLimitPolicy,
-        ServiceRequestRateClass, TenantId, TenantScope,
+        ServiceRequestRateClass, ServiceResourceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{CONVERSATION_READ_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND};
 
     use super::SqliteLocalStore;
     use crate::{
-        SQLITE_SCHEMA_V13, SQLITE_SCHEMA_V16, SQLITE_SCHEMA_V36, SQLITE_SCHEMA_VERSION,
-        UCR_SQLITE_APPLICATION_ID,
+        SQLITE_SCHEMA_V13, SQLITE_SCHEMA_V16, SQLITE_SCHEMA_V36, SQLITE_SCHEMA_V37,
+        SQLITE_SCHEMA_VERSION, UCR_SQLITE_APPLICATION_ID,
     };
 
     static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(80_000);
@@ -1603,6 +1603,35 @@ mod tests {
     }
 
     #[test]
+    fn resource_quota_policy_survives_restart() {
+        let db = TestDb::new();
+        let subject = service("service-resource-sqlite");
+        let policy = ServiceResourceQuotaPolicy {
+            subject: subject.clone(),
+            max_concurrent_participants: 7,
+        };
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open");
+            store
+                .set_service_resource_quota_policy(&policy)
+                .expect("set resource quota");
+            assert_eq!(
+                store
+                    .service_resource_quota_policy(&subject)
+                    .expect("read resource quota"),
+                Some(policy.clone())
+            );
+        }
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert_eq!(
+            reopened
+                .service_resource_quota_policy(&subject)
+                .expect("read after restart"),
+            Some(policy)
+        );
+    }
+
+    #[test]
     fn class_specific_quota_accounting_survives_restart_without_cross_starvation() {
         let db = TestDb::new();
         let subject = service("service-rate-class-sqlite");
@@ -1708,7 +1737,8 @@ mod tests {
             .expect("seed legacy v36 usage");
         connection
             .execute_batch(
-                "DROP TABLE service_rate_limit_usage;
+                "DROP TABLE service_resource_quota_policies;
+                 DROP TABLE service_rate_limit_usage;
                  DROP TABLE service_rate_limit_policies;",
             )
             .expect("restore exact v36 quota shape");
@@ -1728,6 +1758,64 @@ mod tests {
                 "migration must not reset usage for {rate_class:?}"
             );
         }
+    }
+
+    #[test]
+    fn v37_to_v38_migration_adds_resource_quota_storage_without_resetting_rate_limits() {
+        let db = TestDb::new();
+        let subject = service("service-resource-migration");
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("initialize current");
+            store
+                .set_service_quota_policy(&ServiceQuotaPolicy {
+                    subject: subject.clone(),
+                    max_requests: 2,
+                    window_ms: 1_000,
+                })
+                .expect("install rate template");
+            store
+                .consume_service_request_for_class(
+                    &subject,
+                    ServiceRequestRateClass::Management,
+                    10_000,
+                )
+                .expect("seed management usage");
+        }
+
+        let connection = Connection::open(db.path()).expect("open raw sqlite");
+        connection
+            .execute_batch("DROP TABLE service_resource_quota_policies;")
+            .expect("restore exact v37 shape");
+        connection
+            .pragma_update(None, "user_version", SQLITE_SCHEMA_V37)
+            .expect("set v37 version");
+        drop(connection);
+
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v37 to v38");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        assert_eq!(
+            migrated
+                .service_resource_quota_policy(&subject)
+                .expect("new policy storage is readable"),
+            None
+        );
+        migrated
+            .consume_service_request_for_class(
+                &subject,
+                ServiceRequestRateClass::Management,
+                10_000,
+            )
+            .expect("second request proves existing rate state was preserved");
+        assert_eq!(
+            migrated.consume_service_request_for_class(
+                &subject,
+                ServiceRequestRateClass::Management,
+                10_000,
+            ),
+            Err(ServiceQuotaConsumeError::RateLimited {
+                retry_after_ms: 1_000
+            })
+        );
     }
 
     #[test]
