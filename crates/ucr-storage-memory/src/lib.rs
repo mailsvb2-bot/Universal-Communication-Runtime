@@ -6161,16 +6161,15 @@ mod service_principal_quota_audit_tests {
 
     use ucr_core::{
         AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError,
-        PermissionGrantStore, ServiceAuditStore,
-        ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
-        ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaConsumeError, ServiceQuotaStore,
-        issue_service_credential,
+        PermissionGrantStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
+        ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaClockError,
+        ServiceQuotaConsumeError, ServiceQuotaStore, issue_service_credential,
     };
     use ucr_model::{
         AuthorizationRequest, ConversationId, NamespaceId, OpaqueId, PermissionGrant,
-        PermissionScope, PrincipalId,
-        PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuditOutcome, ServiceQuotaPolicy,
-        ServiceRateLimitPolicy, ServiceRequestRateClass, TenantId, TenantScope,
+        PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
+        ServiceAuditOutcome, ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
+        TenantId, TenantScope,
     };
     use ucr_protocol::{
         AUDIO_SEND_PERMISSION, CALL_SIGNAL_PERMISSION, CONFERENCE_JOIN_ISSUE_PERMISSION,
@@ -6384,8 +6383,7 @@ mod service_principal_quota_audit_tests {
                     permission: permission.to_owned(),
                     resource_scope: resource.clone(),
                 }),
-                Err(CanonicalError::new(CanonicalErrorCode::RateLimited)
-                    .with_retry_after(1_000)),
+                Err(CanonicalError::new(CanonicalErrorCode::RateLimited).with_retry_after(1_000)),
                 "second request in {permission} class must be independently limited"
             );
         }
