@@ -9874,3 +9874,149 @@ mod phase14_event_subscription_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod service_resource_participant_quota_tests {
+    use ucr_core::{
+        DurableRecordStatus, DurableStoreError, ServiceQuotaStore, UniversalConferenceStore,
+    };
+    use ucr_model::{
+        ConferenceParticipantRole, ConferenceScheduleMetadata, GroupId, IntegrationId, NamespaceId,
+        OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
+        ServiceResourceQuotaPolicy, TenantId, TenantScope, UniversalConferenceLifecycle,
+        UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid opaque id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-memory-resource")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("namespace-memory-resource"))),
+        }
+    }
+
+    fn integration(value: &str) -> IntegrationId {
+        IntegrationId::from_opaque(oid(value))
+    }
+
+    fn subject(scope: &TenantScope, integration_id: &IntegrationId) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(integration_id.as_opaque().clone()),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
+    fn conference(
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        id: &str,
+    ) -> UniversalConferenceProfile {
+        UniversalConferenceProfile {
+            scope: scope.clone(),
+            conference_id: GroupId::from_opaque(oid(id)),
+            integration_id: integration_id.clone(),
+            external_conference_id: format!("external-{id}").into_bytes(),
+            create_idempotency_key: format!("create-{id}"),
+            mode: UniversalConferenceMode::Meeting,
+            lifecycle: UniversalConferenceLifecycle::Scheduled,
+            schedule: ConferenceScheduleMetadata {
+                starts_at_unix_ms: 1_000,
+                planned_end_unix_ms: None,
+                join_before_seconds: 0,
+                join_after_seconds: 0,
+                timezone: None,
+            },
+            entry_open: true,
+            revision: 1,
+        }
+    }
+
+    fn participant(
+        conference: &UniversalConferenceProfile,
+        principal_id: &str,
+    ) -> UniversalConferenceParticipantProfile {
+        UniversalConferenceParticipantProfile {
+            scope: conference.scope.clone(),
+            conference_id: conference.conference_id.clone(),
+            integration_id: conference.integration_id.clone(),
+            external_user_id: format!("external-{principal_id}").into_bytes(),
+            participant: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid(principal_id)),
+                kind: PrincipalKind::Person,
+            },
+            role: ConferenceParticipantRole::Attendee,
+            audio_muted: false,
+            camera_allowed: true,
+            publish_audio_allowed: true,
+            publish_video_allowed: true,
+            screen_share_allowed: false,
+            active: true,
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn concurrent_participant_quota_is_atomic_with_memory_participant_state() {
+        let store = MemoryLocalStore::default();
+        let scope = scope();
+        let integration = integration("integration-memory-resource");
+        store
+            .set_service_resource_quota_policy(&ServiceResourceQuotaPolicy {
+                subject: subject(&scope, &integration),
+                max_concurrent_participants: 1,
+            })
+            .expect("set quota");
+
+        let conference_one = conference(&scope, &integration, "conference-memory-resource-1");
+        let conference_two = conference(&scope, &integration, "conference-memory-resource-2");
+        store
+            .persist_universal_conference_profile(&conference_one)
+            .expect("conference one");
+        store
+            .persist_universal_conference_profile(&conference_two)
+            .expect("conference two");
+
+        let first = participant(&conference_one, "person-memory-resource-1");
+        let second = participant(&conference_two, "person-memory-resource-2");
+        assert_eq!(
+            store
+                .persist_universal_conference_participant(&first)
+                .expect("first participant"),
+            DurableRecordStatus::Persisted
+        );
+        assert_eq!(
+            store.persist_universal_conference_participant(&second),
+            Err(DurableStoreError::Full)
+        );
+
+        store
+            .update_universal_conference_participant(
+                &scope,
+                &conference_one.conference_id,
+                &first.participant,
+                first.revision,
+                first.role,
+                first.audio_muted,
+                first.camera_allowed,
+                first.publish_audio_allowed,
+                first.publish_video_allowed,
+                first.screen_share_allowed,
+                false,
+            )
+            .expect("deactivate first");
+        assert_eq!(
+            store
+                .persist_universal_conference_participant(&second)
+                .expect("reuse released slot"),
+            DurableRecordStatus::Persisted
+        );
+    }
+}
