@@ -284,7 +284,8 @@ mod tests {
 
     use ucr_model::{
         AuditRecordId, NamespaceId, OpaqueId, PrincipalId, PrincipalRef, ScopedPrincipal,
-        ServiceAuditOutcome, ServiceAuditRecord, ServiceCredentialId, ServiceQuotaPolicy, TenantId,
+        ServiceAuditOutcome, ServiceAuditRecord, ServiceCredentialId, ServiceQuotaPolicy,
+        ServiceRequestRateClass, TenantId,
         TenantScope,
     };
 
@@ -343,6 +344,41 @@ mod tests {
         assert_eq!(
             validate_service_quota_policy(&policy),
             Err(ServiceControlValidationError::NotServiceAccount)
+        );
+    }
+
+    #[test]
+    fn canonical_permissions_map_to_independent_request_rate_classes() {
+        assert_eq!(
+            service_request_rate_class("ucr.conference.join.issue"),
+            ServiceRequestRateClass::JoinIssuance
+        );
+        assert_eq!(
+            service_request_rate_class("ucr.call.signal"),
+            ServiceRequestRateClass::Signaling
+        );
+        for permission in [
+            "ucr.call.audio.send",
+            "ucr.call.audio.receive",
+            "ucr.call.video.send",
+            "ucr.call.video.receive",
+            "ucr.call.screen_share.send",
+            "ucr.transport.local.use",
+            "ucr.organization.relay.use",
+            "ucr.organization.sfu.use",
+        ] {
+            assert_eq!(
+                service_request_rate_class(permission),
+                ServiceRequestRateClass::MediaTransport
+            );
+        }
+        assert_eq!(
+            service_request_rate_class("ucr.conference.manage"),
+            ServiceRequestRateClass::Management
+        );
+        assert_eq!(
+            service_request_rate_class("ucr.message.read"),
+            ServiceRequestRateClass::Management
         );
     }
 
