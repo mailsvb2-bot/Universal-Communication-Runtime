@@ -4318,7 +4318,7 @@ mod universal_runtime_tests {
     }
 
     #[test]
-    fn conference_lifecycle_events_are_atomic_and_survive_restart() {
+    fn conference_lifecycle_events_survive_sqlite_restart() {
         let db = TestDb::new();
         let started_command = CommandId::from_opaque(oid("lifecycle-start-command"));
         let ended_command = CommandId::from_opaque(oid("lifecycle-end-command"));
@@ -4397,14 +4397,17 @@ mod universal_runtime_tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, "conference.started");
         assert_eq!(events[1].event_type, "conference.ended");
+    }
 
-        let rollback_db = TestDb::new();
-        let rollback_store =
-            SqliteLocalStore::open(&rollback_db.0).expect("open rollback sqlite store");
+    #[test]
+    fn conference_lifecycle_event_conflict_rolls_back_sqlite_transition() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open rollback sqlite store");
         let initial = conference();
-        rollback_store
+        store
             .persist_universal_conference_profile(&initial)
             .expect("rollback conference profile");
+        let started_command = CommandId::from_opaque(oid("lifecycle-start-command"));
         let expected = lifecycle_event(
             &initial,
             UniversalConferenceLifecycle::Live,
@@ -4416,11 +4419,11 @@ mod universal_runtime_tests {
         .expect("expected event");
         let mut conflicting = expected.clone();
         conflicting.payload = b"conflicting-lifecycle-payload".to_vec();
-        rollback_store
+        store
             .append_event(&conflicting)
             .expect("seed conflicting event id");
         assert_eq!(
-            rollback_store.transition_universal_conference_with_event(
+            store.transition_universal_conference_with_event(
                 &scope(),
                 &initial.conference_id,
                 initial.revision,
@@ -4430,7 +4433,7 @@ mod universal_runtime_tests {
             ),
             Err(ucr_core::DurableStoreError::Conflict)
         );
-        let unchanged = rollback_store
+        let unchanged = store
             .universal_conference_profile(&scope(), &initial.conference_id)
             .expect("rollback profile read")
             .expect("rollback profile");
