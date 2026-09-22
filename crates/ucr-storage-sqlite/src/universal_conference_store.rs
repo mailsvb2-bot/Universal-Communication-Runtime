@@ -2,8 +2,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use ucr_core::{DurableRecordStatus, DurableStoreError, UniversalConferenceStore};
 use ucr_model::{
     ConferenceParticipantRole, ConferenceScheduleMetadata, EventEnvelope, GroupId, IntegrationId,
-    OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, TenantScope, UniversalConferenceLifecycle,
-    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantScope,
+    UniversalConferenceLifecycle, UniversalConferenceMode, UniversalConferenceParticipantProfile,
+    UniversalConferenceProfile,
 };
 
 use super::{
@@ -543,6 +544,11 @@ impl UniversalConferenceStore for SqliteLocalStore {
                 &participant.scope,
                 &participant.conference_id,
             )?;
+            ensure_integration_participant_quota(
+                &transaction,
+                &participant.scope,
+                &participant.integration_id,
+            )?;
         }
         ensure_unique_active_owner(
             &transaction,
@@ -650,6 +656,7 @@ impl UniversalConferenceStore for SqliteLocalStore {
         }
         if active && !current.active {
             ensure_participant_capacity(&transaction, scope, conference_id)?;
+            ensure_integration_participant_quota(&transaction, scope, &current.integration_id)?;
         }
         ensure_unique_active_owner(
             &transaction,
@@ -738,6 +745,47 @@ fn insert_profile(
         )
         .map_err(|error| map_sqlite_error(&error))?;
     Ok(())
+}
+
+fn ensure_integration_participant_quota(
+    connection: &Connection,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+) -> Result<(), DurableStoreError> {
+    let subject = ScopedPrincipal {
+        scope: scope.clone(),
+        principal: PrincipalRef {
+            principal_id: PrincipalId::from_opaque(integration_id.as_opaque().clone()),
+            kind: PrincipalKind::ServiceAccount,
+        },
+    };
+    let Some(policy) =
+        super::service_control_store::load_resource_quota_policy(connection, &subject)?
+    else {
+        return Ok(());
+    };
+    let namespace = namespace_storage_key(scope);
+    let active: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM universal_conference_participants
+             WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
+               AND integration_id = ?4 AND active = 1",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                integration_id.as_opaque().as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let limit = i64::try_from(policy.max_concurrent_participants)
+        .map_err(|_| DurableStoreError::Corrupt)?;
+    if active >= limit {
+        Err(DurableStoreError::Full)
+    } else {
+        Ok(())
+    }
 }
 
 fn ensure_participant_capacity(
@@ -1350,4 +1398,212 @@ const fn encode_u64(value: u64) -> [u8; 8] {
 fn decode_u64(value: &[u8]) -> Result<u64, DurableStoreError> {
     let bytes: [u8; 8] = value.try_into().map_err(|_| DurableStoreError::Corrupt)?;
     Ok(u64::from_be_bytes(bytes))
+}
+
+#[cfg(test)]
+mod resource_quota_tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use ucr_core::{
+        DurableRecordStatus, DurableStoreError, ServiceQuotaStore, UniversalConferenceStore,
+    };
+    use ucr_model::{
+        ConferenceParticipantRole, ConferenceScheduleMetadata, GroupId, IntegrationId, NamespaceId,
+        OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
+        ServiceResourceQuotaPolicy, TenantId, TenantScope, UniversalConferenceLifecycle,
+        UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    };
+
+    use super::SqliteLocalStore;
+
+    static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+    struct TestDb(PathBuf);
+
+    impl TestDb {
+        fn new() -> Self {
+            let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            Self(std::env::temp_dir().join(format!(
+                "ucr-conference-resource-quota-{}-{sequence}.sqlite3",
+                std::process::id()
+            )))
+        }
+    }
+
+    impl Drop for TestDb {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+            let _ = fs::remove_file(self.0.with_extension("sqlite3-wal"));
+            let _ = fs::remove_file(self.0.with_extension("sqlite3-shm"));
+        }
+    }
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid opaque id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-resource-quota")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("namespace-resource-quota"))),
+        }
+    }
+
+    fn integration(value: &str) -> IntegrationId {
+        IntegrationId::from_opaque(oid(value))
+    }
+
+    fn subject(scope: &TenantScope, integration_id: &IntegrationId) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(integration_id.as_opaque().clone()),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
+    fn conference(
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        id: &str,
+    ) -> UniversalConferenceProfile {
+        UniversalConferenceProfile {
+            scope: scope.clone(),
+            conference_id: GroupId::from_opaque(oid(id)),
+            integration_id: integration_id.clone(),
+            external_conference_id: format!("external-{id}").into_bytes(),
+            create_idempotency_key: format!("create-{id}"),
+            mode: UniversalConferenceMode::Meeting,
+            lifecycle: UniversalConferenceLifecycle::Scheduled,
+            schedule: ConferenceScheduleMetadata {
+                starts_at_unix_ms: 1_000,
+                planned_end_unix_ms: None,
+                join_before_seconds: 0,
+                join_after_seconds: 0,
+                timezone: None,
+            },
+            entry_open: true,
+            revision: 1,
+        }
+    }
+
+    fn participant(
+        conference: &UniversalConferenceProfile,
+        principal_id: &str,
+        external_user_id: &str,
+    ) -> UniversalConferenceParticipantProfile {
+        UniversalConferenceParticipantProfile {
+            scope: conference.scope.clone(),
+            conference_id: conference.conference_id.clone(),
+            integration_id: conference.integration_id.clone(),
+            external_user_id: external_user_id.as_bytes().to_vec(),
+            participant: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid(principal_id)),
+                kind: PrincipalKind::Person,
+            },
+            role: ConferenceParticipantRole::Attendee,
+            audio_muted: false,
+            camera_allowed: true,
+            publish_audio_allowed: true,
+            publish_video_allowed: true,
+            screen_share_allowed: false,
+            active: true,
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn concurrent_participant_quota_is_integration_scoped_and_releases_on_deactivation() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open");
+        let scope = scope();
+        let integration_a = integration("integration-resource-a");
+        let integration_b = integration("integration-resource-b");
+
+        store
+            .set_service_resource_quota_policy(&ServiceResourceQuotaPolicy {
+                subject: subject(&scope, &integration_a),
+                max_concurrent_participants: 1,
+            })
+            .expect("set participant quota");
+
+        let primary_conference = conference(&scope, &integration_a, "conference-resource-a1");
+        let overflow_conference = conference(&scope, &integration_a, "conference-resource-a2");
+        let other_integration_conference =
+            conference(&scope, &integration_b, "conference-resource-b1");
+        for profile in [
+            &primary_conference,
+            &overflow_conference,
+            &other_integration_conference,
+        ] {
+            assert_eq!(
+                store
+                    .persist_universal_conference_profile(profile)
+                    .expect("persist conference"),
+                DurableRecordStatus::Persisted
+            );
+        }
+
+        let primary_participant = participant(
+            &primary_conference,
+            "person-resource-a1",
+            "external-user-a1",
+        );
+        let overflow_participant = participant(
+            &overflow_conference,
+            "person-resource-a2",
+            "external-user-a2",
+        );
+        let other_integration_participant = participant(
+            &other_integration_conference,
+            "person-resource-b1",
+            "external-user-b1",
+        );
+
+        assert_eq!(
+            store
+                .persist_universal_conference_participant(&primary_participant)
+                .expect("first participant"),
+            DurableRecordStatus::Persisted
+        );
+        assert_eq!(
+            store.persist_universal_conference_participant(&overflow_participant),
+            Err(DurableStoreError::Full),
+            "quota spans all conferences owned by one integration"
+        );
+        assert_eq!(
+            store
+                .persist_universal_conference_participant(&other_integration_participant)
+                .expect("other integration remains independent"),
+            DurableRecordStatus::Persisted
+        );
+
+        store
+            .update_universal_conference_participant(
+                &scope,
+                &primary_conference.conference_id,
+                &primary_participant.participant,
+                primary_participant.revision,
+                primary_participant.role,
+                primary_participant.audio_muted,
+                primary_participant.camera_allowed,
+                primary_participant.publish_audio_allowed,
+                primary_participant.publish_video_allowed,
+                primary_participant.screen_share_allowed,
+                false,
+            )
+            .expect("deactivate first participant");
+
+        assert_eq!(
+            store
+                .persist_universal_conference_participant(&overflow_participant)
+                .expect("released capacity can be reused"),
+            DurableRecordStatus::Persisted
+        );
+    }
 }

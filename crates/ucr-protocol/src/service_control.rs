@@ -2,6 +2,7 @@ use sha2::{Digest, Sha256};
 use ucr_model::{
     PrincipalKind, ServiceAuditOperationRef, ServiceAuditOutcome, ServiceAuditRecord,
     ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
+    ServiceResourceQuotaPolicy,
 };
 
 use crate::validate_namespaced_identifier;
@@ -90,6 +91,24 @@ pub fn validate_service_quota_policy(
         || policy.window_ms == 0
         || policy.max_requests > i64::MAX as u64
         || policy.window_ms > i64::MAX as u64
+    {
+        return Err(ServiceControlValidationError::InvalidQuota);
+    }
+    Ok(())
+}
+
+/// Validates durable live-resource ceilings for one Service Account.
+///
+/// # Errors
+/// Rejects non-service principals and zero/SQLite-incompatible limits.
+pub fn validate_service_resource_quota_policy(
+    policy: &ServiceResourceQuotaPolicy,
+) -> Result<(), ServiceControlValidationError> {
+    if policy.subject.principal.kind != PrincipalKind::ServiceAccount {
+        return Err(ServiceControlValidationError::NotServiceAccount);
+    }
+    if policy.max_concurrent_participants == 0
+        || policy.max_concurrent_participants > i64::MAX as u64
     {
         return Err(ServiceControlValidationError::InvalidQuota);
     }
@@ -285,7 +304,7 @@ mod tests {
     use ucr_model::{
         AuditRecordId, NamespaceId, OpaqueId, PrincipalId, PrincipalRef, ScopedPrincipal,
         ServiceAuditOutcome, ServiceAuditRecord, ServiceCredentialId, ServiceQuotaPolicy,
-        ServiceRequestRateClass, TenantId, TenantScope,
+        ServiceRequestRateClass, ServiceResourceQuotaPolicy, TenantId, TenantScope,
     };
 
     use super::*;
@@ -342,6 +361,26 @@ mod tests {
         policy.subject.principal.kind = PrincipalKind::Person;
         assert_eq!(
             validate_service_quota_policy(&policy),
+            Err(ServiceControlValidationError::NotServiceAccount)
+        );
+    }
+
+    #[test]
+    fn resource_quota_policy_requires_service_account_and_nonzero_participant_limit() {
+        let mut policy = ServiceResourceQuotaPolicy {
+            subject: subject(),
+            max_concurrent_participants: 10,
+        };
+        assert_eq!(validate_service_resource_quota_policy(&policy), Ok(()));
+        policy.max_concurrent_participants = 0;
+        assert_eq!(
+            validate_service_resource_quota_policy(&policy),
+            Err(ServiceControlValidationError::InvalidQuota)
+        );
+        policy.max_concurrent_participants = 10;
+        policy.subject.principal.kind = PrincipalKind::Person;
+        assert_eq!(
+            validate_service_resource_quota_policy(&policy),
             Err(ServiceControlValidationError::NotServiceAccount)
         );
     }

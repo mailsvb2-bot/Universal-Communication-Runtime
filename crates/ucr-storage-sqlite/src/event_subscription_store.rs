@@ -1626,7 +1626,8 @@ mod tests {
             let connection = rusqlite::Connection::open(db.path()).expect("open raw sqlite");
             connection
                 .execute_batch(
-                    "DROP TABLE service_rate_limit_usage;
+                    "DROP TABLE service_resource_quota_policies;
+                     DROP TABLE service_rate_limit_usage;
                      DROP TABLE service_rate_limit_policies;
                      DROP TABLE event_subscription_owners;
                      PRAGMA user_version=35;",

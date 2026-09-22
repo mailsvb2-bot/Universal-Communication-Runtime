@@ -46,10 +46,11 @@ use ucr_model::{
     PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecordingConsentState, RecordingId,
     RecordingSession, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
     ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
-    ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass, SessionId, StoreForwardId,
-    StoreForwardJob, StoreForwardLeaseId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
-    TrustedSigningKeyRecord, TrustedSigningKeyState, UniversalConferenceLifecycle,
-    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
+    ServiceResourceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId,
+    SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    TrustedSigningKeyState, UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
+    UniversalConferenceProfile,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -72,8 +73,9 @@ use ucr_protocol::{
     validate_external_identity_binding_key, validate_federation_credential_rotation,
     validate_federation_transition, validate_identity_record, validate_permission_grant,
     validate_principal_identity_binding, validate_recording_session, validate_service_audit_record,
-    validate_service_quota_policy, validate_service_rate_limit_policy, validate_sync_checkpoint,
-    validate_sync_transition, validate_trusted_signing_key_descriptor,
+    validate_service_quota_policy, validate_service_rate_limit_policy,
+    validate_service_resource_quota_policy, validate_sync_checkpoint, validate_sync_transition,
+    validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 12;
@@ -205,6 +207,7 @@ struct MemoryState {
     permission_grants: Vec<PermissionGrant>,
     service_credentials: HashMap<ServiceCredentialRef, ServiceCredentialRecord>,
     service_quota_policies: HashMap<ServicePrincipalKey, ServiceQuotaPolicy>,
+    service_resource_quota_policies: HashMap<ServicePrincipalKey, ServiceResourceQuotaPolicy>,
     service_rate_limit_policies: HashMap<ServiceRateLimitKey, ServiceRateLimitPolicy>,
     service_rate_limit_usage: HashMap<ServiceRateLimitKey, MemoryQuotaUsage>,
     service_audit_records: Vec<(ServiceAuditRecord, [u8; 32])>,
@@ -366,6 +369,30 @@ impl ServiceQuotaStore for MemoryLocalStore {
         let key = service_principal_key(subject);
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         Ok(state.service_quota_policies.get(&key).cloned())
+    }
+
+    fn set_service_resource_quota_policy(
+        &self,
+        policy: &ServiceResourceQuotaPolicy,
+    ) -> Result<(), DurableStoreError> {
+        validate_service_resource_quota_policy(policy)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = service_principal_key(&policy.subject);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        state
+            .service_resource_quota_policies
+            .insert(key, policy.clone());
+        Ok(())
+    }
+
+    fn service_resource_quota_policy(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<Option<ServiceResourceQuotaPolicy>, DurableStoreError> {
+        validate_service_subject(subject)?;
+        let key = service_principal_key(subject);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state.service_resource_quota_policies.get(&key).cloned())
     }
 
     fn set_service_rate_limit_policy(
@@ -2153,6 +2180,42 @@ fn service_principal_key(subject: &ScopedPrincipal) -> ServicePrincipalKey {
             .as_str()
             .to_owned(),
     )
+}
+
+fn integration_service_principal_key(
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+) -> ServicePrincipalKey {
+    (
+        scope_key(scope),
+        integration_id.as_opaque().as_str().to_owned(),
+    )
+}
+
+fn ensure_integration_participant_quota(
+    state: &MemoryState,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+) -> Result<(), DurableStoreError> {
+    let key = integration_service_principal_key(scope, integration_id);
+    let Some(policy) = state.service_resource_quota_policies.get(&key) else {
+        return Ok(());
+    };
+    let active = state
+        .universal_conference_participants
+        .values()
+        .filter(|existing| {
+            existing.scope == *scope
+                && existing.integration_id == *integration_id
+                && existing.active
+        })
+        .count();
+    let active = u64::try_from(active).map_err(|_| DurableStoreError::Full)?;
+    if active >= policy.max_concurrent_participants {
+        Err(DurableStoreError::Full)
+    } else {
+        Ok(())
+    }
 }
 
 fn service_credential_ref(
@@ -8893,6 +8956,11 @@ impl UniversalConferenceStore for MemoryLocalStore {
             if active_participant_count >= MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS {
                 return Err(DurableStoreError::Full);
             }
+            ensure_integration_participant_quota(
+                &state,
+                &participant.scope,
+                &participant.integration_id,
+            )?;
         }
         if participant.active
             && participant.role == ConferenceParticipantRole::Owner
@@ -9041,6 +9109,13 @@ impl UniversalConferenceStore for MemoryLocalStore {
             if active_participant_count >= MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS {
                 return Err(DurableStoreError::Full);
             }
+            let integration_id = state
+                .universal_conference_participants
+                .get(&key)
+                .ok_or(DurableStoreError::Conflict)?
+                .integration_id
+                .clone();
+            ensure_integration_participant_quota(&state, scope, &integration_id)?;
         }
         if active
             && role == ConferenceParticipantRole::Owner
@@ -9797,5 +9872,151 @@ mod phase14_event_subscription_tests {
                 .expect("new poll"),
             EventPollResult::Batch(ref batch) if batch.events[0].event_id.as_opaque().as_str() == "event-new"
         ));
+    }
+}
+
+#[cfg(test)]
+mod service_resource_participant_quota_tests {
+    use ucr_core::{
+        DurableRecordStatus, DurableStoreError, ServiceQuotaStore, UniversalConferenceStore,
+    };
+    use ucr_model::{
+        ConferenceParticipantRole, ConferenceScheduleMetadata, GroupId, IntegrationId, NamespaceId,
+        OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
+        ServiceResourceQuotaPolicy, TenantId, TenantScope, UniversalConferenceLifecycle,
+        UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid opaque id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-memory-resource")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("namespace-memory-resource"))),
+        }
+    }
+
+    fn integration(value: &str) -> IntegrationId {
+        IntegrationId::from_opaque(oid(value))
+    }
+
+    fn subject(scope: &TenantScope, integration_id: &IntegrationId) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(integration_id.as_opaque().clone()),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
+    fn conference(
+        scope: &TenantScope,
+        integration_id: &IntegrationId,
+        id: &str,
+    ) -> UniversalConferenceProfile {
+        UniversalConferenceProfile {
+            scope: scope.clone(),
+            conference_id: GroupId::from_opaque(oid(id)),
+            integration_id: integration_id.clone(),
+            external_conference_id: format!("external-{id}").into_bytes(),
+            create_idempotency_key: format!("create-{id}"),
+            mode: UniversalConferenceMode::Meeting,
+            lifecycle: UniversalConferenceLifecycle::Scheduled,
+            schedule: ConferenceScheduleMetadata {
+                starts_at_unix_ms: 1_000,
+                planned_end_unix_ms: None,
+                join_before_seconds: 0,
+                join_after_seconds: 0,
+                timezone: None,
+            },
+            entry_open: true,
+            revision: 1,
+        }
+    }
+
+    fn participant(
+        conference: &UniversalConferenceProfile,
+        principal_id: &str,
+    ) -> UniversalConferenceParticipantProfile {
+        UniversalConferenceParticipantProfile {
+            scope: conference.scope.clone(),
+            conference_id: conference.conference_id.clone(),
+            integration_id: conference.integration_id.clone(),
+            external_user_id: format!("external-{principal_id}").into_bytes(),
+            participant: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid(principal_id)),
+                kind: PrincipalKind::Person,
+            },
+            role: ConferenceParticipantRole::Attendee,
+            audio_muted: false,
+            camera_allowed: true,
+            publish_audio_allowed: true,
+            publish_video_allowed: true,
+            screen_share_allowed: false,
+            active: true,
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn concurrent_participant_quota_is_atomic_with_memory_participant_state() {
+        let store = MemoryLocalStore::default();
+        let scope = scope();
+        let integration = integration("integration-memory-resource");
+        store
+            .set_service_resource_quota_policy(&ServiceResourceQuotaPolicy {
+                subject: subject(&scope, &integration),
+                max_concurrent_participants: 1,
+            })
+            .expect("set quota");
+
+        let conference_one = conference(&scope, &integration, "conference-memory-resource-1");
+        let conference_two = conference(&scope, &integration, "conference-memory-resource-2");
+        store
+            .persist_universal_conference_profile(&conference_one)
+            .expect("conference one");
+        store
+            .persist_universal_conference_profile(&conference_two)
+            .expect("conference two");
+
+        let first = participant(&conference_one, "person-memory-resource-1");
+        let second = participant(&conference_two, "person-memory-resource-2");
+        assert_eq!(
+            store
+                .persist_universal_conference_participant(&first)
+                .expect("first participant"),
+            DurableRecordStatus::Persisted
+        );
+        assert_eq!(
+            store.persist_universal_conference_participant(&second),
+            Err(DurableStoreError::Full)
+        );
+
+        store
+            .update_universal_conference_participant(
+                &scope,
+                &conference_one.conference_id,
+                &first.participant,
+                first.revision,
+                first.role,
+                first.audio_muted,
+                first.camera_allowed,
+                first.publish_audio_allowed,
+                first.publish_video_allowed,
+                first.screen_share_allowed,
+                false,
+            )
+            .expect("deactivate first");
+        assert_eq!(
+            store
+                .persist_universal_conference_participant(&second)
+                .expect("reuse released slot"),
+            DurableRecordStatus::Persisted
+        );
     }
 }

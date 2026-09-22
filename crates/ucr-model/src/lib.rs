@@ -708,6 +708,16 @@ pub struct ServiceQuotaPolicy {
     pub window_ms: u64,
 }
 
+/// Durable resource ceilings for one external Service Account / integration.
+///
+/// Request rate limiting remains separately owned by `ServiceQuotaPolicy` and
+/// `ServiceRateLimitPolicy`; these limits govern live communication resources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceResourceQuotaPolicy {
+    pub subject: ScopedPrincipal,
+    pub max_concurrent_participants: u64,
+}
+
 /// Independent request-rate buckets for external Service Accounts.
 ///
 /// Management traffic must not be starved by high-volume join, signaling, or media traffic.
