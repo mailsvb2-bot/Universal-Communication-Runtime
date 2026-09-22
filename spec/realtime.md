@@ -47,21 +47,23 @@ The provider lifecycle is ephemeral: create session, apply remote description, a
 
 `LiveWebRtcProvider` is the first concrete engine adapter. It runs `webrtc-rs 0.17.2` on an isolated bounded worker, caps both queued commands and live peer sessions, maps deployment STUN/TURN settings into the engine, creates receive-only audio and video transceivers, emits a fully gathered SDP offer, applies a remote offer/answer and trickle ICE candidates, and closes ephemeral peer state deterministically. The synchronous provider contract never calls `block_on` inside an application Tokio runtime.
 
-The authenticated RealtimeService signalling surface and reference browser camera/microphone client are now implemented. The browser obtains the server offer and per-session ICE servers only after authenticated realtime admission, creates a native `RTCPeerConnection`, acquires local audio/video with `getUserMedia` for endpoint capture/preview, sends its SDP answer and trickle ICE candidates, supports microphone/camera toggles and device selection, and performs bounded reconnect using the same still-valid realtime session. Signalling responses that may contain TURN credentials are `Cache-Control: no-store`.
+The authenticated RealtimeService signalling surface and reference browser camera/microphone client are now implemented. Realtime admission and media authority are deliberately separate server projections: admission controls **when** Conference media may run, while the effective media policy controls **what** the participant may publish after admission. Join and Heartbeat expose both projections from canonical Conference state. The browser therefore remains in a media-free waiting room until `ADMITTED`, then obtains the server offer and per-session ICE servers, creates a native `RTCPeerConnection`, and requests only the endpoint capture currently allowed by the server. Universal Conference audio is allowed only when the participant is not server-muted and may publish audio, camera only when camera + video publication are allowed, and screen sharing only when the independent screen-share permission is allowed. A view-only attendee does not receive gratuitous camera/microphone permission prompts. Policy is refreshed on heartbeat; revoked media authority stops the corresponding local capture and disables the control without creating a second browser-side role authority. Heartbeat also revalidates accepted participant state, so removal or loss of Conference admission ends local capture/session rather than leaving denied capture running. The browser sends its SDP answer and trickle ICE candidates, supports microphone/camera toggles and device selection, and performs bounded reconnect using the same still-valid realtime session. Signalling responses that may contain TURN credentials are `Cache-Control: no-store`.
 
 Network recovery prefers an in-place authenticated ICE restart over tearing down the realtime session. `RestartWebRtc` revalidates the same signed scope/call/session binding, issues fresh session-bounded TURN credentials when TURN is configured, updates the existing peer configuration, asks the WebRTC engine for a new ICE generation, and returns a fresh offer. The browser applies that offer to the existing `RTCPeerConnection`, answers it, and keeps the canonical Conference/Call/realtime session unchanged. A full WebRTC transport rebuild remains a bounded fallback if ICE restart itself fails. Browser `offline -> online` recovery and failed/disconnected peer states use this path; device selection changes may still rebuild the peer because local capture changed.
 
 The reference browser also supports endpoint-only screen capture through `getDisplayMedia` when
 the browser and endpoint E2EE adapter both support live source updates. Screen capture is previewed
 locally and handed to the adapter as `screenStream`; it is stopped deterministically when the
-browser ends sharing, the participant leaves, the E2EE DataChannel closes, or the page is torn
-down. Explicit Leave stops local display capture before any best-effort server shutdown request, so
-a stalled network cleanup cannot keep the screen capture alive. The screen track is never attached
-to server-visible RTP. Browsers without display-capture support (including mobile environments
-where the API is unavailable) keep the control disabled. This browser capture boundary does not by
-itself claim a distinct canonical screen-share authorization policy; server authorization still
-applies to every encrypted video envelope and a later public policy layer must differentiate
-screen-share authority before that part of the capability can be promoted.
+browser ends sharing, the participant leaves, the E2EE DataChannel closes, the page is torn down,
+or the server-projected screen-share authority is revoked. Explicit Leave stops local display
+capture before any best-effort server shutdown request, so a stalled network cleanup cannot keep
+the screen capture alive. The screen track is never attached to server-visible RTP. Browsers
+without display-capture support (including mobile environments where the API is unavailable) keep
+the control disabled. Screen-share authority is distinct from camera authority: the canonical
+Universal Conference participant profile projects `screen_share_allowed` to the independent
+server permission, Join/Heartbeat project that effective decision to the browser, and every
+authenticated screen-share envelope is still revalidated at the realtime/SFU boundary. Browser UI
+state is therefore privacy-preserving advice, never the authorization owner.
 
 Conference media uses the server-created ordered DataChannel `ucr.e2ee.media.v1`, not raw browser RTP. The transport-neutral `SfuForwardEnvelope` wire v1 codec is owned by `ucr-protocol`; WebRTC owns only bounded 16,000-byte chunking/reassembly and delegates envelope encode/decode back to that protocol owner. The TypeScript endpoint mirror is byte-for-byte locked to the Rust codec by a fixed cross-language Conformance vector. The server canonical-validates the reassembled envelope, binds it to the active scope/call/session, revalidates current grant/device/publish policy, and routes the unchanged ciphertext through the existing `ConferenceRuntime -> SfuRuntime` path. Downlink ciphertext is chunked through the same DataChannel. The reference browser deliberately does not call `pc.addTrack(...)` and rejects unexpected RTP tracks, so endpoint camera/microphone samples are not exposed to the server merely because WebRTC signalling is connected.
 
