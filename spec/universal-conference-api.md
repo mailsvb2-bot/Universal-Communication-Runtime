@@ -22,8 +22,8 @@ The lifecycle coordinator may project into canonical Group/Call state but must n
 
 ### Lifecycle integration Events
 
-Crossing into `live` emits canonical Event type `conference.started`; crossing into `ended`
-emits `conference.ended`. Waiting and ending remain coordinator states and do not manufacture
+Crossing into `live` emits canonical Event type `ucr.conference.started`; crossing into `ended`
+emits `ucr.conference.ended`. Waiting and ending remain coordinator states and do not manufacture
 additional public lifecycle webhook types.
 
 The Event payload is `UniversalConferenceLifecycleEvent` and contains only integration-facing
@@ -35,8 +35,8 @@ subscription isolation boundary delivers the fact only to that integration.
 Lifecycle transition and Event append are one durable atomic store operation. Memory performs both
 under one mutex; SQLite performs the lifecycle compare-and-swap and canonical Event append in one
 immediate transaction. A store that cannot provide this atomicity fails closed. A successful
-transition therefore cannot become externally visible without its paired `conference.started` or
-`conference.ended` Event, and an Event cannot commit without the corresponding lifecycle revision.
+transition therefore cannot become externally visible without its paired `ucr.conference.started` or
+`ucr.conference.ended` Event, and an Event cannot commit without the corresponding lifecycle revision.
 
 
 ## Integration isolation
