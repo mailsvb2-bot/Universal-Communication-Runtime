@@ -26,7 +26,12 @@ class QuietHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-def request_json(method: str, url: str, payload: dict | None = None) -> dict:
+def request_json(
+    method: str,
+    url: str,
+    payload: dict | None = None,
+    timeout_seconds: int = 15,
+) -> dict:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -35,7 +40,7 @@ def request_json(method: str, url: str, payload: dict | None = None) -> dict:
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             data = response.read()
     except urllib.error.HTTPError as error:
         data = error.read()
@@ -170,6 +175,7 @@ def main() -> int:
             "POST",
             f"http://127.0.0.1:{webdriver_port}/session",
             {"capabilities": {"alwaysMatch": capabilities(args.browser)}},
+            timeout_seconds=90,
         )
         value = created.get("value") or {}
         session_id = value.get("sessionId") or created.get("sessionId")
