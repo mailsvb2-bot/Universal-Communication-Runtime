@@ -8971,9 +8971,7 @@ mod conference_lifecycle_event_atomicity_tests {
             actor: ActorRef {
                 actor_id: ActorId::from_opaque(oid("conference-memory-lifecycle-actor")),
                 kind: ActorKind::System,
-                on_behalf_of: Some(PrincipalId::from_opaque(
-                    integration_id.as_opaque().clone(),
-                )),
+                on_behalf_of: Some(PrincipalId::from_opaque(integration_id.as_opaque().clone())),
             },
             source_device: DeviceRef {
                 device_id: DeviceId::from_opaque(oid("conference-memory-lifecycle-device")),
