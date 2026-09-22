@@ -10,8 +10,8 @@ use ucr_model::{
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, MAX_SERVICE_AUDIT_OPERATION_KIND_LEN,
-    MAX_SERVICE_REQUEST_PERMISSION_LEN, service_request_rate_class,
-    validate_namespaced_identifier, validate_service_audit_operation_ref,
+    MAX_SERVICE_REQUEST_PERMISSION_LEN, service_request_rate_class, validate_namespaced_identifier,
+    validate_service_audit_operation_ref,
 };
 
 use crate::{
