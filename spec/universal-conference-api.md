@@ -72,7 +72,7 @@ Universal join issuance and revocation are durable idempotent mutations. The acc
 
 ## Capability discovery
 
-`GetCapabilities` exposes the canonical prepared media/conference capabilities plus explicit runtime-readiness flags. Capability discovery must not claim production readiness for browser realtime, WebRTC, TURN, recording, or horizontal SFU until the corresponding implementation and conformance evidence exist. A prepared protocol capability is not the same thing as a production deployment feature.
+`GetCapabilities` exposes the canonical prepared media/conference capabilities plus explicit runtime-readiness flags. Those flags are deployment state, not compile-time constants: the service defaults fail closed, the realtime runtime projects only configured capabilities, and TURN is reported only when a validated TURN URL/credential issuer is actually configured. Browser-gateway and production-WebRTC readiness require explicit operator enablement because those claims depend on deployment evidence outside the private loopback runtime. Recording and horizontal-SFU remain false until corresponding providers are wired. Capability discovery must not claim production readiness for browser realtime, WebRTC, TURN, recording, or horizontal SFU until the corresponding implementation and conformance evidence exist. A prepared protocol capability is not the same thing as a production deployment feature.
 
 ## Waiting room and admission
 
