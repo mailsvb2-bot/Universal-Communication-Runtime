@@ -2345,8 +2345,8 @@ fn validate_conference_lifecycle_event(
     event: Option<&EventEnvelope>,
 ) -> Result<(), DurableStoreError> {
     let expected_type = match lifecycle {
-        UniversalConferenceLifecycle::Live => Some("conference.started"),
-        UniversalConferenceLifecycle::Ended => Some("conference.ended"),
+        UniversalConferenceLifecycle::Live => Some("ucr.conference.started"),
+        UniversalConferenceLifecycle::Ended => Some("ucr.conference.ended"),
         UniversalConferenceLifecycle::Scheduled
         | UniversalConferenceLifecycle::Waiting
         | UniversalConferenceLifecycle::Ending => None,
@@ -8966,7 +8966,7 @@ mod conference_lifecycle_event_atomicity_tests {
         EventEnvelope {
             event_id: EventId::from_opaque(oid("conference-memory-started-event")),
             scope: scope(),
-            event_type: "conference.started".to_owned(),
+            event_type: "ucr.conference.started".to_owned(),
             payload: payload.to_vec(),
             actor: ActorRef {
                 actor_id: ActorId::from_opaque(oid("conference-memory-lifecycle-actor")),
@@ -9013,7 +9013,7 @@ mod conference_lifecycle_event_atomicity_tests {
         assert_eq!(live.revision, 2);
         assert_eq!(
             store
-                .events_for_types(&scope(), &["conference.started"], 4)
+                .events_for_types(&scope(), &["ucr.conference.started"], 4)
                 .expect("started events"),
             vec![started]
         );
