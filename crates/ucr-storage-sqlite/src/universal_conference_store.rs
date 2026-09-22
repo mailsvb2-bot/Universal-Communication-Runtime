@@ -1532,10 +1532,10 @@ mod resource_quota_tests {
             })
             .expect("set participant quota");
 
-        let conference_a1 = conference(&scope, &integration_a, "conference-resource-a1");
-        let conference_a2 = conference(&scope, &integration_a, "conference-resource-a2");
-        let conference_b1 = conference(&scope, &integration_b, "conference-resource-b1");
-        for profile in [&conference_a1, &conference_a2, &conference_b1] {
+        let primary_conference = conference(&scope, &integration_a, "conference-resource-a1");
+        let overflow_conference = conference(&scope, &integration_a, "conference-resource-a2");
+        let other_integration_conference = conference(&scope, &integration_b, "conference-resource-b1");
+        for profile in [&primary_conference, &overflow_conference, &other_integration_conference] {
             assert_eq!(
                 store
                     .persist_universal_conference_profile(profile)
@@ -1544,24 +1544,24 @@ mod resource_quota_tests {
             );
         }
 
-        let participant_a1 = participant(&conference_a1, "person-resource-a1", "external-user-a1");
-        let participant_a2 = participant(&conference_a2, "person-resource-a2", "external-user-a2");
-        let participant_b1 = participant(&conference_b1, "person-resource-b1", "external-user-b1");
+        let primary_participant = participant(&primary_conference, "person-resource-a1", "external-user-a1");
+        let overflow_participant = participant(&overflow_conference, "person-resource-a2", "external-user-a2");
+        let other_integration_participant = participant(&other_integration_conference, "person-resource-b1", "external-user-b1");
 
         assert_eq!(
             store
-                .persist_universal_conference_participant(&participant_a1)
+                .persist_universal_conference_participant(&primary_participant)
                 .expect("first participant"),
             DurableRecordStatus::Persisted
         );
         assert_eq!(
-            store.persist_universal_conference_participant(&participant_a2),
+            store.persist_universal_conference_participant(&overflow_participant),
             Err(DurableStoreError::Full),
             "quota spans all conferences owned by one integration"
         );
         assert_eq!(
             store
-                .persist_universal_conference_participant(&participant_b1)
+                .persist_universal_conference_participant(&other_integration_participant)
                 .expect("other integration remains independent"),
             DurableRecordStatus::Persisted
         );
@@ -1569,22 +1569,22 @@ mod resource_quota_tests {
         store
             .update_universal_conference_participant(
                 &scope,
-                &conference_a1.conference_id,
-                &participant_a1.participant,
-                participant_a1.revision,
-                participant_a1.role,
-                participant_a1.audio_muted,
-                participant_a1.camera_allowed,
-                participant_a1.publish_audio_allowed,
-                participant_a1.publish_video_allowed,
-                participant_a1.screen_share_allowed,
+                &primary_conference.conference_id,
+                &primary_participant.participant,
+                primary_participant.revision,
+                primary_participant.role,
+                primary_participant.audio_muted,
+                primary_participant.camera_allowed,
+                primary_participant.publish_audio_allowed,
+                primary_participant.publish_video_allowed,
+                primary_participant.screen_share_allowed,
                 false,
             )
             .expect("deactivate first participant");
 
         assert_eq!(
             store
-                .persist_universal_conference_participant(&participant_a2)
+                .persist_universal_conference_participant(&overflow_participant)
                 .expect("released capacity can be reused"),
             DurableRecordStatus::Persisted
         );
