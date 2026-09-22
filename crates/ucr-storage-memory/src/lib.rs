@@ -6164,12 +6164,13 @@ mod service_principal_quota_audit_tests {
     use ucr_core::{
         AuthorizedDurableRuntime, AuthorizedMutationError, PermissionGrantStore, ServiceAuditStore,
         ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
-        ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore, issue_service_credential,
+        ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaConsumeError, ServiceQuotaStore,
+        issue_service_credential,
     };
     use ucr_model::{
         ConversationId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuditOutcome, ServiceQuotaPolicy,
-        TenantId, TenantScope,
+        ServiceRateLimitPolicy, ServiceRequestRateClass, TenantId, TenantScope,
     };
     use ucr_protocol::{
         CONVERSATION_READ_PERMISSION, CanonicalError, CanonicalErrorCode,
@@ -6304,6 +6305,65 @@ mod service_principal_quota_audit_tests {
                 ServiceAuditOutcome::Authorized,
                 ServiceAuditOutcome::RateLimited,
             ]
+        );
+    }
+
+    #[test]
+    fn service_request_rate_classes_are_independent_and_overridable() {
+        let store = MemoryLocalStore::default();
+        let subject = service("service-rate-classes");
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject.clone(),
+                max_requests: 1,
+                window_ms: 1_000,
+            })
+            .expect("install legacy template");
+
+        for rate_class in ServiceRequestRateClass::ALL {
+            store
+                .consume_service_request_for_class(&subject, rate_class, 10_000)
+                .expect("each class has its own first request");
+            assert_eq!(
+                store.consume_service_request_for_class(&subject, rate_class, 10_000),
+                Err(ServiceQuotaConsumeError::RateLimited {
+                    retry_after_ms: 1_000
+                })
+            );
+        }
+
+        store
+            .set_service_rate_limit_policy(&ServiceRateLimitPolicy {
+                subject: subject.clone(),
+                rate_class: ServiceRequestRateClass::JoinIssuance,
+                max_requests: 2,
+                window_ms: 1_000,
+            })
+            .expect("override join bucket");
+        store
+            .consume_service_request_for_class(
+                &subject,
+                ServiceRequestRateClass::JoinIssuance,
+                10_000,
+            )
+            .expect("join override resets only join usage");
+        store
+            .consume_service_request_for_class(
+                &subject,
+                ServiceRequestRateClass::JoinIssuance,
+                10_000,
+            )
+            .expect("second join request allowed");
+        assert_eq!(
+            store.consume_service_request_for_class(
+                &subject,
+                ServiceRequestRateClass::Management,
+                10_000,
+            ),
+            Err(ServiceQuotaConsumeError::RateLimited {
+                retry_after_ms: 1_000
+            }),
+            "join override must not reset management usage"
         );
     }
 
