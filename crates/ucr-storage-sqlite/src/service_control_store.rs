@@ -1040,8 +1040,7 @@ fn verify_resource_quota_rows(connection: &Connection) -> Result<(), DurableStor
             max_concurrent_participants: u64::try_from(max_concurrent_participants)
                 .map_err(|_| DurableStoreError::Corrupt)?,
         };
-        validate_service_resource_quota_policy(&policy)
-            .map_err(|_| DurableStoreError::Corrupt)?;
+        validate_service_resource_quota_policy(&policy).map_err(|_| DurableStoreError::Corrupt)?;
     }
     Ok(())
 }
