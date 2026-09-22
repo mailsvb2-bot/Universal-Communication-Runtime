@@ -8918,6 +8918,138 @@ const fn valid_universal_conference_transition(
 }
 
 #[cfg(test)]
+mod conference_lifecycle_event_atomicity_tests {
+    use ucr_core::{DurableStoreError, EventJournalStore, UniversalConferenceStore};
+    use ucr_model::{
+        ActorId, ActorKind, ActorRef, ConferenceScheduleMetadata, CorrelationContext, DeviceId,
+        DeviceRef, EventEnvelope, EventId, GroupId, IdentityId, IntegrationId, OpaqueId,
+        PrincipalId, ProtocolVersion, TenantId, TenantScope, UniversalConferenceLifecycle,
+        UniversalConferenceMode, UniversalConferenceProfile,
+    };
+
+    use super::MemoryLocalStore;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-memory-lifecycle")),
+            namespace_id: None,
+        }
+    }
+
+    fn conference() -> UniversalConferenceProfile {
+        UniversalConferenceProfile {
+            scope: scope(),
+            conference_id: GroupId::from_opaque(oid("conference-memory-lifecycle")),
+            integration_id: IntegrationId::from_opaque(oid("integration-memory-lifecycle")),
+            external_conference_id: b"external-memory-lifecycle".to_vec(),
+            create_idempotency_key: "create-memory-lifecycle".to_owned(),
+            mode: UniversalConferenceMode::Meeting,
+            lifecycle: UniversalConferenceLifecycle::Waiting,
+            schedule: ConferenceScheduleMetadata {
+                starts_at_unix_ms: 1_000,
+                planned_end_unix_ms: Some(10_000),
+                join_before_seconds: 60,
+                join_after_seconds: 60,
+                timezone: Some("UTC".to_owned()),
+            },
+            entry_open: true,
+            revision: 1,
+        }
+    }
+
+    fn started_event(payload: &[u8]) -> EventEnvelope {
+        let integration_id = conference().integration_id;
+        EventEnvelope {
+            event_id: EventId::from_opaque(oid("conference-memory-started-event")),
+            scope: scope(),
+            event_type: "conference.started".to_owned(),
+            payload: payload.to_vec(),
+            actor: ActorRef {
+                actor_id: ActorId::from_opaque(oid("conference-memory-lifecycle-actor")),
+                kind: ActorKind::System,
+                on_behalf_of: Some(PrincipalId::from_opaque(
+                    integration_id.as_opaque().clone(),
+                )),
+            },
+            source_device: DeviceRef {
+                device_id: DeviceId::from_opaque(oid("conference-memory-lifecycle-device")),
+                identity_id: IdentityId::from_opaque(oid("conference-memory-lifecycle-identity")),
+            },
+            wall_time_unix_ms: 2_000,
+            logical_order: 2,
+            correlation: CorrelationContext {
+                correlation_id: oid("conference-memory-lifecycle-command"),
+                causation_id: Some(oid("conference-memory-lifecycle-command")),
+                idempotency_key: Some("conference-memory-lifecycle-key".to_owned()),
+            },
+            schema_version: ProtocolVersion::new(1, 0),
+            integrity_metadata: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn lifecycle_event_and_profile_commit_together_or_not_at_all() {
+        let store = MemoryLocalStore::default();
+        let initial = conference();
+        store
+            .persist_universal_conference_profile(&initial)
+            .expect("persist conference");
+
+        let started = started_event(b"started");
+        let live = store
+            .transition_universal_conference_with_event(
+                &scope(),
+                &initial.conference_id,
+                initial.revision,
+                UniversalConferenceLifecycle::Live,
+                initial.entry_open,
+                Some(&started),
+            )
+            .expect("atomic transition");
+        assert_eq!(live.lifecycle, UniversalConferenceLifecycle::Live);
+        assert_eq!(live.revision, 2);
+        assert_eq!(
+            store
+                .events_for_types(&scope(), &["conference.started"], 4)
+                .expect("started events"),
+            vec![started]
+        );
+
+        let rollback_store = MemoryLocalStore::default();
+        rollback_store
+            .persist_universal_conference_profile(&initial)
+            .expect("persist rollback conference");
+        let expected = started_event(b"expected");
+        let conflicting = started_event(b"conflicting");
+        rollback_store
+            .append_event(&conflicting)
+            .expect("seed conflicting Event ID");
+        assert_eq!(
+            rollback_store.transition_universal_conference_with_event(
+                &scope(),
+                &initial.conference_id,
+                initial.revision,
+                UniversalConferenceLifecycle::Live,
+                initial.entry_open,
+                Some(&expected),
+            ),
+            Err(DurableStoreError::Conflict)
+        );
+        let unchanged = rollback_store
+            .universal_conference_profile(&scope(), &initial.conference_id)
+            .expect("read rollback conference")
+            .expect("rollback conference");
+        assert_eq!(unchanged.lifecycle, UniversalConferenceLifecycle::Waiting);
+        assert_eq!(unchanged.revision, 1);
+    }
+}
+
+#[cfg(test)]
 mod phase14_event_subscription_tests {
     use std::sync::atomic::{AtomicI64, Ordering};
 
