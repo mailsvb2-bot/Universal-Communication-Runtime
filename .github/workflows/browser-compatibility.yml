@@ -1,0 +1,47 @@
+name: Browser Compatibility
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-compatibility-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop-browser-smoke:
+    name: desktop-${{ matrix.browser }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            browser: chrome
+          - runner: ubuntu-24.04
+            browser: edge
+          - runner: ubuntu-24.04
+            browser: firefox
+          - runner: macos-15
+            browser: safari
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Enable Safari WebDriver
+        if: matrix.browser == 'safari'
+        run: sudo safaridriver --enable
+      - name: Probe reference browser contract
+        run: |
+          python3 tools/browser_compatibility_probe.py             --browser "${{ matrix.browser }}"             --output "dist/browser-compatibility/${{ matrix.browser }}.json"
+      - name: Upload browser evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ucr-browser-compatibility-${{ matrix.browser }}-${{ github.sha }}
+          path: dist/browser-compatibility/${{ matrix.browser }}.json
+          if-no-files-found: error
+          retention-days: 14
