@@ -66,6 +66,19 @@ pub struct UniversalConferenceRuntimeCapabilities {
     pub horizontal_sfu: bool,
 }
 
+impl UniversalConferenceRuntimeCapabilities {
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            browser_realtime_gateway: false,
+            production_webrtc: false,
+            turn: false,
+            recording: false,
+            horizontal_sfu: false,
+        }
+    }
+}
+
 pub struct GrpcUniversalConferenceService<C, A, S> {
     clock: Arc<C>,
     authorization: Arc<A>,
@@ -84,7 +97,7 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state: Arc::new(ConferenceRuntimeState::new()),
             join_issuer: None,
-            runtime_capabilities: UniversalConferenceRuntimeCapabilities::default(),
+            runtime_capabilities: UniversalConferenceRuntimeCapabilities::none(),
         }
     }
 
@@ -101,7 +114,7 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state: Arc::new(ConferenceRuntimeState::new()),
             join_issuer: Some(join_issuer),
-            runtime_capabilities: UniversalConferenceRuntimeCapabilities::default(),
+            runtime_capabilities: UniversalConferenceRuntimeCapabilities::none(),
         }
     }
 
@@ -118,7 +131,7 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state,
             join_issuer: None,
-            runtime_capabilities: UniversalConferenceRuntimeCapabilities::default(),
+            runtime_capabilities: UniversalConferenceRuntimeCapabilities::none(),
         }
     }
 
@@ -136,7 +149,7 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state,
             join_issuer: Some(join_issuer),
-            runtime_capabilities: UniversalConferenceRuntimeCapabilities::default(),
+            runtime_capabilities: UniversalConferenceRuntimeCapabilities::none(),
         }
     }
 
