@@ -157,13 +157,20 @@ def main() -> None:
         "actor.principal.principal_id.as_opaque() != integration_id.as_opaque()" in universal_service,
         "integration identity binding drifted",
     )
-    require(
-        "conference.started" in universal_spec
-        and "conference.ended" in universal_spec
-        and "participant.joined" in universal_spec
-        and "participant.left" in universal_spec,
-        "universal webhook/event semantics drifted",
-    )
+    for marker in (
+        "EVENT_SUBSCRIPTION_MODE_WEBHOOK",
+        "optional string webhook_uri = 4;",
+        "repeated string event_types = 5;",
+        "rpc CreateSubscription(EventCreateSubscriptionRequest)",
+    ):
+        require(marker in events, f"webhook transport anchor missing: {marker}")
+    for marker in (
+        "ucr.conference.attendance.joined.v1",
+        "ucr.conference.attendance.left.v1",
+        "ucr.conference.attendance.reconnected.v1",
+        "ucr.conference.attendance.media_ready.v1",
+    ):
+        require(marker in universal_service, f"conference event anchor missing: {marker}")
 
     workflow = read(".github/workflows/conformance.yml")
     for marker in (
