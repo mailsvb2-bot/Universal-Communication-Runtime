@@ -1471,7 +1471,13 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v38_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch("DROP TABLE IF EXISTS service_resource_quota_policies;")
+}
+
+#[cfg(test)]
 fn test_remove_v37_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v38_objects(connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS service_rate_limit_usage;
          DROP TABLE IF EXISTS service_rate_limit_policies;",
