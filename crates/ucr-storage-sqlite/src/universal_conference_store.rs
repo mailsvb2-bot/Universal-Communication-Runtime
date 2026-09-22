@@ -1207,9 +1207,13 @@ fn validate_conference_lifecycle_event(
                 && event.event_type == expected_type
                 && event.logical_order == expected_revision.saturating_add(1)
                 && event.actor.kind == ucr_model::ActorKind::System
-                && event.actor.on_behalf_of.as_ref().is_some_and(|principal_id| {
-                    principal_id.as_opaque() == current.integration_id.as_opaque()
-                }) =>
+                && event
+                    .actor
+                    .on_behalf_of
+                    .as_ref()
+                    .is_some_and(|principal_id| {
+                        principal_id.as_opaque() == current.integration_id.as_opaque()
+                    }) =>
         {
             Ok(())
         }
