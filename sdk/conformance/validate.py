@@ -196,8 +196,8 @@ def main() -> None:
     ):
         require(marker in universal, f"conference lifecycle payload anchor missing: {marker}")
     for marker in (
-        '"conference.started"',
-        '"conference.ended"',
+        '"ucr.conference.started"',
+        '"ucr.conference.ended"',
         "transition_universal_conference_with_event",
         "UniversalConferenceLifecycleEvent",
     ):
