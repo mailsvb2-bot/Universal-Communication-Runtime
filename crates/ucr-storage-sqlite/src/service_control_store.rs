@@ -470,8 +470,7 @@ impl ServiceQuotaStore for SqliteLocalStore {
         &self,
         policy: &ServiceRateLimitPolicy,
     ) -> Result<(), DurableStoreError> {
-        validate_service_rate_limit_policy(policy)
-            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        validate_service_rate_limit_policy(policy).map_err(|_| DurableStoreError::InvalidRecord)?;
         let namespace = namespace_storage_key(&policy.subject.scope);
         let mut connection = self.lock_connection()?;
         let transaction = connection
@@ -593,7 +592,13 @@ impl ServiceQuotaStore for SqliteLocalStore {
                     subject.principal.principal_id.as_opaque().as_str(),
                     rate_class_text(rate_class),
                 ],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|error| ServiceQuotaConsumeError::Store(map_sqlite_error(&error)))?;
@@ -845,11 +850,9 @@ fn load_rate_limit_policy(
                 rate_class,
                 max_requests: u64::try_from(max_requests)
                     .map_err(|_| DurableStoreError::Corrupt)?,
-                window_ms: u64::try_from(window_ms)
-                    .map_err(|_| DurableStoreError::Corrupt)?,
+                window_ms: u64::try_from(window_ms).map_err(|_| DurableStoreError::Corrupt)?,
             };
-            validate_service_rate_limit_policy(&policy)
-                .map_err(|_| DurableStoreError::Corrupt)?;
+            validate_service_rate_limit_policy(&policy).map_err(|_| DurableStoreError::Corrupt)?;
             Ok(policy)
         })
         .transpose()
@@ -1516,11 +1519,7 @@ mod tests {
             })
         );
         reopened
-            .consume_service_request_for_class(
-                &subject,
-                ServiceRequestRateClass::Signaling,
-                10_000,
-            )
+            .consume_service_request_for_class(&subject, ServiceRequestRateClass::Signaling, 10_000)
             .expect("signaling bucket remains independent");
     }
 
