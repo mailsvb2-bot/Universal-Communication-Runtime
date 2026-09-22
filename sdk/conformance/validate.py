@@ -122,6 +122,7 @@ def main() -> None:
     sqlite_service_control = read("crates/ucr-storage-sqlite/src/service_control_store.rs")
     sqlite_store = read("crates/ucr-storage-sqlite/src/lib.rs")
     rate_limit_spec = read("spec/service-principal-rate-limits.md")
+    resource_quota_spec = read("spec/service-resource-quotas.md")
 
     for marker in (
         "rpc SubmitCommand(IntegrationCommandRequest)",
@@ -249,7 +250,36 @@ def main() -> None:
         "backfill_v37_rate_limits",
     ):
         require(marker in sqlite_service_control, f"SQLite request rate-limit anchor missing: {marker}")
-    require("SQLITE_SCHEMA_VERSION: u32 = 37" in sqlite_store, "request rate-limit schema v37 missing")
+    require(
+        "SQLITE_SCHEMA_V37: u32 = 37" in sqlite_store,
+        "request rate-limit migration anchor v37 missing",
+    )
+    require(
+        "SQLITE_SCHEMA_VERSION: u32 = 38" in sqlite_store,
+        "resource quota schema v38 missing",
+    )
+    for marker in (
+        "ServiceResourceQuotaPolicy",
+        "max_concurrent_participants",
+        "service_resource_quota_policies",
+        "ensure_integration_participant_quota",
+    ):
+        require(
+            marker in (
+                service_control_protocol
+                + sqlite_service_control
+                + sqlite_universal_conferences
+            ),
+            f"resource quota contract anchor missing: {marker}",
+        )
+    for marker in (
+        "concurrent participant quota implemented",
+        "concurrent conferences",
+        "publishers",
+        "aggregate bandwidth",
+        "recording minutes",
+    ):
+        require(marker in resource_quota_spec, f"resource quota specification drifted: {marker}")
     for marker in (
         "management",
         "join_issuance",
