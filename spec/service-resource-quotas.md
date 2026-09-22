@@ -1,0 +1,48 @@
+# Service resource quotas
+
+Status: **concurrent participant quota implemented; remaining resource dimensions are not yet implemented**.
+
+This contract is deliberately separate from request-rate limiting. Request admission continues to use
+`ServiceQuotaPolicy` / `ServiceRateLimitPolicy`; live communication resources use
+`ServiceResourceQuotaPolicy`.
+
+## Identity and scope
+
+A resource policy is keyed by one exact `ScopedPrincipal` whose principal kind is
+`ServiceAccount`. The Universal Conference API already requires the authenticated service
+principal ID to equal the request `integration_id`, so the policy is simultaneously scoped to the
+tenant/namespace and to the integration without creating a second integration identity owner.
+
+## Concurrent participants
+
+`max_concurrent_participants` limits active Universal Conference participant projections across
+**all conferences owned by the same integration in the same exact tenant scope**.
+
+Semantics:
+
+- inactive historical participant projections do not consume quota;
+- reactivation consumes quota again;
+- different integrations do not consume one another's quota;
+- absence of a resource policy means no integration-specific participant ceiling is configured;
+- the existing per-conference hard safety ceiling of 1024 active participants remains independent
+  and continues to apply;
+- Memory enforcement happens under the canonical store mutex;
+- SQLite enforcement happens inside the same `BEGIN IMMEDIATE` transaction that persists or
+  reactivates the participant, so parallel admissions cannot use a caller-side read-before-write
+  race to exceed the configured limit;
+- SQLite schema v38 persists the policy across restart.
+
+The same `SERVICE_QUOTA_READ_PERMISSION` and `SERVICE_QUOTA_WRITE_PERMISSION` authorization
+boundary used for request quotas also governs resource quota administration.
+
+## Still required
+
+This slice does **not** claim the complete resource-quota roadmap. The following dimensions remain
+to be added through the same canonical resource policy path:
+
+- concurrent conferences;
+- publishers;
+- aggregate bandwidth;
+- recording minutes.
+
+API RPS remains owned by the already separate class-aware request-rate limiting contract.
