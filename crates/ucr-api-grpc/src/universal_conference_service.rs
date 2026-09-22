@@ -57,12 +57,36 @@ const MAX_TIMEZONE_BYTES: usize = 128;
 const MAX_JOIN_WINDOW_SECONDS: u32 = 31_536_000;
 const MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS: usize = MAX_CALL_PARTICIPANTS + 1;
 
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UniversalConferenceRuntimeCapabilities {
+    pub browser_realtime_gateway: bool,
+    pub production_webrtc: bool,
+    pub turn: bool,
+    pub recording: bool,
+    pub horizontal_sfu: bool,
+}
+
+impl UniversalConferenceRuntimeCapabilities {
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            browser_realtime_gateway: false,
+            production_webrtc: false,
+            turn: false,
+            recording: false,
+            horizontal_sfu: false,
+        }
+    }
+}
+
 pub struct GrpcUniversalConferenceService<C, A, S> {
     clock: Arc<C>,
     authorization: Arc<A>,
     store: Arc<S>,
     state: Arc<ConferenceRuntimeState>,
     join_issuer: Option<Arc<JoinTokenIssuer>>,
+    runtime_capabilities: UniversalConferenceRuntimeCapabilities,
 }
 
 impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
@@ -74,6 +98,7 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state: Arc::new(ConferenceRuntimeState::new()),
             join_issuer: None,
+            runtime_capabilities: UniversalConferenceRuntimeCapabilities::none(),
         }
     }
 
@@ -90,6 +115,7 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state: Arc::new(ConferenceRuntimeState::new()),
             join_issuer: Some(join_issuer),
+            runtime_capabilities: UniversalConferenceRuntimeCapabilities::none(),
         }
     }
 
@@ -106,6 +132,7 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state,
             join_issuer: None,
+            runtime_capabilities: UniversalConferenceRuntimeCapabilities::none(),
         }
     }
 
@@ -123,6 +150,26 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state,
             join_issuer: Some(join_issuer),
+            runtime_capabilities: UniversalConferenceRuntimeCapabilities::none(),
+        }
+    }
+
+    #[must_use]
+    pub const fn with_state_join_issuer_and_runtime_capabilities(
+        clock: Arc<C>,
+        authorization: Arc<A>,
+        store: Arc<S>,
+        state: Arc<ConferenceRuntimeState>,
+        join_issuer: Arc<JoinTokenIssuer>,
+        runtime_capabilities: UniversalConferenceRuntimeCapabilities,
+    ) -> Self {
+        Self {
+            clock,
+            authorization,
+            store,
+            state,
+            join_issuer: Some(join_issuer),
+            runtime_capabilities,
         }
     }
 }
@@ -135,6 +182,7 @@ impl<C, A, S> Clone for GrpcUniversalConferenceService<C, A, S> {
             store: Arc::clone(&self.store),
             state: Arc::clone(&self.state),
             join_issuer: self.join_issuer.as_ref().map(Arc::clone),
+            runtime_capabilities: self.runtime_capabilities,
         }
     }
 }
@@ -872,7 +920,7 @@ where
                     &integration_id,
                     CONFERENCE_READ_PERMISSION,
                 )
-                .and_then(|_| universal_capabilities()),
+                .and_then(|_| universal_capabilities(self.runtime_capabilities)),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::UniversalGetCapabilitiesResponse {
@@ -2907,7 +2955,9 @@ where
         .map_err(map_store_error)
 }
 
-fn universal_capabilities() -> Result<pb::UniversalConferenceCapabilities, CanonicalError> {
+fn universal_capabilities(
+    runtime: UniversalConferenceRuntimeCapabilities,
+) -> Result<pb::UniversalConferenceCapabilities, CanonicalError> {
     let mut capabilities = phase20_audio_capabilities();
     capabilities.extend(phase21_video_capabilities());
     capabilities.extend(phase22_media_e2ee_capabilities());
@@ -2919,11 +2969,11 @@ fn universal_capabilities() -> Result<pb::UniversalConferenceCapabilities, Canon
         capabilities: capabilities.iter().map(pb_capability).collect(),
         max_participants: u32::try_from(MAX_CALL_PARTICIPANTS)
             .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
-        browser_realtime_gateway: false,
-        production_webrtc: false,
-        turn: false,
-        recording: false,
-        horizontal_sfu: false,
+        browser_realtime_gateway: runtime.browser_realtime_gateway,
+        production_webrtc: runtime.production_webrtc,
+        turn: runtime.turn,
+        recording: runtime.recording,
+        horizontal_sfu: runtime.horizontal_sfu,
     })
 }
 

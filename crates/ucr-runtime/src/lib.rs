@@ -13,10 +13,11 @@ use tonic::transport::Server;
 use ucr_api_grpc::{
     GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
     GrpcIntegrationService, GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService,
-    GrpcUniversalConferenceService, RealtimeWebRtcDependencies, call_service_server,
-    conference_service_server, device_service_server, event_service_server, group_service_server,
-    integration_service_server, realtime_service_server, store_forward_service_server,
-    sync_service_server, universal_conference_service_server,
+    GrpcUniversalConferenceService, RealtimeWebRtcDependencies,
+    UniversalConferenceRuntimeCapabilities, call_service_server, conference_service_server,
+    device_service_server, event_service_server, group_service_server, integration_service_server,
+    realtime_service_server, store_forward_service_server, sync_service_server,
+    universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
@@ -47,6 +48,7 @@ pub struct RealtimeRuntimeConfig {
     join_base_url: String,
     join_token_key: JoinTokenKey,
     webrtc_config: Arc<WebRtcSessionConfigFactory>,
+    browser_realtime_gateway: bool,
 }
 
 impl core::fmt::Debug for RealtimeRuntimeConfig {
@@ -56,6 +58,7 @@ impl core::fmt::Debug for RealtimeRuntimeConfig {
             .field("join_base_url", &self.join_base_url)
             .field("join_token_key", &"<redacted>")
             .field("webrtc_config", &self.webrtc_config)
+            .field("browser_realtime_gateway", &self.browser_realtime_gateway)
             .finish()
     }
 }
@@ -75,7 +78,25 @@ impl RealtimeRuntimeConfig {
             join_base_url,
             join_token_key,
             webrtc_config: Arc::new(WebRtcSessionConfigFactory::default()),
+            browser_realtime_gateway: false,
         })
+    }
+
+    #[must_use]
+    pub fn with_browser_realtime_gateway(mut self, enabled: bool) -> Self {
+        self.browser_realtime_gateway = enabled;
+        self
+    }
+
+    #[must_use]
+    fn universal_conference_capabilities(&self) -> UniversalConferenceRuntimeCapabilities {
+        UniversalConferenceRuntimeCapabilities {
+            browser_realtime_gateway: self.browser_realtime_gateway,
+            production_webrtc: false,
+            turn: self.webrtc_config.has_turn(),
+            recording: false,
+            horizontal_sfu: false,
+        }
     }
 
     /// Adds deployment STUN/TURN configuration for browser/mobile peer connections.
@@ -330,8 +351,7 @@ impl ProductionRuntime {
         config: RealtimeRuntimeConfig,
     ) -> Result<(), String> {
         validate_local_bind(bind)?;
-        let diagnostics = self.diagnostics()?;
-        if diagnostics.storage_health != StorageHealth::Healthy {
+        if self.diagnostics()?.storage_health != StorageHealth::Healthy {
             return Err("production runtime refuses unhealthy storage".to_owned());
         }
 
@@ -343,13 +363,13 @@ impl ProductionRuntime {
             .map_err(|error| format!("resolve local realtime API: {error}"))?;
         println!("UCR_REALTIME_READY endpoint=http://{address}");
         println!("UCR_RUNTIME_MODE={RUNTIME_MODE} realtime=true tls_edge=required test_mode=false");
-
         let incoming = TcpListenerStream::new(listener);
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
         let store = Arc::clone(&self.store);
         let authorization = Arc::clone(&self.store);
         let conference_state = Arc::new(ConferenceRuntimeState::new());
+        let runtime_capabilities = config.universal_conference_capabilities();
         let dependencies = realtime_dependencies(config)?;
         let join_issuer = Arc::clone(&dependencies.join_issuer);
         let registry = Arc::clone(&dependencies.registry);
@@ -406,12 +426,13 @@ impl ProductionRuntime {
             ))
             .add_service(realtime_service_server(realtime_service))
             .add_service(universal_conference_service_server(
-                GrpcUniversalConferenceService::with_state_and_join_issuer(
+                GrpcUniversalConferenceService::with_state_join_issuer_and_runtime_capabilities(
                     Arc::clone(&clock),
                     Arc::clone(&authorization),
                     Arc::clone(&store),
                     Arc::clone(&conference_state),
                     join_issuer,
+                    runtime_capabilities,
                 ),
             ))
             .add_service(event_service_server(GrpcEventService::new(
@@ -447,6 +468,7 @@ fn realtime_dependencies(
         join_base_url,
         join_token_key,
         webrtc_config,
+        browser_realtime_gateway: _,
     } = config;
     let join_issuer = Arc::new(
         JoinTokenIssuer::new(join_token_key, join_base_url)
@@ -618,6 +640,35 @@ const fn health_label(health: StorageHealth) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn realtime_capability_projection_defaults_fail_closed_and_derives_turn() {
+        let base = RealtimeRuntimeConfig::new("https://conference.example.test/join", [3_u8; 32])
+            .expect("realtime config");
+        let default_capabilities = base.universal_conference_capabilities();
+        assert!(!default_capabilities.browser_realtime_gateway);
+        assert!(!default_capabilities.production_webrtc);
+        assert!(!default_capabilities.turn);
+        assert!(!default_capabilities.recording);
+        assert!(!default_capabilities.horizontal_sfu);
+
+        let configured = base
+            .with_webrtc_ice(
+                Vec::new(),
+                vec!["turns:turn.example.test:5349?transport=tcp".to_owned()],
+                Some([4_u8; 32]),
+                300,
+                false,
+            )
+            .expect("TURN config")
+            .with_browser_realtime_gateway(true);
+        let capabilities = configured.universal_conference_capabilities();
+        assert!(capabilities.browser_realtime_gateway);
+        assert!(!capabilities.production_webrtc);
+        assert!(capabilities.turn);
+        assert!(!capabilities.recording);
+        assert!(!capabilities.horizontal_sfu);
+    }
 
     #[test]
     fn production_local_daemon_refuses_remote_plaintext_bind() {

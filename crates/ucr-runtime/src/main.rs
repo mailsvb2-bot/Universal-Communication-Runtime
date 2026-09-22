@@ -134,7 +134,10 @@ async fn serve_realtime_command(
             turn_rest_secret,
             turn_ttl_seconds,
             bool_env("UCR_WEBRTC_RELAY_ONLY")?.unwrap_or(false),
-        )?;
+        )?
+        .with_browser_realtime_gateway(
+            bool_env("UCR_BROWSER_REALTIME_GATEWAY_ENABLED")?.unwrap_or(false),
+        );
     Arc::new(ProductionRuntime::open_existing(database)?)
         .serve_realtime(bind, config)
         .await

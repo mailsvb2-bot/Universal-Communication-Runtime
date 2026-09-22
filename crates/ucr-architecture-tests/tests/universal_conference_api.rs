@@ -120,9 +120,12 @@ fn universal_conference_credentials_are_bound_to_integration_identity() {
 }
 
 #[test]
-fn universal_conference_capability_discovery_is_explicit_and_truthful() {
+fn universal_conference_capability_discovery_is_explicit_and_deployment_aware() {
     let proto = read("proto/ucr/v1/universal_conference.proto");
     let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let runtime_cli = read("crates/ucr-runtime/src/main.rs");
+    let webrtc = read("crates/ucr-webrtc/src/lib.rs");
     let spec = read("spec/universal-conference-api.md");
     assert!(proto.contains("rpc GetCapabilities"));
     for field in [
@@ -137,12 +140,21 @@ fn universal_conference_capability_discovery_is_explicit_and_truthful() {
             "missing capability readiness field {field}"
         );
     }
-    assert!(service.contains("browser_realtime_gateway: false"));
-    assert!(service.contains("production_webrtc: false"));
-    assert!(service.contains("turn: false"));
-    assert!(service.contains("recording: false"));
-    assert!(service.contains("horizontal_sfu: false"));
+    assert!(service.contains("UniversalConferenceRuntimeCapabilities"));
+    assert!(service.contains("runtime.browser_realtime_gateway"));
+    assert!(service.contains("runtime.production_webrtc"));
+    assert!(service.contains("runtime.turn"));
+    assert!(service.contains("runtime.recording"));
+    assert!(service.contains("runtime.horizontal_sfu"));
+    assert!(service.contains("UniversalConferenceRuntimeCapabilities::none()"));
+    assert!(runtime.contains("universal_conference_capabilities"));
+    assert!(runtime.contains("turn: self.webrtc_config.has_turn()"));
+    assert!(webrtc.contains("pub fn has_turn(&self) -> bool"));
+    assert!(runtime_cli.contains("UCR_BROWSER_REALTIME_GATEWAY_ENABLED"));
+    assert!(!runtime_cli.contains("UCR_WEBRTC_PRODUCTION_READY"));
+    assert!(runtime.contains("production_webrtc: false"));
     assert!(spec.contains("must not claim production readiness"));
+    assert!(spec.contains("defaults fail closed"));
 }
 
 #[test]
@@ -273,7 +285,9 @@ fn universal_media_subscriptions_reuse_canonical_conference_runtime_state() {
     assert!(!method.contains("CONFERENCE_SUBSCRIBE_PERMISSION"));
     assert!(runtime.contains("GrpcConferenceService::with_state("));
     assert!(runtime.contains("GrpcUniversalConferenceService::with_state("));
-    assert!(runtime.contains("GrpcUniversalConferenceService::with_state_and_join_issuer("));
+    assert!(runtime.contains(
+        "GrpcUniversalConferenceService::with_state_join_issuer_and_runtime_capabilities("
+    ));
     assert!(runtime.contains("Arc::clone(&conference_state)"));
     assert!(spec.contains("Subscription state remains intentionally ephemeral"));
     assert!(spec.contains("actual encrypted SFU routing path"));

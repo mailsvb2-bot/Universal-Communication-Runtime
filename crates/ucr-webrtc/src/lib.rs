@@ -993,6 +993,11 @@ impl WebRtcSessionConfigFactory {
         })
     }
 
+    #[must_use]
+    pub fn has_turn(&self) -> bool {
+        !self.turn_urls.is_empty() && self.turn_issuer.is_some()
+    }
+
     /// Creates one ephemeral ICE configuration for the authenticated realtime session.
     ///
     /// # Errors
