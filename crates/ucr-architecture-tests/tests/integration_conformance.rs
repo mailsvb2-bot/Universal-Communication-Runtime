@@ -24,7 +24,7 @@ fn integration_conformance_profile_covers_universal_connector_requirements() {
         "tenant_isolation",
     ] {
         assert!(
-            matrix.contains(&format!("\\\"{category}\\\"")),
+            matrix.contains(&format!("\"{category}\"")),
             "missing integration conformance category {category}"
         );
     }
