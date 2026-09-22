@@ -405,6 +405,20 @@ impl LiveWebRtcProvider {
             .map_err(|_| WebRtcProviderError::TemporarilyUnavailable)?
     }
 
+    /// Returns whether the isolated peer-engine worker is still available to accept commands.
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        !self.shutdown.load(Ordering::Acquire)
+            && self
+                .command_tx
+                .as_ref()
+                .is_some_and(|sender| !sender.is_closed())
+            && self
+                .worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
+    }
+
     /// Sends one already-encrypted canonical SFU envelope through the session E2EE `DataChannel`.
     /// No endpoint keys or plaintext enter this provider.
     ///
@@ -1239,6 +1253,7 @@ mod tests {
     #[test]
     fn live_provider_creates_audio_video_offer_and_closes_ephemeral_session() {
         let provider = LiveWebRtcProvider::new().expect("live provider");
+        assert!(provider.is_available());
         let session_id = SessionId::from_opaque(OpaqueId::new("live-session").expect("id"));
         let config = WebRtcSessionConfig {
             session_id: session_id.clone(),

@@ -574,6 +574,25 @@ impl RealtimeSessionRegistry {
         }
     }
 
+    /// Returns the current number of non-expired authenticated realtime sessions.
+    ///
+    /// This is operator capacity evidence only. It is not attendance, billing, a quota decision or
+    /// durable Conference state.
+    ///
+    /// # Errors
+    /// Fails when the bounded registry state is unavailable.
+    pub fn active_session_count_at(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<usize, RealtimeRegistryError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        prune_expired(&mut entries, now_unix_ms);
+        Ok(entries.len())
+    }
+
     /// Returns whether the exact signed session is already active.
     ///
     /// This is used by admission policy to distinguish a first entry from a reconnect when a
@@ -1381,6 +1400,37 @@ mod tests {
             issuer.verify(&tampered, 20_001),
             Err(JoinTokenError::InvalidSignature | JoinTokenError::Malformed)
         ));
+    }
+
+    #[test]
+    fn operator_session_count_prunes_expired_sessions() {
+        let issuer = issuer();
+        let claims = issuer
+            .issue(
+                scope(),
+                CallId::from_opaque(id("operator-count-call")),
+                participant(),
+                None,
+                300,
+                29_000,
+            )
+            .expect("issue")
+            .claims;
+        let expires_at = claims.expires_at_unix_ms;
+        let registry = RealtimeSessionRegistry::new(8, 2);
+        registry.join(claims, 29_001).expect("join");
+        assert_eq!(
+            registry
+                .active_session_count_at(29_001)
+                .expect("active count"),
+            1
+        );
+        assert_eq!(
+            registry
+                .active_session_count_at(expires_at)
+                .expect("expired count"),
+            0
+        );
     }
 
     #[test]

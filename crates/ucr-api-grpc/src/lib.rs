@@ -78,6 +78,11 @@ pub use universal_conference_service::{
     universal_conference_service_server,
 };
 
+mod operator_runtime_service;
+pub use operator_runtime_service::{
+    GrpcOperatorRuntimeService, OperatorRuntimeHealthSource, operator_runtime_service_server,
+};
+
 pub const SERVICE_CREDENTIAL_ID_METADATA_KEY: &str = "ucr-service-credential-id-bin";
 pub const SERVICE_CREDENTIAL_SECRET_METADATA_KEY: &str = "ucr-service-credential-secret-bin";
 pub const GRPC_DIAGNOSTIC_DOMAIN: &str = "ucr.grpc.binding";

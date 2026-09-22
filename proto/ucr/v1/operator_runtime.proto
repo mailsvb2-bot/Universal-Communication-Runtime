@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+// Operator-only health/readiness contract. This service belongs to the private loopback
+// runtime boundary and MUST NOT be exposed through an integration/public edge.
+enum OperatorComponentStatus {
+  OPERATOR_COMPONENT_STATUS_UNSPECIFIED = 0;
+  OPERATOR_COMPONENT_STATUS_HEALTHY = 1;
+  OPERATOR_COMPONENT_STATUS_DEGRADED = 2;
+  OPERATOR_COMPONENT_STATUS_UNAVAILABLE = 3;
+  OPERATOR_COMPONENT_STATUS_NOT_CONFIGURED = 4;
+  OPERATOR_COMPONENT_STATUS_UNVERIFIED = 5;
+}
+
+message OperatorComponentHealth {
+  OperatorComponentStatus status = 1;
+  string detail = 2;
+}
+
+message OperatorCapacityStatus {
+  OperatorComponentStatus status = 1;
+  uint32 active_realtime_sessions = 2;
+  uint32 max_realtime_sessions = 3;
+  uint32 available_realtime_sessions = 4;
+}
+
+message OperatorRuntimeHealthRequest {}
+
+message OperatorRuntimeHealthResponse {
+  OperatorComponentHealth api = 1;
+  OperatorComponentHealth sfu = 2;
+  OperatorComponentHealth turn = 3;
+  OperatorComponentHealth storage = 4;
+  OperatorComponentHealth webhook_worker = 5;
+  OperatorComponentHealth recorder = 6;
+  OperatorCapacityStatus capacity = 7;
+}
+
+service OperatorRuntimeService {
+  rpc GetHealth(OperatorRuntimeHealthRequest) returns (OperatorRuntimeHealthResponse);
+}
