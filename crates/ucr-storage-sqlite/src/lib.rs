@@ -79,7 +79,8 @@ const SQLITE_SCHEMA_V32: u32 = 32;
 const SQLITE_SCHEMA_V33: u32 = 33;
 const SQLITE_SCHEMA_V34: u32 = 34;
 const SQLITE_SCHEMA_V35: u32 = 35;
-pub const SQLITE_SCHEMA_VERSION: u32 = 36;
+const SQLITE_SCHEMA_V36: u32 = 36;
+pub const SQLITE_SCHEMA_VERSION: u32 = 37;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -461,7 +462,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v36(connection);
+        return verify_schema_v37(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -507,11 +508,17 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V33 => migrate_v33_to_v34(connection)?,
             SQLITE_SCHEMA_V34 => migrate_v34_to_v35(connection)?,
             SQLITE_SCHEMA_V35 => migrate_v35_to_v36(connection)?,
+            SQLITE_SCHEMA_V36 => migrate_v36_to_v37(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v36(connection)
+    verify_schema_v37(connection)
+}
+
+fn verify_schema_v37(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v36(connection)?;
+    service_control_store::verify_v37_objects(connection)
 }
 
 fn verify_schema_v36(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -587,6 +594,8 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     conference_join_grant_store::create_v34_objects(&transaction)?;
     universal_conference_store::create_v35_objects(&transaction)?;
     event_subscription_store::create_v36_objects(&transaction)?;
+    service_control_store::create_v37_objects(&transaction)?;
+    service_control_store::backfill_v37_rate_limits(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1108,7 +1117,7 @@ fn migrate_v34_to_v35(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     universal_conference_store::create_v35_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V35)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
@@ -1267,12 +1276,28 @@ fn migrate_v35_to_v36(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     event_subscription_store::create_v36_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V36)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v36(connection)
+}
+
+fn migrate_v36_to_v37(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v36(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    service_control_store::create_v37_objects(&transaction)?;
+    service_control_store::backfill_v37_rate_limits(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v37(connection)
 }
 
 fn verify_table_columns(
@@ -1423,7 +1448,16 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v37_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS service_rate_limit_usage;
+         DROP TABLE IF EXISTS service_rate_limit_policies;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v36_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v37_objects(connection)?;
     connection.execute_batch("DROP TABLE IF EXISTS event_subscription_owners;")
 }
 
