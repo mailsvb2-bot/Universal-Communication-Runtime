@@ -4,12 +4,12 @@ use ucr_model::{
     AuditRecordId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
     ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditOutcome, ServiceAuditRecord,
     ServiceCredentialId, ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
-    TenantId, TenantScope,
+    ServiceResourceQuotaPolicy, TenantId, TenantScope,
 };
 use ucr_protocol::{
     MAX_SERVICE_AUDIT_READ_ITEMS, service_audit_hash, validate_service_audit_operation_ref,
     validate_service_audit_record, validate_service_quota_policy,
-    validate_service_rate_limit_policy,
+    validate_service_rate_limit_policy, validate_service_resource_quota_policy,
 };
 
 use super::{
@@ -109,6 +109,19 @@ BEFORE DELETE ON service_audit_operations
 BEGIN SELECT RAISE(ABORT, 'service audit operation is append-only'); END;
 ";
 
+const V38_OBJECTS_SQL: &str = "
+CREATE TABLE service_resource_quota_policies (
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+    namespace_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    max_concurrent_participants INTEGER NOT NULL CHECK(max_concurrent_participants > 0),
+    PRIMARY KEY(tenant_id, namespace_present, namespace_id, principal_id),
+    CHECK((namespace_present = 0 AND namespace_id = '') OR
+          (namespace_present = 1 AND namespace_id <> ''))
+) WITHOUT ROWID;
+";
+
 const V37_OBJECTS_SQL: &str = "
 CREATE TABLE service_rate_limit_policies (
     tenant_id TEXT NOT NULL,
@@ -145,6 +158,27 @@ CREATE TABLE service_rate_limit_usage (
           (namespace_present = 1 AND namespace_id <> ''))
 ) WITHOUT ROWID;
 ";
+
+pub(super) fn create_v38_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(V38_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn verify_v38_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_table_columns(
+        connection,
+        "service_resource_quota_policies",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("principal_id", "TEXT", 1, 4),
+            ("max_concurrent_participants", "INTEGER", 1, 0),
+        ],
+    )?;
+    verify_resource_quota_rows(connection)
+}
 
 pub(super) fn create_v37_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
     transaction
@@ -464,6 +498,45 @@ impl ServiceQuotaStore for SqliteLocalStore {
         validate_service_subject(subject)?;
         let connection = self.lock_connection()?;
         load_quota_policy(&connection, subject)
+    }
+
+    fn set_service_resource_quota_policy(
+        &self,
+        policy: &ServiceResourceQuotaPolicy,
+    ) -> Result<(), DurableStoreError> {
+        validate_service_resource_quota_policy(policy)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let namespace = namespace_storage_key(&policy.subject.scope);
+        let max_concurrent_participants = i64::try_from(policy.max_concurrent_participants)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let connection = self.lock_connection()?;
+        connection
+            .execute(
+                "INSERT INTO service_resource_quota_policies (
+                    tenant_id, namespace_present, namespace_id, principal_id,
+                    max_concurrent_participants
+                 ) VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(tenant_id, namespace_present, namespace_id, principal_id)
+                 DO UPDATE SET max_concurrent_participants=excluded.max_concurrent_participants",
+                params![
+                    policy.subject.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    policy.subject.principal.principal_id.as_opaque().as_str(),
+                    max_concurrent_participants,
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(())
+    }
+
+    fn service_resource_quota_policy(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<Option<ServiceResourceQuotaPolicy>, DurableStoreError> {
+        validate_service_subject(subject)?;
+        let connection = self.lock_connection()?;
+        load_resource_quota_policy(&connection, subject)
     }
 
     fn set_service_rate_limit_policy(
@@ -832,6 +905,38 @@ fn load_rate_limit_usage(
         .map_err(|error| map_sqlite_error(&error))
 }
 
+pub(crate) fn load_resource_quota_policy(
+    connection: &Connection,
+    subject: &ScopedPrincipal,
+) -> Result<Option<ServiceResourceQuotaPolicy>, DurableStoreError> {
+    let namespace = namespace_storage_key(&subject.scope);
+    connection
+        .query_row(
+            "SELECT max_concurrent_participants FROM service_resource_quota_policies
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND principal_id=?4",
+            params![
+                subject.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                subject.principal.principal_id.as_opaque().as_str(),
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(&error))?
+        .map(|max_concurrent_participants| {
+            let policy = ServiceResourceQuotaPolicy {
+                subject: subject.clone(),
+                max_concurrent_participants: u64::try_from(max_concurrent_participants)
+                    .map_err(|_| DurableStoreError::Corrupt)?,
+            };
+            validate_service_resource_quota_policy(&policy)
+                .map_err(|_| DurableStoreError::Corrupt)?;
+            Ok(policy)
+        })
+        .transpose()
+}
+
 fn load_rate_limit_policy(
     connection: &Connection,
     subject: &ScopedPrincipal,
@@ -905,6 +1010,40 @@ fn decode_quota_policy(
     };
     validate_service_quota_policy(&policy).map_err(|_| DurableStoreError::Corrupt)?;
     Ok(policy)
+}
+
+fn verify_resource_quota_rows(connection: &Connection) -> Result<(), DurableStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT tenant_id, namespace_present, namespace_id, principal_id,
+                    max_concurrent_participants
+             FROM service_resource_quota_policies",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|error| map_sqlite_error(&error))?;
+    for row in rows {
+        let (tenant, present, namespace, principal, max_concurrent_participants) =
+            row.map_err(|error| map_sqlite_error(&error))?;
+        let subject = decode_service_subject(&tenant, present, &namespace, &principal)?;
+        let policy = ServiceResourceQuotaPolicy {
+            subject,
+            max_concurrent_participants: u64::try_from(max_concurrent_participants)
+                .map_err(|_| DurableStoreError::Corrupt)?,
+        };
+        validate_service_resource_quota_policy(&policy)
+            .map_err(|_| DurableStoreError::Corrupt)?;
+    }
+    Ok(())
 }
 
 fn verify_quota_rows(connection: &Connection) -> Result<(), DurableStoreError> {
