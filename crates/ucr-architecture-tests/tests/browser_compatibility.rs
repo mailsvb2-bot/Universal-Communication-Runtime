@@ -45,6 +45,6 @@ fn browser_compatibility_matrix_runs_real_desktop_browsers_and_keeps_mobile_trut
     assert!(spec.contains("Android Chrome"));
     assert!(spec.contains("iOS Safari"));
     assert!(spec.contains("pending real mobile browser run"));
-    assert!(spec.contains("not accepted as production evidence"));
+    assert!(spec.contains("**not** accepted as production evidence"));
     assert!(spec.contains("does not by itself prove TURN reachability"));
 }
