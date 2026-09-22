@@ -1,7 +1,8 @@
 use sha2::{Digest, Sha256};
 use ucr_model::{
     PrincipalKind, ServiceAuditOperationRef, ServiceAuditOutcome, ServiceAuditRecord,
-    ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass, ServiceResourceQuotaPolicy,
+    ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
+    ServiceResourceQuotaPolicy,
 };
 
 use crate::validate_namespaced_identifier;
