@@ -116,6 +116,12 @@ def main() -> None:
     )
     universal_store_contract = read("crates/ucr-core/src/universal_conference.rs")
     universal_spec = read("spec/universal-conference-api.md")
+    service_request = read("crates/ucr-core/src/service_request.rs")
+    service_control_protocol = read("crates/ucr-protocol/src/service_control.rs")
+    memory_store = read("crates/ucr-storage-memory/src/lib.rs")
+    sqlite_service_control = read("crates/ucr-storage-sqlite/src/service_control_store.rs")
+    sqlite_store = read("crates/ucr-storage-sqlite/src/lib.rs")
+    rate_limit_spec = read("spec/service-principal-rate-limits.md")
 
     for marker in (
         "rpc SubmitCommand(IntegrationCommandRequest)",
@@ -216,6 +222,42 @@ def main() -> None:
         and "transition_universal_conference_with_event" in sqlite_universal_conferences,
         "SQLite conference lifecycle Event atomicity missing",
     )
+
+    require(
+        "ServiceRequestRateClass::ALL" in memory_store
+        and "service_rate_limit_policies" in memory_store
+        and "service_rate_limit_usage" in memory_store,
+        "memory request rate-class storage boundary missing",
+    )
+    for marker in (
+        "ServiceRequestRateClass::Management",
+        "ServiceRequestRateClass::JoinIssuance",
+        "ServiceRequestRateClass::Signaling",
+        "ServiceRequestRateClass::MediaTransport",
+    ):
+        require(
+            marker in service_control_protocol,
+            f"canonical request rate classifier missing: {marker}",
+        )
+    require(
+        "service_request_rate_class(&self.proof.permission)" in service_request,
+        "Service Principal request gate lost canonical rate-class selection",
+    )
+    for marker in (
+        "service_rate_limit_policies",
+        "service_rate_limit_usage",
+        "backfill_v37_rate_limits",
+    ):
+        require(marker in sqlite_service_control, f"SQLite request rate-limit anchor missing: {marker}")
+    require("SQLITE_SCHEMA_VERSION: u32 = 37" in sqlite_store, "request rate-limit schema v37 missing")
+    for marker in (
+        "management",
+        "join_issuance",
+        "signaling",
+        "media_transport",
+        "does **not** complete UCR resource quotas",
+    ):
+        require(marker in rate_limit_spec, f"request rate-limit specification drifted: {marker}")
 
     workflow = read(".github/workflows/conformance.yml")
     for marker in (

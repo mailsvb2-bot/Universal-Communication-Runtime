@@ -28,8 +28,8 @@ use ucr_model::{
     IntentId, KeyId, MessageEnvelope, MessageId, PermissionGrant, PrincipalIdentityBinding,
     PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
     ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
-    ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState,
-    TenantScope, TrustedSigningKeyRecord,
+    ServiceCredentialRecord, ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
+    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -286,7 +286,37 @@ pub trait ServiceQuotaStore: StorageProvider {
         subject: &ScopedPrincipal,
     ) -> Result<Option<ServiceQuotaPolicy>, DurableStoreError>;
 
-    /// Atomically consumes one request from the current fixed window.
+    /// Installs or replaces one explicit class-specific request-rate policy.
+    ///
+    /// # Errors
+    /// Rejects malformed policy and explicit storage failures.
+    fn set_service_rate_limit_policy(
+        &self,
+        policy: &ServiceRateLimitPolicy,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Loads one exact class-specific request-rate policy.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures; absence is not an error.
+    fn service_rate_limit_policy(
+        &self,
+        subject: &ScopedPrincipal,
+        rate_class: ServiceRequestRateClass,
+    ) -> Result<Option<ServiceRateLimitPolicy>, DurableStoreError>;
+
+    /// Atomically consumes one request from one independent fixed-window class.
+    ///
+    /// # Errors
+    /// Fails closed for missing policy, exhaustion, clock rollback, or storage failure.
+    fn consume_service_request_for_class(
+        &self,
+        subject: &ScopedPrincipal,
+        rate_class: ServiceRequestRateClass,
+        now_unix_ms: i64,
+    ) -> Result<(), ServiceQuotaConsumeError>;
+
+    /// Backward-compatible management-class request consumption.
     ///
     /// # Errors
     /// Fails closed for missing policy, exhaustion, clock rollback, or storage failure.
@@ -294,7 +324,13 @@ pub trait ServiceQuotaStore: StorageProvider {
         &self,
         subject: &ScopedPrincipal,
         now_unix_ms: i64,
-    ) -> Result<(), ServiceQuotaConsumeError>;
+    ) -> Result<(), ServiceQuotaConsumeError> {
+        self.consume_service_request_for_class(
+            subject,
+            ServiceRequestRateClass::Management,
+            now_unix_ms,
+        )
+    }
 }
 
 /// Append-only metadata-only audit owner for Service Principal request admission.

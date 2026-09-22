@@ -708,6 +708,34 @@ pub struct ServiceQuotaPolicy {
     pub window_ms: u64,
 }
 
+/// Independent request-rate buckets for external Service Accounts.
+///
+/// Management traffic must not be starved by high-volume join, signaling, or media traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ServiceRequestRateClass {
+    Management,
+    JoinIssuance,
+    Signaling,
+    MediaTransport,
+}
+
+impl ServiceRequestRateClass {
+    pub const ALL: [Self; 4] = [
+        Self::Management,
+        Self::JoinIssuance,
+        Self::Signaling,
+        Self::MediaTransport,
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceRateLimitPolicy {
+    pub subject: ScopedPrincipal,
+    pub rate_class: ServiceRequestRateClass,
+    pub max_requests: u64,
+    pub window_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceAuditOutcome {
     AuthenticationFailed,

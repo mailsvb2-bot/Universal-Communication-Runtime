@@ -2358,7 +2358,8 @@ fn service_principal_request_ingress_requires_unforgeable_single_use_quota_conte
     assert!(runtime.contains("service_principal_admission_proof()"));
     assert!(request.contains("AuthorizationEvaluator for ServicePrincipalRequestAuthorization"));
     assert!(request.contains("authenticate_service_principal"));
-    assert!(request.contains("consume_service_request(&self.proof.subject, now)"));
+    assert!(request.contains("consume_service_request_for_class("));
+    assert!(request.contains("service_request_rate_class(&self.proof.permission)"));
     assert!(request.contains("self.authorization.authorize(request)"));
     assert!(request.contains("append_service_audit(&record)"));
     assert!(request.contains("self.used.swap(true"));

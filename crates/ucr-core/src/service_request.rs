@@ -10,7 +10,7 @@ use ucr_model::{
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, MAX_SERVICE_AUDIT_OPERATION_KIND_LEN,
-    MAX_SERVICE_REQUEST_PERMISSION_LEN, validate_namespaced_identifier,
+    MAX_SERVICE_REQUEST_PERMISSION_LEN, service_request_rate_class, validate_namespaced_identifier,
     validate_service_audit_operation_ref,
 };
 
@@ -274,7 +274,11 @@ where
             );
         }
 
-        let quota_result = self.store.consume_service_request(&self.proof.subject, now);
+        let quota_result = self.store.consume_service_request_for_class(
+            &self.proof.subject,
+            service_request_rate_class(&self.proof.permission),
+            now,
+        );
         if let Err(error) = quota_result {
             let (outcome, canonical) = map_quota_error(error);
             return self.audit_permission_and_return(

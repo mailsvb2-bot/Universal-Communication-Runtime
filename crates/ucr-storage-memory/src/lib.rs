@@ -46,10 +46,10 @@ use ucr_model::{
     PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecordingConsentState, RecordingId,
     RecordingSession, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
     ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
-    ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId,
-    SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
-    TrustedSigningKeyState, UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
-    UniversalConferenceProfile,
+    ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass, SessionId, StoreForwardId,
+    StoreForwardJob, StoreForwardLeaseId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord, TrustedSigningKeyState, UniversalConferenceLifecycle,
+    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -72,8 +72,8 @@ use ucr_protocol::{
     validate_external_identity_binding_key, validate_federation_credential_rotation,
     validate_federation_transition, validate_identity_record, validate_permission_grant,
     validate_principal_identity_binding, validate_recording_session, validate_service_audit_record,
-    validate_service_quota_policy, validate_sync_checkpoint, validate_sync_transition,
-    validate_trusted_signing_key_descriptor,
+    validate_service_quota_policy, validate_service_rate_limit_policy, validate_sync_checkpoint,
+    validate_sync_transition, validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 12;
@@ -111,6 +111,7 @@ type TrustedSigningDeviceRef = (ScopeKey, String);
 type DeviceKey = (ScopeKey, String);
 type ServiceCredentialRef = (ScopeKey, String);
 type ServicePrincipalKey = (ScopeKey, String);
+type ServiceRateLimitKey = (ServicePrincipalKey, ServiceRequestRateClass);
 type UniversalConferenceKey = (ScopeKey, String);
 type UniversalConferenceExternalKey = (ScopeKey, String, Vec<u8>);
 type UniversalConferenceIdempotencyKey = (ScopeKey, String, String);
@@ -204,7 +205,8 @@ struct MemoryState {
     permission_grants: Vec<PermissionGrant>,
     service_credentials: HashMap<ServiceCredentialRef, ServiceCredentialRecord>,
     service_quota_policies: HashMap<ServicePrincipalKey, ServiceQuotaPolicy>,
-    service_quota_usage: HashMap<ServicePrincipalKey, MemoryQuotaUsage>,
+    service_rate_limit_policies: HashMap<ServiceRateLimitKey, ServiceRateLimitPolicy>,
+    service_rate_limit_usage: HashMap<ServiceRateLimitKey, MemoryQuotaUsage>,
     service_audit_records: Vec<(ServiceAuditRecord, [u8; 32])>,
     universal_conferences: HashMap<UniversalConferenceKey, UniversalConferenceProfile>,
     universal_conference_external: HashMap<UniversalConferenceExternalKey, UniversalConferenceKey>,
@@ -340,7 +342,19 @@ impl ServiceQuotaStore for MemoryLocalStore {
         state
             .service_quota_policies
             .insert(key.clone(), policy.clone());
-        state.service_quota_usage.remove(&key);
+        for rate_class in ServiceRequestRateClass::ALL {
+            let rate_key = (key.clone(), rate_class);
+            state.service_rate_limit_policies.insert(
+                rate_key.clone(),
+                ServiceRateLimitPolicy {
+                    subject: policy.subject.clone(),
+                    rate_class,
+                    max_requests: policy.max_requests,
+                    window_ms: policy.window_ms,
+                },
+            );
+            state.service_rate_limit_usage.remove(&rate_key);
+        }
         Ok(())
     }
 
@@ -354,22 +368,51 @@ impl ServiceQuotaStore for MemoryLocalStore {
         Ok(state.service_quota_policies.get(&key).cloned())
     }
 
-    fn consume_service_request(
+    fn set_service_rate_limit_policy(
+        &self,
+        policy: &ServiceRateLimitPolicy,
+    ) -> Result<(), DurableStoreError> {
+        validate_service_rate_limit_policy(policy).map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = (service_principal_key(&policy.subject), policy.rate_class);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if state.service_rate_limit_policies.get(&key) == Some(policy) {
+            return Ok(());
+        }
+        state
+            .service_rate_limit_policies
+            .insert(key.clone(), policy.clone());
+        state.service_rate_limit_usage.remove(&key);
+        Ok(())
+    }
+
+    fn service_rate_limit_policy(
         &self,
         subject: &ScopedPrincipal,
+        rate_class: ServiceRequestRateClass,
+    ) -> Result<Option<ServiceRateLimitPolicy>, DurableStoreError> {
+        validate_service_subject(subject)?;
+        let key = (service_principal_key(subject), rate_class);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state.service_rate_limit_policies.get(&key).cloned())
+    }
+
+    fn consume_service_request_for_class(
+        &self,
+        subject: &ScopedPrincipal,
+        rate_class: ServiceRequestRateClass,
         now_unix_ms: i64,
     ) -> Result<(), ServiceQuotaConsumeError> {
         validate_service_subject(subject).map_err(ServiceQuotaConsumeError::Store)?;
         if now_unix_ms < 0 {
             return Err(ServiceQuotaConsumeError::ClockRollback);
         }
-        let key = service_principal_key(subject);
+        let key = (service_principal_key(subject), rate_class);
         let mut state = self
             .state
             .lock()
             .map_err(|_| ServiceQuotaConsumeError::Store(DurableStoreError::Internal))?;
         let policy = state
-            .service_quota_policies
+            .service_rate_limit_policies
             .get(&key)
             .cloned()
             .ok_or(ServiceQuotaConsumeError::NotConfigured)?;
@@ -377,7 +420,7 @@ impl ServiceQuotaStore for MemoryLocalStore {
             .map_err(|_| ServiceQuotaConsumeError::Store(DurableStoreError::Corrupt))?;
         let window_start_unix_ms = now_unix_ms - now_unix_ms.rem_euclid(window_ms);
         let usage = state
-            .service_quota_usage
+            .service_rate_limit_usage
             .entry(key)
             .or_insert(MemoryQuotaUsage {
                 window_start_unix_ms,
@@ -6117,16 +6160,19 @@ mod service_principal_quota_audit_tests {
     use std::sync::atomic::{AtomicI64, Ordering};
 
     use ucr_core::{
-        AuthorizedDurableRuntime, AuthorizedMutationError, PermissionGrantStore, ServiceAuditStore,
-        ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
-        ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore, issue_service_credential,
+        AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError,
+        PermissionGrantStore, ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
+        ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaClockError,
+        ServiceQuotaConsumeError, ServiceQuotaStore, issue_service_credential,
     };
     use ucr_model::{
-        ConversationId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
-        PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuditOutcome, ServiceQuotaPolicy,
+        AuthorizationRequest, ConversationId, NamespaceId, OpaqueId, PermissionGrant,
+        PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
+        ServiceAuditOutcome, ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
         TenantId, TenantScope,
     };
     use ucr_protocol::{
+        AUDIO_SEND_PERMISSION, CALL_SIGNAL_PERMISSION, CONFERENCE_JOIN_ISSUE_PERMISSION,
         CONVERSATION_READ_PERMISSION, CanonicalError, CanonicalErrorCode,
         SERVICE_AUDIT_READ_PERMISSION, SERVICE_QUOTA_READ_PERMISSION,
         SERVICE_QUOTA_WRITE_PERMISSION,
@@ -6259,6 +6305,146 @@ mod service_principal_quota_audit_tests {
                 ServiceAuditOutcome::Authorized,
                 ServiceAuditOutcome::RateLimited,
             ]
+        );
+    }
+
+    #[test]
+    fn service_request_gate_does_not_cross_starve_rate_classes() {
+        let store = MemoryLocalStore::default();
+        let subject = service("service-rate-gate");
+        let resource = scope();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        for permission in [
+            CONVERSATION_READ_PERMISSION,
+            CONFERENCE_JOIN_ISSUE_PERMISSION,
+            CALL_SIGNAL_PERMISSION,
+            AUDIO_SEND_PERMISSION,
+        ] {
+            store
+                .grant_permission(&grant(&subject, permission))
+                .expect("bootstrap representative permission");
+        }
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject.clone(),
+                max_requests: 1,
+                window_ms: 1_000,
+            })
+            .expect("install one-per-class template");
+        let clock = TestClock::new(10_000);
+
+        for permission in [
+            CONVERSATION_READ_PERMISSION,
+            CONFERENCE_JOIN_ISSUE_PERMISSION,
+            CALL_SIGNAL_PERMISSION,
+            AUDIO_SEND_PERMISSION,
+        ] {
+            let request = ServicePrincipalRequestGate::new(&clock, &store, &store)
+                .authenticate_request(
+                    &resource,
+                    &credential.credential_id,
+                    &secret,
+                    permission,
+                    &resource,
+                )
+                .expect("authenticate representative request");
+            assert_eq!(
+                request.authorize(&AuthorizationRequest {
+                    subject: subject.clone(),
+                    permission: permission.to_owned(),
+                    resource_scope: resource.clone(),
+                }),
+                Ok(()),
+                "first request in {permission} class must remain independent"
+            );
+        }
+
+        for permission in [
+            CONVERSATION_READ_PERMISSION,
+            CONFERENCE_JOIN_ISSUE_PERMISSION,
+            CALL_SIGNAL_PERMISSION,
+            AUDIO_SEND_PERMISSION,
+        ] {
+            let request = ServicePrincipalRequestGate::new(&clock, &store, &store)
+                .authenticate_request(
+                    &resource,
+                    &credential.credential_id,
+                    &secret,
+                    permission,
+                    &resource,
+                )
+                .expect("authentication precedes rate admission");
+            assert_eq!(
+                request.authorize(&AuthorizationRequest {
+                    subject: subject.clone(),
+                    permission: permission.to_owned(),
+                    resource_scope: resource.clone(),
+                }),
+                Err(CanonicalError::new(CanonicalErrorCode::RateLimited).with_retry_after(1_000)),
+                "second request in {permission} class must be independently limited"
+            );
+        }
+    }
+
+    #[test]
+    fn service_request_rate_classes_are_independent_and_overridable() {
+        let store = MemoryLocalStore::default();
+        let subject = service("service-rate-classes");
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject.clone(),
+                max_requests: 1,
+                window_ms: 1_000,
+            })
+            .expect("install legacy template");
+
+        for rate_class in ServiceRequestRateClass::ALL {
+            store
+                .consume_service_request_for_class(&subject, rate_class, 10_000)
+                .expect("each class has its own first request");
+            assert_eq!(
+                store.consume_service_request_for_class(&subject, rate_class, 10_000),
+                Err(ServiceQuotaConsumeError::RateLimited {
+                    retry_after_ms: 1_000
+                })
+            );
+        }
+
+        store
+            .set_service_rate_limit_policy(&ServiceRateLimitPolicy {
+                subject: subject.clone(),
+                rate_class: ServiceRequestRateClass::JoinIssuance,
+                max_requests: 2,
+                window_ms: 1_000,
+            })
+            .expect("override join bucket");
+        store
+            .consume_service_request_for_class(
+                &subject,
+                ServiceRequestRateClass::JoinIssuance,
+                10_000,
+            )
+            .expect("join override resets only join usage");
+        store
+            .consume_service_request_for_class(
+                &subject,
+                ServiceRequestRateClass::JoinIssuance,
+                10_000,
+            )
+            .expect("second join request allowed");
+        assert_eq!(
+            store.consume_service_request_for_class(
+                &subject,
+                ServiceRequestRateClass::Management,
+                10_000,
+            ),
+            Err(ServiceQuotaConsumeError::RateLimited {
+                retry_after_ms: 1_000
+            }),
+            "join override must not reset management usage"
         );
     }
 

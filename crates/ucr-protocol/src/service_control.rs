@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use ucr_model::{
     PrincipalKind, ServiceAuditOperationRef, ServiceAuditOutcome, ServiceAuditRecord,
-    ServiceQuotaPolicy,
+    ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
 };
 
 use crate::validate_namespaced_identifier;
@@ -94,6 +94,38 @@ pub fn validate_service_quota_policy(
         return Err(ServiceControlValidationError::InvalidQuota);
     }
     Ok(())
+}
+
+/// Validates one class-specific fixed-window Service Principal request quota.
+///
+/// # Errors
+/// Rejects non-service principals and zero/SQLite-incompatible quota values.
+pub fn validate_service_rate_limit_policy(
+    policy: &ServiceRateLimitPolicy,
+) -> Result<(), ServiceControlValidationError> {
+    validate_service_quota_policy(&ServiceQuotaPolicy {
+        subject: policy.subject.clone(),
+        max_requests: policy.max_requests,
+        window_ms: policy.window_ms,
+    })
+}
+
+/// Maps one canonical permission to its independent Service Account request-rate bucket.
+#[must_use]
+pub fn service_request_rate_class(permission: &str) -> ServiceRequestRateClass {
+    match permission {
+        "ucr.conference.join.issue" => ServiceRequestRateClass::JoinIssuance,
+        "ucr.call.signal" => ServiceRequestRateClass::Signaling,
+        "ucr.call.audio.send"
+        | "ucr.call.audio.receive"
+        | "ucr.call.video.send"
+        | "ucr.call.video.receive"
+        | "ucr.call.screen_share.send"
+        | "ucr.transport.local.use"
+        | "ucr.organization.relay.use"
+        | "ucr.organization.sfu.use" => ServiceRequestRateClass::MediaTransport,
+        _ => ServiceRequestRateClass::Management,
+    }
 }
 
 /// Validates one metadata-only Service Principal admission audit record.
@@ -252,8 +284,8 @@ mod tests {
 
     use ucr_model::{
         AuditRecordId, NamespaceId, OpaqueId, PrincipalId, PrincipalRef, ScopedPrincipal,
-        ServiceAuditOutcome, ServiceAuditRecord, ServiceCredentialId, ServiceQuotaPolicy, TenantId,
-        TenantScope,
+        ServiceAuditOutcome, ServiceAuditRecord, ServiceCredentialId, ServiceQuotaPolicy,
+        ServiceRequestRateClass, TenantId, TenantScope,
     };
 
     use super::*;
@@ -311,6 +343,41 @@ mod tests {
         assert_eq!(
             validate_service_quota_policy(&policy),
             Err(ServiceControlValidationError::NotServiceAccount)
+        );
+    }
+
+    #[test]
+    fn canonical_permissions_map_to_independent_request_rate_classes() {
+        assert_eq!(
+            service_request_rate_class("ucr.conference.join.issue"),
+            ServiceRequestRateClass::JoinIssuance
+        );
+        assert_eq!(
+            service_request_rate_class("ucr.call.signal"),
+            ServiceRequestRateClass::Signaling
+        );
+        for permission in [
+            "ucr.call.audio.send",
+            "ucr.call.audio.receive",
+            "ucr.call.video.send",
+            "ucr.call.video.receive",
+            "ucr.call.screen_share.send",
+            "ucr.transport.local.use",
+            "ucr.organization.relay.use",
+            "ucr.organization.sfu.use",
+        ] {
+            assert_eq!(
+                service_request_rate_class(permission),
+                ServiceRequestRateClass::MediaTransport
+            );
+        }
+        assert_eq!(
+            service_request_rate_class("ucr.conference.manage"),
+            ServiceRequestRateClass::Management
+        );
+        assert_eq!(
+            service_request_rate_class("ucr.message.read"),
+            ServiceRequestRateClass::Management
         );
     }
 
