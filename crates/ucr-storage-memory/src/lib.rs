@@ -2317,24 +2317,63 @@ fn event_is_attributed_to_principal(event: &EventEnvelope, principal: &Principal
     }
 }
 
+fn append_event_to_memory_state(
+    state: &mut MemoryState,
+    event: &EventEnvelope,
+) -> Result<EventAppendStatus, DurableStoreError> {
+    let event = canonical_event(event).map_err(map_event_error)?;
+    let key = event_key(&event);
+    if let Some(original) = state.events.get(&key) {
+        return if original == &event {
+            Ok(EventAppendStatus::Duplicate)
+        } else {
+            Err(DurableStoreError::Conflict)
+        };
+    }
+    if state.group_changes.contains_key(&key) || state.call_signals.contains_key(&key) {
+        return Err(DurableStoreError::Conflict);
+    }
+    state.events.insert(key.clone(), event);
+    state.event_order.push(key);
+    Ok(EventAppendStatus::Appended)
+}
+
+fn validate_conference_lifecycle_event(
+    current: &UniversalConferenceProfile,
+    expected_revision: u64,
+    lifecycle: UniversalConferenceLifecycle,
+    event: Option<&EventEnvelope>,
+) -> Result<(), DurableStoreError> {
+    let expected_type = match lifecycle {
+        UniversalConferenceLifecycle::Live => Some("conference.started"),
+        UniversalConferenceLifecycle::Ended => Some("conference.ended"),
+        UniversalConferenceLifecycle::Scheduled
+        | UniversalConferenceLifecycle::Waiting
+        | UniversalConferenceLifecycle::Ending => None,
+    };
+    match (expected_type, event) {
+        (None, None) => Ok(()),
+        (Some(expected_type), Some(event))
+            if event.scope == current.scope
+                && event.event_type == expected_type
+                && event.logical_order == expected_revision.saturating_add(1)
+                && event.actor.kind == ucr_model::ActorKind::System
+                && event.actor.on_behalf_of.as_ref().is_some_and(|principal_id| {
+                    principal_id.as_opaque() == current.integration_id.as_opaque()
+                }) =>
+        {
+            canonical_event(event)
+                .map(|_| ())
+                .map_err(map_event_error)
+        }
+        _ => Err(DurableStoreError::InvalidRecord),
+    }
+}
+
 impl EventJournalStore for MemoryLocalStore {
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError> {
-        let event = canonical_event(event).map_err(map_event_error)?;
-        let key = event_key(&event);
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
-        if let Some(original) = state.events.get(&key) {
-            return if original == &event {
-                Ok(EventAppendStatus::Duplicate)
-            } else {
-                Err(DurableStoreError::Conflict)
-            };
-        }
-        if state.group_changes.contains_key(&key) || state.call_signals.contains_key(&key) {
-            return Err(DurableStoreError::Conflict);
-        }
-        state.events.insert(key.clone(), event);
-        state.event_order.push(key);
-        Ok(EventAppendStatus::Appended)
+        append_event_to_memory_state(&mut state, event)
     }
 
     fn events_for_types(
@@ -8537,6 +8576,76 @@ impl UniversalConferenceStore for MemoryLocalStore {
             .checked_add(1)
             .ok_or(DurableStoreError::InvalidRecord)?;
         Ok(current.clone())
+    }
+
+    fn transition_universal_conference_with_event(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        expected_revision: u64,
+        lifecycle: UniversalConferenceLifecycle,
+        entry_open: bool,
+        event: Option<&EventEnvelope>,
+    ) -> Result<UniversalConferenceProfile, DurableStoreError> {
+        let key = universal_conference_key(scope, conference_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current = state
+            .universal_conferences
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::Conflict)?;
+
+        validate_conference_lifecycle_event(&current, expected_revision, lifecycle, event)?;
+
+        if current.revision == expected_revision.saturating_add(1)
+            && current.lifecycle == lifecycle
+            && current.entry_open == entry_open
+        {
+            if let Some(event) = event {
+                let _ = append_event_to_memory_state(&mut state, event)?;
+            }
+            return state
+                .universal_conferences
+                .get(&key)
+                .cloned()
+                .ok_or(DurableStoreError::Corrupt);
+        }
+
+        if current.revision != expected_revision
+            || !valid_universal_conference_transition(current.lifecycle, lifecycle)
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+
+        let next_revision = expected_revision
+            .checked_add(1)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if let Some(event) = event {
+            if event.logical_order != next_revision {
+                return Err(DurableStoreError::InvalidRecord);
+            }
+        }
+
+        {
+            let profile = state
+                .universal_conferences
+                .get_mut(&key)
+                .ok_or(DurableStoreError::Corrupt)?;
+            profile.lifecycle = lifecycle;
+            profile.entry_open = entry_open;
+            profile.revision = next_revision;
+        }
+        if let Some(event) = event
+            && let Err(error) = append_event_to_memory_state(&mut state, event)
+        {
+            state.universal_conferences.insert(key.clone(), current);
+            return Err(error);
+        }
+        state
+            .universal_conferences
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::Corrupt)
     }
 
     fn persist_universal_conference_participant(
