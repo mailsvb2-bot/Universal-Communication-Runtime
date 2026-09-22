@@ -12,12 +12,13 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use ucr_api_grpc::{
     GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
-    GrpcIntegrationService, GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService,
-    GrpcUniversalConferenceService, RealtimeWebRtcDependencies,
+    GrpcIntegrationService, GrpcOperatorRuntimeService, GrpcRealtimeService,
+    GrpcStoreForwardService, GrpcSyncService, GrpcUniversalConferenceService,
+    OperatorRuntimeHealthSource, RealtimeWebRtcDependencies,
     UniversalConferenceRuntimeCapabilities, call_service_server, conference_service_server,
     device_service_server, event_service_server, group_service_server, integration_service_server,
-    realtime_service_server, store_forward_service_server, sync_service_server,
-    universal_conference_service_server,
+    operator_runtime_service_server, pb, realtime_service_server, store_forward_service_server,
+    sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
@@ -35,9 +36,9 @@ use ucr_webhook::{
     HardenedWebhookSink, NativeTlsWebhookExecutor, SystemWebhookDnsResolver, WebhookSigningSecret,
 };
 use ucr_webrtc::{
-    LIVE_WEBRTC_E2EE_INGRESS_CAPACITY, LiveWebRtcProvider, TurnRestCredentialIssuer,
-    TurnRestSecret, WebRtcE2eeIngressFrame, WebRtcProvider, WebRtcProviderError,
-    WebRtcSessionConfigFactory,
+    LIVE_WEBRTC_E2EE_INGRESS_CAPACITY, LIVE_WEBRTC_MAX_SESSIONS, LiveWebRtcProvider,
+    TurnRestCredentialIssuer, TurnRestSecret, WebRtcE2eeIngressFrame, WebRtcProvider,
+    WebRtcProviderError, WebRtcSessionConfigFactory,
 };
 
 pub const DEFAULT_RUNTIME_BIND: &str = "127.0.0.1:50051";
@@ -171,6 +172,192 @@ pub struct ProductionRuntime {
     store: Arc<SqliteLocalStore>,
 }
 
+#[derive(Debug)]
+struct RealtimeOperatorHealth {
+    registry: Arc<RealtimeSessionRegistry>,
+    live_provider: Arc<LiveWebRtcProvider>,
+    turn_configured: bool,
+}
+
+#[derive(Debug)]
+struct ProductionOperatorHealthSource {
+    store: Arc<SqliteLocalStore>,
+    realtime: Option<RealtimeOperatorHealth>,
+}
+
+impl ProductionOperatorHealthSource {
+    fn basic(store: Arc<SqliteLocalStore>) -> Self {
+        Self {
+            store,
+            realtime: None,
+        }
+    }
+
+    fn realtime(
+        store: Arc<SqliteLocalStore>,
+        registry: Arc<RealtimeSessionRegistry>,
+        live_provider: Arc<LiveWebRtcProvider>,
+        turn_configured: bool,
+    ) -> Self {
+        Self {
+            store,
+            realtime: Some(RealtimeOperatorHealth {
+                registry,
+                live_provider,
+                turn_configured,
+            }),
+        }
+    }
+}
+
+impl OperatorRuntimeHealthSource for ProductionOperatorHealthSource {
+    fn snapshot(&self) -> pb::OperatorRuntimeHealthResponse {
+        let realtime = operator_realtime_health(self.realtime.as_ref());
+        pb::OperatorRuntimeHealthResponse {
+            api: Some(operator_component(
+                pb::OperatorComponentStatus::Healthy,
+                "private loopback operator API is serving",
+            )),
+            sfu: Some(realtime.sfu),
+            turn: Some(realtime.turn),
+            storage: Some(operator_storage_health(self.store.as_ref())),
+            webhook_worker: Some(operator_component(
+                pb::OperatorComponentStatus::NotConfigured,
+                "webhook delivery worker is not running",
+            )),
+            recorder: Some(operator_component(
+                pb::OperatorComponentStatus::NotConfigured,
+                "recording provider is not configured",
+            )),
+            capacity: Some(realtime.capacity),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OperatorRealtimeHealthSnapshot {
+    sfu: pb::OperatorComponentHealth,
+    turn: pb::OperatorComponentHealth,
+    capacity: pb::OperatorCapacityStatus,
+}
+
+fn operator_storage_health(store: &SqliteLocalStore) -> pb::OperatorComponentHealth {
+    match store.health() {
+        Ok(StorageHealth::Healthy) => operator_component(
+            pb::OperatorComponentStatus::Healthy,
+            "durable storage is healthy",
+        ),
+        Ok(StorageHealth::ReadOnly) => operator_component(
+            pb::OperatorComponentStatus::Degraded,
+            "durable storage is read-only",
+        ),
+        Ok(StorageHealth::Unavailable) => operator_component(
+            pb::OperatorComponentStatus::Unavailable,
+            "durable storage is unavailable",
+        ),
+        Ok(StorageHealth::Corrupt) => operator_component(
+            pb::OperatorComponentStatus::Unavailable,
+            "durable storage is corrupt",
+        ),
+        Err(_) => operator_component(
+            pb::OperatorComponentStatus::Unavailable,
+            "durable storage health check failed",
+        ),
+    }
+}
+
+fn operator_realtime_health(
+    realtime: Option<&RealtimeOperatorHealth>,
+) -> OperatorRealtimeHealthSnapshot {
+    let Some(realtime) = realtime else {
+        return OperatorRealtimeHealthSnapshot {
+            sfu: operator_component(
+                pb::OperatorComponentStatus::NotConfigured,
+                "realtime/SFU runtime is not enabled",
+            ),
+            turn: operator_component(
+                pb::OperatorComponentStatus::NotConfigured,
+                "TURN is not configured",
+            ),
+            capacity: pb::OperatorCapacityStatus {
+                status: pb::OperatorComponentStatus::NotConfigured as i32,
+                active_realtime_sessions: 0,
+                max_realtime_sessions: 0,
+                available_realtime_sessions: 0,
+            },
+        };
+    };
+
+    let sfu = if realtime.live_provider.is_available() {
+        operator_component(
+            pb::OperatorComponentStatus::Healthy,
+            "encrypted SFU/WebRTC transport worker is available",
+        )
+    } else {
+        operator_component(
+            pb::OperatorComponentStatus::Unavailable,
+            "encrypted SFU/WebRTC transport worker is unavailable",
+        )
+    };
+    let turn = if realtime.turn_configured {
+        operator_component(
+            pb::OperatorComponentStatus::Unverified,
+            "TURN configured but network reachability is unverified",
+        )
+    } else {
+        operator_component(
+            pb::OperatorComponentStatus::NotConfigured,
+            "TURN is not configured",
+        )
+    };
+    OperatorRealtimeHealthSnapshot {
+        sfu,
+        turn,
+        capacity: realtime_capacity(&realtime.registry),
+    }
+}
+
+fn operator_component(
+    status: pb::OperatorComponentStatus,
+    detail: &str,
+) -> pb::OperatorComponentHealth {
+    pb::OperatorComponentHealth {
+        status: status as i32,
+        detail: detail.to_owned(),
+    }
+}
+
+fn unavailable_realtime_capacity() -> pb::OperatorCapacityStatus {
+    pb::OperatorCapacityStatus {
+        status: pb::OperatorComponentStatus::Unavailable as i32,
+        active_realtime_sessions: 0,
+        max_realtime_sessions: u32::try_from(LIVE_WEBRTC_MAX_SESSIONS).unwrap_or(u32::MAX),
+        available_realtime_sessions: 0,
+    }
+}
+
+fn realtime_capacity(registry: &RealtimeSessionRegistry) -> pb::OperatorCapacityStatus {
+    let Ok(now_unix_ms) = runtime_now_unix_ms() else {
+        return unavailable_realtime_capacity();
+    };
+    let Ok(active) = registry.active_session_count_at(now_unix_ms) else {
+        return unavailable_realtime_capacity();
+    };
+    let maximum = LIVE_WEBRTC_MAX_SESSIONS;
+    let available = maximum.saturating_sub(active);
+    let status = if active >= maximum {
+        pb::OperatorComponentStatus::Degraded
+    } else {
+        pb::OperatorComponentStatus::Healthy
+    };
+    pb::OperatorCapacityStatus {
+        status: status as i32,
+        active_realtime_sessions: u32::try_from(active).unwrap_or(u32::MAX),
+        max_realtime_sessions: u32::try_from(maximum).unwrap_or(u32::MAX),
+        available_realtime_sessions: u32::try_from(available).unwrap_or(u32::MAX),
+    }
+}
+
 impl ProductionRuntime {
     /// Initializes a durable UCR `SQLite` database without creating credentials, identities,
     /// permissions, test transports, or other development bootstrap state.
@@ -280,8 +467,12 @@ impl ProductionRuntime {
         let store = Arc::clone(&self.store);
         let authorization = Arc::clone(&self.store);
         let conference_state = Arc::new(ConferenceRuntimeState::new());
+        let operator_health = Arc::new(ProductionOperatorHealthSource::basic(Arc::clone(&store)));
 
         Server::builder()
+            .add_service(operator_runtime_service_server(
+                GrpcOperatorRuntimeService::new(operator_health),
+            ))
             .add_service(integration_service_server(GrpcIntegrationService::new(
                 Arc::clone(&clock),
                 Arc::clone(&authorization),
@@ -373,6 +564,12 @@ impl ProductionRuntime {
         let dependencies = realtime_dependencies(config)?;
         let join_issuer = Arc::clone(&dependencies.join_issuer);
         let registry = Arc::clone(&dependencies.registry);
+        let operator_health = realtime_operator_health(
+            &store,
+            &registry,
+            &dependencies.live_provider,
+            runtime_capabilities.turn,
+        );
         let realtime_service = GrpcRealtimeService::with_webrtc(
             Arc::clone(&clock),
             Arc::clone(&authorization),
@@ -382,75 +579,120 @@ impl ProductionRuntime {
             Arc::clone(&conference_state),
             dependencies.webrtc,
         );
-        let bridge_task = tokio::spawn(run_webrtc_e2ee_bridge(
+        let bridge_task = spawn_webrtc_e2ee_bridge(
             dependencies.e2ee_ingress,
-            Arc::clone(&dependencies.live_provider),
-            Arc::clone(&registry),
-            realtime_service.clone(),
-        ));
+            &dependencies.live_provider,
+            &registry,
+            &realtime_service,
+        );
 
-        let server_result = Server::builder()
-            .add_service(integration_service_server(GrpcIntegrationService::new(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-            )))
-            .add_service(group_service_server(GrpcGroupService::new(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-            )))
-            .add_service(device_service_server(GrpcDeviceService::new(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-            )))
-            .add_service(sync_service_server(GrpcSyncService::new(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-            )))
-            .add_service(call_service_server(GrpcCallService::new(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-            )))
-            .add_service(conference_service_server(
-                GrpcConferenceService::with_state_and_join_issuer(
-                    Arc::clone(&clock),
-                    Arc::clone(&authorization),
-                    Arc::clone(&store),
-                    Arc::clone(&conference_state),
-                    Arc::clone(&join_issuer),
-                ),
-            ))
-            .add_service(realtime_service_server(realtime_service))
-            .add_service(universal_conference_service_server(
-                GrpcUniversalConferenceService::with_state_join_issuer_and_runtime_capabilities(
-                    Arc::clone(&clock),
-                    Arc::clone(&authorization),
-                    Arc::clone(&store),
-                    Arc::clone(&conference_state),
-                    join_issuer,
-                    runtime_capabilities,
-                ),
-            ))
-            .add_service(event_service_server(GrpcEventService::new(
-                Arc::clone(&clock),
-                event_clock,
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-            )))
-            .add_service(store_forward_service_server(GrpcStoreForwardService::new(
-                clock,
-                authorization,
-                store,
-            )))
-            .serve_with_incoming(incoming)
-            .await;
+        let services = RealtimeServerServices {
+            clock,
+            event_clock,
+            store,
+            authorization,
+            conference_state,
+            runtime_capabilities,
+            join_issuer,
+            operator_health,
+            realtime_service,
+        };
+        let server_result = serve_realtime_services(services, incoming).await;
         bridge_task.abort();
         server_result.map_err(|error| format!("local realtime API server: {error}"))
     }
+}
+
+struct RealtimeServerServices {
+    clock: Arc<SystemServiceQuotaClock>,
+    event_clock: Arc<SystemEventDeliveryClock>,
+    store: Arc<SqliteLocalStore>,
+    authorization: Arc<SqliteLocalStore>,
+    conference_state: Arc<ConferenceRuntimeState>,
+    runtime_capabilities: UniversalConferenceRuntimeCapabilities,
+    join_issuer: Arc<JoinTokenIssuer>,
+    operator_health: Arc<ProductionOperatorHealthSource>,
+    realtime_service:
+        GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+}
+
+async fn serve_realtime_services(
+    services: RealtimeServerServices,
+    incoming: TcpListenerStream,
+) -> Result<(), tonic::transport::Error> {
+    let RealtimeServerServices {
+        clock,
+        event_clock,
+        store,
+        authorization,
+        conference_state,
+        runtime_capabilities,
+        join_issuer,
+        operator_health,
+        realtime_service,
+    } = services;
+    Server::builder()
+        .add_service(operator_runtime_service_server(
+            GrpcOperatorRuntimeService::new(operator_health),
+        ))
+        .add_service(integration_service_server(GrpcIntegrationService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(group_service_server(GrpcGroupService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(device_service_server(GrpcDeviceService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(sync_service_server(GrpcSyncService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(call_service_server(GrpcCallService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(conference_service_server(
+            GrpcConferenceService::with_state_and_join_issuer(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+                Arc::clone(&conference_state),
+                Arc::clone(&join_issuer),
+            ),
+        ))
+        .add_service(realtime_service_server(realtime_service))
+        .add_service(universal_conference_service_server(
+            GrpcUniversalConferenceService::with_state_join_issuer_and_runtime_capabilities(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+                Arc::clone(&conference_state),
+                join_issuer,
+                runtime_capabilities,
+            ),
+        ))
+        .add_service(event_service_server(GrpcEventService::new(
+            Arc::clone(&clock),
+            event_clock,
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(store_forward_service_server(GrpcStoreForwardService::new(
+            clock,
+            authorization,
+            store,
+        )))
+        .serve_with_incoming(incoming)
+        .await
 }
 
 struct RealtimeRuntimeDependencies {
@@ -533,6 +775,34 @@ impl SfuForwardSink for WebRtcE2eeForwardSink {
             Err(SfuForwardSinkError::Unavailable)
         }
     }
+}
+
+fn realtime_operator_health(
+    store: &Arc<SqliteLocalStore>,
+    registry: &Arc<RealtimeSessionRegistry>,
+    live_provider: &Arc<LiveWebRtcProvider>,
+    turn_configured: bool,
+) -> Arc<ProductionOperatorHealthSource> {
+    Arc::new(ProductionOperatorHealthSource::realtime(
+        Arc::clone(store),
+        Arc::clone(registry),
+        Arc::clone(live_provider),
+        turn_configured,
+    ))
+}
+
+fn spawn_webrtc_e2ee_bridge(
+    ingress: tokio::sync::mpsc::Receiver<WebRtcE2eeIngressFrame>,
+    provider: &Arc<LiveWebRtcProvider>,
+    registry: &Arc<RealtimeSessionRegistry>,
+    service: &GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run_webrtc_e2ee_bridge(
+        ingress,
+        Arc::clone(provider),
+        Arc::clone(registry),
+        service.clone(),
+    ))
 }
 
 async fn run_webrtc_e2ee_bridge(
