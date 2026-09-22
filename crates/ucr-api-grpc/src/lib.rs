@@ -4465,7 +4465,7 @@ mod tests {
             actor: Some(pb::ActorRef {
                 actor_id: Some(pb_id("actor-event-grpc")),
                 kind: pb::ActorKind::System as i32,
-                on_behalf_of: None,
+                on_behalf_of: Some(pb_id("service-grpc")),
             }),
             source_device: Some(pb::DeviceRef {
                 device_id: Some(pb_id("device-event-grpc")),
