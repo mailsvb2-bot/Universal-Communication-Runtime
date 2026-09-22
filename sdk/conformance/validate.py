@@ -148,7 +148,7 @@ def main() -> None:
         "external_user_id",
         "integration_id",
         "idempotency_key",
-        "expires_at_unix_ms",
+        "ttl_seconds",
     )
     for marker in integration_markers:
         require(marker in universal, f"integration conformance anchor missing: {marker}")
