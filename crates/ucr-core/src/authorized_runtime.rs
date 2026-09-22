@@ -8,8 +8,8 @@ use ucr_model::{
     IdentityId, IdentityRecord, IntegrationId, IntentId, KeyId, MessageEnvelope, MessageId,
     PermissionGrant, PermissionScope, PrincipalKind, PublicKeyDescriptor, RecoveryPlan,
     RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord,
-    ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy, SessionId, SyncCheckpoint,
-    SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    ServiceCredentialId, ServiceCredentialRecord, ServiceQuotaPolicy, ServiceResourceQuotaPolicy,
+    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{
     ANTI_ENTROPY_READ_PERMISSION, ANTI_ENTROPY_RECONCILE_PERMISSION, CALL_OBSERVE_PERMISSION,
@@ -240,6 +240,40 @@ where
         )?;
         self.store
             .set_service_quota_policy(policy)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Reads one Service Account live-resource quota policy only after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn service_resource_quota_policy(
+        &self,
+        subject: &ScopedPrincipal,
+        target: &ScopedPrincipal,
+    ) -> Result<Option<ServiceResourceQuotaPolicy>, AuthorizedMutationError> {
+        self.require(subject, &target.scope, SERVICE_QUOTA_READ_PERMISSION)?;
+        self.store
+            .service_resource_quota_policy(target)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Installs or replaces one Service Account live-resource quota policy after authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn set_service_resource_quota_policy(
+        &self,
+        subject: &ScopedPrincipal,
+        policy: &ServiceResourceQuotaPolicy,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(
+            subject,
+            &policy.subject.scope,
+            SERVICE_QUOTA_WRITE_PERMISSION,
+        )?;
+        self.store
+            .set_service_resource_quota_policy(policy)
             .map_err(AuthorizedMutationError::Store)
     }
 }
