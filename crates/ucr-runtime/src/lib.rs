@@ -364,7 +364,6 @@ impl ProductionRuntime {
             .map_err(|error| format!("resolve local realtime API: {error}"))?;
         println!("UCR_REALTIME_READY endpoint=http://{address}");
         println!("UCR_RUNTIME_MODE={RUNTIME_MODE} realtime=true tls_edge=required test_mode=false");
-
         let incoming = TcpListenerStream::new(listener);
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
