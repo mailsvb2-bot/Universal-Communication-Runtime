@@ -47,10 +47,9 @@ use ucr_model::{
     RecordingSession, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
     ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
     ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass, SessionId, StoreForwardId,
-    StoreForwardJob, StoreForwardLeaseId,
-    SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
-    TrustedSigningKeyState, UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
-    UniversalConferenceProfile,
+    StoreForwardJob, StoreForwardLeaseId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord, TrustedSigningKeyState, UniversalConferenceLifecycle,
+    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
     AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
@@ -73,7 +72,8 @@ use ucr_protocol::{
     validate_external_identity_binding_key, validate_federation_credential_rotation,
     validate_federation_transition, validate_identity_record, validate_permission_grant,
     validate_principal_identity_binding, validate_recording_session, validate_service_audit_record,
-    validate_service_quota_policy, validate_sync_checkpoint, validate_sync_transition,
+    validate_service_quota_policy, validate_service_rate_limit_policy, validate_sync_checkpoint,
+    validate_sync_transition,
     validate_trusted_signing_key_descriptor,
 };
 
@@ -373,8 +373,7 @@ impl ServiceQuotaStore for MemoryLocalStore {
         &self,
         policy: &ServiceRateLimitPolicy,
     ) -> Result<(), DurableStoreError> {
-        validate_service_rate_limit_policy(policy)
-            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        validate_service_rate_limit_policy(policy).map_err(|_| DurableStoreError::InvalidRecord)?;
         let key = (service_principal_key(&policy.subject), policy.rate_class);
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         if state.service_rate_limit_policies.get(&key) == Some(policy) {
