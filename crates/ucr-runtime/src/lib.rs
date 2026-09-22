@@ -351,8 +351,7 @@ impl ProductionRuntime {
         config: RealtimeRuntimeConfig,
     ) -> Result<(), String> {
         validate_local_bind(bind)?;
-        let diagnostics = self.diagnostics()?;
-        if diagnostics.storage_health != StorageHealth::Healthy {
+        if self.diagnostics()?.storage_health != StorageHealth::Healthy {
             return Err("production runtime refuses unhealthy storage".to_owned());
         }
 
