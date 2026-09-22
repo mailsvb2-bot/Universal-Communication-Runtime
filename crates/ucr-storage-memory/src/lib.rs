@@ -8622,10 +8622,10 @@ impl UniversalConferenceStore for MemoryLocalStore {
         let next_revision = expected_revision
             .checked_add(1)
             .ok_or(DurableStoreError::InvalidRecord)?;
-        if let Some(event) = event {
-            if event.logical_order != next_revision {
-                return Err(DurableStoreError::InvalidRecord);
-            }
+        if let Some(event) = event
+            && event.logical_order != next_revision
+        {
+            return Err(DurableStoreError::InvalidRecord);
         }
 
         {
