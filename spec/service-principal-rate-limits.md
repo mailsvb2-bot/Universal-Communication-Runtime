@@ -41,7 +41,9 @@ temporary burst merely because the runtime was restarted or upgraded.
 
 ## Non-claims: resource quotas
 
-Request-rate separation does **not** complete UCR resource quotas. Concurrent conferences,
-participants, publishers, aggregate bandwidth, recording minutes, and other deployment capacity
-budgets remain separate resource-governance work. Those limits must be enforced by their canonical
-runtime/storage owners rather than approximated through API request counts.
+Request-rate separation does **not** complete UCR resource quotas. The concurrent-participant
+ceiling is now owned by the separate `ServiceResourceQuotaPolicy` contract documented in
+`service-resource-quotas.md`. Concurrent conferences, publishers, aggregate bandwidth, recording
+minutes, and other deployment capacity budgets remain separate resource-governance work. Those
+limits must be enforced by their canonical runtime/storage owners rather than approximated through
+API request counts.
