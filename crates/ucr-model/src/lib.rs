@@ -719,6 +719,15 @@ pub enum ServiceRequestRateClass {
     MediaTransport,
 }
 
+impl ServiceRequestRateClass {
+    pub const ALL: [Self; 4] = [
+        Self::Management,
+        Self::JoinIssuance,
+        Self::Signaling,
+        Self::MediaTransport,
+    ];
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceRateLimitPolicy {
     pub subject: ScopedPrincipal,
