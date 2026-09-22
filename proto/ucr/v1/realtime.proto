@@ -24,6 +24,12 @@ enum RealtimeAdmissionState {
   REALTIME_ADMISSION_STATE_CLOSED = 3;
 }
 
+message RealtimeMediaPolicy {
+  optional bool publish_audio_allowed = 1;
+  optional bool publish_camera_allowed = 2;
+  optional bool screen_share_allowed = 3;
+}
+
 message RealtimeSession {
   TenantScope scope = 1;
   OpaqueId call_id = 2;
@@ -33,6 +39,7 @@ message RealtimeSession {
   int64 expires_at_unix_ms = 6;
   uint64 heartbeat_interval_ms = 7;
   RealtimeAdmissionState admission_state = 8;
+  optional RealtimeMediaPolicy media_policy = 9;
 }
 
 message RealtimeJoinResponse {
@@ -55,6 +62,7 @@ message RealtimeHeartbeatResponse {
     ErrorEnvelope error = 2;
   }
   RealtimeAdmissionState admission_state = 3;
+  optional RealtimeMediaPolicy media_policy = 4;
 }
 
 message RealtimeLeaveRequest {

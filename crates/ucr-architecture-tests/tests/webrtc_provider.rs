@@ -117,6 +117,31 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
 }
 
 #[test]
+fn browser_media_policy_is_server_projected_and_coexists_with_admission() {
+    let realtime_proto = read("proto/ucr/v1/realtime.proto");
+    let realtime_service = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let browser = read("crates/ucr-realtime-web/static/client.html");
+
+    assert!(realtime_proto.contains("message RealtimeMediaPolicy"));
+    assert!(realtime_proto.contains("RealtimeAdmissionState admission_state = 8;"));
+    assert!(realtime_proto.contains("optional RealtimeMediaPolicy media_policy = 9;"));
+    assert!(realtime_proto.contains("RealtimeAdmissionState admission_state = 3;"));
+    assert!(realtime_proto.contains("optional RealtimeMediaPolicy media_policy = 4;"));
+    assert!(realtime_service.contains("effective_universal_media_policy"));
+    assert!(realtime_service.contains("publish_audio_allowed"));
+    assert!(realtime_service.contains("publish_camera_allowed"));
+    assert!(realtime_service.contains("screen_share_allowed"));
+    assert!(realtime_service.contains("require_accepted_conference_participant(&claims)"));
+    assert!(browser.contains("applyMediaPolicy"));
+    assert!(browser.contains("policyAllows(\"audio\")"));
+    assert!(browser.contains("policyAllows(\"camera\")"));
+    assert!(browser.contains("policyAllows(\"screen\")"));
+    assert!(browser.contains("mediaActive&&policyAllows"));
+    assert!(browser.contains("Viewing mode does not request camera or microphone access."));
+    assert!(browser.contains("Conference access ended by host or server policy."));
+}
+
+#[test]
 fn browser_screen_sharing_stays_endpoint_only_and_privacy_first() {
     let browser = read("crates/ucr-realtime-web/static/client.html");
     let realtime_spec = read("spec/realtime.md");

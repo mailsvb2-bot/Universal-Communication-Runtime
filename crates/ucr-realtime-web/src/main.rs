@@ -120,6 +120,26 @@ struct WebRtcOfferResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct BrowserMediaPolicyResponse {
+    #[serde(rename = "publish_audio_allowed")]
+    audio: Option<bool>,
+    #[serde(rename = "publish_camera_allowed")]
+    camera: Option<bool>,
+    #[serde(rename = "screen_share_allowed")]
+    screen_share: Option<bool>,
+}
+
+impl From<pb::RealtimeMediaPolicy> for BrowserMediaPolicyResponse {
+    fn from(value: pb::RealtimeMediaPolicy) -> Self {
+        Self {
+            audio: value.publish_audio_allowed,
+            camera: value.publish_camera_allowed,
+            screen_share: value.screen_share_allowed,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 struct ApiResponse {
     ok: bool,
     code: &'static str,
@@ -129,6 +149,8 @@ struct ApiResponse {
     accepted_recipient_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     admission_state: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_policy: Option<BrowserMediaPolicyResponse>,
 }
 
 #[tokio::main]
@@ -389,14 +411,18 @@ async fn join(state: &AppState, token: &str, input: SessionRequest) -> HttpRespo
 
     match client.join_realtime(request).await {
         Ok(response) => match response.into_inner().result {
-            Some(pb::realtime_join_response::Result::Session(session)) => api_ok_with_admission(
-                "joined",
-                "realtime session joined",
-                Some(session.expires_at_unix_ms),
-                Some(session.heartbeat_interval_ms),
-                None,
-                admission_state_name(session.admission_state),
-            ),
+            Some(pb::realtime_join_response::Result::Session(session)) => {
+                let media_policy = session.media_policy.map(BrowserMediaPolicyResponse::from);
+                api_ok_with_realtime_state(
+                    "joined",
+                    "realtime session joined",
+                    Some(session.expires_at_unix_ms),
+                    Some(session.heartbeat_interval_ms),
+                    None,
+                    admission_state_name(session.admission_state),
+                    media_policy,
+                )
+            }
             Some(pb::realtime_join_response::Result::Error(error)) => join_error(&error),
             None => api_error(
                 StatusCode::UNAUTHORIZED,
@@ -440,13 +466,15 @@ async fn heartbeat(state: &AppState, token: &str, input: HeartbeatRequest) -> Ht
             let response = response.into_inner();
             match response.result {
                 Some(pb::realtime_heartbeat_response::Result::Acknowledgement(_)) => {
-                    api_ok_with_admission(
+                    let media_policy = response.media_policy.map(BrowserMediaPolicyResponse::from);
+                    api_ok_with_realtime_state(
                         "alive",
                         "realtime heartbeat accepted",
                         None,
                         None,
                         None,
                         admission_state_name(response.admission_state),
+                        media_policy,
                     )
                 }
                 Some(pb::realtime_heartbeat_response::Result::Error(_)) | None => api_error(
@@ -1008,23 +1036,25 @@ fn api_ok(
     heartbeat_interval_ms: Option<u64>,
     accepted_recipient_count: Option<u32>,
 ) -> HttpResponse {
-    api_ok_with_admission(
+    api_ok_with_realtime_state(
         code,
         message,
         expires_at_unix_ms,
         heartbeat_interval_ms,
         accepted_recipient_count,
         None,
+        None,
     )
 }
 
-fn api_ok_with_admission(
+fn api_ok_with_realtime_state(
     code: &'static str,
     message: impl Into<String>,
     expires_at_unix_ms: Option<i64>,
     heartbeat_interval_ms: Option<u64>,
     accepted_recipient_count: Option<u32>,
     admission_state: Option<&'static str>,
+    media_policy: Option<BrowserMediaPolicyResponse>,
 ) -> HttpResponse {
     json_response(
         StatusCode::OK,
@@ -1036,6 +1066,7 @@ fn api_ok_with_admission(
             heartbeat_interval_ms,
             accepted_recipient_count,
             admission_state,
+            media_policy,
         },
     )
 }
@@ -1060,6 +1091,7 @@ fn api_error(status: StatusCode, code: &'static str, message: impl Into<String>)
             heartbeat_interval_ms: None,
             accepted_recipient_count: None,
             admission_state: None,
+            media_policy: None,
         },
     )
 }
@@ -1125,6 +1157,12 @@ mod tests {
             "id=\"camera\"",
             "id=\"mic-toggle\"",
             "id=\"camera-toggle\"",
+            "applyMediaPolicy",
+            "policyAllows(\"audio\")",
+            "policyAllows(\"camera\")",
+            "policyAllows(\"screen\")",
+            "Viewing mode does not request camera or microphone access.",
+            "Conference access ended by host or server policy.",
         ] {
             assert!(
                 CLIENT_HTML.contains(required),

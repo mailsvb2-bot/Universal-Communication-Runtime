@@ -285,6 +285,7 @@ pub struct LiveWebRtcProvider {
     command_tx: Option<tokio::sync::mpsc::Sender<LiveWebRtcCommand>>,
     worker: Option<thread::JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
     request_timeout: Duration,
 }
 
@@ -331,6 +332,8 @@ impl LiveWebRtcProvider {
         let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
+        let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+        let worker_shutdown_notify = Arc::clone(&shutdown_notify);
         let worker = thread::Builder::new()
             .name("ucr-webrtc-peer-engine".to_owned())
             .spawn(move || {
@@ -344,6 +347,7 @@ impl LiveWebRtcProvider {
                         runtime.block_on(run_live_webrtc_worker(
                             command_rx,
                             worker_shutdown,
+                            worker_shutdown_notify,
                             e2ee_ingress,
                         ));
                     }
@@ -358,6 +362,7 @@ impl LiveWebRtcProvider {
                 command_tx: Some(command_tx),
                 worker: Some(worker),
                 shutdown,
+                shutdown_notify,
                 request_timeout: Duration::from_secs(LIVE_WEBRTC_REQUEST_TIMEOUT_SECONDS),
             }),
             Ok(Err(error)) => {
@@ -441,6 +446,7 @@ impl LiveWebRtcProvider {
 impl Drop for LiveWebRtcProvider {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self.shutdown_notify.notify_one();
         self.command_tx.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -532,11 +538,25 @@ struct LiveWebRtcSession {
 async fn run_live_webrtc_worker(
     mut commands: tokio::sync::mpsc::Receiver<LiveWebRtcCommand>,
     shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
     e2ee_ingress: Option<tokio::sync::mpsc::Sender<WebRtcE2eeIngressFrame>>,
 ) {
     let mut sessions = HashMap::<String, LiveWebRtcSession>::new();
-    while !shutdown.load(Ordering::Acquire) {
-        let Some(command) = commands.recv().await else {
+    loop {
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        let command = tokio::select! {
+            biased;
+            () = shutdown_notify.notified() => {
+                if shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+                continue;
+            }
+            command = commands.recv() => command,
+        };
+        let Some(command) = command else {
             break;
         };
         if shutdown.load(Ordering::Acquire) {
@@ -1243,6 +1263,7 @@ mod tests {
             }
         }
         provider.shutdown.store(true, Ordering::Release);
+        provider.shutdown_notify.notify_one();
         provider.command_tx.take();
         let worker = provider.worker.take().expect("worker");
         let started = Instant::now();

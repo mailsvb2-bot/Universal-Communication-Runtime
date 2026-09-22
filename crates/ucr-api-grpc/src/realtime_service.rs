@@ -46,6 +46,13 @@ pub const REALTIME_AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const REALTIME_BEARER_PREFIX: &str = "Bearer ";
 const REALTIME_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EffectiveRealtimeMediaPolicy {
+    publish_audio_allowed: bool,
+    publish_camera_allowed: bool,
+    screen_share_allowed: bool,
+}
+
 #[derive(Clone)]
 pub struct RealtimeWebRtcDependencies {
     provider: Arc<dyn WebRtcProvider>,
@@ -218,6 +225,7 @@ where
                         self.require_entry_open_for_join(&claims)?;
                     }
                     self.ensure_accepted_conference_participant_for_join(&claims)?;
+                    let media_policy = self.effective_universal_media_policy(&claims)?;
                     let redeemed = self.redeemed_claims(&token, &scope, &call_id, &session_id)?;
                     if redeemed != claims {
                         return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
@@ -230,7 +238,7 @@ where
                         let _ = self.registry.leave(&claims, now);
                         return Err(error);
                     }
-                    Ok(pb_realtime_session(&claims, admission))
+                    Ok(pb_realtime_session(&claims, admission, media_policy))
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
@@ -254,6 +262,7 @@ where
             (Ok(token), Ok((scope, call_id, session_id))) => self
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
+                    self.require_accepted_conference_participant(&claims)?;
                     let now = self.now()?;
                     let sequence = self
                         .registry
@@ -265,28 +274,33 @@ where
                         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
                     }
                     let admission = self.realtime_admission_state(&claims)?;
+                    let media_policy = self.effective_universal_media_policy(&claims)?;
                     Ok((
                         pb_acknowledgement(acknowledgement_for(
                             claims.session_id.as_opaque().clone(),
                         )),
                         admission,
+                        media_policy,
                     ))
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
-        let (result, admission_state) = match result {
-            Ok((acknowledgement, admission)) => (
+        let (result, admission_state, media_policy) = match result {
+            Ok((acknowledgement, admission, media_policy)) => (
                 pb::realtime_heartbeat_response::Result::Acknowledgement(acknowledgement),
                 admission as i32,
+                media_policy.map(pb_realtime_media_policy),
             ),
             Err(error) => (
                 pb::realtime_heartbeat_response::Result::Error(pb_error(error)),
                 pb::RealtimeAdmissionState::Unspecified as i32,
+                None,
             ),
         };
         Ok(Response::new(pb::RealtimeHeartbeatResponse {
             result: Some(result),
             admission_state,
+            media_policy,
         }))
     }
 
@@ -1089,12 +1103,10 @@ where
         }
     }
 
-    fn require_universal_publish_allowed(
+    fn effective_universal_media_policy(
         &self,
         claims: &RealtimeSessionClaims,
-        media_kind: MediaKind,
-        video_source_kind: Option<VideoSourceKind>,
-    ) -> Result<(), CanonicalError> {
+    ) -> Result<Option<EffectiveRealtimeMediaPolicy>, CanonicalError> {
         let actor = actor_for(claims);
         let snapshot = conference_runtime(self)
             .snapshot(&actor, &claims.scope, &claims.call_id)
@@ -1104,7 +1116,7 @@ where
             .universal_conference_profile(&claims.scope, &snapshot.group_id)
             .map_err(map_store_error)?
         else {
-            return Ok(());
+            return Ok(None);
         };
         let participant = self
             .store
@@ -1118,16 +1130,26 @@ where
         if !participant.active {
             return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
         }
+        Ok(Some(EffectiveRealtimeMediaPolicy {
+            publish_audio_allowed: !participant.audio_muted && participant.publish_audio_allowed,
+            publish_camera_allowed: participant.camera_allowed && participant.publish_video_allowed,
+            screen_share_allowed: participant.screen_share_allowed,
+        }))
+    }
+
+    fn require_universal_publish_allowed(
+        &self,
+        claims: &RealtimeSessionClaims,
+        media_kind: MediaKind,
+        video_source_kind: Option<VideoSourceKind>,
+    ) -> Result<(), CanonicalError> {
+        let Some(policy) = self.effective_universal_media_policy(claims)? else {
+            return Ok(());
+        };
         let allowed = match (media_kind, video_source_kind) {
-            (MediaKind::Audio, None) => {
-                !participant.audio_muted && participant.publish_audio_allowed
-            }
-            (MediaKind::Video, Some(VideoSourceKind::Camera)) => {
-                participant.camera_allowed && participant.publish_video_allowed
-            }
-            (MediaKind::Video, Some(VideoSourceKind::ScreenShare)) => {
-                participant.screen_share_allowed
-            }
+            (MediaKind::Audio, None) => policy.publish_audio_allowed,
+            (MediaKind::Video, Some(VideoSourceKind::Camera)) => policy.publish_camera_allowed,
+            (MediaKind::Video, Some(VideoSourceKind::ScreenShare)) => policy.screen_share_allowed,
             _ => false,
         };
         if allowed {
@@ -1420,9 +1442,18 @@ fn pb_sfu_forward_envelope(value: &SfuForwardEnvelope) -> pb::SfuForwardEnvelope
     }
 }
 
+fn pb_realtime_media_policy(policy: EffectiveRealtimeMediaPolicy) -> pb::RealtimeMediaPolicy {
+    pb::RealtimeMediaPolicy {
+        publish_audio_allowed: Some(policy.publish_audio_allowed),
+        publish_camera_allowed: Some(policy.publish_camera_allowed),
+        screen_share_allowed: Some(policy.screen_share_allowed),
+    }
+}
+
 fn pb_realtime_session(
     claims: &RealtimeSessionClaims,
     admission: pb::RealtimeAdmissionState,
+    media_policy: Option<EffectiveRealtimeMediaPolicy>,
 ) -> pb::RealtimeSession {
     pb::RealtimeSession {
         scope: Some(pb_scope(&claims.scope)),
@@ -1436,6 +1467,7 @@ fn pb_realtime_session(
         expires_at_unix_ms: claims.expires_at_unix_ms,
         heartbeat_interval_ms: REALTIME_HEARTBEAT_INTERVAL_MS,
         admission_state: admission as i32,
+        media_policy: media_policy.map(pb_realtime_media_policy),
     }
 }
 
