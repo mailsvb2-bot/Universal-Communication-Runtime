@@ -117,6 +117,7 @@ def main() -> None:
     universal_store_contract = read("crates/ucr-core/src/universal_conference.rs")
     universal_spec = read("spec/universal-conference-api.md")
     service_request = read("crates/ucr-core/src/service_request.rs")
+    service_control_protocol = read("crates/ucr-protocol/src/service_control.rs")
     memory_store = read("crates/ucr-storage-memory/src/lib.rs")
     sqlite_service_control = read("crates/ucr-storage-sqlite/src/service_control_store.rs")
     sqlite_store = read("crates/ucr-storage-sqlite/src/lib.rs")
@@ -222,13 +223,22 @@ def main() -> None:
         "SQLite conference lifecycle Event atomicity missing",
     )
 
+    require(
+        "ServiceRequestRateClass::ALL" in memory_store
+        and "service_rate_limit_policies" in memory_store
+        and "service_rate_limit_usage" in memory_store,
+        "memory request rate-class storage boundary missing",
+    )
     for marker in (
         "ServiceRequestRateClass::Management",
         "ServiceRequestRateClass::JoinIssuance",
         "ServiceRequestRateClass::Signaling",
         "ServiceRequestRateClass::MediaTransport",
     ):
-        require(marker in memory_store, f"request rate class storage anchor missing: {marker}")
+        require(
+            marker in service_control_protocol,
+            f"canonical request rate classifier missing: {marker}",
+        )
     require(
         "service_request_rate_class(&self.proof.permission)" in service_request,
         "Service Principal request gate lost canonical rate-class selection",
