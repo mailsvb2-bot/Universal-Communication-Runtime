@@ -404,9 +404,45 @@ impl ServiceQuotaStore for SqliteLocalStore {
                 ],
             )
             .map_err(|error| map_sqlite_error(&error))?;
+        for rate_class in ServiceRequestRateClass::ALL {
+            transaction
+                .execute(
+                    "INSERT INTO service_rate_limit_policies (
+                        tenant_id, namespace_present, namespace_id, principal_id,
+                        rate_class, max_requests, window_ms
+                     ) VALUES (?1,?2,?3,?4,?5,?6,?7)
+                     ON CONFLICT(
+                        tenant_id, namespace_present, namespace_id, principal_id, rate_class
+                     ) DO UPDATE SET
+                        max_requests=excluded.max_requests,
+                        window_ms=excluded.window_ms",
+                    params![
+                        policy.subject.scope.tenant_id.as_opaque().as_str(),
+                        namespace.present,
+                        namespace.value,
+                        policy.subject.principal.principal_id.as_opaque().as_str(),
+                        rate_class_text(rate_class),
+                        requested.0,
+                        requested.1,
+                    ],
+                )
+                .map_err(|error| map_sqlite_error(&error))?;
+        }
         transaction
             .execute(
                 "DELETE FROM service_quota_usage
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND principal_id=?4",
+                params![
+                    policy.subject.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    policy.subject.principal.principal_id.as_opaque().as_str(),
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        transaction
+            .execute(
+                "DELETE FROM service_rate_limit_usage
                  WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND principal_id=?4",
                 params![
                     policy.subject.scope.tenant_id.as_opaque().as_str(),
@@ -430,9 +466,101 @@ impl ServiceQuotaStore for SqliteLocalStore {
         load_quota_policy(&connection, subject)
     }
 
-    fn consume_service_request(
+    fn set_service_rate_limit_policy(
+        &self,
+        policy: &ServiceRateLimitPolicy,
+    ) -> Result<(), DurableStoreError> {
+        validate_service_rate_limit_policy(policy)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let namespace = namespace_storage_key(&policy.subject.scope);
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        if load_quota_policy(&transaction, &policy.subject)?.is_none() {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let requested = (
+            i64::try_from(policy.max_requests).map_err(|_| DurableStoreError::InvalidRecord)?,
+            i64::try_from(policy.window_ms).map_err(|_| DurableStoreError::InvalidRecord)?,
+        );
+        let existing = transaction
+            .query_row(
+                "SELECT max_requests, window_ms FROM service_rate_limit_policies
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND principal_id=?4 AND rate_class=?5",
+                params![
+                    policy.subject.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    policy.subject.principal.principal_id.as_opaque().as_str(),
+                    rate_class_text(policy.rate_class),
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(&error))?;
+        if existing == Some(requested) {
+            transaction
+                .commit()
+                .map_err(|error| map_sqlite_error(&error))?;
+            return Ok(());
+        }
+        transaction
+            .execute(
+                "INSERT INTO service_rate_limit_policies (
+                    tenant_id, namespace_present, namespace_id, principal_id,
+                    rate_class, max_requests, window_ms
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7)
+                 ON CONFLICT(
+                    tenant_id, namespace_present, namespace_id, principal_id, rate_class
+                 ) DO UPDATE SET
+                    max_requests=excluded.max_requests,
+                    window_ms=excluded.window_ms",
+                params![
+                    policy.subject.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    policy.subject.principal.principal_id.as_opaque().as_str(),
+                    rate_class_text(policy.rate_class),
+                    requested.0,
+                    requested.1,
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        transaction
+            .execute(
+                "DELETE FROM service_rate_limit_usage
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND principal_id=?4 AND rate_class=?5",
+                params![
+                    policy.subject.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    policy.subject.principal.principal_id.as_opaque().as_str(),
+                    rate_class_text(policy.rate_class),
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))
+    }
+
+    fn service_rate_limit_policy(
         &self,
         subject: &ScopedPrincipal,
+        rate_class: ServiceRequestRateClass,
+    ) -> Result<Option<ServiceRateLimitPolicy>, DurableStoreError> {
+        validate_service_subject(subject)?;
+        let connection = self.lock_connection()?;
+        load_rate_limit_policy(&connection, subject, rate_class)
+    }
+
+    fn consume_service_request_for_class(
+        &self,
+        subject: &ScopedPrincipal,
+        rate_class: ServiceRequestRateClass,
         now_unix_ms: i64,
     ) -> Result<(), ServiceQuotaConsumeError> {
         validate_service_subject(subject).map_err(ServiceQuotaConsumeError::Store)?;
@@ -446,7 +574,7 @@ impl ServiceQuotaStore for SqliteLocalStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| ServiceQuotaConsumeError::Store(map_sqlite_error(&error)))?;
-        let policy = load_quota_policy(&transaction, subject)
+        let policy = load_rate_limit_policy(&transaction, subject, rate_class)
             .map_err(ServiceQuotaConsumeError::Store)?
             .ok_or(ServiceQuotaConsumeError::NotConfigured)?;
         let window_ms = i64::try_from(policy.window_ms)
@@ -455,13 +583,15 @@ impl ServiceQuotaStore for SqliteLocalStore {
         let usage = transaction
             .query_row(
                 "SELECT window_start_unix_ms, used_requests, last_observed_unix_ms
-                 FROM service_quota_usage
-                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND principal_id=?4",
+                 FROM service_rate_limit_usage
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND principal_id=?4 AND rate_class=?5",
                 params![
                     subject.scope.tenant_id.as_opaque().as_str(),
                     namespace.present,
                     namespace.value,
                     subject.principal.principal_id.as_opaque().as_str(),
+                    rate_class_text(rate_class),
                 ],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             )
@@ -481,13 +611,15 @@ impl ServiceQuotaStore for SqliteLocalStore {
         if used >= max_requests {
             transaction
                 .execute(
-                    "UPDATE service_quota_usage SET last_observed_unix_ms=?5
-                     WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND principal_id=?4",
+                    "UPDATE service_rate_limit_usage SET last_observed_unix_ms=?6
+                     WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                       AND principal_id=?4 AND rate_class=?5",
                     params![
                         subject.scope.tenant_id.as_opaque().as_str(),
                         namespace.present,
                         namespace.value,
                         subject.principal.principal_id.as_opaque().as_str(),
+                        rate_class_text(rate_class),
                         now_unix_ms,
                     ],
                 )
@@ -509,19 +641,22 @@ impl ServiceQuotaStore for SqliteLocalStore {
             .ok_or(ServiceQuotaConsumeError::Store(DurableStoreError::Corrupt))?;
         transaction
             .execute(
-                "INSERT INTO service_quota_usage (
-                    tenant_id, namespace_present, namespace_id, principal_id,
+                "INSERT INTO service_rate_limit_usage (
+                    tenant_id, namespace_present, namespace_id, principal_id, rate_class,
                     window_start_unix_ms, used_requests, last_observed_unix_ms
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7)
-                 ON CONFLICT(tenant_id, namespace_present, namespace_id, principal_id)
-                 DO UPDATE SET window_start_unix_ms=excluded.window_start_unix_ms,
-                               used_requests=excluded.used_requests,
-                               last_observed_unix_ms=excluded.last_observed_unix_ms",
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                 ON CONFLICT(
+                    tenant_id, namespace_present, namespace_id, principal_id, rate_class
+                 ) DO UPDATE SET
+                    window_start_unix_ms=excluded.window_start_unix_ms,
+                    used_requests=excluded.used_requests,
+                    last_observed_unix_ms=excluded.last_observed_unix_ms",
                 params![
                     subject.scope.tenant_id.as_opaque().as_str(),
                     namespace.present,
                     namespace.value,
                     subject.principal.principal_id.as_opaque().as_str(),
+                    rate_class_text(rate_class),
                     stored_window,
                     next_used,
                     now_unix_ms,
@@ -671,6 +806,53 @@ impl ServiceAuditStore for SqliteLocalStore {
         records.reverse();
         Ok(records)
     }
+}
+
+const fn rate_class_text(rate_class: ServiceRequestRateClass) -> &'static str {
+    match rate_class {
+        ServiceRequestRateClass::Management => "management",
+        ServiceRequestRateClass::JoinIssuance => "join_issuance",
+        ServiceRequestRateClass::Signaling => "signaling",
+        ServiceRequestRateClass::MediaTransport => "media_transport",
+    }
+}
+
+fn load_rate_limit_policy(
+    connection: &Connection,
+    subject: &ScopedPrincipal,
+    rate_class: ServiceRequestRateClass,
+) -> Result<Option<ServiceRateLimitPolicy>, DurableStoreError> {
+    let namespace = namespace_storage_key(&subject.scope);
+    connection
+        .query_row(
+            "SELECT max_requests, window_ms FROM service_rate_limit_policies
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+               AND principal_id=?4 AND rate_class=?5",
+            params![
+                subject.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                subject.principal.principal_id.as_opaque().as_str(),
+                rate_class_text(rate_class),
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(&error))?
+        .map(|(max_requests, window_ms)| {
+            let policy = ServiceRateLimitPolicy {
+                subject: subject.clone(),
+                rate_class,
+                max_requests: u64::try_from(max_requests)
+                    .map_err(|_| DurableStoreError::Corrupt)?,
+                window_ms: u64::try_from(window_ms)
+                    .map_err(|_| DurableStoreError::Corrupt)?,
+            };
+            validate_service_rate_limit_policy(&policy)
+                .map_err(|_| DurableStoreError::Corrupt)?;
+            Ok(policy)
+        })
+        .transpose()
 }
 
 fn load_quota_policy(
