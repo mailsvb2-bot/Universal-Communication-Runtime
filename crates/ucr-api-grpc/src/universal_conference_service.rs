@@ -3644,7 +3644,7 @@ mod universal_runtime_tests {
     };
 
     use ucr_core::{
-        CallStore, DeviceLifecycleStore, GroupCallLookupStore, GroupStore,
+        CallStore, DeviceLifecycleStore, EventJournalStore, GroupCallLookupStore, GroupStore,
         IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
         UniversalConferenceStore,
     };
@@ -3664,7 +3664,7 @@ mod universal_runtime_tests {
     use super::{
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
         IssueJoinGrantInput, PrepareConferenceRuntimeInput, UpdateParticipantInput,
-        ensure_participant, ensure_participant_device, issue_join_grant,
+        ensure_participant, ensure_participant_device, issue_join_grant, lifecycle_event,
         prepare_conference_runtime, resolve_join_call, resolve_join_device,
         resolve_person_principal, update_participant,
     };
@@ -4317,6 +4317,131 @@ mod universal_runtime_tests {
                 .as_str(),
             "zz-active-device"
         );
+    }
+
+    #[test]
+    fn conference_lifecycle_events_are_atomic_and_survive_restart() {
+        let db = TestDb::new();
+        let started_command = CommandId::from_opaque(oid("lifecycle-start-command"));
+        let ended_command = CommandId::from_opaque(oid("lifecycle-end-command"));
+        {
+            let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+            let initial = conference();
+            store
+                .persist_universal_conference_profile(&initial)
+                .expect("conference profile");
+
+            let started = lifecycle_event(
+                &initial,
+                UniversalConferenceLifecycle::Live,
+                &started_command,
+                "lifecycle-start-key",
+                Some(1_500_000),
+            )
+            .expect("build started event")
+            .expect("started event");
+            let live = store
+                .transition_universal_conference_with_event(
+                    &scope(),
+                    &initial.conference_id,
+                    initial.revision,
+                    UniversalConferenceLifecycle::Live,
+                    initial.entry_open,
+                    Some(&started),
+                )
+                .expect("atomic live transition");
+            assert_eq!(live.lifecycle, UniversalConferenceLifecycle::Live);
+            assert_eq!(live.revision, 2);
+
+            let ending = store
+                .transition_universal_conference_with_event(
+                    &scope(),
+                    &live.conference_id,
+                    live.revision,
+                    UniversalConferenceLifecycle::Ending,
+                    live.entry_open,
+                    None,
+                )
+                .expect("ending transition");
+            let ended_event = lifecycle_event(
+                &ending,
+                UniversalConferenceLifecycle::Ended,
+                &ended_command,
+                "lifecycle-end-key",
+                Some(2_000_000),
+            )
+            .expect("build ended event")
+            .expect("ended event");
+            let ended = store
+                .transition_universal_conference_with_event(
+                    &scope(),
+                    &ending.conference_id,
+                    ending.revision,
+                    UniversalConferenceLifecycle::Ended,
+                    ending.entry_open,
+                    Some(&ended_event),
+                )
+                .expect("atomic ended transition");
+            assert_eq!(ended.lifecycle, UniversalConferenceLifecycle::Ended);
+            assert_eq!(ended.revision, 4);
+        }
+
+        let reopened = SqliteLocalStore::open(&db.0).expect("reopen sqlite store");
+        let persisted = reopened
+            .universal_conference_profile(&scope(), &conference().conference_id)
+            .expect("conference read")
+            .expect("conference");
+        assert_eq!(persisted.lifecycle, UniversalConferenceLifecycle::Ended);
+        assert_eq!(persisted.revision, 4);
+        let events = reopened
+            .events_for_types(
+                &scope(),
+                &["conference.started", "conference.ended"],
+                8,
+            )
+            .expect("lifecycle events after restart");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "conference.started");
+        assert_eq!(events[1].event_type, "conference.ended");
+
+        let rollback_db = TestDb::new();
+        let rollback_store =
+            SqliteLocalStore::open(&rollback_db.0).expect("open rollback sqlite store");
+        let initial = conference();
+        rollback_store
+            .persist_universal_conference_profile(&initial)
+            .expect("rollback conference profile");
+        let expected = lifecycle_event(
+            &initial,
+            UniversalConferenceLifecycle::Live,
+            &started_command,
+            "lifecycle-start-key",
+            Some(1_500_000),
+        )
+        .expect("build expected event")
+        .expect("expected event");
+        let mut conflicting = expected.clone();
+        conflicting.payload = b"conflicting-lifecycle-payload".to_vec();
+        rollback_store
+            .append_event(&conflicting)
+            .expect("seed conflicting event id");
+        assert_eq!(
+            rollback_store.transition_universal_conference_with_event(
+                &scope(),
+                &initial.conference_id,
+                initial.revision,
+                UniversalConferenceLifecycle::Live,
+                initial.entry_open,
+                Some(&expected),
+            ),
+            Err(ucr_core::DurableStoreError::Conflict)
+        );
+        let unchanged = rollback_store
+            .universal_conference_profile(&scope(), &initial.conference_id)
+            .expect("rollback profile read")
+            .expect("rollback profile");
+        assert_eq!(unchanged.lifecycle, UniversalConferenceLifecycle::Waiting);
+        assert_eq!(unchanged.revision, 1);
     }
 
     #[test]
