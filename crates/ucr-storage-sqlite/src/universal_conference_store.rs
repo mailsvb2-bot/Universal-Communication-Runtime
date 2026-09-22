@@ -1,14 +1,14 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{DurableRecordStatus, DurableStoreError, UniversalConferenceStore};
 use ucr_model::{
-    ConferenceParticipantRole, ConferenceScheduleMetadata, GroupId, IntegrationId, OpaqueId,
-    PrincipalId, PrincipalKind, PrincipalRef, TenantScope, UniversalConferenceLifecycle,
+    ConferenceParticipantRole, ConferenceScheduleMetadata, EventEnvelope, GroupId, IntegrationId,
+    OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, TenantScope, UniversalConferenceLifecycle,
     UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 
 use super::{
-    SqliteLocalStore, map_schema_change_error, map_sqlite_error, namespace_storage_key,
-    verify_table_columns,
+    SqliteLocalStore, event_journal::append_event_in_transaction, map_schema_change_error,
+    map_sqlite_error, namespace_storage_key, verify_table_columns,
 };
 
 const MAX_EXTERNAL_REFERENCE_BYTES: usize = 512;
@@ -410,6 +410,87 @@ impl UniversalConferenceStore for SqliteLocalStore {
         if changed != 1 {
             return Err(DurableStoreError::Conflict);
         }
+        let updated =
+            load_profile(&transaction, scope, conference_id)?.ok_or(DurableStoreError::Corrupt)?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(updated)
+    }
+
+    fn transition_universal_conference_with_event(
+        &self,
+        scope: &TenantScope,
+        conference_id: &GroupId,
+        expected_revision: u64,
+        lifecycle: UniversalConferenceLifecycle,
+        entry_open: bool,
+        event: Option<&EventEnvelope>,
+    ) -> Result<UniversalConferenceProfile, DurableStoreError> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let current =
+            load_profile(&transaction, scope, conference_id)?.ok_or(DurableStoreError::Conflict)?;
+
+        validate_conference_lifecycle_event(&current, expected_revision, lifecycle, event)?;
+
+        if current.revision == expected_revision.saturating_add(1)
+            && current.lifecycle == lifecycle
+            && current.entry_open == entry_open
+        {
+            if let Some(event) = event {
+                let _ = append_event_in_transaction(&transaction, event)?;
+            }
+            transaction
+                .commit()
+                .map_err(|error| map_sqlite_error(&error))?;
+            return Ok(current);
+        }
+
+        if current.revision != expected_revision
+            || !valid_lifecycle_transition(current.lifecycle, lifecycle)
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+
+        let next_revision = expected_revision
+            .checked_add(1)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        if let Some(event) = event
+            && event.logical_order != next_revision
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+
+        let namespace = namespace_storage_key(scope);
+        let changed = transaction
+            .execute(
+                "UPDATE universal_conferences \
+                 SET lifecycle = ?1, entry_open = ?2, revision = ?3 \
+                 WHERE tenant_id = ?4 AND namespace_present = ?5 AND namespace_id = ?6 \
+                   AND conference_id = ?7 AND revision = ?8",
+                params![
+                    lifecycle_text(lifecycle),
+                    bool_to_i64(entry_open),
+                    encode_u64(next_revision).as_slice(),
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    conference_id.as_opaque().as_str(),
+                    encode_u64(expected_revision).as_slice(),
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        if changed != 1 {
+            return Err(DurableStoreError::Conflict);
+        }
+
+        if let Some(event) = event {
+            let _ = append_event_in_transaction(&transaction, event)?;
+        }
+
         let updated =
             load_profile(&transaction, scope, conference_id)?.ok_or(DurableStoreError::Corrupt)?;
         transaction
@@ -1103,6 +1184,36 @@ fn validate_external_reference(value: &[u8]) -> Result<(), DurableStoreError> {
         Err(DurableStoreError::InvalidRecord)
     } else {
         Ok(())
+    }
+}
+
+fn validate_conference_lifecycle_event(
+    current: &UniversalConferenceProfile,
+    expected_revision: u64,
+    lifecycle: UniversalConferenceLifecycle,
+    event: Option<&EventEnvelope>,
+) -> Result<(), DurableStoreError> {
+    let expected_type = match lifecycle {
+        UniversalConferenceLifecycle::Live => Some("conference.started"),
+        UniversalConferenceLifecycle::Ended => Some("conference.ended"),
+        UniversalConferenceLifecycle::Scheduled
+        | UniversalConferenceLifecycle::Waiting
+        | UniversalConferenceLifecycle::Ending => None,
+    };
+    match (expected_type, event) {
+        (None, None) => Ok(()),
+        (Some(expected_type), Some(event))
+            if event.scope == current.scope
+                && event.event_type == expected_type
+                && event.logical_order == expected_revision.saturating_add(1)
+                && event.actor.kind == ucr_model::ActorKind::System
+                && event.actor.on_behalf_of.as_ref().is_some_and(|principal_id| {
+                    principal_id.as_opaque() == current.integration_id.as_opaque()
+                }) =>
+        {
+            Ok(())
+        }
+        _ => Err(DurableStoreError::InvalidRecord),
     }
 }
 
