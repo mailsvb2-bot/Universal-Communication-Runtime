@@ -86,7 +86,7 @@ impl RealtimeRuntimeConfig {
     }
 
     #[must_use]
-    pub const fn with_operational_capabilities(
+    pub fn with_operational_capabilities(
         mut self,
         browser_realtime_gateway: bool,
         production_webrtc: bool,
@@ -651,6 +651,38 @@ const fn health_label(health: StorageHealth) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn realtime_capability_projection_defaults_fail_closed_and_derives_turn() {
+        let base = RealtimeRuntimeConfig::new(
+            "https://conference.example.test/join",
+            [3_u8; 32],
+        )
+        .expect("realtime config");
+        let default_capabilities = base.universal_conference_capabilities();
+        assert!(!default_capabilities.browser_realtime_gateway);
+        assert!(!default_capabilities.production_webrtc);
+        assert!(!default_capabilities.turn);
+        assert!(!default_capabilities.recording);
+        assert!(!default_capabilities.horizontal_sfu);
+
+        let configured = base
+            .with_webrtc_ice(
+                Vec::new(),
+                vec!["turns:turn.example.test:5349?transport=tcp".to_owned()],
+                Some([4_u8; 32]),
+                300,
+                false,
+            )
+            .expect("TURN config")
+            .with_operational_capabilities(true, true);
+        let capabilities = configured.universal_conference_capabilities();
+        assert!(capabilities.browser_realtime_gateway);
+        assert!(capabilities.production_webrtc);
+        assert!(capabilities.turn);
+        assert!(!capabilities.recording);
+        assert!(!capabilities.horizontal_sfu);
+    }
 
     #[test]
     fn production_local_daemon_refuses_remote_plaintext_bind() {
