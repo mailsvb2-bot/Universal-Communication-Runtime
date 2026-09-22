@@ -285,8 +285,7 @@ mod tests {
     use ucr_model::{
         AuditRecordId, NamespaceId, OpaqueId, PrincipalId, PrincipalRef, ScopedPrincipal,
         ServiceAuditOutcome, ServiceAuditRecord, ServiceCredentialId, ServiceQuotaPolicy,
-        ServiceRequestRateClass, TenantId,
-        TenantScope,
+        ServiceRequestRateClass, TenantId, TenantScope,
     };
 
     use super::*;
