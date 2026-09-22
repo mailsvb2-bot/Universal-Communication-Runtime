@@ -71,6 +71,8 @@ fn webrtc_provider_boundary_is_universal_ephemeral_and_truthful() {
     assert!(runtime.contains("LiveWebRtcProvider::with_e2ee_ingress"));
     assert!(runtime.contains("run_webrtc_e2ee_bridge"));
     assert!(runtime.contains("forward_authenticated_e2ee_media"));
+    assert!(realtime_service.contains("claim_universal_publisher_quota"));
+    assert!(realtime_service.contains("claim_publisher_slot"));
     assert!(runtime.contains("spawn_blocking"));
     assert!(e2ee_bridge.contains("WEBRTC_E2EE_DATA_CHANNEL_LABEL"));
     assert!(e2ee_bridge.contains("ucr.e2ee.media.v1"));

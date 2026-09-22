@@ -10030,6 +10030,7 @@ mod service_resource_participant_quota_tests {
                 subject: subject(&scope, &integration),
                 max_concurrent_participants: 1,
                 max_concurrent_conferences: None,
+                max_concurrent_publishers: None,
             })
             .expect("set quota");
 
@@ -10088,6 +10089,7 @@ mod service_resource_participant_quota_tests {
                 subject: subject(&scope, &integration),
                 max_concurrent_participants: 100,
                 max_concurrent_conferences: Some(1),
+                max_concurrent_publishers: None,
             })
             .expect("set conference quota");
 

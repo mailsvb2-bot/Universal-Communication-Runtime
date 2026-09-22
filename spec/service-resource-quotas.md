@@ -1,6 +1,6 @@
 # Service resource quotas
 
-Status: **concurrent participant and conference quotas implemented; remaining resource dimensions are not yet implemented**.
+Status: **concurrent participant, conference, and publisher quotas implemented; remaining resource dimensions are not yet implemented**.
 
 This contract is deliberately separate from request-rate limiting. Request admission continues to use
 `ServiceQuotaPolicy` / `ServiceRateLimitPolicy`; live communication resources use
@@ -30,7 +30,7 @@ Semantics:
 - SQLite enforcement happens inside the same `BEGIN IMMEDIATE` transaction that persists or
   reactivates the participant, so parallel admissions cannot use a caller-side read-before-write
   race to exceed the configured limit;
-- SQLite schema v38 introduced durable participant policy storage; schema v39 extends the same policy with conference concurrency and preserves v38 rows across migration.
+- SQLite schema v38 introduced durable participant policy storage; schema v39 extends the same policy with conference concurrency; schema v40 adds publisher concurrency while preserving existing rows across both migrations.
 
 ## Concurrent conferences
 
@@ -47,6 +47,21 @@ Semantics:
 - Memory enforcement is atomic under the canonical store mutex;
 - SQLite enforcement runs inside the same `BEGIN IMMEDIATE` transaction as conference creation/lifecycle transition, preventing parallel admissions from exceeding the configured ceiling.
 
+## Concurrent publishers
+
+`max_concurrent_publishers` is optional and limits realtime sessions that have begun publishing encrypted media for the same integration and exact tenant scope.
+
+Semantics:
+
+- merely having audio, camera, or screen-share publish permission does not consume a publisher slot;
+- the first policy-authorized encrypted media publish attempt claims one slot for that exact realtime session before SFU forwarding, so simultaneous first frames cannot race past the ceiling;
+- audio, camera-video, and screen-share sources from one realtime session share one publisher slot;
+- direct gRPC publication and WebRTC E2EE DataChannel publication use the same `forward_authenticated_e2ee_media` boundary and therefore the same publisher quota;
+- a slot is released when the realtime session leaves, expires, or performs a full `join` reconnect; a resumed downlink alone does not create a second publisher;
+- different integrations do not consume one another's publisher quota;
+- absence of `max_concurrent_publishers` means no integration-specific publisher concurrency ceiling is configured;
+- publisher admission is atomic under the bounded `RealtimeSessionRegistry` mutex, while SQLite schema v40 durably persists only the policy, not ephemeral realtime publisher presence.
+
 The same `SERVICE_QUOTA_READ_PERMISSION` and `SERVICE_QUOTA_WRITE_PERMISSION` authorization
 boundary used for request quotas also governs resource quota administration.
 
@@ -55,7 +70,6 @@ boundary used for request quotas also governs resource quota administration.
 This slice does **not** claim the complete resource-quota roadmap. The following dimensions remain
 to be added through the same canonical resource policy path:
 
-- publishers;
 - aggregate bandwidth;
 - recording minutes.
 

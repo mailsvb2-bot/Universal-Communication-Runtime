@@ -128,6 +128,12 @@ ADD COLUMN max_concurrent_conferences INTEGER
 CHECK(max_concurrent_conferences IS NULL OR max_concurrent_conferences > 0);
 ";
 
+const V40_OBJECTS_SQL: &str = "
+ALTER TABLE service_resource_quota_policies
+ADD COLUMN max_concurrent_publishers INTEGER
+CHECK(max_concurrent_publishers IS NULL OR max_concurrent_publishers > 0);
+";
+
 const V37_OBJECTS_SQL: &str = "
 CREATE TABLE service_rate_limit_policies (
     tenant_id TEXT NOT NULL,
@@ -177,6 +183,12 @@ pub(super) fn create_v39_objects(transaction: &Transaction<'_>) -> Result<(), Du
         .map_err(|error| map_schema_change_error(&error))
 }
 
+pub(super) fn create_v40_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(V40_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))
+}
+
 pub(super) fn verify_v38_objects(connection: &Connection) -> Result<(), DurableStoreError> {
     verify_table_columns(
         connection,
@@ -203,6 +215,23 @@ pub(super) fn verify_v39_objects(connection: &Connection) -> Result<(), DurableS
             ("principal_id", "TEXT", 1, 4),
             ("max_concurrent_participants", "INTEGER", 1, 0),
             ("max_concurrent_conferences", "INTEGER", 0, 0),
+        ],
+    )?;
+    verify_resource_quota_rows_v39(connection)
+}
+
+pub(super) fn verify_v40_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_table_columns(
+        connection,
+        "service_resource_quota_policies",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("principal_id", "TEXT", 1, 4),
+            ("max_concurrent_participants", "INTEGER", 1, 0),
+            ("max_concurrent_conferences", "INTEGER", 0, 0),
+            ("max_concurrent_publishers", "INTEGER", 0, 0),
         ],
     )?;
     verify_resource_quota_rows(connection)
@@ -542,17 +571,24 @@ impl ServiceQuotaStore for SqliteLocalStore {
             .map(i64::try_from)
             .transpose()
             .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let max_concurrent_publishers = policy
+            .max_concurrent_publishers
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
         let connection = self.lock_connection()?;
         connection
             .execute(
                 "INSERT INTO service_resource_quota_policies (
                     tenant_id, namespace_present, namespace_id, principal_id,
-                    max_concurrent_participants, max_concurrent_conferences
-                 ) VALUES (?1,?2,?3,?4,?5,?6)
+                    max_concurrent_participants, max_concurrent_conferences,
+                    max_concurrent_publishers
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7)
                  ON CONFLICT(tenant_id, namespace_present, namespace_id, principal_id)
                  DO UPDATE SET
                     max_concurrent_participants=excluded.max_concurrent_participants,
-                    max_concurrent_conferences=excluded.max_concurrent_conferences",
+                    max_concurrent_conferences=excluded.max_concurrent_conferences,
+                    max_concurrent_publishers=excluded.max_concurrent_publishers",
                 params![
                     policy.subject.scope.tenant_id.as_opaque().as_str(),
                     namespace.present,
@@ -560,6 +596,7 @@ impl ServiceQuotaStore for SqliteLocalStore {
                     policy.subject.principal.principal_id.as_opaque().as_str(),
                     max_concurrent_participants,
                     max_concurrent_conferences,
+                    max_concurrent_publishers,
                 ],
             )
             .map_err(|error| map_sqlite_error(&error))?;
@@ -948,7 +985,8 @@ pub(crate) fn load_resource_quota_policy(
     let namespace = namespace_storage_key(&subject.scope);
     connection
         .query_row(
-            "SELECT max_concurrent_participants, max_concurrent_conferences
+            "SELECT max_concurrent_participants, max_concurrent_conferences,
+                    max_concurrent_publishers
              FROM service_resource_quota_policies
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND principal_id=?4",
             params![
@@ -957,17 +995,31 @@ pub(crate) fn load_resource_quota_policy(
                 namespace.value,
                 subject.principal.principal_id.as_opaque().as_str(),
             ],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(|error| map_sqlite_error(&error))?
         .map(
-            |(max_concurrent_participants, max_concurrent_conferences)| {
+            |(
+                max_concurrent_participants,
+                max_concurrent_conferences,
+                max_concurrent_publishers,
+            )| {
                 let policy = ServiceResourceQuotaPolicy {
                     subject: subject.clone(),
                     max_concurrent_participants: u64::try_from(max_concurrent_participants)
                         .map_err(|_| DurableStoreError::Corrupt)?,
                     max_concurrent_conferences: max_concurrent_conferences
+                        .map(u64::try_from)
+                        .transpose()
+                        .map_err(|_| DurableStoreError::Corrupt)?,
+                    max_concurrent_publishers: max_concurrent_publishers
                         .map(u64::try_from)
                         .transpose()
                         .map_err(|_| DurableStoreError::Corrupt)?,
@@ -1083,13 +1135,14 @@ fn verify_resource_quota_rows_v38(connection: &Connection) -> Result<(), Durable
             max_concurrent_participants: u64::try_from(max_concurrent_participants)
                 .map_err(|_| DurableStoreError::Corrupt)?,
             max_concurrent_conferences: None,
+            max_concurrent_publishers: None,
         };
         validate_service_resource_quota_policy(&policy).map_err(|_| DurableStoreError::Corrupt)?;
     }
     Ok(())
 }
 
-fn verify_resource_quota_rows(connection: &Connection) -> Result<(), DurableStoreError> {
+fn verify_resource_quota_rows_v39(connection: &Connection) -> Result<(), DurableStoreError> {
     let mut statement = connection
         .prepare(
             "SELECT tenant_id, namespace_present, namespace_id, principal_id,
@@ -1124,6 +1177,58 @@ fn verify_resource_quota_rows(connection: &Connection) -> Result<(), DurableStor
             max_concurrent_participants: u64::try_from(max_concurrent_participants)
                 .map_err(|_| DurableStoreError::Corrupt)?,
             max_concurrent_conferences: max_concurrent_conferences
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| DurableStoreError::Corrupt)?,
+            max_concurrent_publishers: None,
+        };
+        validate_service_resource_quota_policy(&policy).map_err(|_| DurableStoreError::Corrupt)?;
+    }
+    Ok(())
+}
+
+fn verify_resource_quota_rows(connection: &Connection) -> Result<(), DurableStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT tenant_id, namespace_present, namespace_id, principal_id,
+                    max_concurrent_participants, max_concurrent_conferences,
+                    max_concurrent_publishers
+             FROM service_resource_quota_policies",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+            ))
+        })
+        .map_err(|error| map_sqlite_error(&error))?;
+    for row in rows {
+        let (
+            tenant,
+            present,
+            namespace,
+            principal,
+            max_concurrent_participants,
+            max_concurrent_conferences,
+            max_concurrent_publishers,
+        ) = row.map_err(|error| map_sqlite_error(&error))?;
+        let subject = decode_service_subject(&tenant, present, &namespace, &principal)?;
+        let policy = ServiceResourceQuotaPolicy {
+            subject,
+            max_concurrent_participants: u64::try_from(max_concurrent_participants)
+                .map_err(|_| DurableStoreError::Corrupt)?,
+            max_concurrent_conferences: max_concurrent_conferences
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| DurableStoreError::Corrupt)?,
+            max_concurrent_publishers: max_concurrent_publishers
                 .map(u64::try_from)
                 .transpose()
                 .map_err(|_| DurableStoreError::Corrupt)?,
@@ -1566,7 +1671,7 @@ mod tests {
     use super::SqliteLocalStore;
     use crate::{
         SQLITE_SCHEMA_V13, SQLITE_SCHEMA_V16, SQLITE_SCHEMA_V36, SQLITE_SCHEMA_V37,
-        SQLITE_SCHEMA_V38, SQLITE_SCHEMA_VERSION, UCR_SQLITE_APPLICATION_ID,
+        SQLITE_SCHEMA_V38, SQLITE_SCHEMA_V39, SQLITE_SCHEMA_VERSION, UCR_SQLITE_APPLICATION_ID,
     };
 
     static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(80_000);
@@ -1697,6 +1802,7 @@ mod tests {
             subject: subject.clone(),
             max_concurrent_participants: 7,
             max_concurrent_conferences: Some(3),
+            max_concurrent_publishers: Some(4),
         };
         {
             let store = SqliteLocalStore::open(db.path()).expect("open");
@@ -1952,6 +2058,62 @@ mod tests {
                 subject,
                 max_concurrent_participants: 7,
                 max_concurrent_conferences: None,
+                max_concurrent_publishers: None,
+            })
+        );
+    }
+
+    #[test]
+    fn v39_to_v40_migration_preserves_existing_resource_quotas_and_adds_publisher_limit() {
+        let db = TestDb::new();
+        let subject = service("service-resource-v39-migration");
+        {
+            let _store = SqliteLocalStore::open(db.path()).expect("initialize current");
+        }
+
+        let connection = Connection::open(db.path()).expect("open raw sqlite");
+        connection
+            .execute_batch("DROP TABLE service_resource_quota_policies;")
+            .expect("drop current resource quota table");
+        connection
+            .execute_batch(super::V38_OBJECTS_SQL)
+            .expect("restore v38 resource quota table");
+        connection
+            .execute_batch(super::V39_OBJECTS_SQL)
+            .expect("restore exact v39 resource quota shape");
+        let namespace = super::namespace_storage_key(&subject.scope);
+        connection
+            .execute(
+                "INSERT INTO service_resource_quota_policies (
+                    tenant_id, namespace_present, namespace_id, principal_id,
+                    max_concurrent_participants, max_concurrent_conferences
+                 ) VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![
+                    subject.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    subject.principal.principal_id.as_opaque().as_str(),
+                    7_i64,
+                    2_i64,
+                ],
+            )
+            .expect("seed v39 resource quotas");
+        connection
+            .pragma_update(None, "user_version", SQLITE_SCHEMA_V39)
+            .expect("set v39 version");
+        drop(connection);
+
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v39 to v40");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        assert_eq!(
+            migrated
+                .service_resource_quota_policy(&subject)
+                .expect("read migrated resource quota"),
+            Some(ServiceResourceQuotaPolicy {
+                subject,
+                max_concurrent_participants: 7,
+                max_concurrent_conferences: Some(2),
+                max_concurrent_publishers: None,
             })
         );
     }
