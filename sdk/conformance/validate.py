@@ -20,6 +20,17 @@ CATEGORIES = [
     "idempotency",
 ]
 LANGUAGES = ["rust", "python", "typescript", "kotlin", "swift"]
+INTEGRATION_CATEGORIES = [
+    "auth",
+    "create",
+    "join",
+    "leave",
+    "webhook",
+    "idempotency",
+    "expiry",
+    "permissions",
+    "tenant_isolation",
+]
 ID_KEY = "ucr-service-credential-id-bin"
 SECRET_KEY = "ucr-service-credential-secret-bin"
 
@@ -47,6 +58,16 @@ def main() -> None:
     require(matrix["required_categories"] == CATEGORIES, "canonical SDK conformance categories drifted")
     require(matrix["required_languages"] == LANGUAGES, "required SDK language set drifted")
     require(contract["languages"] == LANGUAGES, "Phase-39 SDK language set drifted")
+    integration_profile = matrix.get("integration_profile")
+    require(isinstance(integration_profile, dict), "missing integration conformance profile")
+    require(
+        integration_profile.get("required_categories") == INTEGRATION_CATEGORIES,
+        "integration conformance categories drifted",
+    )
+    require(
+        integration_profile.get("evidence_levels") == ["contract", "runtime-binding"],
+        "integration conformance evidence levels drifted",
+    )
 
     expected_levels = {
         "rust": ["contract", "host-probe", "runtime-binding"],
@@ -83,6 +104,9 @@ def main() -> None:
     runtime = read("proto/ucr/v1/runtime.proto")
     errors = read("proto/ucr/v1/errors.proto")
     public_sdks = read("spec/public-sdks.md")
+    universal = read("proto/ucr/v1/universal_conference.proto")
+    universal_service = read("crates/ucr-api-grpc/src/universal_conference_service.rs")
+    universal_spec = read("spec/universal-conference-api.md")
 
     for marker in (
         "rpc SubmitCommand(IntegrationCommandRequest)",
@@ -114,6 +138,33 @@ def main() -> None:
     require("There is no hidden automatic application retry" in public_sdks, "retry boundary documentation drifted")
     require("Phase 41 owns the complete SDK conformance matrix" in public_sdks, "Phase-39 handoff to Phase 41 disappeared")
 
+    integration_markers = (
+        "rpc CreateConference",
+        "rpc EnsureParticipant",
+        "rpc IssueJoinGrant",
+        "rpc RevokeJoinGrant",
+        "rpc RemoveParticipant",
+        "external_conference_id",
+        "external_user_id",
+        "integration_id",
+        "idempotency_key",
+        "expires_at_unix_ms",
+    )
+    for marker in integration_markers:
+        require(marker in universal, f"integration conformance anchor missing: {marker}")
+    require("fn admit_integration(" in universal_service, "integration admission boundary missing")
+    require(
+        "actor.principal.principal_id.as_opaque() != integration_id.as_opaque()" in universal_service,
+        "integration identity binding drifted",
+    )
+    require(
+        "conference.started" in universal_spec
+        and "conference.ended" in universal_spec
+        and "participant.joined" in universal_spec
+        and "participant.left" in universal_spec,
+        "universal webhook/event semantics drifted",
+    )
+
     workflow = read(".github/workflows/conformance.yml")
     for marker in (
         "python3 sdk/conformance/validate.py",
@@ -130,6 +181,8 @@ def main() -> None:
     spec = read("spec/conformance-suite.md")
     adr = read("docs/adr/0087-phase41-conformance-suite-is-language-independent-and-fail-closed.md")
     require("eight semantic areas" in spec, "Phase-41 spec lost canonical eight-axis scope")
+    require("integration profile" in spec, "integration conformance profile documentation missing")
+    require("tenant isolation" in spec, "integration tenant-isolation conformance disappeared")
     require("not a new runtime" in spec, "Phase-41 second-brain boundary disappeared")
     require("Missing probes" in adr, "Phase-41 ADR lost fail-closed decision")
 
