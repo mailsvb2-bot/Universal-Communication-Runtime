@@ -74,7 +74,8 @@ pub use realtime_service::{
 
 mod universal_conference_service;
 pub use universal_conference_service::{
-    GrpcUniversalConferenceService, universal_conference_service_server,
+    GrpcUniversalConferenceService, UniversalConferenceRuntimeCapabilities,
+    universal_conference_service_server,
 };
 
 pub const SERVICE_CREDENTIAL_ID_METADATA_KEY: &str = "ucr-service-credential-id-bin";
