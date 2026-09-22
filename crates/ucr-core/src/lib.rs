@@ -29,7 +29,8 @@ use ucr_model::{
     PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
     ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
     ServiceCredentialRecord, ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
-    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
+    ServiceResourceQuotaPolicy, SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
+    TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
@@ -285,6 +286,24 @@ pub trait ServiceQuotaStore: StorageProvider {
         &self,
         subject: &ScopedPrincipal,
     ) -> Result<Option<ServiceQuotaPolicy>, DurableStoreError>;
+
+    /// Installs or replaces durable live-resource ceilings for one Service Account.
+    ///
+    /// # Errors
+    /// Rejects malformed policy and explicit storage failures.
+    fn set_service_resource_quota_policy(
+        &self,
+        policy: &ServiceResourceQuotaPolicy,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Loads one exact Service Account live-resource quota policy.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures; absence is not an error.
+    fn service_resource_quota_policy(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<Option<ServiceResourceQuotaPolicy>, DurableStoreError>;
 
     /// Installs or replaces one explicit class-specific request-rate policy.
     ///
