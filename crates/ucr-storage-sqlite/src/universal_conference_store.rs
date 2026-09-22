@@ -1534,8 +1534,13 @@ mod resource_quota_tests {
 
         let primary_conference = conference(&scope, &integration_a, "conference-resource-a1");
         let overflow_conference = conference(&scope, &integration_a, "conference-resource-a2");
-        let other_integration_conference = conference(&scope, &integration_b, "conference-resource-b1");
-        for profile in [&primary_conference, &overflow_conference, &other_integration_conference] {
+        let other_integration_conference =
+            conference(&scope, &integration_b, "conference-resource-b1");
+        for profile in [
+            &primary_conference,
+            &overflow_conference,
+            &other_integration_conference,
+        ] {
             assert_eq!(
                 store
                     .persist_universal_conference_profile(profile)
@@ -1544,9 +1549,21 @@ mod resource_quota_tests {
             );
         }
 
-        let primary_participant = participant(&primary_conference, "person-resource-a1", "external-user-a1");
-        let overflow_participant = participant(&overflow_conference, "person-resource-a2", "external-user-a2");
-        let other_integration_participant = participant(&other_integration_conference, "person-resource-b1", "external-user-b1");
+        let primary_participant = participant(
+            &primary_conference,
+            "person-resource-a1",
+            "external-user-a1",
+        );
+        let overflow_participant = participant(
+            &overflow_conference,
+            "person-resource-a2",
+            "external-user-a2",
+        );
+        let other_integration_participant = participant(
+            &other_integration_conference,
+            "person-resource-b1",
+            "external-user-b1",
+        );
 
         assert_eq!(
             store
