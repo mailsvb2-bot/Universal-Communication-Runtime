@@ -6160,17 +6160,20 @@ mod service_principal_quota_audit_tests {
     use std::sync::atomic::{AtomicI64, Ordering};
 
     use ucr_core::{
-        AuthorizedDurableRuntime, AuthorizedMutationError, PermissionGrantStore, ServiceAuditStore,
+        AuthorizationEvaluator, AuthorizedDurableRuntime, AuthorizedMutationError,
+        PermissionGrantStore, ServiceAuditStore,
         ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
         ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaConsumeError, ServiceQuotaStore,
         issue_service_credential,
     };
     use ucr_model::{
-        ConversationId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
+        AuthorizationRequest, ConversationId, NamespaceId, OpaqueId, PermissionGrant,
+        PermissionScope, PrincipalId,
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuditOutcome, ServiceQuotaPolicy,
         ServiceRateLimitPolicy, ServiceRequestRateClass, TenantId, TenantScope,
     };
     use ucr_protocol::{
+        AUDIO_SEND_PERMISSION, CALL_SIGNAL_PERMISSION, CONFERENCE_JOIN_ISSUE_PERMISSION,
         CONVERSATION_READ_PERMISSION, CanonicalError, CanonicalErrorCode,
         SERVICE_AUDIT_READ_PERMISSION, SERVICE_QUOTA_READ_PERMISSION,
         SERVICE_QUOTA_WRITE_PERMISSION,
@@ -6304,6 +6307,88 @@ mod service_principal_quota_audit_tests {
                 ServiceAuditOutcome::RateLimited,
             ]
         );
+    }
+
+    #[test]
+    fn service_request_gate_does_not_cross_starve_rate_classes() {
+        let store = MemoryLocalStore::default();
+        let subject = service("service-rate-gate");
+        let resource = scope();
+        let (credential, secret) = issue_service_credential(&subject).expect("issue");
+        store
+            .provision_service_credential(&credential)
+            .expect("bootstrap credential");
+        for permission in [
+            CONVERSATION_READ_PERMISSION,
+            CONFERENCE_JOIN_ISSUE_PERMISSION,
+            CALL_SIGNAL_PERMISSION,
+            AUDIO_SEND_PERMISSION,
+        ] {
+            store
+                .grant_permission(&grant(&subject, permission))
+                .expect("bootstrap representative permission");
+        }
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject.clone(),
+                max_requests: 1,
+                window_ms: 1_000,
+            })
+            .expect("install one-per-class template");
+        let clock = TestClock::new(10_000);
+
+        for permission in [
+            CONVERSATION_READ_PERMISSION,
+            CONFERENCE_JOIN_ISSUE_PERMISSION,
+            CALL_SIGNAL_PERMISSION,
+            AUDIO_SEND_PERMISSION,
+        ] {
+            let request = ServicePrincipalRequestGate::new(&clock, &store, &store)
+                .authenticate_request(
+                    &resource,
+                    &credential.credential_id,
+                    &secret,
+                    permission,
+                    &resource,
+                )
+                .expect("authenticate representative request");
+            assert_eq!(
+                request.authorize(&AuthorizationRequest {
+                    subject: subject.clone(),
+                    permission: permission.to_owned(),
+                    resource_scope: resource.clone(),
+                }),
+                Ok(()),
+                "first request in {permission} class must remain independent"
+            );
+        }
+
+        for permission in [
+            CONVERSATION_READ_PERMISSION,
+            CONFERENCE_JOIN_ISSUE_PERMISSION,
+            CALL_SIGNAL_PERMISSION,
+            AUDIO_SEND_PERMISSION,
+        ] {
+            let request = ServicePrincipalRequestGate::new(&clock, &store, &store)
+                .authenticate_request(
+                    &resource,
+                    &credential.credential_id,
+                    &secret,
+                    permission,
+                    &resource,
+                )
+                .expect("authentication precedes rate admission");
+            assert_eq!(
+                request.authorize(&AuthorizationRequest {
+                    subject: subject.clone(),
+                    permission: permission.to_owned(),
+                    resource_scope: resource.clone(),
+                }),
+                Err(CanonicalError::new(CanonicalErrorCode::RateLimited)
+                    .with_retry_after(1_000)),
+                "second request in {permission} class must be independently limited"
+            );
+        }
     }
 
     #[test]
