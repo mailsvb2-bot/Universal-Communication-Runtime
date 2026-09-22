@@ -1063,8 +1063,22 @@ pub trait EventSubscriptionStore: EventJournalStore {
     /// Returns validation, same-ID semantic conflict, or explicit storage failures.
     fn persist_event_subscription(
         &self,
+        owner: &ScopedPrincipal,
         subscription: &EventSubscription,
     ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads the durable owner of one exact subscription.
+    ///
+    /// Legacy subscriptions created before ownership binding may return `None` and must
+    /// fail closed at authenticated Event API and webhook boundaries.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn event_subscription_owner(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+    ) -> Result<Option<ScopedPrincipal>, DurableStoreError>;
 
     /// Loads one exact scoped subscription when present.
     ///

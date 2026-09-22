@@ -182,6 +182,16 @@ fn activate_sync(store: &MemoryLocalStore, session: &SyncSession) {
         .expect("activate sync session");
 }
 
+fn event_subscription_owner(scope: &TenantScope) -> ScopedPrincipal {
+    ScopedPrincipal {
+        scope: scope.clone(),
+        principal: PrincipalRef {
+            principal_id: PrincipalId::from_opaque(oid("chaos-event-subscription-owner")),
+            kind: PrincipalKind::Person,
+        },
+    }
+}
+
 fn event(session: &SyncSession, id: &str, payload: &[u8]) -> EventEnvelope {
     EventEnvelope {
         event_id: EventId::from_opaque(oid(id)),
@@ -484,7 +494,7 @@ fn slow_consumer_chaos_enforces_bounded_in_flight_and_cursor_redelivery() {
         start: EventSubscriptionStart::Beginning,
     };
     assert_eq!(
-        store.persist_event_subscription(&subscription),
+        store.persist_event_subscription(&event_subscription_owner(&sync.scope), &subscription),
         Ok(DurableRecordStatus::Persisted)
     );
     for (id, payload) in [
@@ -553,7 +563,7 @@ fn webhook_dispatcher_uses_durable_retry_and_dead_letter_state() {
         start: EventSubscriptionStart::Beginning,
     };
     store
-        .persist_event_subscription(&subscription)
+        .persist_event_subscription(&event_subscription_owner(&sync.scope), &subscription)
         .expect("persist webhook subscription");
     store
         .append_event(&event(&sync, "chaos-webhook-event", b"webhook"))

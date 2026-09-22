@@ -44,6 +44,10 @@ use crate::{
     TrustedSigningKeyStore,
 };
 
+fn owner_scope_mismatch(owner: &ScopedPrincipal, scope: &TenantScope) -> bool {
+    owner.scope != *scope
+}
+
 /// Authorization-enforcing runtime boundary over tenant-scoped durable capabilities.
 ///
 /// The caller supplies an already authenticated [`ScopedPrincipal`]. Raw stores remain
@@ -944,6 +948,16 @@ where
         event: &EventEnvelope,
     ) -> Result<EventAppendStatus, AuthorizedMutationError> {
         self.require(subject, &event.scope, EVENT_APPEND_PERMISSION)?;
+        if subject.principal.kind == PrincipalKind::ServiceAccount
+            && !(event.actor.kind == ucr_model::ActorKind::System
+                && event.actor.on_behalf_of.as_ref() == Some(&subject.principal.principal_id))
+        {
+            return Err(AuthorizedMutationError::Authorization(
+                ucr_protocol::CanonicalError::new(
+                    ucr_protocol::CanonicalErrorCode::PermissionDenied,
+                ),
+            ));
+        }
         self.store
             .append_event(event)
             .map_err(AuthorizedMutationError::Store)
@@ -965,9 +979,51 @@ where
         subscription: &EventSubscription,
     ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
         self.require(subject, &subscription.scope, EVENT_SUBSCRIBE_PERMISSION)?;
+        if owner_scope_mismatch(subject, &subscription.scope) {
+            return Err(AuthorizedMutationError::Authorization(
+                ucr_protocol::CanonicalError::new(
+                    ucr_protocol::CanonicalErrorCode::PermissionDenied,
+                ),
+            ));
+        }
+        if self
+            .store
+            .event_subscription(&subscription.scope, &subscription.subscription_id)
+            .map_err(AuthorizedMutationError::Store)?
+            .is_some()
+        {
+            let owner = self
+                .store
+                .event_subscription_owner(&subscription.scope, &subscription.subscription_id)
+                .map_err(AuthorizedMutationError::Store)?;
+            if owner.as_ref() != Some(subject) {
+                return Err(AuthorizedMutationError::Authorization(
+                    ucr_protocol::CanonicalError::new(ucr_protocol::CanonicalErrorCode::NotFound),
+                ));
+            }
+        }
         self.store
-            .persist_event_subscription(subscription)
+            .persist_event_subscription(subject, subscription)
             .map_err(AuthorizedMutationError::Store)
+    }
+
+    fn require_event_subscription_owner(
+        &self,
+        subject: &ScopedPrincipal,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+    ) -> Result<(), AuthorizedMutationError> {
+        let owner = self
+            .store
+            .event_subscription_owner(scope, subscription_id)
+            .map_err(AuthorizedMutationError::Store)?;
+        if owner.as_ref() == Some(subject) {
+            Ok(())
+        } else {
+            Err(AuthorizedMutationError::Authorization(
+                ucr_protocol::CanonicalError::new(ucr_protocol::CanonicalErrorCode::NotFound),
+            ))
+        }
     }
 
     /// Reads a subscription only after explicit subscribe authority.
@@ -981,6 +1037,7 @@ where
         subscription_id: &EventSubscriptionId,
     ) -> Result<Option<EventSubscription>, AuthorizedMutationError> {
         self.require(subject, scope, EVENT_SUBSCRIBE_PERMISSION)?;
+        self.require_event_subscription_owner(subject, scope, subscription_id)?;
         self.store
             .event_subscription(scope, subscription_id)
             .map_err(AuthorizedMutationError::Store)
@@ -999,6 +1056,7 @@ where
         now_unix_ms: i64,
     ) -> Result<EventPollResult, AuthorizedMutationError> {
         self.require(subject, scope, EVENT_CONSUME_PERMISSION)?;
+        self.require_event_subscription_owner(subject, scope, subscription_id)?;
         self.store
             .poll_event_subscription(scope, subscription_id, max_items, now_unix_ms)
             .map_err(AuthorizedMutationError::Store)
@@ -1016,6 +1074,7 @@ where
         cursor: &EventConsumerCursor,
     ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
         self.require(subject, scope, EVENT_CONSUME_PERMISSION)?;
+        self.require_event_subscription_owner(subject, scope, subscription_id)?;
         self.store
             .acknowledge_event_cursor(scope, subscription_id, cursor)
             .map_err(AuthorizedMutationError::Store)
@@ -1035,6 +1094,7 @@ where
         now_unix_ms: i64,
     ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
         self.require(subject, scope, EVENT_CONSUME_PERMISSION)?;
+        self.require_event_subscription_owner(subject, scope, subscription_id)?;
         self.store
             .reject_event_cursor(scope, subscription_id, cursor, failure_kind, now_unix_ms)
             .map_err(AuthorizedMutationError::Store)
@@ -1052,6 +1112,7 @@ where
         replay_id: &ucr_model::OpaqueId,
     ) -> Result<DurableRecordStatus, AuthorizedMutationError> {
         self.require(subject, scope, EVENT_REPLAY_PERMISSION)?;
+        self.require_event_subscription_owner(subject, scope, subscription_id)?;
         self.store
             .replay_event_subscription(scope, subscription_id, replay_id)
             .map_err(AuthorizedMutationError::Store)
@@ -1069,6 +1130,7 @@ where
         max_items: usize,
     ) -> Result<Vec<EventDeadLetter>, AuthorizedMutationError> {
         self.require(subject, scope, EVENT_DEAD_LETTER_READ_PERMISSION)?;
+        self.require_event_subscription_owner(subject, scope, subscription_id)?;
         self.store
             .event_dead_letters(scope, subscription_id, max_items)
             .map_err(AuthorizedMutationError::Store)

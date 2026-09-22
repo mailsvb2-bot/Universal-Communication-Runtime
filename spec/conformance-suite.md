@@ -39,7 +39,7 @@ It requires evidence for nine areas:
 6. **idempotency** — create and mutate retries preserve exact idempotency semantics and changed-request conflicts;
 7. **expiry** — join grants remain bounded by their canonical expiry and event schedule constraints;
 8. **permissions** — integration permissions remain server-owned and fail closed;
-9. **tenant isolation** — one integration cannot read, mutate, join, or subscribe to another integration's conference state.
+9. **tenant isolation** — one integration cannot read, mutate, join, or subscribe to another integration's conference state; Event subscriptions are durably owner-bound so an integration cannot poll or receive webhook delivery of another Service Account's attributed Events.
 
 Prepared evidence for this profile is `contract + runtime-binding`. Static contract anchors alone cannot certify tenant isolation or expiry behavior as Production evidence; executable runtime proofs remain required before a deployment may claim full integration certification.
 
