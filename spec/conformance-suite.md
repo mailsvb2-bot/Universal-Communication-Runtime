@@ -35,7 +35,7 @@ It requires evidence for nine areas:
 2. **create** — conference creation uses the stable Universal Conference contract and external reference IDs;
 3. **join** — participant resolution and join-grant issuance use the canonical integration-scoped boundary;
 4. **leave** — participant removal/revocation and realtime leave semantics remain canonical operations;
-5. **webhook** — conference and participant lifecycle facts are delivered through the canonical Event/Webhook surface rather than a product-specific callback model;
+5. **webhook** — integrations use the canonical Event/Webhook subscription surface; current executable conference evidence includes attendance `joined`, `left`, `reconnected`, and `media_ready` events. The full conference lifecycle webhook set remains required before Production integration certification;
 6. **idempotency** — create and mutate retries preserve exact idempotency semantics and changed-request conflicts;
 7. **expiry** — join grants remain bounded by their canonical expiry and event schedule constraints;
 8. **permissions** — integration permissions remain server-owned and fail closed;
