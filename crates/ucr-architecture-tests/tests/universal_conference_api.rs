@@ -151,7 +151,8 @@ fn universal_conference_capability_discovery_is_explicit_and_deployment_aware() 
     assert!(runtime.contains("turn: self.webrtc_config.has_turn()"));
     assert!(webrtc.contains("pub fn has_turn(&self) -> bool"));
     assert!(runtime_cli.contains("UCR_BROWSER_REALTIME_GATEWAY_ENABLED"));
-    assert!(runtime_cli.contains("UCR_WEBRTC_PRODUCTION_READY"));
+    assert!(!runtime_cli.contains("UCR_WEBRTC_PRODUCTION_READY"));
+    assert!(runtime.contains("production_webrtc: false"));
     assert!(spec.contains("must not claim production readiness"));
     assert!(spec.contains("defaults fail closed"));
 }
