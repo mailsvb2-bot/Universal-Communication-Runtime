@@ -3484,9 +3484,7 @@ fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
     Ok(profile)
 }
 
-const fn pb_lifecycle(
-    value: UniversalConferenceLifecycle,
-) -> pb::UniversalConferenceLifecycle {
+const fn pb_lifecycle(value: UniversalConferenceLifecycle) -> pb::UniversalConferenceLifecycle {
     match value {
         UniversalConferenceLifecycle::Scheduled => pb::UniversalConferenceLifecycle::Scheduled,
         UniversalConferenceLifecycle::Waiting => pb::UniversalConferenceLifecycle::Waiting,
@@ -4394,11 +4392,7 @@ mod universal_runtime_tests {
         assert_eq!(persisted.lifecycle, UniversalConferenceLifecycle::Ended);
         assert_eq!(persisted.revision, 4);
         let events = reopened
-            .events_for_types(
-                &scope(),
-                &["conference.started", "conference.ended"],
-                8,
-            )
+            .events_for_types(&scope(), &["conference.started", "conference.ended"], 8)
             .expect("lifecycle events after restart");
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, "conference.started");
