@@ -1194,8 +1194,8 @@ fn validate_conference_lifecycle_event(
     event: Option<&EventEnvelope>,
 ) -> Result<(), DurableStoreError> {
     let expected_type = match lifecycle {
-        UniversalConferenceLifecycle::Live => Some("conference.started"),
-        UniversalConferenceLifecycle::Ended => Some("conference.ended"),
+        UniversalConferenceLifecycle::Live => Some("ucr.conference.started"),
+        UniversalConferenceLifecycle::Ended => Some("ucr.conference.ended"),
         UniversalConferenceLifecycle::Scheduled
         | UniversalConferenceLifecycle::Waiting
         | UniversalConferenceLifecycle::Ending => None,
