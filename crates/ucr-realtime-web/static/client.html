@@ -330,7 +330,7 @@ function scheduleWebRtcRetry(){
   if(!sessionActive||!mediaActive||Date.now()>=claims.expires||restarting)return;
   if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);
   ui.webrtcState.textContent="Reconnecting";
-  webrtcRetryTimer=setTimeout(()=>{webrtcRetryTimer=null;restartWebRtc(false);},WEBRTC_RETRY_MS);
+  webrtcRetryTimer=setTimeout(()=>{webrtcRetryTimer=null;recoverWebRtc();},WEBRTC_RETRY_MS);
 }
 async function startWebRtc(forceMedia=false){
   if(!sessionActive||!mediaActive||!navigator.onLine)return;
@@ -368,6 +368,39 @@ async function startWebRtc(forceMedia=false){
   remoteDescriptionAccepted=true;
   for(const candidate of pendingCandidates.splice(0)){await sendCandidate(candidate);}
   ui.webrtcState.textContent="Connecting";
+}
+async function restartIce(){
+  if(restarting||!sessionActive||!mediaActive||!navigator.onLine||!peer)return false;
+  restarting=true;
+  try{
+    if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
+    ui.webrtcState.textContent="ICE restart";
+    const response=await api("/v1/realtime/webrtc/restart",body());
+    const offer=await response.json();
+    const pc=peer;
+    if(!pc||pc.connectionState==="closed")throw new Error("WebRTC peer is unavailable for ICE restart");
+    pc.setConfiguration({iceServers:offer.ice_servers||[]});
+    await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
+    const answer=await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await api("/v1/realtime/webrtc/remote-description",{...body(),sdp_type:pc.localDescription.type,sdp:pc.localDescription.sdp});
+    ui.webrtcState.textContent="Reconnecting";
+    ui.status.textContent="Network path changed. ICE restart is reconnecting media without recreating the conference session.";
+    return true;
+  }finally{
+    restarting=false;
+  }
+}
+async function recoverWebRtc(){
+  if(restarting||!sessionActive||!mediaActive||Date.now()>=claims.expires||!navigator.onLine)return;
+  if(peer){
+    try{
+      if(await restartIce())return;
+    }catch(e){
+      ui.status.textContent="ICE restart failed; rebuilding only the WebRTC transport: "+e.message;
+    }
+  }
+  await restartWebRtc(false);
 }
 async function restartWebRtc(forceMedia){
   if(restarting||!sessionActive)return;

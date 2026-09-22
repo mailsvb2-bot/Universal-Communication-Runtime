@@ -49,6 +49,8 @@ The provider lifecycle is ephemeral: create session, apply remote description, a
 
 The authenticated RealtimeService signalling surface and reference browser camera/microphone client are now implemented. The browser obtains the server offer and per-session ICE servers only after authenticated realtime admission, creates a native `RTCPeerConnection`, acquires local audio/video with `getUserMedia` for endpoint capture/preview, sends its SDP answer and trickle ICE candidates, supports microphone/camera toggles and device selection, and performs bounded reconnect using the same still-valid realtime session. Signalling responses that may contain TURN credentials are `Cache-Control: no-store`.
 
+Network recovery prefers an in-place authenticated ICE restart over tearing down the realtime session. `RestartWebRtc` revalidates the same signed scope/call/session binding, issues fresh session-bounded TURN credentials when TURN is configured, updates the existing peer configuration, asks the WebRTC engine for a new ICE generation, and returns a fresh offer. The browser applies that offer to the existing `RTCPeerConnection`, answers it, and keeps the canonical Conference/Call/realtime session unchanged. A full WebRTC transport rebuild remains a bounded fallback if ICE restart itself fails. Browser `offline -> online` recovery and failed/disconnected peer states use this path; device selection changes may still rebuild the peer because local capture changed.
+
 The reference browser also supports endpoint-only screen capture through `getDisplayMedia` when
 the browser and endpoint E2EE adapter both support live source updates. Screen capture is previewed
 locally and handed to the adapter as `screenStream`; it is stopped deterministically when the

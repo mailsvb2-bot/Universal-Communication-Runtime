@@ -270,6 +270,10 @@ async fn handle_request(
             Ok(input) => add_webrtc_ice_candidate(&state, &token, input).await,
             Err(error) => error.into_response(),
         },
+        "/v1/realtime/webrtc/restart" => match decode_json::<SessionRequest>(&body) {
+            Ok(input) => restart_webrtc(&state, &token, input).await,
+            Err(error) => error.into_response(),
+        },
         "/v1/realtime/webrtc/close" => match decode_json::<SessionRequest>(&body) {
             Ok(input) => close_webrtc(&state, &token, input).await,
             Err(error) => error.into_response(),
@@ -747,6 +751,37 @@ async fn add_webrtc_ice_candidate(
     }
 }
 
+async fn restart_webrtc(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeRestartWebRtcRequest {
+        scope: Some(pb_scope(&input)),
+        call_id: Some(pb_id(&input.call)),
+        session_id: Some(pb_id(&input.session)),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.restart_web_rtc(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_restart_web_rtc_response::Result::Offer(offer)) => {
+                webrtc_offer_response("webrtc_restarted", "WebRTC ICE restart offer ready", offer)
+            }
+            Some(pb::realtime_restart_web_rtc_response::Result::Error(error)) => webrtc_error(
+                &error,
+                "webrtc_restart_rejected",
+                "WebRTC ICE restart rejected",
+            ),
+            None => api_error(
+                StatusCode::BAD_GATEWAY,
+                "webrtc_restart_rejected",
+                "WebRTC ICE restart rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
 async fn close_webrtc(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeCloseWebRtcRequest {
@@ -870,6 +905,49 @@ fn pb_id(value: &str) -> pb::OpaqueId {
     pb::OpaqueId {
         value: value.as_bytes().to_vec(),
     }
+}
+
+fn webrtc_offer_response(
+    code: &'static str,
+    message: &'static str,
+    offer: pb::RealtimeWebRtcOffer,
+) -> HttpResponse {
+    let Some(description) = offer.description else {
+        return api_error(
+            StatusCode::BAD_GATEWAY,
+            "invalid_webrtc_offer",
+            "realtime upstream returned an invalid WebRTC offer",
+        );
+    };
+    let sdp_type = match pb::WebRtcSdpType::try_from(description.sdp_type) {
+        Ok(pb::WebRtcSdpType::Offer) => "offer",
+        _ => {
+            return api_error(
+                StatusCode::BAD_GATEWAY,
+                "invalid_webrtc_offer",
+                "realtime upstream returned an invalid WebRTC offer",
+            );
+        }
+    };
+    json_response(
+        StatusCode::OK,
+        &WebRtcOfferResponse {
+            ok: true,
+            code,
+            message,
+            sdp_type,
+            sdp: description.sdp,
+            ice_servers: offer
+                .ice_servers
+                .into_iter()
+                .map(|server| WebRtcIceServerResponse {
+                    urls: server.urls,
+                    username: server.username,
+                    credential: server.credential,
+                })
+                .collect(),
+        },
+    )
 }
 
 fn webrtc_error(
