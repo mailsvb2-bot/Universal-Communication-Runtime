@@ -330,6 +330,13 @@ impl UniversalConferenceStore for SqliteLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        if conference_consumes_resource_quota(profile.lifecycle) {
+            ensure_integration_conference_quota(
+                &transaction,
+                &profile.scope,
+                &profile.integration_id,
+            )?;
+        }
 
         insert_profile(&transaction, profile)?;
         transaction
@@ -384,6 +391,11 @@ impl UniversalConferenceStore for SqliteLocalStore {
             || valid_lifecycle_transition(current.lifecycle, lifecycle);
         if current.revision != expected_revision || !lifecycle_change_allowed {
             return Err(DurableStoreError::Conflict);
+        }
+        if !conference_consumes_resource_quota(current.lifecycle)
+            && conference_consumes_resource_quota(lifecycle)
+        {
+            ensure_integration_conference_quota(&transaction, scope, &current.integration_id)?;
         }
 
         let next_revision = expected_revision
@@ -454,6 +466,11 @@ impl UniversalConferenceStore for SqliteLocalStore {
             || !valid_lifecycle_transition(current.lifecycle, lifecycle)
         {
             return Err(DurableStoreError::Conflict);
+        }
+        if !conference_consumes_resource_quota(current.lifecycle)
+            && conference_consumes_resource_quota(lifecycle)
+        {
+            ensure_integration_conference_quota(&transaction, scope, &current.integration_id)?;
         }
 
         let next_revision = expected_revision
@@ -781,6 +798,56 @@ fn ensure_integration_participant_quota(
         .map_err(|error| map_sqlite_error(&error))?;
     let limit = i64::try_from(policy.max_concurrent_participants)
         .map_err(|_| DurableStoreError::Corrupt)?;
+    if active >= limit {
+        Err(DurableStoreError::Full)
+    } else {
+        Ok(())
+    }
+}
+
+const fn conference_consumes_resource_quota(lifecycle: UniversalConferenceLifecycle) -> bool {
+    matches!(
+        lifecycle,
+        UniversalConferenceLifecycle::Waiting
+            | UniversalConferenceLifecycle::Live
+            | UniversalConferenceLifecycle::Ending
+    )
+}
+
+fn ensure_integration_conference_quota(
+    connection: &Connection,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+) -> Result<(), DurableStoreError> {
+    let subject = ScopedPrincipal {
+        scope: scope.clone(),
+        principal: PrincipalRef {
+            principal_id: PrincipalId::from_opaque(integration_id.as_opaque().clone()),
+            kind: PrincipalKind::ServiceAccount,
+        },
+    };
+    let Some(limit) =
+        super::service_control_store::load_resource_quota_policy(connection, &subject)?
+            .and_then(|policy| policy.max_concurrent_conferences)
+    else {
+        return Ok(());
+    };
+    let namespace = namespace_storage_key(scope);
+    let active: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM universal_conferences
+             WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
+               AND integration_id = ?4 AND lifecycle IN ('waiting','live','ending')",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                integration_id.as_opaque().as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let limit = i64::try_from(limit).map_err(|_| DurableStoreError::Corrupt)?;
     if active >= limit {
         Err(DurableStoreError::Full)
     } else {
@@ -1529,6 +1596,7 @@ mod resource_quota_tests {
             .set_service_resource_quota_policy(&ServiceResourceQuotaPolicy {
                 subject: subject(&scope, &integration_a),
                 max_concurrent_participants: 1,
+                max_concurrent_conferences: None,
             })
             .expect("set participant quota");
 
@@ -1605,5 +1673,98 @@ mod resource_quota_tests {
                 .expect("released capacity can be reused"),
             DurableRecordStatus::Persisted
         );
+    }
+
+    #[test]
+    fn concurrent_conference_quota_is_atomic_and_scheduled_rooms_do_not_consume_it() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open");
+        let scope = scope();
+        let integration_a = integration("integration-conference-quota-a");
+        let integration_b = integration("integration-conference-quota-b");
+
+        store
+            .set_service_resource_quota_policy(&ServiceResourceQuotaPolicy {
+                subject: subject(&scope, &integration_a),
+                max_concurrent_participants: 100,
+                max_concurrent_conferences: Some(1),
+            })
+            .expect("set conference quota");
+
+        let first = conference(&scope, &integration_a, "conference-quota-a1");
+        let second = conference(&scope, &integration_a, "conference-quota-a2");
+        let other = conference(&scope, &integration_b, "conference-quota-b1");
+        for profile in [&first, &second, &other] {
+            store
+                .persist_universal_conference_profile(profile)
+                .expect("scheduled conference does not consume live quota");
+        }
+
+        let waiting = store
+            .transition_universal_conference(
+                &scope,
+                &first.conference_id,
+                1,
+                UniversalConferenceLifecycle::Waiting,
+                true,
+            )
+            .expect("first conference consumes slot");
+        assert_eq!(waiting.revision, 2);
+        assert_eq!(
+            store.transition_universal_conference(
+                &scope,
+                &second.conference_id,
+                1,
+                UniversalConferenceLifecycle::Live,
+                true,
+            ),
+            Err(DurableStoreError::Full)
+        );
+        store
+            .transition_universal_conference(
+                &scope,
+                &other.conference_id,
+                1,
+                UniversalConferenceLifecycle::Live,
+                true,
+            )
+            .expect("other integration has independent quota");
+
+        let live = store
+            .transition_universal_conference(
+                &scope,
+                &first.conference_id,
+                waiting.revision,
+                UniversalConferenceLifecycle::Live,
+                true,
+            )
+            .expect("waiting to live keeps slot");
+        let ending = store
+            .transition_universal_conference(
+                &scope,
+                &first.conference_id,
+                live.revision,
+                UniversalConferenceLifecycle::Ending,
+                false,
+            )
+            .expect("ending keeps slot");
+        store
+            .transition_universal_conference(
+                &scope,
+                &first.conference_id,
+                ending.revision,
+                UniversalConferenceLifecycle::Ended,
+                false,
+            )
+            .expect("ended releases slot");
+        store
+            .transition_universal_conference(
+                &scope,
+                &second.conference_id,
+                1,
+                UniversalConferenceLifecycle::Live,
+                true,
+            )
+            .expect("released slot can be reused");
     }
 }

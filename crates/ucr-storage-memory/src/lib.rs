@@ -2218,6 +2218,45 @@ fn ensure_integration_participant_quota(
     }
 }
 
+const fn conference_consumes_resource_quota(lifecycle: UniversalConferenceLifecycle) -> bool {
+    matches!(
+        lifecycle,
+        UniversalConferenceLifecycle::Waiting
+            | UniversalConferenceLifecycle::Live
+            | UniversalConferenceLifecycle::Ending
+    )
+}
+
+fn ensure_integration_conference_quota(
+    state: &MemoryState,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+) -> Result<(), DurableStoreError> {
+    let key = integration_service_principal_key(scope, integration_id);
+    let Some(limit) = state
+        .service_resource_quota_policies
+        .get(&key)
+        .and_then(|policy| policy.max_concurrent_conferences)
+    else {
+        return Ok(());
+    };
+    let active = state
+        .universal_conferences
+        .values()
+        .filter(|existing| {
+            existing.scope == *scope
+                && existing.integration_id == *integration_id
+                && conference_consumes_resource_quota(existing.lifecycle)
+        })
+        .count();
+    let active = u64::try_from(active).map_err(|_| DurableStoreError::Full)?;
+    if active >= limit {
+        Err(DurableStoreError::Full)
+    } else {
+        Ok(())
+    }
+}
+
 fn service_credential_ref(
     scope: &TenantScope,
     credential_id: &ServiceCredentialId,
@@ -8753,6 +8792,9 @@ impl UniversalConferenceStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
+        if conference_consumes_resource_quota(profile.lifecycle) {
+            ensure_integration_conference_quota(&state, &profile.scope, &profile.integration_id)?;
+        }
         state
             .universal_conference_external
             .insert(external_key, key.clone());
@@ -8806,13 +8848,14 @@ impl UniversalConferenceStore for MemoryLocalStore {
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         let current = state
             .universal_conferences
-            .get_mut(&key)
+            .get(&key)
+            .cloned()
             .ok_or(DurableStoreError::Conflict)?;
         if current.revision == expected_revision.saturating_add(1)
             && current.lifecycle == lifecycle
             && current.entry_open == entry_open
         {
-            return Ok(current.clone());
+            return Ok(current);
         }
         let lifecycle_change_allowed = current.lifecycle == lifecycle
             && current.entry_open != entry_open
@@ -8820,13 +8863,22 @@ impl UniversalConferenceStore for MemoryLocalStore {
         if current.revision != expected_revision || !lifecycle_change_allowed {
             return Err(DurableStoreError::Conflict);
         }
-        current.lifecycle = lifecycle;
-        current.entry_open = entry_open;
-        current.revision = current
+        if !conference_consumes_resource_quota(current.lifecycle)
+            && conference_consumes_resource_quota(lifecycle)
+        {
+            ensure_integration_conference_quota(&state, scope, &current.integration_id)?;
+        }
+        let profile = state
+            .universal_conferences
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Corrupt)?;
+        profile.lifecycle = lifecycle;
+        profile.entry_open = entry_open;
+        profile.revision = profile
             .revision
             .checked_add(1)
             .ok_or(DurableStoreError::InvalidRecord)?;
-        Ok(current.clone())
+        Ok(profile.clone())
     }
 
     fn transition_universal_conference_with_event(
@@ -8866,6 +8918,11 @@ impl UniversalConferenceStore for MemoryLocalStore {
             || !valid_universal_conference_transition(current.lifecycle, lifecycle)
         {
             return Err(DurableStoreError::Conflict);
+        }
+        if !conference_consumes_resource_quota(current.lifecycle)
+            && conference_consumes_resource_quota(lifecycle)
+        {
+            ensure_integration_conference_quota(&state, scope, &current.integration_id)?;
         }
 
         let next_revision = expected_revision
@@ -9972,6 +10029,7 @@ mod service_resource_participant_quota_tests {
             .set_service_resource_quota_policy(&ServiceResourceQuotaPolicy {
                 subject: subject(&scope, &integration),
                 max_concurrent_participants: 1,
+                max_concurrent_conferences: None,
             })
             .expect("set quota");
 
@@ -10018,5 +10076,86 @@ mod service_resource_participant_quota_tests {
                 .expect("reuse released slot"),
             DurableRecordStatus::Persisted
         );
+    }
+
+    #[test]
+    fn concurrent_conference_quota_counts_waiting_live_and_ending_but_not_scheduled() {
+        let store = MemoryLocalStore::default();
+        let scope = scope();
+        let integration = integration("integration-memory-conference-quota");
+        store
+            .set_service_resource_quota_policy(&ServiceResourceQuotaPolicy {
+                subject: subject(&scope, &integration),
+                max_concurrent_participants: 100,
+                max_concurrent_conferences: Some(1),
+            })
+            .expect("set conference quota");
+
+        let first = conference(&scope, &integration, "conference-memory-live-1");
+        let second = conference(&scope, &integration, "conference-memory-live-2");
+        store
+            .persist_universal_conference_profile(&first)
+            .expect("first scheduled conference");
+        store
+            .persist_universal_conference_profile(&second)
+            .expect("second scheduled conference");
+
+        let waiting = store
+            .transition_universal_conference(
+                &scope,
+                &first.conference_id,
+                1,
+                UniversalConferenceLifecycle::Waiting,
+                true,
+            )
+            .expect("first conference enters waiting");
+        assert_eq!(waiting.revision, 2);
+        assert_eq!(
+            store.transition_universal_conference(
+                &scope,
+                &second.conference_id,
+                1,
+                UniversalConferenceLifecycle::Live,
+                true,
+            ),
+            Err(DurableStoreError::Full)
+        );
+
+        let live = store
+            .transition_universal_conference(
+                &scope,
+                &first.conference_id,
+                2,
+                UniversalConferenceLifecycle::Live,
+                true,
+            )
+            .expect("waiting to live keeps one slot");
+        let ending = store
+            .transition_universal_conference(
+                &scope,
+                &first.conference_id,
+                live.revision,
+                UniversalConferenceLifecycle::Ending,
+                false,
+            )
+            .expect("ending still owns slot");
+        store
+            .transition_universal_conference(
+                &scope,
+                &first.conference_id,
+                ending.revision,
+                UniversalConferenceLifecycle::Ended,
+                false,
+            )
+            .expect("ended releases slot");
+        store
+            .transition_universal_conference(
+                &scope,
+                &second.conference_id,
+                1,
+                UniversalConferenceLifecycle::Live,
+                true,
+            )
+            .expect("released conference slot can be reused");
     }
 }
