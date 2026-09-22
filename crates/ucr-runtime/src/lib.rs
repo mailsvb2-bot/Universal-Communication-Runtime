@@ -49,7 +49,6 @@ pub struct RealtimeRuntimeConfig {
     join_token_key: JoinTokenKey,
     webrtc_config: Arc<WebRtcSessionConfigFactory>,
     browser_realtime_gateway: bool,
-    production_webrtc: bool,
 }
 
 impl core::fmt::Debug for RealtimeRuntimeConfig {
@@ -60,7 +59,6 @@ impl core::fmt::Debug for RealtimeRuntimeConfig {
             .field("join_token_key", &"<redacted>")
             .field("webrtc_config", &self.webrtc_config)
             .field("browser_realtime_gateway", &self.browser_realtime_gateway)
-            .field("production_webrtc", &self.production_webrtc)
             .finish()
     }
 }
@@ -81,18 +79,12 @@ impl RealtimeRuntimeConfig {
             join_token_key,
             webrtc_config: Arc::new(WebRtcSessionConfigFactory::default()),
             browser_realtime_gateway: false,
-            production_webrtc: false,
         })
     }
 
     #[must_use]
-    pub fn with_operational_capabilities(
-        mut self,
-        browser_realtime_gateway: bool,
-        production_webrtc: bool,
-    ) -> Self {
-        self.browser_realtime_gateway = browser_realtime_gateway;
-        self.production_webrtc = production_webrtc;
+    pub fn with_browser_realtime_gateway(mut self, enabled: bool) -> Self {
+        self.browser_realtime_gateway = enabled;
         self
     }
 
@@ -100,7 +92,7 @@ impl RealtimeRuntimeConfig {
     fn universal_conference_capabilities(&self) -> UniversalConferenceRuntimeCapabilities {
         UniversalConferenceRuntimeCapabilities {
             browser_realtime_gateway: self.browser_realtime_gateway,
-            production_webrtc: self.production_webrtc,
+            production_webrtc: false,
             turn: self.webrtc_config.has_turn(),
             recording: false,
             horizontal_sfu: false,
@@ -479,7 +471,6 @@ fn realtime_dependencies(
         join_token_key,
         webrtc_config,
         browser_realtime_gateway: _,
-        production_webrtc: _,
     } = config;
     let join_issuer = Arc::new(
         JoinTokenIssuer::new(join_token_key, join_base_url)
@@ -675,10 +666,10 @@ mod tests {
                 false,
             )
             .expect("TURN config")
-            .with_operational_capabilities(true, true);
+            .with_browser_realtime_gateway(true);
         let capabilities = configured.universal_conference_capabilities();
         assert!(capabilities.browser_realtime_gateway);
-        assert!(capabilities.production_webrtc);
+        assert!(!capabilities.production_webrtc);
         assert!(capabilities.turn);
         assert!(!capabilities.recording);
         assert!(!capabilities.horizontal_sfu);
