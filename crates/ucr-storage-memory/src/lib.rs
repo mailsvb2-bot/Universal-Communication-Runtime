@@ -73,8 +73,7 @@ use ucr_protocol::{
     validate_federation_transition, validate_identity_record, validate_permission_grant,
     validate_principal_identity_binding, validate_recording_session, validate_service_audit_record,
     validate_service_quota_policy, validate_service_rate_limit_policy, validate_sync_checkpoint,
-    validate_sync_transition,
-    validate_trusted_signing_key_descriptor,
+    validate_sync_transition, validate_trusted_signing_key_descriptor,
 };
 
 const SCHEMA_VERSION: u32 = 12;
