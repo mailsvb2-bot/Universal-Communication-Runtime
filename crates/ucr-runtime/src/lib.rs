@@ -13,7 +13,8 @@ use tonic::transport::Server;
 use ucr_api_grpc::{
     GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
     GrpcIntegrationService, GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService,
-    GrpcUniversalConferenceService, RealtimeWebRtcDependencies, call_service_server,
+    GrpcUniversalConferenceService, RealtimeWebRtcDependencies,
+    UniversalConferenceRuntimeCapabilities, call_service_server,
     conference_service_server, device_service_server, event_service_server, group_service_server,
     integration_service_server, realtime_service_server, store_forward_service_server,
     sync_service_server, universal_conference_service_server,
@@ -47,6 +48,8 @@ pub struct RealtimeRuntimeConfig {
     join_base_url: String,
     join_token_key: JoinTokenKey,
     webrtc_config: Arc<WebRtcSessionConfigFactory>,
+    browser_realtime_gateway: bool,
+    production_webrtc: bool,
 }
 
 impl core::fmt::Debug for RealtimeRuntimeConfig {
@@ -56,6 +59,8 @@ impl core::fmt::Debug for RealtimeRuntimeConfig {
             .field("join_base_url", &self.join_base_url)
             .field("join_token_key", &"<redacted>")
             .field("webrtc_config", &self.webrtc_config)
+            .field("browser_realtime_gateway", &self.browser_realtime_gateway)
+            .field("production_webrtc", &self.production_webrtc)
             .finish()
     }
 }
@@ -75,7 +80,31 @@ impl RealtimeRuntimeConfig {
             join_base_url,
             join_token_key,
             webrtc_config: Arc::new(WebRtcSessionConfigFactory::default()),
+            browser_realtime_gateway: false,
+            production_webrtc: false,
         })
+    }
+
+    #[must_use]
+    pub const fn with_operational_capabilities(
+        mut self,
+        browser_realtime_gateway: bool,
+        production_webrtc: bool,
+    ) -> Self {
+        self.browser_realtime_gateway = browser_realtime_gateway;
+        self.production_webrtc = production_webrtc;
+        self
+    }
+
+    #[must_use]
+    fn universal_conference_capabilities(&self) -> UniversalConferenceRuntimeCapabilities {
+        UniversalConferenceRuntimeCapabilities {
+            browser_realtime_gateway: self.browser_realtime_gateway,
+            production_webrtc: self.production_webrtc,
+            turn: self.webrtc_config.has_turn(),
+            recording: false,
+            horizontal_sfu: false,
+        }
     }
 
     /// Adds deployment STUN/TURN configuration for browser/mobile peer connections.
@@ -350,6 +379,7 @@ impl ProductionRuntime {
         let store = Arc::clone(&self.store);
         let authorization = Arc::clone(&self.store);
         let conference_state = Arc::new(ConferenceRuntimeState::new());
+        let runtime_capabilities = config.universal_conference_capabilities();
         let dependencies = realtime_dependencies(config)?;
         let join_issuer = Arc::clone(&dependencies.join_issuer);
         let registry = Arc::clone(&dependencies.registry);
@@ -406,12 +436,13 @@ impl ProductionRuntime {
             ))
             .add_service(realtime_service_server(realtime_service))
             .add_service(universal_conference_service_server(
-                GrpcUniversalConferenceService::with_state_and_join_issuer(
+                GrpcUniversalConferenceService::with_state_join_issuer_and_runtime_capabilities(
                     Arc::clone(&clock),
                     Arc::clone(&authorization),
                     Arc::clone(&store),
                     Arc::clone(&conference_state),
                     join_issuer,
+                    runtime_capabilities,
                 ),
             ))
             .add_service(event_service_server(GrpcEventService::new(
@@ -447,6 +478,8 @@ fn realtime_dependencies(
         join_base_url,
         join_token_key,
         webrtc_config,
+        browser_realtime_gateway: _,
+        production_webrtc: _,
     } = config;
     let join_issuer = Arc::new(
         JoinTokenIssuer::new(join_token_key, join_base_url)
