@@ -3,7 +3,8 @@ use ucr_core::{DurableRecordStatus, DurableStoreError, EventSubscriptionStore};
 use ucr_model::{
     EventConsumerCursor, EventDeadLetter, EventDeliveryBatch, EventDeliveryFailureKind,
     EventEnvelope, EventPollResult, EventSubscription, EventSubscriptionId, EventSubscriptionMode,
-    EventSubscriptionStart, NamespaceId, OpaqueId, TenantId, TenantScope,
+    EventSubscriptionStart, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
+    ScopedPrincipal, TenantId, TenantScope,
 };
 use ucr_protocol::{
     EventApiError, canonical_event_subscription, event_consumer_cursor_token,
@@ -98,6 +99,26 @@ CREATE INDEX event_dead_letters_by_subscription_sequence
 ON event_dead_letters(tenant_id, namespace_present, namespace_id, subscription_id, journal_seq);
 ";
 
+pub(super) const V36_OBJECTS_SQL: &str = "
+CREATE TABLE event_subscription_owners (
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+    namespace_id TEXT NOT NULL,
+    subscription_id TEXT NOT NULL,
+    owner_principal_id TEXT NOT NULL,
+    owner_principal_kind TEXT NOT NULL CHECK(owner_principal_kind IN (
+        'person', 'device', 'service_account', 'ai_agent', 'bot', 'organization',
+        'automation', 'external_platform'
+    )),
+    PRIMARY KEY(tenant_id, namespace_present, namespace_id, subscription_id),
+    FOREIGN KEY(tenant_id, namespace_present, namespace_id, subscription_id)
+      REFERENCES event_subscriptions(tenant_id, namespace_present, namespace_id, subscription_id)
+      ON DELETE CASCADE,
+    CHECK((namespace_present = 0 AND namespace_id = '') OR
+          (namespace_present = 1 AND namespace_id <> ''))
+) WITHOUT ROWID;
+";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CursorAction {
     Acknowledge,
@@ -115,6 +136,7 @@ struct ActiveBatch {
 #[derive(Debug, Clone)]
 struct LoadedSubscription {
     subscription: EventSubscription,
+    owner: Option<ScopedPrincipal>,
     committed_seq: u64,
     generation: u64,
     last_replay_id: Option<OpaqueId>,
@@ -126,6 +148,58 @@ pub(super) fn create_v20_objects(transaction: &Transaction<'_>) -> Result<(), Du
     transaction
         .execute_batch(V20_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn create_v36_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(V36_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn verify_v36_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_table_columns(
+        connection,
+        "event_subscription_owners",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("subscription_id", "TEXT", 1, 4),
+            ("owner_principal_id", "TEXT", 1, 0),
+            ("owner_principal_kind", "TEXT", 1, 0),
+        ],
+    )?;
+    let mut statement = connection
+        .prepare(
+            "SELECT tenant_id, namespace_present, namespace_id, subscription_id
+             FROM event_subscription_owners",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut keys = Vec::new();
+    for row in rows {
+        keys.push(row.map_err(|error| map_sqlite_error(&error))?);
+    }
+    drop(statement);
+    for (tenant, present, namespace, subscription_id) in keys {
+        let scope = parse_scope(&tenant, present, &namespace)?;
+        let subscription_id = EventSubscriptionId::from_opaque(parse_id(&subscription_id)?);
+        let owner = load_subscription_owner(connection, &scope, &subscription_id)?
+            .ok_or(DurableStoreError::Corrupt)?;
+        if owner.scope != scope {
+            return Err(DurableStoreError::Corrupt);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn verify_schema_v20(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -316,6 +390,33 @@ fn parse_failure(value: &str) -> Result<EventDeliveryFailureKind, DurableStoreEr
     }
 }
 
+const fn principal_kind_name(kind: PrincipalKind) -> &'static str {
+    match kind {
+        PrincipalKind::Person => "person",
+        PrincipalKind::Device => "device",
+        PrincipalKind::ServiceAccount => "service_account",
+        PrincipalKind::AiAgent => "ai_agent",
+        PrincipalKind::Bot => "bot",
+        PrincipalKind::Organization => "organization",
+        PrincipalKind::Automation => "automation",
+        PrincipalKind::ExternalPlatform => "external_platform",
+    }
+}
+
+fn parse_principal_kind(value: &str) -> Result<PrincipalKind, DurableStoreError> {
+    match value {
+        "person" => Ok(PrincipalKind::Person),
+        "device" => Ok(PrincipalKind::Device),
+        "service_account" => Ok(PrincipalKind::ServiceAccount),
+        "ai_agent" => Ok(PrincipalKind::AiAgent),
+        "bot" => Ok(PrincipalKind::Bot),
+        "organization" => Ok(PrincipalKind::Organization),
+        "automation" => Ok(PrincipalKind::Automation),
+        "external_platform" => Ok(PrincipalKind::ExternalPlatform),
+        _ => Err(DurableStoreError::Corrupt),
+    }
+}
+
 fn parse_id(value: &str) -> Result<OpaqueId, DurableStoreError> {
     OpaqueId::new(value).map_err(|_| DurableStoreError::Corrupt)
 }
@@ -383,6 +484,50 @@ fn load_filters(
     Ok(filters)
 }
 
+fn load_subscription_owner(
+    connection: &Connection,
+    scope: &TenantScope,
+    subscription_id: &EventSubscriptionId,
+) -> Result<Option<ScopedPrincipal>, DurableStoreError> {
+    let owner_table_exists: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type='table' AND name='event_subscription_owners'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if owner_table_exists == 0 {
+        return Ok(None);
+    }
+    let namespace = namespace_storage_key(scope);
+    let row: Option<(String, String)> = connection
+        .query_row(
+            "SELECT owner_principal_id, owner_principal_kind
+             FROM event_subscription_owners
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND subscription_id=?4",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                subscription_id.as_opaque().as_str()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(&error))?;
+    row.map(|(principal_id, principal_kind)| {
+        Ok(ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(parse_id(&principal_id)?),
+                kind: parse_principal_kind(&principal_kind)?,
+            },
+        })
+    })
+    .transpose()
+}
+
 type SubscriptionRow = (
     String,
     Option<String>,
@@ -395,6 +540,39 @@ type SubscriptionRow = (
     Option<Vec<u8>>,
     Option<String>,
 );
+
+fn load_active_batch(
+    connection: &Connection,
+    scope: &TenantScope,
+    subscription_id: &EventSubscriptionId,
+) -> Result<Option<ActiveBatch>, DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let active_row: Option<(i64, i64, i64, i64)> = connection
+        .query_row(
+            "SELECT generation, end_seq, attempt, not_before_unix_ms
+             FROM event_subscription_active_batches
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND subscription_id=?4",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                subscription_id.as_opaque().as_str()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(&error))?;
+    active_row
+        .map(|(generation, end_seq, attempt, not_before_unix_ms)| {
+            Ok(ActiveBatch {
+                generation: decode_u64(generation)?,
+                end_seq: decode_u64(end_seq)?,
+                attempt: decode_u32(attempt)?,
+                not_before_unix_ms,
+            })
+        })
+        .transpose()
+}
 
 fn load_subscription(
     connection: &Connection,
@@ -446,6 +624,7 @@ fn load_subscription(
     else {
         return Ok(None);
     };
+    let owner = load_subscription_owner(connection, scope, subscription_id)?;
     let filters = load_filters(connection, scope, subscription_id)?;
     let subscription = EventSubscription {
         subscription_id: subscription_id.clone(),
@@ -467,33 +646,10 @@ fn load_subscription(
         (Some(token), Some(action)) => Some((token, parse_action(&action)?)),
         _ => return Err(DurableStoreError::Corrupt),
     };
-    let active_row: Option<(i64, i64, i64, i64)> = connection
-        .query_row(
-            "SELECT generation, end_seq, attempt, not_before_unix_ms
-             FROM event_subscription_active_batches
-             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND subscription_id=?4",
-            params![
-                scope.tenant_id.as_opaque().as_str(),
-                namespace.present,
-                namespace.value,
-                subscription_id.as_opaque().as_str()
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()
-        .map_err(|error| map_sqlite_error(&error))?;
-    let active = active_row
-        .map(|(generation, end_seq, attempt, not_before_unix_ms)| {
-            Ok(ActiveBatch {
-                generation: decode_u64(generation)?,
-                end_seq: decode_u64(end_seq)?,
-                attempt: decode_u32(attempt)?,
-                not_before_unix_ms,
-            })
-        })
-        .transpose()?;
+    let active = load_active_batch(connection, scope, subscription_id)?;
     Ok(Some(LoadedSubscription {
         subscription,
+        owner,
         committed_seq: decode_u64(committed_seq)?,
         generation: decode_u64(generation)?,
         last_replay_id: last_replay_id.map(|value| parse_id(&value)).transpose()?,
@@ -525,6 +681,19 @@ fn load_matching_event_refs(
     let through_seq = through_seq
         .map(|value| i64::try_from(value).map_err(|_| DurableStoreError::Corrupt))
         .transpose()?;
+    let owner = loaded
+        .owner
+        .as_ref()
+        .ok_or(DurableStoreError::PermissionDenied)?;
+    if owner.scope != loaded.subscription.scope {
+        return Err(DurableStoreError::Corrupt);
+    }
+    let (enforce_owner, owner_principal_id) =
+        if owner.principal.kind == PrincipalKind::ServiceAccount {
+            (1_i64, owner.principal.principal_id.as_opaque().as_str())
+        } else {
+            (0_i64, "")
+        };
     let limit = i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?;
     let mut statement = connection
         .prepare(
@@ -545,6 +714,7 @@ fn load_matching_event_refs(
                      AND f.subscription_id=?4 AND f.event_type=e.event_type
                  )
                )
+               AND (?8 = 0 OR (e.actor_kind='system' AND e.on_behalf_of=?9))
              ORDER BY e.journal_seq
              LIMIT ?7",
         )
@@ -559,6 +729,8 @@ fn load_matching_event_refs(
                 after_seq,
                 through_seq,
                 limit,
+                enforce_owner,
+                owner_principal_id,
             ],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )
@@ -759,9 +931,13 @@ fn persist_retry_rejection(
 impl EventSubscriptionStore for SqliteLocalStore {
     fn persist_event_subscription(
         &self,
+        owner: &ScopedPrincipal,
         subscription: &EventSubscription,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let canonical = canonical_event_subscription(subscription).map_err(map_event_api_error)?;
+        if owner.scope != canonical.scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
         let namespace = namespace_storage_key(&canonical.scope);
         let mut connection = self.lock_connection()?;
         let transaction = connection
@@ -770,7 +946,7 @@ impl EventSubscriptionStore for SqliteLocalStore {
         if let Some(existing) =
             load_subscription(&transaction, &canonical.scope, &canonical.subscription_id)?
         {
-            return if existing.subscription == canonical {
+            return if existing.subscription == canonical && existing.owner.as_ref() == Some(owner) {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
                 Err(DurableStoreError::Conflict)
@@ -800,6 +976,22 @@ impl EventSubscriptionStore for SqliteLocalStore {
                 ],
             )
             .map_err(|error| map_sqlite_error(&error))?;
+        transaction
+            .execute(
+                "INSERT INTO event_subscription_owners (
+                    tenant_id, namespace_present, namespace_id, subscription_id,
+                    owner_principal_id, owner_principal_kind
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    canonical.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    canonical.subscription_id.as_opaque().as_str(),
+                    owner.principal.principal_id.as_opaque().as_str(),
+                    principal_kind_name(owner.principal.kind),
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
         for (position, event_type) in canonical.event_types.iter().enumerate() {
             transaction
                 .execute(
@@ -821,6 +1013,15 @@ impl EventSubscriptionStore for SqliteLocalStore {
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
         Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn event_subscription_owner(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+    ) -> Result<Option<ScopedPrincipal>, DurableStoreError> {
+        let connection = self.lock_connection()?;
+        load_subscription_owner(&connection, scope, subscription_id)
     }
 
     fn event_subscription(
@@ -1175,7 +1376,8 @@ mod tests {
         ActorId, ActorKind, ActorRef, CorrelationContext, DeviceId, DeviceRef, EventConsumerCursor,
         EventDeliveryFailureKind, EventEnvelope, EventId, EventPollResult, EventSubscription,
         EventSubscriptionId, EventSubscriptionMode, EventSubscriptionStart, IdentityId, OpaqueId,
-        ProtocolVersion, TenantId, TenantScope,
+        PrincipalId, PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal, TenantId,
+        TenantScope,
     };
 
     use super::SqliteLocalStore;
@@ -1215,6 +1417,32 @@ mod tests {
             tenant_id: TenantId::from_opaque(oid("tenant-phase14")),
             namespace_id: None,
         }
+    }
+
+    fn subscription_owner() -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("event-subscription-owner")),
+                kind: PrincipalKind::Person,
+            },
+        }
+    }
+
+    fn service_owner(id: &str) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid(id)),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
+    fn attributed_event(id: &str, owner: &ScopedPrincipal, payload: &[u8]) -> EventEnvelope {
+        let mut value = event(id, payload);
+        value.actor.on_behalf_of = Some(owner.principal.principal_id.clone());
+        value
     }
 
     fn event(id: &str, payload: &[u8]) -> EventEnvelope {
@@ -1261,7 +1489,7 @@ mod tests {
     fn seed_retry_state(db: &TestDbPath, subscription: &EventSubscription) -> EventConsumerCursor {
         let store = SqliteLocalStore::open(db.path()).expect("open store");
         store
-            .persist_event_subscription(subscription)
+            .persist_event_subscription(&subscription_owner(), subscription)
             .expect("subscription");
         store
             .append_event(&event("event-phase14", b"payload"))
@@ -1335,6 +1563,89 @@ mod tests {
         assert_eq!(
             store.replay_event_subscription(&scope(), &subscription.subscription_id, &replay_id),
             Ok(DurableRecordStatus::Duplicate)
+        );
+    }
+
+    #[test]
+    fn service_account_owner_and_filter_survive_sqlite_restart() {
+        let db = TestDbPath::new();
+        let owner_a = service_owner("sqlite-service-a");
+        let owner_b = service_owner("sqlite-service-b");
+        let subscription = subscription();
+
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open store");
+            assert_eq!(
+                store.persist_event_subscription(&owner_a, &subscription),
+                Ok(DurableRecordStatus::Persisted)
+            );
+            store
+                .append_event(&attributed_event("sqlite-event-b", &owner_b, b"private-b"))
+                .expect("append B event");
+            store
+                .append_event(&attributed_event("sqlite-event-a", &owner_a, b"private-a"))
+                .expect("append A event");
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen store");
+        assert_eq!(
+            reopened
+                .event_subscription_owner(&scope(), &subscription.subscription_id)
+                .expect("load durable owner"),
+            Some(owner_a)
+        );
+        let batch = match reopened
+            .poll_event_subscription(&scope(), &subscription.subscription_id, 8, 9_000)
+            .expect("poll after restart")
+        {
+            EventPollResult::Batch(batch) => batch,
+            other => panic!("expected durable batch, got {other:?}"),
+        };
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(
+            batch.events[0].event_id.as_opaque().as_str(),
+            "sqlite-event-a"
+        );
+    }
+
+    #[test]
+    fn v35_subscription_migration_keeps_legacy_owner_unknown_and_fail_closed() {
+        let db = TestDbPath::new();
+        let owner = service_owner("sqlite-legacy-service");
+        let subscription = subscription();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create current store");
+            store
+                .persist_event_subscription(&owner, &subscription)
+                .expect("persist current subscription");
+            store
+                .append_event(&attributed_event("sqlite-legacy-event", &owner, b"legacy"))
+                .expect("append legacy event");
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open raw sqlite");
+            connection
+                .execute_batch(
+                    "DROP TABLE event_subscription_owners;
+                     PRAGMA user_version=35;",
+                )
+                .expect("simulate exact v35 subscription state");
+        }
+
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v35 to v36");
+        assert_eq!(
+            migrated.schema_version(),
+            Ok(super::super::SQLITE_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            migrated
+                .event_subscription_owner(&scope(), &subscription.subscription_id)
+                .expect("load migrated owner"),
+            None
+        );
+        assert_eq!(
+            migrated.poll_event_subscription(&scope(), &subscription.subscription_id, 1, 10_000),
+            Err(DurableStoreError::PermissionDenied)
         );
     }
 

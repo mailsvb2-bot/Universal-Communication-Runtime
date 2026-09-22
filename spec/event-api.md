@@ -10,6 +10,8 @@ Phase 14 exposes canonical UCR Events to authenticated external consumers withou
 
 Every external operation passes Service Principal authentication -> durable quota/audit -> explicit permission -> canonical runtime owner. The Event permissions are independent: append, subscribe/read configuration, consume/ack/reject, replay, and dead-letter read. `NOT_FOUND` is disclosed only after successful admission/authorization.
 
+Every durable Event subscription is additionally bound to the exact authenticated `ScopedPrincipal` that created it. Service Account subscriptions may consume only Events attributed to that same Service Account (canonical System actor with `on_behalf_of` equal to the Service Account principal). The authorized Event append boundary also requires a Service Account publisher to use that exact attribution, preventing one credential from forging Events into another Service Account's stream. A credential that has tenant-level Event permissions still cannot read, poll, acknowledge, reject, replay, or inspect dead letters for another Service Account's subscription. The internal webhook dispatcher uses the same persisted owner filter, so webhook delivery cannot bypass this boundary.
+
 ## Durable stream and backpressure
 
 Subscriptions have exact `TenantScope`, opaque `EventSubscriptionId`, bounded canonical filters, `Beginning` or `Latest` start semantics, bounded `max_in_flight`, and bounded `max_attempts`. Empty filters mean all canonical Event types in the exact scope. Filter ordering is non-semantic and canonicalized.
@@ -40,7 +42,9 @@ Webhook subscriptions use the same durable subscription/retry/cursor/DLQ owner a
 
 Memory and SQLite implement the same contract. SQLite schema v20 adds subscription configuration, consumer runtime/cursor action state, filters, and dead letters while continuing to read Events from the existing `events` journal. Migration v19 -> v20 is additive: all existing Events/Identity/Message/etc. state is preserved and no subscription, cursor, replay, or dead letter is inferred.
 
-Restart evidence proves active retry state, cursors, dead letters, and replay behavior survive reopen. Corrupt/noncanonical subscription state fails reopen verification. Memory and SQLite both call the same protocol-owned aggregate batch-budget decision, preventing backend-specific truncation or skip semantics.
+SQLite schema v36 adds the durable subscription-owner binding without rewriting the Event journal or public protobuf contract. Existing pre-v36 subscriptions have no trustworthy creator identity, so migration deliberately leaves them unowned and fail-closed; they must be explicitly recreated under authenticated credentials rather than being assigned an inferred owner.
+
+Restart evidence proves owner binding, Service Account event filtering, active retry state, cursors, dead letters, and replay behavior survive reopen. Corrupt/noncanonical subscription state fails reopen verification. Memory and SQLite both call the same protocol-owned aggregate batch-budget decision, preventing backend-specific truncation or skip semantics.
 
 ## gRPC resource budgets
 

@@ -106,6 +106,11 @@ def main() -> None:
     public_sdks = read("spec/public-sdks.md")
     universal = read("proto/ucr/v1/universal_conference.proto")
     universal_service = read("crates/ucr-api-grpc/src/universal_conference_service.rs")
+    authorized_runtime = read("crates/ucr-core/src/authorized_runtime.rs")
+    memory_store = read("crates/ucr-storage-memory/src/lib.rs")
+    sqlite_event_subscriptions = read(
+        "crates/ucr-storage-sqlite/src/event_subscription_store.rs"
+    )
     universal_spec = read("spec/universal-conference-api.md")
 
     for marker in (
@@ -164,6 +169,14 @@ def main() -> None:
         "rpc CreateSubscription(EventCreateSubscriptionRequest)",
     ):
         require(marker in events, f"webhook transport anchor missing: {marker}")
+    for marker, source in (
+        ("require_event_subscription_owner", authorized_runtime),
+        ("event.actor.on_behalf_of.as_ref() == Some(&subject.principal.principal_id)", authorized_runtime),
+        ("event_visible_to_subscription_owner", memory_store),
+        ("event_subscription_owners", sqlite_event_subscriptions),
+        ("owner_principal_kind", sqlite_event_subscriptions),
+    ):
+        require(marker in source, f"Event subscription isolation anchor missing: {marker}")
     for marker in (
         "ucr.conference.attendance.joined.v1",
         "ucr.conference.attendance.left.v1",

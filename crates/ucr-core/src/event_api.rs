@@ -158,6 +158,13 @@ where
         AuthorizedDurableRuntime::new(&request, self.store)
             .persist_event_subscription(&subject, subscription)
             .map_err(map_authorized_error)?;
+        let owner = self
+            .store
+            .event_subscription_owner(&subscription.scope, &subscription.subscription_id)
+            .map_err(map_store_error)?;
+        if owner.as_ref() != Some(&subject) {
+            return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+        }
         self.store
             .event_subscription(&subscription.scope, &subscription.subscription_id)
             .map_err(map_store_error)?

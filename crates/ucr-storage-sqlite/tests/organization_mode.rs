@@ -165,7 +165,7 @@ fn v30_migration_adds_empty_organization_state_without_inference() {
         let connection = rusqlite::Connection::open(&path).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP INDEX IF EXISTS conference_join_grants_conference;
+                "DROP TABLE IF EXISTS event_subscription_owners;\n                 DROP INDEX IF EXISTS conference_join_grants_conference;
                  DROP TABLE IF EXISTS conference_join_grants;
                  DROP TABLE recording_consents;
                  DROP TABLE recordings;

@@ -141,6 +141,7 @@ struct MemoryEventActiveBatch {
 #[derive(Debug, Clone)]
 struct MemoryEventSubscriptionState {
     subscription: EventSubscription,
+    owner: ScopedPrincipal,
     committed_position: u64,
     generation: u64,
     active: Option<MemoryEventActiveBatch>,
@@ -2211,7 +2212,9 @@ fn memory_next_event_batch(
             .events
             .get(event_key)
             .ok_or(DurableStoreError::Corrupt)?;
-        if !event_matches_subscription(&subscription_state.subscription, event) {
+        if !event_matches_subscription(&subscription_state.subscription, event)
+            || !event_visible_to_subscription_owner(&subscription_state.owner, event)
+        {
             end_position = position;
             continue;
         }
@@ -2248,7 +2251,9 @@ fn memory_active_events(
     let mut batch_bytes = 0_usize;
     for key in &state.event_order[start..end] {
         let event = state.events.get(key).ok_or(DurableStoreError::Corrupt)?;
-        if event_matches_subscription(&subscription_state.subscription, event) {
+        if event_matches_subscription(&subscription_state.subscription, event)
+            && event_visible_to_subscription_owner(&subscription_state.owner, event)
+        {
             batch_bytes = batch_bytes
                 .checked_add(event_delivery_size(event).map_err(map_event_error)?)
                 .ok_or(DurableStoreError::Corrupt)?;
@@ -2281,6 +2286,11 @@ fn receipt_for_existing(
 
 const fn map_event_error(_error: EventError) -> DurableStoreError {
     DurableStoreError::InvalidRecord
+}
+
+fn event_visible_to_subscription_owner(owner: &ScopedPrincipal, event: &EventEnvelope) -> bool {
+    owner.principal.kind != PrincipalKind::ServiceAccount
+        || event_is_attributed_to_principal(event, &owner.principal)
 }
 
 fn event_is_attributed_to_principal(event: &EventEnvelope, principal: &PrincipalRef) -> bool {
@@ -2397,13 +2407,17 @@ impl EventJournalStore for MemoryLocalStore {
 impl EventSubscriptionStore for MemoryLocalStore {
     fn persist_event_subscription(
         &self,
+        owner: &ScopedPrincipal,
         subscription: &EventSubscription,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
         let canonical = canonical_event_subscription(subscription).map_err(map_event_api_error)?;
+        if owner.scope != canonical.scope {
+            return Err(DurableStoreError::PermissionDenied);
+        }
         let key = event_subscription_key(&canonical.scope, &canonical.subscription_id);
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         if let Some(existing) = state.event_subscriptions.get(&key) {
-            return if existing.subscription == canonical {
+            return if existing.subscription == canonical && existing.owner == *owner {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
                 Err(DurableStoreError::Conflict)
@@ -2419,6 +2433,7 @@ impl EventSubscriptionStore for MemoryLocalStore {
             key,
             MemoryEventSubscriptionState {
                 subscription: canonical,
+                owner: owner.clone(),
                 committed_position,
                 generation: 1,
                 active: None,
@@ -2428,6 +2443,18 @@ impl EventSubscriptionStore for MemoryLocalStore {
             },
         );
         Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn event_subscription_owner(
+        &self,
+        scope: &TenantScope,
+        subscription_id: &EventSubscriptionId,
+    ) -> Result<Option<ScopedPrincipal>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .event_subscriptions
+            .get(&event_subscription_key(scope, subscription_id))
+            .map(|value| value.owner.clone()))
     }
 
     fn event_subscription(
@@ -8796,7 +8823,10 @@ mod phase14_event_subscription_tests {
         PermissionGrant, PermissionScope, PrincipalId, PrincipalKind, PrincipalRef,
         ProtocolVersion, ScopedPrincipal, ServiceQuotaPolicy, TenantId, TenantScope,
     };
-    use ucr_protocol::{CanonicalErrorCode, EVENT_APPEND_PERMISSION, EVENT_SUBSCRIBE_PERMISSION};
+    use ucr_protocol::{
+        CanonicalErrorCode, EVENT_APPEND_PERMISSION, EVENT_CONSUME_PERMISSION,
+        EVENT_SUBSCRIBE_PERMISSION,
+    };
 
     use super::MemoryLocalStore;
 
@@ -8808,6 +8838,16 @@ mod phase14_event_subscription_tests {
         TenantScope {
             tenant_id: TenantId::from_opaque(oid("tenant-event-api")),
             namespace_id: None,
+        }
+    }
+
+    fn subscription_owner() -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("event-subscription-owner")),
+                kind: PrincipalKind::Person,
+            },
         }
     }
 
@@ -8860,14 +8900,28 @@ mod phase14_event_subscription_tests {
         }
     }
 
-    fn service() -> ScopedPrincipal {
+    fn service_named(id: &str) -> ScopedPrincipal {
         ScopedPrincipal {
             scope: scope(),
             principal: PrincipalRef {
-                principal_id: PrincipalId::from_opaque(oid("service-event-api")),
+                principal_id: PrincipalId::from_opaque(oid(id)),
                 kind: PrincipalKind::ServiceAccount,
             },
         }
+    }
+
+    fn service() -> ScopedPrincipal {
+        service_named("service-event-api")
+    }
+
+    fn attributed_service_event(
+        id: &str,
+        owner: &ScopedPrincipal,
+        payload: &[u8],
+    ) -> EventEnvelope {
+        let mut value = event(id, "ucr.message.created", payload);
+        value.actor.on_behalf_of = Some(owner.principal.principal_id.clone());
+        value
     }
 
     fn grant(subject: &ScopedPrincipal, permission: &str) -> PermissionGrant {
@@ -8875,6 +8929,32 @@ mod phase14_event_subscription_tests {
             grantee: subject.clone(),
             permission: permission.to_owned(),
             scope: PermissionScope::Exact(scope()),
+        }
+    }
+
+    fn provision_event_service(
+        store: &MemoryLocalStore,
+        subject: &ScopedPrincipal,
+        credential: &ucr_model::ServiceCredentialRecord,
+    ) {
+        store
+            .provision_service_credential(credential)
+            .expect("provision service credential");
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject.clone(),
+                max_requests: 32,
+                window_ms: 60_000,
+            })
+            .expect("install service quota");
+        for permission in [
+            EVENT_SUBSCRIBE_PERMISSION,
+            EVENT_CONSUME_PERMISSION,
+            EVENT_APPEND_PERMISSION,
+        ] {
+            store
+                .grant_permission(&grant(subject, permission))
+                .expect("grant Event permission");
         }
     }
 
@@ -8923,7 +9003,7 @@ mod phase14_event_subscription_tests {
             Ok(None)
         );
 
-        let value = event("event-ingress", "ucr.message.created", b"payload");
+        let value = attributed_service_event("event-ingress", &subject, b"payload");
         let wrong = ucr_core::ServiceCredentialSecret::from_bytes([0xa5; 32]);
         let unauthenticated = ingress
             .publish_event(&subject.scope, &credential.credential_id, &wrong, &value)
@@ -8958,15 +9038,165 @@ mod phase14_event_subscription_tests {
     }
 
     #[test]
+    fn service_event_publish_cannot_forge_another_service_account() {
+        let store = MemoryLocalStore::default();
+        let service_a = service_named("service-publisher-a");
+        let service_b = service_named("service-publisher-b");
+        let (credential_a, secret_a) =
+            issue_service_credential(&service_a).expect("issue credential A");
+        provision_event_service(&store, &service_a, &credential_a);
+        let clock = TestClock::new(65_000);
+        let ingress = EventApiIngress::new(&clock, &clock, &store, &store);
+
+        let own = attributed_service_event("event-own-a", &service_a, b"own");
+        assert_eq!(
+            ingress.publish_event(
+                &service_a.scope,
+                &credential_a.credential_id,
+                &secret_a,
+                &own,
+            ),
+            Ok(EventAppendStatus::Appended)
+        );
+
+        let forged = attributed_service_event("event-forged-as-b", &service_b, b"forged");
+        let denied = ingress
+            .publish_event(
+                &service_a.scope,
+                &credential_a.credential_id,
+                &secret_a,
+                &forged,
+            )
+            .expect_err("A must not publish an Event attributed to B");
+        assert_eq!(denied.code, CanonicalErrorCode::PermissionDenied);
+        let visible = store
+            .events_for_types(&scope(), &["ucr.message.created"], 8)
+            .expect("read Event journal after denied forgery");
+        assert_eq!(visible.len(), 1, "denied forgery must leave no Event");
+        assert_eq!(visible[0].event_id, own.event_id);
+    }
+
+    #[test]
+    fn service_event_subscriptions_are_owner_isolated_within_one_tenant() {
+        let store = MemoryLocalStore::default();
+        let service_a = service_named("service-event-a");
+        let service_b = service_named("service-event-b");
+        let (credential_a, secret_a) =
+            issue_service_credential(&service_a).expect("issue credential A");
+        let (credential_b, secret_b) =
+            issue_service_credential(&service_b).expect("issue credential B");
+        provision_event_service(&store, &service_a, &credential_a);
+        provision_event_service(&store, &service_b, &credential_b);
+
+        let clock = TestClock::new(70_000);
+        let ingress = EventApiIngress::new(&clock, &clock, &store, &store);
+        let subscription_a =
+            subscription("subscription-service-a", EventSubscriptionStart::Beginning);
+        let subscription_b =
+            subscription("subscription-service-b", EventSubscriptionStart::Beginning);
+        ingress
+            .create_subscription(
+                &service_a.scope,
+                &credential_a.credential_id,
+                &secret_a,
+                &subscription_a,
+            )
+            .expect("create A subscription");
+        ingress
+            .create_subscription(
+                &service_b.scope,
+                &credential_b.credential_id,
+                &secret_b,
+                &subscription_b,
+            )
+            .expect("create B subscription");
+
+        assert_eq!(
+            store
+                .event_subscription_owner(&scope(), &subscription_a.subscription_id)
+                .expect("load A owner"),
+            Some(service_a.clone())
+        );
+
+        let foreign_create = ingress
+            .create_subscription(
+                &service_a.scope,
+                &credential_a.credential_id,
+                &secret_a,
+                &subscription_b,
+            )
+            .expect_err("A must not probe B subscription through create");
+        assert_eq!(foreign_create.code, CanonicalErrorCode::NotFound);
+
+        store
+            .append_event(&attributed_service_event(
+                "event-service-b",
+                &service_b,
+                b"private-b",
+            ))
+            .expect("append B event");
+        store
+            .append_event(&attributed_service_event(
+                "event-service-a",
+                &service_a,
+                b"private-a",
+            ))
+            .expect("append A event");
+
+        let a_batch = match ingress
+            .poll_events(
+                &service_a.scope,
+                &credential_a.credential_id,
+                &secret_a,
+                &scope(),
+                &subscription_a.subscription_id,
+                8,
+            )
+            .expect("poll A subscription")
+        {
+            EventPollResult::Batch(batch) => batch,
+            other => panic!("expected A batch, got {other:?}"),
+        };
+        assert_eq!(a_batch.events.len(), 1);
+        assert_eq!(
+            a_batch.events[0].event_id.as_opaque().as_str(),
+            "event-service-a"
+        );
+
+        let foreign_get = ingress
+            .get_subscription(
+                &service_a.scope,
+                &credential_a.credential_id,
+                &secret_a,
+                &scope(),
+                &subscription_b.subscription_id,
+            )
+            .expect_err("A must not read B subscription");
+        assert_eq!(foreign_get.code, CanonicalErrorCode::NotFound);
+
+        let foreign_poll = ingress
+            .poll_events(
+                &service_a.scope,
+                &credential_a.credential_id,
+                &secret_a,
+                &scope(),
+                &subscription_b.subscription_id,
+                8,
+            )
+            .expect_err("A must not poll B subscription");
+        assert_eq!(foreign_poll.code, CanonicalErrorCode::NotFound);
+    }
+
+    #[test]
     fn durable_stream_cursor_ack_backpressure_and_filter_are_idempotent() {
         let store = MemoryLocalStore::default();
         let subscription = subscription("subscription-memory", EventSubscriptionStart::Beginning);
         assert_eq!(
-            store.persist_event_subscription(&subscription),
+            store.persist_event_subscription(&subscription_owner(), &subscription),
             Ok(DurableRecordStatus::Persisted)
         );
         assert_eq!(
-            store.persist_event_subscription(&subscription),
+            store.persist_event_subscription(&subscription_owner(), &subscription),
             Ok(DurableRecordStatus::Duplicate)
         );
         assert_eq!(
@@ -9018,7 +9248,7 @@ mod phase14_event_subscription_tests {
         let store = MemoryLocalStore::default();
         let subscription = subscription("subscription-retry", EventSubscriptionStart::Beginning);
         store
-            .persist_event_subscription(&subscription)
+            .persist_event_subscription(&subscription_owner(), &subscription)
             .expect("subscription");
         store
             .append_event(&event("event-retry", "ucr.message.created", b"retry"))
@@ -9123,7 +9353,7 @@ mod phase14_event_subscription_tests {
             .expect("old event");
         let subscription = subscription("subscription-latest", EventSubscriptionStart::Latest);
         store
-            .persist_event_subscription(&subscription)
+            .persist_event_subscription(&subscription_owner(), &subscription)
             .expect("latest subscription");
         assert_eq!(
             store
