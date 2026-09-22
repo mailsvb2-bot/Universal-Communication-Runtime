@@ -3,11 +3,13 @@ use ucr_core::{DurableStoreError, ServiceAuditStore, ServiceQuotaConsumeError, S
 use ucr_model::{
     AuditRecordId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
     ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditOutcome, ServiceAuditRecord,
-    ServiceCredentialId, ServiceQuotaPolicy, TenantId, TenantScope,
+    ServiceCredentialId, ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
+    TenantId, TenantScope,
 };
 use ucr_protocol::{
     MAX_SERVICE_AUDIT_READ_ITEMS, service_audit_hash, validate_service_audit_operation_ref,
     validate_service_audit_record, validate_service_quota_policy,
+    validate_service_rate_limit_policy,
 };
 
 use super::{
@@ -106,6 +108,149 @@ CREATE TRIGGER service_audit_operation_no_delete
 BEFORE DELETE ON service_audit_operations
 BEGIN SELECT RAISE(ABORT, 'service audit operation is append-only'); END;
 ";
+
+const V37_OBJECTS_SQL: &str = "
+CREATE TABLE service_rate_limit_policies (
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+    namespace_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    rate_class TEXT NOT NULL CHECK(rate_class IN ('management','join_issuance','signaling','media_transport')),
+    max_requests INTEGER NOT NULL CHECK(max_requests > 0),
+    window_ms INTEGER NOT NULL CHECK(window_ms > 0),
+    PRIMARY KEY(tenant_id, namespace_present, namespace_id, principal_id, rate_class),
+    FOREIGN KEY(tenant_id, namespace_present, namespace_id, principal_id)
+        REFERENCES service_quota_policies(tenant_id, namespace_present, namespace_id, principal_id)
+        ON DELETE CASCADE,
+    CHECK((namespace_present = 0 AND namespace_id = '') OR
+          (namespace_present = 1 AND namespace_id <> ''))
+) WITHOUT ROWID;
+
+CREATE TABLE service_rate_limit_usage (
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+    namespace_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    rate_class TEXT NOT NULL CHECK(rate_class IN ('management','join_issuance','signaling','media_transport')),
+    window_start_unix_ms INTEGER NOT NULL CHECK(window_start_unix_ms >= 0),
+    used_requests INTEGER NOT NULL CHECK(used_requests >= 0),
+    last_observed_unix_ms INTEGER NOT NULL CHECK(last_observed_unix_ms >= 0),
+    PRIMARY KEY(tenant_id, namespace_present, namespace_id, principal_id, rate_class),
+    FOREIGN KEY(tenant_id, namespace_present, namespace_id, principal_id, rate_class)
+        REFERENCES service_rate_limit_policies(
+            tenant_id, namespace_present, namespace_id, principal_id, rate_class
+        ) ON DELETE CASCADE,
+    CHECK(last_observed_unix_ms >= window_start_unix_ms),
+    CHECK((namespace_present = 0 AND namespace_id = '') OR
+          (namespace_present = 1 AND namespace_id <> ''))
+) WITHOUT ROWID;
+";
+
+pub(super) fn create_v37_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(V37_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn backfill_v37_rate_limits(
+    transaction: &Transaction<'_>,
+) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(
+            "INSERT OR IGNORE INTO service_rate_limit_policies (
+                tenant_id, namespace_present, namespace_id, principal_id,
+                rate_class, max_requests, window_ms
+             )
+             SELECT p.tenant_id, p.namespace_present, p.namespace_id, p.principal_id,
+                    classes.rate_class, p.max_requests, p.window_ms
+             FROM service_quota_policies p
+             CROSS JOIN (
+                SELECT 'management' AS rate_class
+                UNION ALL SELECT 'join_issuance'
+                UNION ALL SELECT 'signaling'
+                UNION ALL SELECT 'media_transport'
+             ) classes;
+
+             INSERT OR IGNORE INTO service_rate_limit_usage (
+                tenant_id, namespace_present, namespace_id, principal_id, rate_class,
+                window_start_unix_ms, used_requests, last_observed_unix_ms
+             )
+             SELECT u.tenant_id, u.namespace_present, u.namespace_id, u.principal_id,
+                    classes.rate_class, u.window_start_unix_ms, u.used_requests,
+                    u.last_observed_unix_ms
+             FROM service_quota_usage u
+             CROSS JOIN (
+                SELECT 'management' AS rate_class
+                UNION ALL SELECT 'join_issuance'
+                UNION ALL SELECT 'signaling'
+                UNION ALL SELECT 'media_transport'
+             ) classes;",
+        )
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn verify_v37_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_table_columns(
+        connection,
+        "service_rate_limit_policies",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("principal_id", "TEXT", 1, 4),
+            ("rate_class", "TEXT", 1, 5),
+            ("max_requests", "INTEGER", 1, 0),
+            ("window_ms", "INTEGER", 1, 0),
+        ],
+    )?;
+    verify_table_columns(
+        connection,
+        "service_rate_limit_usage",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("principal_id", "TEXT", 1, 4),
+            ("rate_class", "TEXT", 1, 5),
+            ("window_start_unix_ms", "INTEGER", 1, 0),
+            ("used_requests", "INTEGER", 1, 0),
+            ("last_observed_unix_ms", "INTEGER", 1, 0),
+        ],
+    )?;
+    let incomplete_policy_sets: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM service_quota_policies p
+             WHERE (
+               SELECT COUNT(*) FROM service_rate_limit_policies r
+               WHERE r.tenant_id=p.tenant_id
+                 AND r.namespace_present=p.namespace_present
+                 AND r.namespace_id=p.namespace_id
+                 AND r.principal_id=p.principal_id
+             ) != 4",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if incomplete_policy_sets != 0 {
+        return Err(DurableStoreError::Corrupt);
+    }
+    let invalid_usage: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM service_rate_limit_usage u
+             JOIN service_rate_limit_policies p
+               USING(tenant_id,namespace_present,namespace_id,principal_id,rate_class)
+             WHERE u.used_requests > p.max_requests
+                OR (u.window_start_unix_ms % p.window_ms) != 0
+                OR u.last_observed_unix_ms < u.window_start_unix_ms",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if invalid_usage != 0 {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
+}
 
 pub(super) fn create_v17_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
     transaction
