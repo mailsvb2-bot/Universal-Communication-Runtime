@@ -20,6 +20,25 @@ Lifecycle metadata is separate from Call signalling:
 
 The lifecycle coordinator may project into canonical Group/Call state but must never become a second CallSession authority. Scheduled rooms may exist before a realtime Call is started.
 
+### Lifecycle integration Events
+
+Crossing into `live` emits canonical Event type `ucr.conference.started`; crossing into `ended`
+emits `ucr.conference.ended`. Waiting and ending remain coordinator states and do not manufacture
+additional public lifecycle webhook types.
+
+The Event payload is `UniversalConferenceLifecycleEvent` and contains only integration-facing
+scope, conference/integration IDs, the integrator's external conference reference, previous/current
+lifecycle, resulting revision and occurrence timestamp. The Event actor is `System` on behalf of
+the authenticated Service Account whose principal ID equals `integration_id`, so the Event
+subscription isolation boundary delivers the fact only to that integration.
+
+Lifecycle transition and Event append are one durable atomic store operation. Memory performs both
+under one mutex; SQLite performs the lifecycle compare-and-swap and canonical Event append in one
+immediate transaction. A store that cannot provide this atomicity fails closed. A successful
+transition therefore cannot become externally visible without its paired `ucr.conference.started` or
+`ucr.conference.ended` Event, and an Event cannot commit without the corresponding lifecycle revision.
+
+
 ## Integration isolation
 
 Every conference read or mutation is scoped by both `TenantScope` and `IntegrationId`. Universal Conference credentials are canonical Service Account credentials whose authenticated principal ID must exactly match the presented `IntegrationId`; a tenant permission by itself is not sufficient to impersonate another integration. A caller that presents another integration's `conference_id` receives `NOT_FOUND` after integration admission; the public API must not expose cross-integration existence or permit management by handle alone. External references remain integration-scoped and no integration credential is a tenant-wide conference superuser by default.

@@ -111,6 +111,10 @@ def main() -> None:
     sqlite_event_subscriptions = read(
         "crates/ucr-storage-sqlite/src/event_subscription_store.rs"
     )
+    sqlite_universal_conferences = read(
+        "crates/ucr-storage-sqlite/src/universal_conference_store.rs"
+    )
+    universal_store_contract = read("crates/ucr-core/src/universal_conference.rs")
     universal_spec = read("spec/universal-conference-api.md")
 
     for marker in (
@@ -184,6 +188,34 @@ def main() -> None:
         "ucr.conference.attendance.media_ready.v1",
     ):
         require(marker in universal_service, f"conference event anchor missing: {marker}")
+    for marker in (
+        "message UniversalConferenceLifecycleEvent",
+        "UniversalConferenceLifecycle previous = 5;",
+        "UniversalConferenceLifecycle current = 6;",
+        "occurred_at_unix_ms = 8;",
+    ):
+        require(marker in universal, f"conference lifecycle payload anchor missing: {marker}")
+    for marker in (
+        '"ucr.conference.started"',
+        '"ucr.conference.ended"',
+        "transition_universal_conference_with_event",
+        "UniversalConferenceLifecycleEvent",
+    ):
+        require(marker in universal_service, f"conference lifecycle event anchor missing: {marker}")
+    require(
+        "transition_universal_conference_with_event" in universal_store_contract,
+        "atomic conference lifecycle Event store boundary missing",
+    )
+    require(
+        "append_event_to_memory_state" in memory_store
+        and "transition_universal_conference_with_event" in memory_store,
+        "memory conference lifecycle Event atomicity missing",
+    )
+    require(
+        "append_event_in_transaction" in sqlite_universal_conferences
+        and "transition_universal_conference_with_event" in sqlite_universal_conferences,
+        "SQLite conference lifecycle Event atomicity missing",
+    )
 
     workflow = read(".github/workflows/conformance.yml")
     for marker in (

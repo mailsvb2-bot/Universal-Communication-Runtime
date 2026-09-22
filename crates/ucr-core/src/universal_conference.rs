@@ -1,7 +1,7 @@
 use ucr_model::{
-    ConferenceJoinGrantRecord, ConferenceParticipantRole, GroupId, IntegrationId, PrincipalRef,
-    SessionId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
-    UniversalConferenceProfile,
+    ConferenceJoinGrantRecord, ConferenceParticipantRole, EventEnvelope, GroupId, IntegrationId,
+    PrincipalRef, SessionId, TenantScope, UniversalConferenceLifecycle,
+    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 
 use crate::{DurableRecordStatus, DurableStoreError, StorageProvider};
@@ -56,6 +56,37 @@ pub trait UniversalConferenceStore: StorageProvider {
         lifecycle: UniversalConferenceLifecycle,
         entry_open: bool,
     ) -> Result<UniversalConferenceProfile, DurableStoreError>;
+
+    /// Applies one optimistic lifecycle transition and, when supplied, appends its canonical
+    /// integration Event in the same durable atomic action.
+    ///
+    /// This is the required boundary for externally observable lifecycle facts: implementations
+    /// must never expose a transitioned Conference without the paired Event, nor an Event without
+    /// the corresponding Conference revision. Stores that cannot provide that guarantee fail
+    /// closed rather than falling back to two independent writes.
+    ///
+    /// # Errors
+    /// Rejects invalid/stale transitions, malformed/conflicting Events, unsupported atomicity,
+    /// and explicit durable-store failures.
+    fn transition_universal_conference_with_event(
+        &self,
+        scope: &TenantScope,
+        conference_id: &GroupId,
+        expected_revision: u64,
+        lifecycle: UniversalConferenceLifecycle,
+        entry_open: bool,
+        event: Option<&EventEnvelope>,
+    ) -> Result<UniversalConferenceProfile, DurableStoreError> {
+        let _ = (
+            scope,
+            conference_id,
+            expected_revision,
+            lifecycle,
+            entry_open,
+            event,
+        );
+        Err(DurableStoreError::Unavailable)
+    }
 
     /// Creates or deduplicates one integration-facing participant projection.
     ///

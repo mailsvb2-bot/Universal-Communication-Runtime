@@ -21,18 +21,19 @@ use ucr_core::{
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
 use ucr_model::{
-    AuthorizationRequest, CallId, CallParticipant, CallParticipantState, CallParticipantUpdateKind,
-    CallSession, CallSignal, CallSignalKind, CallSignallingState, CommandEnvelope, CommandId,
-    ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
-    ConferenceParticipantRole, ConferenceScheduleMetadata, ConferenceSubscriptionSet,
-    ConversationId, ConversationKind, ConversationRecord, ConversationRef, CorrelationContext,
-    DeliveryPolicy, DeviceDescriptor, DeviceId, DeviceLifecycleState, EventId,
-    ExternalIdentityBinding, GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy,
-    GroupId, GroupMediaState, GroupOwnership, GroupRecord, GroupRole, IdentityEvidence, IdentityId,
-    IdentityOwnership, IdentityRecord, IntegrationId, MediaKind, OpaqueId, PermissionGrant,
-    PermissionScope, PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef,
-    ProtocolVersion, ScopedPrincipal, SessionId, TenantScope, UniversalConferenceLifecycle,
-    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    ActorId, ActorKind, ActorRef, AuthorizationRequest, CallId, CallParticipant,
+    CallParticipantState, CallParticipantUpdateKind, CallSession, CallSignal, CallSignalKind,
+    CallSignallingState, CommandEnvelope, CommandId, ConferenceJoinGrantRecord,
+    ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription, ConferenceParticipantRole,
+    ConferenceScheduleMetadata, ConferenceSubscriptionSet, ConversationId, ConversationKind,
+    ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy, DeviceDescriptor,
+    DeviceId, DeviceLifecycleState, DeviceRef, EventEnvelope, EventId, ExternalIdentityBinding,
+    GroupChange, GroupChangeKind, GroupCryptoState, GroupHistoryPolicy, GroupId, GroupMediaState,
+    GroupOwnership, GroupRecord, GroupRole, IdentityEvidence, IdentityId, IdentityOwnership,
+    IdentityRecord, IntegrationId, MediaKind, OpaqueId, PermissionGrant, PermissionScope,
+    PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion,
+    ScopedPrincipal, SessionId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
+    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
     AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CALL_OBSERVE_PERMISSION,
@@ -430,7 +431,7 @@ where
                     CONFERENCE_MANAGE_PERMISSION,
                 )
                 .and_then(|_| {
-                    accept_mutation(
+                    let stable_command_id = accept_mutation_id(
                         &*self.store,
                         &scope,
                         "ucr.conference.lifecycle.v1",
@@ -446,13 +447,28 @@ where
                     if current.lifecycle == target {
                         return Ok(current);
                     }
+                    let now_unix_ms = if lifecycle_event_type(target).is_some() {
+                        Some(self.clock.now_unix_ms().map_err(|_| {
+                            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+                        })?)
+                    } else {
+                        None
+                    };
+                    let event = lifecycle_event(
+                        &current,
+                        target,
+                        &stable_command_id,
+                        &idempotency_key,
+                        now_unix_ms,
+                    )?;
                     self.store
-                        .transition_universal_conference(
+                        .transition_universal_conference_with_event(
                             &scope,
                             &conference_id,
                             current.revision,
                             target,
                             current.entry_open,
+                            event.as_ref(),
                         )
                         .map_err(map_store_error)
                 }),
@@ -3468,6 +3484,89 @@ fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
     Ok(profile)
 }
 
+const fn pb_lifecycle(value: UniversalConferenceLifecycle) -> pb::UniversalConferenceLifecycle {
+    match value {
+        UniversalConferenceLifecycle::Scheduled => pb::UniversalConferenceLifecycle::Scheduled,
+        UniversalConferenceLifecycle::Waiting => pb::UniversalConferenceLifecycle::Waiting,
+        UniversalConferenceLifecycle::Live => pb::UniversalConferenceLifecycle::Live,
+        UniversalConferenceLifecycle::Ending => pb::UniversalConferenceLifecycle::Ending,
+        UniversalConferenceLifecycle::Ended => pb::UniversalConferenceLifecycle::Ended,
+    }
+}
+
+const fn lifecycle_event_type(lifecycle: UniversalConferenceLifecycle) -> Option<&'static str> {
+    match lifecycle {
+        UniversalConferenceLifecycle::Live => Some("ucr.conference.started"),
+        UniversalConferenceLifecycle::Ended => Some("ucr.conference.ended"),
+        UniversalConferenceLifecycle::Scheduled
+        | UniversalConferenceLifecycle::Waiting
+        | UniversalConferenceLifecycle::Ending => None,
+    }
+}
+
+fn lifecycle_event(
+    current: &UniversalConferenceProfile,
+    target: UniversalConferenceLifecycle,
+    command_id: &CommandId,
+    idempotency_key: &str,
+    occurred_at_unix_ms: Option<i64>,
+) -> Result<Option<EventEnvelope>, CanonicalError> {
+    let Some(event_type) = lifecycle_event_type(target) else {
+        return Ok(None);
+    };
+    let occurred_at_unix_ms = occurred_at_unix_ms
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+    let next_revision = current
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    let payload = pb::UniversalConferenceLifecycleEvent {
+        scope: Some(pb_scope(&current.scope)),
+        conference_id: Some(pb_opaque(current.conference_id.as_opaque())),
+        integration_id: Some(pb_opaque(current.integration_id.as_opaque())),
+        external_conference_id: current.external_conference_id.clone(),
+        previous: pb_lifecycle(current.lifecycle) as i32,
+        current: pb_lifecycle(target) as i32,
+        revision: next_revision,
+        occurred_at_unix_ms,
+    }
+    .encode_to_vec();
+    Ok(Some(EventEnvelope {
+        event_id: EventId::from_opaque(derived_id("conference-lifecycle-event", command_id)?),
+        scope: current.scope.clone(),
+        event_type: event_type.to_owned(),
+        payload,
+        actor: ActorRef {
+            actor_id: ActorId::from_opaque(derived_id("conference-lifecycle-actor", command_id)?),
+            kind: ActorKind::System,
+            on_behalf_of: Some(PrincipalId::from_opaque(
+                current.integration_id.as_opaque().clone(),
+            )),
+        },
+        source_device: DeviceRef {
+            device_id: DeviceId::from_opaque(derived_id(
+                "conference-lifecycle-device",
+                command_id,
+            )?),
+            identity_id: IdentityId::from_opaque(derived_id(
+                "conference-lifecycle-identity",
+                command_id,
+            )?),
+        },
+        wall_time_unix_ms: occurred_at_unix_ms,
+        logical_order: next_revision,
+        correlation: CorrelationContext {
+            correlation_id: command_id.as_opaque().clone(),
+            causation_id: Some(command_id.as_opaque().clone()),
+            idempotency_key: Some(idempotency_key.to_owned()),
+        },
+        schema_version: ProtocolVersion::new(1, 0),
+        integrity_metadata: Vec::new(),
+        extensions: Vec::new(),
+    }))
+}
+
 fn pb_conference(value: &UniversalConferenceProfile) -> pb::UniversalConferenceDescriptor {
     pb::UniversalConferenceDescriptor {
         scope: Some(pb_scope(&value.scope)),
@@ -3480,13 +3579,7 @@ fn pb_conference(value: &UniversalConferenceProfile) -> pb::UniversalConferenceD
             UniversalConferenceMode::Broadcast => pb::UniversalConferenceMode::Broadcast,
             UniversalConferenceMode::AudioRoom => pb::UniversalConferenceMode::AudioRoom,
         }) as i32,
-        lifecycle: (match value.lifecycle {
-            UniversalConferenceLifecycle::Scheduled => pb::UniversalConferenceLifecycle::Scheduled,
-            UniversalConferenceLifecycle::Waiting => pb::UniversalConferenceLifecycle::Waiting,
-            UniversalConferenceLifecycle::Live => pb::UniversalConferenceLifecycle::Live,
-            UniversalConferenceLifecycle::Ending => pb::UniversalConferenceLifecycle::Ending,
-            UniversalConferenceLifecycle::Ended => pb::UniversalConferenceLifecycle::Ended,
-        }) as i32,
+        lifecycle: pb_lifecycle(value.lifecycle) as i32,
         schedule: Some(pb::ConferenceScheduleMetadata {
             starts_at_unix_ms: value.schedule.starts_at_unix_ms,
             planned_end_unix_ms: value.schedule.planned_end_unix_ms,
@@ -3549,7 +3642,7 @@ mod universal_runtime_tests {
     };
 
     use ucr_core::{
-        CallStore, DeviceLifecycleStore, GroupCallLookupStore, GroupStore,
+        CallStore, DeviceLifecycleStore, EventJournalStore, GroupCallLookupStore, GroupStore,
         IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
         UniversalConferenceStore,
     };
@@ -3569,7 +3662,7 @@ mod universal_runtime_tests {
     use super::{
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
         IssueJoinGrantInput, PrepareConferenceRuntimeInput, UpdateParticipantInput,
-        ensure_participant, ensure_participant_device, issue_join_grant,
+        ensure_participant, ensure_participant_device, issue_join_grant, lifecycle_event,
         prepare_conference_runtime, resolve_join_call, resolve_join_device,
         resolve_person_principal, update_participant,
     };
@@ -4222,6 +4315,134 @@ mod universal_runtime_tests {
                 .as_str(),
             "zz-active-device"
         );
+    }
+
+    #[test]
+    fn conference_lifecycle_events_survive_sqlite_restart() {
+        let db = TestDb::new();
+        let started_command = CommandId::from_opaque(oid("lifecycle-start-command"));
+        let ended_command = CommandId::from_opaque(oid("lifecycle-end-command"));
+        {
+            let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+            let initial = conference();
+            store
+                .persist_universal_conference_profile(&initial)
+                .expect("conference profile");
+
+            let started = lifecycle_event(
+                &initial,
+                UniversalConferenceLifecycle::Live,
+                &started_command,
+                "lifecycle-start-key",
+                Some(1_500_000),
+            )
+            .expect("build started event")
+            .expect("started event");
+            let live = store
+                .transition_universal_conference_with_event(
+                    &scope(),
+                    &initial.conference_id,
+                    initial.revision,
+                    UniversalConferenceLifecycle::Live,
+                    initial.entry_open,
+                    Some(&started),
+                )
+                .expect("atomic live transition");
+            assert_eq!(live.lifecycle, UniversalConferenceLifecycle::Live);
+            assert_eq!(live.revision, 2);
+
+            let ending = store
+                .transition_universal_conference_with_event(
+                    &scope(),
+                    &live.conference_id,
+                    live.revision,
+                    UniversalConferenceLifecycle::Ending,
+                    live.entry_open,
+                    None,
+                )
+                .expect("ending transition");
+            let ended_event = lifecycle_event(
+                &ending,
+                UniversalConferenceLifecycle::Ended,
+                &ended_command,
+                "lifecycle-end-key",
+                Some(2_000_000),
+            )
+            .expect("build ended event")
+            .expect("ended event");
+            let ended = store
+                .transition_universal_conference_with_event(
+                    &scope(),
+                    &ending.conference_id,
+                    ending.revision,
+                    UniversalConferenceLifecycle::Ended,
+                    ending.entry_open,
+                    Some(&ended_event),
+                )
+                .expect("atomic ended transition");
+            assert_eq!(ended.lifecycle, UniversalConferenceLifecycle::Ended);
+            assert_eq!(ended.revision, 4);
+        }
+
+        let reopened = SqliteLocalStore::open(&db.0).expect("reopen sqlite store");
+        let persisted = reopened
+            .universal_conference_profile(&scope(), &conference().conference_id)
+            .expect("conference read")
+            .expect("conference");
+        assert_eq!(persisted.lifecycle, UniversalConferenceLifecycle::Ended);
+        assert_eq!(persisted.revision, 4);
+        let events = reopened
+            .events_for_types(
+                &scope(),
+                &["ucr.conference.started", "ucr.conference.ended"],
+                8,
+            )
+            .expect("lifecycle events after restart");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "ucr.conference.started");
+        assert_eq!(events[1].event_type, "ucr.conference.ended");
+    }
+
+    #[test]
+    fn conference_lifecycle_event_conflict_rolls_back_sqlite_transition() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open rollback sqlite store");
+        let initial = conference();
+        store
+            .persist_universal_conference_profile(&initial)
+            .expect("rollback conference profile");
+        let started_command = CommandId::from_opaque(oid("lifecycle-start-command"));
+        let expected = lifecycle_event(
+            &initial,
+            UniversalConferenceLifecycle::Live,
+            &started_command,
+            "lifecycle-start-key",
+            Some(1_500_000),
+        )
+        .expect("build expected event")
+        .expect("expected event");
+        let mut conflicting = expected.clone();
+        conflicting.payload = b"conflicting-lifecycle-payload".to_vec();
+        store
+            .append_event(&conflicting)
+            .expect("seed conflicting event id");
+        assert_eq!(
+            store.transition_universal_conference_with_event(
+                &scope(),
+                &initial.conference_id,
+                initial.revision,
+                UniversalConferenceLifecycle::Live,
+                initial.entry_open,
+                Some(&expected),
+            ),
+            Err(ucr_core::DurableStoreError::Conflict)
+        );
+        let unchanged = store
+            .universal_conference_profile(&scope(), &initial.conference_id)
+            .expect("rollback profile read")
+            .expect("rollback profile");
+        assert_eq!(unchanged.lifecycle, UniversalConferenceLifecycle::Waiting);
+        assert_eq!(unchanged.revision, 1);
     }
 
     #[test]

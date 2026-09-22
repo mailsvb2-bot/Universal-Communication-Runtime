@@ -62,6 +62,19 @@ message UniversalConferenceDescriptor {
   uint64 revision = 9;
 }
 
+// Payload carried by canonical conference.started / conference.ended Events.
+// It contains only integration-facing identifiers and lifecycle metadata.
+message UniversalConferenceLifecycleEvent {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId integration_id = 3;
+  bytes external_conference_id = 4;
+  UniversalConferenceLifecycle previous = 5;
+  UniversalConferenceLifecycle current = 6;
+  uint64 revision = 7;
+  int64 occurred_at_unix_ms = 8;
+}
+
 message UniversalConferenceParticipant {
   reserved 1; // Internal PrincipalId is deliberately not exposed by the universal facade.
   bytes external_user_id = 2;
