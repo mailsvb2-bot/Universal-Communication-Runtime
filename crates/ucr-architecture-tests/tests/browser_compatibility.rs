@@ -36,7 +36,10 @@ fn browser_compatibility_matrix_runs_real_desktop_browsers_and_keeps_mobile_trut
         "cryptoSubtle",
         "secureContext",
     ] {
-        assert!(probe.contains(invariant), "missing browser probe invariant {invariant}");
+        assert!(
+            probe.contains(invariant),
+            "missing browser probe invariant {invariant}"
+        );
     }
 
     assert!(spec.contains("Android Chrome"));
