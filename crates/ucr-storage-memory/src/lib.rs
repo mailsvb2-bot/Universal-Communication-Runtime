@@ -46,7 +46,8 @@ use ucr_model::{
     PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecordingConsentState, RecordingId,
     RecordingSession, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
     ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
-    ServiceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId,
+    ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass, SessionId, StoreForwardId,
+    StoreForwardJob, StoreForwardLeaseId,
     SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
     TrustedSigningKeyState, UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
     UniversalConferenceProfile,
@@ -111,6 +112,7 @@ type TrustedSigningDeviceRef = (ScopeKey, String);
 type DeviceKey = (ScopeKey, String);
 type ServiceCredentialRef = (ScopeKey, String);
 type ServicePrincipalKey = (ScopeKey, String);
+type ServiceRateLimitKey = (ServicePrincipalKey, ServiceRequestRateClass);
 type UniversalConferenceKey = (ScopeKey, String);
 type UniversalConferenceExternalKey = (ScopeKey, String, Vec<u8>);
 type UniversalConferenceIdempotencyKey = (ScopeKey, String, String);
@@ -204,7 +206,8 @@ struct MemoryState {
     permission_grants: Vec<PermissionGrant>,
     service_credentials: HashMap<ServiceCredentialRef, ServiceCredentialRecord>,
     service_quota_policies: HashMap<ServicePrincipalKey, ServiceQuotaPolicy>,
-    service_quota_usage: HashMap<ServicePrincipalKey, MemoryQuotaUsage>,
+    service_rate_limit_policies: HashMap<ServiceRateLimitKey, ServiceRateLimitPolicy>,
+    service_rate_limit_usage: HashMap<ServiceRateLimitKey, MemoryQuotaUsage>,
     service_audit_records: Vec<(ServiceAuditRecord, [u8; 32])>,
     universal_conferences: HashMap<UniversalConferenceKey, UniversalConferenceProfile>,
     universal_conference_external: HashMap<UniversalConferenceExternalKey, UniversalConferenceKey>,
@@ -340,7 +343,19 @@ impl ServiceQuotaStore for MemoryLocalStore {
         state
             .service_quota_policies
             .insert(key.clone(), policy.clone());
-        state.service_quota_usage.remove(&key);
+        for rate_class in ServiceRequestRateClass::ALL {
+            let rate_key = (key.clone(), rate_class);
+            state.service_rate_limit_policies.insert(
+                rate_key.clone(),
+                ServiceRateLimitPolicy {
+                    subject: policy.subject.clone(),
+                    rate_class,
+                    max_requests: policy.max_requests,
+                    window_ms: policy.window_ms,
+                },
+            );
+            state.service_rate_limit_usage.remove(&rate_key);
+        }
         Ok(())
     }
 
@@ -354,22 +369,52 @@ impl ServiceQuotaStore for MemoryLocalStore {
         Ok(state.service_quota_policies.get(&key).cloned())
     }
 
-    fn consume_service_request(
+    fn set_service_rate_limit_policy(
+        &self,
+        policy: &ServiceRateLimitPolicy,
+    ) -> Result<(), DurableStoreError> {
+        validate_service_rate_limit_policy(policy)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = (service_principal_key(&policy.subject), policy.rate_class);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if state.service_rate_limit_policies.get(&key) == Some(policy) {
+            return Ok(());
+        }
+        state
+            .service_rate_limit_policies
+            .insert(key.clone(), policy.clone());
+        state.service_rate_limit_usage.remove(&key);
+        Ok(())
+    }
+
+    fn service_rate_limit_policy(
         &self,
         subject: &ScopedPrincipal,
+        rate_class: ServiceRequestRateClass,
+    ) -> Result<Option<ServiceRateLimitPolicy>, DurableStoreError> {
+        validate_service_subject(subject)?;
+        let key = (service_principal_key(subject), rate_class);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state.service_rate_limit_policies.get(&key).cloned())
+    }
+
+    fn consume_service_request_for_class(
+        &self,
+        subject: &ScopedPrincipal,
+        rate_class: ServiceRequestRateClass,
         now_unix_ms: i64,
     ) -> Result<(), ServiceQuotaConsumeError> {
         validate_service_subject(subject).map_err(ServiceQuotaConsumeError::Store)?;
         if now_unix_ms < 0 {
             return Err(ServiceQuotaConsumeError::ClockRollback);
         }
-        let key = service_principal_key(subject);
+        let key = (service_principal_key(subject), rate_class);
         let mut state = self
             .state
             .lock()
             .map_err(|_| ServiceQuotaConsumeError::Store(DurableStoreError::Internal))?;
         let policy = state
-            .service_quota_policies
+            .service_rate_limit_policies
             .get(&key)
             .cloned()
             .ok_or(ServiceQuotaConsumeError::NotConfigured)?;
@@ -377,7 +422,7 @@ impl ServiceQuotaStore for MemoryLocalStore {
             .map_err(|_| ServiceQuotaConsumeError::Store(DurableStoreError::Corrupt))?;
         let window_start_unix_ms = now_unix_ms - now_unix_ms.rem_euclid(window_ms);
         let usage = state
-            .service_quota_usage
+            .service_rate_limit_usage
             .entry(key)
             .or_insert(MemoryQuotaUsage {
                 window_start_unix_ms,
