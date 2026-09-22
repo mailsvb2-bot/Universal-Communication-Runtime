@@ -46,7 +46,8 @@ use ucr_model::{
     PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecordingConsentState, RecordingId,
     RecordingSession, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
     ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
-    ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass, SessionId, StoreForwardId,
+    ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass, ServiceResourceQuotaPolicy,
+    SessionId, StoreForwardId,
     StoreForwardJob, StoreForwardLeaseId, SyncCheckpoint, SyncSession, SyncState, TenantScope,
     TrustedSigningKeyRecord, TrustedSigningKeyState, UniversalConferenceLifecycle,
     UniversalConferenceParticipantProfile, UniversalConferenceProfile,
@@ -72,7 +73,8 @@ use ucr_protocol::{
     validate_external_identity_binding_key, validate_federation_credential_rotation,
     validate_federation_transition, validate_identity_record, validate_permission_grant,
     validate_principal_identity_binding, validate_recording_session, validate_service_audit_record,
-    validate_service_quota_policy, validate_service_rate_limit_policy, validate_sync_checkpoint,
+    validate_service_quota_policy, validate_service_rate_limit_policy,
+    validate_service_resource_quota_policy, validate_sync_checkpoint,
     validate_sync_transition, validate_trusted_signing_key_descriptor,
 };
 
@@ -205,6 +207,7 @@ struct MemoryState {
     permission_grants: Vec<PermissionGrant>,
     service_credentials: HashMap<ServiceCredentialRef, ServiceCredentialRecord>,
     service_quota_policies: HashMap<ServicePrincipalKey, ServiceQuotaPolicy>,
+    service_resource_quota_policies: HashMap<ServicePrincipalKey, ServiceResourceQuotaPolicy>,
     service_rate_limit_policies: HashMap<ServiceRateLimitKey, ServiceRateLimitPolicy>,
     service_rate_limit_usage: HashMap<ServiceRateLimitKey, MemoryQuotaUsage>,
     service_audit_records: Vec<(ServiceAuditRecord, [u8; 32])>,
@@ -366,6 +369,30 @@ impl ServiceQuotaStore for MemoryLocalStore {
         let key = service_principal_key(subject);
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         Ok(state.service_quota_policies.get(&key).cloned())
+    }
+
+    fn set_service_resource_quota_policy(
+        &self,
+        policy: &ServiceResourceQuotaPolicy,
+    ) -> Result<(), DurableStoreError> {
+        validate_service_resource_quota_policy(policy)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = service_principal_key(&policy.subject);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        state
+            .service_resource_quota_policies
+            .insert(key, policy.clone());
+        Ok(())
+    }
+
+    fn service_resource_quota_policy(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<Option<ServiceResourceQuotaPolicy>, DurableStoreError> {
+        validate_service_subject(subject)?;
+        let key = service_principal_key(subject);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state.service_resource_quota_policies.get(&key).cloned())
     }
 
     fn set_service_rate_limit_policy(
@@ -2153,6 +2180,42 @@ fn service_principal_key(subject: &ScopedPrincipal) -> ServicePrincipalKey {
             .as_str()
             .to_owned(),
     )
+}
+
+fn integration_service_principal_key(
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+) -> ServicePrincipalKey {
+    (
+        scope_key(scope),
+        integration_id.as_opaque().as_str().to_owned(),
+    )
+}
+
+fn ensure_integration_participant_quota(
+    state: &MemoryState,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+) -> Result<(), DurableStoreError> {
+    let key = integration_service_principal_key(scope, integration_id);
+    let Some(policy) = state.service_resource_quota_policies.get(&key) else {
+        return Ok(());
+    };
+    let active = state
+        .universal_conference_participants
+        .values()
+        .filter(|existing| {
+            existing.scope == *scope
+                && existing.integration_id == *integration_id
+                && existing.active
+        })
+        .count();
+    let active = u64::try_from(active).map_err(|_| DurableStoreError::Full)?;
+    if active >= policy.max_concurrent_participants {
+        Err(DurableStoreError::Full)
+    } else {
+        Ok(())
+    }
 }
 
 fn service_credential_ref(
@@ -8893,6 +8956,11 @@ impl UniversalConferenceStore for MemoryLocalStore {
             if active_participant_count >= MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS {
                 return Err(DurableStoreError::Full);
             }
+            ensure_integration_participant_quota(
+                &state,
+                &participant.scope,
+                &participant.integration_id,
+            )?;
         }
         if participant.active
             && participant.role == ConferenceParticipantRole::Owner
@@ -9041,6 +9109,13 @@ impl UniversalConferenceStore for MemoryLocalStore {
             if active_participant_count >= MAX_UNIVERSAL_CONFERENCE_PARTICIPANTS {
                 return Err(DurableStoreError::Full);
             }
+            let integration_id = state
+                .universal_conference_participants
+                .get(&key)
+                .ok_or(DurableStoreError::Conflict)?
+                .integration_id
+                .clone();
+            ensure_integration_participant_quota(&state, scope, &integration_id)?;
         }
         if active
             && role == ConferenceParticipantRole::Owner
