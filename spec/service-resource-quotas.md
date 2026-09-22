@@ -1,6 +1,6 @@
 # Service resource quotas
 
-Status: **concurrent participant quota implemented; remaining resource dimensions are not yet implemented**.
+Status: **concurrent participant and conference quotas implemented; remaining resource dimensions are not yet implemented**.
 
 This contract is deliberately separate from request-rate limiting. Request admission continues to use
 `ServiceQuotaPolicy` / `ServiceRateLimitPolicy`; live communication resources use
@@ -30,7 +30,22 @@ Semantics:
 - SQLite enforcement happens inside the same `BEGIN IMMEDIATE` transaction that persists or
   reactivates the participant, so parallel admissions cannot use a caller-side read-before-write
   race to exceed the configured limit;
-- SQLite schema v38 persists the policy across restart.
+- SQLite schema v38 introduced durable participant policy storage; schema v39 extends the same policy with conference concurrency and preserves v38 rows across migration.
+
+## Concurrent conferences
+
+`max_concurrent_conferences` is optional and limits conferences that currently consume realtime capacity for the same integration and exact tenant scope.
+
+Semantics:
+
+- `Scheduled` conferences do not consume quota, so integrations may create rooms well before an event starts;
+- `Waiting`, `Live`, and `Ending` conferences each consume one slot;
+- `Ended` releases the slot;
+- moving `Waiting` to `Live` or `Live` to `Ending` does not consume another slot;
+- different integrations do not consume one another's conference quota;
+- absence of `max_concurrent_conferences` means no integration-specific conference concurrency ceiling is configured;
+- Memory enforcement is atomic under the canonical store mutex;
+- SQLite enforcement runs inside the same `BEGIN IMMEDIATE` transaction as conference creation/lifecycle transition, preventing parallel admissions from exceeding the configured ceiling.
 
 The same `SERVICE_QUOTA_READ_PERMISSION` and `SERVICE_QUOTA_WRITE_PERMISSION` authorization
 boundary used for request quotas also governs resource quota administration.
@@ -40,7 +55,6 @@ boundary used for request quotas also governs resource quota administration.
 This slice does **not** claim the complete resource-quota roadmap. The following dimensions remain
 to be added through the same canonical resource policy path:
 
-- concurrent conferences;
 - publishers;
 - aggregate bandwidth;
 - recording minutes.

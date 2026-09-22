@@ -109,6 +109,9 @@ pub fn validate_service_resource_quota_policy(
     }
     if policy.max_concurrent_participants == 0
         || policy.max_concurrent_participants > i64::MAX as u64
+        || policy
+            .max_concurrent_conferences
+            .is_some_and(|limit| limit == 0 || limit > i64::MAX as u64)
     {
         return Err(ServiceControlValidationError::InvalidQuota);
     }
@@ -366,10 +369,11 @@ mod tests {
     }
 
     #[test]
-    fn resource_quota_policy_requires_service_account_and_nonzero_participant_limit() {
+    fn resource_quota_policy_requires_service_account_and_valid_resource_limits() {
         let mut policy = ServiceResourceQuotaPolicy {
             subject: subject(),
             max_concurrent_participants: 10,
+            max_concurrent_conferences: Some(2),
         };
         assert_eq!(validate_service_resource_quota_policy(&policy), Ok(()));
         policy.max_concurrent_participants = 0;
@@ -378,6 +382,12 @@ mod tests {
             Err(ServiceControlValidationError::InvalidQuota)
         );
         policy.max_concurrent_participants = 10;
+        policy.max_concurrent_conferences = Some(0);
+        assert_eq!(
+            validate_service_resource_quota_policy(&policy),
+            Err(ServiceControlValidationError::InvalidQuota)
+        );
+        policy.max_concurrent_conferences = Some(2);
         policy.subject.principal.kind = PrincipalKind::Person;
         assert_eq!(
             validate_service_resource_quota_policy(&policy),

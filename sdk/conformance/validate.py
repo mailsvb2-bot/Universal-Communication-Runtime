@@ -255,14 +255,18 @@ def main() -> None:
         "request rate-limit migration anchor v37 missing",
     )
     require(
-        "SQLITE_SCHEMA_VERSION: u32 = 38" in sqlite_store,
-        "resource quota schema v38 missing",
+        "SQLITE_SCHEMA_V38: u32 = 38" in sqlite_store
+        and "SQLITE_SCHEMA_VERSION: u32 = 39" in sqlite_store
+        and "migrate_v38_to_v39" in sqlite_store,
+        "resource quota schema v39 migration missing",
     )
     for marker in (
         "ServiceResourceQuotaPolicy",
         "max_concurrent_participants",
+        "max_concurrent_conferences",
         "service_resource_quota_policies",
         "ensure_integration_participant_quota",
+        "ensure_integration_conference_quota",
     ):
         require(
             marker in (
@@ -273,8 +277,8 @@ def main() -> None:
             f"resource quota contract anchor missing: {marker}",
         )
     for marker in (
-        "concurrent participant quota implemented",
-        "concurrent conferences",
+        "concurrent participant and conference quotas implemented",
+        "`Scheduled` conferences do not consume quota",
         "publishers",
         "aggregate bandwidth",
         "recording minutes",
