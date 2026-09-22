@@ -2,8 +2,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use ucr_core::{DurableRecordStatus, DurableStoreError, UniversalConferenceStore};
 use ucr_model::{
     ConferenceParticipantRole, ConferenceScheduleMetadata, EventEnvelope, GroupId, IntegrationId,
-    OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, TenantScope, UniversalConferenceLifecycle,
-    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantScope,
+    UniversalConferenceLifecycle, UniversalConferenceMode, UniversalConferenceParticipantProfile,
+    UniversalConferenceProfile,
 };
 
 use super::{
@@ -543,6 +544,11 @@ impl UniversalConferenceStore for SqliteLocalStore {
                 &participant.scope,
                 &participant.conference_id,
             )?;
+            ensure_integration_participant_quota(
+                &transaction,
+                &participant.scope,
+                &participant.integration_id,
+            )?;
         }
         ensure_unique_active_owner(
             &transaction,
@@ -650,6 +656,11 @@ impl UniversalConferenceStore for SqliteLocalStore {
         }
         if active && !current.active {
             ensure_participant_capacity(&transaction, scope, conference_id)?;
+            ensure_integration_participant_quota(
+                &transaction,
+                scope,
+                &current.integration_id,
+            )?;
         }
         ensure_unique_active_owner(
             &transaction,
@@ -738,6 +749,47 @@ fn insert_profile(
         )
         .map_err(|error| map_sqlite_error(&error))?;
     Ok(())
+}
+
+fn ensure_integration_participant_quota(
+    connection: &Connection,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+) -> Result<(), DurableStoreError> {
+    let subject = ScopedPrincipal {
+        scope: scope.clone(),
+        principal: PrincipalRef {
+            principal_id: PrincipalId::from_opaque(integration_id.as_opaque().clone()),
+            kind: PrincipalKind::ServiceAccount,
+        },
+    };
+    let Some(policy) =
+        super::service_control_store::load_resource_quota_policy(connection, &subject)?
+    else {
+        return Ok(());
+    };
+    let namespace = namespace_storage_key(scope);
+    let active: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM universal_conference_participants
+             WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
+               AND integration_id = ?4 AND active = 1",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                integration_id.as_opaque().as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let limit = i64::try_from(policy.max_concurrent_participants)
+        .map_err(|_| DurableStoreError::Corrupt)?;
+    if active >= limit {
+        Err(DurableStoreError::Full)
+    } else {
+        Ok(())
+    }
 }
 
 fn ensure_participant_capacity(
