@@ -29,8 +29,7 @@ use ucr_model::{
     PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecoveryPlan, RecoveryPlanId,
     ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId,
     ServiceCredentialRecord, ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
-    SessionId, SyncCheckpoint, SyncSession, SyncState,
-    TenantScope, TrustedSigningKeyRecord,
+    SessionId, SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
 };
 use ucr_protocol::{CanonicalError, CommandReceipt};
 
