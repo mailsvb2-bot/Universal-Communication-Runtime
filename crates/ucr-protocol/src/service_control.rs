@@ -303,7 +303,7 @@ mod tests {
     use ucr_model::{
         AuditRecordId, NamespaceId, OpaqueId, PrincipalId, PrincipalRef, ScopedPrincipal,
         ServiceAuditOutcome, ServiceAuditRecord, ServiceCredentialId, ServiceQuotaPolicy,
-        ServiceRequestRateClass, TenantId, TenantScope,
+        ServiceRequestRateClass, ServiceResourceQuotaPolicy, TenantId, TenantScope,
     };
 
     use super::*;
@@ -360,6 +360,26 @@ mod tests {
         policy.subject.principal.kind = PrincipalKind::Person;
         assert_eq!(
             validate_service_quota_policy(&policy),
+            Err(ServiceControlValidationError::NotServiceAccount)
+        );
+    }
+
+    #[test]
+    fn resource_quota_policy_requires_service_account_and_nonzero_participant_limit() {
+        let mut policy = ServiceResourceQuotaPolicy {
+            subject: subject(),
+            max_concurrent_participants: 10,
+        };
+        assert_eq!(validate_service_resource_quota_policy(&policy), Ok(()));
+        policy.max_concurrent_participants = 0;
+        assert_eq!(
+            validate_service_resource_quota_policy(&policy),
+            Err(ServiceControlValidationError::InvalidQuota)
+        );
+        policy.max_concurrent_participants = 10;
+        policy.subject.principal.kind = PrincipalKind::Person;
+        assert_eq!(
+            validate_service_resource_quota_policy(&policy),
             Err(ServiceControlValidationError::NotServiceAccount)
         );
     }
