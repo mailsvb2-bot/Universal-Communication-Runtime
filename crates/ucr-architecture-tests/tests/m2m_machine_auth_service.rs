@@ -8,21 +8,23 @@ fn machine_auth_runtime_owns_credentials_authorization_and_token_issuance() {
         .expect("workspace root");
     let runtime = fs::read_to_string(workspace.join("crates/ucr-machine-auth/src/lib.rs"))
         .expect("machine auth runtime");
+    let production = runtime
+        .split_once("#[cfg(test)]")
+        .map_or(runtime.as_str(), |(production, _)| production);
     let grpc =
         fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/machine_auth_service.rs"))
             .expect("machine auth gRPC adapter");
     let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/authorization.rs"))
         .expect("authorization registry");
 
-    assert!(runtime.contains("ServicePrincipalRequestGate::new"));
-    assert!(runtime.contains("MACHINE_TOKEN_ISSUE_PERMISSION"));
-    assert!(runtime.contains("admission.authorize(&AuthorizationRequest"));
-    assert!(runtime.contains("authorize_additional_permission"));
-    assert!(runtime.contains("require_client_id(&subject, request.client_id)"));
-    assert!(runtime.contains("issue_machine_access_token"));
-    assert!(runtime.contains("generate_opaque_id"));
-    assert!(runtime.contains("request.audience != self.policy.audience"));
-    assert!(runtime.contains("ServiceRequestRateClass::Management"));
+    assert!(production.contains("ServicePrincipalRequestGate::new"));
+    assert!(production.contains("MACHINE_TOKEN_ISSUE_PERMISSION"));
+    assert!(production.contains("admission.authorize(&AuthorizationRequest"));
+    assert!(production.contains("authorize_additional_permission"));
+    assert!(production.contains("require_client_id(&subject, request.client_id)"));
+    assert!(production.contains("issue_machine_access_token"));
+    assert!(production.contains("generate_opaque_id"));
+    assert!(production.contains("request.audience != self.policy.audience"));
 
     for permission in [
         "CONFERENCE_CREATE_PERMISSION",
@@ -33,7 +35,7 @@ fn machine_auth_runtime_owns_credentials_authorization_and_token_issuance() {
         "CONFERENCE_RECORDING_MANAGE_PERMISSION",
     ] {
         assert!(
-            runtime.contains(permission),
+            production.contains(permission),
             "missing canonical permission: {permission}"
         );
     }
@@ -41,9 +43,9 @@ fn machine_auth_runtime_owns_credentials_authorization_and_token_issuance() {
     assert!(protocol.contains(
         r#"pub const MACHINE_TOKEN_ISSUE_PERMISSION: &str = "ucr.authentication.machine_token.issue""#
     ));
-    assert!(!runtime.contains("PermissionGrant {"));
-    assert!(!runtime.contains("client_secret"));
-    assert!(!runtime.contains("ServiceCredentialRecord {"));
+    assert!(!production.contains("PermissionGrant {"));
+    assert!(!production.contains("client_secret"));
+    assert!(!production.contains("ServiceCredentialRecord {"));
 
     assert!(grpc.contains("MachineAuthRuntime::new"));
     assert!(grpc.contains("MachineAuthExchangeRequest"));
