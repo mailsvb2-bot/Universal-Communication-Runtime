@@ -20,7 +20,7 @@ fn production_runtime_exposes_machine_auth_only_on_loopback_with_stable_key_load
     assert!(runtime.contains("UCR_MACHINE_AUTH_READY endpoint=http://{address} tls_edge=required"));
     assert!(runtime.contains("MachineTokenSigningKey::from_seed"));
 
-    assert!(main.contains(""serve-auth" => serve_auth_command"));
+    assert!(main.contains(r#""serve-auth" => serve_auth_command"#));
     assert!(main.contains("UCR_MACHINE_TOKEN_SIGNING_KEY_FILE"));
     assert!(main.contains("Zeroizing::new"));
     assert!(main.contains("read_machine_token_signing_key"));
