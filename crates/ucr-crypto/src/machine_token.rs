@@ -7,7 +7,7 @@ use ucr_model::{
     KeyId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
     TenantId, TenantScope,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::VerifyingKeyBytes;
 
@@ -176,7 +176,7 @@ impl MachineTokenSigningKey {
     #[must_use]
     pub fn from_seed(key_id: KeyId, mut seed: [u8; 32]) -> Self {
         let key = SigningKey::from_bytes(&seed);
-        seed.fill(0);
+        seed.zeroize();
         Self { key_id, key }
     }
 
