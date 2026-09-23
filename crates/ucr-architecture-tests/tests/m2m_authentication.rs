@@ -8,12 +8,10 @@ fn m2m_auth_is_an_attenuation_layer_over_canonical_service_credentials() {
         .expect("workspace root");
     let proto =
         fs::read_to_string(workspace.join("proto/ucr/v1/m2m_auth.proto")).expect("m2m proto");
-    let spec =
-        fs::read_to_string(workspace.join("spec/m2m-authentication.md")).expect("m2m spec");
-    let service_auth = fs::read_to_string(
-        workspace.join("spec/service-principal-authentication.md"),
-    )
-    .expect("service auth spec");
+    let spec = fs::read_to_string(workspace.join("spec/m2m-authentication.md")).expect("m2m spec");
+    let service_auth =
+        fs::read_to_string(workspace.join("spec/service-principal-authentication.md"))
+            .expect("service auth spec");
 
     assert!(proto.contains("service MachineAuthService"));
     assert!(proto.contains("rpc ExchangeClientCredentials"));
@@ -39,14 +37,25 @@ fn m2m_auth_contract_keeps_business_and_human_login_out() {
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let spec =
-        fs::read_to_string(workspace.join("spec/m2m-authentication.md")).expect("m2m spec");
+    let spec = fs::read_to_string(workspace.join("spec/m2m-authentication.md")).expect("m2m spec");
 
-    for forbidden in ["CRM", "payment", "advertising", "authorization-code flow", "refresh tokens"] {
+    for forbidden in [
+        "CRM",
+        "payment",
+        "advertising",
+        "authorization-code flow",
+        "refresh tokens",
+    ] {
         if ["authorization-code flow", "refresh tokens"].contains(&forbidden) {
-            assert!(spec.contains(forbidden), "nonclaim must stay explicit: {forbidden}");
+            assert!(
+                spec.contains(forbidden),
+                "nonclaim must stay explicit: {forbidden}"
+            );
         } else {
-            assert!(!spec.contains(forbidden), "business concept leaked into auth: {forbidden}");
+            assert!(
+                !spec.contains(forbidden),
+                "business concept leaked into auth: {forbidden}"
+            );
         }
     }
 }
