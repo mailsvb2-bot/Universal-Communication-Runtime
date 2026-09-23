@@ -39,7 +39,7 @@ fn machine_auth_runtime_owns_credentials_authorization_and_token_issuance() {
     }
 
     assert!(protocol.contains(
-        "pub const MACHINE_TOKEN_ISSUE_PERMISSION: &str = "ucr.authentication.machine_token.issue""
+        r#"pub const MACHINE_TOKEN_ISSUE_PERMISSION: &str = "ucr.authentication.machine_token.issue""#
     ));
     assert!(!runtime.contains("PermissionGrant {"));
     assert!(!runtime.contains("client_secret"));
@@ -65,9 +65,9 @@ fn machine_auth_runtime_is_shared_workspace_owner_not_transport_local_logic() {
         fs::read_to_string(workspace.join("crates/ucr-api-grpc/Cargo.toml"))
             .expect("gRPC manifest");
 
-    assert!(root.contains(""crates/ucr-machine-auth""));
+    assert!(root.contains(r#""crates/ucr-machine-auth""#));
     assert!(
-        grpc_manifest.contains("ucr-machine-auth = { path = "../ucr-machine-auth" }")
+        grpc_manifest.contains(r#"ucr-machine-auth = { path = "../ucr-machine-auth" }"#)
     );
 }
 
