@@ -259,16 +259,19 @@ def main() -> None:
     require(
         "SQLITE_SCHEMA_V38: u32 = 38" in sqlite_store
         and "SQLITE_SCHEMA_V39: u32 = 39" in sqlite_store
-        and "SQLITE_SCHEMA_VERSION: u32 = 40" in sqlite_store
+        and "SQLITE_SCHEMA_V40: u32 = 40" in sqlite_store
+        and "SQLITE_SCHEMA_VERSION: u32 = 41" in sqlite_store
         and "migrate_v38_to_v39" in sqlite_store
-        and "migrate_v39_to_v40" in sqlite_store,
-        "resource quota schema v40 migration chain missing",
+        and "migrate_v39_to_v40" in sqlite_store
+        and "migrate_v40_to_v41" in sqlite_store,
+        "resource quota schema v41 migration chain missing",
     )
     for marker in (
         "ServiceResourceQuotaPolicy",
         "max_concurrent_participants",
         "max_concurrent_conferences",
         "max_concurrent_publishers",
+        "max_aggregate_bandwidth_bps",
         "service_resource_quota_policies",
         "ensure_integration_participant_quota",
         "ensure_integration_conference_quota",
@@ -282,10 +285,10 @@ def main() -> None:
             f"resource quota contract anchor missing: {marker}",
         )
     for marker in (
-        "concurrent participant, conference, and publisher quotas implemented",
+        "concurrent participant, conference, publisher, and aggregate bandwidth quotas implemented",
         "`Scheduled` conferences do not consume quota",
         "first policy-authorized encrypted media publish attempt claims one slot",
-        "aggregate bandwidth",
+        "every SFU recipient consumes one additional egress copy",
         "recording minutes",
     ):
         require(marker in resource_quota_spec, f"resource quota specification drifted: {marker}")
@@ -300,6 +303,18 @@ def main() -> None:
         "forward_authenticated_e2ee_media",
     ):
         require(marker in realtime_service, f"publisher quota ingress anchor missing: {marker}")
+    for marker in (
+        "charge_aggregate_bandwidth",
+        "BandwidthWindow",
+    ):
+        require(marker in realtime_registry, f"bandwidth quota registry anchor missing: {marker}")
+    for marker in (
+        "universal_bandwidth_quota",
+        "BandwidthQuotaSink",
+        "encode_sfu_forward_envelope",
+        "charge_aggregate_bandwidth",
+    ):
+        require(marker in realtime_service, f"bandwidth quota fanout anchor missing: {marker}")
     for marker in (
         "management",
         "join_issuance",

@@ -1,4 +1,8 @@
-use std::{fmt, pin::Pin, sync::Arc};
+use std::{
+    fmt,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use prost::Message as _;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
@@ -20,18 +24,18 @@ use ucr_model::{
     DeviceId, DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId,
     GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind,
     OpaqueId, PrincipalId, PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope,
-    TenantScope, UniversalConferenceLifecycle, VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
-    WebRtcSessionDescription,
+    SfuForwardTarget, TenantScope, UniversalConferenceLifecycle, VideoSourceKind,
+    WebRtcIceCandidate, WebRtcSdpType, WebRtcSessionDescription,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
-    RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for, canonical_event,
+    RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for, canonical_event, encode_sfu_forward_envelope,
 };
 use ucr_realtime::{
     AttendanceTransition, AttendanceTransitionKind, JoinTokenError, JoinTokenIssuer,
     RealtimeRegistryError, RealtimeSessionClaims, RealtimeSessionRegistry,
 };
-use ucr_sfu::{PreparedSfuCapabilities, SfuForwardSink};
+use ucr_sfu::{PreparedSfuCapabilities, SfuForwardSink, SfuForwardSinkError};
 use ucr_webrtc::{
     PreparedWebRtcProvider, WebRtcProvider, WebRtcProviderError, WebRtcSessionConfigFactory,
 };
@@ -45,6 +49,47 @@ use super::{
 pub const REALTIME_AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const REALTIME_BEARER_PREFIX: &str = "Bearer ";
 const REALTIME_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
+
+#[derive(Debug)]
+struct BandwidthQuotaSink<'a> {
+    inner: &'a dyn SfuForwardSink,
+    registry: &'a RealtimeSessionRegistry,
+    owner: ScopedPrincipal,
+    max_aggregate_bandwidth_bps: u64,
+    wire_bytes: usize,
+    now_unix_ms: i64,
+    quota_error: Mutex<Option<RealtimeRegistryError>>,
+}
+
+impl BandwidthQuotaSink<'_> {
+    fn quota_error(&self) -> Result<Option<RealtimeRegistryError>, CanonicalError> {
+        self.quota_error
+            .lock()
+            .map(|error| *error)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))
+    }
+}
+
+impl SfuForwardSink for BandwidthQuotaSink<'_> {
+    fn forward_encrypted(
+        &self,
+        target: &SfuForwardTarget,
+        envelope: &SfuForwardEnvelope,
+    ) -> Result<(), SfuForwardSinkError> {
+        if let Err(error) = self.registry.charge_aggregate_bandwidth(
+            &self.owner,
+            self.max_aggregate_bandwidth_bps,
+            self.wire_bytes,
+            self.now_unix_ms,
+        ) {
+            if let Ok(mut quota_error) = self.quota_error.lock() {
+                *quota_error = Some(error);
+            }
+            return Err(SfuForwardSinkError::Rejected);
+        }
+        self.inner.forward_encrypted(target, envelope)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EffectiveRealtimeMediaPolicy {
@@ -796,9 +841,48 @@ where
             envelope.frame.header.video_source_kind,
         )?;
         self.claim_universal_publisher_quota(claims)?;
-        let outcome = conference_runtime(self)
-            .forward(&actor_for(claims), device_id, envelope, sink)
-            .map_err(|error| map_conference_error(&error))?;
+        let bandwidth_quota = self.universal_bandwidth_quota(claims)?;
+        let outcome = if let Some((owner, max_aggregate_bandwidth_bps)) = bandwidth_quota {
+            let now_unix_ms = self.now()?;
+            let wire_bytes = encode_sfu_forward_envelope(envelope)
+                .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?
+                .len();
+            self.registry
+                .charge_aggregate_bandwidth(
+                    &owner,
+                    max_aggregate_bandwidth_bps,
+                    wire_bytes,
+                    now_unix_ms,
+                )
+                .map_err(map_registry_error)?;
+            let quota_sink = BandwidthQuotaSink {
+                inner: sink,
+                registry: &self.registry,
+                owner,
+                max_aggregate_bandwidth_bps,
+                wire_bytes,
+                now_unix_ms,
+                quota_error: Mutex::new(None),
+            };
+            match conference_runtime(self).forward(
+                &actor_for(claims),
+                device_id,
+                envelope,
+                &quota_sink,
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if let Some(quota_error) = quota_sink.quota_error()? {
+                        return Err(map_registry_error(quota_error));
+                    }
+                    return Err(map_conference_error(&error));
+                }
+            }
+        } else {
+            conference_runtime(self)
+                .forward(&actor_for(claims), device_id, envelope, sink)
+                .map_err(|error| map_conference_error(&error))?
+        };
         if outcome.accepted_recipients > 0
             && let Some(transition) = self
                 .registry
@@ -1176,6 +1260,38 @@ where
         self.registry
             .claim_publisher_slot(claims, &owner, limit, self.now()?)
             .map_err(map_registry_error)
+    }
+
+    fn universal_bandwidth_quota(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<Option<(ScopedPrincipal, u64)>, CanonicalError> {
+        let actor = actor_for(claims);
+        let snapshot = conference_runtime(self)
+            .snapshot(&actor, &claims.scope, &claims.call_id)
+            .map_err(|error| map_conference_error(&error))?;
+        let Some(conference) = self
+            .store
+            .universal_conference_profile(&claims.scope, &snapshot.group_id)
+            .map_err(map_store_error)?
+        else {
+            return Ok(None);
+        };
+        let owner = ScopedPrincipal {
+            scope: claims.scope.clone(),
+            principal: ucr_model::PrincipalRef {
+                principal_id: PrincipalId::from_opaque(
+                    conference.integration_id.as_opaque().clone(),
+                ),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
+        let limit = self
+            .store
+            .service_resource_quota_policy(&owner)
+            .map_err(map_store_error)?
+            .and_then(|policy| policy.max_aggregate_bandwidth_bps);
+        Ok(limit.map(|limit| (owner, limit)))
     }
 
     fn require_universal_publish_allowed(
@@ -1790,6 +1906,9 @@ const fn map_registry_error(error: RealtimeRegistryError) -> CanonicalError {
         RealtimeRegistryError::CapacityExceeded => {
             CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
         }
+        RealtimeRegistryError::ClockRollback => {
+            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+        }
         RealtimeRegistryError::SessionUnavailable => {
             CanonicalError::new(CanonicalErrorCode::NotFound)
         }
@@ -1866,4 +1985,117 @@ fn status_from_canonical(error: CanonicalError) -> Status {
         CanonicalErrorCode::Internal => tonic::Code::Internal,
     };
     Status::new(code, "realtime request rejected")
+}
+
+#[cfg(test)]
+mod bandwidth_quota_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use ucr_model::{NamespaceId, PrincipalRef, TenantId};
+
+    #[derive(Debug, Default)]
+    struct CountingSink {
+        accepted: AtomicUsize,
+    }
+
+    impl SfuForwardSink for CountingSink {
+        fn forward_encrypted(
+            &self,
+            _target: &SfuForwardTarget,
+            _envelope: &SfuForwardEnvelope,
+        ) -> Result<(), SfuForwardSinkError> {
+            self.accepted.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    fn id(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn envelope(scope: TenantScope) -> SfuForwardEnvelope {
+        SfuForwardEnvelope {
+            frame: EncryptedGroupMediaFrame {
+                header: GroupMediaFrameHeader {
+                    scope,
+                    call_id: CallId::from_opaque(id("bandwidth-call")),
+                    group_id: GroupId::from_opaque(id("bandwidth-group")),
+                    stream_id: id("bandwidth-stream"),
+                    source: PrincipalRef {
+                        principal_id: PrincipalId::from_opaque(id("bandwidth-source")),
+                        kind: PrincipalKind::Person,
+                    },
+                    source_device_id: DeviceId::from_opaque(id("bandwidth-device")),
+                    negotiation_ref: id("bandwidth-negotiation"),
+                    negotiation_generation: 1,
+                    crypto_epoch: 1,
+                    crypto_state_ref: id("bandwidth-crypto"),
+                    crypto_suite: CryptoSuite::UcrV1,
+                    header_version: GROUP_MEDIA_FRAME_HEADER_V1,
+                    media_kind: MediaKind::Audio,
+                    video_source_kind: None,
+                    sequence: 1,
+                    media_timestamp: 1,
+                    keyframe: false,
+                },
+                nonce: [0_u8; 24],
+                ciphertext: vec![1],
+                source_signature: GroupMediaSourceSignature {
+                    key_id: KeyId::from_opaque(id("bandwidth-key")),
+                    algorithm_id: "test.signature".to_owned(),
+                    algorithm_version: 1,
+                    signature: vec![1],
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn bandwidth_sink_stops_fanout_before_downstream_after_budget_is_exhausted() {
+        let scope = TenantScope {
+            tenant_id: TenantId::from_opaque(id("bandwidth-tenant")),
+            namespace_id: Some(NamespaceId::from_opaque(id("bandwidth-namespace"))),
+        };
+        let owner = ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("bandwidth-service")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
+        let target = SfuForwardTarget {
+            recipient: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("bandwidth-recipient")),
+                kind: PrincipalKind::Person,
+            },
+        };
+        let envelope = envelope(scope);
+        let registry = RealtimeSessionRegistry::new(8, 2);
+        registry
+            .charge_aggregate_bandwidth(&owner, 16, 1, 1_000)
+            .expect("reserve ingress");
+        let inner = CountingSink::default();
+        let sink = BandwidthQuotaSink {
+            inner: &inner,
+            registry: &registry,
+            owner,
+            max_aggregate_bandwidth_bps: 16,
+            wire_bytes: 1,
+            now_unix_ms: 1_000,
+            quota_error: Mutex::new(None),
+        };
+
+        sink.forward_encrypted(&target, &envelope)
+            .expect("first egress reaches exact budget");
+        assert_eq!(
+            sink.forward_encrypted(&target, &envelope),
+            Err(SfuForwardSinkError::Rejected)
+        );
+        assert_eq!(inner.accepted.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            sink.quota_error().expect("quota error state"),
+            Some(RealtimeRegistryError::CapacityExceeded)
+        );
+    }
 }

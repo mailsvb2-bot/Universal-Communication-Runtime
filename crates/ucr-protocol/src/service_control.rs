@@ -115,6 +115,9 @@ pub fn validate_service_resource_quota_policy(
         || policy
             .max_concurrent_publishers
             .is_some_and(|limit| limit == 0 || limit > i64::MAX as u64)
+        || policy
+            .max_aggregate_bandwidth_bps
+            .is_some_and(|limit| limit == 0 || limit > i64::MAX as u64)
     {
         return Err(ServiceControlValidationError::InvalidQuota);
     }
@@ -378,6 +381,7 @@ mod tests {
             max_concurrent_participants: 10,
             max_concurrent_conferences: Some(2),
             max_concurrent_publishers: Some(3),
+            max_aggregate_bandwidth_bps: Some(8_000_000),
         };
         assert_eq!(validate_service_resource_quota_policy(&policy), Ok(()));
         policy.max_concurrent_participants = 0;
@@ -398,6 +402,12 @@ mod tests {
             Err(ServiceControlValidationError::InvalidQuota)
         );
         policy.max_concurrent_publishers = Some(3);
+        policy.max_aggregate_bandwidth_bps = Some(0);
+        assert_eq!(
+            validate_service_resource_quota_policy(&policy),
+            Err(ServiceControlValidationError::InvalidQuota)
+        );
+        policy.max_aggregate_bandwidth_bps = Some(8_000_000);
         policy.subject.principal.kind = PrincipalKind::Person;
         assert_eq!(
             validate_service_resource_quota_policy(&policy),

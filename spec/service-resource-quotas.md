@@ -1,6 +1,6 @@
 # Service resource quotas
 
-Status: **concurrent participant, conference, and publisher quotas implemented; remaining resource dimensions are not yet implemented**.
+Status: **concurrent participant, conference, publisher, and aggregate bandwidth quotas implemented; recording-minute quota remains**.
 
 This contract is deliberately separate from request-rate limiting. Request admission continues to use
 `ServiceQuotaPolicy` / `ServiceRateLimitPolicy`; live communication resources use
@@ -30,7 +30,7 @@ Semantics:
 - SQLite enforcement happens inside the same `BEGIN IMMEDIATE` transaction that persists or
   reactivates the participant, so parallel admissions cannot use a caller-side read-before-write
   race to exceed the configured limit;
-- SQLite schema v38 introduced durable participant policy storage; schema v39 extends the same policy with conference concurrency; schema v40 adds publisher concurrency while preserving existing rows across both migrations.
+- SQLite schema v38 introduced durable participant policy storage; schema v39 extends the same policy with conference concurrency; schema v40 adds publisher concurrency; schema v41 adds aggregate bandwidth while preserving existing rows across the migration chain.
 
 ## Concurrent conferences
 
@@ -62,6 +62,22 @@ Semantics:
 - absence of `max_concurrent_publishers` means no integration-specific publisher concurrency ceiling is configured;
 - publisher admission is atomic under the bounded `RealtimeSessionRegistry` mutex, while SQLite schema v40 durably persists only the policy, not ephemeral realtime publisher presence.
 
+## Aggregate bandwidth
+
+`max_aggregate_bandwidth_bps` is optional and limits aggregate encrypted media transport for the same integration and exact tenant scope in fixed one-second windows.
+
+Semantics:
+
+- accounting uses the exact canonical SFU wire-envelope length produced by `encode_sfu_forward_envelope`, converted to bits;
+- every accepted source frame consumes one ingress copy before SFU routing;
+- every SFU recipient consumes one additional egress copy immediately before `forward_encrypted`, so a one-to-many webinar is charged for actual fan-out rather than only source bitrate;
+- direct gRPC publication and WebRTC E2EE DataChannel publication share the same `forward_authenticated_e2ee_media` boundary and therefore the same bandwidth budget;
+- all realtime sessions for one Service Account share one atomic one-second budget; different integrations remain isolated;
+- an egress reservation is conservative: if the downstream sink fails after quota reservation, the reserved bits remain consumed for that one-second window rather than being rolled back through a racy compensation path;
+- clock rollback fails closed; a later one-second window naturally resets instantaneous usage;
+- bandwidth usage is ephemeral runtime state, while SQLite schema v41 durably persists only the configured ceiling;
+- absence of `max_aggregate_bandwidth_bps` means no integration-specific aggregate media bandwidth ceiling is configured.
+
 The same `SERVICE_QUOTA_READ_PERMISSION` and `SERVICE_QUOTA_WRITE_PERMISSION` authorization
 boundary used for request quotas also governs resource quota administration.
 
@@ -70,7 +86,6 @@ boundary used for request quotas also governs resource quota administration.
 This slice does **not** claim the complete resource-quota roadmap. The following dimensions remain
 to be added through the same canonical resource policy path:
 
-- aggregate bandwidth;
 - recording minutes.
 
 API RPS remains owned by the already separate class-aware request-rate limiting contract.

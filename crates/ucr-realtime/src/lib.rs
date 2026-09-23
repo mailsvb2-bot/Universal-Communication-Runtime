@@ -23,6 +23,7 @@ pub const DEFAULT_JOIN_TTL_SECONDS: u32 = 300;
 pub const DEFAULT_REALTIME_QUEUE_CAPACITY: usize = 64;
 pub const MAX_REALTIME_SESSIONS: usize = 4096;
 pub const MAX_JOIN_GRANTS: usize = 4096;
+const BANDWIDTH_WINDOW_MS: i64 = 1_000;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -515,8 +516,16 @@ pub enum RealtimeRegistryError {
     Expired,
     CapacityExceeded,
     ClaimMismatch,
+    ClockRollback,
     SessionUnavailable,
     SequenceOverflow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BandwidthWindow {
+    owner: ScopedPrincipal,
+    window_start_unix_ms: i64,
+    used_bits: u64,
 }
 
 struct SessionEntry {
@@ -544,6 +553,7 @@ impl fmt::Debug for SessionEntry {
 #[derive(Debug)]
 pub struct RealtimeSessionRegistry {
     entries: Mutex<Vec<SessionEntry>>,
+    bandwidth_usage: Mutex<Vec<BandwidthWindow>>,
     max_sessions: usize,
     queue_capacity: usize,
 }
@@ -571,6 +581,7 @@ impl RealtimeSessionRegistry {
     pub const fn new(max_sessions: usize, queue_capacity: usize) -> Self {
         Self {
             entries: Mutex::new(Vec::new()),
+            bandwidth_usage: Mutex::new(Vec::new()),
             max_sessions,
             queue_capacity,
         }
@@ -898,6 +909,77 @@ impl RealtimeSessionRegistry {
             return Err(RealtimeRegistryError::CapacityExceeded);
         }
         entries[index].publisher_owner = Some(owner.clone());
+        Ok(())
+    }
+
+    /// Atomically charges one encrypted SFU wire copy against the Service Account's aggregate
+    /// media bandwidth ceiling in a fixed one-second window.
+    ///
+    /// The same owner window is shared by every realtime session, so concurrent publishers and
+    /// SFU fan-out recipients consume one aggregate budget. The window is ephemeral runtime state:
+    /// policy is durable, while instantaneous traffic accounting resets naturally across restart.
+    ///
+    /// # Errors
+    /// Fails for invalid owners/limits, clock rollback, unavailable registry state, bounded usage
+    /// state exhaustion, arithmetic overflow, or when the aggregate bandwidth ceiling is exceeded.
+    pub fn charge_aggregate_bandwidth(
+        &self,
+        owner: &ScopedPrincipal,
+        max_aggregate_bandwidth_bps: u64,
+        wire_bytes: usize,
+        now_unix_ms: i64,
+    ) -> Result<(), RealtimeRegistryError> {
+        if owner.principal.kind != PrincipalKind::ServiceAccount {
+            return Err(RealtimeRegistryError::ClaimMismatch);
+        }
+        if max_aggregate_bandwidth_bps == 0 {
+            return Err(RealtimeRegistryError::CapacityExceeded);
+        }
+        if now_unix_ms < 0 {
+            return Err(RealtimeRegistryError::ClockRollback);
+        }
+        let wire_bits = u64::try_from(wire_bytes)
+            .ok()
+            .and_then(|bytes| bytes.checked_mul(8))
+            .ok_or(RealtimeRegistryError::CapacityExceeded)?;
+        if wire_bits > max_aggregate_bandwidth_bps {
+            return Err(RealtimeRegistryError::CapacityExceeded);
+        }
+        let window_start_unix_ms = now_unix_ms - now_unix_ms.rem_euclid(BANDWIDTH_WINDOW_MS);
+        let mut usage = self
+            .bandwidth_usage
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        if let Some(entry) = usage.iter_mut().find(|entry| entry.owner == *owner) {
+            if entry.window_start_unix_ms > window_start_unix_ms {
+                return Err(RealtimeRegistryError::ClockRollback);
+            }
+            if entry.window_start_unix_ms < window_start_unix_ms {
+                entry.window_start_unix_ms = window_start_unix_ms;
+                entry.used_bits = wire_bits;
+                return Ok(());
+            }
+            let next = entry
+                .used_bits
+                .checked_add(wire_bits)
+                .ok_or(RealtimeRegistryError::CapacityExceeded)?;
+            if next > max_aggregate_bandwidth_bps {
+                return Err(RealtimeRegistryError::CapacityExceeded);
+            }
+            entry.used_bits = next;
+            return Ok(());
+        }
+        let oldest_relevant_window = window_start_unix_ms.saturating_sub(BANDWIDTH_WINDOW_MS);
+        usage.retain(|entry| entry.window_start_unix_ms >= oldest_relevant_window);
+        let max_bandwidth_windows = self.max_sessions.saturating_mul(2);
+        if usage.len() >= max_bandwidth_windows {
+            return Err(RealtimeRegistryError::CapacityExceeded);
+        }
+        usage.push(BandwidthWindow {
+            owner: owner.clone(),
+            window_start_unix_ms,
+            used_bits: wire_bits,
+        });
         Ok(())
     }
 
@@ -1581,6 +1663,42 @@ mod tests {
         registry
             .claim_publisher_slot(&second, &owner, 1, first.expires_at_unix_ms)
             .expect("expiry pruning released first slot");
+    }
+
+    #[test]
+    fn aggregate_bandwidth_is_integration_scoped_windowed_and_clock_safe() {
+        let registry = RealtimeSessionRegistry::new(8, 2);
+        let owner_a = service_owner("bandwidth-owner-a");
+        let owner_b = service_owner("bandwidth-owner-b");
+        let now = 28_000;
+
+        registry
+            .charge_aggregate_bandwidth(&owner_a, 16, 1, now + 1)
+            .expect("first byte");
+        registry
+            .charge_aggregate_bandwidth(&owner_a, 16, 1, now + 2)
+            .expect("second byte reaches exact ceiling");
+        assert_eq!(
+            registry.charge_aggregate_bandwidth(&owner_a, 16, 1, now + 3),
+            Err(RealtimeRegistryError::CapacityExceeded)
+        );
+        registry
+            .charge_aggregate_bandwidth(&owner_b, 16, 1, now + 4)
+            .expect("other integration has independent bandwidth");
+        registry
+            .charge_aggregate_bandwidth(&owner_a, 16, 1, now + BANDWIDTH_WINDOW_MS)
+            .expect("new second resets instantaneous budget");
+        registry
+            .charge_aggregate_bandwidth(&owner_b, 16, 1, now + 5)
+            .expect("another integration's newer window cannot cross-starve this owner");
+        assert_eq!(
+            registry.charge_aggregate_bandwidth(&owner_a, 16, 1, now + BANDWIDTH_WINDOW_MS - 1,),
+            Err(RealtimeRegistryError::ClockRollback)
+        );
+        assert_eq!(
+            registry.charge_aggregate_bandwidth(&owner_a, 7, 1, now + BANDWIDTH_WINDOW_MS + 1),
+            Err(RealtimeRegistryError::CapacityExceeded)
+        );
     }
 
     #[test]
