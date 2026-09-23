@@ -563,7 +563,7 @@ fn webhook_dispatcher_uses_durable_retry_and_dead_letter_state() {
         start: EventSubscriptionStart::Beginning,
     };
     store
-        .persist_event_subscription(&event_subscription_owner(&sync.scope), &subscription)
+        .persist_event_subscription(&service_subject(&sync.scope), &subscription)
         .expect("persist webhook subscription");
     store
         .append_event(&event(&sync, "chaos-webhook-event", b"webhook"))
