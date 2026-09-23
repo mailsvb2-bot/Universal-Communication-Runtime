@@ -1,6 +1,6 @@
 # Machine-to-Machine Authentication
 
-Status: **Prepared v1 public contract; token issuance runtime/HTTPS edge is not yet claimed**.
+Status: **Prepared v1 public contract with signed token codec/runtime; public HTTPS edge is not yet claimed**.
 
 This layer adds a standard machine-to-machine authentication boundary for external applications without creating a second identity, credential, authorization, tenant, or permission owner. The canonical Service Account remains the client identity and the existing Service Credential remains the long-lived client authentication proof.
 
@@ -99,4 +99,6 @@ Token values, client secrets and Service Credential digests are secrets and MUST
 
 This contract does not claim human login, authorization-code flow, PKCE, refresh tokens, browser SSO, social login, user OIDC federation, or a production public HTTPS OAuth edge.
 
-It also does not claim that merely compiling `MachineAuthService` makes M2M authentication production-ready. Runtime token issuance, asymmetric signing/JWKS, bearer verification at public API boundaries, key rotation evidence and HTTPS conformance remain required.
+`ucr-crypto::machine_token` now provides the reference Ed25519 signed access-token issuer/verifier over an already authenticated canonical Service Account. It enforces bounded token size, issuer/audience, short lifetime, `kid`, canonical tenant/namespace/service-account identity, scope attenuation, expiry and redacted token/private-key diagnostics. A resolver abstraction allows overlapping public keys during rotation without exporting private key material.
+
+This runtime codec still does not make M2M authentication production-ready by itself. `MachineAuthService` composition with canonical Service Credential authentication, public HTTPS `POST /oauth2/token`, JWKS/metadata publication, bearer admission on public API boundaries, durable deployment key rotation and HTTPS conformance remain required.
