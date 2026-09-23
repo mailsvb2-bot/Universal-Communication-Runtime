@@ -1160,6 +1160,44 @@ mod tests {
     }
 
     #[test]
+    fn webhook_worker_health_reflects_durable_lease_without_exposing_holder() {
+        let path = std::env::temp_dir().join(format!(
+            "ucr-runtime-worker-health-{}-{}.sqlite",
+            std::process::id(),
+            runtime_now_unix_ms().expect("clock")
+        ));
+        let store = SqliteLocalStore::open(&path).expect("open store");
+
+        let absent = operator_webhook_worker_health_at(&store, 1_000);
+        assert_eq!(
+            absent.status,
+            pb::OperatorComponentStatus::NotConfigured as i32
+        );
+
+        assert!(store
+            .try_acquire_runtime_worker_lease(
+                WEBHOOK_DELIVERY_WORKER_KIND,
+                "worker-private-id",
+                1_000,
+                1_000,
+            )
+            .expect("acquire lease"));
+        let healthy = operator_webhook_worker_health_at(&store, 1_500);
+        assert_eq!(healthy.status, pb::OperatorComponentStatus::Healthy as i32);
+        assert!(!healthy.detail.contains("worker-private-id"));
+
+        let expired = operator_webhook_worker_health_at(&store, 2_000);
+        assert_eq!(
+            expired.status,
+            pb::OperatorComponentStatus::Unavailable as i32
+        );
+        assert!(!expired.detail.contains("worker-private-id"));
+
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn diagnostics_and_metrics_are_metadata_only() {
         let diagnostics = RuntimeDiagnostics {
             schema_version: 31,
