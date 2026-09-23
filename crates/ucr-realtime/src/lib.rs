@@ -12,8 +12,8 @@ use sha2::Sha256;
 use tokio::sync::mpsc;
 use ucr_core::generate_opaque_id;
 use ucr_model::{
-    CallId, DeviceId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, SessionId,
-    SfuForwardEnvelope, TenantId, TenantScope,
+    CallId, DeviceId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
+    ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantId, TenantScope,
 };
 use ucr_sfu::{SfuForwardSink, SfuForwardSinkError};
 
@@ -525,6 +525,7 @@ struct SessionEntry {
     receiver: Option<mpsc::Receiver<SfuForwardEnvelope>>,
     sequence: u64,
     media_ready: bool,
+    publisher_owner: Option<ScopedPrincipal>,
 }
 
 impl fmt::Debug for SessionEntry {
@@ -534,6 +535,7 @@ impl fmt::Debug for SessionEntry {
             .field("claims", &self.claims)
             .field("sequence", &self.sequence)
             .field("media_ready", &self.media_ready)
+            .field("publisher_active", &self.publisher_owner.is_some())
             .field("queue_capacity", &self.sender.capacity())
             .finish_non_exhaustive()
     }
@@ -649,6 +651,7 @@ impl RealtimeSessionRegistry {
                 .checked_add(1)
                 .ok_or(RealtimeRegistryError::SequenceOverflow)?;
             entry.media_ready = false;
+            entry.publisher_owner = None;
             let (sender, receiver) = mpsc::channel(self.queue_capacity);
             entry.sender = sender;
             entry.receiver = Some(receiver);
@@ -676,6 +679,7 @@ impl RealtimeSessionRegistry {
             receiver: Some(receiver),
             sequence: 1,
             media_ready: false,
+            publisher_owner: None,
         });
         Ok(RealtimeJoinOutcome { claims, transition })
     }
@@ -839,6 +843,62 @@ impl RealtimeSessionRegistry {
             return Err(RealtimeRegistryError::ClaimMismatch);
         }
         Ok(entry.sequence)
+    }
+
+    /// Atomically claims one publisher slot for the exact live realtime session.
+    ///
+    /// A session claims at most one slot regardless of how many audio/video/screen sources it
+    /// publishes. Slots are scoped by the exact Service Account owner, and are released when the
+    /// session leaves, expires, or performs a full reconnect through `join`.
+    ///
+    /// # Errors
+    /// Fails for expiry, claim/owner mismatch, missing session state, unavailable registry state,
+    /// or when the owner's configured concurrent publisher ceiling is already exhausted.
+    pub fn claim_publisher_slot(
+        &self,
+        claims: &RealtimeSessionClaims,
+        owner: &ScopedPrincipal,
+        max_concurrent_publishers: u64,
+        now_unix_ms: i64,
+    ) -> Result<(), RealtimeRegistryError> {
+        if now_unix_ms >= claims.expires_at_unix_ms {
+            return Err(RealtimeRegistryError::Expired);
+        }
+        if owner.scope != claims.scope || owner.principal.kind != PrincipalKind::ServiceAccount {
+            return Err(RealtimeRegistryError::ClaimMismatch);
+        }
+        if max_concurrent_publishers == 0 {
+            return Err(RealtimeRegistryError::CapacityExceeded);
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        prune_expired(&mut entries, now_unix_ms);
+        let index = entries
+            .iter()
+            .position(|entry| same_session(entry, claims))
+            .ok_or(RealtimeRegistryError::SessionUnavailable)?;
+        if entries[index].claims != *claims {
+            return Err(RealtimeRegistryError::ClaimMismatch);
+        }
+        if let Some(existing_owner) = &entries[index].publisher_owner {
+            return if existing_owner == owner {
+                Ok(())
+            } else {
+                Err(RealtimeRegistryError::ClaimMismatch)
+            };
+        }
+        let active = entries
+            .iter()
+            .filter(|entry| entry.publisher_owner.as_ref() == Some(owner))
+            .count();
+        let active = u64::try_from(active).map_err(|_| RealtimeRegistryError::CapacityExceeded)?;
+        if active >= max_concurrent_publishers {
+            return Err(RealtimeRegistryError::CapacityExceeded);
+        }
+        entries[index].publisher_owner = Some(owner.clone());
+        Ok(())
     }
 
     /// Marks the first media-ready transition for the current connection.
@@ -1160,6 +1220,16 @@ mod tests {
         }
     }
 
+    fn service_owner(value: &str) -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id(value)),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
     fn issuer() -> JoinTokenIssuer {
         JoinTokenIssuer::new(
             JoinTokenKey::from_bytes([7_u8; 32]),
@@ -1400,6 +1470,117 @@ mod tests {
             issuer.verify(&tampered, 20_001),
             Err(JoinTokenError::InvalidSignature | JoinTokenError::Malformed)
         ));
+    }
+
+    #[test]
+    fn publisher_slots_are_scoped_atomic_idempotent_and_released_by_leave() {
+        let now = 28_000;
+        let registry = RealtimeSessionRegistry::new(8, 2);
+        let base = RealtimeSessionClaims {
+            scope: scope(),
+            call_id: CallId::from_opaque(id("publisher-call")),
+            participant: participant(),
+            device_id: Some(DeviceId::from_opaque(id("publisher-device-a"))),
+            session_id: SessionId::from_opaque(id("publisher-session-a")),
+            issued_at_unix_ms: now,
+            not_before_unix_ms: now,
+            expires_at_unix_ms: now + 60_000,
+            use_policy: JoinGrantUsePolicy::Reusable,
+        };
+        let second = RealtimeSessionClaims {
+            participant: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("publisher-participant-b")),
+                kind: PrincipalKind::Person,
+            },
+            device_id: Some(DeviceId::from_opaque(id("publisher-device-b"))),
+            session_id: SessionId::from_opaque(id("publisher-session-b")),
+            ..base.clone()
+        };
+        let third = RealtimeSessionClaims {
+            participant: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("publisher-participant-c")),
+                kind: PrincipalKind::Person,
+            },
+            device_id: Some(DeviceId::from_opaque(id("publisher-device-c"))),
+            session_id: SessionId::from_opaque(id("publisher-session-c")),
+            ..base.clone()
+        };
+        registry.join(base.clone(), now).expect("join first");
+        registry.join(second.clone(), now).expect("join second");
+        registry.join(third.clone(), now).expect("join third");
+
+        let owner_a = service_owner("publisher-owner-a");
+        let owner_b = service_owner("publisher-owner-b");
+        registry
+            .claim_publisher_slot(&base, &owner_a, 1, now + 1)
+            .expect("first publisher");
+        registry
+            .claim_publisher_slot(&base, &owner_a, 1, now + 2)
+            .expect("repeat same session is idempotent");
+        assert_eq!(
+            registry.claim_publisher_slot(&second, &owner_a, 1, now + 3),
+            Err(RealtimeRegistryError::CapacityExceeded)
+        );
+        registry
+            .claim_publisher_slot(&third, &owner_b, 1, now + 4)
+            .expect("other integration has independent capacity");
+
+        registry.leave(&base, now + 5).expect("leave releases slot");
+        registry
+            .claim_publisher_slot(&second, &owner_a, 1, now + 6)
+            .expect("released owner slot can be reused");
+    }
+
+    #[test]
+    fn publisher_slots_are_released_by_full_reconnect_and_expiry() {
+        let now = 28_500;
+        let registry = RealtimeSessionRegistry::new(8, 2);
+        let first = RealtimeSessionClaims {
+            scope: scope(),
+            call_id: CallId::from_opaque(id("publisher-release-call")),
+            participant: participant(),
+            device_id: Some(DeviceId::from_opaque(id("publisher-release-device-a"))),
+            session_id: SessionId::from_opaque(id("publisher-release-session-a")),
+            issued_at_unix_ms: now,
+            not_before_unix_ms: now,
+            expires_at_unix_ms: now + 10,
+            use_policy: JoinGrantUsePolicy::Reusable,
+        };
+        let second = RealtimeSessionClaims {
+            participant: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("publisher-release-participant-b")),
+                kind: PrincipalKind::Person,
+            },
+            device_id: Some(DeviceId::from_opaque(id("publisher-release-device-b"))),
+            session_id: SessionId::from_opaque(id("publisher-release-session-b")),
+            expires_at_unix_ms: now + 60_000,
+            ..first.clone()
+        };
+        let owner = service_owner("publisher-release-owner");
+
+        registry.join(first.clone(), now).expect("join first");
+        registry.join(second.clone(), now).expect("join second");
+        registry
+            .claim_publisher_slot(&first, &owner, 1, now + 1)
+            .expect("first publisher");
+
+        registry
+            .join(first.clone(), now + 2)
+            .expect("full reconnect resets publisher presence");
+        registry
+            .claim_publisher_slot(&second, &owner, 1, now + 3)
+            .expect("reconnect released first slot");
+        registry.leave(&second, now + 4).expect("release second");
+
+        registry
+            .claim_publisher_slot(&first, &owner, 1, now + 5)
+            .expect("first reclaims slot");
+        registry
+            .join(second.clone(), now + 5)
+            .expect("rejoin second");
+        registry
+            .claim_publisher_slot(&second, &owner, 1, first.expires_at_unix_ms)
+            .expect("expiry pruning released first slot");
     }
 
     #[test]

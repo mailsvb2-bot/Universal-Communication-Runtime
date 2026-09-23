@@ -121,6 +121,8 @@ def main() -> None:
     memory_store = read("crates/ucr-storage-memory/src/lib.rs")
     sqlite_service_control = read("crates/ucr-storage-sqlite/src/service_control_store.rs")
     sqlite_store = read("crates/ucr-storage-sqlite/src/lib.rs")
+    realtime_registry = read("crates/ucr-realtime/src/lib.rs")
+    realtime_service = read("crates/ucr-api-grpc/src/realtime_service.rs")
     rate_limit_spec = read("spec/service-principal-rate-limits.md")
     resource_quota_spec = read("spec/service-resource-quotas.md")
 
@@ -256,14 +258,17 @@ def main() -> None:
     )
     require(
         "SQLITE_SCHEMA_V38: u32 = 38" in sqlite_store
-        and "SQLITE_SCHEMA_VERSION: u32 = 39" in sqlite_store
-        and "migrate_v38_to_v39" in sqlite_store,
-        "resource quota schema v39 migration missing",
+        and "SQLITE_SCHEMA_V39: u32 = 39" in sqlite_store
+        and "SQLITE_SCHEMA_VERSION: u32 = 40" in sqlite_store
+        and "migrate_v38_to_v39" in sqlite_store
+        and "migrate_v39_to_v40" in sqlite_store,
+        "resource quota schema v40 migration chain missing",
     )
     for marker in (
         "ServiceResourceQuotaPolicy",
         "max_concurrent_participants",
         "max_concurrent_conferences",
+        "max_concurrent_publishers",
         "service_resource_quota_policies",
         "ensure_integration_participant_quota",
         "ensure_integration_conference_quota",
@@ -277,13 +282,24 @@ def main() -> None:
             f"resource quota contract anchor missing: {marker}",
         )
     for marker in (
-        "concurrent participant and conference quotas implemented",
+        "concurrent participant, conference, and publisher quotas implemented",
         "`Scheduled` conferences do not consume quota",
-        "publishers",
+        "first policy-authorized encrypted media publish attempt claims one slot",
         "aggregate bandwidth",
         "recording minutes",
     ):
         require(marker in resource_quota_spec, f"resource quota specification drifted: {marker}")
+    for marker in (
+        "claim_publisher_slot",
+        "publisher_owner",
+    ):
+        require(marker in realtime_registry, f"publisher quota registry anchor missing: {marker}")
+    for marker in (
+        "claim_universal_publisher_quota",
+        "claim_publisher_slot",
+        "forward_authenticated_e2ee_media",
+    ):
+        require(marker in realtime_service, f"publisher quota ingress anchor missing: {marker}")
     for marker in (
         "management",
         "join_issuance",

@@ -717,6 +717,7 @@ pub struct ServiceResourceQuotaPolicy {
     pub subject: ScopedPrincipal,
     pub max_concurrent_participants: u64,
     pub max_concurrent_conferences: Option<u64>,
+    pub max_concurrent_publishers: Option<u64>,
 }
 
 /// Independent request-rate buckets for external Service Accounts.

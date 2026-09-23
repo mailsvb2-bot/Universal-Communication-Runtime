@@ -9,7 +9,7 @@ use ucr_conference::{
 use ucr_core::{
     AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
     DurableStoreError, EventJournalStore, GroupStore, PrincipalIdentityBindingStore,
-    UniversalConferenceStore,
+    ServiceQuotaStore, UniversalConferenceStore,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
@@ -19,8 +19,8 @@ use ucr_model::{
     ConferenceParticipantRole, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
     DeviceId, DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId,
     GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind,
-    OpaqueId, PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope,
-    UniversalConferenceLifecycle, VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
+    OpaqueId, PrincipalId, PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope,
+    TenantScope, UniversalConferenceLifecycle, VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
     WebRtcSessionDescription,
 };
 use ucr_protocol::{
@@ -177,6 +177,7 @@ where
         + EventJournalStore
         + UniversalConferenceStore
         + ConferenceJoinGrantStore
+        + ServiceQuotaStore
         + 'static,
 {
     pb::realtime_service_server::RealtimeServiceServer::new(service)
@@ -197,6 +198,7 @@ where
         + EventJournalStore
         + UniversalConferenceStore
         + ConferenceJoinGrantStore
+        + ServiceQuotaStore
         + 'static,
 {
     type SubscribeMediaStream =
@@ -762,7 +764,8 @@ where
         + TrustedSigningKeyResolver
         + EventJournalStore
         + UniversalConferenceStore
-        + ConferenceJoinGrantStore,
+        + ConferenceJoinGrantStore
+        + ServiceQuotaStore,
 {
     /// Routes one already-encrypted endpoint media envelope through the exact canonical
     /// Conference/SFU path after revalidating long-lived session control and publish policy.
@@ -792,6 +795,7 @@ where
             envelope.frame.header.media_kind,
             envelope.frame.header.video_source_kind,
         )?;
+        self.claim_universal_publisher_quota(claims)?;
         let outcome = conference_runtime(self)
             .forward(&actor_for(claims), device_id, envelope, sink)
             .map_err(|error| map_conference_error(&error))?;
@@ -1135,6 +1139,43 @@ where
             publish_camera_allowed: participant.camera_allowed && participant.publish_video_allowed,
             screen_share_allowed: participant.screen_share_allowed,
         }))
+    }
+
+    fn claim_universal_publisher_quota(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<(), CanonicalError> {
+        let actor = actor_for(claims);
+        let snapshot = conference_runtime(self)
+            .snapshot(&actor, &claims.scope, &claims.call_id)
+            .map_err(|error| map_conference_error(&error))?;
+        let Some(conference) = self
+            .store
+            .universal_conference_profile(&claims.scope, &snapshot.group_id)
+            .map_err(map_store_error)?
+        else {
+            return Ok(());
+        };
+        let owner = ScopedPrincipal {
+            scope: claims.scope.clone(),
+            principal: ucr_model::PrincipalRef {
+                principal_id: PrincipalId::from_opaque(
+                    conference.integration_id.as_opaque().clone(),
+                ),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
+        let Some(limit) = self
+            .store
+            .service_resource_quota_policy(&owner)
+            .map_err(map_store_error)?
+            .and_then(|policy| policy.max_concurrent_publishers)
+        else {
+            return Ok(());
+        };
+        self.registry
+            .claim_publisher_slot(claims, &owner, limit, self.now()?)
+            .map_err(map_registry_error)
     }
 
     fn require_universal_publish_allowed(
