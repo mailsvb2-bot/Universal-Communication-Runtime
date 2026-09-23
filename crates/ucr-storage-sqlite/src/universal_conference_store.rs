@@ -1598,6 +1598,7 @@ mod resource_quota_tests {
                 max_concurrent_participants: 1,
                 max_concurrent_conferences: None,
                 max_concurrent_publishers: None,
+                max_aggregate_bandwidth_bps: None,
             })
             .expect("set participant quota");
 
@@ -1690,6 +1691,7 @@ mod resource_quota_tests {
                 max_concurrent_participants: 100,
                 max_concurrent_conferences: Some(1),
                 max_concurrent_publishers: None,
+                max_aggregate_bandwidth_bps: None,
             })
             .expect("set conference quota");
 

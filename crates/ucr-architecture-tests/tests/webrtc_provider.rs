@@ -15,6 +15,10 @@ fn read(path: &str) -> String {
 fn assert_publisher_quota_boundary(realtime_service: &str, runtime: &str) {
     assert!(realtime_service.contains("claim_universal_publisher_quota"));
     assert!(realtime_service.contains("claim_publisher_slot"));
+    assert!(realtime_service.contains("BandwidthQuotaSink"));
+    assert!(realtime_service.contains("universal_bandwidth_quota"));
+    assert!(realtime_service.contains("encode_sfu_forward_envelope"));
+    assert!(realtime_service.contains("charge_aggregate_bandwidth"));
     assert!(runtime.contains("forward_authenticated_e2ee_media"));
 }
 
