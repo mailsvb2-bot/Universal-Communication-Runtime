@@ -10,7 +10,7 @@ use ucr_crypto::{
     AccessTokenIssueRequest, MachineTokenError, MachineTokenPolicy, MachineTokenSigningKey,
     issue_machine_access_token,
 };
-use ucr_model::{AuthorizationRequest, OpaqueId, PrincipalKind, ScopedPrincipal, TenantScope};
+use ucr_model::{AuthorizationRequest, OpaqueId, PrincipalKind, ScopedPrincipal};
 use ucr_protocol::{
     CONFERENCE_ATTENDANCE_READ_PERMISSION, CONFERENCE_CREATE_PERMISSION,
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION, CONFERENCE_READ_PERMISSION,
