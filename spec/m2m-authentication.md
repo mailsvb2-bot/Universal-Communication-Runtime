@@ -1,6 +1,6 @@
 # Machine-to-Machine Authentication
 
-Status: **Prepared v1 public contract with signed token codec/runtime; public HTTPS edge is not yet claimed**.
+Status: **Prepared v1 public contract with signed token codec/runtime and canonical gRPC MachineAuthService composition; public HTTPS edge is not yet claimed**.
 
 This layer adds a standard machine-to-machine authentication boundary for external applications without creating a second identity, credential, authorization, tenant, or permission owner. The canonical Service Account remains the client identity and the existing Service Credential remains the long-lived client authentication proof.
 
@@ -102,3 +102,29 @@ This contract does not claim human login, authorization-code flow, PKCE, refresh
 `ucr-crypto::machine_token` now provides the reference Ed25519 signed access-token issuer/verifier over an already authenticated canonical Service Account. It enforces bounded token size, issuer/audience, short lifetime, `kid`, canonical tenant/namespace/service-account identity, scope attenuation, expiry and redacted token/private-key diagnostics. A resolver abstraction allows overlapping public keys during rotation without exporting private key material.
 
 This runtime codec still does not make M2M authentication production-ready by itself. `MachineAuthService` composition with canonical Service Credential authentication, public HTTPS `POST /oauth2/token`, JWKS/metadata publication, bearer admission on public API boundaries, durable deployment key rotation and HTTPS conformance remain required.
+
+
+## Canonical MachineAuthService composition
+
+The reference gRPC `MachineAuthService` now composes token issuance with the existing Service Principal admission boundary. Credential ID and secret remain transport metadata; the request body carries only scope, client ID, requested OAuth scopes, audience and optional bounded TTL.
+
+Token exchange:
+
+1. authenticates the presented Service Credential through the existing `ServicePrincipalRequestGate`;
+2. requires the authenticated canonical Service Account principal to exactly match `client_id`;
+3. maps every requested OAuth scope to an existing canonical permission;
+4. authorizes the first permission through the normal quota/audit admission path and every additional requested permission through the same admitted Service Principal context;
+5. issues a short-lived signed access token only after all requested authority has been proven.
+
+The initial mapping is:
+
+- `conference:create` -> `ucr.conference.create`;
+- `conference:manage` -> `ucr.conference.manage`;
+- `conference:join:issue` -> `ucr.conference.join.issue`;
+- `conference:read` -> `ucr.conference.read`;
+- `attendance:read` -> `ucr.conference.attendance.read`;
+- `recording:manage` -> `ucr.conference.recording.manage`.
+
+Unknown or duplicate OAuth scopes fail closed. This mapping is an attenuation/projection of canonical authorization and does not persist OAuth scopes as a second permission owner.
+
+The gRPC composition still does not claim the production HTTPS `POST /oauth2/token` edge, standard HTTP client authentication syntax, JWKS serving, bearer middleware on public APIs, or durable deployment signing-key rotation.
