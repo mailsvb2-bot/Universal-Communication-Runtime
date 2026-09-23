@@ -23,7 +23,7 @@ use ucr_api_grpc::{
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
     DurableStoreError, EventWebhookDispatcher, StorageHealth, StorageProvider,
-    SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome,
+    SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome, generate_opaque_id,
 };
 use ucr_model::{
     EventSubscriptionId, IceTransportPolicy, NamespaceId, OpaqueId, SfuForwardEnvelope, TenantId,
@@ -31,7 +31,7 @@ use ucr_model::{
 };
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_sfu::{SfuForwardSink, SfuForwardSinkError};
-use ucr_storage_sqlite::SqliteLocalStore;
+use ucr_storage_sqlite::{SqliteLocalStore, WEBHOOK_DELIVERY_WORKER_KIND};
 use ucr_webhook::{
     HardenedWebhookSink, NativeTlsWebhookExecutor, SystemWebhookDnsResolver, WebhookSigningSecret,
 };
@@ -48,6 +48,7 @@ const WEBHOOK_DISPATCH_TARGET_PAGE: usize = 128;
 pub const DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub const MIN_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub const MAX_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_mins(1);
+const WEBHOOK_WORKER_LEASE_DURATION_MS: i64 = 120_000;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct WebhookWorkerSweep {
@@ -235,10 +236,7 @@ impl OperatorRuntimeHealthSource for ProductionOperatorHealthSource {
             sfu: Some(realtime.sfu),
             turn: Some(realtime.turn),
             storage: Some(operator_storage_health(self.store.as_ref())),
-            webhook_worker: Some(operator_component(
-                pb::OperatorComponentStatus::NotConfigured,
-                "webhook delivery worker is not running",
-            )),
+            webhook_worker: Some(operator_webhook_worker_health(self.store.as_ref())),
             recorder: Some(operator_component(
                 pb::OperatorComponentStatus::NotConfigured,
                 "recording provider is not configured",
@@ -253,6 +251,40 @@ struct OperatorRealtimeHealthSnapshot {
     sfu: pb::OperatorComponentHealth,
     turn: pb::OperatorComponentHealth,
     capacity: pb::OperatorCapacityStatus,
+}
+
+fn operator_webhook_worker_health(store: &SqliteLocalStore) -> pb::OperatorComponentHealth {
+    let Ok(now_unix_ms) = runtime_now_unix_ms() else {
+        return operator_component(
+            pb::OperatorComponentStatus::Unavailable,
+            "webhook delivery worker health clock is unavailable",
+        );
+    };
+    operator_webhook_worker_health_at(store, now_unix_ms)
+}
+
+fn operator_webhook_worker_health_at(
+    store: &SqliteLocalStore,
+    now_unix_ms: i64,
+) -> pb::OperatorComponentHealth {
+    match store.runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND) {
+        Ok(Some(lease)) if lease.lease_expires_unix_ms > now_unix_ms => operator_component(
+            pb::OperatorComponentStatus::Healthy,
+            "webhook delivery worker durable lease is active",
+        ),
+        Ok(Some(_)) => operator_component(
+            pb::OperatorComponentStatus::Unavailable,
+            "webhook delivery worker durable lease has expired",
+        ),
+        Ok(None) => operator_component(
+            pb::OperatorComponentStatus::NotConfigured,
+            "webhook delivery worker has no durable lease",
+        ),
+        Err(_) => operator_component(
+            pb::OperatorComponentStatus::Unavailable,
+            "webhook delivery worker lease health check failed",
+        ),
+    }
 }
 
 fn operator_storage_health(store: &SqliteLocalStore) -> pb::OperatorComponentHealth {
@@ -472,6 +504,24 @@ impl ProductionRuntime {
             return Err("webhook worker poll interval must be between 100 ms and 60 s".to_owned());
         }
 
+        let holder_id = generate_opaque_id()
+            .map_err(|_| "generate webhook worker lease holder id".to_owned())?
+            .as_str()
+            .to_owned();
+        let now_unix_ms = runtime_now_unix_ms()?;
+        let acquired = self
+            .store
+            .try_acquire_runtime_worker_lease(
+                WEBHOOK_DELIVERY_WORKER_KIND,
+                &holder_id,
+                now_unix_ms,
+                WEBHOOK_WORKER_LEASE_DURATION_MS,
+            )
+            .map_err(|error| format!("acquire webhook worker durable lease: {error:?}"))?;
+        if !acquired {
+            return Err("another webhook worker holds the durable delivery lease".to_owned());
+        }
+
         let clock = SystemEventDeliveryClock;
         let sink = HardenedWebhookSink::new(
             SystemWebhookDnsResolver,
@@ -484,7 +534,15 @@ impl ProductionRuntime {
         );
 
         loop {
-            let sweep = self.dispatch_webhook_sweep(clock, &sink)?;
+            let sweep = match self.dispatch_webhook_sweep(clock, &sink, &holder_id) {
+                Ok(sweep) => sweep,
+                Err(error) => {
+                    let _ = self
+                        .store
+                        .release_runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND, &holder_id);
+                    return Err(error);
+                }
+            };
             if sweep.delivered > 0
                 || sweep.retry_scheduled > 0
                 || sweep.dead_lettered > 0
@@ -503,6 +561,9 @@ impl ProductionRuntime {
             tokio::select! {
                 result = tokio::signal::ctrl_c() => {
                     result.map_err(|error| format!("webhook worker shutdown signal: {error}"))?;
+                    self.store
+                        .release_runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND, &holder_id)
+                        .map_err(|error| format!("release webhook worker durable lease: {error:?}"))?;
                     println!("UCR_WEBHOOK_WORKER_STOPPED");
                     return Ok(());
                 }
@@ -515,7 +576,9 @@ impl ProductionRuntime {
         &self,
         clock: SystemEventDeliveryClock,
         sink: &HardenedWebhookSink<SystemWebhookDnsResolver, NativeTlsWebhookExecutor>,
+        holder_id: &str,
     ) -> Result<WebhookWorkerSweep, String> {
+        self.renew_webhook_worker_lease(holder_id)?;
         let dispatcher = EventWebhookDispatcher::new(&clock, self.store.as_ref(), sink);
         let mut after = None;
         let mut sweep = WebhookWorkerSweep::default();
@@ -530,6 +593,7 @@ impl ProductionRuntime {
             }
 
             for (scope, subscription_id) in &targets {
+                self.renew_webhook_worker_lease(holder_id)?;
                 sweep.targets = sweep.targets.saturating_add(1);
                 match dispatcher.dispatch_once(scope, subscription_id) {
                     Ok(WebhookDispatchOutcome::Delivered) => {
@@ -564,6 +628,24 @@ impl ProductionRuntime {
         }
 
         Ok(sweep)
+    }
+
+    fn renew_webhook_worker_lease(&self, holder_id: &str) -> Result<(), String> {
+        let now_unix_ms = runtime_now_unix_ms()?;
+        let renewed = self
+            .store
+            .renew_runtime_worker_lease(
+                WEBHOOK_DELIVERY_WORKER_KIND,
+                holder_id,
+                now_unix_ms,
+                WEBHOOK_WORKER_LEASE_DURATION_MS,
+            )
+            .map_err(|error| format!("renew webhook worker durable lease: {error:?}"))?;
+        if renewed {
+            Ok(())
+        } else {
+            Err("webhook worker durable lease was lost or expired".to_owned())
+        }
     }
 
     /// Serves the existing public UCR gRPC contract as a durable local daemon.
