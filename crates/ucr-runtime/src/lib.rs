@@ -4,7 +4,7 @@ use std::{
     net::SocketAddr,
     path::Path,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::net::TcpListener;
@@ -22,8 +22,8 @@ use ucr_api_grpc::{
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
-    EventWebhookDispatcher, StorageHealth, StorageProvider, SystemEventDeliveryClock,
-    SystemServiceQuotaClock, WebhookDispatchOutcome,
+    DurableStoreError, EventWebhookDispatcher, StorageHealth, StorageProvider,
+    SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome,
 };
 use ucr_model::{
     EventSubscriptionId, IceTransportPolicy, NamespaceId, OpaqueId, SfuForwardEnvelope, TenantId,
@@ -43,6 +43,20 @@ use ucr_webrtc::{
 
 pub const DEFAULT_RUNTIME_BIND: &str = "127.0.0.1:50051";
 pub const RUNTIME_MODE: &str = "local-daemon";
+
+const WEBHOOK_DISPATCH_TARGET_PAGE: usize = 128;
+pub const DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_secs(1);
+pub const MIN_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+pub const MAX_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_mins(1);
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct WebhookWorkerSweep {
+    targets: usize,
+    delivered: usize,
+    retry_scheduled: usize,
+    dead_lettered: usize,
+    rejected: usize,
+}
 
 #[derive(Clone)]
 pub struct RealtimeRuntimeConfig {
@@ -435,6 +449,121 @@ impl ProductionRuntime {
         EventWebhookDispatcher::new(&clock, self.store.as_ref(), &sink)
             .dispatch_once(&scope, &subscription_id)
             .map_err(|error| format!("dispatch durable webhook: {error:?}"))
+    }
+
+    /// Runs the production webhook worker over all canonical Service Account-owned webhook
+    /// subscriptions in the durable `SQLite` store.
+    ///
+    /// Discovery is bounded and paginated. The worker does not own retry, cursor or dead-letter
+    /// state: every attempt is delegated to `EventWebhookDispatcher`, which revalidates the exact
+    /// durable owner immediately before polling or network I/O. The signing key remains process
+    /// memory only and is zeroized with the sink on shutdown.
+    ///
+    /// # Errors
+    /// Rejects unsafe polling intervals and stops on durable-store/worker infrastructure failures.
+    pub async fn run_webhook_worker(
+        self: Arc<Self>,
+        signing_key: [u8; 32],
+        poll_interval: Duration,
+    ) -> Result<(), String> {
+        if !(MIN_WEBHOOK_WORKER_POLL_INTERVAL..=MAX_WEBHOOK_WORKER_POLL_INTERVAL)
+            .contains(&poll_interval)
+        {
+            return Err("webhook worker poll interval must be between 100 ms and 60 s".to_owned());
+        }
+
+        let clock = SystemEventDeliveryClock;
+        let sink = HardenedWebhookSink::new(
+            SystemWebhookDnsResolver,
+            NativeTlsWebhookExecutor::default(),
+            WebhookSigningSecret::from_bytes(signing_key),
+        );
+        println!(
+            "UCR_WEBHOOK_WORKER_READY poll_interval_ms={}",
+            poll_interval.as_millis()
+        );
+
+        loop {
+            let sweep = self.dispatch_webhook_sweep(clock, &sink)?;
+            if sweep.delivered > 0
+                || sweep.retry_scheduled > 0
+                || sweep.dead_lettered > 0
+                || sweep.rejected > 0
+            {
+                println!(
+                    "UCR_WEBHOOK_WORKER_SWEEP targets={} delivered={} retry_scheduled={} dead_lettered={} rejected={}",
+                    sweep.targets,
+                    sweep.delivered,
+                    sweep.retry_scheduled,
+                    sweep.dead_lettered,
+                    sweep.rejected,
+                );
+            }
+
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => {
+                    result.map_err(|error| format!("webhook worker shutdown signal: {error}"))?;
+                    println!("UCR_WEBHOOK_WORKER_STOPPED");
+                    return Ok(());
+                }
+                () = tokio::time::sleep(poll_interval) => {}
+            }
+        }
+    }
+
+    fn dispatch_webhook_sweep(
+        &self,
+        clock: SystemEventDeliveryClock,
+        sink: &HardenedWebhookSink<SystemWebhookDnsResolver, NativeTlsWebhookExecutor>,
+    ) -> Result<WebhookWorkerSweep, String> {
+        let dispatcher = EventWebhookDispatcher::new(&clock, self.store.as_ref(), sink);
+        let mut after = None;
+        let mut sweep = WebhookWorkerSweep::default();
+
+        loop {
+            let targets = self
+                .store
+                .service_webhook_dispatch_targets(after.as_ref(), WEBHOOK_DISPATCH_TARGET_PAGE)
+                .map_err(|error| format!("enumerate durable webhook targets: {error:?}"))?;
+            if targets.is_empty() {
+                break;
+            }
+
+            for (scope, subscription_id) in &targets {
+                sweep.targets = sweep.targets.saturating_add(1);
+                match dispatcher.dispatch_once(scope, subscription_id) {
+                    Ok(WebhookDispatchOutcome::Delivered) => {
+                        sweep.delivered = sweep.delivered.saturating_add(1);
+                    }
+                    Ok(WebhookDispatchOutcome::RetryScheduled) => {
+                        sweep.retry_scheduled = sweep.retry_scheduled.saturating_add(1);
+                    }
+                    Ok(WebhookDispatchOutcome::DeadLettered) => {
+                        sweep.dead_lettered = sweep.dead_lettered.saturating_add(1);
+                    }
+                    Ok(
+                        WebhookDispatchOutcome::Idle | WebhookDispatchOutcome::RetryAfter { .. },
+                    ) => {}
+                    Err(
+                        DurableStoreError::InvalidRecord
+                        | DurableStoreError::Conflict
+                        | DurableStoreError::PermissionDenied,
+                    ) => {
+                        sweep.rejected = sweep.rejected.saturating_add(1);
+                    }
+                    Err(error) => {
+                        return Err(format!("dispatch durable webhook target: {error:?}"));
+                    }
+                }
+            }
+
+            if targets.len() < WEBHOOK_DISPATCH_TARGET_PAGE {
+                break;
+            }
+            after = targets.last().cloned();
+        }
+
+        Ok(sweep)
     }
 
     /// Serves the existing public UCR gRPC contract as a durable local daemon.

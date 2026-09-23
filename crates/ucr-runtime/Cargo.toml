@@ -12,7 +12,7 @@ name = "ucr-runtime"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread"] }
+tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 tokio-stream = { version = "=0.1.17", features = ["net"] }
 tonic = { version = "=0.14.6", features = ["transport"] }
 ucr-api-grpc = { path = "../ucr-api-grpc" }

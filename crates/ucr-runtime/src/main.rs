@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use ucr_core::WebhookDispatchOutcome;
-use ucr_runtime::{DEFAULT_RUNTIME_BIND, ProductionRuntime, RealtimeRuntimeConfig};
+use ucr_runtime::{
+    DEFAULT_RUNTIME_BIND, DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, ProductionRuntime,
+    RealtimeRuntimeConfig,
+};
 
 #[tokio::main]
 async fn main() {
@@ -98,6 +101,7 @@ async fn run() -> Result<(), String> {
             namespace_id.as_deref(),
             subscription_id,
         ),
+        "run-webhook-worker" => run_webhook_worker(&database).await,
         _ => Err(usage()),
     }
 }
@@ -181,6 +185,27 @@ fn dispatch_webhook_once(
     Ok(())
 }
 
+async fn run_webhook_worker(database: &PathBuf) -> Result<(), String> {
+    let key_hex = std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX")
+        .map_err(|_| "UCR_WEBHOOK_SIGNING_KEY_HEX is required for run-webhook-worker".to_owned())?;
+    let poll_interval = std::env::var("UCR_WEBHOOK_POLL_INTERVAL_MS")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map(Duration::from_millis)
+                .map_err(|_| "UCR_WEBHOOK_POLL_INTERVAL_MS must be an unsigned integer".to_owned())
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL);
+    Arc::new(ProductionRuntime::open_existing(database)?)
+        .run_webhook_worker(
+            decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
+            poll_interval,
+        )
+        .await
+}
+
 fn csv_env(variable: &str) -> Vec<String> {
     std::env::var(variable)
         .ok()
@@ -237,6 +262,6 @@ fn hex_nibble(byte: u8) -> Result<u8, String> {
 }
 
 fn usage() -> String {
-    "usage: ucr-runtime <init|check|metrics|serve|serve-realtime|dispatch-webhook-once> --database PATH [--bind 127.0.0.1:50051] [--join-base-url https://host/conference] [--tenant-id ID] [--namespace-id ID] [--subscription-id ID]"
+    "usage: ucr-runtime <init|check|metrics|serve|serve-realtime|dispatch-webhook-once|run-webhook-worker> --database PATH [--bind 127.0.0.1:50051] [--join-base-url https://host/conference] [--tenant-id ID] [--namespace-id ID] [--subscription-id ID]"
         .to_owned()
 }

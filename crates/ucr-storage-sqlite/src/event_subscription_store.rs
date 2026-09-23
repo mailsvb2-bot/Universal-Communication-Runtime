@@ -928,6 +928,134 @@ fn persist_retry_rejection(
     Ok(())
 }
 
+const MAX_WEBHOOK_DISPATCH_TARGET_PAGE: usize = 256;
+
+type WebhookDispatchTarget = (TenantScope, EventSubscriptionId);
+
+impl SqliteLocalStore {
+    /// Lists one bounded page of canonical Service Account-owned webhook subscriptions.
+    ///
+    /// This is an operator/runtime discovery surface only. It does not create a second queue or
+    /// delivery owner: every returned target must still pass `EventWebhookDispatcher` ownership
+    /// validation immediately before polling or network I/O.
+    ///
+    /// # Errors
+    /// Returns invalid-record for an empty/oversized page request and explicit storage/corruption
+    /// failures otherwise.
+    pub fn service_webhook_dispatch_targets(
+        &self,
+        after: Option<&(TenantScope, EventSubscriptionId)>,
+        max_items: usize,
+    ) -> Result<Vec<(TenantScope, EventSubscriptionId)>, DurableStoreError> {
+        if max_items == 0 || max_items > MAX_WEBHOOK_DISPATCH_TARGET_PAGE {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        let limit = i64::try_from(max_items).map_err(|_| DurableStoreError::InvalidRecord)?;
+        match after {
+            Some((scope, subscription_id)) => {
+                service_webhook_dispatch_targets_after(&connection, scope, subscription_id, limit)
+            }
+            None => service_webhook_dispatch_targets_first(&connection, limit),
+        }
+    }
+}
+
+fn service_webhook_dispatch_targets_first(
+    connection: &Connection,
+    limit: i64,
+) -> Result<Vec<WebhookDispatchTarget>, DurableStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT s.tenant_id, s.namespace_present, s.namespace_id, s.subscription_id
+             FROM event_subscriptions AS s
+             INNER JOIN event_subscription_owners AS o
+               ON o.tenant_id = s.tenant_id
+              AND o.namespace_present = s.namespace_present
+              AND o.namespace_id = s.namespace_id
+              AND o.subscription_id = s.subscription_id
+             WHERE s.mode = 'webhook'
+               AND o.owner_principal_kind = 'service_account'
+             ORDER BY s.tenant_id, s.namespace_present, s.namespace_id, s.subscription_id
+             LIMIT ?1",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    collect_webhook_dispatch_targets(
+        statement
+            .query_map(params![limit], read_webhook_dispatch_target)
+            .map_err(|error| map_sqlite_error(&error))?,
+    )
+}
+
+fn service_webhook_dispatch_targets_after(
+    connection: &Connection,
+    scope: &TenantScope,
+    subscription_id: &EventSubscriptionId,
+    limit: i64,
+) -> Result<Vec<WebhookDispatchTarget>, DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let mut statement = connection
+        .prepare(
+            "SELECT s.tenant_id, s.namespace_present, s.namespace_id, s.subscription_id
+             FROM event_subscriptions AS s
+             INNER JOIN event_subscription_owners AS o
+               ON o.tenant_id = s.tenant_id
+              AND o.namespace_present = s.namespace_present
+              AND o.namespace_id = s.namespace_id
+              AND o.subscription_id = s.subscription_id
+             WHERE s.mode = 'webhook'
+               AND o.owner_principal_kind = 'service_account'
+               AND (
+                    s.tenant_id > ?1
+                 OR (s.tenant_id = ?1 AND s.namespace_present > ?2)
+                 OR (s.tenant_id = ?1 AND s.namespace_present = ?2 AND s.namespace_id > ?3)
+                 OR (s.tenant_id = ?1 AND s.namespace_present = ?2 AND s.namespace_id = ?3
+                     AND s.subscription_id > ?4)
+               )
+             ORDER BY s.tenant_id, s.namespace_present, s.namespace_id, s.subscription_id
+             LIMIT ?5",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    collect_webhook_dispatch_targets(
+        statement
+            .query_map(
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    subscription_id.as_opaque().as_str(),
+                    limit,
+                ],
+                read_webhook_dispatch_target,
+            )
+            .map_err(|error| map_sqlite_error(&error))?,
+    )
+}
+
+fn read_webhook_dispatch_target(
+    row: &rusqlite::Row<'_>,
+) -> Result<(String, i64, String, String), rusqlite::Error> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+}
+
+fn collect_webhook_dispatch_targets<F>(
+    rows: rusqlite::MappedRows<'_, F>,
+) -> Result<Vec<WebhookDispatchTarget>, DurableStoreError>
+where
+    F: FnMut(&rusqlite::Row<'_>) -> Result<(String, i64, String, String), rusqlite::Error>,
+{
+    let mut targets = Vec::new();
+    for row in rows {
+        let (tenant, namespace_present, namespace, subscription_id) =
+            row.map_err(|error| map_sqlite_error(&error))?;
+        targets.push((
+            parse_scope(&tenant, namespace_present, &namespace)?,
+            EventSubscriptionId::from_opaque(parse_id(&subscription_id)?),
+        ));
+    }
+    Ok(targets)
+}
+
 impl EventSubscriptionStore for SqliteLocalStore {
     fn persist_event_subscription(
         &self,
@@ -1486,6 +1614,14 @@ mod tests {
         }
     }
 
+    fn webhook_subscription(id: &str) -> EventSubscription {
+        let mut value = subscription();
+        value.subscription_id = EventSubscriptionId::from_opaque(oid(id));
+        value.mode = EventSubscriptionMode::Webhook;
+        value.webhook_uri = Some("https://webhook.example.test/ucr".to_owned());
+        value
+    }
+
     fn seed_retry_state(db: &TestDbPath, subscription: &EventSubscription) -> EventConsumerCursor {
         let store = SqliteLocalStore::open(db.path()).expect("open store");
         store
@@ -1563,6 +1699,67 @@ mod tests {
         assert_eq!(
             store.replay_event_subscription(&scope(), &subscription.subscription_id, &replay_id),
             Ok(DurableRecordStatus::Duplicate)
+        );
+    }
+
+    #[test]
+    fn webhook_dispatch_target_discovery_is_bounded_paginated_and_service_only() {
+        let db = TestDbPath::new();
+        let store = SqliteLocalStore::open(db.path()).expect("open store");
+        let service = service_owner("dispatch-service");
+        let first_webhook = webhook_subscription("dispatch-webhook-a");
+        let second_webhook = webhook_subscription("dispatch-webhook-b");
+        let person_webhook = webhook_subscription("dispatch-webhook-person");
+        let mut durable_stream = subscription();
+        durable_stream.subscription_id =
+            EventSubscriptionId::from_opaque(oid("dispatch-durable-service"));
+
+        store
+            .persist_event_subscription(&service, &first_webhook)
+            .expect("first service webhook");
+        store
+            .persist_event_subscription(&service, &second_webhook)
+            .expect("second service webhook");
+        store
+            .persist_event_subscription(&subscription_owner(), &person_webhook)
+            .expect("person webhook");
+        store
+            .persist_event_subscription(&service, &durable_stream)
+            .expect("service durable stream");
+
+        let first_page = store
+            .service_webhook_dispatch_targets(None, 1)
+            .expect("first dispatch page");
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(
+            first_page[0].1.as_opaque().as_str(),
+            first_webhook.subscription_id.as_opaque().as_str()
+        );
+
+        let second_page = store
+            .service_webhook_dispatch_targets(first_page.last(), 1)
+            .expect("second dispatch page");
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(
+            second_page[0].1.as_opaque().as_str(),
+            second_webhook.subscription_id.as_opaque().as_str()
+        );
+        assert!(
+            store
+                .service_webhook_dispatch_targets(second_page.last(), 1)
+                .expect("last dispatch page")
+                .is_empty()
+        );
+        assert_eq!(
+            store.service_webhook_dispatch_targets(None, 0),
+            Err(DurableStoreError::InvalidRecord)
+        );
+        assert_eq!(
+            store.service_webhook_dispatch_targets(
+                None,
+                super::MAX_WEBHOOK_DISPATCH_TARGET_PAGE + 1
+            ),
+            Err(DurableStoreError::InvalidRecord)
         );
     }
 

@@ -18,6 +18,8 @@ fn webhook_adapter_preserves_single_event_owner_and_fails_closed() {
     let adapter = read("crates/ucr-webhook/src/lib.rs");
     let core = read("crates/ucr-core/src/event_api.rs");
     let runtime = read("crates/ucr-runtime/src/main.rs");
+    let runtime_library = read("crates/ucr-runtime/src/lib.rs");
+    let sqlite = read("crates/ucr-storage-sqlite/src/event_subscription_store.rs");
     let spec = read("spec/event-api.md");
 
     assert!(workspace.contains("\"crates/ucr-webhook\""));
@@ -41,6 +43,15 @@ fn webhook_adapter_preserves_single_event_owner_and_fails_closed() {
     assert!(adapter.contains("connector.connect(&request.host, stream)"));
     assert!(adapter.contains("SystemWebhookDnsResolver"));
     assert!(runtime.contains("\"dispatch-webhook-once\""));
+    assert!(runtime.contains("\"run-webhook-worker\""));
     assert!(runtime.contains("UCR_WEBHOOK_SIGNING_KEY_HEX"));
+    assert!(runtime.contains("UCR_WEBHOOK_POLL_INTERVAL_MS"));
+    assert!(runtime_library.contains("service_webhook_dispatch_targets"));
+    assert!(runtime_library.contains("EventWebhookDispatcher::new"));
+    assert!(runtime_library.contains("run_webhook_worker"));
+    assert!(sqlite.contains("owner_principal_kind = 'service_account'"));
+    assert!(sqlite.contains("MAX_WEBHOOK_DISPATCH_TARGET_PAGE"));
     assert!(spec.contains("dispatch-webhook-once"));
+    assert!(spec.contains("run-webhook-worker"));
+    assert!(!spec.contains("Event webhook networking remains unimplemented"));
 }
