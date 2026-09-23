@@ -63,10 +63,7 @@ pub(super) fn verify_v43_objects(connection: &Connection) -> Result<(), DurableS
     for row in rows {
         let (worker_kind, holder_id, heartbeat, expires) =
             row.map_err(|error| map_sqlite_error(&error))?;
-        validate_lease_input(&worker_kind, &holder_id, heartbeat, expires - heartbeat)?;
-        if expires <= heartbeat {
-            return Err(DurableStoreError::Corrupt);
-        }
+        validate_persisted_lease(&worker_kind, &holder_id, heartbeat, expires)?;
     }
     Ok(())
 }
@@ -180,19 +177,38 @@ impl SqliteLocalStore {
             .optional()
             .map_err(|error| map_sqlite_error(&error))?
             .map(|lease| {
-                validate_lease_input(
+                validate_persisted_lease(
                     worker_kind,
                     &lease.holder_id,
                     lease.heartbeat_unix_ms,
-                    lease.lease_expires_unix_ms - lease.heartbeat_unix_ms,
+                    lease.lease_expires_unix_ms,
                 )?;
-                if lease.lease_expires_unix_ms <= lease.heartbeat_unix_ms {
-                    return Err(DurableStoreError::Corrupt);
-                }
                 Ok(lease)
             })
             .transpose()
     }
+}
+
+fn validate_persisted_lease(
+    worker_kind: &str,
+    holder_id: &str,
+    heartbeat_unix_ms: i64,
+    lease_expires_unix_ms: i64,
+) -> Result<(), DurableStoreError> {
+    validate_identifier(worker_kind, MAX_WORKER_KIND_BYTES)
+        .map_err(|_| DurableStoreError::Corrupt)?;
+    validate_identifier(holder_id, MAX_HOLDER_ID_BYTES)
+        .map_err(|_| DurableStoreError::Corrupt)?;
+    let duration = lease_expires_unix_ms
+        .checked_sub(heartbeat_unix_ms)
+        .ok_or(DurableStoreError::Corrupt)?;
+    if heartbeat_unix_ms < 0
+        || lease_expires_unix_ms <= heartbeat_unix_ms
+        || duration > MAX_WORKER_LEASE_MS
+    {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
 }
 
 fn validated_expiry(
