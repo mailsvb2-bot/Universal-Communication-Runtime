@@ -3655,6 +3655,7 @@ dependencies = [
  "ucr-crypto",
  "ucr-group-mls",
  "ucr-media-e2ee",
+ "ucr-machine-auth",
  "ucr-mesh",
  "ucr-model",
  "ucr-offline-groups",
@@ -3835,6 +3836,17 @@ dependencies = [
  "ucr-crypto",
  "ucr-model",
  "ucr-protocol",
+]
+
+[[package]]
+name = "ucr-machine-auth"
+version = "0.0.1"
+dependencies = [
+ "ucr-core",
+ "ucr-crypto",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-memory",
 ]
 
 [[package]]

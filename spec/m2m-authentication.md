@@ -128,3 +128,18 @@ The initial mapping is:
 Unknown or duplicate OAuth scopes fail closed. This mapping is an attenuation/projection of canonical authorization and does not persist OAuth scopes as a second permission owner.
 
 The gRPC composition still does not claim the production HTTPS `POST /oauth2/token` edge, standard HTTP client authentication syntax, JWKS serving, bearer middleware on public APIs, or durable deployment signing-key rotation.
+
+
+## Shared machine-auth runtime owner and fixed token admission
+
+The canonical token-exchange rules are now owned by the transport-neutral `ucr-machine-auth` runtime. gRPC and future HTTPS/REST adapters must delegate to that owner rather than reimplementing credential, scope, client-ID, quota, audit or token-signing rules.
+
+Token exchange has its own canonical permission:
+
+`ucr.authentication.machine_token.issue`
+
+A Service Account must hold that permission before any requested OAuth scope is considered. The request is admitted through the normal Service Principal gate under that fixed permission, so token exchange always consumes the canonical Management request-rate bucket. The order of requested OAuth scopes therefore cannot change or bypass token-request rate limiting.
+
+After fixed token admission succeeds, every requested OAuth scope is checked as an additional canonical permission for the same authenticated Service Account and exact tenant scope. Only after all requested permissions are proven may the runtime issue the short-lived signed token.
+
+This closes the earlier transport-local behavior where the first requested OAuth scope could determine the primary Service Principal admission permission and therefore its request-rate class.
