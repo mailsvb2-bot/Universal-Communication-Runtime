@@ -83,6 +83,11 @@ pub use operator_runtime_service::{
     GrpcOperatorRuntimeService, OperatorRuntimeHealthSource, operator_runtime_service_server,
 };
 
+mod machine_auth_service;
+pub use machine_auth_service::{
+    GrpcMachineAuthService, MachineAuthDiscovery, machine_auth_service_server,
+};
+
 pub const SERVICE_CREDENTIAL_ID_METADATA_KEY: &str = "ucr-service-credential-id-bin";
 pub const SERVICE_CREDENTIAL_SECRET_METADATA_KEY: &str = "ucr-service-credential-secret-bin";
 pub const GRPC_DIAGNOSTIC_DOMAIN: &str = "ucr.grpc.binding";
