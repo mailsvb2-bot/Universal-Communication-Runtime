@@ -8,8 +8,8 @@ fn production_runtime_exposes_machine_auth_only_on_loopback_with_stable_key_load
         .expect("workspace root");
     let runtime = fs::read_to_string(workspace.join("crates/ucr-runtime/src/lib.rs"))
         .expect("runtime source");
-    let main = fs::read_to_string(workspace.join("crates/ucr-runtime/src/main.rs"))
-        .expect("runtime main");
+    let main =
+        fs::read_to_string(workspace.join("crates/ucr-runtime/src/main.rs")).expect("runtime main");
     let crypto = fs::read_to_string(workspace.join("crates/ucr-crypto/src/machine_token.rs"))
         .expect("machine token crypto");
 
