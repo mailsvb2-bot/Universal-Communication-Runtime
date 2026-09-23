@@ -271,8 +271,9 @@ mod tests {
     use ucr_crypto::{MachineTokenPublicKey, verify_machine_access_token};
     use ucr_model::{
         NamespaceId, PermissionGrant, PermissionScope, PrincipalId, PrincipalRef,
-        ServiceQuotaPolicy, TenantId,
+        ServiceQuotaPolicy, ServiceRequestRateClass, TenantId,
     };
+    use ucr_protocol::service_request_rate_class;
     use ucr_storage_memory::MemoryLocalStore;
 
     use super::*;
@@ -370,6 +371,14 @@ mod tests {
             Some(CONFERENCE_RECORDING_MANAGE_PERMISSION)
         );
         assert_eq!(canonical_permission_for_scope("admin:all"), None);
+    }
+
+    #[test]
+    fn machine_token_issue_permission_uses_fixed_management_rate_class() {
+        assert_eq!(
+            service_request_rate_class(MACHINE_TOKEN_ISSUE_PERMISSION),
+            ServiceRequestRateClass::Management
+        );
     }
 
     #[test]
