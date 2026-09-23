@@ -17,6 +17,7 @@ tokio-stream = { version = "=0.1.17", features = ["net"] }
 tonic = { version = "=0.14.6", features = ["transport"] }
 ucr-api-grpc = { path = "../ucr-api-grpc" }
 ucr-core = { path = "../ucr-core" }
+ucr-crypto = { path = "../ucr-crypto" }
 ucr-conference = { path = "../ucr-conference" }
 ucr-media-e2ee = { path = "../ucr-media-e2ee" }
 ucr-model = { path = "../ucr-model" }
@@ -25,6 +26,7 @@ ucr-sfu = { path = "../ucr-sfu" }
 ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
 ucr-webhook = { path = "../ucr-webhook" }
 ucr-webrtc = { path = "../ucr-webrtc" }
+zeroize = "=1.9.0"
 
 [lints]
 workspace = true
