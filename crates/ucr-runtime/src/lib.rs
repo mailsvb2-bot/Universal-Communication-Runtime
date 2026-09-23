@@ -58,7 +58,6 @@ struct WebhookWorkerSweep {
     rejected: usize,
 }
 
-
 #[derive(Clone)]
 pub struct RealtimeRuntimeConfig {
     join_base_url: String,
@@ -524,10 +523,7 @@ impl ProductionRuntime {
         loop {
             let targets = self
                 .store
-                .service_webhook_dispatch_targets(
-                    after.as_ref(),
-                    WEBHOOK_DISPATCH_TARGET_PAGE,
-                )
+                .service_webhook_dispatch_targets(after.as_ref(), WEBHOOK_DISPATCH_TARGET_PAGE)
                 .map_err(|error| format!("enumerate durable webhook targets: {error:?}"))?;
             if targets.is_empty() {
                 break;
@@ -545,7 +541,9 @@ impl ProductionRuntime {
                     Ok(WebhookDispatchOutcome::DeadLettered) => {
                         sweep.dead_lettered = sweep.dead_lettered.saturating_add(1);
                     }
-                    Ok(WebhookDispatchOutcome::Idle | WebhookDispatchOutcome::RetryAfter { .. }) => {}
+                    Ok(
+                        WebhookDispatchOutcome::Idle | WebhookDispatchOutcome::RetryAfter { .. },
+                    ) => {}
                     Err(
                         DurableStoreError::InvalidRecord
                         | DurableStoreError::Conflict
