@@ -27,7 +27,8 @@ pub use kdf::DerivationError;
 pub use machine_token::{
     MAX_MACHINE_TOKEN_AUDIENCE_LEN, MAX_MACHINE_TOKEN_BYTES, MAX_MACHINE_TOKEN_ISSUER_LEN,
     MAX_MACHINE_TOKEN_SCOPE_LEN, MAX_MACHINE_TOKEN_SCOPES, MAX_MACHINE_TOKEN_TTL_SECONDS,
-    MachineAccessToken, MachineTokenError, MachineTokenKeyResolver, MachineTokenPolicy,
+    AccessTokenIssueRequest, MachineAccessToken, MachineTokenError, MachineTokenKeyResolver,
+    MachineTokenPolicy,
     MachineTokenPublicKey, MachineTokenSigningKey, VerifiedMachineAccessToken,
     issue_machine_access_token, verify_machine_access_token,
 };
