@@ -131,20 +131,12 @@ where
         }
 
         let permissions = requested_scope_permissions(&request.requested_scopes)?;
-        let primary_permission = permissions
-            .first()
-            .copied()
-            .ok_or_else(invalid_argument)?;
+        let primary_permission = permissions.first().copied().ok_or_else(invalid_argument)?;
 
         let gate =
             ServicePrincipalRequestGate::new(&*self.clock, &*self.authorization, &*self.store);
-        let admission = gate.authenticate_request(
-            &scope,
-            credential_id,
-            secret,
-            primary_permission,
-            &scope,
-        )?;
+        let admission =
+            gate.authenticate_request(&scope, credential_id, secret, primary_permission, &scope)?;
         let subject = admission.subject().clone();
         admission.authorize(&AuthorizationRequest {
             subject: subject.clone(),
@@ -158,8 +150,8 @@ where
         }
 
         let now_unix_s = now_unix_s(&*self.clock)?;
-        let token_id = generate_opaque_id()
-            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
+        let token_id =
+            generate_opaque_id().map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
         let requested_ttl_seconds =
             (request.requested_ttl_seconds != 0).then_some(request.requested_ttl_seconds);
         let token = issue_machine_access_token(
@@ -271,7 +263,10 @@ const fn canonical_permission_for_scope(scope: &str) -> Option<&'static str> {
     }
 }
 
-fn require_client_id(subject: &ScopedPrincipal, client_id: &OpaqueId) -> Result<(), CanonicalError> {
+fn require_client_id(
+    subject: &ScopedPrincipal,
+    client_id: &OpaqueId,
+) -> Result<(), CanonicalError> {
     if subject.principal.kind == PrincipalKind::ServiceAccount
         && subject.principal.principal_id.as_opaque() == client_id
     {
@@ -350,11 +345,13 @@ mod tests {
     #[test]
     fn duplicate_and_unknown_scopes_fail_closed() {
         assert!(requested_scope_permissions(&[]).is_err());
-        assert!(requested_scope_permissions(&[
-            MACHINE_SCOPE_CONFERENCE_READ.to_owned(),
-            MACHINE_SCOPE_CONFERENCE_READ.to_owned(),
-        ])
-        .is_err());
+        assert!(
+            requested_scope_permissions(&[
+                MACHINE_SCOPE_CONFERENCE_READ.to_owned(),
+                MACHINE_SCOPE_CONFERENCE_READ.to_owned(),
+            ])
+            .is_err()
+        );
         assert!(requested_scope_permissions(&["admin:all".to_owned()]).is_err());
     }
 }
