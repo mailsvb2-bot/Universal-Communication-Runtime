@@ -428,9 +428,9 @@ fn parse_scope_claim(scope_claim: &str) -> Result<Vec<String>, MachineTokenError
 fn valid_scope(scope: &str) -> bool {
     !scope.is_empty()
         && scope.len() <= MAX_MACHINE_TOKEN_SCOPE_LEN
-        && scope
-            .bytes()
-            .all(|byte| byte == b'!' || (b'#'..=b'[').contains(&byte) || (b']'..=b'~').contains(&byte))
+        && scope.bytes().all(|byte| {
+            byte == b'!' || (b'#'..=b'[').contains(&byte) || (b']'..=b'~').contains(&byte)
+        })
 }
 
 fn decode_segment(segment: &str) -> Result<Vec<u8>, MachineTokenError> {
@@ -495,10 +495,7 @@ mod tests {
     fn signed_machine_token_round_trips_canonical_service_subject() {
         let signing_key = MachineTokenSigningKey::generate(key_id("token-key-a")).expect("key");
         let public_key = signing_key.public_key();
-        let requested = vec![
-            "conference:read".to_owned(),
-            "conference:create".to_owned(),
-        ];
+        let requested = vec!["conference:read".to_owned(), "conference:create".to_owned()];
         let allowed = vec![
             "conference:create".to_owned(),
             "conference:read".to_owned(),
@@ -517,18 +514,14 @@ mod tests {
             },
         )
         .expect("issue");
-        let verified =
-            verify_machine_access_token(&public_key, &policy(), token.as_str(), 1_100)
-                .expect("verify");
+        let verified = verify_machine_access_token(&public_key, &policy(), token.as_str(), 1_100)
+            .expect("verify");
 
         assert_eq!(verified.subject, service_subject());
         assert_eq!(verified.token_id, opaque("token-a"));
         assert_eq!(
             verified.granted_scopes,
-            vec![
-                "conference:create".to_owned(),
-                "conference:read".to_owned()
-            ]
+            vec!["conference:create".to_owned(), "conference:read".to_owned()]
         );
         assert_eq!(verified.issued_at_unix_s, 1_000);
         assert_eq!(verified.expires_at_unix_s, 1_300);
