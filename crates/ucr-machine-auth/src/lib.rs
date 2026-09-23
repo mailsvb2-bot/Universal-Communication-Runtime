@@ -150,7 +150,7 @@ where
         let claimed_subject = ScopedPrincipal {
             scope: subject.scope.clone(),
             principal: PrincipalRef {
-                principal_id: PrincipalId::from_opaque(request.client_id.clone()),
+                principal_id: PrincipalId::from_opaque((*request.client_id).clone()),
                 kind: PrincipalKind::ServiceAccount,
             },
         };
