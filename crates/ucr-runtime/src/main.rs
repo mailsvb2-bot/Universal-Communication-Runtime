@@ -191,9 +191,10 @@ async fn run_webhook_worker(database: &PathBuf) -> Result<(), String> {
     let poll_interval = std::env::var("UCR_WEBHOOK_POLL_INTERVAL_MS")
         .ok()
         .map(|value| {
-            value.parse::<u64>().map(Duration::from_millis).map_err(|_| {
-                "UCR_WEBHOOK_POLL_INTERVAL_MS must be an unsigned integer".to_owned()
-            })
+            value
+                .parse::<u64>()
+                .map(Duration::from_millis)
+                .map_err(|_| "UCR_WEBHOOK_POLL_INTERVAL_MS must be an unsigned integer".to_owned())
         })
         .transpose()?
         .unwrap_or(DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL);
