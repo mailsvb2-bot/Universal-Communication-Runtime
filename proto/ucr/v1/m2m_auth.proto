@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/errors.proto";
+
+// OAuth2-compatible machine-to-machine token exchange over the existing canonical
+// Service Account + Service Credential owner. Client credential presentation belongs
+// to the concrete transport binding and MUST NOT be copied into this request body.
+message MachineTokenRequest {
+  TenantScope scope = 1;
+  OpaqueId client_id = 2;
+  repeated string requested_scopes = 3;
+  string audience = 4;
+  uint32 requested_ttl_seconds = 5;
+}
+
+message MachineAccessToken {
+  bytes access_token = 1;
+  string token_type = 2;
+  uint32 expires_in_seconds = 3;
+  repeated string granted_scopes = 4;
+  string issuer = 5;
+  string audience = 6;
+  string key_id = 7;
+}
+
+message MachineTokenResponse {
+  oneof result {
+    MachineAccessToken token = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Redaction-safe discovery metadata. Private signing material is never represented here.
+message MachineAuthMetadataRequest {}
+
+message MachineAuthMetadata {
+  string issuer = 1;
+  string token_endpoint = 2;
+  string jwks_uri = 3;
+  repeated string supported_grant_types = 4;
+  repeated string supported_scopes = 5;
+  repeated string supported_token_endpoint_auth_methods = 6;
+}
+
+message MachineAuthMetadataResponse {
+  oneof result {
+    MachineAuthMetadata metadata = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+service MachineAuthService {
+  rpc ExchangeClientCredentials(MachineTokenRequest) returns (MachineTokenResponse);
+  rpc GetMetadata(MachineAuthMetadataRequest) returns (MachineAuthMetadataResponse);
+}
