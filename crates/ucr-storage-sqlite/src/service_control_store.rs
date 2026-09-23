@@ -1,5 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use ucr_core::{DurableStoreError, ServiceAuditStore, ServiceQuotaConsumeError, ServiceQuotaStore};
+use ucr_core::{
+    DurableStoreError, ServiceAuditStore, ServiceQuotaConsumeError, ServiceQuotaStore,
+    ServiceResourceQuotaConsumeError,
+};
 use ucr_model::{
     AuditRecordId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
     ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditOutcome, ServiceAuditRecord,
@@ -140,6 +143,27 @@ ADD COLUMN max_aggregate_bandwidth_bps INTEGER
 CHECK(max_aggregate_bandwidth_bps IS NULL OR max_aggregate_bandwidth_bps > 0);
 ";
 
+const V42_OBJECTS_SQL: &str = "
+ALTER TABLE service_resource_quota_policies
+ADD COLUMN max_recording_minutes INTEGER
+CHECK(max_recording_minutes IS NULL OR max_recording_minutes > 0);
+
+CREATE TABLE service_recording_usage (
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+    namespace_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    used_recording_ms INTEGER NOT NULL CHECK(used_recording_ms >= 0),
+    PRIMARY KEY(tenant_id, namespace_present, namespace_id, principal_id),
+    FOREIGN KEY(tenant_id, namespace_present, namespace_id, principal_id)
+        REFERENCES service_resource_quota_policies(
+            tenant_id, namespace_present, namespace_id, principal_id
+        ) ON DELETE CASCADE,
+    CHECK((namespace_present = 0 AND namespace_id = '') OR
+          (namespace_present = 1 AND namespace_id <> ''))
+) WITHOUT ROWID;
+";
+
 const V37_OBJECTS_SQL: &str = "
 CREATE TABLE service_rate_limit_policies (
     tenant_id TEXT NOT NULL,
@@ -198,6 +222,12 @@ pub(super) fn create_v40_objects(transaction: &Transaction<'_>) -> Result<(), Du
 pub(super) fn create_v41_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
     transaction
         .execute_batch(V41_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn create_v42_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(V42_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))
 }
 
@@ -264,7 +294,38 @@ pub(super) fn verify_v41_objects(connection: &Connection) -> Result<(), DurableS
             ("max_aggregate_bandwidth_bps", "INTEGER", 0, 0),
         ],
     )?;
-    verify_resource_quota_rows(connection)
+    verify_resource_quota_rows_v41(connection)
+}
+
+pub(super) fn verify_v42_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_table_columns(
+        connection,
+        "service_resource_quota_policies",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("principal_id", "TEXT", 1, 4),
+            ("max_concurrent_participants", "INTEGER", 1, 0),
+            ("max_concurrent_conferences", "INTEGER", 0, 0),
+            ("max_concurrent_publishers", "INTEGER", 0, 0),
+            ("max_aggregate_bandwidth_bps", "INTEGER", 0, 0),
+            ("max_recording_minutes", "INTEGER", 0, 0),
+        ],
+    )?;
+    verify_table_columns(
+        connection,
+        "service_recording_usage",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("principal_id", "TEXT", 1, 4),
+            ("used_recording_ms", "INTEGER", 1, 0),
+        ],
+    )?;
+    verify_resource_quota_rows(connection)?;
+    verify_recording_usage_rows(connection)
 }
 
 pub(super) fn create_v37_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
@@ -611,20 +672,27 @@ impl ServiceQuotaStore for SqliteLocalStore {
             .map(i64::try_from)
             .transpose()
             .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let max_recording_minutes = policy
+            .max_recording_minutes
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
         let connection = self.lock_connection()?;
         connection
             .execute(
                 "INSERT INTO service_resource_quota_policies (
                     tenant_id, namespace_present, namespace_id, principal_id,
                     max_concurrent_participants, max_concurrent_conferences,
-                    max_concurrent_publishers, max_aggregate_bandwidth_bps
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                    max_concurrent_publishers, max_aggregate_bandwidth_bps,
+                    max_recording_minutes
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
                  ON CONFLICT(tenant_id, namespace_present, namespace_id, principal_id)
                  DO UPDATE SET
                     max_concurrent_participants=excluded.max_concurrent_participants,
                     max_concurrent_conferences=excluded.max_concurrent_conferences,
                     max_concurrent_publishers=excluded.max_concurrent_publishers,
-                    max_aggregate_bandwidth_bps=excluded.max_aggregate_bandwidth_bps",
+                    max_aggregate_bandwidth_bps=excluded.max_aggregate_bandwidth_bps,
+                    max_recording_minutes=excluded.max_recording_minutes",
                 params![
                     policy.subject.scope.tenant_id.as_opaque().as_str(),
                     namespace.present,
@@ -634,6 +702,7 @@ impl ServiceQuotaStore for SqliteLocalStore {
                     max_concurrent_conferences,
                     max_concurrent_publishers,
                     max_aggregate_bandwidth_bps,
+                    max_recording_minutes,
                 ],
             )
             .map_err(|error| map_sqlite_error(&error))?;
@@ -647,6 +716,123 @@ impl ServiceQuotaStore for SqliteLocalStore {
         validate_service_subject(subject)?;
         let connection = self.lock_connection()?;
         load_resource_quota_policy(&connection, subject)
+    }
+
+    fn consume_service_recording_duration(
+        &self,
+        subject: &ScopedPrincipal,
+        duration_ms: u64,
+    ) -> Result<(), ServiceResourceQuotaConsumeError> {
+        validate_service_subject(subject).map_err(ServiceResourceQuotaConsumeError::Store)?;
+        if duration_ms == 0 {
+            return Err(ServiceResourceQuotaConsumeError::InvalidUsage);
+        }
+        let duration_ms = i64::try_from(duration_ms)
+            .map_err(|_| ServiceResourceQuotaConsumeError::InvalidUsage)?;
+        let namespace = namespace_storage_key(&subject.scope);
+        let mut connection = self
+            .lock_connection()
+            .map_err(ServiceResourceQuotaConsumeError::Store)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| ServiceResourceQuotaConsumeError::Store(map_sqlite_error(&error)))?;
+        let limit_minutes = load_resource_quota_policy(&transaction, subject)
+            .map_err(ServiceResourceQuotaConsumeError::Store)?
+            .and_then(|policy| policy.max_recording_minutes)
+            .ok_or(ServiceResourceQuotaConsumeError::NotConfigured)?;
+        let limit_ms = i64::try_from(limit_minutes)
+            .ok()
+            .and_then(|minutes| minutes.checked_mul(60_000))
+            .ok_or(ServiceResourceQuotaConsumeError::Store(
+                DurableStoreError::Corrupt,
+            ))?;
+        let used = transaction
+            .query_row(
+                "SELECT used_recording_ms FROM service_recording_usage
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND principal_id=?4",
+                params![
+                    subject.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    subject.principal.principal_id.as_opaque().as_str(),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| ServiceResourceQuotaConsumeError::Store(map_sqlite_error(&error)))?
+            .unwrap_or(0);
+        let next = used
+            .checked_add(duration_ms)
+            .ok_or(ServiceResourceQuotaConsumeError::ResourceExhausted)?;
+        if next > limit_ms {
+            return Err(ServiceResourceQuotaConsumeError::ResourceExhausted);
+        }
+        transaction
+            .execute(
+                "INSERT INTO service_recording_usage (
+                    tenant_id, namespace_present, namespace_id, principal_id, used_recording_ms
+                 ) VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(tenant_id, namespace_present, namespace_id, principal_id)
+                 DO UPDATE SET used_recording_ms=excluded.used_recording_ms",
+                params![
+                    subject.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    subject.principal.principal_id.as_opaque().as_str(),
+                    next,
+                ],
+            )
+            .map_err(|error| ServiceResourceQuotaConsumeError::Store(map_sqlite_error(&error)))?;
+        transaction
+            .commit()
+            .map_err(|error| ServiceResourceQuotaConsumeError::Store(map_sqlite_error(&error)))
+    }
+
+    fn service_recording_usage_ms(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<u64, DurableStoreError> {
+        validate_service_subject(subject)?;
+        let namespace = namespace_storage_key(&subject.scope);
+        let connection = self.lock_connection()?;
+        let used = connection
+            .query_row(
+                "SELECT used_recording_ms FROM service_recording_usage
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND principal_id=?4",
+                params![
+                    subject.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    subject.principal.principal_id.as_opaque().as_str(),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(&error))?
+            .unwrap_or(0);
+        u64::try_from(used).map_err(|_| DurableStoreError::Corrupt)
+    }
+
+    fn reset_service_recording_usage(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<(), DurableStoreError> {
+        validate_service_subject(subject)?;
+        let namespace = namespace_storage_key(&subject.scope);
+        let connection = self.lock_connection()?;
+        connection
+            .execute(
+                "DELETE FROM service_recording_usage
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND principal_id=?4",
+                params![
+                    subject.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    subject.principal.principal_id.as_opaque().as_str(),
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(())
     }
 
     fn set_service_rate_limit_policy(
@@ -1023,7 +1209,8 @@ pub(crate) fn load_resource_quota_policy(
     connection
         .query_row(
             "SELECT max_concurrent_participants, max_concurrent_conferences,
-                    max_concurrent_publishers, max_aggregate_bandwidth_bps
+                    max_concurrent_publishers, max_aggregate_bandwidth_bps,
+                    max_recording_minutes
              FROM service_resource_quota_policies
              WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND principal_id=?4",
             params![
@@ -1038,6 +1225,7 @@ pub(crate) fn load_resource_quota_policy(
                     row.get::<_, Option<i64>>(1)?,
                     row.get::<_, Option<i64>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
                 ))
             },
         )
@@ -1049,6 +1237,7 @@ pub(crate) fn load_resource_quota_policy(
                 max_concurrent_conferences,
                 max_concurrent_publishers,
                 max_aggregate_bandwidth_bps,
+                max_recording_minutes,
             )| {
                 let policy = ServiceResourceQuotaPolicy {
                     subject: subject.clone(),
@@ -1063,6 +1252,10 @@ pub(crate) fn load_resource_quota_policy(
                         .transpose()
                         .map_err(|_| DurableStoreError::Corrupt)?,
                     max_aggregate_bandwidth_bps: max_aggregate_bandwidth_bps
+                        .map(u64::try_from)
+                        .transpose()
+                        .map_err(|_| DurableStoreError::Corrupt)?,
+                    max_recording_minutes: max_recording_minutes
                         .map(u64::try_from)
                         .transpose()
                         .map_err(|_| DurableStoreError::Corrupt)?,
@@ -1180,6 +1373,7 @@ fn verify_resource_quota_rows_v38(connection: &Connection) -> Result<(), Durable
             max_concurrent_conferences: None,
             max_concurrent_publishers: None,
             max_aggregate_bandwidth_bps: None,
+            max_recording_minutes: None,
         };
         validate_service_resource_quota_policy(&policy).map_err(|_| DurableStoreError::Corrupt)?;
     }
@@ -1226,6 +1420,7 @@ fn verify_resource_quota_rows_v39(connection: &Connection) -> Result<(), Durable
                 .map_err(|_| DurableStoreError::Corrupt)?,
             max_concurrent_publishers: None,
             max_aggregate_bandwidth_bps: None,
+            max_recording_minutes: None,
         };
         validate_service_resource_quota_policy(&policy).map_err(|_| DurableStoreError::Corrupt)?;
     }
@@ -1278,13 +1473,14 @@ fn verify_resource_quota_rows_v40(connection: &Connection) -> Result<(), Durable
                 .transpose()
                 .map_err(|_| DurableStoreError::Corrupt)?,
             max_aggregate_bandwidth_bps: None,
+            max_recording_minutes: None,
         };
         validate_service_resource_quota_policy(&policy).map_err(|_| DurableStoreError::Corrupt)?;
     }
     Ok(())
 }
 
-fn verify_resource_quota_rows(connection: &Connection) -> Result<(), DurableStoreError> {
+fn verify_resource_quota_rows_v41(connection: &Connection) -> Result<(), DurableStoreError> {
     let mut statement = connection
         .prepare(
             "SELECT tenant_id, namespace_present, namespace_id, principal_id,
@@ -1335,8 +1531,93 @@ fn verify_resource_quota_rows(connection: &Connection) -> Result<(), DurableStor
                 .map(u64::try_from)
                 .transpose()
                 .map_err(|_| DurableStoreError::Corrupt)?,
+            max_recording_minutes: None,
         };
         validate_service_resource_quota_policy(&policy).map_err(|_| DurableStoreError::Corrupt)?;
+    }
+    Ok(())
+}
+
+fn verify_resource_quota_rows(connection: &Connection) -> Result<(), DurableStoreError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT tenant_id, namespace_present, namespace_id, principal_id,
+                    max_concurrent_participants, max_concurrent_conferences,
+                    max_concurrent_publishers, max_aggregate_bandwidth_bps,
+                    max_recording_minutes
+             FROM service_resource_quota_policies",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<i64>>(8)?,
+            ))
+        })
+        .map_err(|error| map_sqlite_error(&error))?;
+    for row in rows {
+        let (
+            tenant,
+            present,
+            namespace,
+            principal,
+            max_concurrent_participants,
+            max_concurrent_conferences,
+            max_concurrent_publishers,
+            max_aggregate_bandwidth_bps,
+            max_recording_minutes,
+        ) = row.map_err(|error| map_sqlite_error(&error))?;
+        let subject = decode_service_subject(&tenant, present, &namespace, &principal)?;
+        let policy = ServiceResourceQuotaPolicy {
+            subject,
+            max_concurrent_participants: u64::try_from(max_concurrent_participants)
+                .map_err(|_| DurableStoreError::Corrupt)?,
+            max_concurrent_conferences: max_concurrent_conferences
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| DurableStoreError::Corrupt)?,
+            max_concurrent_publishers: max_concurrent_publishers
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| DurableStoreError::Corrupt)?,
+            max_aggregate_bandwidth_bps: max_aggregate_bandwidth_bps
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| DurableStoreError::Corrupt)?,
+            max_recording_minutes: max_recording_minutes
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| DurableStoreError::Corrupt)?,
+        };
+        validate_service_resource_quota_policy(&policy).map_err(|_| DurableStoreError::Corrupt)?;
+    }
+    Ok(())
+}
+
+fn verify_recording_usage_rows(connection: &Connection) -> Result<(), DurableStoreError> {
+    let invalid: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM service_recording_usage u
+             LEFT JOIN service_resource_quota_policies p
+               ON p.tenant_id=u.tenant_id
+              AND p.namespace_present=u.namespace_present
+              AND p.namespace_id=u.namespace_id
+              AND p.principal_id=u.principal_id
+             WHERE u.used_recording_ms < 0 OR p.principal_id IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if invalid != 0 {
+        return Err(DurableStoreError::Corrupt);
     }
     Ok(())
 }
@@ -1761,7 +2042,8 @@ mod tests {
     use rusqlite::Connection;
     use ucr_core::{
         PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaConsumeError,
-        ServiceQuotaStore, StorageProvider, issue_service_credential,
+        ServiceQuotaStore, ServiceResourceQuotaConsumeError, StorageProvider,
+        issue_service_credential,
     };
     use ucr_model::{
         AuditRecordId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
@@ -1774,8 +2056,8 @@ mod tests {
     use super::SqliteLocalStore;
     use crate::{
         SQLITE_SCHEMA_V13, SQLITE_SCHEMA_V16, SQLITE_SCHEMA_V36, SQLITE_SCHEMA_V37,
-        SQLITE_SCHEMA_V38, SQLITE_SCHEMA_V39, SQLITE_SCHEMA_V40, SQLITE_SCHEMA_VERSION,
-        UCR_SQLITE_APPLICATION_ID,
+        SQLITE_SCHEMA_V38, SQLITE_SCHEMA_V39, SQLITE_SCHEMA_V40, SQLITE_SCHEMA_V41,
+        SQLITE_SCHEMA_VERSION, UCR_SQLITE_APPLICATION_ID,
     };
 
     static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(80_000);
@@ -1908,6 +2190,7 @@ mod tests {
             max_concurrent_conferences: Some(3),
             max_concurrent_publishers: Some(4),
             max_aggregate_bandwidth_bps: Some(8_000_000),
+            max_recording_minutes: Some(120),
         };
         {
             let store = SqliteLocalStore::open(db.path()).expect("open");
@@ -1927,6 +2210,69 @@ mod tests {
                 .service_resource_quota_policy(&subject)
                 .expect("read after restart"),
             Some(policy)
+        );
+    }
+
+    #[test]
+    fn recording_minute_usage_survives_restart_and_policy_updates_do_not_reset_it() {
+        let db = TestDb::new();
+        let subject = service("service-recording-usage-sqlite");
+        let policy = ServiceResourceQuotaPolicy {
+            subject: subject.clone(),
+            max_concurrent_participants: 100,
+            max_concurrent_conferences: None,
+            max_concurrent_publishers: None,
+            max_aggregate_bandwidth_bps: None,
+            max_recording_minutes: Some(2),
+        };
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open");
+            store
+                .set_service_resource_quota_policy(&policy)
+                .expect("set recording quota");
+            store
+                .consume_service_recording_duration(&subject, 60_000)
+                .expect("consume first minute");
+            assert_eq!(
+                store.service_recording_usage_ms(&subject).expect("usage"),
+                60_000
+            );
+            store
+                .set_service_resource_quota_policy(&policy)
+                .expect("identical policy update");
+            assert_eq!(
+                store.service_recording_usage_ms(&subject).expect("usage"),
+                60_000,
+                "policy update must not reset durable usage"
+            );
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        assert_eq!(
+            reopened
+                .service_recording_usage_ms(&subject)
+                .expect("usage after restart"),
+            60_000
+        );
+        reopened
+            .consume_service_recording_duration(&subject, 60_000)
+            .expect("consume second minute");
+        assert_eq!(
+            reopened.consume_service_recording_duration(&subject, 1),
+            Err(ServiceResourceQuotaConsumeError::ResourceExhausted)
+        );
+        reopened
+            .reset_service_recording_usage(&subject)
+            .expect("explicit reset");
+        assert_eq!(
+            reopened
+                .service_recording_usage_ms(&subject)
+                .expect("usage after reset"),
+            0
+        );
+        assert_eq!(
+            reopened.consume_service_recording_duration(&subject, 0),
+            Err(ServiceResourceQuotaConsumeError::InvalidUsage)
         );
     }
 
@@ -2036,7 +2382,8 @@ mod tests {
             .expect("seed legacy v36 usage");
         connection
             .execute_batch(
-                "DROP TABLE service_resource_quota_policies;
+                "DROP TABLE service_recording_usage;
+                 DROP TABLE service_resource_quota_policies;
                  DROP TABLE service_rate_limit_usage;
                  DROP TABLE service_rate_limit_policies;",
             )
@@ -2083,7 +2430,10 @@ mod tests {
 
         let connection = Connection::open(db.path()).expect("open raw sqlite");
         connection
-            .execute_batch("DROP TABLE service_resource_quota_policies;")
+            .execute_batch(
+                "DROP TABLE service_recording_usage;
+                 DROP TABLE service_resource_quota_policies;",
+            )
             .expect("restore exact v37 shape");
         connection
             .pragma_update(None, "user_version", SQLITE_SCHEMA_V37)
@@ -2127,7 +2477,10 @@ mod tests {
 
         let connection = Connection::open(db.path()).expect("open raw sqlite");
         connection
-            .execute_batch("DROP TABLE service_resource_quota_policies;")
+            .execute_batch(
+                "DROP TABLE service_recording_usage;
+                 DROP TABLE service_resource_quota_policies;",
+            )
             .expect("drop current resource quota table");
         connection
             .execute_batch(super::V38_OBJECTS_SQL)
@@ -2165,6 +2518,7 @@ mod tests {
                 max_concurrent_conferences: None,
                 max_concurrent_publishers: None,
                 max_aggregate_bandwidth_bps: None,
+                max_recording_minutes: None,
             })
         );
     }
@@ -2179,7 +2533,10 @@ mod tests {
 
         let connection = Connection::open(db.path()).expect("open raw sqlite");
         connection
-            .execute_batch("DROP TABLE service_resource_quota_policies;")
+            .execute_batch(
+                "DROP TABLE service_recording_usage;
+                 DROP TABLE service_resource_quota_policies;",
+            )
             .expect("drop current resource quota table");
         connection
             .execute_batch(super::V38_OBJECTS_SQL)
@@ -2221,6 +2578,7 @@ mod tests {
                 max_concurrent_conferences: Some(2),
                 max_concurrent_publishers: None,
                 max_aggregate_bandwidth_bps: None,
+                max_recording_minutes: None,
             })
         );
     }
@@ -2235,7 +2593,10 @@ mod tests {
 
         let connection = Connection::open(db.path()).expect("open raw sqlite");
         connection
-            .execute_batch("DROP TABLE service_resource_quota_policies;")
+            .execute_batch(
+                "DROP TABLE service_recording_usage;
+                 DROP TABLE service_resource_quota_policies;",
+            )
             .expect("drop current resource quota table");
         connection
             .execute_batch(super::V38_OBJECTS_SQL)
@@ -2282,7 +2643,83 @@ mod tests {
                 max_concurrent_conferences: Some(2),
                 max_concurrent_publishers: Some(3),
                 max_aggregate_bandwidth_bps: None,
+                max_recording_minutes: None,
             })
+        );
+    }
+
+    #[test]
+    fn v41_to_v42_migration_preserves_resource_quotas_and_adds_recording_usage() {
+        let db = TestDb::new();
+        let subject = service("service-resource-v41-migration");
+        {
+            let _store = SqliteLocalStore::open(db.path()).expect("initialize current");
+        }
+
+        let connection = Connection::open(db.path()).expect("open raw sqlite");
+        connection
+            .execute_batch(
+                "DROP TABLE service_recording_usage;
+                 DROP TABLE service_resource_quota_policies;",
+            )
+            .expect("drop current v42 resource quota objects");
+        connection
+            .execute_batch(super::V38_OBJECTS_SQL)
+            .expect("restore v38 resource quota table");
+        connection
+            .execute_batch(super::V39_OBJECTS_SQL)
+            .expect("restore v39 resource quota shape");
+        connection
+            .execute_batch(super::V40_OBJECTS_SQL)
+            .expect("restore v40 resource quota shape");
+        connection
+            .execute_batch(super::V41_OBJECTS_SQL)
+            .expect("restore exact v41 resource quota shape");
+        let namespace = super::namespace_storage_key(&subject.scope);
+        connection
+            .execute(
+                "INSERT INTO service_resource_quota_policies (
+                    tenant_id, namespace_present, namespace_id, principal_id,
+                    max_concurrent_participants, max_concurrent_conferences,
+                    max_concurrent_publishers, max_aggregate_bandwidth_bps
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                rusqlite::params![
+                    subject.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    subject.principal.principal_id.as_opaque().as_str(),
+                    7_i64,
+                    2_i64,
+                    3_i64,
+                    8_000_000_i64,
+                ],
+            )
+            .expect("seed v41 resource quotas");
+        connection
+            .pragma_update(None, "user_version", SQLITE_SCHEMA_V41)
+            .expect("set v41 version");
+        drop(connection);
+
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v41 to v42");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        assert_eq!(
+            migrated
+                .service_resource_quota_policy(&subject)
+                .expect("read migrated resource quota"),
+            Some(ServiceResourceQuotaPolicy {
+                subject: subject.clone(),
+                max_concurrent_participants: 7,
+                max_concurrent_conferences: Some(2),
+                max_concurrent_publishers: Some(3),
+                max_aggregate_bandwidth_bps: Some(8_000_000),
+                max_recording_minutes: None,
+            })
+        );
+        assert_eq!(
+            migrated
+                .service_recording_usage_ms(&subject)
+                .expect("new recording usage"),
+            0
         );
     }
 

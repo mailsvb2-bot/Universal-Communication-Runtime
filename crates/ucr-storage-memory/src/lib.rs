@@ -22,8 +22,8 @@ use ucr_core::{
     PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, RecordingStore,
     RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
     ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
-    ServiceQuotaConsumeError, ServiceQuotaStore, StorageHealth, StorageProvider, SyncStore,
-    TrustedSigningKeyStore, UniversalConferenceStore,
+    ServiceQuotaConsumeError, ServiceQuotaStore, ServiceResourceQuotaConsumeError, StorageHealth,
+    StorageProvider, SyncStore, TrustedSigningKeyStore, UniversalConferenceStore,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -208,6 +208,7 @@ struct MemoryState {
     service_credentials: HashMap<ServiceCredentialRef, ServiceCredentialRecord>,
     service_quota_policies: HashMap<ServicePrincipalKey, ServiceQuotaPolicy>,
     service_resource_quota_policies: HashMap<ServicePrincipalKey, ServiceResourceQuotaPolicy>,
+    service_recording_usage_ms: HashMap<ServicePrincipalKey, u64>,
     service_rate_limit_policies: HashMap<ServiceRateLimitKey, ServiceRateLimitPolicy>,
     service_rate_limit_usage: HashMap<ServiceRateLimitKey, MemoryQuotaUsage>,
     service_audit_records: Vec<(ServiceAuditRecord, [u8; 32])>,
@@ -393,6 +394,71 @@ impl ServiceQuotaStore for MemoryLocalStore {
         let key = service_principal_key(subject);
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         Ok(state.service_resource_quota_policies.get(&key).cloned())
+    }
+
+    fn consume_service_recording_duration(
+        &self,
+        subject: &ScopedPrincipal,
+        duration_ms: u64,
+    ) -> Result<(), ServiceResourceQuotaConsumeError> {
+        validate_service_subject(subject).map_err(ServiceResourceQuotaConsumeError::Store)?;
+        if duration_ms == 0 {
+            return Err(ucr_core::ServiceResourceQuotaConsumeError::InvalidUsage);
+        }
+        let key = service_principal_key(subject);
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ServiceResourceQuotaConsumeError::Store(DurableStoreError::Internal))?;
+        let limit_minutes = state
+            .service_resource_quota_policies
+            .get(&key)
+            .and_then(|policy| policy.max_recording_minutes)
+            .ok_or(ServiceResourceQuotaConsumeError::NotConfigured)?;
+        let limit_ms =
+            limit_minutes
+                .checked_mul(60_000)
+                .ok_or(ServiceResourceQuotaConsumeError::Store(
+                    DurableStoreError::Corrupt,
+                ))?;
+        let used = state
+            .service_recording_usage_ms
+            .get(&key)
+            .copied()
+            .unwrap_or(0);
+        let next = used
+            .checked_add(duration_ms)
+            .ok_or(ServiceResourceQuotaConsumeError::ResourceExhausted)?;
+        if next > limit_ms {
+            return Err(ucr_core::ServiceResourceQuotaConsumeError::ResourceExhausted);
+        }
+        state.service_recording_usage_ms.insert(key, next);
+        Ok(())
+    }
+
+    fn service_recording_usage_ms(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<u64, DurableStoreError> {
+        validate_service_subject(subject)?;
+        let key = service_principal_key(subject);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .service_recording_usage_ms
+            .get(&key)
+            .copied()
+            .unwrap_or(0))
+    }
+
+    fn reset_service_recording_usage(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<(), DurableStoreError> {
+        validate_service_subject(subject)?;
+        let key = service_principal_key(subject);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        state.service_recording_usage_ms.remove(&key);
+        Ok(())
     }
 
     fn set_service_rate_limit_policy(
@@ -10032,6 +10098,7 @@ mod service_resource_participant_quota_tests {
                 max_concurrent_conferences: None,
                 max_concurrent_publishers: None,
                 max_aggregate_bandwidth_bps: None,
+                max_recording_minutes: None,
             })
             .expect("set quota");
 
@@ -10092,6 +10159,7 @@ mod service_resource_participant_quota_tests {
                 max_concurrent_conferences: Some(1),
                 max_concurrent_publishers: None,
                 max_aggregate_bandwidth_bps: None,
+                max_recording_minutes: None,
             })
             .expect("set conference quota");
 
@@ -10161,5 +10229,80 @@ mod service_resource_participant_quota_tests {
                 true,
             )
             .expect("released conference slot can be reused");
+    }
+    #[test]
+    fn recording_minute_quota_is_exact_integration_scoped_and_reset_is_explicit() {
+        let store = MemoryLocalStore::default();
+        let scope = scope();
+        let integration_a = integration("integration-memory-recording-a");
+        let integration_b = integration("integration-memory-recording-b");
+        let subject_a = subject(&scope, &integration_a);
+        let subject_b = subject(&scope, &integration_b);
+        for subject in [&subject_a, &subject_b] {
+            store
+                .set_service_resource_quota_policy(&ServiceResourceQuotaPolicy {
+                    subject: subject.clone(),
+                    max_concurrent_participants: 100,
+                    max_concurrent_conferences: None,
+                    max_concurrent_publishers: None,
+                    max_aggregate_bandwidth_bps: None,
+                    max_recording_minutes: Some(2),
+                })
+                .expect("set recording quota");
+        }
+
+        store
+            .consume_service_recording_duration(&subject_a, 60_000)
+            .expect("first minute");
+        assert_eq!(
+            store.service_recording_usage_ms(&subject_a).expect("usage"),
+            60_000
+        );
+
+        store
+            .set_service_resource_quota_policy(&ServiceResourceQuotaPolicy {
+                subject: subject_a.clone(),
+                max_concurrent_participants: 100,
+                max_concurrent_conferences: None,
+                max_concurrent_publishers: None,
+                max_aggregate_bandwidth_bps: None,
+                max_recording_minutes: Some(2),
+            })
+            .expect("policy update must not reset usage");
+        assert_eq!(
+            store.service_recording_usage_ms(&subject_a).expect("usage"),
+            60_000
+        );
+
+        store
+            .consume_service_recording_duration(&subject_a, 60_000)
+            .expect("second minute");
+        assert_eq!(
+            store.consume_service_recording_duration(&subject_a, 1),
+            Err(ucr_core::ServiceResourceQuotaConsumeError::ResourceExhausted)
+        );
+        assert_eq!(
+            store
+                .service_recording_usage_ms(&subject_b)
+                .expect("other usage"),
+            0
+        );
+        store
+            .consume_service_recording_duration(&subject_b, 1)
+            .expect("other integration remains isolated");
+
+        store
+            .reset_service_recording_usage(&subject_a)
+            .expect("explicit reset");
+        assert_eq!(
+            store
+                .service_recording_usage_ms(&subject_a)
+                .expect("reset usage"),
+            0
+        );
+        assert_eq!(
+            store.consume_service_recording_duration(&subject_a, 0),
+            Err(ucr_core::ServiceResourceQuotaConsumeError::InvalidUsage)
+        );
     }
 }

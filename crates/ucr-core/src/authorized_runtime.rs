@@ -276,6 +276,36 @@ where
             .set_service_resource_quota_policy(policy)
             .map_err(AuthorizedMutationError::Store)
     }
+
+    /// Reads durable recording usage only after quota-read authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn service_recording_usage_ms(
+        &self,
+        subject: &ScopedPrincipal,
+        target: &ScopedPrincipal,
+    ) -> Result<u64, AuthorizedMutationError> {
+        self.require(subject, &target.scope, SERVICE_QUOTA_READ_PERMISSION)?;
+        self.store
+            .service_recording_usage_ms(target)
+            .map_err(AuthorizedMutationError::Store)
+    }
+
+    /// Explicitly resets durable recording usage only after quota-write authorization.
+    ///
+    /// # Errors
+    /// Returns authorization or durable-store failures.
+    pub fn reset_service_recording_usage(
+        &self,
+        subject: &ScopedPrincipal,
+        target: &ScopedPrincipal,
+    ) -> Result<(), AuthorizedMutationError> {
+        self.require(subject, &target.scope, SERVICE_QUOTA_WRITE_PERMISSION)?;
+        self.store
+            .reset_service_recording_usage(target)
+            .map_err(AuthorizedMutationError::Store)
+    }
 }
 
 impl<A, S> AuthorizedDurableRuntime<'_, A, S>

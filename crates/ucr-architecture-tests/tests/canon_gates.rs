@@ -1858,6 +1858,8 @@ const AUTHORIZED_DURABLE_METHODS: &[&str] = &[
     "set_service_quota_policy",
     "service_resource_quota_policy",
     "set_service_resource_quota_policy",
+    "service_recording_usage_ms",
+    "reset_service_recording_usage",
     "service_audit_records",
     "service_audit_records_for_operation",
     "register_device",
