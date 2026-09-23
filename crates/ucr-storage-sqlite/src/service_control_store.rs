@@ -2382,7 +2382,8 @@ mod tests {
             .expect("seed legacy v36 usage");
         connection
             .execute_batch(
-                "DROP TABLE service_recording_usage;
+                "DROP TABLE runtime_worker_leases;
+                 DROP TABLE service_recording_usage;
                  DROP TABLE service_resource_quota_policies;
                  DROP TABLE service_rate_limit_usage;
                  DROP TABLE service_rate_limit_policies;",
@@ -2431,7 +2432,8 @@ mod tests {
         let connection = Connection::open(db.path()).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE service_recording_usage;
+                "DROP TABLE runtime_worker_leases;
+                 DROP TABLE service_recording_usage;
                  DROP TABLE service_resource_quota_policies;",
             )
             .expect("restore exact v37 shape");
@@ -2478,7 +2480,8 @@ mod tests {
         let connection = Connection::open(db.path()).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE service_recording_usage;
+                "DROP TABLE runtime_worker_leases;
+                 DROP TABLE service_recording_usage;
                  DROP TABLE service_resource_quota_policies;",
             )
             .expect("drop current resource quota table");
@@ -2534,7 +2537,8 @@ mod tests {
         let connection = Connection::open(db.path()).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE service_recording_usage;
+                "DROP TABLE runtime_worker_leases;
+                 DROP TABLE service_recording_usage;
                  DROP TABLE service_resource_quota_policies;",
             )
             .expect("drop current resource quota table");
@@ -2594,7 +2598,8 @@ mod tests {
         let connection = Connection::open(db.path()).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE service_recording_usage;
+                "DROP TABLE runtime_worker_leases;
+                 DROP TABLE service_recording_usage;
                  DROP TABLE service_resource_quota_policies;",
             )
             .expect("drop current resource quota table");
@@ -2659,7 +2664,8 @@ mod tests {
         let connection = Connection::open(db.path()).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE service_recording_usage;
+                "DROP TABLE runtime_worker_leases;
+                 DROP TABLE service_recording_usage;
                  DROP TABLE service_resource_quota_policies;",
             )
             .expect("drop current v42 resource quota objects");
