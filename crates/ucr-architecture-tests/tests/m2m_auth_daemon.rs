@@ -24,6 +24,10 @@ fn production_runtime_exposes_machine_auth_only_on_loopback_with_stable_key_load
     assert!(main.contains("UCR_MACHINE_TOKEN_SIGNING_KEY_FILE"));
     assert!(main.contains("Zeroizing::new"));
     assert!(main.contains("read_machine_token_signing_key"));
+    assert!(main.contains("fs::symlink_metadata(path)"));
+    assert!(main.contains("metadata.file_type().is_symlink()"));
+    assert!(main.contains("metadata.len() > 256"));
+    assert!(main.contains("metadata.permissions().mode() & 0o077"));
     assert!(!main.contains("UCR_MACHINE_TOKEN_SIGNING_KEY_HEX"));
 
     assert!(crypto.contains("pub fn from_seed"));
