@@ -16,6 +16,7 @@ ucr-core = { path = "../ucr-core" }
 ucr-crypto = { path = "../ucr-crypto" }
 ucr-group-mls = { path = "../ucr-group-mls" }
 ucr-media-e2ee = { path = "../ucr-media-e2ee" }
+ucr-machine-auth = { path = "../ucr-machine-auth" }
 ucr-mesh = { path = "../ucr-mesh" }
 ucr-model = { path = "../ucr-model" }
 ucr-offline-groups = { path = "../ucr-offline-groups" }
