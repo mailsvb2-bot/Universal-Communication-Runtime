@@ -10,8 +10,8 @@ use ucr_crypto::{
     issue_machine_access_token,
 };
 use ucr_model::{
-    AuthorizationRequest, KeyId, OpaqueId, PrincipalKind, ScopedPrincipal, ServiceCredentialId,
-    TenantScope,
+    AuthorizationRequest, KeyId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
+    ScopedPrincipal, ServiceCredentialId, TenantScope,
 };
 use ucr_protocol::{
     CONFERENCE_ATTENDANCE_READ_PERMISSION, CONFERENCE_CREATE_PERMISSION,
@@ -36,7 +36,7 @@ pub const SUPPORTED_MACHINE_SCOPES: [&str; 6] = [
     MACHINE_SCOPE_RECORDING_MANAGE,
 ];
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct MachineAuthExchangeRequest<'a> {
     pub scope: &'a TenantScope,
     pub credential_id: &'a ServiceCredentialId,
@@ -147,8 +147,15 @@ where
             request.scope,
         )?;
         let subject = admission.subject().clone();
+        let claimed_subject = ScopedPrincipal {
+            scope: subject.scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(request.client_id.clone()),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
         admission.authorize(&AuthorizationRequest {
-            subject: subject.clone(),
+            subject: claimed_subject,
             permission: MACHINE_TOKEN_ISSUE_PERMISSION.to_owned(),
             resource_scope: request.scope.clone(),
         })?;
@@ -268,13 +275,13 @@ const fn map_machine_token_error(error: MachineTokenError) -> CanonicalError {
 #[cfg(test)]
 mod tests {
     use ucr_core::{
-        PermissionGrantStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaClockError,
-        ServiceQuotaStore, issue_service_credential,
+        PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock,
+        ServiceQuotaClockError, ServiceQuotaStore, issue_service_credential,
     };
     use ucr_crypto::{MachineTokenPublicKey, verify_machine_access_token};
     use ucr_model::{
         NamespaceId, PermissionGrant, PermissionScope, PrincipalId, PrincipalRef,
-        ServiceQuotaPolicy, ServiceRequestRateClass, TenantId,
+        ServiceAuditOutcome, ServiceQuotaPolicy, ServiceRequestRateClass, TenantId,
     };
     use ucr_protocol::service_request_rate_class;
     use ucr_storage_memory::MemoryLocalStore;
@@ -497,5 +504,17 @@ mod tests {
             })
             .expect_err("client ID mismatch denied");
         assert_eq!(error.code, CanonicalErrorCode::PermissionDenied);
+
+        let audit = store
+            .service_audit_records(&scope(), 8)
+            .expect("read machine auth audit");
+        assert!(audit.iter().any(|record| {
+            record.permission == MACHINE_TOKEN_ISSUE_PERMISSION
+                && record.outcome == ServiceAuditOutcome::PermissionDenied
+        }));
+        assert!(!audit.iter().any(|record| {
+            record.permission == MACHINE_TOKEN_ISSUE_PERMISSION
+                && record.outcome == ServiceAuditOutcome::Authorized
+        }));
     }
 }
