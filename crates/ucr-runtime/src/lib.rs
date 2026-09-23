@@ -18,17 +18,14 @@ use ucr_api_grpc::{
     UniversalConferenceRuntimeCapabilities, call_service_server, conference_service_server,
     device_service_server, event_service_server, group_service_server, integration_service_server,
     machine_auth_service_server, operator_runtime_service_server, pb, realtime_service_server,
-    store_forward_service_server,
-    sync_service_server, universal_conference_service_server,
+    store_forward_service_server, sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
     DurableStoreError, EventWebhookDispatcher, StorageHealth, StorageProvider,
     SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome, generate_opaque_id,
 };
-use ucr_crypto::{
-    MAX_MACHINE_TOKEN_TTL_SECONDS, MachineTokenPolicy, MachineTokenSigningKey,
-};
+use ucr_crypto::{MAX_MACHINE_TOKEN_TTL_SECONDS, MachineTokenPolicy, MachineTokenSigningKey};
 use ucr_model::{
     EventSubscriptionId, IceTransportPolicy, KeyId, NamespaceId, OpaqueId, SfuForwardEnvelope,
     TenantId, TenantScope,
@@ -94,7 +91,9 @@ impl MachineAuthRuntimeConfig {
         validate_public_https_url(&token_endpoint, "machine token endpoint")?;
         validate_public_https_url(&jwks_uri, "machine token JWKS URI")?;
         if audience.is_empty() || audience.chars().any(char::is_whitespace) {
-            return Err("machine token audience must be a non-empty token without whitespace".to_owned());
+            return Err(
+                "machine token audience must be a non-empty token without whitespace".to_owned(),
+            );
         }
         if max_ttl_seconds == 0 || max_ttl_seconds > MAX_MACHINE_TOKEN_TTL_SECONDS {
             return Err(format!(
