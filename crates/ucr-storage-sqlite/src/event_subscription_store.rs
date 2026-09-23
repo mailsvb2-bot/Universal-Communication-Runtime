@@ -928,7 +928,6 @@ fn persist_retry_rejection(
     Ok(())
 }
 
-
 const MAX_WEBHOOK_DISPATCH_TARGET_PAGE: usize = 256;
 
 type WebhookDispatchTarget = (TenantScope, EventSubscriptionId);
