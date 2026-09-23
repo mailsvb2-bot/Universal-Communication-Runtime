@@ -150,7 +150,7 @@ fn read_machine_token_signing_key(path: &str) -> Result<[u8; 32], String> {
     let mut bytes = Zeroizing::new(
         fs::read(path).map_err(|error| format!("read machine token signing key file: {error}"))?,
     );
-    while bytes.last().is_some_and(|byte| byte.is_ascii_whitespace()) {
+    while bytes.last().is_some_and(u8::is_ascii_whitespace) {
         bytes.pop();
     }
     let encoded = std::str::from_utf8(bytes.as_slice())
