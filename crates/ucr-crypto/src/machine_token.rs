@@ -628,12 +628,14 @@ mod tests {
         let token = issue_machine_access_token(
             &signing_key,
             &policy(),
-            &service_subject(),
-            &opaque("token-a"),
-            &scopes,
-            &scopes,
-            1_000,
-            Some(60),
+            AccessTokenIssueRequest {
+                subject: &service_subject(),
+                token_id: &opaque("token-a"),
+                requested_scopes: &scopes,
+                allowed_scopes: &scopes,
+                issued_at_unix_s: 1_000,
+                requested_ttl_seconds: Some(60),
+            },
         )
         .expect("issue");
         let token_debug = format!("{token:?}");
