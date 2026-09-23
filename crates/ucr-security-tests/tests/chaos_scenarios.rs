@@ -562,11 +562,14 @@ fn webhook_dispatcher_uses_durable_retry_and_dead_letter_state() {
         max_attempts: 2,
         start: EventSubscriptionStart::Beginning,
     };
+    let service = service_subject(&sync.scope);
     store
-        .persist_event_subscription(&service_subject(&sync.scope), &subscription)
+        .persist_event_subscription(&service, &subscription)
         .expect("persist webhook subscription");
+    let mut webhook_event = event(&sync, "chaos-webhook-event", b"webhook");
+    webhook_event.actor.on_behalf_of = Some(service.principal.principal_id.clone());
     store
-        .append_event(&event(&sync, "chaos-webhook-event", b"webhook"))
+        .append_event(&webhook_event)
         .expect("append webhook Event");
     let clock = TestClock::new(60_000);
     let sink = RetryableWebhookSink;
