@@ -27,7 +27,7 @@ fn production_runtime_exposes_machine_auth_only_on_loopback_with_stable_key_load
     assert!(!main.contains("UCR_MACHINE_TOKEN_SIGNING_KEY_HEX"));
 
     assert!(crypto.contains("pub fn from_seed"));
-    assert!(crypto.contains("seed.fill(0)"));
+    assert!(crypto.contains("seed.zeroize()"));
     assert!(crypto.contains(".field("key", &"<secret>")"));
 }
 
