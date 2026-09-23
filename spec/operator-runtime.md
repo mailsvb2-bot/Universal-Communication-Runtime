@@ -23,13 +23,16 @@ join tokens, webhook secrets, TURN credentials, media keys, message plaintext or
   path is running;
 - TURN: `not_configured` when absent and `unverified` when deployment configuration is valid but
   no independent network probe has proved relay reachability;
-- webhook worker: `not_configured` until a continuous delivery worker is actually attached to the
-  daemon; the existing one-shot dispatcher is not reported as a running worker;
+- webhook worker: derived from the durable SQLite worker lease. An active unexpired lease is
+  `healthy`; an expired lease is `unavailable`; absence is `not_configured`. The holder ID is
+  never exposed. The existing one-shot dispatcher does not acquire the worker lease and therefore is
+  never reported as a running continuous worker;
 - recorder: `not_configured` until a recording provider is attached;
 - capacity: current authenticated realtime session count against the live WebRTC session ceiling.
 
 The contract must fail closed rather than promote configuration into stronger health evidence. In
-particular, valid TURN configuration is not equivalent to TURN network health.
+particular, valid TURN configuration is not equivalent to TURN network health. Webhook worker health
+is also not inferred from process configuration: only a currently unexpired durable lease is healthy.
 
 ## Capacity
 

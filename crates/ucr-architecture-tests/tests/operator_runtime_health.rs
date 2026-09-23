@@ -41,7 +41,7 @@ fn operator_health_is_separate_from_integration_api() {
 }
 
 #[test]
-fn operator_health_does_not_claim_missing_workers_or_providers() {
+fn operator_health_uses_durable_webhook_lease_and_does_not_claim_missing_providers() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -49,7 +49,11 @@ fn operator_health_does_not_claim_missing_workers_or_providers() {
     let runtime =
         fs::read_to_string(workspace.join("crates/ucr-runtime/src/lib.rs")).expect("runtime");
 
-    assert!(runtime.contains("webhook delivery worker is not running"));
+    assert!(runtime.contains("webhook delivery worker durable lease is active"));
+    assert!(runtime.contains("webhook delivery worker durable lease has expired"));
+    assert!(runtime.contains("webhook delivery worker has no durable lease"));
+    assert!(runtime.contains("runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND)"));
+    assert!(!runtime.contains("lease.holder_id"));
     assert!(runtime.contains("recording provider is not configured"));
     assert!(runtime.contains("TURN configured but network reachability is unverified"));
 }

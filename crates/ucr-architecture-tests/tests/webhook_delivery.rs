@@ -20,6 +20,7 @@ fn webhook_adapter_preserves_single_event_owner_and_fails_closed() {
     let runtime = read("crates/ucr-runtime/src/main.rs");
     let runtime_library = read("crates/ucr-runtime/src/lib.rs");
     let sqlite = read("crates/ucr-storage-sqlite/src/event_subscription_store.rs");
+    let worker_store = read("crates/ucr-storage-sqlite/src/runtime_worker_store.rs");
     let spec = read("spec/event-api.md");
 
     assert!(workspace.contains("\"crates/ucr-webhook\""));
@@ -49,9 +50,16 @@ fn webhook_adapter_preserves_single_event_owner_and_fails_closed() {
     assert!(runtime_library.contains("service_webhook_dispatch_targets"));
     assert!(runtime_library.contains("EventWebhookDispatcher::new"));
     assert!(runtime_library.contains("run_webhook_worker"));
+    assert!(runtime_library.contains("try_acquire_runtime_worker_lease"));
+    assert!(runtime_library.contains("renew_webhook_worker_lease"));
+    assert!(runtime_library.contains("release_runtime_worker_lease"));
+    assert!(worker_store.contains("CREATE TABLE runtime_worker_leases"));
+    assert!(worker_store.contains("lease_expires_unix_ms <= excluded.heartbeat_unix_ms"));
+    assert!(worker_store.contains("lease_expires_unix_ms > ?3"));
     assert!(sqlite.contains("owner_principal_kind = 'service_account'"));
     assert!(sqlite.contains("MAX_WEBHOOK_DISPATCH_TARGET_PAGE"));
     assert!(spec.contains("dispatch-webhook-once"));
     assert!(spec.contains("run-webhook-worker"));
+    assert!(spec.contains("durable single-holder lease"));
     assert!(!spec.contains("Event webhook networking remains unimplemented"));
 }
