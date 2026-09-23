@@ -23,6 +23,8 @@ fn webhook_adapter_preserves_single_event_owner_and_fails_closed() {
     assert!(workspace.contains("\"crates/ucr-webhook\""));
     assert!(core.contains("pub trait EventWebhookSink"));
     assert!(core.contains("pub struct EventWebhookDispatcher"));
+    assert!(core.contains(".event_subscription_owner(scope, subscription_id)?"));
+    assert!(core.contains("owner.principal.kind != PrincipalKind::ServiceAccount"));
     assert!(adapter.contains("impl<R, X> EventWebhookSink for HardenedWebhookSink<R, X>"));
     assert!(adapter.contains("url.scheme() != \"https\""));
     assert!(adapter.contains("!url.username().is_empty()"));

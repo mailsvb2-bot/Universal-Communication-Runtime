@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ucr_model::{
     EventConsumerCursor, EventDeadLetter, EventDeliveryFailureKind, EventEnvelope, EventPollResult,
-    EventSubscription, EventSubscriptionId, EventSubscriptionMode, OpaqueId,
+    EventSubscription, EventSubscriptionId, EventSubscriptionMode, OpaqueId, PrincipalKind,
     ServiceAuditOperationRef, ServiceCredentialId, TenantScope,
 };
 use ucr_protocol::{
@@ -486,6 +486,13 @@ where
             .store
             .event_subscription(scope, subscription_id)?
             .ok_or(DurableStoreError::InvalidRecord)?;
+        let owner = self
+            .store
+            .event_subscription_owner(scope, subscription_id)?
+            .ok_or(DurableStoreError::PermissionDenied)?;
+        if owner.scope != *scope || owner.principal.kind != PrincipalKind::ServiceAccount {
+            return Err(DurableStoreError::PermissionDenied);
+        }
         if subscription.mode != EventSubscriptionMode::Webhook || subscription.max_in_flight != 1 {
             return Err(DurableStoreError::InvalidRecord);
         }
