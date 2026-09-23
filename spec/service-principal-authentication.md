@@ -26,4 +26,4 @@ SQLite schema v13 persists this lifecycle and migrates additively from v12 witho
 
 ## Explicit non-goals
 
-This foundation does not define public HTTP/gRPC bearer syntax, browser sessions, human login, OAuth/OIDC federation, Device authentication, or remote peer/session authentication. The separate `service-principal-control.md` contract composes quota and admission audit after this credential authentication without changing credential semantics.
+This foundation does not itself define browser sessions, human login, user OIDC federation, Device authentication, or remote peer/session authentication. Machine-to-machine bearer issuance and OAuth2-compatible client-credentials semantics are defined separately in `m2m-authentication.md`, which reuses this canonical credential owner instead of replacing it. The separate `service-principal-control.md` contract composes quota and admission audit after this credential authentication without changing credential semantics.
