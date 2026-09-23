@@ -47,7 +47,7 @@ pub const RUNTIME_MODE: &str = "local-daemon";
 const WEBHOOK_DISPATCH_TARGET_PAGE: usize = 128;
 pub const DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub const MIN_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_millis(100);
-pub const MAX_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_secs(60);
+pub const MAX_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_mins(1);
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct WebhookWorkerSweep {
@@ -452,7 +452,7 @@ impl ProductionRuntime {
     }
 
     /// Runs the production webhook worker over all canonical Service Account-owned webhook
-    /// subscriptions in the durable SQLite store.
+    /// subscriptions in the durable `SQLite` store.
     ///
     /// Discovery is bounded and paginated. The worker does not own retry, cursor or dead-letter
     /// state: every attempt is delegated to `EventWebhookDispatcher`, which revalidates the exact
@@ -484,7 +484,7 @@ impl ProductionRuntime {
         );
 
         loop {
-            let sweep = self.dispatch_webhook_sweep(&clock, &sink)?;
+            let sweep = self.dispatch_webhook_sweep(clock, &sink)?;
             if sweep.delivered > 0
                 || sweep.retry_scheduled > 0
                 || sweep.dead_lettered > 0
@@ -513,10 +513,10 @@ impl ProductionRuntime {
 
     fn dispatch_webhook_sweep(
         &self,
-        clock: &SystemEventDeliveryClock,
+        clock: SystemEventDeliveryClock,
         sink: &HardenedWebhookSink<SystemWebhookDnsResolver, NativeTlsWebhookExecutor>,
     ) -> Result<WebhookWorkerSweep, String> {
-        let dispatcher = EventWebhookDispatcher::new(clock, self.store.as_ref(), sink);
+        let dispatcher = EventWebhookDispatcher::new(&clock, self.store.as_ref(), sink);
         let mut after = None;
         let mut sweep = WebhookWorkerSweep::default();
 
