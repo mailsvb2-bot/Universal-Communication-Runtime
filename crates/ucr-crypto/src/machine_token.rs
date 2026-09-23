@@ -29,6 +29,16 @@ pub struct MachineTokenPolicy {
     pub max_ttl_seconds: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AccessTokenIssueRequest<'a> {
+    pub subject: &'a ScopedPrincipal,
+    pub token_id: &'a OpaqueId,
+    pub requested_scopes: &'a [String],
+    pub allowed_scopes: &'a [String],
+    pub issued_at_unix_s: u64,
+    pub requested_ttl_seconds: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MachineTokenError {
     InvalidPolicy,
@@ -183,27 +193,26 @@ impl MachineTokenSigningKey {
 pub fn issue_machine_access_token(
     signing_key: &MachineTokenSigningKey,
     policy: &MachineTokenPolicy,
-    subject: &ScopedPrincipal,
-    token_id: &OpaqueId,
-    requested_scopes: &[String],
-    allowed_scopes: &[String],
-    issued_at_unix_s: u64,
-    requested_ttl_seconds: Option<u32>,
+    request: AccessTokenIssueRequest<'_>,
 ) -> Result<MachineAccessToken, MachineTokenError> {
     validate_policy(policy)?;
-    if subject.principal.kind != PrincipalKind::ServiceAccount {
+    if request.subject.principal.kind != PrincipalKind::ServiceAccount {
         return Err(MachineTokenError::NotServiceAccount);
     }
 
-    let ttl_seconds = requested_ttl_seconds.unwrap_or(policy.max_ttl_seconds);
+    let ttl_seconds = request
+        .requested_ttl_seconds
+        .unwrap_or(policy.max_ttl_seconds);
     if ttl_seconds == 0 || ttl_seconds > policy.max_ttl_seconds {
         return Err(MachineTokenError::InvalidTtl);
     }
-    let expires_at_unix_s = issued_at_unix_s
+    let expires_at_unix_s = request
+        .issued_at_unix_s
         .checked_add(u64::from(ttl_seconds))
         .ok_or(MachineTokenError::InvalidTtl)?;
 
-    let granted_scopes = validate_and_attenuate_scopes(requested_scopes, allowed_scopes)?;
+    let granted_scopes =
+        validate_and_attenuate_scopes(request.requested_scopes, request.allowed_scopes)?;
     let header = MachineTokenHeader {
         alg: MACHINE_TOKEN_ALGORITHM,
         typ: MACHINE_TOKEN_TYPE,
@@ -212,22 +221,30 @@ pub fn issue_machine_access_token(
     let claims = MachineTokenClaims {
         iss: policy.issuer.clone(),
         aud: policy.audience.clone(),
-        sub: subject
+        sub: request
+            .subject
             .principal
             .principal_id
             .as_opaque()
             .as_str()
             .to_owned(),
-        tenant_id: subject.scope.tenant_id.as_opaque().as_str().to_owned(),
-        namespace_id: subject
+        tenant_id: request
+            .subject
+            .scope
+            .tenant_id
+            .as_opaque()
+            .as_str()
+            .to_owned(),
+        namespace_id: request
+            .subject
             .scope
             .namespace_id
             .as_ref()
             .map(|namespace| namespace.as_opaque().as_str().to_owned()),
         scope: granted_scopes.join(" "),
-        iat: issued_at_unix_s,
+        iat: request.issued_at_unix_s,
         exp: expires_at_unix_s,
-        jti: token_id.as_str().to_owned(),
+        jti: request.token_id.as_str().to_owned(),
     };
 
     let header_json = serde_json::to_vec(&header).map_err(|_| MachineTokenError::Serialization)?;
@@ -490,12 +507,14 @@ mod tests {
         let token = issue_machine_access_token(
             &signing_key,
             &policy(),
-            &service_subject(),
-            &opaque("token-a"),
-            &requested,
-            &allowed,
-            1_000,
-            Some(300),
+            AccessTokenIssueRequest {
+                subject: &service_subject(),
+                token_id: &opaque("token-a"),
+                requested_scopes: &requested,
+                allowed_scopes: &allowed,
+                issued_at_unix_s: 1_000,
+                requested_ttl_seconds: Some(300),
+            },
         )
         .expect("issue");
         let verified =
@@ -522,12 +541,14 @@ mod tests {
         let error = issue_machine_access_token(
             &signing_key,
             &policy(),
-            &service_subject(),
-            &opaque("token-a"),
-            &["conference:manage".to_owned()],
-            &["conference:read".to_owned()],
-            1_000,
-            None,
+            AccessTokenIssueRequest {
+                subject: &service_subject(),
+                token_id: &opaque("token-a"),
+                requested_scopes: &["conference:manage".to_owned()],
+                allowed_scopes: &["conference:read".to_owned()],
+                issued_at_unix_s: 1_000,
+                requested_ttl_seconds: None,
+            },
         )
         .expect_err("must reject escalation");
         assert_eq!(error, MachineTokenError::ScopeNotAllowed);
@@ -541,12 +562,14 @@ mod tests {
         let token = issue_machine_access_token(
             &signing_key,
             &policy(),
-            &service_subject(),
-            &opaque("token-a"),
-            &scopes,
-            &scopes,
-            1_000,
-            Some(60),
+            AccessTokenIssueRequest {
+                subject: &service_subject(),
+                token_id: &opaque("token-a"),
+                requested_scopes: &scopes,
+                allowed_scopes: &scopes,
+                issued_at_unix_s: 1_000,
+                requested_ttl_seconds: Some(60),
+            },
         )
         .expect("issue");
 
@@ -583,12 +606,14 @@ mod tests {
         let old_token = issue_machine_access_token(
             &old_key,
             &policy(),
-            &service_subject(),
-            &opaque("token-old"),
-            &scopes,
-            &scopes,
-            1_000,
-            Some(300),
+            AccessTokenIssueRequest {
+                subject: &service_subject(),
+                token_id: &opaque("token-old"),
+                requested_scopes: &scopes,
+                allowed_scopes: &scopes,
+                issued_at_unix_s: 1_000,
+                requested_ttl_seconds: Some(300),
+            },
         )
         .expect("old token");
         let key_set = TestKeySet(vec![old_key.public_key(), new_key.public_key()]);
@@ -634,12 +659,14 @@ mod tests {
             issue_machine_access_token(
                 &signing_key,
                 &policy(),
-                &person,
-                &opaque("token-a"),
-                &[],
-                &[],
-                1_000,
-                None,
+                AccessTokenIssueRequest {
+                    subject: &person,
+                    token_id: &opaque("token-a"),
+                    requested_scopes: &[],
+                    allowed_scopes: &[],
+                    issued_at_unix_s: 1_000,
+                    requested_ttl_seconds: None,
+                },
             )
             .expect_err("person denied"),
             MachineTokenError::NotServiceAccount
@@ -648,12 +675,14 @@ mod tests {
             issue_machine_access_token(
                 &signing_key,
                 &policy(),
-                &service_subject(),
-                &opaque("token-a"),
-                &[],
-                &[],
-                1_000,
-                Some(901),
+                AccessTokenIssueRequest {
+                    subject: &service_subject(),
+                    token_id: &opaque("token-a"),
+                    requested_scopes: &[],
+                    allowed_scopes: &[],
+                    issued_at_unix_s: 1_000,
+                    requested_ttl_seconds: Some(901),
+                },
             )
             .expect_err("ttl denied"),
             MachineTokenError::InvalidTtl
