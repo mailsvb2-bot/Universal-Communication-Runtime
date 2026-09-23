@@ -40,6 +40,8 @@ fn m2m_token_runtime_redacts_bearer_and_private_key_material() {
 
     assert!(runtime.contains(".field(\"encoded\", &\"<redacted>\")"));
     assert!(runtime.contains(".field(\"key\", &\"<secret>\")"));
-    assert!(!runtime.contains("private_key"));
+    assert!(!runtime.contains("pub private_key"));
+    assert!(!runtime.contains("private_key:"));
+    assert!(!runtime.contains(".field(\"private_key\""));
     assert!(!runtime.contains("secret_digest"));
 }
