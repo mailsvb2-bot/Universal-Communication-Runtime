@@ -147,6 +147,25 @@ fn required_env(variable: &str) -> Result<String, String> {
 }
 
 fn read_machine_token_signing_key(path: &str) -> Result<[u8; 32], String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect machine token signing key file: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("machine token signing key path must be a regular non-symlink file".to_owned());
+    }
+    if metadata.len() > 256 {
+        return Err("machine token signing key file exceeds the bounded size".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(
+                "machine token signing key file must not be readable or writable by group/others"
+                    .to_owned(),
+            );
+        }
+    }
+
     let mut bytes = Zeroizing::new(
         fs::read(path).map_err(|error| format!("read machine token signing key file: {error}"))?,
     );
