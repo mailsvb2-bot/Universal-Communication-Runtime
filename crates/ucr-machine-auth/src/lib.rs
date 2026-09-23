@@ -264,7 +264,84 @@ const fn map_machine_token_error(error: MachineTokenError) -> CanonicalError {
 
 #[cfg(test)]
 mod tests {
+    use ucr_core::{
+        PermissionGrantStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaClockError,
+        ServiceQuotaStore, issue_service_credential,
+    };
+    use ucr_crypto::{MachineTokenPublicKey, verify_machine_access_token};
+    use ucr_model::{
+        NamespaceId, PermissionGrant, PermissionScope, PrincipalId, PrincipalRef,
+        ServiceQuotaPolicy, TenantId,
+    };
+    use ucr_storage_memory::MemoryLocalStore;
+
     use super::*;
+
+    #[derive(Debug, Clone, Copy)]
+    struct FixedClock(i64);
+
+    impl ServiceQuotaClock for FixedClock {
+        fn now_unix_ms(&self) -> Result<i64, ServiceQuotaClockError> {
+            Ok(self.0)
+        }
+    }
+
+    fn opaque(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("test opaque ID")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(opaque("tenant-machine-auth")),
+            namespace_id: Some(NamespaceId::from_opaque(opaque("namespace-machine-auth"))),
+        }
+    }
+
+    fn subject() -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(opaque("integration-machine-auth")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
+    fn policy() -> MachineTokenPolicy {
+        MachineTokenPolicy {
+            issuer: "https://auth.ucr.example.test".to_owned(),
+            audience: "ucr-api".to_owned(),
+            max_ttl_seconds: 900,
+        }
+    }
+
+    fn seed(
+        store: &MemoryLocalStore,
+        permissions: &[&str],
+    ) -> (ServiceCredentialId, ServiceCredentialSecret) {
+        let subject = subject();
+        let (record, secret) = issue_service_credential(&subject).expect("issue credential");
+        store
+            .provision_service_credential(&record)
+            .expect("persist credential");
+        for permission in permissions {
+            store
+                .grant_permission(&PermissionGrant {
+                    grantee: subject.clone(),
+                    permission: (*permission).to_owned(),
+                    scope: PermissionScope::Exact(scope()),
+                })
+                .expect("grant permission");
+        }
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject,
+                max_requests: 16,
+                window_ms: 60_000,
+            })
+            .expect("install management quota");
+        (record.credential_id, secret)
+    }
 
     #[test]
     fn public_machine_scopes_map_only_to_existing_canonical_permissions() {
@@ -306,5 +383,111 @@ mod tests {
             .is_err()
         );
         assert!(requested_scope_permissions(&["admin:all".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn token_exchange_requires_fixed_issue_permission_and_proves_requested_scopes() {
+        let store = MemoryLocalStore::default();
+        let (credential_id, secret) = seed(
+            &store,
+            &[
+                MACHINE_TOKEN_ISSUE_PERMISSION,
+                CONFERENCE_READ_PERMISSION,
+                CONFERENCE_JOIN_ISSUE_PERMISSION,
+            ],
+        );
+        let signing_key = MachineTokenSigningKey::generate(KeyId::from_opaque(opaque("m2m-key")))
+            .expect("signing key");
+        let public_key: MachineTokenPublicKey = signing_key.public_key();
+        let policy = policy();
+        let clock = FixedClock(1_700_000_000_000);
+        let requested_scopes = vec![
+            MACHINE_SCOPE_CONFERENCE_JOIN_ISSUE.to_owned(),
+            MACHINE_SCOPE_CONFERENCE_READ.to_owned(),
+        ];
+        let runtime = MachineAuthRuntime::new(&clock, &store, &store, &signing_key, &policy);
+
+        let grant = runtime
+            .exchange(MachineAuthExchangeRequest {
+                scope: &scope(),
+                credential_id: &credential_id,
+                secret: &secret,
+                client_id: subject().principal.principal_id.as_opaque(),
+                requested_scopes: &requested_scopes,
+                audience: "ucr-api",
+                requested_ttl_seconds: Some(300),
+            })
+            .expect("exchange");
+
+        assert_eq!(grant.expires_in_seconds, 300);
+        let verified = verify_machine_access_token(
+            &public_key,
+            &policy,
+            grant.access_token(),
+            1_700_000_100,
+        )
+        .expect("verify access token");
+        assert_eq!(verified.subject, subject());
+        assert_eq!(
+            verified.granted_scopes,
+            vec![
+                MACHINE_SCOPE_CONFERENCE_JOIN_ISSUE.to_owned(),
+                MACHINE_SCOPE_CONFERENCE_READ.to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn conference_permission_alone_cannot_issue_machine_token() {
+        let store = MemoryLocalStore::default();
+        let (credential_id, secret) = seed(&store, &[CONFERENCE_READ_PERMISSION]);
+        let signing_key = MachineTokenSigningKey::generate(KeyId::from_opaque(opaque("m2m-key")))
+            .expect("signing key");
+        let policy = policy();
+        let clock = FixedClock(1_700_000_000_000);
+        let requested_scopes = vec![MACHINE_SCOPE_CONFERENCE_READ.to_owned()];
+        let runtime = MachineAuthRuntime::new(&clock, &store, &store, &signing_key, &policy);
+
+        let error = runtime
+            .exchange(MachineAuthExchangeRequest {
+                scope: &scope(),
+                credential_id: &credential_id,
+                secret: &secret,
+                client_id: subject().principal.principal_id.as_opaque(),
+                requested_scopes: &requested_scopes,
+                audience: "ucr-api",
+                requested_ttl_seconds: Some(60),
+            })
+            .expect_err("token issue permission required");
+        assert_eq!(error.code, CanonicalErrorCode::PermissionDenied);
+    }
+
+    #[test]
+    fn authenticated_service_account_cannot_claim_another_client_id() {
+        let store = MemoryLocalStore::default();
+        let (credential_id, secret) = seed(
+            &store,
+            &[MACHINE_TOKEN_ISSUE_PERMISSION, CONFERENCE_READ_PERMISSION],
+        );
+        let signing_key = MachineTokenSigningKey::generate(KeyId::from_opaque(opaque("m2m-key")))
+            .expect("signing key");
+        let policy = policy();
+        let clock = FixedClock(1_700_000_000_000);
+        let requested_scopes = vec![MACHINE_SCOPE_CONFERENCE_READ.to_owned()];
+        let runtime = MachineAuthRuntime::new(&clock, &store, &store, &signing_key, &policy);
+        let other_client = opaque("different-integration");
+
+        let error = runtime
+            .exchange(MachineAuthExchangeRequest {
+                scope: &scope(),
+                credential_id: &credential_id,
+                secret: &secret,
+                client_id: &other_client,
+                requested_scopes: &requested_scopes,
+                audience: "ucr-api",
+                requested_ttl_seconds: Some(60),
+            })
+            .expect_err("client ID mismatch denied");
+        assert_eq!(error.code, CanonicalErrorCode::PermissionDenied);
     }
 }
