@@ -197,8 +197,7 @@ fn validate_persisted_lease(
 ) -> Result<(), DurableStoreError> {
     validate_identifier(worker_kind, MAX_WORKER_KIND_BYTES)
         .map_err(|_| DurableStoreError::Corrupt)?;
-    validate_identifier(holder_id, MAX_HOLDER_ID_BYTES)
-        .map_err(|_| DurableStoreError::Corrupt)?;
+    validate_identifier(holder_id, MAX_HOLDER_ID_BYTES).map_err(|_| DurableStoreError::Corrupt)?;
     let duration = lease_expires_unix_ms
         .checked_sub(heartbeat_unix_ms)
         .ok_or(DurableStoreError::Corrupt)?;
@@ -271,30 +270,36 @@ mod tests {
         let path = temp_db();
         {
             let store = SqliteLocalStore::open(&path).expect("open");
-            assert!(store
-                .try_acquire_runtime_worker_lease(
-                    WEBHOOK_DELIVERY_WORKER_KIND,
-                    "worker-a",
-                    1_000,
-                    120_000,
-                )
-                .expect("acquire a"));
-            assert!(!store
-                .try_acquire_runtime_worker_lease(
-                    WEBHOOK_DELIVERY_WORKER_KIND,
-                    "worker-b",
-                    2_000,
-                    120_000,
-                )
-                .expect("reject b"));
-            assert!(store
-                .renew_runtime_worker_lease(
-                    WEBHOOK_DELIVERY_WORKER_KIND,
-                    "worker-a",
-                    3_000,
-                    120_000,
-                )
-                .expect("renew a"));
+            assert!(
+                store
+                    .try_acquire_runtime_worker_lease(
+                        WEBHOOK_DELIVERY_WORKER_KIND,
+                        "worker-a",
+                        1_000,
+                        120_000,
+                    )
+                    .expect("acquire a")
+            );
+            assert!(
+                !store
+                    .try_acquire_runtime_worker_lease(
+                        WEBHOOK_DELIVERY_WORKER_KIND,
+                        "worker-b",
+                        2_000,
+                        120_000,
+                    )
+                    .expect("reject b")
+            );
+            assert!(
+                store
+                    .renew_runtime_worker_lease(
+                        WEBHOOK_DELIVERY_WORKER_KIND,
+                        "worker-a",
+                        3_000,
+                        120_000,
+                    )
+                    .expect("renew a")
+            );
             assert_eq!(store.health(), Ok(ucr_core::StorageHealth::Healthy));
         }
         {
@@ -304,28 +309,36 @@ mod tests {
                 .expect("read")
                 .expect("lease");
             assert_eq!(lease.holder_id, "worker-a");
-            assert!(!store
-                .try_acquire_runtime_worker_lease(
-                    WEBHOOK_DELIVERY_WORKER_KIND,
-                    "worker-b",
-                    100_000,
-                    120_000,
-                )
-                .expect("still held"));
-            assert!(store
-                .try_acquire_runtime_worker_lease(
-                    WEBHOOK_DELIVERY_WORKER_KIND,
-                    "worker-b",
-                    123_001,
-                    120_000,
-                )
-                .expect("take over expired"));
-            assert!(!store
-                .release_runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND, "worker-a")
-                .expect("old holder cannot release"));
-            assert!(store
-                .release_runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND, "worker-b")
-                .expect("release b"));
+            assert!(
+                !store
+                    .try_acquire_runtime_worker_lease(
+                        WEBHOOK_DELIVERY_WORKER_KIND,
+                        "worker-b",
+                        100_000,
+                        120_000,
+                    )
+                    .expect("still held")
+            );
+            assert!(
+                store
+                    .try_acquire_runtime_worker_lease(
+                        WEBHOOK_DELIVERY_WORKER_KIND,
+                        "worker-b",
+                        123_001,
+                        120_000,
+                    )
+                    .expect("take over expired")
+            );
+            assert!(
+                !store
+                    .release_runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND, "worker-a")
+                    .expect("old holder cannot release")
+            );
+            assert!(
+                store
+                    .release_runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND, "worker-b")
+                    .expect("release b")
+            );
             assert_eq!(
                 store
                     .runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND)
@@ -368,22 +381,21 @@ mod tests {
     fn expired_holder_cannot_renew_without_reacquiring() {
         let path = temp_db();
         let store = SqliteLocalStore::open(&path).expect("open");
-        assert!(store
-            .try_acquire_runtime_worker_lease(
-                WEBHOOK_DELIVERY_WORKER_KIND,
-                "worker-a",
-                1_000,
-                1_000,
-            )
-            .expect("acquire"));
-        assert!(!store
-            .renew_runtime_worker_lease(
-                WEBHOOK_DELIVERY_WORKER_KIND,
-                "worker-a",
-                2_000,
-                1_000,
-            )
-            .expect("expired renewal"));
+        assert!(
+            store
+                .try_acquire_runtime_worker_lease(
+                    WEBHOOK_DELIVERY_WORKER_KIND,
+                    "worker-a",
+                    1_000,
+                    1_000,
+                )
+                .expect("acquire")
+        );
+        assert!(
+            !store
+                .renew_runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND, "worker-a", 2_000, 1_000,)
+                .expect("expired renewal")
+        );
         let _ = fs::remove_file(path);
     }
 }
