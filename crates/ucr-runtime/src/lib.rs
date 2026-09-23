@@ -1174,14 +1174,16 @@ mod tests {
             pb::OperatorComponentStatus::NotConfigured as i32
         );
 
-        assert!(store
-            .try_acquire_runtime_worker_lease(
-                WEBHOOK_DELIVERY_WORKER_KIND,
-                "worker-private-id",
-                1_000,
-                1_000,
-            )
-            .expect("acquire lease"));
+        assert!(
+            store
+                .try_acquire_runtime_worker_lease(
+                    WEBHOOK_DELIVERY_WORKER_KIND,
+                    "worker-private-id",
+                    1_000,
+                    1_000,
+                )
+                .expect("acquire lease")
+        );
         let healthy = operator_webhook_worker_health_at(&store, 1_500);
         assert_eq!(healthy.status, pb::OperatorComponentStatus::Healthy as i32);
         assert!(!healthy.detail.contains("worker-private-id"));
