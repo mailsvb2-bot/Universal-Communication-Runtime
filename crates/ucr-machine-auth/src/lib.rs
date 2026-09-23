@@ -219,7 +219,10 @@ const fn canonical_permission_for_scope(scope: &str) -> Option<&'static str> {
     }
 }
 
-fn require_client_id(subject: &ScopedPrincipal, client_id: &OpaqueId) -> Result<(), CanonicalError> {
+fn require_client_id(
+    subject: &ScopedPrincipal,
+    client_id: &OpaqueId,
+) -> Result<(), CanonicalError> {
     if subject.principal.kind == PrincipalKind::ServiceAccount
         && subject.principal.principal_id.as_opaque() == client_id
     {
@@ -429,13 +432,9 @@ mod tests {
             .expect("exchange");
 
         assert_eq!(grant.expires_in_seconds, 300);
-        let verified = verify_machine_access_token(
-            &public_key,
-            &policy,
-            grant.access_token(),
-            1_700_000_100,
-        )
-        .expect("verify access token");
+        let verified =
+            verify_machine_access_token(&public_key, &policy, grant.access_token(), 1_700_000_100)
+                .expect("verify access token");
         assert_eq!(verified.subject, subject());
         assert_eq!(
             verified.granted_scopes,
