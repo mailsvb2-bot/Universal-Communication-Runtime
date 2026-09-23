@@ -38,7 +38,11 @@ Webhook subscriptions use the same durable subscription/retry/cursor/DLQ owner a
 
 `ucr-runtime dispatch-webhook-once` wires this path to the existing durable SQLite Event subscription owner for diagnostics and explicit single-attempt operation. Tenant/subscription coordinates are explicit operator inputs, while `UCR_WEBHOOK_SIGNING_KEY_HEX` is process environment only and is never persisted or printed.
 
-`ucr-runtime run-webhook-worker` is the continuous delivery process. It discovers only Service Account-owned webhook subscriptions through bounded keyset-paginated SQLite reads, then delegates exactly one attempt per discovered subscription to the same hardened `EventWebhookDispatcher` before starting the next sweep. Discovery never becomes a delivery queue and the dispatcher revalidates durable ownership immediately before every poll/network side effect. `UCR_WEBHOOK_POLL_INTERVAL_MS` may tune the sweep cadence between 100 ms and 60 seconds; the default is one second. Retry timing, cursor state, deduplication identity and dead letters remain canonical subscription state, so worker restart does not reset delivery semantics. The Phase-15 UCR TCP transport is not reused as an HTTP client. Process supervision and active/standby deployment remain operator responsibilities.
+`ucr-runtime run-webhook-worker` is the continuous delivery process. It discovers only Service Account-owned webhook subscriptions through bounded keyset-paginated SQLite reads, then delegates exactly one attempt per discovered subscription to the same hardened `EventWebhookDispatcher` before starting the next sweep. Discovery never becomes a delivery queue and the dispatcher revalidates durable ownership immediately before every poll/network side effect. `UCR_WEBHOOK_POLL_INTERVAL_MS` may tune the sweep cadence between 100 ms and 60 seconds; the default is one second. Retry timing, cursor state, deduplication identity and dead letters remain canonical subscription state, so worker restart does not reset delivery semantics. The Phase-15 UCR TCP transport is not reused as an HTTP client. The worker acquires a durable single-holder lease before it can dispatch and renews that lease before
+each sweep and each webhook network side effect. A second process sharing the same durable SQLite store
+cannot become active until the lease expires; an expired holder cannot renew without reacquiring.
+Graceful shutdown releases the lease, while crash recovery relies on bounded lease expiry. Process
+supervision remains operator-owned.
 
 ## Persistence
 
@@ -54,4 +58,8 @@ The reference Tonic binding derives a finite request decode budget from the maxi
 
 ## Nonclaims
 
-Phase 14 does not claim exactly-once external side effects, distributed queues, multi-node worker leasing/leader election, a globally ordered Event log, or automatic deployment. The shipped worker provides continuous real HTTPS delivery with DNS/TLS/SSRF/signature policy and canonical retry/DLQ state, but an operator still owns process supervision and any high-availability topology. Effectively-once consumer behavior is obtained only from canonical Event IDs, durable cursor state, idempotent ACK/reject/replay operations, and consumer-side idempotency. Phase 15 is implemented separately as a Prepared UCR TCP transport; webhook HTTPS networking is implemented independently by `ucr-webhook` and the runtime worker.
+Phase 14 does not claim exactly-once external side effects, distributed queues, cross-database or
+cross-region leader election, a globally ordered Event log, or automatic deployment. The shipped
+worker provides continuous real HTTPS delivery with DNS/TLS/SSRF/signature policy, canonical
+retry/DLQ state and a durable active/standby lease for processes sharing the same SQLite store, but an
+operator still owns process supervision and broader high-availability topology. Effectively-once consumer behavior is obtained only from canonical Event IDs, durable cursor state, idempotent ACK/reject/replay operations, and consumer-side idempotency. Phase 15 is implemented separately as a Prepared UCR TCP transport; webhook HTTPS networking is implemented independently by `ucr-webhook` and the runtime worker.
