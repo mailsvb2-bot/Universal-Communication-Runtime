@@ -10,7 +10,7 @@ use ucr_crypto::{MachineTokenPolicy, MachineTokenSigningKey};
 use ucr_machine_auth::{
     MachineAuthExchangeRequest, MachineAuthRuntime, SUPPORTED_MACHINE_SCOPES,
 };
-use ucr_protocol::{CanonicalError, CanonicalErrorCode};
+use ucr_protocol::CanonicalError;
 
 use crate::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_credentials,
@@ -200,11 +200,4 @@ mod tests {
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"conference:read"));
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"attendance:read"));
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"recording:manage"));
-    }
-
-    #[test]
-    fn canonical_error_import_remains_used_by_transport_conversion() {
-        let error = CanonicalError::new(CanonicalErrorCode::Unauthenticated);
-        assert_eq!(error.code, CanonicalErrorCode::Unauthenticated);
-    }
-}
+    }}
