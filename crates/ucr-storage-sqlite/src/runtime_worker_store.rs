@@ -337,6 +337,34 @@ mod tests {
     }
 
     #[test]
+    fn v42_to_v43_migration_adds_empty_worker_lease_state() {
+        let path = temp_db();
+        {
+            let store = SqliteLocalStore::open(&path).expect("initialize current");
+            assert_eq!(store.schema_version(), Ok(crate::SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(&path).expect("raw connection");
+            connection
+                .execute_batch("DROP TABLE runtime_worker_leases;")
+                .expect("remove v43 worker table");
+            connection
+                .pragma_update(None, "user_version", crate::SQLITE_SCHEMA_V42)
+                .expect("set v42");
+        }
+
+        let migrated = SqliteLocalStore::open(&path).expect("migrate v42");
+        assert_eq!(migrated.schema_version(), Ok(crate::SQLITE_SCHEMA_VERSION));
+        assert_eq!(
+            migrated
+                .runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND)
+                .expect("read migrated lease"),
+            None
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn expired_holder_cannot_renew_without_reacquiring() {
         let path = temp_db();
         let store = SqliteLocalStore::open(&path).expect("open");
