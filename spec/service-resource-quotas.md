@@ -1,6 +1,6 @@
 # Service resource quotas
 
-Status: **concurrent participant, conference, publisher, and aggregate bandwidth quotas implemented; recording-minute quota remains**.
+Status: **concurrent participant, conference, publisher, aggregate bandwidth, and recording-minute quotas implemented**.
 
 This contract is deliberately separate from request-rate limiting. Request admission continues to use
 `ServiceQuotaPolicy` / `ServiceRateLimitPolicy`; live communication resources use
@@ -30,7 +30,7 @@ Semantics:
 - SQLite enforcement happens inside the same `BEGIN IMMEDIATE` transaction that persists or
   reactivates the participant, so parallel admissions cannot use a caller-side read-before-write
   race to exceed the configured limit;
-- SQLite schema v38 introduced durable participant policy storage; schema v39 extends the same policy with conference concurrency; schema v40 adds publisher concurrency; schema v41 adds aggregate bandwidth while preserving existing rows across the migration chain.
+- SQLite schema v38 introduced durable participant policy storage; schema v39 extends the same policy with conference concurrency; schema v40 adds publisher concurrency; schema v41 adds aggregate bandwidth; schema v42 adds recording-minute policy and durable usage while preserving existing rows across the migration chain.
 
 ## Concurrent conferences
 
@@ -78,14 +78,38 @@ Semantics:
 - bandwidth usage is ephemeral runtime state, while SQLite schema v41 durably persists only the configured ceiling;
 - absence of `max_aggregate_bandwidth_bps` means no integration-specific aggregate media bandwidth ceiling is configured.
 
+## Recording minutes
+
+`max_recording_minutes` is optional and configures a durable recording allowance for the same
+integration and exact tenant scope. The public policy is expressed in minutes, while consumption is
+accounted in exact milliseconds so short recordings and partial minutes do not require lossy
+rounding.
+
+Semantics:
+
+- a concrete recording provider reserves accepted recording duration through
+  `consume_service_recording_duration` before treating that duration as accepted provider work;
+- usage is shared by all recordings owned by the same Service Account in the exact tenant scope;
+- different integrations do not consume one another's recording allowance;
+- usage survives process restart; SQLite schema v42 persists `service_recording_usage`;
+- policy updates do **not** reset already consumed duration, preventing quota bypass by rewriting
+  the same policy or briefly changing the configured ceiling;
+- UCR owns no month, billing period, subscription renewal, or calendar-reset semantics. A new
+  allowance period begins only through the explicit authorized `reset_service_recording_usage`
+  operation invoked by the external policy/billing owner;
+- failed downstream provider work after an accepted reservation is conservatively counted unless a
+  future provider contract adds an equally atomic, auditable compensation protocol;
+- absence of `max_recording_minutes` means no integration-specific recording allowance is
+  configured.
+
+This accounting boundary does not make recording itself production-ready. Capability discovery must
+continue to report recording unavailable until a concrete encrypted recording provider is wired and
+the separate Recording conformance requirements are satisfied.
+
 The same `SERVICE_QUOTA_READ_PERMISSION` and `SERVICE_QUOTA_WRITE_PERMISSION` authorization
-boundary used for request quotas also governs resource quota administration.
+boundary used for request quotas also governs resource quota administration and explicit recording
+usage reset.
 
-## Still required
-
-This slice does **not** claim the complete resource-quota roadmap. The following dimensions remain
-to be added through the same canonical resource policy path:
-
-- recording minutes.
-
-API RPS remains owned by the already separate class-aware request-rate limiting contract.
+The five resource dimensions from the integration quota roadmap are now represented by one canonical
+`ServiceResourceQuotaPolicy`. API RPS remains owned by the separate class-aware request-rate limiting
+contract.

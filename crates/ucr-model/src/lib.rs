@@ -719,6 +719,7 @@ pub struct ServiceResourceQuotaPolicy {
     pub max_concurrent_conferences: Option<u64>,
     pub max_concurrent_publishers: Option<u64>,
     pub max_aggregate_bandwidth_bps: Option<u64>,
+    pub max_recording_minutes: Option<u64>,
 }
 
 /// Independent request-rate buckets for external Service Accounts.

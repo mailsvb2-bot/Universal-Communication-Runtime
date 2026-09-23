@@ -260,11 +260,13 @@ def main() -> None:
         "SQLITE_SCHEMA_V38: u32 = 38" in sqlite_store
         and "SQLITE_SCHEMA_V39: u32 = 39" in sqlite_store
         and "SQLITE_SCHEMA_V40: u32 = 40" in sqlite_store
-        and "SQLITE_SCHEMA_VERSION: u32 = 41" in sqlite_store
+        and "SQLITE_SCHEMA_V41: u32 = 41" in sqlite_store
+        and "SQLITE_SCHEMA_VERSION: u32 = 42" in sqlite_store
         and "migrate_v38_to_v39" in sqlite_store
         and "migrate_v39_to_v40" in sqlite_store
-        and "migrate_v40_to_v41" in sqlite_store,
-        "resource quota schema v41 migration chain missing",
+        and "migrate_v40_to_v41" in sqlite_store
+        and "migrate_v41_to_v42" in sqlite_store,
+        "resource quota schema v42 migration chain missing",
     )
     for marker in (
         "ServiceResourceQuotaPolicy",
@@ -272,7 +274,11 @@ def main() -> None:
         "max_concurrent_conferences",
         "max_concurrent_publishers",
         "max_aggregate_bandwidth_bps",
+        "max_recording_minutes",
         "service_resource_quota_policies",
+        "service_recording_usage",
+        "consume_service_recording_duration",
+        "reset_service_recording_usage",
         "ensure_integration_participant_quota",
         "ensure_integration_conference_quota",
     ):
@@ -285,11 +291,14 @@ def main() -> None:
             f"resource quota contract anchor missing: {marker}",
         )
     for marker in (
-        "concurrent participant, conference, publisher, and aggregate bandwidth quotas implemented",
+        "concurrent participant, conference, publisher, aggregate bandwidth, and recording-minute quotas implemented",
         "`Scheduled` conferences do not consume quota",
         "first policy-authorized encrypted media publish attempt claims one slot",
         "every SFU recipient consumes one additional egress copy",
-        "recording minutes",
+        "`max_recording_minutes`",
+        "`consume_service_recording_duration`",
+        "`reset_service_recording_usage`",
+        "UCR owns no month, billing period, subscription renewal, or calendar-reset semantics",
     ):
         require(marker in resource_quota_spec, f"resource quota specification drifted: {marker}")
     for marker in (

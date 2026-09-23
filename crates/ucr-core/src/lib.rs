@@ -267,6 +267,14 @@ pub enum ServiceQuotaConsumeError {
     Store(DurableStoreError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceResourceQuotaConsumeError {
+    NotConfigured,
+    InvalidUsage,
+    ResourceExhausted,
+    Store(DurableStoreError),
+}
+
 /// Durable fixed-window quota policy and accounting for canonical Service Accounts.
 pub trait ServiceQuotaStore: StorageProvider {
     /// Installs or replaces one explicit quota policy. Identical updates must not reset usage.
@@ -304,6 +312,41 @@ pub trait ServiceQuotaStore: StorageProvider {
         &self,
         subject: &ScopedPrincipal,
     ) -> Result<Option<ServiceResourceQuotaPolicy>, DurableStoreError>;
+
+    /// Atomically reserves accepted recording duration against the integration allowance.
+    ///
+    /// The duration is metered in exact milliseconds; the configured ceiling is expressed in
+    /// recording minutes. Implementations must persist usage across restart and must not reset
+    /// usage when the policy is updated.
+    ///
+    /// # Errors
+    /// Fails closed for missing policy, invalid duration, exhaustion, or storage failure.
+    fn consume_service_recording_duration(
+        &self,
+        subject: &ScopedPrincipal,
+        duration_ms: u64,
+    ) -> Result<(), ServiceResourceQuotaConsumeError>;
+
+    /// Reads durable recording-duration usage in exact milliseconds.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn service_recording_usage_ms(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<u64, DurableStoreError>;
+
+    /// Explicitly resets recording-duration usage for an externally owned allowance period.
+    ///
+    /// UCR intentionally owns no billing/calendar period semantics; callers decide when a new
+    /// allowance period begins and must authorize this reset separately.
+    ///
+    /// # Errors
+    /// Returns explicit validation/storage failures.
+    fn reset_service_recording_usage(
+        &self,
+        subject: &ScopedPrincipal,
+    ) -> Result<(), DurableStoreError>;
 
     /// Installs or replaces one explicit class-specific request-rate policy.
     ///
