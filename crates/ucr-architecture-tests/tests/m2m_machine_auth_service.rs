@@ -44,10 +44,9 @@ fn machine_auth_service_keeps_scope_vocabulary_bounded_and_provider_neutral() {
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let service = fs::read_to_string(
-        workspace.join("crates/ucr-api-grpc/src/machine_auth_service.rs"),
-    )
-    .expect("machine auth service");
+    let service =
+        fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/machine_auth_service.rs"))
+            .expect("machine auth service");
 
     for scope in [
         "conference:create",
