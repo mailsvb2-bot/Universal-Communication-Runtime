@@ -6,13 +6,11 @@ fn m2m_token_runtime_uses_canonical_service_identity_and_crypto_owner() {
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let runtime =
-        fs::read_to_string(workspace.join("crates/ucr-crypto/src/machine_token.rs"))
-            .expect("machine token runtime");
-    let manifest =
-        fs::read_to_string(workspace.join("crates/ucr-crypto/Cargo.toml")).expect("crypto manifest");
-    let spec =
-        fs::read_to_string(workspace.join("spec/m2m-authentication.md")).expect("m2m spec");
+    let runtime = fs::read_to_string(workspace.join("crates/ucr-crypto/src/machine_token.rs"))
+        .expect("machine token runtime");
+    let manifest = fs::read_to_string(workspace.join("crates/ucr-crypto/Cargo.toml"))
+        .expect("crypto manifest");
+    let spec = fs::read_to_string(workspace.join("spec/m2m-authentication.md")).expect("m2m spec");
 
     assert!(runtime.contains("PrincipalKind::ServiceAccount"));
     assert!(runtime.contains("MachineTokenKeyResolver"));
@@ -37,9 +35,8 @@ fn m2m_token_runtime_redacts_bearer_and_private_key_material() {
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let runtime =
-        fs::read_to_string(workspace.join("crates/ucr-crypto/src/machine_token.rs"))
-            .expect("machine token runtime");
+    let runtime = fs::read_to_string(workspace.join("crates/ucr-crypto/src/machine_token.rs"))
+        .expect("machine token runtime");
 
     assert!(runtime.contains(".field(\"encoded\", &\"<redacted>\")"));
     assert!(runtime.contains(".field(\"key\", &\"<secret>\")"));
