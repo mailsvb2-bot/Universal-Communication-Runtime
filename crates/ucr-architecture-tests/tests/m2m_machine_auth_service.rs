@@ -8,11 +8,11 @@ fn machine_auth_runtime_owns_credentials_authorization_and_token_issuance() {
         .expect("workspace root");
     let runtime = fs::read_to_string(workspace.join("crates/ucr-machine-auth/src/lib.rs"))
         .expect("machine auth runtime");
-    let grpc = fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/machine_auth_service.rs"))
-        .expect("machine auth gRPC adapter");
-    let protocol =
-        fs::read_to_string(workspace.join("crates/ucr-protocol/src/authorization.rs"))
-            .expect("authorization registry");
+    let grpc =
+        fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/machine_auth_service.rs"))
+            .expect("machine auth gRPC adapter");
+    let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/authorization.rs"))
+        .expect("authorization registry");
 
     assert!(runtime.contains("ServicePrincipalRequestGate::new"));
     assert!(runtime.contains("MACHINE_TOKEN_ISSUE_PERMISSION"));
@@ -61,14 +61,11 @@ fn machine_auth_runtime_is_shared_workspace_owner_not_transport_local_logic() {
         .and_then(Path::parent)
         .expect("workspace root");
     let root = fs::read_to_string(workspace.join("Cargo.toml")).expect("workspace manifest");
-    let grpc_manifest =
-        fs::read_to_string(workspace.join("crates/ucr-api-grpc/Cargo.toml"))
-            .expect("gRPC manifest");
+    let grpc_manifest = fs::read_to_string(workspace.join("crates/ucr-api-grpc/Cargo.toml"))
+        .expect("gRPC manifest");
 
     assert!(root.contains(r#""crates/ucr-machine-auth""#));
-    assert!(
-        grpc_manifest.contains(r#"ucr-machine-auth = { path = "../ucr-machine-auth" }"#)
-    );
+    assert!(grpc_manifest.contains(r#"ucr-machine-auth = { path = "../ucr-machine-auth" }"#));
 }
 
 #[test]
