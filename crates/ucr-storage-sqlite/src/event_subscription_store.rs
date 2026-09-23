@@ -1755,7 +1755,10 @@ mod tests {
             Err(DurableStoreError::InvalidRecord)
         );
         assert_eq!(
-            store.service_webhook_dispatch_targets(None, super::MAX_WEBHOOK_DISPATCH_TARGET_PAGE + 1),
+            store.service_webhook_dispatch_targets(
+                None,
+                super::MAX_WEBHOOK_DISPATCH_TARGET_PAGE + 1
+            ),
             Err(DurableStoreError::InvalidRecord)
         );
     }
