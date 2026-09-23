@@ -7,9 +7,7 @@ use ucr_core::{
     ServiceQuotaStore,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenSigningKey};
-use ucr_machine_auth::{
-    MachineAuthExchangeRequest, MachineAuthRuntime, SUPPORTED_MACHINE_SCOPES,
-};
+use ucr_machine_auth::{MachineAuthExchangeRequest, MachineAuthRuntime, SUPPORTED_MACHINE_SCOPES};
 use ucr_protocol::CanonicalError;
 
 use crate::{
@@ -200,4 +198,5 @@ mod tests {
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"conference:read"));
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"attendance:read"));
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"recording:manage"));
-    }}
+    }
+}
