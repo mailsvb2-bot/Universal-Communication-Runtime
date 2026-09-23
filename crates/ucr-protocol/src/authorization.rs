@@ -8,6 +8,7 @@ pub const SERVICE_CREDENTIAL_PROVISION_PERMISSION: &str =
     "ucr.authentication.service_credential.provision";
 pub const SERVICE_CREDENTIAL_REVOKE_PERMISSION: &str =
     "ucr.authentication.service_credential.revoke";
+pub const MACHINE_TOKEN_ISSUE_PERMISSION: &str = "ucr.authentication.machine_token.issue";
 pub const SERVICE_QUOTA_READ_PERMISSION: &str = "ucr.authorization.service_quota.read";
 pub const SERVICE_QUOTA_WRITE_PERMISSION: &str = "ucr.authorization.service_quota.write";
 pub const SERVICE_AUDIT_READ_PERMISSION: &str = "ucr.audit.service_principal.read";
@@ -99,6 +100,7 @@ pub const ORGANIZATION_BRIDGE_USE_PERMISSION: &str = "ucr.organization.bridge.us
 pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     SERVICE_CREDENTIAL_PROVISION_PERMISSION,
     SERVICE_CREDENTIAL_REVOKE_PERMISSION,
+    MACHINE_TOKEN_ISSUE_PERMISSION,
     SERVICE_QUOTA_READ_PERMISSION,
     SERVICE_QUOTA_WRITE_PERMISSION,
     SERVICE_AUDIT_READ_PERMISSION,
