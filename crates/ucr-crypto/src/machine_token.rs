@@ -17,6 +17,7 @@ pub const MAX_MACHINE_TOKEN_AUDIENCE_LEN: usize = 512;
 pub const MAX_MACHINE_TOKEN_SCOPE_LEN: usize = 128;
 pub const MAX_MACHINE_TOKEN_SCOPES: usize = 32;
 pub const MAX_MACHINE_TOKEN_TTL_SECONDS: u32 = 86_400;
+pub const MAX_MACHINE_TOKEN_PUBLIC_KEYS: usize = 8;
 
 const MACHINE_TOKEN_ALGORITHM: &str = "EdDSA";
 const MACHINE_TOKEN_TYPE: &str = "at+jwt";
@@ -87,6 +88,114 @@ pub trait MachineTokenKeyResolver: fmt::Debug + Send + Sync {
 impl MachineTokenKeyResolver for MachineTokenPublicKey {
     fn resolve_machine_token_key(&self, key_id: &KeyId) -> Option<VerifyingKeyBytes> {
         (self.key_id == *key_id).then_some(self.verifying_key)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineTokenKeySetError {
+    Empty,
+    TooManyKeys,
+    DuplicateKeyId,
+    Serialization,
+}
+
+/// Bounded public verification-key set used for access-token verification overlap and JWKS
+/// publication. It contains public material only and never owns signing seeds or private keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineTokenPublicKeySet {
+    keys: Vec<MachineTokenPublicKey>,
+}
+
+impl MachineTokenPublicKeySet {
+    /// Builds a bounded public key set with unique key IDs.
+    ///
+    /// # Errors
+    /// Rejects an empty set, more than `MAX_MACHINE_TOKEN_PUBLIC_KEYS`, or duplicate key IDs.
+    pub fn new(keys: Vec<MachineTokenPublicKey>) -> Result<Self, MachineTokenKeySetError> {
+        if keys.is_empty() {
+            return Err(MachineTokenKeySetError::Empty);
+        }
+        if keys.len() > MAX_MACHINE_TOKEN_PUBLIC_KEYS {
+            return Err(MachineTokenKeySetError::TooManyKeys);
+        }
+        for (index, key) in keys.iter().enumerate() {
+            if keys[..index]
+                .iter()
+                .any(|existing| existing.key_id == key.key_id)
+            {
+                return Err(MachineTokenKeySetError::DuplicateKeyId);
+            }
+        }
+        Ok(Self { keys })
+    }
+
+    #[must_use]
+    pub fn keys(&self) -> &[MachineTokenPublicKey] {
+        &self.keys
+    }
+
+    /// Adds one public verification key for a rotation overlap window.
+    ///
+    /// # Errors
+    /// Rejects duplicate key IDs or a set that would exceed the bounded key count.
+    pub fn insert(&mut self, key: MachineTokenPublicKey) -> Result<(), MachineTokenKeySetError> {
+        if self
+            .keys
+            .iter()
+            .any(|existing| existing.key_id == key.key_id)
+        {
+            return Err(MachineTokenKeySetError::DuplicateKeyId);
+        }
+        if self.keys.len() >= MAX_MACHINE_TOKEN_PUBLIC_KEYS {
+            return Err(MachineTokenKeySetError::TooManyKeys);
+        }
+        self.keys.push(key);
+        Ok(())
+    }
+
+    /// Removes one public verification key. Removing a key immediately makes tokens signed by
+    /// that key fail verification, which is the cryptographic primitive used by explicit
+    /// deployment revocation.
+    #[must_use]
+    pub fn remove_key(&mut self, key_id: &KeyId) -> bool {
+        let Some(index) = self.keys.iter().position(|key| key.key_id == *key_id) else {
+            return false;
+        };
+        self.keys.remove(index);
+        true
+    }
+
+    /// Serializes the current public verification keys as an RFC 8037-compatible JWKS document.
+    /// Private signing material is structurally absent from the output.
+    ///
+    /// # Errors
+    /// Returns `Serialization` if JSON serialization unexpectedly fails.
+    pub fn jwks_json(&self) -> Result<String, MachineTokenKeySetError> {
+        let keys = self
+            .keys
+            .iter()
+            .map(|key| {
+                serde_json::json!({
+                    "kty": "OKP",
+                    "crv": "Ed25519",
+                    "use": "sig",
+                    "alg": MACHINE_TOKEN_ALGORITHM,
+                    "kid": key.key_id.as_opaque().as_str(),
+                    "x": URL_SAFE_NO_PAD.encode(key.verifying_key.0),
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&serde_json::json!({ "keys": keys }))
+            .map_err(|_| MachineTokenKeySetError::Serialization)
+    }
+}
+
+impl MachineTokenKeyResolver for MachineTokenPublicKeySet {
+    fn resolve_machine_token_key(&self, key_id: &KeyId) -> Option<VerifyingKeyBytes> {
+        self.keys
+            .iter()
+            .find(|key| key.key_id == *key_id)
+            .map(|key| key.verifying_key)
     }
 }
 
@@ -608,6 +717,83 @@ mod tests {
             verify_machine_access_token(&public_key, &policy(), &tampered, 1_010),
             Err(MachineTokenError::InvalidSignature | MachineTokenError::MalformedToken)
         ));
+    }
+
+    #[test]
+    fn bounded_public_key_set_supports_overlap_jwks_and_explicit_removal() {
+        let old_key = MachineTokenSigningKey::generate(key_id("token-key-old")).expect("old key");
+        let new_key = MachineTokenSigningKey::generate(key_id("token-key-new")).expect("new key");
+        let old_public = old_key.public_key();
+        let new_public = new_key.public_key();
+        let scopes = vec!["conference:read".to_owned()];
+        let old_token = issue_machine_access_token(
+            &old_key,
+            &policy(),
+            AccessTokenIssueRequest {
+                subject: &service_subject(),
+                token_id: &opaque("token-old"),
+                requested_scopes: &scopes,
+                allowed_scopes: &scopes,
+                issued_at_unix_s: 1_000,
+                requested_ttl_seconds: Some(300),
+            },
+        )
+        .expect("old token");
+
+        let mut key_set =
+            MachineTokenPublicKeySet::new(vec![old_public.clone(), new_public.clone()])
+                .expect("key set");
+        assert!(
+            verify_machine_access_token(&key_set, &policy(), old_token.as_str(), 1_100).is_ok()
+        );
+
+        let jwks = key_set.jwks_json().expect("JWKS");
+        let document: serde_json::Value = serde_json::from_str(&jwks).expect("valid JWKS JSON");
+        let keys = document["keys"].as_array().expect("JWKS keys");
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().all(|key| key.get("d").is_none()));
+        assert!(keys.iter().all(|key| key["kty"] == "OKP"));
+        assert!(keys.iter().all(|key| key["crv"] == "Ed25519"));
+        assert!(keys.iter().all(|key| key["alg"] == "EdDSA"));
+        assert!(keys.iter().all(|key| key["use"] == "sig"));
+        let old_x = URL_SAFE_NO_PAD.encode(old_public.verifying_key.0);
+        assert!(keys.iter().any(|key| {
+            key["kid"] == "token-key-old" && key["x"].as_str() == Some(old_x.as_str())
+        }));
+
+        assert!(key_set.remove_key(&key_id("token-key-old")));
+        assert_eq!(
+            verify_machine_access_token(&key_set, &policy(), old_token.as_str(), 1_100),
+            Err(MachineTokenError::UnknownSigningKey)
+        );
+        assert!(!key_set.remove_key(&key_id("token-key-missing")));
+    }
+
+    #[test]
+    fn public_key_set_rejects_empty_duplicate_and_unbounded_sets() {
+        assert_eq!(
+            MachineTokenPublicKeySet::new(Vec::new()),
+            Err(MachineTokenKeySetError::Empty)
+        );
+
+        let signing_key =
+            MachineTokenSigningKey::generate(key_id("token-key-a")).expect("signing key");
+        let public = signing_key.public_key();
+        assert_eq!(
+            MachineTokenPublicKeySet::new(vec![public.clone(), public.clone()]),
+            Err(MachineTokenKeySetError::DuplicateKeyId)
+        );
+
+        let keys = (0..=MAX_MACHINE_TOKEN_PUBLIC_KEYS)
+            .map(|index| MachineTokenPublicKey {
+                key_id: key_id(&format!("token-key-{index}")),
+                verifying_key: public.verifying_key,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            MachineTokenPublicKeySet::new(keys),
+            Err(MachineTokenKeySetError::TooManyKeys)
+        );
     }
 
     #[test]
