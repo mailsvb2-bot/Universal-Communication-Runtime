@@ -185,9 +185,7 @@ const fn map_bearer_token_error(error: MachineTokenError) -> CanonicalError {
 #[cfg(test)]
 mod tests {
     use ucr_core::{PermissionGrantStore, ServiceQuotaClockError};
-    use ucr_crypto::{
-        AccessTokenIssueRequest, MachineTokenSigningKey, issue_machine_access_token,
-    };
+    use ucr_crypto::{AccessTokenIssueRequest, MachineTokenSigningKey, issue_machine_access_token};
     use ucr_model::{
         NamespaceId, PermissionGrant, PermissionScope, PrincipalId, PrincipalKind, PrincipalRef,
         TenantId,
@@ -293,7 +291,10 @@ mod tests {
         assert_eq!(admission.subject(), &subject());
         assert_eq!(admission.token_id().as_str(), "machine-bearer-token");
         assert_eq!(admission.granted_scopes(), scopes);
-        assert_eq!(admission.key_id().as_opaque().as_str(), "machine-bearer-key");
+        assert_eq!(
+            admission.key_id().as_opaque().as_str(),
+            "machine-bearer-key"
+        );
         assert_eq!(admission.expires_at_unix_s(), 1_300);
     }
 
@@ -352,8 +353,7 @@ mod tests {
         let scopes = vec![MACHINE_SCOPE_CONFERENCE_READ.to_owned()];
         let token = issue(&key, &policy, &scopes);
         let expired_clock = FixedClock(1_400_000);
-        let runtime =
-            MachineBearerAdmissionRuntime::new(&expired_clock, &store, &public, &policy);
+        let runtime = MachineBearerAdmissionRuntime::new(&expired_clock, &store, &public, &policy);
 
         let expired = runtime
             .admit(token.as_str(), MACHINE_SCOPE_CONFERENCE_READ, &scope())
