@@ -6,9 +6,8 @@ fn oauth_client_secret_is_only_a_transport_binding_over_canonical_credentials() 
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let source =
-        fs::read_to_string(workspace.join("crates/ucr-machine-auth/src/client_secret.rs"))
-            .expect("OAuth client secret source");
+    let source = fs::read_to_string(workspace.join("crates/ucr-machine-auth/src/client_secret.rs"))
+        .expect("OAuth client secret source");
     let spec =
         fs::read_to_string(workspace.join("spec/m2m-authentication.md")).expect("M2M auth spec");
 
@@ -28,7 +27,9 @@ fn oauth_client_secret_is_only_a_transport_binding_over_canonical_credentials() 
     assert!(!source.contains("ClientPlatform"));
 
     assert!(spec.contains("opaque `client_id + client_secret` transport binding"));
-    assert!(spec.contains("concrete HTTPS parser/response adapter remains separate transport work"));
+    assert!(
+        spec.contains("concrete HTTPS parser/response adapter remains separate transport work")
+    );
 }
 
 #[test]
