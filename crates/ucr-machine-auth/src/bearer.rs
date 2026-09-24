@@ -1,6 +1,10 @@
 use core::fmt;
 
-use ucr_core::{AuthorizationEvaluator, ServiceQuotaClock};
+use ucr_core::{
+    AuthorizationEvaluator, ServiceAuditStore, ServiceCredentialStore,
+    ServicePrincipalRequestAuthorization, ServicePrincipalRequestGate, ServiceQuotaClock,
+    ServiceQuotaStore,
+};
 use ucr_crypto::{
     MachineTokenError, MachineTokenKeyResolver, MachineTokenPolicy, VerifiedMachineAccessToken,
     verify_machine_access_token,
@@ -116,12 +120,25 @@ where
         required_scope: &str,
         resource_scope: &TenantScope,
     ) -> Result<MachineBearerAdmission, CanonicalError> {
+        let (verified, permission) = self.authenticate_scope(encoded, required_scope)?;
+        self.authorization.authorize(&AuthorizationRequest {
+            subject: verified.subject.clone(),
+            permission: permission.to_owned(),
+            resource_scope: resource_scope.clone(),
+        })?;
+        Ok(admission_from_verified(verified))
+    }
+
+    fn authenticate_scope(
+        &self,
+        encoded: &str,
+        required_scope: &str,
+    ) -> Result<(VerifiedMachineAccessToken, &'static str), CanonicalError> {
         let permission = canonical_permission_for_scope(required_scope)
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
         let now_unix_s = now_unix_s(self.clock)?;
         let verified = verify_machine_access_token(self.resolver, self.policy, encoded, now_unix_s)
             .map_err(map_bearer_token_error)?;
-
         if !verified
             .granted_scopes
             .iter()
@@ -129,14 +146,94 @@ where
         {
             return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
         }
+        Ok((verified, permission))
+    }
+}
 
-        self.authorization.authorize(&AuthorizationRequest {
-            subject: verified.subject.clone(),
-            permission: permission.to_owned(),
-            resource_scope: resource_scope.clone(),
-        })?;
+/// Machine Bearer request gate that reuses the canonical Service Principal quota/audit owner.
+///
+/// Token signature, issuer, audience, lifetime and OAuth scope are verified here. Canonical
+/// Permission Grant evaluation, request-rate quota consumption and durable audit are then performed
+/// exactly once by `ServicePrincipalRequestAuthorization`.
+pub struct MachineBearerRequestGate<'a, C, A, R, S> {
+    bearer: MachineBearerAdmissionRuntime<'a, C, A, R>,
+    request: ServicePrincipalRequestGate<'a, C, A, S>,
+}
 
-        Ok(admission_from_verified(verified))
+impl<'a, C, A, R, S> MachineBearerRequestGate<'a, C, A, R, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore,
+{
+    #[must_use]
+    pub const fn new(
+        clock: &'a C,
+        authorization: &'a A,
+        store: &'a S,
+        resolver: &'a R,
+        policy: &'a MachineTokenPolicy,
+    ) -> Self {
+        Self {
+            bearer: MachineBearerAdmissionRuntime::new(clock, authorization, resolver, policy),
+            request: ServicePrincipalRequestGate::new(clock, authorization, store),
+        }
+    }
+}
+
+impl<C, A, R, S> fmt::Debug for MachineBearerRequestGate<'_, C, A, R, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MachineBearerRequestGate")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, C, A, R, S> MachineBearerRequestGate<'a, C, A, R, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    R: MachineTokenKeyResolver,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore,
+{
+    /// Verifies one Bearer and binds it to the canonical quota/authorization/audit evaluator.
+    ///
+    /// # Errors
+    /// Fails closed for invalid Bearer tokens/scopes and for malformed route permission mapping.
+    pub fn authenticate_request(
+        &self,
+        encoded: &str,
+        required_scope: &str,
+        resource_scope: &TenantScope,
+    ) -> Result<ServicePrincipalRequestAuthorization<'a, C, A, S>, CanonicalError> {
+        let (verified, permission) = self.bearer.authenticate_scope(encoded, required_scope)?;
+        self.request.bind_machine_bearer_request(
+            verified.subject,
+            verified.token_id,
+            permission,
+            resource_scope,
+        )
+    }
+
+    /// Operation-bound Bearer request admission.
+    ///
+    /// # Errors
+    /// Fails closed for invalid Bearer tokens/scopes or malformed operation metadata.
+    pub fn authenticate_request_for_operation(
+        &self,
+        encoded: &str,
+        required_scope: &str,
+        resource_scope: &TenantScope,
+        operation: &ucr_model::ServiceAuditOperationRef,
+    ) -> Result<ServicePrincipalRequestAuthorization<'a, C, A, S>, CanonicalError> {
+        let (verified, permission) = self.bearer.authenticate_scope(encoded, required_scope)?;
+        self.request.bind_machine_bearer_request_for_operation(
+            verified.subject,
+            verified.token_id,
+            permission,
+            resource_scope,
+            operation,
+        )
     }
 }
 
@@ -184,11 +281,13 @@ const fn map_bearer_token_error(error: MachineTokenError) -> CanonicalError {
 
 #[cfg(test)]
 mod tests {
-    use ucr_core::{PermissionGrantStore, ServiceQuotaClockError};
+    use ucr_core::{
+        PermissionGrantStore, ServiceAuditStore, ServiceQuotaClockError, ServiceQuotaStore,
+    };
     use ucr_crypto::{AccessTokenIssueRequest, MachineTokenSigningKey, issue_machine_access_token};
     use ucr_model::{
         NamespaceId, PermissionGrant, PermissionScope, PrincipalId, PrincipalKind, PrincipalRef,
-        TenantId,
+        ServiceAuditOutcome, ServiceAuthenticationRef, ServiceQuotaPolicy, TenantId,
     };
     use ucr_protocol::{CONFERENCE_MANAGE_PERMISSION, CONFERENCE_READ_PERMISSION};
     use ucr_storage_memory::MemoryLocalStore;
@@ -364,6 +463,57 @@ mod tests {
             .admit("not-a-token", MACHINE_SCOPE_CONFERENCE_READ, &scope())
             .expect_err("malformed token");
         assert_eq!(malformed.code, CanonicalErrorCode::Unauthenticated);
+    }
+
+    #[test]
+    fn bearer_request_gate_reuses_quota_and_audit_with_exact_token_id() {
+        let store = MemoryLocalStore::default();
+        grant(&store, CONFERENCE_READ_PERMISSION);
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject(),
+                max_requests: 1,
+                window_ms: 1_000,
+            })
+            .expect("install request quota");
+
+        let key = signing_key();
+        let public = key.public_key();
+        let policy = policy();
+        let scopes = vec![MACHINE_SCOPE_CONFERENCE_READ.to_owned()];
+        let token = issue(&key, &policy, &scopes);
+        let clock = FixedClock(1_100_000);
+        let gate = MachineBearerRequestGate::new(&clock, &store, &store, &public, &policy);
+        let request = AuthorizationRequest {
+            subject: subject(),
+            permission: CONFERENCE_READ_PERMISSION.to_owned(),
+            resource_scope: scope(),
+        };
+
+        let first = gate
+            .authenticate_request(token.as_str(), MACHINE_SCOPE_CONFERENCE_READ, &scope())
+            .expect("authenticate bearer request");
+        first.authorize(&request).expect("authorize first request");
+
+        let second = gate
+            .authenticate_request(token.as_str(), MACHINE_SCOPE_CONFERENCE_READ, &scope())
+            .expect("authenticate second bearer request");
+        let limited = second
+            .authorize(&request)
+            .expect_err("second request must share canonical quota");
+        assert_eq!(limited.code, CanonicalErrorCode::RateLimited);
+
+        let audit = store
+            .service_audit_records(&scope(), 8)
+            .expect("read bearer audit");
+        assert_eq!(audit.len(), 2);
+        assert_eq!(audit[0].outcome, ServiceAuditOutcome::Authorized);
+        assert_eq!(audit[1].outcome, ServiceAuditOutcome::RateLimited);
+        assert!(audit.iter().all(|record| matches!(
+            &record.authentication,
+            ServiceAuthenticationRef::MachineAccessToken(token_id)
+                if token_id.as_str() == "machine-bearer-token"
+        )));
     }
 
     #[test]

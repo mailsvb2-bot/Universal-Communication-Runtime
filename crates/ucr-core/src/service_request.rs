@@ -5,9 +5,9 @@ use core::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ucr_model::{
-    AuditRecordId, AuthorizationRequest, ScopedPrincipal, ServiceAuditOperationRef,
-    ServiceAuditOutcome, ServiceAuditRecord, ServiceAuthenticationRef, ServiceCredentialId,
-    TenantScope,
+    AuditRecordId, AuthorizationRequest, OpaqueId, PrincipalKind, ScopedPrincipal,
+    ServiceAuditOperationRef, ServiceAuditOutcome, ServiceAuditRecord, ServiceAuthenticationRef,
+    ServiceCredentialId, TenantScope,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, MAX_SERVICE_AUDIT_OPERATION_KIND_LEN,
@@ -75,7 +75,7 @@ impl ServiceQuotaClock for SystemServiceQuotaClock {
 /// same evaluator; those checks are separately audited but do not consume request quota again.
 #[derive(Clone, Copy)]
 struct ServiceAuditRequestContext<'a> {
-    credential_id: &'a ServiceCredentialId,
+    authentication: &'a ServiceAuthenticationRef,
     presented_scope: &'a TenantScope,
     permission: &'a str,
     resource_scope: &'a TenantScope,
@@ -162,6 +162,85 @@ where
         )
     }
 
+    /// Binds a machine Bearer authentication result to the canonical single-use quota/audit gate.
+    ///
+    /// This is a trusted-authentication-owner entry point. It does not parse or verify Bearer
+    /// tokens; callers must supply the canonical Service Account subject and signed token ID
+    /// produced by the machine-auth verifier. Repository architecture guards restrict production
+    /// call sites to the machine-auth owner.
+    ///
+    /// # Errors
+    /// Rejects non-Service-Account subjects and malformed permission metadata.
+    #[doc(hidden)]
+    pub fn bind_machine_bearer_request(
+        &self,
+        subject: ScopedPrincipal,
+        token_id: OpaqueId,
+        permission: &str,
+        resource_scope: &TenantScope,
+    ) -> Result<ServicePrincipalRequestAuthorization<'a, C, A, S>, CanonicalError> {
+        self.bind_machine_bearer_request_inner(subject, token_id, permission, resource_scope, None)
+    }
+
+    /// Operation-bound variant of bind_machine_bearer_request.
+    ///
+    /// # Errors
+    /// Rejects malformed operation metadata plus all ordinary trusted binding errors.
+    #[doc(hidden)]
+    pub fn bind_machine_bearer_request_for_operation(
+        &self,
+        subject: ScopedPrincipal,
+        token_id: OpaqueId,
+        permission: &str,
+        resource_scope: &TenantScope,
+        operation: &ServiceAuditOperationRef,
+    ) -> Result<ServicePrincipalRequestAuthorization<'a, C, A, S>, CanonicalError> {
+        if operation.operation_kind.len() > MAX_SERVICE_AUDIT_OPERATION_KIND_LEN {
+            return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+        }
+        validate_service_audit_operation_ref(operation)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+        self.bind_machine_bearer_request_inner(
+            subject,
+            token_id,
+            permission,
+            resource_scope,
+            Some(operation),
+        )
+    }
+
+    fn bind_machine_bearer_request_inner(
+        &self,
+        subject: ScopedPrincipal,
+        token_id: OpaqueId,
+        permission: &str,
+        resource_scope: &TenantScope,
+        operation: Option<&ServiceAuditOperationRef>,
+    ) -> Result<ServicePrincipalRequestAuthorization<'a, C, A, S>, CanonicalError> {
+        if subject.principal.kind != PrincipalKind::ServiceAccount {
+            return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+        }
+        if permission.len() > MAX_SERVICE_REQUEST_PERMISSION_LEN {
+            return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+        }
+        validate_namespaced_identifier(permission)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+        Ok(ServicePrincipalRequestAuthorization {
+            clock: self.clock,
+            authorization: self.authorization,
+            store: self.store,
+            proof: ServicePrincipalAdmissionProof {
+                subject,
+                permission: permission.to_owned(),
+                resource_scope: resource_scope.clone(),
+            },
+            authentication: ServiceAuthenticationRef::MachineAccessToken(token_id),
+            operation: operation.cloned(),
+            used: AtomicBool::new(false),
+            primary_authorized: AtomicBool::new(false),
+        })
+    }
+
     fn authenticate_request_inner(
         &self,
         presented_scope: &TenantScope,
@@ -176,13 +255,7 @@ where
         }
         validate_namespaced_identifier(permission)
             .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
-        let audit_context = ServiceAuditRequestContext {
-            credential_id,
-            presented_scope,
-            permission,
-            resource_scope,
-            operation,
-        };
+        let authentication = ServiceAuthenticationRef::ServiceCredential(credential_id.clone());
         let now = self.clock.now_unix_ms().map_err(map_clock_error)?;
         let subject = match authenticate_service_principal(
             self.store,
@@ -200,7 +273,18 @@ where
                         ServiceAuditOutcome::AuthenticationUnavailable
                     }
                 };
-                let record = new_audit_record(audit_context, None, outcome, now)?;
+                let record = new_audit_record(
+                    ServiceAuditRequestContext {
+                        authentication: &authentication,
+                        presented_scope,
+                        permission,
+                        resource_scope,
+                        operation,
+                    },
+                    None,
+                    outcome,
+                    now,
+                )?;
                 self.store
                     .append_service_audit(&record)
                     .map_err(map_store_error)?;
@@ -216,7 +300,7 @@ where
                 permission: permission.to_owned(),
                 resource_scope: resource_scope.clone(),
             },
-            credential_id: credential_id.clone(),
+            authentication,
             operation: operation.cloned(),
             used: AtomicBool::new(false),
             primary_authorized: AtomicBool::new(false),
@@ -229,7 +313,7 @@ pub struct ServicePrincipalRequestAuthorization<'a, C, A, S> {
     authorization: &'a A,
     store: &'a S,
     proof: ServicePrincipalAdmissionProof,
-    credential_id: ServiceCredentialId,
+    authentication: ServiceAuthenticationRef,
     operation: Option<ServiceAuditOperationRef>,
     used: AtomicBool,
     primary_authorized: AtomicBool,
@@ -240,7 +324,7 @@ impl<C, A, S> fmt::Debug for ServicePrincipalRequestAuthorization<'_, C, A, S> {
         formatter
             .debug_struct("ServicePrincipalRequestAuthorization")
             .field("proof", &self.proof)
-            .field("credential_id", &self.credential_id)
+            .field("authentication_kind", &self.authentication.kind())
             .field("has_operation", &self.operation.is_some())
             .field("used", &self.used.load(Ordering::Relaxed))
             .field(
@@ -382,7 +466,7 @@ where
         result: Result<T, CanonicalError>,
     ) -> Result<T, CanonicalError> {
         let context = ServiceAuditRequestContext {
-            credential_id: &self.credential_id,
+            authentication: &self.authentication,
             presented_scope: &self.proof.subject.scope,
             permission,
             resource_scope: &self.proof.resource_scope,
@@ -410,7 +494,7 @@ fn new_audit_record(
     let audit_id = AuditRecordId::from_opaque(generate_opaque_id().map_err(map_id_error)?);
     Ok(ServiceAuditRecord {
         audit_id,
-        authentication: ServiceAuthenticationRef::ServiceCredential(context.credential_id.clone()),
+        authentication: context.authentication.clone(),
         presented_scope: context.presented_scope.clone(),
         subject,
         permission: context.permission.to_owned(),
