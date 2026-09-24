@@ -8,6 +8,10 @@ This layer adds a standard machine-to-machine authentication boundary for extern
 
 The v1 grant is OAuth2-compatible `client_credentials` semantics.
 
+For the standard HTTP `client_secret_basic` binding, the external username is the canonical Service Account / integration `client_id`. The password is one opaque UCR OAuth client secret. That secret packages the exact canonical tenant scope, Service Credential locator and one-time credential secret into one redacted, zeroizing transport value. An integration therefore persists only `client_id + client_secret`; it is not required to persist or understand UCR's internal `credential_id` or tenant/namespace credential lookup tuple separately.
+
+Decoding this opaque transport value never authenticates by itself. The HTTP adapter must pass the decoded scope, credential ID and secret into the existing `ServicePrincipalRequestGate`, then require the independently presented Basic username / `client_id` to match the authenticated canonical Service Account exactly. Rotation remains the existing Service Credential lifecycle: issue a new credential/client-secret value, overlap as deployment policy permits, then irreversibly revoke the old credential. No OAuth-specific credential database is introduced.
+
 A concrete HTTPS token edge authenticates a client with the existing canonical Service Credential. The credential identifier and secret are transport credentials and MUST NOT be copied into the protobuf request body or persisted in an access token record.
 
 The token request carries only:
@@ -127,7 +131,7 @@ The initial mapping is:
 
 Unknown or duplicate OAuth scopes fail closed. This mapping is an attenuation/projection of canonical authorization and does not persist OAuth scopes as a second permission owner.
 
-The gRPC composition still does not claim the production HTTPS `POST /oauth2/token` edge, standard HTTP client authentication syntax, JWKS serving, bearer middleware on public APIs, or durable deployment signing-key rotation.
+The gRPC composition still does not claim the production HTTPS `POST /oauth2/token` edge, JWKS serving, bearer middleware on public APIs, or durable deployment signing-key rotation. The shared machine-auth crate now defines the opaque `client_id + client_secret` transport binding required for standard HTTP `client_secret_basic`; the concrete HTTPS parser/response adapter remains separate transport work.
 
 
 ## Shared machine-auth runtime owner and fixed token admission

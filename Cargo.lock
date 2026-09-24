@@ -3842,11 +3842,13 @@ dependencies = [
 name = "ucr-machine-auth"
 version = "0.0.1"
 dependencies = [
+ "base64",
  "ucr-core",
  "ucr-crypto",
  "ucr-model",
  "ucr-protocol",
  "ucr-storage-memory",
+ "zeroize",
 ]
 
 [[package]]
