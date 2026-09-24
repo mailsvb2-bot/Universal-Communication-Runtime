@@ -226,14 +226,12 @@ mod tests {
 
     #[test]
     fn machine_auth_jwks_projects_only_public_ed25519_material() {
-        let signing_key = Arc::new(
-            MachineTokenSigningKey::from_seed(
-                ucr_model::KeyId::from_opaque(
-                    ucr_model::OpaqueId::new("machine-jwks-key").expect("key id"),
-                ),
-                [7_u8; 32],
+        let signing_key = Arc::new(MachineTokenSigningKey::from_seed(
+            ucr_model::KeyId::from_opaque(
+                ucr_model::OpaqueId::new("machine-jwks-key").expect("key id"),
             ),
-        );
+            [7_u8; 32],
+        ));
         let service = GrpcMachineAuthService::new(
             Arc::new(ucr_core::SystemServiceQuotaClock),
             Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
@@ -258,6 +256,9 @@ mod tests {
         assert_eq!(key.r#use, "sig");
         assert_eq!(key.alg, "EdDSA");
         assert_eq!(key.kid, "machine-jwks-key");
-        assert_eq!(key.x, URL_SAFE_NO_PAD.encode(signing_key.public_key().verifying_key.0));
+        assert_eq!(
+            key.x,
+            URL_SAFE_NO_PAD.encode(signing_key.public_key().verifying_key.0)
+        );
     }
 }
