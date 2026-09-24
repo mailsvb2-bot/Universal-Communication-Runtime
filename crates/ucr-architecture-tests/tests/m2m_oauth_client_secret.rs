@@ -26,10 +26,8 @@ fn oauth_client_secret_is_only_a_transport_binding_over_canonical_credentials() 
     assert!(!source.contains("AuthorizationRequest {"));
     assert!(!source.contains("ClientPlatform"));
 
-    assert!(spec.contains("opaque `client_id + client_secret` transport binding"));
-    assert!(
-        spec.contains("concrete HTTPS parser/response adapter remains separate transport work")
-    );
+    assert!(spec.contains("opaque `client_id + client_secret` binding"));
+    assert!(spec.contains("delegates exchange to `MachineAuthService`"));
 }
 
 #[test]
