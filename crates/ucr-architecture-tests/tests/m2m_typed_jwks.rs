@@ -40,6 +40,8 @@ fn typed_machine_jwks_exposes_only_public_ed25519_material() {
     assert!(service.contains(r#"crv: "Ed25519".to_owned()"#));
     assert!(service.contains(r#"r#use: "sig".to_owned()"#));
     assert!(service.contains(r#"alg: "EdDSA".to_owned()"#));
+    assert!(service.contains("self.verification_keys"));
+    assert!(service.contains(".keys()"));
     assert!(service.contains("URL_SAFE_NO_PAD.encode(public_key.verifying_key.0)"));
     assert!(service.contains(
         r#"supported_token_endpoint_auth_methods: vec!["client_secret_basic".to_owned()]"#
@@ -48,7 +50,7 @@ fn typed_machine_jwks_exposes_only_public_ed25519_material() {
 }
 
 #[test]
-fn jwks_http_projection_remains_transport_only_future_work() {
+fn jwks_http_projection_uses_restart_safe_overlap_set() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
@@ -57,6 +59,8 @@ fn jwks_http_projection_remains_transport_only_future_work() {
         fs::read_to_string(workspace.join("spec/m2m-authentication.md")).expect("M2M auth spec");
 
     assert!(spec.contains("MachineAuthService.GetJwks"));
-    assert!(spec.contains("future HTTPS adapter"));
-    assert!(spec.contains("durable active/previous signing-key rotation remain separate work"));
+    assert!(spec.contains("active key and an optional previous overlap key"));
+    assert!(spec.contains("New tokens are signed only by the active key"));
+    assert!(spec.contains("overlap restart-safe"));
+    assert!(!spec.contains("durable active/previous signing-key rotation remain separate work"));
 }
