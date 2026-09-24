@@ -12,22 +12,23 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use ucr_api_grpc::{
     GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
-    GrpcIntegrationService, GrpcOperatorRuntimeService, GrpcRealtimeService,
-    GrpcStoreForwardService, GrpcSyncService, GrpcUniversalConferenceService,
-    OperatorRuntimeHealthSource, RealtimeWebRtcDependencies,
+    GrpcIntegrationService, GrpcMachineAuthService, GrpcOperatorRuntimeService,
+    GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService, GrpcUniversalConferenceService,
+    MachineAuthDiscovery, OperatorRuntimeHealthSource, RealtimeWebRtcDependencies,
     UniversalConferenceRuntimeCapabilities, call_service_server, conference_service_server,
     device_service_server, event_service_server, group_service_server, integration_service_server,
-    operator_runtime_service_server, pb, realtime_service_server, store_forward_service_server,
-    sync_service_server, universal_conference_service_server,
+    machine_auth_service_server, operator_runtime_service_server, pb, realtime_service_server,
+    store_forward_service_server, sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
     DurableStoreError, EventWebhookDispatcher, StorageHealth, StorageProvider,
     SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome, generate_opaque_id,
 };
+use ucr_crypto::{MAX_MACHINE_TOKEN_TTL_SECONDS, MachineTokenPolicy, MachineTokenSigningKey};
 use ucr_model::{
-    EventSubscriptionId, IceTransportPolicy, NamespaceId, OpaqueId, SfuForwardEnvelope, TenantId,
-    TenantScope,
+    EventSubscriptionId, IceTransportPolicy, KeyId, NamespaceId, OpaqueId, SfuForwardEnvelope,
+    TenantId, TenantScope,
 };
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_sfu::{SfuForwardSink, SfuForwardSinkError};
@@ -57,6 +58,65 @@ struct WebhookWorkerSweep {
     retry_scheduled: usize,
     dead_lettered: usize,
     rejected: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct MachineAuthRuntimeConfig {
+    policy: MachineTokenPolicy,
+    signing_key: Arc<MachineTokenSigningKey>,
+    discovery: MachineAuthDiscovery,
+}
+
+impl MachineAuthRuntimeConfig {
+    /// Builds the loopback machine-auth daemon configuration from a deployment-owned stable
+    /// Ed25519 seed. Public URLs must be HTTPS because external reachability belongs behind a
+    /// trusted TLS edge.
+    ///
+    /// # Errors
+    /// Rejects malformed identifiers, non-HTTPS public URLs, empty audience, or invalid TTL.
+    pub fn new(
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        signing_key_id: impl Into<String>,
+        signing_seed: [u8; 32],
+        token_endpoint: impl Into<String>,
+        jwks_uri: impl Into<String>,
+        max_ttl_seconds: u32,
+    ) -> Result<Self, String> {
+        let issuer = issuer.into();
+        let audience = audience.into();
+        let token_endpoint = token_endpoint.into();
+        let jwks_uri = jwks_uri.into();
+        validate_public_https_url(&issuer, "machine token issuer")?;
+        validate_public_https_url(&token_endpoint, "machine token endpoint")?;
+        validate_public_https_url(&jwks_uri, "machine token JWKS URI")?;
+        if audience.is_empty() || audience.chars().any(char::is_whitespace) {
+            return Err(
+                "machine token audience must be a non-empty token without whitespace".to_owned(),
+            );
+        }
+        if max_ttl_seconds == 0 || max_ttl_seconds > MAX_MACHINE_TOKEN_TTL_SECONDS {
+            return Err(format!(
+                "machine token max TTL must be between 1 and {MAX_MACHINE_TOKEN_TTL_SECONDS} seconds"
+            ));
+        }
+        let key_id = KeyId::from_opaque(runtime_opaque(
+            &signing_key_id.into(),
+            "machine token signing key id",
+        )?);
+        Ok(Self {
+            policy: MachineTokenPolicy {
+                issuer,
+                audience,
+                max_ttl_seconds,
+            },
+            signing_key: Arc::new(MachineTokenSigningKey::from_seed(key_id, signing_seed)),
+            discovery: MachineAuthDiscovery {
+                token_endpoint,
+                jwks_uri,
+            },
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -741,6 +801,56 @@ impl ProductionRuntime {
             .map_err(|error| format!("local runtime API server: {error}"))
     }
 
+    /// Serves the canonical machine-auth gRPC service on a loopback-only listener.
+    ///
+    /// The signing key is deployment-owned and stable across restart. Public OAuth2/JWKS
+    /// reachability belongs to a separate trusted HTTPS gateway; this method never exposes
+    /// plaintext remotely.
+    ///
+    /// # Errors
+    /// Returns explicit configuration, bind, storage, or gRPC server errors.
+    pub async fn serve_machine_auth(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        config: MachineAuthRuntimeConfig,
+    ) -> Result<(), String> {
+        validate_local_bind(bind)?;
+        if self.diagnostics()?.storage_health != StorageHealth::Healthy {
+            return Err("production runtime refuses unhealthy storage".to_owned());
+        }
+
+        let listener = TcpListener::bind(bind)
+            .await
+            .map_err(|error| format!("bind local machine-auth API: {error}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("resolve local machine-auth API: {error}"))?;
+        println!("UCR_MACHINE_AUTH_READY endpoint=http://{address} tls_edge=required");
+        println!("UCR_RUNTIME_MODE={RUNTIME_MODE} machine_auth=true test_mode=false");
+
+        let incoming = TcpListenerStream::new(listener);
+        let clock = Arc::new(SystemServiceQuotaClock);
+        let store = Arc::clone(&self.store);
+        let operator_health = Arc::new(ProductionOperatorHealthSource::basic(Arc::clone(&store)));
+        let service = GrpcMachineAuthService::new(
+            clock,
+            Arc::clone(&store),
+            store,
+            config.signing_key,
+            config.policy,
+            config.discovery,
+        );
+
+        Server::builder()
+            .add_service(operator_runtime_service_server(
+                GrpcOperatorRuntimeService::new(operator_health),
+            ))
+            .add_service(machine_auth_service_server(service))
+            .serve_with_incoming(incoming)
+            .await
+            .map_err(|error| format!("local machine-auth API server: {error}"))
+    }
+
     /// Serves the canonical API plus Conference join and Realtime media on a loopback-only
     /// listener. Public reachability belongs to a separate authenticated TLS reverse proxy or
     /// gateway; this method never opens plaintext on a non-loopback address.
@@ -1091,6 +1201,17 @@ pub fn validate_local_bind(bind: SocketAddr) -> Result<(), String> {
     }
 }
 
+fn validate_public_https_url(value: &str, label: &str) -> Result<(), String> {
+    if value.starts_with("https://")
+        && value.len() > "https://".len()
+        && !value.chars().any(char::is_whitespace)
+    {
+        Ok(())
+    } else {
+        Err(format!("{label} must be an absolute HTTPS URL"))
+    }
+}
+
 fn runtime_opaque(value: &str, label: &str) -> Result<OpaqueId, String> {
     OpaqueId::new(value.to_owned()).map_err(|_| format!("invalid {label}"))
 }
@@ -1121,6 +1242,35 @@ const fn health_label(health: StorageHealth) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_auth_config_requires_https_and_redacts_signing_key() {
+        let config = MachineAuthRuntimeConfig::new(
+            "https://auth.example.test",
+            "ucr-api",
+            "key-2026-09",
+            [7_u8; 32],
+            "https://auth.example.test/oauth2/token",
+            "https://auth.example.test/.well-known/jwks.json",
+            900,
+        )
+        .expect("machine auth config");
+        let debug = format!("{config:?}");
+        assert!(debug.contains("<secret>"));
+        assert!(!debug.contains("[7, 7, 7"));
+        assert!(
+            MachineAuthRuntimeConfig::new(
+                "http://auth.example.test",
+                "ucr-api",
+                "key-a",
+                [1_u8; 32],
+                "https://auth.example.test/oauth2/token",
+                "https://auth.example.test/.well-known/jwks.json",
+                900,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn realtime_capability_projection_defaults_fail_closed_and_derives_turn() {

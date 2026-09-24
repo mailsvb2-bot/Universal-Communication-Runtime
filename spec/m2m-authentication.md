@@ -1,6 +1,6 @@
 # Machine-to-Machine Authentication
 
-Status: **Prepared v1 public contract with signed token codec/runtime and canonical gRPC MachineAuthService composition; public HTTPS edge is not yet claimed**.
+Status: **Prepared v1 public contract with signed token codec/runtime, canonical MachineAuthService composition, and loopback production-daemon wiring; public HTTPS edge is not yet claimed**.
 
 This layer adds a standard machine-to-machine authentication boundary for external applications without creating a second identity, credential, authorization, tenant, or permission owner. The canonical Service Account remains the client identity and the existing Service Credential remains the long-lived client authentication proof.
 
@@ -143,3 +143,24 @@ A Service Account must hold that permission before any requested OAuth scope is 
 After fixed token admission succeeds, every requested OAuth scope is checked as an additional canonical permission for the same authenticated Service Account and exact tenant scope. Only after all requested permissions are proven may the runtime issue the short-lived signed token.
 
 This closes the earlier transport-local behavior where the first requested OAuth scope could determine the primary Service Principal admission permission and therefore its request-rate class.
+
+
+## Production daemon wiring
+
+The production runtime now has an explicit `serve-auth` mode that serves the canonical `MachineAuthService` on a loopback-only gRPC listener over the same durable SQLite Service Credential, Permission Grant, quota and audit owners used by the rest of UCR.
+
+The daemon requires deployment-owned machine-token configuration:
+
+- stable HTTPS issuer;
+- explicit API audience;
+- stable signing-key ID;
+- public HTTPS token endpoint URL;
+- public HTTPS JWKS URL;
+- bounded maximum token TTL;
+- a protected operator secret file containing the 32-byte Ed25519 signing seed encoded as hexadecimal text.
+
+The signing seed is read into zeroizing process memory and is never accepted as a command-line argument or dedicated `UCR_MACHINE_TOKEN_SIGNING_KEY_HEX` environment variable. The private seed is never printed, persisted in the application database, returned by gRPC, or included in discovery metadata.
+
+The stable seed means the same deployment key survives daemon restart. This is not yet the final rotation owner: overlap publication, active/previous key lifecycle, explicit key revocation and JWKS serving remain future work.
+
+The local auth daemon refuses non-loopback plaintext binding. External OAuth2 traffic must still terminate at a trusted HTTPS edge before reaching this local service. Consequently this wiring does not yet claim a public `POST /oauth2/token` endpoint, `client_secret_basic`, JWKS publication, bearer admission on public APIs, or production signing-key rotation.

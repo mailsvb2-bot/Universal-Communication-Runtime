@@ -1,12 +1,13 @@
 #![forbid(unsafe_code)]
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use ucr_core::WebhookDispatchOutcome;
 use ucr_runtime::{
-    DEFAULT_RUNTIME_BIND, DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, ProductionRuntime,
-    RealtimeRuntimeConfig,
+    DEFAULT_RUNTIME_BIND, DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MachineAuthRuntimeConfig,
+    ProductionRuntime, RealtimeRuntimeConfig,
 };
+use zeroize::Zeroizing;
 
 #[tokio::main]
 async fn main() {
@@ -95,6 +96,7 @@ async fn run() -> Result<(), String> {
                 .await
         }
         "serve-realtime" => serve_realtime_command(&database, &bind, join_base_url).await,
+        "serve-auth" => serve_auth_command(&database, &bind).await,
         "dispatch-webhook-once" => dispatch_webhook_once(
             &database,
             tenant_id,
@@ -104,6 +106,75 @@ async fn run() -> Result<(), String> {
         "run-webhook-worker" => run_webhook_worker(&database).await,
         _ => Err(usage()),
     }
+}
+
+async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String> {
+    let bind: SocketAddr = bind
+        .parse()
+        .map_err(|error| format!("invalid --bind address: {error}"))?;
+    let issuer = required_env("UCR_MACHINE_TOKEN_ISSUER")?;
+    let audience = required_env("UCR_MACHINE_TOKEN_AUDIENCE")?;
+    let signing_key_id = required_env("UCR_MACHINE_TOKEN_SIGNING_KEY_ID")?;
+    let token_endpoint = required_env("UCR_MACHINE_TOKEN_ENDPOINT")?;
+    let jwks_uri = required_env("UCR_MACHINE_TOKEN_JWKS_URI")?;
+    let signing_key_file = required_env("UCR_MACHINE_TOKEN_SIGNING_KEY_FILE")?;
+    let max_ttl_seconds = std::env::var("UCR_MACHINE_TOKEN_MAX_TTL_SECONDS")
+        .ok()
+        .map(|value| {
+            value.parse::<u32>().map_err(|_| {
+                "UCR_MACHINE_TOKEN_MAX_TTL_SECONDS must be an unsigned integer".to_owned()
+            })
+        })
+        .transpose()?
+        .unwrap_or(900);
+    let signing_seed = read_machine_token_signing_key(&signing_key_file)?;
+    let config = MachineAuthRuntimeConfig::new(
+        issuer,
+        audience,
+        signing_key_id,
+        signing_seed,
+        token_endpoint,
+        jwks_uri,
+        max_ttl_seconds,
+    )?;
+    Arc::new(ProductionRuntime::open_existing(database)?)
+        .serve_machine_auth(bind, config)
+        .await
+}
+
+fn required_env(variable: &str) -> Result<String, String> {
+    std::env::var(variable).map_err(|_| format!("{variable} is required for serve-auth"))
+}
+
+fn read_machine_token_signing_key(path: &str) -> Result<[u8; 32], String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect machine token signing key file: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("machine token signing key path must be a regular non-symlink file".to_owned());
+    }
+    if metadata.len() > 256 {
+        return Err("machine token signing key file exceeds the bounded size".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(
+                "machine token signing key file must not be readable or writable by group/others"
+                    .to_owned(),
+            );
+        }
+    }
+
+    let mut bytes = Zeroizing::new(
+        fs::read(path).map_err(|error| format!("read machine token signing key file: {error}"))?,
+    );
+    while bytes.last().is_some_and(u8::is_ascii_whitespace) {
+        bytes.pop();
+    }
+    let encoded = std::str::from_utf8(bytes.as_slice())
+        .map_err(|_| "machine token signing key file must contain ASCII hex".to_owned())?;
+    decode_key_hex_named(encoded, "machine token signing key file")
 }
 
 async fn serve_realtime_command(
@@ -262,6 +333,6 @@ fn hex_nibble(byte: u8) -> Result<u8, String> {
 }
 
 fn usage() -> String {
-    "usage: ucr-runtime <init|check|metrics|serve|serve-realtime|dispatch-webhook-once|run-webhook-worker> --database PATH [--bind 127.0.0.1:50051] [--join-base-url https://host/conference] [--tenant-id ID] [--namespace-id ID] [--subscription-id ID]"
+    "usage: ucr-runtime <init|check|metrics|serve|serve-auth|serve-realtime|dispatch-webhook-once|run-webhook-worker> --database PATH [--bind 127.0.0.1:50051] [--join-base-url https://host/conference] [--tenant-id ID] [--namespace-id ID] [--subscription-id ID]"
         .to_owned()
 }

@@ -3980,6 +3980,7 @@ dependencies = [
  "ucr-api-grpc",
  "ucr-conference",
  "ucr-core",
+ "ucr-crypto",
  "ucr-media-e2ee",
  "ucr-model",
  "ucr-realtime",
@@ -3987,6 +3988,7 @@ dependencies = [
  "ucr-storage-sqlite",
  "ucr-webhook",
  "ucr-webrtc",
+ "zeroize",
 ]
 
 [[package]]

@@ -7,7 +7,7 @@ use ucr_model::{
     KeyId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
     TenantId, TenantScope,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::VerifyingKeyBytes;
 
@@ -167,6 +167,17 @@ impl MachineTokenSigningKey {
             key_id,
             key: SigningKey::from_bytes(&seed),
         })
+    }
+
+    /// Restores a deployment-owned Ed25519 access-token signing key from a stable 32-byte seed.
+    ///
+    /// The input buffer is zeroized before this function returns. Operators should still source
+    /// it from a protected secret file or secret manager and must never log the seed.
+    #[must_use]
+    pub fn from_seed(key_id: KeyId, mut seed: [u8; 32]) -> Self {
+        let key = SigningKey::from_bytes(&seed);
+        seed.zeroize();
+        Self { key_id, key }
     }
 
     #[must_use]
@@ -489,6 +500,14 @@ mod tests {
             audience: "ucr-api".to_owned(),
             max_ttl_seconds: 900,
         }
+    }
+
+    #[test]
+    fn stable_seed_restores_same_public_key_and_redacts_private_material() {
+        let first = MachineTokenSigningKey::from_seed(key_id("stable-key"), [11_u8; 32]);
+        let second = MachineTokenSigningKey::from_seed(key_id("stable-key"), [11_u8; 32]);
+        assert_eq!(first.public_key(), second.public_key());
+        assert!(format!("{first:?}").contains("<secret>"));
     }
 
     #[test]
