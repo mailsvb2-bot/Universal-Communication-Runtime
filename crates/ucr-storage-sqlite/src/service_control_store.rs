@@ -7,8 +7,7 @@ use ucr_model::{
     AuditRecordId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
     ScopedPrincipal, ServiceAuditOperationRef, ServiceAuditOutcome, ServiceAuditRecord,
     ServiceAuthenticationRef, ServiceCredentialId, ServiceQuotaPolicy, ServiceRateLimitPolicy,
-    ServiceRequestRateClass,
-    ServiceResourceQuotaPolicy, TenantId, TenantScope,
+    ServiceRequestRateClass, ServiceResourceQuotaPolicy, TenantId, TenantScope,
 };
 use ucr_protocol::{
     MAX_SERVICE_AUDIT_READ_ITEMS, service_audit_hash, validate_service_audit_operation_ref,
@@ -1215,13 +1214,9 @@ impl ServiceAuditStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         let mut records = rows
             .map(|row| {
-                let (tuple, authentication_kind) =
-                    row.map_err(|error| map_sqlite_error(&error))?;
+                let (tuple, authentication_kind) = row.map_err(|error| map_sqlite_error(&error))?;
                 let mut record =
-                    decode_audit_tuple_with_authentication(
-                        tuple,
-                        authentication_kind.as_deref(),
-                    )?;
+                    decode_audit_tuple_with_authentication(tuple, authentication_kind.as_deref())?;
                 record.operation = Some(operation.clone());
                 validate_service_audit_record(&record).map_err(|_| DurableStoreError::Corrupt)?;
                 Ok(record)
@@ -1982,14 +1977,16 @@ fn load_audit_by_id(
         )
         .optional()
         .map_err(|error| map_sqlite_error(&error))?
-        .map(|(tuple, authentication_kind, operation_kind, operation_id)| {
-            decode_audit_tuple_with_authentication_and_operation(
-                tuple,
-                authentication_kind.as_deref(),
-                operation_kind,
-                operation_id,
-            )
-        })
+        .map(
+            |(tuple, authentication_kind, operation_kind, operation_id)| {
+                decode_audit_tuple_with_authentication_and_operation(
+                    tuple,
+                    authentication_kind.as_deref(),
+                    operation_kind,
+                    operation_id,
+                )
+            },
+        )
         .transpose()
 }
 
@@ -2248,8 +2245,8 @@ mod tests {
         AuditRecordId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuditOperationRef,
         ServiceAuditOutcome, ServiceAuditRecord, ServiceAuthenticationRef, ServiceQuotaPolicy,
-        ServiceRateLimitPolicy,
-        ServiceRequestRateClass, ServiceResourceQuotaPolicy, TenantId, TenantScope,
+        ServiceRateLimitPolicy, ServiceRequestRateClass, ServiceResourceQuotaPolicy, TenantId,
+        TenantScope,
     };
     use ucr_protocol::{CONVERSATION_READ_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND};
 
