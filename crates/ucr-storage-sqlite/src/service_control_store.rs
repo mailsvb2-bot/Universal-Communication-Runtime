@@ -2221,7 +2221,8 @@ mod tests {
     use ucr_model::{
         AuditRecordId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuditOperationRef,
-        ServiceAuditOutcome, ServiceAuditRecord, ServiceQuotaPolicy, ServiceRateLimitPolicy,
+        ServiceAuditOutcome, ServiceAuditRecord, ServiceAuthenticationRef, ServiceQuotaPolicy,
+        ServiceRateLimitPolicy,
         ServiceRequestRateClass, ServiceResourceQuotaPolicy, TenantId, TenantScope,
     };
     use ucr_protocol::{CONVERSATION_READ_PERMISSION, SERVICE_AUDIT_COMMAND_OPERATION_KIND};
