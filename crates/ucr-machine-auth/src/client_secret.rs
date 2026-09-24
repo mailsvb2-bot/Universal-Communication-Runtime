@@ -159,16 +159,18 @@ fn decode_binding(raw: &[u8]) -> Result<OAuthClientSecretBinding, OAuthClientSec
         _ => return Err(OAuthClientSecretError::Malformed),
     };
     let credential_id = ServiceCredentialId::from_opaque(read_opaque(raw, &mut cursor)?);
-    let secret: [u8; SERVICE_CREDENTIAL_SECRET_LEN] = take(
+    let mut secret_bytes = [0_u8; SERVICE_CREDENTIAL_SECRET_LEN];
+    secret_bytes.copy_from_slice(take(
         raw,
         &mut cursor,
         SERVICE_CREDENTIAL_SECRET_LEN,
-    )?
-    .try_into()
-    .map_err(|_| OAuthClientSecretError::Malformed)?;
+    )?);
     if cursor != raw.len() {
+        secret_bytes.zeroize();
         return Err(OAuthClientSecretError::Malformed);
     }
+    let secret = ServiceCredentialSecret::from_bytes(secret_bytes);
+    secret_bytes.zeroize();
 
     Ok(OAuthClientSecretBinding {
         scope: TenantScope {
@@ -176,7 +178,7 @@ fn decode_binding(raw: &[u8]) -> Result<OAuthClientSecretBinding, OAuthClientSec
             namespace_id,
         },
         credential_id,
-        secret: ServiceCredentialSecret::from_bytes(secret),
+        secret,
     })
 }
 
@@ -292,14 +294,14 @@ mod tests {
 
     #[test]
     fn malformed_or_oversized_oauth_secret_fails_closed() {
-        assert_eq!(
+        assert!(matches!(
             decode_oauth_client_secret("not-ucr-secret"),
             Err(OAuthClientSecretError::Malformed)
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             decode_oauth_client_secret("ucr1.%%%not-base64%%%"),
             Err(OAuthClientSecretError::Malformed)
-        );
+        ));
 
         let scope = scope(Some("namespace-oauth"));
         let credential_id = ServiceCredentialId::from_opaque(opaque("credential-oauth"));
@@ -309,9 +311,9 @@ mod tests {
         assert!(decode_oauth_client_secret(&with_trailing).is_err());
 
         let oversized = "x".repeat(MAX_ENCODED_CLIENT_SECRET_LEN + 1);
-        assert_eq!(
+        assert!(matches!(
             decode_oauth_client_secret(&oversized),
             Err(OAuthClientSecretError::TooLarge)
-        );
+        ));
     }
 }
