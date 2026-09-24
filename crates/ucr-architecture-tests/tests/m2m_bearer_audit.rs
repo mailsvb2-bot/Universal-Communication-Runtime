@@ -18,8 +18,15 @@ fn machine_bearer_audit_has_typed_authentication_reference_and_distinct_hash_dom
     assert!(model.contains("pub enum ServiceAuthenticationRef"));
     assert!(model.contains("ServiceCredential(ServiceCredentialId)"));
     assert!(model.contains("MachineAccessToken(OpaqueId)"));
-    assert!(model.contains("pub authentication: ServiceAuthenticationRef"));
-    assert!(!model.contains("pub credential_id: ServiceCredentialId"));
+    let audit_record = model
+        .split_once("pub struct ServiceAuditRecord {")
+        .expect("ServiceAuditRecord")
+        .1
+        .split_once("\n}")
+        .expect("ServiceAuditRecord end")
+        .0;
+    assert!(audit_record.contains("pub authentication: ServiceAuthenticationRef"));
+    assert!(!audit_record.contains("pub credential_id: ServiceCredentialId"));
 
     assert!(protocol.contains("SERVICE_AUDIT_HASH_V1_DOMAIN"));
     assert!(protocol.contains("SERVICE_AUDIT_HASH_V2_DOMAIN"));
