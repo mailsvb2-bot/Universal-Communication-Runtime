@@ -1,3 +1,10 @@
+mod client_secret;
+
+pub use client_secret::{
+    OAuthClientSecret, OAuthClientSecretBinding, OAuthClientSecretError,
+    decode_oauth_client_secret, encode_oauth_client_secret,
+};
+
 use core::fmt;
 use std::collections::BTreeSet;
 
