@@ -77,8 +77,8 @@ fn production_bearer_verifier_uses_public_jwks_without_private_signing_material(
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let runtime =
-        fs::read_to_string(workspace.join("crates/ucr-runtime/src/lib.rs")).expect("runtime source");
+    let runtime = fs::read_to_string(workspace.join("crates/ucr-runtime/src/lib.rs"))
+        .expect("runtime source");
     let runtime_cli = fs::read_to_string(workspace.join("crates/ucr-runtime/src/main.rs"))
         .expect("runtime CLI source");
     let crypto = fs::read_to_string(workspace.join("crates/ucr-crypto/src/machine_token.rs"))
