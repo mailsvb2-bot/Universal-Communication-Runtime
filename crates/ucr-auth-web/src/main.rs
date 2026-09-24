@@ -8,20 +8,14 @@ use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use hyper::{
     Method, Request, Response, StatusCode,
     body::Incoming,
-    header::{
-        AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, PRAGMA, WWW_AUTHENTICATE,
-    },
+    header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, PRAGMA, WWW_AUTHENTICATE},
     server::conn::http1,
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tonic::{
-    Request as GrpcRequest,
-    metadata::BinaryMetadataValue,
-    transport::Channel,
-};
+use tonic::{Request as GrpcRequest, metadata::BinaryMetadataValue, transport::Channel};
 use ucr_api_grpc::{
     SERVICE_CREDENTIAL_ID_METADATA_KEY, SERVICE_CREDENTIAL_SECRET_METADATA_KEY, pb,
 };
@@ -48,11 +42,7 @@ struct GatewayFailure {
 }
 
 impl GatewayFailure {
-    const fn new(
-        status: StatusCode,
-        error: &'static str,
-        description: &'static str,
-    ) -> Self {
+    const fn new(status: StatusCode, error: &'static str, description: &'static str) -> Self {
         Self {
             status,
             error,
@@ -319,20 +309,18 @@ async fn authorization_server_metadata(state: &AppState) -> HttpResponse {
     let request = GrpcRequest::new(pb::MachineAuthMetadataRequest {});
     match client.get_metadata(request).await {
         Ok(response) => match response.into_inner().result {
-            Some(pb::machine_auth_metadata_response::Result::Metadata(metadata)) => {
-                json_response(
-                    StatusCode::OK,
-                    &OAuthMetadataResponse {
-                        issuer: metadata.issuer,
-                        token_endpoint: metadata.token_endpoint,
-                        jwks_uri: metadata.jwks_uri,
-                        grant_types_supported: metadata.supported_grant_types,
-                        scopes_supported: metadata.supported_scopes,
-                        token_endpoint_auth_methods_supported:
-                            metadata.supported_token_endpoint_auth_methods,
-                    },
-                )
-            }
+            Some(pb::machine_auth_metadata_response::Result::Metadata(metadata)) => json_response(
+                StatusCode::OK,
+                &OAuthMetadataResponse {
+                    issuer: metadata.issuer,
+                    token_endpoint: metadata.token_endpoint,
+                    jwks_uri: metadata.jwks_uri,
+                    grant_types_supported: metadata.supported_grant_types,
+                    scopes_supported: metadata.supported_scopes,
+                    token_endpoint_auth_methods_supported: metadata
+                        .supported_token_endpoint_auth_methods,
+                },
+            ),
             Some(pb::machine_auth_metadata_response::Result::Error(error)) => {
                 machine_auth_error(&error).into_response()
             }
@@ -389,10 +377,7 @@ fn machine_auth_client(
     pb::machine_auth_service_client::MachineAuthServiceClient::new(state.upstream.clone())
 }
 
-fn attach_service_credential<T>(
-    request: &mut GrpcRequest<T>,
-    binding: &OAuthClientSecretBinding,
-) {
+fn attach_service_credential<T>(request: &mut GrpcRequest<T>, binding: &OAuthClientSecretBinding) {
     let mut credential_id =
         BinaryMetadataValue::from_bytes(binding.credential_id().as_opaque().as_wire_bytes());
     credential_id.set_sensitive(true);
@@ -567,10 +552,7 @@ fn parse_token_form(body: &[u8]) -> Result<TokenForm, GatewayFailure> {
     })
 }
 
-fn set_once(
-    target: &mut Option<String>,
-    value: String,
-) -> Result<(), GatewayFailure> {
+fn set_once(target: &mut Option<String>, value: String) -> Result<(), GatewayFailure> {
     if target.replace(value).is_some() {
         Err(GatewayFailure::new(
             StatusCode::BAD_REQUEST,
@@ -729,17 +711,15 @@ fn oauth_error_response(
     if challenge_basic {
         response.headers_mut().insert(
             WWW_AUTHENTICATE,
-            hyper::header::HeaderValue::from_static(
-                r#"Basic realm="ucr-oauth", charset="UTF-8""#,
-            ),
+            hyper::header::HeaderValue::from_static(r#"Basic realm="ucr-oauth", charset="UTF-8""#),
         );
     }
     response
 }
 
 fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> HttpResponse {
-    let bytes = serde_json::to_vec(payload)
-        .unwrap_or_else(|_| br#"{"error":"server_error"}"#.to_vec());
+    let bytes =
+        serde_json::to_vec(payload).unwrap_or_else(|_| br#"{"error":"server_error"}"#.to_vec());
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "application/json")
@@ -798,15 +778,11 @@ mod tests {
 
     #[test]
     fn client_secret_basic_decodes_external_client_and_opaque_secret() {
-        let credential_id =
-            ServiceCredentialId::from_opaque(opaque("credential-auth-web"));
+        let credential_id = ServiceCredentialId::from_opaque(opaque("credential-auth-web"));
         let secret = ServiceCredentialSecret::from_bytes([7_u8; 32]);
         let oauth_secret = encode_oauth_client_secret(&scope(), &credential_id, &secret);
         let client_id = "integration%3Aauth-web";
-        let basic = STANDARD.encode(format!(
-            "{client_id}:{}",
-            oauth_secret.expose_secret()
-        ));
+        let basic = STANDARD.encode(format!("{client_id}:{}", oauth_secret.expose_secret()));
         let mut headers = hyper::HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
@@ -828,18 +804,20 @@ mod tests {
         assert_eq!(
             form,
             TokenForm {
-                requested_scopes: vec![
-                    "conference:read".to_owned(),
-                    "attendance:read".to_owned(),
-                ],
+                requested_scopes: vec!["conference:read".to_owned(), "attendance:read".to_owned(),],
                 audience: "ucr-api".to_owned(),
                 requested_ttl_seconds: Some(300),
             }
         );
 
-        assert!(parse_token_form(b"grant_type=password&scope=conference%3Aread&audience=ucr-api").is_err());
+        assert!(
+            parse_token_form(b"grant_type=password&scope=conference%3Aread&audience=ucr-api")
+                .is_err()
+        );
         assert!(parse_token_form(b"grant_type=client_credentials&audience=ucr-api").is_err());
-        assert!(parse_token_form(b"grant_type=client_credentials&scope=conference%3Aread").is_err());
+        assert!(
+            parse_token_form(b"grant_type=client_credentials&scope=conference%3Aread").is_err()
+        );
     }
 
     #[test]
