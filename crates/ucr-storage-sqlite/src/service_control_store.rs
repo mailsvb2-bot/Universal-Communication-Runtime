@@ -1126,7 +1126,7 @@ impl ServiceAuditStore for SqliteLocalStore {
                         r.presented_namespace_present, r.presented_namespace_id,
                         r.subject_present, r.subject_principal_id, r.permission,
                         r.resource_tenant_id, r.resource_namespace_present, r.resource_namespace_id,
-                        r.outcome, r.occurred_at_unix_ms, r.authentication_kind,
+                        r.outcome, r.occurred_at_unix_ms, a.authentication_kind,
                         o.operation_kind, o.operation_id
                  FROM service_audit_records r
                  LEFT JOIN service_audit_authentication a ON a.audit_seq = r.audit_seq
@@ -1190,7 +1190,7 @@ impl ServiceAuditStore for SqliteLocalStore {
                         r.presented_namespace_present, r.presented_namespace_id,
                         r.subject_present, r.subject_principal_id, r.permission,
                         r.resource_tenant_id, r.resource_namespace_present, r.resource_namespace_id,
-                        r.outcome, r.occurred_at_unix_ms, r.authentication_kind
+                        r.outcome, r.occurred_at_unix_ms, a.authentication_kind
                  FROM service_audit_operations o
                  JOIN service_audit_records r ON r.audit_seq = o.audit_seq
                  LEFT JOIN service_audit_authentication a ON a.audit_seq = r.audit_seq
@@ -1927,7 +1927,7 @@ fn insert_audit_record(
     let audit_seq = transaction.last_insert_rowid();
 
     if matches!(
-        record.authentication,
+        &record.authentication,
         ServiceAuthenticationRef::MachineAccessToken(_)
     ) {
         transaction
