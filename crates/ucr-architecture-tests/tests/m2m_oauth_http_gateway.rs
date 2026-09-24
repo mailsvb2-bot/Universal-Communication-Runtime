@@ -7,9 +7,8 @@ fn oauth_http_gateway_is_transport_only_and_loopback_only() {
         .and_then(Path::parent)
         .expect("workspace root");
     let root = fs::read_to_string(workspace.join("Cargo.toml")).expect("workspace manifest");
-    let source =
-        fs::read_to_string(workspace.join("crates/ucr-auth-web/src/main.rs"))
-            .expect("OAuth gateway source");
+    let source = fs::read_to_string(workspace.join("crates/ucr-auth-web/src/main.rs"))
+        .expect("OAuth gateway source");
 
     assert!(root.contains(r#""crates/ucr-auth-web""#));
     assert!(source.contains(r#""/oauth2/token""#));
