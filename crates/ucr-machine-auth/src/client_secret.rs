@@ -127,7 +127,7 @@ pub fn encode_oauth_client_secret(
 ///
 /// # Errors
 /// Returns `TooLarge` for an input outside the bounded transport budget and `Malformed` for an
-/// invalid prefix, Base64URL payload, identifier, namespace marker, length, or trailing data.
+/// invalid prefix, `Base64URL` payload, identifier, namespace marker, length, or trailing data.
 pub fn decode_oauth_client_secret(
     encoded: &str,
 ) -> Result<OAuthClientSecretBinding, OAuthClientSecretError> {
