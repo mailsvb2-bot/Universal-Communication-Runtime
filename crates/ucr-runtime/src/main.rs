@@ -164,10 +164,14 @@ fn machine_bearer_config_from_env() -> Result<Option<MachineBearerRuntimeConfig>
     let Some(jwks_file) = std::env::var("UCR_MACHINE_TOKEN_VERIFICATION_JWKS_FILE").ok() else {
         return Ok(None);
     };
-    let issuer = std::env::var("UCR_MACHINE_TOKEN_ISSUER")
-        .map_err(|_| "UCR_MACHINE_TOKEN_ISSUER is required when machine Bearer verification is enabled".to_owned())?;
-    let audience = std::env::var("UCR_MACHINE_TOKEN_AUDIENCE")
-        .map_err(|_| "UCR_MACHINE_TOKEN_AUDIENCE is required when machine Bearer verification is enabled".to_owned())?;
+    let issuer = std::env::var("UCR_MACHINE_TOKEN_ISSUER").map_err(|_| {
+        "UCR_MACHINE_TOKEN_ISSUER is required when machine Bearer verification is enabled"
+            .to_owned()
+    })?;
+    let audience = std::env::var("UCR_MACHINE_TOKEN_AUDIENCE").map_err(|_| {
+        "UCR_MACHINE_TOKEN_AUDIENCE is required when machine Bearer verification is enabled"
+            .to_owned()
+    })?;
     let max_ttl_seconds = std::env::var("UCR_MACHINE_TOKEN_MAX_TTL_SECONDS")
         .ok()
         .map(|value| {
