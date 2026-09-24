@@ -849,10 +849,8 @@ impl ProductionRuntime {
             conference_state,
         );
         if let Some(config) = machine_bearer {
-            universal_service = universal_service.with_machine_bearer_auth(
-                config.verification_keys,
-                config.policy,
-            );
+            universal_service =
+                universal_service.with_machine_bearer_auth(config.verification_keys, config.policy);
         }
 
         Server::builder()
@@ -1097,10 +1095,8 @@ async fn serve_realtime_services(
             runtime_capabilities,
         );
     if let Some(config) = machine_bearer {
-        universal_service = universal_service.with_machine_bearer_auth(
-            config.verification_keys,
-            config.policy,
-        );
+        universal_service =
+            universal_service.with_machine_bearer_auth(config.verification_keys, config.policy);
     }
 
     Server::builder()
