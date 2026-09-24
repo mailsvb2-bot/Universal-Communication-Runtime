@@ -501,28 +501,6 @@ pub(super) fn verify_schema_v14(connection: &Connection) -> Result<(), DurableSt
             ("last_observed_unix_ms", "INTEGER", 1, 0),
         ],
     )?;
-    verify_table_columns(
-        connection,
-        "service_audit_records",
-        &[
-            ("audit_seq", "INTEGER", 0, 1),
-            ("audit_id", "TEXT", 1, 0),
-            ("credential_id", "TEXT", 1, 0),
-            ("presented_tenant_id", "TEXT", 1, 0),
-            ("presented_namespace_present", "INTEGER", 1, 0),
-            ("presented_namespace_id", "TEXT", 1, 0),
-            ("subject_present", "INTEGER", 1, 0),
-            ("subject_principal_id", "TEXT", 1, 0),
-            ("permission", "TEXT", 1, 0),
-            ("resource_tenant_id", "TEXT", 1, 0),
-            ("resource_namespace_present", "INTEGER", 1, 0),
-            ("resource_namespace_id", "TEXT", 1, 0),
-            ("outcome", "TEXT", 1, 0),
-            ("occurred_at_unix_ms", "INTEGER", 1, 0),
-            ("previous_hash", "BLOB", 1, 0),
-            ("record_hash", "BLOB", 1, 0),
-        ],
-    )?;
     let schema_version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|error| map_sqlite_error(&error))?;
@@ -548,6 +526,29 @@ pub(super) fn verify_schema_v14(connection: &Connection) -> Result<(), DurableSt
                 ("previous_hash", "BLOB", 1, 0),
                 ("record_hash", "BLOB", 1, 0),
                 ("authentication_kind", "TEXT", 1, 0),
+            ],
+        )?;
+    } else {
+        verify_table_columns(
+            connection,
+            "service_audit_records",
+            &[
+                ("audit_seq", "INTEGER", 0, 1),
+                ("audit_id", "TEXT", 1, 0),
+                ("credential_id", "TEXT", 1, 0),
+                ("presented_tenant_id", "TEXT", 1, 0),
+                ("presented_namespace_present", "INTEGER", 1, 0),
+                ("presented_namespace_id", "TEXT", 1, 0),
+                ("subject_present", "INTEGER", 1, 0),
+                ("subject_principal_id", "TEXT", 1, 0),
+                ("permission", "TEXT", 1, 0),
+                ("resource_tenant_id", "TEXT", 1, 0),
+                ("resource_namespace_present", "INTEGER", 1, 0),
+                ("resource_namespace_id", "TEXT", 1, 0),
+                ("outcome", "TEXT", 1, 0),
+                ("occurred_at_unix_ms", "INTEGER", 1, 0),
+                ("previous_hash", "BLOB", 1, 0),
+                ("record_hash", "BLOB", 1, 0),
             ],
         )?;
     }
