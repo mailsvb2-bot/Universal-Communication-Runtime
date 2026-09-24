@@ -115,10 +115,9 @@ pub fn encode_oauth_client_secret(
     append_opaque(&mut raw, credential_id.as_opaque());
     raw.extend_from_slice(secret.as_bytes());
 
-    let encoded = format!(
-        "{OAUTH_CLIENT_SECRET_PREFIX}{}",
-        URL_SAFE_NO_PAD.encode(&raw)
-    );
+    let mut encoded = String::with_capacity(MAX_ENCODED_CLIENT_SECRET_LEN);
+    encoded.push_str(OAUTH_CLIENT_SECRET_PREFIX);
+    URL_SAFE_NO_PAD.encode_string(&raw, &mut encoded);
     raw.zeroize();
     OAuthClientSecret(encoded)
 }
