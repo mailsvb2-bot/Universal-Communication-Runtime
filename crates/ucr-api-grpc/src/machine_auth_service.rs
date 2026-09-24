@@ -1,6 +1,7 @@
 use core::fmt;
 use std::sync::Arc;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use tonic::{Request, Response, Status};
 use ucr_core::{
     AuthorizationEvaluator, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock,
@@ -95,6 +96,20 @@ where
     A: AuthorizationEvaluator,
     S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore,
 {
+    fn public_jwks(&self) -> pb::MachineAuthJwks {
+        let public_key = self.signing_key.public_key();
+        pb::MachineAuthJwks {
+            keys: vec![pb::MachineAuthJwk {
+                kty: "OKP".to_owned(),
+                crv: "Ed25519".to_owned(),
+                r#use: "sig".to_owned(),
+                alg: "EdDSA".to_owned(),
+                kid: public_key.key_id.as_opaque().as_str().to_owned(),
+                x: URL_SAFE_NO_PAD.encode(public_key.verifying_key.0),
+            }],
+        }
+    }
+
     fn exchange(
         &self,
         credential_id: &ucr_model::ServiceCredentialId,
@@ -176,10 +191,19 @@ where
                         .iter()
                         .map(|scope| (*scope).to_owned())
                         .collect(),
-                    supported_token_endpoint_auth_methods: vec![
-                        "ucr_service_credential".to_owned(),
-                    ],
+                    supported_token_endpoint_auth_methods: vec!["client_secret_basic".to_owned()],
                 },
+            )),
+        }))
+    }
+
+    async fn get_jwks(
+        &self,
+        _request: Request<pb::MachineAuthJwksRequest>,
+    ) -> Result<Response<pb::MachineAuthJwksResponse>, Status> {
+        Ok(Response::new(pb::MachineAuthJwksResponse {
+            result: Some(pb::machine_auth_jwks_response::Result::Jwks(
+                self.public_jwks(),
             )),
         }))
     }
@@ -198,5 +222,42 @@ mod tests {
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"conference:read"));
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"attendance:read"));
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"recording:manage"));
+    }
+
+    #[test]
+    fn machine_auth_jwks_projects_only_public_ed25519_material() {
+        let signing_key = Arc::new(
+            MachineTokenSigningKey::from_seed(
+                ucr_model::KeyId::from_opaque(
+                    ucr_model::OpaqueId::new("machine-jwks-key").expect("key id"),
+                ),
+                [7_u8; 32],
+            ),
+        );
+        let service = GrpcMachineAuthService::new(
+            Arc::new(ucr_core::SystemServiceQuotaClock),
+            Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
+            Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
+            Arc::clone(&signing_key),
+            MachineTokenPolicy {
+                issuer: "https://auth.example.test".to_owned(),
+                audience: "ucr-api".to_owned(),
+                max_ttl_seconds: 900,
+            },
+            MachineAuthDiscovery {
+                token_endpoint: "https://auth.example.test/oauth2/token".to_owned(),
+                jwks_uri: "https://auth.example.test/oauth2/jwks".to_owned(),
+            },
+        );
+
+        let jwks = service.public_jwks();
+        assert_eq!(jwks.keys.len(), 1);
+        let key = &jwks.keys[0];
+        assert_eq!(key.kty, "OKP");
+        assert_eq!(key.crv, "Ed25519");
+        assert_eq!(key.r#use, "sig");
+        assert_eq!(key.alg, "EdDSA");
+        assert_eq!(key.kid, "machine-jwks-key");
+        assert_eq!(key.x, URL_SAFE_NO_PAD.encode(signing_key.public_key().verifying_key.0));
     }
 }
