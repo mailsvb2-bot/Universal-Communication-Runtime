@@ -2,15 +2,13 @@ use core::fmt;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ucr_core::ServiceCredentialSecret;
-use ucr_model::{
-    NamespaceId, OpaqueId, ServiceCredentialId, TenantId, TenantScope,
-};
+use ucr_model::{NamespaceId, OpaqueId, ServiceCredentialId, TenantId, TenantScope};
 use zeroize::Zeroize;
 
 const OAUTH_CLIENT_SECRET_PREFIX: &str = "ucr1.";
 const SERVICE_CREDENTIAL_SECRET_LEN: usize = 32;
-const MAX_DECODED_CLIENT_SECRET_BYTES: usize =
-    2 + OpaqueId::MAX_LEN
+const MAX_DECODED_CLIENT_SECRET_BYTES: usize = 2
+    + OpaqueId::MAX_LEN
     + 1
     + 2
     + OpaqueId::MAX_LEN
@@ -117,7 +115,10 @@ pub fn encode_oauth_client_secret(
     append_opaque(&mut raw, credential_id.as_opaque());
     raw.extend_from_slice(secret.as_bytes());
 
-    let encoded = format!("{OAUTH_CLIENT_SECRET_PREFIX}{}", URL_SAFE_NO_PAD.encode(&raw));
+    let encoded = format!(
+        "{OAUTH_CLIENT_SECRET_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(&raw)
+    );
     raw.zeroize();
     OAuthClientSecret(encoded)
 }
@@ -160,11 +161,7 @@ fn decode_binding(raw: &[u8]) -> Result<OAuthClientSecretBinding, OAuthClientSec
     };
     let credential_id = ServiceCredentialId::from_opaque(read_opaque(raw, &mut cursor)?);
     let mut secret_bytes = [0_u8; SERVICE_CREDENTIAL_SECRET_LEN];
-    secret_bytes.copy_from_slice(take(
-        raw,
-        &mut cursor,
-        SERVICE_CREDENTIAL_SECRET_LEN,
-    )?);
+    secret_bytes.copy_from_slice(take(raw, &mut cursor, SERVICE_CREDENTIAL_SECRET_LEN)?);
     if cursor != raw.len() {
         secret_bytes.zeroize();
         return Err(OAuthClientSecretError::Malformed);
@@ -189,10 +186,7 @@ fn append_opaque(output: &mut Vec<u8>, value: &OpaqueId) {
     output.extend_from_slice(bytes);
 }
 
-fn read_opaque(
-    raw: &[u8],
-    cursor: &mut usize,
-) -> Result<OpaqueId, OAuthClientSecretError> {
+fn read_opaque(raw: &[u8], cursor: &mut usize) -> Result<OpaqueId, OAuthClientSecretError> {
     let length_bytes: [u8; 2] = take(raw, cursor, 2)?
         .try_into()
         .map_err(|_| OAuthClientSecretError::Malformed)?;
@@ -256,9 +250,12 @@ mod tests {
             .provision_service_credential(&record)
             .expect("persist credential");
 
-        let encoded =
-            encode_oauth_client_secret(&subject.scope, &record.credential_id, &secret);
-        assert!(encoded.expose_secret().starts_with(OAUTH_CLIENT_SECRET_PREFIX));
+        let encoded = encode_oauth_client_secret(&subject.scope, &record.credential_id, &secret);
+        assert!(
+            encoded
+                .expose_secret()
+                .starts_with(OAUTH_CLIENT_SECRET_PREFIX)
+        );
         assert!(!format!("{encoded:?}").contains(encoded.expose_secret()));
 
         let decoded =
