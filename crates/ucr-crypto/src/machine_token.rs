@@ -838,20 +838,14 @@ mod tests {
             MachineTokenSigningKey::generate(key_id("token-key-active")).expect("active key");
         let previous =
             MachineTokenSigningKey::generate(key_id("token-key-previous")).expect("previous key");
-        let original = MachineTokenPublicKeySet::new(vec![
-            active.public_key(),
-            previous.public_key(),
-        ])
-        .expect("public key set");
+        let original =
+            MachineTokenPublicKeySet::new(vec![active.public_key(), previous.public_key()])
+                .expect("public key set");
         let encoded = original.jwks_json().expect("JWKS");
         let restored = MachineTokenPublicKeySet::from_jwks_json(&encoded).expect("parse JWKS");
         assert_eq!(restored, original);
 
-        let private_material = encoded.replacen(
-            "\"x\":",
-            "\"d\":\"forbidden\",\"x\":",
-            1,
-        );
+        let private_material = encoded.replacen("\"x\":", "\"d\":\"forbidden\",\"x\":", 1);
         assert_eq!(
             MachineTokenPublicKeySet::from_jwks_json(&private_material),
             Err(MachineTokenKeySetError::InvalidJwks)
