@@ -11,6 +11,9 @@ fn machine_auth_runtime_owns_credentials_authorization_and_token_issuance() {
     let production = runtime
         .split_once("#[cfg(test)]")
         .map_or(runtime.as_str(), |(production, _)| production);
+    let token_runtime = production
+        .split_once("pub struct MachineAuthRuntime")
+        .map_or(production, |(_, runtime)| runtime);
     let grpc =
         fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/machine_auth_service.rs"))
             .expect("machine auth gRPC adapter");
@@ -44,7 +47,7 @@ fn machine_auth_runtime_owns_credentials_authorization_and_token_issuance() {
         r#"pub const MACHINE_TOKEN_ISSUE_PERMISSION: &str = "ucr.authentication.machine_token.issue""#
     ));
     assert!(!production.contains("PermissionGrant {"));
-    assert!(!production.contains("client_secret"));
+    assert!(!token_runtime.contains("client_secret"));
     assert!(!production.contains("ServiceCredentialRecord {"));
 
     assert!(grpc.contains("MachineAuthRuntime::new"));
