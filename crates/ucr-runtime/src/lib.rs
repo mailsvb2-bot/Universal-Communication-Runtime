@@ -155,6 +155,53 @@ impl MachineAuthRuntimeConfig {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct MachineBearerRuntimeConfig {
+    policy: MachineTokenPolicy,
+    verification_keys: Arc<MachineTokenPublicKeySet>,
+}
+
+impl MachineBearerRuntimeConfig {
+    /// Builds verifier-only machine Bearer configuration for the public API process.
+    ///
+    /// This type contains public verification material only. The private signing seed remains
+    /// isolated in the machine-auth daemon.
+    ///
+    /// # Errors
+    /// Rejects a non-HTTPS issuer, malformed audience, invalid TTL, or an empty key set.
+    pub fn new(
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        max_ttl_seconds: u32,
+        verification_keys: MachineTokenPublicKeySet,
+    ) -> Result<Self, String> {
+        let issuer = issuer.into();
+        let audience = audience.into();
+        validate_public_https_url(&issuer, "machine token issuer")?;
+        if audience.is_empty() || audience.chars().any(char::is_whitespace) {
+            return Err(
+                "machine token audience must be a non-empty token without whitespace".to_owned(),
+            );
+        }
+        if max_ttl_seconds == 0 || max_ttl_seconds > MAX_MACHINE_TOKEN_TTL_SECONDS {
+            return Err(format!(
+                "machine token max TTL must be between 1 and {MAX_MACHINE_TOKEN_TTL_SECONDS} seconds"
+            ));
+        }
+        if verification_keys.keys().is_empty() {
+            return Err("machine token verification key set must not be empty".to_owned());
+        }
+        Ok(Self {
+            policy: MachineTokenPolicy {
+                issuer,
+                audience,
+                max_ttl_seconds,
+            },
+            verification_keys: Arc::new(verification_keys),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct RealtimeRuntimeConfig {
     join_base_url: String,
@@ -753,6 +800,26 @@ impl ProductionRuntime {
     /// # Errors
     /// Returns explicit bind, storage, or gRPC server errors.
     pub async fn serve(self: Arc<Self>, bind: SocketAddr) -> Result<(), String> {
+        self.serve_api(bind, None).await
+    }
+
+    /// Serves the canonical API with verifier-only machine Bearer support.
+    ///
+    /// # Errors
+    /// Returns explicit configuration, bind, storage, or gRPC server errors.
+    pub async fn serve_with_machine_bearer(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        machine_bearer: MachineBearerRuntimeConfig,
+    ) -> Result<(), String> {
+        self.serve_api(bind, Some(machine_bearer)).await
+    }
+
+    async fn serve_api(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        machine_bearer: Option<MachineBearerRuntimeConfig>,
+    ) -> Result<(), String> {
         validate_local_bind(bind)?;
         let diagnostics = self.diagnostics()?;
         if diagnostics.storage_health != StorageHealth::Healthy {
@@ -775,6 +842,18 @@ impl ProductionRuntime {
         let authorization = Arc::clone(&self.store);
         let conference_state = Arc::new(ConferenceRuntimeState::new());
         let operator_health = Arc::new(ProductionOperatorHealthSource::basic(Arc::clone(&store)));
+        let mut universal_service = GrpcUniversalConferenceService::with_state(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+            conference_state,
+        );
+        if let Some(config) = machine_bearer {
+            universal_service = universal_service.with_machine_bearer_auth(
+                config.verification_keys,
+                config.policy,
+            );
+        }
 
         Server::builder()
             .add_service(operator_runtime_service_server(
@@ -813,14 +892,7 @@ impl ProductionRuntime {
                     Arc::clone(&conference_state),
                 ),
             ))
-            .add_service(universal_conference_service_server(
-                GrpcUniversalConferenceService::with_state(
-                    Arc::clone(&clock),
-                    Arc::clone(&authorization),
-                    Arc::clone(&store),
-                    conference_state,
-                ),
-            ))
+            .add_service(universal_conference_service_server(universal_service))
             .add_service(event_service_server(GrpcEventService::new(
                 Arc::clone(&clock),
                 event_clock,
@@ -899,6 +971,29 @@ impl ProductionRuntime {
         bind: SocketAddr,
         config: RealtimeRuntimeConfig,
     ) -> Result<(), String> {
+        self.serve_realtime_inner(bind, config, None).await
+    }
+
+    /// Serves realtime plus Universal Conference with verifier-only machine Bearer support.
+    ///
+    /// # Errors
+    /// Returns explicit configuration, bind, storage, or gRPC server errors.
+    pub async fn serve_realtime_with_machine_bearer(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        config: RealtimeRuntimeConfig,
+        machine_bearer: MachineBearerRuntimeConfig,
+    ) -> Result<(), String> {
+        self.serve_realtime_inner(bind, config, Some(machine_bearer))
+            .await
+    }
+
+    async fn serve_realtime_inner(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        config: RealtimeRuntimeConfig,
+        machine_bearer: Option<MachineBearerRuntimeConfig>,
+    ) -> Result<(), String> {
         validate_local_bind(bind)?;
         if self.diagnostics()?.storage_health != StorageHealth::Healthy {
             return Err("production runtime refuses unhealthy storage".to_owned());
@@ -952,6 +1047,7 @@ impl ProductionRuntime {
             conference_state,
             runtime_capabilities,
             join_issuer,
+            machine_bearer,
             operator_health,
             realtime_service,
         };
@@ -969,6 +1065,7 @@ struct RealtimeServerServices {
     conference_state: Arc<ConferenceRuntimeState>,
     runtime_capabilities: UniversalConferenceRuntimeCapabilities,
     join_issuer: Arc<JoinTokenIssuer>,
+    machine_bearer: Option<MachineBearerRuntimeConfig>,
     operator_health: Arc<ProductionOperatorHealthSource>,
     realtime_service:
         GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
@@ -986,9 +1083,26 @@ async fn serve_realtime_services(
         conference_state,
         runtime_capabilities,
         join_issuer,
+        machine_bearer,
         operator_health,
         realtime_service,
     } = services;
+    let mut universal_service =
+        GrpcUniversalConferenceService::with_state_join_issuer_and_runtime_capabilities(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+            Arc::clone(&conference_state),
+            join_issuer,
+            runtime_capabilities,
+        );
+    if let Some(config) = machine_bearer {
+        universal_service = universal_service.with_machine_bearer_auth(
+            config.verification_keys,
+            config.policy,
+        );
+    }
+
     Server::builder()
         .add_service(operator_runtime_service_server(
             GrpcOperatorRuntimeService::new(operator_health),
@@ -1028,16 +1142,7 @@ async fn serve_realtime_services(
             ),
         ))
         .add_service(realtime_service_server(realtime_service))
-        .add_service(universal_conference_service_server(
-            GrpcUniversalConferenceService::with_state_join_issuer_and_runtime_capabilities(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-                Arc::clone(&conference_state),
-                join_issuer,
-                runtime_capabilities,
-            ),
-        ))
+        .add_service(universal_conference_service_server(universal_service))
         .add_service(event_service_server(GrpcEventService::new(
             Arc::clone(&clock),
             event_clock,

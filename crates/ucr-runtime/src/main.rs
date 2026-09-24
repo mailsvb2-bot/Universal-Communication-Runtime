@@ -3,9 +3,10 @@
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use ucr_core::WebhookDispatchOutcome;
+use ucr_crypto::{MAX_MACHINE_TOKEN_JWKS_BYTES, MachineTokenPublicKeySet};
 use ucr_runtime::{
     DEFAULT_RUNTIME_BIND, DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MachineAuthRuntimeConfig,
-    ProductionRuntime, RealtimeRuntimeConfig,
+    MachineBearerRuntimeConfig, ProductionRuntime, RealtimeRuntimeConfig,
 };
 use zeroize::Zeroizing;
 
@@ -91,9 +92,11 @@ async fn run() -> Result<(), String> {
             let bind: SocketAddr = bind
                 .parse()
                 .map_err(|error| format!("invalid --bind address: {error}"))?;
-            Arc::new(ProductionRuntime::open_existing(&database)?)
-                .serve(bind)
-                .await
+            let runtime = Arc::new(ProductionRuntime::open_existing(&database)?);
+            match machine_bearer_config_from_env()? {
+                Some(config) => runtime.serve_with_machine_bearer(bind, config).await,
+                None => runtime.serve(bind).await,
+            }
         }
         "serve-realtime" => serve_realtime_command(&database, &bind, join_base_url).await,
         "serve-auth" => serve_auth_command(&database, &bind).await,
@@ -155,6 +158,38 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
     Arc::new(ProductionRuntime::open_existing(database)?)
         .serve_machine_auth(bind, config)
         .await
+}
+
+fn machine_bearer_config_from_env() -> Result<Option<MachineBearerRuntimeConfig>, String> {
+    let Some(jwks_file) = std::env::var("UCR_MACHINE_TOKEN_VERIFICATION_JWKS_FILE").ok() else {
+        return Ok(None);
+    };
+    let issuer = std::env::var("UCR_MACHINE_TOKEN_ISSUER")
+        .map_err(|_| "UCR_MACHINE_TOKEN_ISSUER is required when machine Bearer verification is enabled".to_owned())?;
+    let audience = std::env::var("UCR_MACHINE_TOKEN_AUDIENCE")
+        .map_err(|_| "UCR_MACHINE_TOKEN_AUDIENCE is required when machine Bearer verification is enabled".to_owned())?;
+    let max_ttl_seconds = std::env::var("UCR_MACHINE_TOKEN_MAX_TTL_SECONDS")
+        .ok()
+        .map(|value| {
+            value.parse::<u32>().map_err(|_| {
+                "UCR_MACHINE_TOKEN_MAX_TTL_SECONDS must be an unsigned integer".to_owned()
+            })
+        })
+        .transpose()?
+        .unwrap_or(900);
+    let metadata = fs::metadata(&jwks_file)
+        .map_err(|error| format!("inspect machine token verification JWKS file: {error}"))?;
+    if !metadata.is_file() || metadata.len() > MAX_MACHINE_TOKEN_JWKS_BYTES as u64 {
+        return Err("machine token verification JWKS must be a bounded regular file".to_owned());
+    }
+    let encoded = fs::read_to_string(&jwks_file)
+        .map_err(|error| format!("read machine token verification JWKS file: {error}"))?;
+    if encoded.len() > MAX_MACHINE_TOKEN_JWKS_BYTES {
+        return Err("machine token verification JWKS exceeds the bounded size".to_owned());
+    }
+    let verification_keys = MachineTokenPublicKeySet::from_jwks_json(&encoded)
+        .map_err(|error| format!("parse machine token verification JWKS: {error:?}"))?;
+    MachineBearerRuntimeConfig::new(issuer, audience, max_ttl_seconds, verification_keys).map(Some)
 }
 
 fn required_env(variable: &str) -> Result<String, String> {
@@ -228,9 +263,15 @@ async fn serve_realtime_command(
         .with_browser_realtime_gateway(
             bool_env("UCR_BROWSER_REALTIME_GATEWAY_ENABLED")?.unwrap_or(false),
         );
-    Arc::new(ProductionRuntime::open_existing(database)?)
-        .serve_realtime(bind, config)
-        .await
+    let runtime = Arc::new(ProductionRuntime::open_existing(database)?);
+    match machine_bearer_config_from_env()? {
+        Some(machine_bearer) => {
+            runtime
+                .serve_realtime_with_machine_bearer(bind, config, machine_bearer)
+                .await
+        }
+        None => runtime.serve_realtime(bind, config).await,
+    }
 }
 
 fn dispatch_webhook_once(

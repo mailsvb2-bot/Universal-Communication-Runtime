@@ -18,6 +18,7 @@ pub const MAX_MACHINE_TOKEN_SCOPE_LEN: usize = 128;
 pub const MAX_MACHINE_TOKEN_SCOPES: usize = 32;
 pub const MAX_MACHINE_TOKEN_TTL_SECONDS: u32 = 86_400;
 pub const MAX_MACHINE_TOKEN_PUBLIC_KEYS: usize = 8;
+pub const MAX_MACHINE_TOKEN_JWKS_BYTES: usize = 16 * 1024;
 
 const MACHINE_TOKEN_ALGORITHM: &str = "EdDSA";
 const MACHINE_TOKEN_TYPE: &str = "at+jwt";
@@ -96,7 +97,26 @@ pub enum MachineTokenKeySetError {
     Empty,
     TooManyKeys,
     DuplicateKeyId,
+    InvalidJwks,
     Serialization,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineTokenJwksDocument {
+    keys: Vec<MachineTokenJwk>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineTokenJwk {
+    kty: String,
+    crv: String,
+    #[serde(rename = "use")]
+    key_use: String,
+    alg: String,
+    kid: String,
+    x: String,
 }
 
 /// Bounded public verification-key set used for access-token verification overlap and JWKS
@@ -132,6 +152,49 @@ impl MachineTokenPublicKeySet {
     #[must_use]
     pub fn keys(&self) -> &[MachineTokenPublicKey] {
         &self.keys
+    }
+
+    /// Parses the bounded RFC 8037 JWKS shape emitted by `jwks_json`.
+    ///
+    /// This accepts public verification material only. Private `d` parameters, unknown fields,
+    /// non-Ed25519 algorithms, malformed key IDs and non-32-byte public keys fail closed.
+    ///
+    /// # Errors
+    /// Returns `InvalidJwks` for malformed or unsupported JWKS and preserves the ordinary
+    /// key-set errors for empty, duplicate or over-capacity sets.
+    pub fn from_jwks_json(encoded: &str) -> Result<Self, MachineTokenKeySetError> {
+        if encoded.is_empty() || encoded.len() > MAX_MACHINE_TOKEN_JWKS_BYTES {
+            return Err(MachineTokenKeySetError::InvalidJwks);
+        }
+        let document: MachineTokenJwksDocument =
+            serde_json::from_str(encoded).map_err(|_| MachineTokenKeySetError::InvalidJwks)?;
+        let mut keys = Vec::with_capacity(document.keys.len().min(MAX_MACHINE_TOKEN_PUBLIC_KEYS));
+        for key in document.keys {
+            if key.kty != "OKP"
+                || key.crv != "Ed25519"
+                || key.key_use != "sig"
+                || key.alg != MACHINE_TOKEN_ALGORITHM
+            {
+                return Err(MachineTokenKeySetError::InvalidJwks);
+            }
+            let key_id = OpaqueId::new(key.kid)
+                .map(KeyId::from_opaque)
+                .map_err(|_| MachineTokenKeySetError::InvalidJwks)?;
+            let decoded = URL_SAFE_NO_PAD
+                .decode(key.x.as_bytes())
+                .map_err(|_| MachineTokenKeySetError::InvalidJwks)?;
+            let verifying_key: [u8; 32] = decoded
+                .as_slice()
+                .try_into()
+                .map_err(|_| MachineTokenKeySetError::InvalidJwks)?;
+            VerifyingKey::from_bytes(&verifying_key)
+                .map_err(|_| MachineTokenKeySetError::InvalidJwks)?;
+            keys.push(MachineTokenPublicKey {
+                key_id,
+                verifying_key: VerifyingKeyBytes(verifying_key),
+            });
+        }
+        Self::new(keys)
     }
 
     /// Adds one public verification key for a rotation overlap window.
@@ -767,6 +830,36 @@ mod tests {
             Err(MachineTokenError::UnknownSigningKey)
         );
         assert!(!key_set.remove_key(&key_id("token-key-missing")));
+    }
+
+    #[test]
+    fn jwks_round_trip_restores_only_bounded_public_verification_keys() {
+        let active =
+            MachineTokenSigningKey::generate(key_id("token-key-active")).expect("active key");
+        let previous =
+            MachineTokenSigningKey::generate(key_id("token-key-previous")).expect("previous key");
+        let original = MachineTokenPublicKeySet::new(vec![
+            active.public_key(),
+            previous.public_key(),
+        ])
+        .expect("public key set");
+        let encoded = original.jwks_json().expect("JWKS");
+        let restored = MachineTokenPublicKeySet::from_jwks_json(&encoded).expect("parse JWKS");
+        assert_eq!(restored, original);
+
+        let private_material = encoded.replacen(
+            "\"x\":",
+            "\"d\":\"forbidden\",\"x\":",
+            1,
+        );
+        assert_eq!(
+            MachineTokenPublicKeySet::from_jwks_json(&private_material),
+            Err(MachineTokenKeySetError::InvalidJwks)
+        );
+        assert_eq!(
+            MachineTokenPublicKeySet::from_jwks_json(&"x".repeat(MAX_MACHINE_TOKEN_JWKS_BYTES + 1)),
+            Err(MachineTokenKeySetError::InvalidJwks)
+        );
     }
 
     #[test]

@@ -223,6 +223,26 @@ fn requested_scope_permissions(scopes: &[String]) -> Result<Vec<&'static str>, C
     Ok(permissions)
 }
 
+/// Projects one canonical public-API permission to its OAuth machine scope.
+///
+/// Broader conference-management scope is only attenuation. The request path still re-evaluates
+/// the exact canonical permission (for example participant/device management) on every call.
+#[must_use]
+pub const fn machine_scope_for_permission(permission: &str) -> Option<&'static str> {
+    match permission.as_bytes() {
+        b"ucr.conference.create" => Some(MACHINE_SCOPE_CONFERENCE_CREATE),
+        b"ucr.conference.manage"
+        | b"ucr.conference.participant.ensure"
+        | b"ucr.conference.participant.manage"
+        | b"ucr.identity.device.register" => Some(MACHINE_SCOPE_CONFERENCE_MANAGE),
+        b"ucr.conference.join.issue" => Some(MACHINE_SCOPE_CONFERENCE_JOIN_ISSUE),
+        b"ucr.conference.read" => Some(MACHINE_SCOPE_CONFERENCE_READ),
+        b"ucr.conference.attendance.read" => Some(MACHINE_SCOPE_ATTENDANCE_READ),
+        b"ucr.conference.recording.manage" => Some(MACHINE_SCOPE_RECORDING_MANAGE),
+        _ => None,
+    }
+}
+
 const fn canonical_permission_for_scope(scope: &str) -> Option<&'static str> {
     match scope.as_bytes() {
         b"conference:create" => Some(CONFERENCE_CREATE_PERMISSION),
@@ -283,6 +303,42 @@ const fn map_machine_token_error(error: MachineTokenError) -> CanonicalError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn public_conference_permissions_project_to_supported_machine_scopes() {
+        assert_eq!(
+            machine_scope_for_permission(CONFERENCE_CREATE_PERMISSION),
+            Some(MACHINE_SCOPE_CONFERENCE_CREATE)
+        );
+        for permission in [
+            CONFERENCE_MANAGE_PERMISSION,
+            ucr_protocol::CONFERENCE_PARTICIPANT_ENSURE_PERMISSION,
+            ucr_protocol::CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
+            ucr_protocol::DEVICE_REGISTER_PERMISSION,
+        ] {
+            assert_eq!(
+                machine_scope_for_permission(permission),
+                Some(MACHINE_SCOPE_CONFERENCE_MANAGE)
+            );
+        }
+        assert_eq!(
+            machine_scope_for_permission(CONFERENCE_JOIN_ISSUE_PERMISSION),
+            Some(MACHINE_SCOPE_CONFERENCE_JOIN_ISSUE)
+        );
+        assert_eq!(
+            machine_scope_for_permission(CONFERENCE_READ_PERMISSION),
+            Some(MACHINE_SCOPE_CONFERENCE_READ)
+        );
+        assert_eq!(
+            machine_scope_for_permission(CONFERENCE_ATTENDANCE_READ_PERMISSION),
+            Some(MACHINE_SCOPE_ATTENDANCE_READ)
+        );
+        assert_eq!(
+            machine_scope_for_permission(CONFERENCE_RECORDING_MANAGE_PERMISSION),
+            Some(MACHINE_SCOPE_RECORDING_MANAGE)
+        );
+        assert_eq!(machine_scope_for_permission("ucr.message.send"), None);
+    }
+
     use ucr_core::{
         PermissionGrantStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock,
         ServiceQuotaClockError, ServiceQuotaStore, issue_service_credential,

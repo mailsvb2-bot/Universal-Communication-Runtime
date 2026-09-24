@@ -2,12 +2,13 @@ use std::{fmt, sync::Arc};
 
 use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE,
+    SERVICE_CREDENTIAL_ID_METADATA_KEY, SERVICE_CREDENTIAL_SECRET_METADATA_KEY,
     conference_service::{map_conference_error, prepared_conference_runtime},
     decode_credentials, decode_opaque, decode_scope, invalid_argument, pb, pb_acknowledgement,
-    pb_error, pb_opaque, pb_scope,
+    pb_error, pb_opaque, pb_scope, unauthenticated,
 };
 use prost::Message;
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
     AuthorizationEvaluator, CallStore, CommandAcceptanceStore, ConferenceJoinGrantStore,
@@ -18,8 +19,11 @@ use ucr_core::{
     ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore, UniversalConferenceStore,
     generate_opaque_id,
 };
-use ucr_crypto::TrustedSigningKeyResolver;
+use ucr_crypto::{
+    MAX_MACHINE_TOKEN_BYTES, MachineTokenPolicy, MachineTokenPublicKeySet, TrustedSigningKeyResolver,
+};
 use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
+use ucr_machine_auth::MachineBearerRequestGate;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AuthorizationRequest, CallId, CallParticipant,
     CallParticipantState, CallParticipantUpdateKind, CallSession, CallSignal, CallSignalKind,
@@ -52,6 +56,71 @@ use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
     RealtimeSessionClaims,
 };
+const AUTHORIZATION_METADATA_KEY: &str = "authorization";
+const MAX_BEARER_AUTHORIZATION_METADATA_BYTES: usize = MAX_MACHINE_TOKEN_BYTES + 32;
+
+struct UniversalConferenceMachineBearer {
+    verification_keys: Arc<MachineTokenPublicKeySet>,
+    policy: MachineTokenPolicy,
+}
+
+enum UniversalConferenceAuthentication {
+    ServiceCredential {
+        credential_id: ucr_model::ServiceCredentialId,
+        secret: ServiceCredentialSecret,
+    },
+    MachineBearer(String),
+}
+
+fn decode_universal_conference_authentication(
+    metadata: &MetadataMap,
+) -> Result<UniversalConferenceAuthentication, CanonicalError> {
+    let has_credential_id = metadata
+        .get_bin(SERVICE_CREDENTIAL_ID_METADATA_KEY)
+        .is_some();
+    let has_credential_secret = metadata
+        .get_bin(SERVICE_CREDENTIAL_SECRET_METADATA_KEY)
+        .is_some();
+
+    let mut authorization_values = metadata.get_all(AUTHORIZATION_METADATA_KEY).iter();
+    let authorization = authorization_values.next();
+    if authorization_values.next().is_some() {
+        return Err(unauthenticated());
+    }
+
+    if let Some(value) = authorization {
+        if has_credential_id || has_credential_secret {
+            return Err(unauthenticated());
+        }
+        let value = value.to_str().map_err(|_| unauthenticated())?;
+        if value.len() > MAX_BEARER_AUTHORIZATION_METADATA_BYTES {
+            return Err(unauthenticated());
+        }
+        let mut parts = value.split_ascii_whitespace();
+        let scheme = parts.next().ok_or_else(unauthenticated)?;
+        let token = parts.next().ok_or_else(unauthenticated)?;
+        if !scheme.eq_ignore_ascii_case("bearer")
+            || token.is_empty()
+            || token.len() > MAX_MACHINE_TOKEN_BYTES
+            || parts.next().is_some()
+        {
+            return Err(unauthenticated());
+        }
+        return Ok(UniversalConferenceAuthentication::MachineBearer(
+            token.to_owned(),
+        ));
+    }
+
+    if has_credential_id != has_credential_secret {
+        return Err(unauthenticated());
+    }
+    let (credential_id, secret) = decode_credentials(metadata)?;
+    Ok(UniversalConferenceAuthentication::ServiceCredential {
+        credential_id,
+        secret,
+    })
+}
+
 const MAX_EXTERNAL_CONFERENCE_ID_BYTES: usize = 512;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 const MAX_TIMEZONE_BYTES: usize = 128;
@@ -87,6 +156,7 @@ pub struct GrpcUniversalConferenceService<C, A, S> {
     store: Arc<S>,
     state: Arc<ConferenceRuntimeState>,
     join_issuer: Option<Arc<JoinTokenIssuer>>,
+    machine_bearer: Option<Arc<UniversalConferenceMachineBearer>>,
     runtime_capabilities: UniversalConferenceRuntimeCapabilities,
 }
 
@@ -99,6 +169,7 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state: Arc::new(ConferenceRuntimeState::new()),
             join_issuer: None,
+            machine_bearer: None,
             runtime_capabilities: UniversalConferenceRuntimeCapabilities::none(),
         }
     }
@@ -116,6 +187,7 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state: Arc::new(ConferenceRuntimeState::new()),
             join_issuer: Some(join_issuer),
+            machine_bearer: None,
             runtime_capabilities: UniversalConferenceRuntimeCapabilities::none(),
         }
     }
@@ -133,6 +205,7 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state,
             join_issuer: None,
+            machine_bearer: None,
             runtime_capabilities: UniversalConferenceRuntimeCapabilities::none(),
         }
     }
@@ -151,6 +224,7 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state,
             join_issuer: Some(join_issuer),
+            machine_bearer: None,
             runtime_capabilities: UniversalConferenceRuntimeCapabilities::none(),
         }
     }
@@ -170,8 +244,23 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
             store,
             state,
             join_issuer: Some(join_issuer),
+            machine_bearer: None,
             runtime_capabilities,
         }
+    }
+
+    /// Enables machine Bearer admission for the Universal Conference gRPC ingress.
+    #[must_use]
+    pub fn with_machine_bearer_auth(
+        mut self,
+        verification_keys: Arc<MachineTokenPublicKeySet>,
+        policy: MachineTokenPolicy,
+    ) -> Self {
+        self.machine_bearer = Some(Arc::new(UniversalConferenceMachineBearer {
+            verification_keys,
+            policy,
+        }));
+        self
     }
 }
 
@@ -183,6 +272,7 @@ impl<C, A, S> Clone for GrpcUniversalConferenceService<C, A, S> {
             store: Arc::clone(&self.store),
             state: Arc::clone(&self.state),
             join_issuer: self.join_issuer.as_ref().map(Arc::clone),
+            machine_bearer: self.machine_bearer.as_ref().map(Arc::clone),
             runtime_capabilities: self.runtime_capabilities,
         }
     }
@@ -205,14 +295,33 @@ where
     fn admit(
         &self,
         scope: &TenantScope,
-        credential_id: &ucr_model::ServiceCredentialId,
-        secret: &ServiceCredentialSecret,
+        authentication: UniversalConferenceAuthentication,
         permission: &str,
     ) -> Result<ScopedPrincipal, CanonicalError> {
-        let gate =
-            ServicePrincipalRequestGate::new(&*self.clock, &*self.authorization, &*self.store);
-        let admission =
-            gate.authenticate_request(scope, credential_id, secret, permission, scope)?;
+        let admission = match authentication {
+            UniversalConferenceAuthentication::ServiceCredential {
+                credential_id,
+                secret,
+            } => {
+                let gate = ServicePrincipalRequestGate::new(
+                    &*self.clock,
+                    &*self.authorization,
+                    &*self.store,
+                );
+                gate.authenticate_request(scope, &credential_id, &secret, permission, scope)?
+            }
+            UniversalConferenceAuthentication::MachineBearer(encoded) => {
+                let config = self.machine_bearer.as_deref().ok_or_else(unauthenticated)?;
+                let gate = MachineBearerRequestGate::new(
+                    &*self.clock,
+                    &*self.authorization,
+                    &*self.store,
+                    &*config.verification_keys,
+                    &config.policy,
+                );
+                gate.authenticate_permission_request(&encoded, permission, scope)?
+            }
+        };
         let actor = admission.subject().clone();
         admission.authorize(&AuthorizationRequest {
             subject: actor.clone(),
@@ -225,12 +334,11 @@ where
     fn admit_integration(
         &self,
         scope: &TenantScope,
-        credential_id: &ucr_model::ServiceCredentialId,
-        secret: &ServiceCredentialSecret,
+        authentication: UniversalConferenceAuthentication,
         integration_id: &IntegrationId,
         permission: &str,
     ) -> Result<ScopedPrincipal, CanonicalError> {
-        let actor = self.admit(scope, credential_id, secret, permission)?;
+        let actor = self.admit(scope, authentication, permission)?;
         if actor.principal.kind != PrincipalKind::ServiceAccount
             || actor.principal.principal_id.as_opaque() != integration_id.as_opaque()
         {
@@ -306,16 +414,15 @@ where
         &self,
         request: Request<pb::UniversalCreateConferenceRequest>,
     ) -> Result<Response<pb::UniversalCreateConferenceResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let body = request.into_inner();
         let command_payload = body.encode_to_vec();
         let decoded = decode_create(body);
-        let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok(input)) => self
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok(input)) => self
                 .admit_integration(
                     &input.scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &input.integration_id,
                     CONFERENCE_CREATE_PERMISSION,
                 )
@@ -339,14 +446,13 @@ where
         &self,
         request: Request<pb::UniversalResolveConferenceRequest>,
     ) -> Result<Response<pb::UniversalResolveConferenceResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let decoded = decode_resolve(request.into_inner());
-        let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok((scope, integration_id, external_id))) => self
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok((scope, integration_id, external_id))) => self
                 .admit_integration(
                     &scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &integration_id,
                     CONFERENCE_READ_PERMISSION,
                 )
@@ -379,14 +485,13 @@ where
         &self,
         request: Request<pb::UniversalGetConferenceRequest>,
     ) -> Result<Response<pb::UniversalGetConferenceResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let decoded = decode_get_conference(request.into_inner());
-        let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok((scope, conference_id, integration_id))) => self
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok((scope, conference_id, integration_id))) => self
                 .admit_integration(
                     &scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &integration_id,
                     CONFERENCE_READ_PERMISSION,
                 )
@@ -414,19 +519,18 @@ where
         &self,
         request: Request<pb::UniversalConferenceLifecycleRequest>,
     ) -> Result<Response<pb::UniversalConferenceLifecycleResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let body = request.into_inner();
         let payload = body.encode_to_vec();
         let decoded = decode_lifecycle_request(body);
-        let result = match (credentials, decoded) {
+        let result = match (authentication, decoded) {
             (
-                Ok((credential_id, secret)),
+                Ok(authentication),
                 Ok((scope, conference_id, integration_id, target, idempotency_key)),
             ) => self
                 .admit_integration(
                     &scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &integration_id,
                     CONFERENCE_MANAGE_PERMISSION,
                 )
@@ -490,19 +594,18 @@ where
         &self,
         request: Request<pb::UniversalSetEntryOpenRequest>,
     ) -> Result<Response<pb::UniversalSetEntryOpenResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let body = request.into_inner();
         let payload = body.encode_to_vec();
         let decoded = decode_entry_request(body);
-        let result = match (credentials, decoded) {
+        let result = match (authentication, decoded) {
             (
-                Ok((credential_id, secret)),
+                Ok(authentication),
                 Ok((scope, conference_id, integration_id, entry_open, idempotency_key)),
             ) => self
                 .admit_integration(
                     &scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &integration_id,
                     CONFERENCE_MANAGE_PERMISSION,
                 )
@@ -549,16 +652,15 @@ where
         &self,
         request: Request<pb::UniversalEnsureParticipantRequest>,
     ) -> Result<Response<pb::UniversalEnsureParticipantResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let body = request.into_inner();
         let payload = body.encode_to_vec();
         let decoded = decode_ensure_participant(body);
-        let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok(input)) => self
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok(input)) => self
                 .admit_integration(
                     &input.scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &input.integration_id,
                     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION,
                 )
@@ -581,16 +683,15 @@ where
         &self,
         request: Request<pb::UniversalEnsureParticipantDeviceRequest>,
     ) -> Result<Response<pb::UniversalEnsureParticipantDeviceResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let body = request.into_inner();
         let payload = body.encode_to_vec();
         let decoded = decode_ensure_participant_device(body);
-        let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok(input)) => self
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok(input)) => self
                 .admit_integration(
                     &input.scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &input.integration_id,
                     DEVICE_REGISTER_PERMISSION,
                 )
@@ -615,16 +716,15 @@ where
         &self,
         request: Request<pb::UniversalUpdateParticipantRequest>,
     ) -> Result<Response<pb::UniversalUpdateParticipantResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let body = request.into_inner();
         let payload = body.encode_to_vec();
         let decoded = decode_update_participant(body);
-        let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok(input)) => self
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok(input)) => self
                 .admit_integration(
                     &input.scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &input.integration_id,
                     CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
                 )
@@ -647,16 +747,15 @@ where
         &self,
         request: Request<pb::UniversalRemoveParticipantRequest>,
     ) -> Result<Response<pb::UniversalRemoveParticipantResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let body = request.into_inner();
         let payload = body.encode_to_vec();
         let decoded = decode_remove_participant(body);
-        let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok(input)) => self
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok(input)) => self
                 .admit_integration(
                     &input.scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &input.integration_id,
                     CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
                 )
@@ -681,17 +780,13 @@ where
         &self,
         request: Request<pb::UniversalListParticipantsRequest>,
     ) -> Result<Response<pb::UniversalListParticipantsResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let decoded = decode_list_participants(request.into_inner());
-        let result = match (credentials, decoded) {
-            (
-                Ok((credential_id, secret)),
-                Ok((scope, conference_id, integration_id, max_items)),
-            ) => self
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok((scope, conference_id, integration_id, max_items))) => self
                 .admit_integration(
                     &scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &integration_id,
                     CONFERENCE_READ_PERMISSION,
                 )
@@ -724,14 +819,13 @@ where
         &self,
         request: Request<pb::UniversalSetSubscriptionsRequest>,
     ) -> Result<Response<pb::UniversalSetSubscriptionsResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let decoded = decode_set_subscriptions(request.into_inner());
-        let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok(input)) => self
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok(input)) => self
                 .admit_integration(
                     &input.scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &input.integration_id,
                     CONFERENCE_MANAGE_PERMISSION,
                 )
@@ -756,16 +850,15 @@ where
         &self,
         request: Request<pb::UniversalPrepareConferenceRuntimeRequest>,
     ) -> Result<Response<pb::UniversalPrepareConferenceRuntimeResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let body = request.into_inner();
         let payload = body.encode_to_vec();
         let decoded = decode_prepare_conference_runtime(body);
-        let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok(input)) => self
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok(input)) => self
                 .admit_integration(
                     &input.scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &input.integration_id,
                     CONFERENCE_MANAGE_PERMISSION,
                 )
@@ -790,16 +883,15 @@ where
         &self,
         request: Request<pb::UniversalIssueJoinGrantRequest>,
     ) -> Result<Response<pb::UniversalIssueJoinGrantResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let body = request.into_inner();
         let payload = body.encode_to_vec();
         let decoded = decode_issue_join_grant(body);
-        let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok(input)) => self
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok(input)) => self
                 .admit_integration(
                     &input.scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &input.integration_id,
                     CONFERENCE_JOIN_ISSUE_PERMISSION,
                 )
@@ -828,19 +920,18 @@ where
         &self,
         request: Request<pb::UniversalRevokeJoinGrantRequest>,
     ) -> Result<Response<pb::UniversalRevokeJoinGrantResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let body = request.into_inner();
         let payload = body.encode_to_vec();
         let decoded = decode_revoke_join_grant(body);
-        let result = match (credentials, decoded) {
+        let result = match (authentication, decoded) {
             (
-                Ok((credential_id, secret)),
+                Ok(authentication),
                 Ok((scope, conference_id, integration_id, session_id, idempotency_key)),
             ) => self
                 .admit_integration(
                     &scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &integration_id,
                     CONFERENCE_JOIN_ISSUE_PERMISSION,
                 )
@@ -876,17 +967,13 @@ where
         &self,
         request: Request<pb::UniversalGetParticipantAttendanceRequest>,
     ) -> Result<Response<pb::UniversalGetParticipantAttendanceResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let decoded = decode_participant_attendance(request.into_inner());
-        let result = match (credentials, decoded) {
-            (
-                Ok((credential_id, secret)),
-                Ok((scope, conference_id, integration_id, external_user_id)),
-            ) => self
-                .admit_integration(
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok((scope, conference_id, integration_id, external_user_id))) => {
+                self.admit_integration(
                     &scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &integration_id,
                     CONFERENCE_ATTENDANCE_READ_PERMISSION,
                 )
@@ -902,7 +989,8 @@ where
                         &external_user_id,
                         now_unix_ms,
                     )
-                }),
+                })
+            }
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(
@@ -925,14 +1013,13 @@ where
         &self,
         request: Request<pb::UniversalGetCapabilitiesRequest>,
     ) -> Result<Response<pb::UniversalGetCapabilitiesResponse>, Status> {
-        let credentials = decode_credentials(request.metadata());
+        let authentication = decode_universal_conference_authentication(request.metadata());
         let decoded = decode_capabilities_request(request.into_inner());
-        let result = match (credentials, decoded) {
-            (Ok((credential_id, secret)), Ok((scope, integration_id))) => self
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok((scope, integration_id))) => self
                 .admit_integration(
                     &scope,
-                    &credential_id,
-                    &secret,
+                    authentication,
                     &integration_id,
                     CONFERENCE_READ_PERMISSION,
                 )
@@ -3631,6 +3718,187 @@ fn map_store_error(error: DurableStoreError) -> CanonicalError {
         | DurableStoreError::Internal => CanonicalErrorCode::Internal,
     };
     CanonicalError::new(code)
+}
+
+#[cfg(test)]
+mod bearer_ingress_tests {
+    use std::sync::Arc;
+
+    use tonic::Request;
+    use ucr_core::{
+        PermissionGrantStore, ServiceAuditStore, ServiceQuotaClock, ServiceQuotaClockError,
+        ServiceQuotaStore,
+    };
+    use ucr_crypto::{
+        AccessTokenIssueRequest, MachineTokenPolicy, MachineTokenPublicKeySet,
+        MachineTokenSigningKey, issue_machine_access_token,
+    };
+    use ucr_model::{
+        IntegrationId, KeyId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
+        PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuthenticationRef,
+        ServiceCredentialId, ServiceQuotaPolicy, TenantId, TenantScope,
+    };
+    use ucr_protocol::{CONFERENCE_READ_PERMISSION, CanonicalErrorCode};
+    use ucr_storage_memory::MemoryLocalStore;
+
+    use super::{
+        AUTHORIZATION_METADATA_KEY, GrpcUniversalConferenceService,
+        UniversalConferenceAuthentication, decode_universal_conference_authentication,
+    };
+
+    #[derive(Debug, Clone, Copy)]
+    struct FixedClock(i64);
+
+    impl ServiceQuotaClock for FixedClock {
+        fn now_unix_ms(&self) -> Result<i64, ServiceQuotaClockError> {
+            Ok(self.0)
+        }
+    }
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("opaque id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(oid("tenant-conference-bearer")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("namespace-conference-bearer"))),
+        }
+    }
+
+    fn integration_id() -> IntegrationId {
+        IntegrationId::from_opaque(oid("integration-conference-bearer"))
+    }
+
+    fn subject() -> ScopedPrincipal {
+        ScopedPrincipal {
+            scope: scope(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(integration_id().as_opaque().clone()),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        }
+    }
+
+    fn policy() -> MachineTokenPolicy {
+        MachineTokenPolicy {
+            issuer: "https://auth.ucr.example.test".to_owned(),
+            audience: "ucr-api".to_owned(),
+            max_ttl_seconds: 900,
+        }
+    }
+
+    fn bearer() -> (String, Arc<MachineTokenPublicKeySet>, MachineTokenPolicy) {
+        let key = MachineTokenSigningKey::from_seed(
+            KeyId::from_opaque(oid("conference-bearer-key")),
+            [0x45_u8; 32],
+        );
+        let policy = policy();
+        let token_id = oid("conference-bearer-jti");
+        let scopes = vec![ucr_machine_auth::MACHINE_SCOPE_CONFERENCE_READ.to_owned()];
+        let token = issue_machine_access_token(
+            &key,
+            &policy,
+            AccessTokenIssueRequest {
+                subject: &subject(),
+                token_id: &token_id,
+                requested_scopes: &scopes,
+                allowed_scopes: &scopes,
+                issued_at_unix_s: 1_000,
+                requested_ttl_seconds: Some(300),
+            },
+        )
+        .expect("issue bearer");
+        let keys = Arc::new(
+            MachineTokenPublicKeySet::new(vec![key.public_key()]).expect("verification keys"),
+        );
+        (token.as_str().to_owned(), keys, policy)
+    }
+
+    #[test]
+    fn conference_authentication_rejects_mixed_credential_and_bearer_metadata() {
+        let mut request = Request::new(());
+        crate::attach_service_credential(
+            &mut request,
+            &ServiceCredentialId::from_opaque(oid("credential-mixed")),
+            &ucr_core::ServiceCredentialSecret::from_bytes([0x22_u8; 32]),
+        );
+        request.metadata_mut().insert(
+            AUTHORIZATION_METADATA_KEY,
+            "Bearer opaque-token"
+                .parse()
+                .expect("authorization metadata"),
+        );
+
+        let error = match decode_universal_conference_authentication(request.metadata()) {
+            Ok(_) => panic!("mixed authentication must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, CanonicalErrorCode::Unauthenticated);
+    }
+
+    #[test]
+    fn conference_authentication_rejects_oversized_bearer_before_copying_token() {
+        let mut request = Request::new(());
+        let value = format!("Bearer {}", "x".repeat(MAX_MACHINE_TOKEN_BYTES + 1));
+        request.metadata_mut().insert(
+            AUTHORIZATION_METADATA_KEY,
+            value.parse().expect("oversized authorization metadata"),
+        );
+
+        let error = match decode_universal_conference_authentication(request.metadata()) {
+            Ok(_) => panic!("oversized Bearer must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, CanonicalErrorCode::Unauthenticated);
+    }
+
+    #[test]
+    fn conference_bearer_uses_canonical_permission_quota_and_audit() {
+        let store = Arc::new(MemoryLocalStore::default());
+        store
+            .grant_permission(&PermissionGrant {
+                grantee: subject(),
+                permission: CONFERENCE_READ_PERMISSION.to_owned(),
+                scope: PermissionScope::Exact(scope()),
+            })
+            .expect("grant read");
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject: subject(),
+                max_requests: 2,
+                window_ms: 1_000,
+            })
+            .expect("quota");
+
+        let (encoded, keys, policy) = bearer();
+        let service = GrpcUniversalConferenceService::new(
+            Arc::new(FixedClock(1_100_000)),
+            Arc::clone(&store),
+            Arc::clone(&store),
+        )
+        .with_machine_bearer_auth(keys, policy);
+
+        let actor = service
+            .admit_integration(
+                &scope(),
+                UniversalConferenceAuthentication::MachineBearer(encoded),
+                &integration_id(),
+                CONFERENCE_READ_PERMISSION,
+            )
+            .expect("admit Bearer");
+        assert_eq!(actor, subject());
+
+        let audit = store
+            .service_audit_records(&scope(), 4)
+            .expect("Bearer audit");
+        assert_eq!(audit.len(), 1);
+        assert!(matches!(
+            &audit[0].authentication,
+            ServiceAuthenticationRef::MachineAccessToken(token_id)
+                if token_id.as_str() == "conference-bearer-jti"
+        ));
+    }
 }
 
 #[cfg(test)]
