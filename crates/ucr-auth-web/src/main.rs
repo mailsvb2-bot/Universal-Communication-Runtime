@@ -262,11 +262,8 @@ async fn token(request: Request<Incoming>, state: &AppState) -> HttpResponse {
         Ok(credentials) => credentials,
         Err(error) => return error.into_response(),
     };
-    let binding = match decode_oauth_client_secret(&credentials.client_secret) {
-        Ok(binding) => binding,
-        Err(_) => {
-            return GatewayFailure::invalid_client("invalid client credentials").into_response();
-        }
+    let Ok(binding) = decode_oauth_client_secret(&credentials.client_secret) else {
+        return GatewayFailure::invalid_client("invalid client credentials").into_response();
     };
     let body = match bounded_body(request.into_body()).await {
         Ok(body) => body,
@@ -437,12 +434,9 @@ fn decode_basic_pair(decoded: &[u8]) -> Result<BasicCredentials, GatewayFailure>
         client_secret.zeroize();
         return Err(GatewayFailure::invalid_client("invalid client credentials"));
     }
-    let client_id = match OpaqueId::new(client_id) {
-        Ok(client_id) => client_id,
-        Err(_) => {
-            client_secret.zeroize();
-            return Err(GatewayFailure::invalid_client("invalid client credentials"));
-        }
+    let Ok(client_id) = OpaqueId::new(client_id) else {
+        client_secret.zeroize();
+        return Err(GatewayFailure::invalid_client("invalid client credentials"));
     };
     Ok(BasicCredentials {
         client_id,
