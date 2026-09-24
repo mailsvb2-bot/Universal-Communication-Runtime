@@ -14,10 +14,22 @@ fn typed_machine_jwks_exposes_only_public_ed25519_material() {
 
     assert!(proto.contains("rpc GetJwks"));
     assert!(proto.contains("message MachineAuthJwk"));
-    for field in ["string kty", "string crv", "string use", "string alg", "string kid", "string x"] {
+    for field in [
+        "string kty",
+        "string crv",
+        "string use",
+        "string alg",
+        "string kid",
+        "string x",
+    ] {
         assert!(proto.contains(field), "missing public JWKS field: {field}");
     }
-    for forbidden in ["private_key", "signing_seed", "client_secret", "credential_secret"] {
+    for forbidden in [
+        "private_key",
+        "signing_seed",
+        "client_secret",
+        "credential_secret",
+    ] {
         assert!(
             !proto.contains(forbidden),
             "secret material leaked into typed JWKS contract: {forbidden}"
@@ -29,7 +41,9 @@ fn typed_machine_jwks_exposes_only_public_ed25519_material() {
     assert!(service.contains(r#"r#use: "sig".to_owned()"#));
     assert!(service.contains(r#"alg: "EdDSA".to_owned()"#));
     assert!(service.contains("URL_SAFE_NO_PAD.encode(public_key.verifying_key.0)"));
-    assert!(service.contains(r#"supported_token_endpoint_auth_methods: vec!["client_secret_basic".to_owned()]"#));
+    assert!(service.contains(
+        r#"supported_token_endpoint_auth_methods: vec!["client_secret_basic".to_owned()]"#
+    ));
     assert!(!service.contains("UCR_MACHINE_TOKEN_SIGNING_KEY_HEX"));
 }
 
