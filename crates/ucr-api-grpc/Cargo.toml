@@ -8,6 +8,7 @@ repository.workspace = true
 build = "build.rs"
 
 [dependencies]
+base64 = "=0.22.1"
 prost = "=0.14.4"
 tonic = { version = "=0.14.6", features = ["transport"] }
 tonic-prost = "=0.14.6"
