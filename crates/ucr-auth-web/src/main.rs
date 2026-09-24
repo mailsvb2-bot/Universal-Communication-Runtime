@@ -588,7 +588,11 @@ fn is_form_urlencoded(headers: &hyper::HeaderMap) -> bool {
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/x-www-form-urlencoded"))
+        .is_some_and(|value| {
+            value
+                .trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        })
 }
 
 async fn bounded_body(mut body: Incoming) -> Result<Bytes, GatewayFailure> {
@@ -604,13 +608,11 @@ async fn bounded_body(mut body: Incoming) -> Result<Bytes, GatewayFailure> {
         let Ok(data) = frame.into_data() else {
             continue;
         };
-        let next_len = bytes.len().checked_add(data.len()).ok_or_else(|| {
-            GatewayFailure::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "invalid_request",
-                "token request body exceeds the bounded limit",
-            )
-        })?;
+        let next_len = bytes.len().checked_add(data.len()).ok_or(GatewayFailure::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request",
+            "token request body exceeds the bounded limit",
+        ))?;
         if next_len > MAX_REQUEST_BODY_BYTES {
             bytes.zeroize();
             return Err(GatewayFailure::new(
