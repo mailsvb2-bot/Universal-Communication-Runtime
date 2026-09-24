@@ -418,9 +418,13 @@ fn basic_credentials(headers: &hyper::HeaderMap) -> Result<BasicCredentials, Gat
             "HTTP Basic client credentials exceed the bounded limit",
         ));
     }
-    let encoded = value
-        .strip_prefix("Basic ")
-        .ok_or_else(|| GatewayFailure::invalid_client("client_secret_basic is required"))?;
+    let bytes = value.as_bytes();
+    if bytes.len() < 6 || !bytes[..6].eq_ignore_ascii_case(b"Basic ") {
+        return Err(GatewayFailure::invalid_client(
+            "client_secret_basic is required",
+        ));
+    }
+    let encoded = &value[6..];
 
     let mut decoded = STANDARD
         .decode(encoded.as_bytes())
