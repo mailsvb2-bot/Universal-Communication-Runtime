@@ -608,11 +608,14 @@ async fn bounded_body(mut body: Incoming) -> Result<Bytes, GatewayFailure> {
         let Ok(data) = frame.into_data() else {
             continue;
         };
-        let next_len = bytes.len().checked_add(data.len()).ok_or(GatewayFailure::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "invalid_request",
-            "token request body exceeds the bounded limit",
-        ))?;
+        let next_len = bytes
+            .len()
+            .checked_add(data.len())
+            .ok_or(GatewayFailure::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_request",
+                "token request body exceeds the bounded limit",
+            ))?;
         if next_len > MAX_REQUEST_BODY_BYTES {
             bytes.zeroize();
             return Err(GatewayFailure::new(
