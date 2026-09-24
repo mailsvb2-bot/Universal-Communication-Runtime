@@ -365,8 +365,8 @@ mod tests {
     use ucr_model::{
         AuditRecordId, NamespaceId, OpaqueId, PrincipalId, PrincipalRef, ScopedPrincipal,
         ServiceAuditOutcome, ServiceAuditRecord, ServiceAuthenticationRef, ServiceCredentialId,
-        ServiceQuotaPolicy,
-        ServiceRequestRateClass, ServiceResourceQuotaPolicy, TenantId, TenantScope,
+        ServiceQuotaPolicy, ServiceRequestRateClass, ServiceResourceQuotaPolicy, TenantId,
+        TenantScope,
     };
 
     use super::*;
@@ -562,10 +562,7 @@ mod tests {
         let mut changed_token = token.clone();
         changed_token.authentication =
             ServiceAuthenticationRef::MachineAccessToken(oid("machine-token-jti-b"));
-        assert_ne!(
-            token_digest,
-            service_audit_hash([0_u8; 32], &changed_token)
-        );
+        assert_ne!(token_digest, service_audit_hash([0_u8; 32], &changed_token));
 
         let mut operation_bound = token;
         operation_bound.operation = Some(ServiceAuditOperationRef {
