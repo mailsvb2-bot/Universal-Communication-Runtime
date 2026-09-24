@@ -25,7 +25,10 @@ use ucr_core::{
     DurableStoreError, EventWebhookDispatcher, StorageHealth, StorageProvider,
     SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome, generate_opaque_id,
 };
-use ucr_crypto::{MAX_MACHINE_TOKEN_TTL_SECONDS, MachineTokenPolicy, MachineTokenSigningKey};
+use ucr_crypto::{
+    MAX_MACHINE_TOKEN_TTL_SECONDS, MachineTokenPolicy, MachineTokenPublicKeySet,
+    MachineTokenSigningKey,
+};
 use ucr_model::{
     EventSubscriptionId, IceTransportPolicy, KeyId, NamespaceId, OpaqueId, SfuForwardEnvelope,
     TenantId, TenantScope,
@@ -64,6 +67,7 @@ struct WebhookWorkerSweep {
 pub struct MachineAuthRuntimeConfig {
     policy: MachineTokenPolicy,
     signing_key: Arc<MachineTokenSigningKey>,
+    verification_keys: Arc<MachineTokenPublicKeySet>,
     discovery: MachineAuthDiscovery,
 }
 
@@ -104,18 +108,50 @@ impl MachineAuthRuntimeConfig {
             &signing_key_id.into(),
             "machine token signing key id",
         )?);
+        let signing_key = Arc::new(MachineTokenSigningKey::from_seed(key_id, signing_seed));
+        let verification_keys = Arc::new(
+            MachineTokenPublicKeySet::new(vec![signing_key.public_key()])
+                .map_err(|error| format!("build machine token verification key set: {error:?}"))?,
+        );
         Ok(Self {
             policy: MachineTokenPolicy {
                 issuer,
                 audience,
                 max_ttl_seconds,
             },
-            signing_key: Arc::new(MachineTokenSigningKey::from_seed(key_id, signing_seed)),
+            signing_key,
+            verification_keys,
             discovery: MachineAuthDiscovery {
                 token_endpoint,
                 jwks_uri,
             },
         })
+    }
+
+    /// Adds one deployment-owned previous signing key for a bounded rotation overlap window.
+    ///
+    /// New tokens continue to be signed only by the active key. The previous private seed is used
+    /// only long enough to derive its public verification key and is zeroized by
+    /// `MachineTokenSigningKey::from_seed` before this function returns.
+    ///
+    /// # Errors
+    /// Rejects malformed or duplicate key identifiers.
+    pub fn with_previous_signing_key(
+        mut self,
+        previous_key_id: impl Into<String>,
+        previous_seed: [u8; 32],
+    ) -> Result<Self, String> {
+        let previous_key_id = KeyId::from_opaque(runtime_opaque(
+            &previous_key_id.into(),
+            "previous machine token signing key id",
+        )?);
+        let previous_key = MachineTokenSigningKey::from_seed(previous_key_id, previous_seed);
+        let mut verification_keys = (*self.verification_keys).clone();
+        verification_keys
+            .insert(previous_key.public_key())
+            .map_err(|error| format!("add previous machine token verification key: {error:?}"))?;
+        self.verification_keys = Arc::new(verification_keys);
+        Ok(self)
     }
 }
 
@@ -837,6 +873,7 @@ impl ProductionRuntime {
             Arc::clone(&store),
             store,
             config.signing_key,
+            config.verification_keys,
             config.policy,
             config.discovery,
         );
@@ -1254,7 +1291,24 @@ mod tests {
             "https://auth.example.test/.well-known/jwks.json",
             900,
         )
-        .expect("machine auth config");
+        .expect("machine auth config")
+        .with_previous_signing_key("key-2026-08", [6_u8; 32])
+        .expect("previous signing key");
+        assert_eq!(config.verification_keys.keys().len(), 2);
+        assert_eq!(
+            config.verification_keys.keys()[0]
+                .key_id
+                .as_opaque()
+                .as_str(),
+            "key-2026-09"
+        );
+        assert_eq!(
+            config.verification_keys.keys()[1]
+                .key_id
+                .as_opaque()
+                .as_str(),
+            "key-2026-08"
+        );
         let debug = format!("{config:?}");
         assert!(debug.contains("<secret>"));
         assert!(!debug.contains("[7, 7, 7"));
@@ -1269,6 +1323,51 @@ mod tests {
                 900,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn machine_auth_overlap_is_restart_stable_and_retirement_is_explicit() {
+        let build = || {
+            MachineAuthRuntimeConfig::new(
+                "https://auth.example.test",
+                "ucr-api",
+                "key-active",
+                [9_u8; 32],
+                "https://auth.example.test/oauth2/token",
+                "https://auth.example.test/.well-known/jwks.json",
+                900,
+            )
+            .expect("active machine auth config")
+            .with_previous_signing_key("key-previous", [8_u8; 32])
+            .expect("previous signing key")
+        };
+
+        let before_restart = build();
+        let after_restart = build();
+        assert_eq!(
+            before_restart.verification_keys.as_ref(),
+            after_restart.verification_keys.as_ref()
+        );
+        assert_eq!(after_restart.verification_keys.keys().len(), 2);
+
+        let retired = MachineAuthRuntimeConfig::new(
+            "https://auth.example.test",
+            "ucr-api",
+            "key-active",
+            [9_u8; 32],
+            "https://auth.example.test/oauth2/token",
+            "https://auth.example.test/.well-known/jwks.json",
+            900,
+        )
+        .expect("retired previous key config");
+        assert_eq!(retired.verification_keys.keys().len(), 1);
+        assert_eq!(
+            retired.verification_keys.keys()[0]
+                .key_id
+                .as_opaque()
+                .as_str(),
+            "key-active"
         );
     }
 

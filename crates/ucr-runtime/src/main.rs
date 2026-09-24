@@ -128,7 +128,7 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
         .transpose()?
         .unwrap_or(900);
     let signing_seed = read_machine_token_signing_key(&signing_key_file)?;
-    let config = MachineAuthRuntimeConfig::new(
+    let mut config = MachineAuthRuntimeConfig::new(
         issuer,
         audience,
         signing_key_id,
@@ -137,6 +137,21 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
         jwks_uri,
         max_ttl_seconds,
     )?;
+    let previous_key_id = std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_ID").ok();
+    let previous_key_file = std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_FILE").ok();
+    match (previous_key_id, previous_key_file) {
+        (Some(key_id), Some(key_file)) => {
+            let previous_seed = read_machine_token_signing_key(&key_file)?;
+            config = config.with_previous_signing_key(key_id, previous_seed)?;
+        }
+        (None, None) => {}
+        _ => {
+            return Err(
+                "UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_ID and UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_FILE must be configured together"
+                    .to_owned(),
+            );
+        }
+    }
     Arc::new(ProductionRuntime::open_existing(database)?)
         .serve_machine_auth(bind, config)
         .await

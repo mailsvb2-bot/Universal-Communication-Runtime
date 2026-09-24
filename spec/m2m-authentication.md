@@ -1,6 +1,6 @@
 # Machine-to-Machine Authentication
 
-Status: **Prepared v1 public contract with signed token codec/runtime, canonical MachineAuthService composition, loopback production-daemon wiring, and bounded public verification-key/JWKS projection; public HTTPS edge is not yet claimed**.
+Status: **Prepared v1 public contract with signed token codec/runtime, canonical MachineAuthService composition, loopback production-daemon wiring, restart-safe active/previous signing-key overlap, and bounded public verification-key/JWKS projection; public HTTPS edge is not yet claimed**.
 
 This layer adds a standard machine-to-machine authentication boundary for external applications without creating a second identity, credential, authorization, tenant, or permission owner. The canonical Service Account remains the client identity and the existing Service Credential remains the long-lived client authentication proof.
 
@@ -69,7 +69,7 @@ Access tokens are signed by an asymmetric deployment signing key. A token header
 
 Key rotation MUST allow an overlap window: a new signing key may become active while the previous public key remains published until every token signed by it can no longer be valid. Revoking a key early intentionally invalidates outstanding tokens signed by that key.
 
-The public HTTPS edge MUST expose an RFC-compatible JWKS document and stable issuer metadata. `ucr-crypto` provides a bounded `MachineTokenPublicKeySet` that implements the canonical verification-key resolver, supports overlap windows, explicit key removal, and RFC 8037 Ed25519 JWKS projection containing only public `kid`/`x` material. The typed `MachineAuthService.GetJwks` contract now exposes the active deployment verification key as structured RFC 8037/JWKS fields (`OKP`, `Ed25519`, `sig`, `EdDSA`, `kid`, Base64URL `x`) so a future HTTPS adapter does not need signing-key access or duplicate key projection rules. Private signing material never appears in JWKS, protobuf, logs, metrics, Event payloads, or general durable application storage.
+The public HTTPS edge MUST expose an RFC-compatible JWKS document and stable issuer metadata. `ucr-crypto` provides a bounded `MachineTokenPublicKeySet` that implements the canonical verification-key resolver, supports overlap windows, explicit key removal, and RFC 8037 Ed25519 JWKS projection containing only public `kid`/`x` material. The typed `MachineAuthService.GetJwks` contract exposes the deployment verification-key set, including the active key and an optional previous overlap key, as structured RFC 8037/JWKS fields (`OKP`, `Ed25519`, `sig`, `EdDSA`, `kid`, Base64URL `x`) so the HTTPS adapter does not need signing-key access or duplicate key projection rules. Private signing material never appears in JWKS, protobuf, logs, metrics, Event payloads, or general durable application storage.
 
 ## Audience and issuer
 
@@ -107,7 +107,7 @@ This contract does not claim human login, authorization-code flow, PKCE, refresh
 
 `ucr-crypto::machine_token` now provides the reference Ed25519 signed access-token issuer/verifier over an already authenticated canonical Service Account. It enforces bounded token size, issuer/audience, short lifetime, `kid`, canonical tenant/namespace/service-account identity, scope attenuation, expiry and redacted token/private-key diagnostics. A resolver abstraction allows overlapping public keys during rotation without exporting private key material.
 
-The machine-auth stack now includes canonical Service Credential composition, signed short-lived access tokens, typed discovery/JWKS, a loopback OAuth HTTP adapter, and a shared Bearer-admission runtime. Bearer admission verifies signature/issuer/audience/lifetime, requires the server-selected OAuth scope to be present, and then re-evaluates the current canonical Permission Grant for the requested resource. Production public HTTPS termination, wiring Bearer admission into each broader public API route, durable active/previous signing-key rotation, live deployment evidence and HTTPS conformance remain required.
+The machine-auth stack now includes canonical Service Credential composition, signed short-lived access tokens, typed discovery/JWKS, a loopback OAuth HTTP adapter, a shared Bearer-admission runtime, and deployment-managed active/previous signing-key overlap. Bearer admission verifies signature/issuer/audience/lifetime, requires the server-selected OAuth scope to be present, and then re-evaluates the current canonical Permission Grant for the requested resource. Production public HTTPS termination, wiring Bearer admission into each broader public API route, live deployment evidence and HTTPS conformance remain required.
 
 
 ## Canonical MachineAuthService composition
@@ -133,7 +133,7 @@ The initial mapping is:
 
 Unknown or duplicate OAuth scopes fail closed. This mapping is an attenuation/projection of canonical authorization and does not persist OAuth scopes as a second permission owner.
 
-The gRPC composition remains the semantic owner. The shared machine-auth crate defines the opaque `client_id + client_secret` binding, while `ucr-auth-web` now parses standard HTTP `client_secret_basic`, derives the internal credential metadata from that opaque secret, and delegates exchange to `MachineAuthService`. The adapter does not reimplement authorization or signing. Direct public TLS termination, bearer middleware on public APIs, and durable deployment signing-key rotation remain separate work.
+The gRPC composition remains the semantic owner. The shared machine-auth crate defines the opaque `client_id + client_secret` binding, while `ucr-auth-web` now parses standard HTTP `client_secret_basic`, derives the internal credential metadata from that opaque secret, and delegates exchange to `MachineAuthService`. The adapter does not reimplement authorization or signing. Direct public TLS termination and bearer middleware on public APIs remain separate work.
 
 
 ## Shared machine-auth runtime owner and fixed token admission
@@ -159,14 +159,17 @@ The daemon requires deployment-owned machine-token configuration:
 
 - stable HTTPS issuer;
 - explicit API audience;
-- stable signing-key ID;
+- stable active signing-key ID;
+- a protected active signing-key seed file;
+- optional previous signing-key ID plus protected previous seed file for the overlap window;
 - public HTTPS token endpoint URL;
 - public HTTPS JWKS URL;
-- bounded maximum token TTL;
-- a protected operator secret file containing the 32-byte Ed25519 signing seed encoded as hexadecimal text.
+- bounded maximum token TTL.
+
+Protected machine signing-key files contain the 32-byte Ed25519 seed encoded as hexadecimal text. The previous-key ID and previous-key file are optional, but they MUST be configured together.
 
 The signing seed is read into zeroizing process memory and is never accepted as a command-line argument or dedicated `UCR_MACHINE_TOKEN_SIGNING_KEY_HEX` environment variable. The private seed is never printed, persisted in the application database, returned by gRPC, or included in discovery metadata.
 
-The stable seed means the same deployment key survives daemon restart. The crypto layer now has a bounded public key-set primitive for overlap verification, explicit key removal, and JWKS projection. This is still not the final durable rotation owner: active/previous signing-key lifecycle, restart-safe key-set persistence and public HTTPS JWKS serving remain future work.
+The active seed means the same deployment signing key survives daemon restart. During rotation the daemon may also load one previous deployment key. New tokens are signed only by the active key, while JWKS publishes both active and previous public keys. The previous private seed is used only to derive its public verification key and is then discarded. Removing the previous-key configuration on a later restart explicitly retires that key. This makes the overlap restart-safe without introducing a signing-key table into the application database. Operators MUST keep the previous key configured for at least the maximum lifetime of tokens issued by it unless deliberate early revocation is intended.
 
-The local auth daemon and `ucr-auth-web` both refuse non-loopback plaintext binding. `ucr-auth-web` now provides the concrete HTTP Basic parser, `POST /oauth2/token`, authorization-server metadata and JWKS HTTP routes, while delegating token issuance to the loopback `MachineAuthService`. The shared `MachineBearerAdmissionRuntime` is now the semantic owner for verifying machine access tokens and rechecking current canonical Permission Grants; public API transports must call it rather than implement local JWT/scope logic. External OAuth2 traffic must still terminate TLS at a trusted public edge before reaching the loopback gateway. Wiring this admission owner into the broader public API surface, direct/public TLS serving, and durable active/previous signing-key rotation remain separate work.
+The local auth daemon and `ucr-auth-web` both refuse non-loopback plaintext binding. `ucr-auth-web` now provides the concrete HTTP Basic parser, `POST /oauth2/token`, authorization-server metadata and JWKS HTTP routes, while delegating token issuance to the loopback `MachineAuthService`. The shared `MachineBearerAdmissionRuntime` is now the semantic owner for verifying machine access tokens and rechecking current canonical Permission Grants; public API transports must call it rather than implement local JWT/scope logic. External OAuth2 traffic must still terminate TLS at a trusted public edge before reaching the loopback gateway. Wiring this admission owner into the broader public API surface and direct/public TLS serving remain separate work.
