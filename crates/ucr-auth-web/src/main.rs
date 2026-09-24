@@ -739,7 +739,7 @@ fn oauth_error_response(
 
 fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> HttpResponse {
     let bytes = serde_json::to_vec(payload)
-        .unwrap_or_else(|_| b"{"error":"server_error"}".to_vec());
+        .unwrap_or_else(|_| br#"{"error":"server_error"}"#.to_vec());
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, "application/json")
