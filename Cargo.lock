@@ -3689,6 +3689,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-auth-web"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "bytes",
+ "form_urlencoded",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "ucr-api-grpc",
+ "ucr-core",
+ "ucr-machine-auth",
+ "ucr-model",
+ "zeroize",
+]
+
+[[package]]
 name = "ucr-bridge"
 version = "0.0.1"
 dependencies = [
