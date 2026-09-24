@@ -52,7 +52,32 @@ message MachineAuthMetadataResponse {
   }
 }
 
+// RFC 8037 / JWKS public Ed25519 verification-key projection.
+// Private signing material is structurally absent from this contract.
+message MachineAuthJwk {
+  string kty = 1;
+  string crv = 2;
+  string use = 3;
+  string alg = 4;
+  string kid = 5;
+  string x = 6;
+}
+
+message MachineAuthJwksRequest {}
+
+message MachineAuthJwks {
+  repeated MachineAuthJwk keys = 1;
+}
+
+message MachineAuthJwksResponse {
+  oneof result {
+    MachineAuthJwks jwks = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 service MachineAuthService {
   rpc ExchangeClientCredentials(MachineTokenRequest) returns (MachineTokenResponse);
   rpc GetMetadata(MachineAuthMetadataRequest) returns (MachineAuthMetadataResponse);
+  rpc GetJwks(MachineAuthJwksRequest) returns (MachineAuthJwksResponse);
 }
