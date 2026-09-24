@@ -108,8 +108,8 @@ where
     ///
     /// # Errors
     /// Invalid, expired, forged, wrong-issuer/audience and unknown-key tokens collapse to
-    /// Unauthenticated. Missing token scope or a revoked/absent current Permission Grant fails
-    /// with PermissionDenied. Unknown server-side scope configuration fails closed as Internal.
+    /// `Unauthenticated`. Missing token scope or a revoked/absent current Permission Grant fails
+    /// with `PermissionDenied`. Unknown server-side scope configuration fails closed as `Internal`.
     pub fn admit(
         &self,
         encoded: &str,
