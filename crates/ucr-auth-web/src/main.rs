@@ -588,26 +588,40 @@ fn is_form_urlencoded(headers: &hyper::HeaderMap) -> bool {
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim() == "application/x-www-form-urlencoded")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/x-www-form-urlencoded"))
 }
 
-async fn bounded_body(body: Incoming) -> Result<Bytes, GatewayFailure> {
-    let collected = body.collect().await.map_err(|_| {
-        GatewayFailure::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "could not read token request body",
-        )
-    })?;
-    let bytes = collected.to_bytes();
-    if bytes.len() > MAX_REQUEST_BODY_BYTES {
-        return Err(GatewayFailure::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "invalid_request",
-            "token request body exceeds the bounded limit",
-        ));
+async fn bounded_body(mut body: Incoming) -> Result<Bytes, GatewayFailure> {
+    let mut bytes = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| {
+            GatewayFailure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "could not read token request body",
+            )
+        })?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        let next_len = bytes.len().checked_add(data.len()).ok_or_else(|| {
+            GatewayFailure::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_request",
+                "token request body exceeds the bounded limit",
+            )
+        })?;
+        if next_len > MAX_REQUEST_BODY_BYTES {
+            bytes.zeroize();
+            return Err(GatewayFailure::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "invalid_request",
+                "token request body exceeds the bounded limit",
+            ));
+        }
+        bytes.extend_from_slice(&data);
     }
-    Ok(bytes)
+    Ok(Bytes::from(bytes))
 }
 
 fn pb_scope(scope: &TenantScope) -> pb::TenantScope {
@@ -626,7 +640,9 @@ fn pb_id(id: &OpaqueId) -> pb::OpaqueId {
 fn token_response(token: pb::MachineAccessToken) -> HttpResponse {
     let access_token = match String::from_utf8(token.access_token) {
         Ok(access_token) => access_token,
-        Err(_) => {
+        Err(error) => {
+            let mut bytes = error.into_bytes();
+            bytes.zeroize();
             return GatewayFailure::new(
                 StatusCode::BAD_GATEWAY,
                 "server_error",
