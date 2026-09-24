@@ -767,10 +767,39 @@ pub struct ServiceAuditOperationRef {
     pub operation_id: OpaqueId,
 }
 
+/// Authentication proof that admitted one external Service Account request.
+///
+/// Service Credential references preserve the existing audit semantics. Machine access-token
+/// references carry the signed token jti so Bearer requests can be traced without pretending that
+/// an access token is a long-lived Service Credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceAuthenticationRef {
+    ServiceCredential(ServiceCredentialId),
+    MachineAccessToken(OpaqueId),
+}
+
+impl ServiceAuthenticationRef {
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::ServiceCredential(_) => "service_credential",
+            Self::MachineAccessToken(_) => "machine_access_token",
+        }
+    }
+
+    #[must_use]
+    pub const fn as_opaque(&self) -> &OpaqueId {
+        match self {
+            Self::ServiceCredential(value) => value.as_opaque(),
+            Self::MachineAccessToken(value) => value,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceAuditRecord {
     pub audit_id: AuditRecordId,
-    pub credential_id: ServiceCredentialId,
+    pub authentication: ServiceAuthenticationRef,
     pub presented_scope: TenantScope,
     pub subject: Option<ScopedPrincipal>,
     pub permission: String,

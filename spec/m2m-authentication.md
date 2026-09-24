@@ -99,7 +99,7 @@ The gateway is bounded, returns `Cache-Control: no-store` / `Pragma: no-cache` f
 
 ## Security logging
 
-Token values, client secrets and Service Credential digests are secrets and MUST NOT be logged. Audit may record redaction-safe facts such as client ID, tenant scope, requested/granted scope identifiers, token key ID, issuance outcome and expiry.
+Token values, client secrets and Service Credential digests are secrets and MUST NOT be logged. Audit may record redaction-safe facts such as client ID, tenant scope, requested/granted scope identifiers, token key ID, issuance outcome and expiry.\n\nFor API requests authenticated by a verified machine Bearer, the durable Service Account audit chain identifies the authentication proof by the signed token ID (jti) as a MachineAccessToken reference. It MUST NOT coerce that jti into a ServiceCredentialId. Existing Service Credential audit rows retain their historical V1/V2 hash inputs; machine-token-authenticated rows use the distinct V3 audit hash domain while sharing the same append-only chain.
 
 ## Nonclaims
 

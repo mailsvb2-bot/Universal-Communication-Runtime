@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use ucr_model::{
     PrincipalKind, ServiceAuditOperationRef, ServiceAuditOutcome, ServiceAuditRecord,
-    ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
+    ServiceAuthenticationRef, ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
     ServiceResourceQuotaPolicy,
 };
 
@@ -9,6 +9,7 @@ use crate::validate_namespaced_identifier;
 
 pub const SERVICE_AUDIT_HASH_V1_DOMAIN: &[u8] = b"UCR-SERVICE-AUDIT-HASH-V1\0";
 pub const SERVICE_AUDIT_HASH_V2_DOMAIN: &[u8] = b"UCR-SERVICE-AUDIT-HASH-V2\0";
+pub const SERVICE_AUDIT_HASH_V3_DOMAIN: &[u8] = b"UCR-SERVICE-AUDIT-HASH-V3\0";
 pub const SERVICE_AUDIT_HASH_LEN: usize = 32;
 pub const SERVICE_AUDIT_COMMAND_OPERATION_KIND: &str = "ucr.command";
 pub const SERVICE_AUDIT_IDENTITY_CREATE_OPERATION_KIND: &str = "ucr.identity.create";
@@ -226,9 +227,16 @@ pub fn service_audit_hash(
     previous_hash: [u8; SERVICE_AUDIT_HASH_LEN],
     record: &ServiceAuditRecord,
 ) -> [u8; SERVICE_AUDIT_HASH_LEN] {
-    match &record.operation {
-        Some(operation) => service_audit_hash_v2(previous_hash, record, operation),
-        None => service_audit_hash_v1(previous_hash, record),
+    match (&record.authentication, &record.operation) {
+        (ServiceAuthenticationRef::ServiceCredential(_), Some(operation)) => {
+            service_audit_hash_v2(previous_hash, record, operation)
+        }
+        (ServiceAuthenticationRef::ServiceCredential(_), None) => {
+            service_audit_hash_v1(previous_hash, record)
+        }
+        (ServiceAuthenticationRef::MachineAccessToken(_), operation) => {
+            service_audit_hash_v3(previous_hash, record, operation.as_ref())
+        }
     }
 }
 
@@ -260,7 +268,10 @@ fn service_audit_hash_v2(
 
 fn hash_legacy_audit_fields(hash: &mut Sha256, record: &ServiceAuditRecord) {
     hash_id(hash, record.audit_id.as_opaque().as_wire_bytes());
-    hash_id(hash, record.credential_id.as_opaque().as_wire_bytes());
+    let ServiceAuthenticationRef::ServiceCredential(credential_id) = &record.authentication else {
+        unreachable!("legacy audit hashing is only used for Service Credential records");
+    };
+    hash_id(hash, credential_id.as_opaque().as_wire_bytes());
     hash_scope(hash, &record.presented_scope);
     match &record.subject {
         Some(subject) => {
@@ -277,6 +288,44 @@ fn hash_legacy_audit_fields(hash: &mut Sha256, record: &ServiceAuditRecord) {
     hash_scope(hash, &record.resource_scope);
     hash.update([audit_outcome_code(record.outcome)]);
     hash.update(record.occurred_at_unix_ms.to_be_bytes());
+}
+
+fn service_audit_hash_v3(
+    previous_hash: [u8; SERVICE_AUDIT_HASH_LEN],
+    record: &ServiceAuditRecord,
+    operation: Option<&ServiceAuditOperationRef>,
+) -> [u8; SERVICE_AUDIT_HASH_LEN] {
+    let mut hash = Sha256::new();
+    hash.update(SERVICE_AUDIT_HASH_V3_DOMAIN);
+    hash.update(previous_hash);
+    hash_id(&mut hash, record.audit_id.as_opaque().as_wire_bytes());
+    hash_id(&mut hash, record.authentication.kind().as_bytes());
+    hash_id(&mut hash, record.authentication.as_opaque().as_wire_bytes());
+    hash_scope(&mut hash, &record.presented_scope);
+    match &record.subject {
+        Some(subject) => {
+            hash.update([1]);
+            hash_scope(&mut hash, &subject.scope);
+            hash_id(
+                &mut hash,
+                subject.principal.principal_id.as_opaque().as_wire_bytes(),
+            );
+        }
+        None => hash.update([0]),
+    }
+    hash_id(&mut hash, record.permission.as_bytes());
+    hash_scope(&mut hash, &record.resource_scope);
+    hash.update([audit_outcome_code(record.outcome)]);
+    hash.update(record.occurred_at_unix_ms.to_be_bytes());
+    match operation {
+        Some(operation) => {
+            hash.update([1]);
+            hash_id(&mut hash, operation.operation_kind.as_bytes());
+            hash_id(&mut hash, operation.operation_id.as_wire_bytes());
+        }
+        None => hash.update([0]),
+    }
+    hash.finalize().into()
 }
 
 fn hash_scope(hash: &mut Sha256, scope: &ucr_model::TenantScope) {
@@ -315,8 +364,9 @@ mod tests {
 
     use ucr_model::{
         AuditRecordId, NamespaceId, OpaqueId, PrincipalId, PrincipalRef, ScopedPrincipal,
-        ServiceAuditOutcome, ServiceAuditRecord, ServiceCredentialId, ServiceQuotaPolicy,
-        ServiceRequestRateClass, ServiceResourceQuotaPolicy, TenantId, TenantScope,
+        ServiceAuditOutcome, ServiceAuditRecord, ServiceAuthenticationRef, ServiceCredentialId,
+        ServiceQuotaPolicy, ServiceRequestRateClass, ServiceResourceQuotaPolicy, TenantId,
+        TenantScope,
     };
 
     use super::*;
@@ -345,7 +395,9 @@ mod tests {
     fn record() -> ServiceAuditRecord {
         ServiceAuditRecord {
             audit_id: AuditRecordId::from_opaque(oid("audit-a")),
-            credential_id: ServiceCredentialId::from_opaque(oid("credential-a")),
+            authentication: ServiceAuthenticationRef::ServiceCredential(
+                ServiceCredentialId::from_opaque(oid("credential-a")),
+            ),
             presented_scope: scope(),
             subject: Some(subject()),
             permission: "ucr.message.read".to_owned(),
@@ -495,6 +547,32 @@ mod tests {
         changed.outcome = ServiceAuditOutcome::PermissionDenied;
         assert_ne!(digest, service_audit_hash([0_u8; 32], &changed));
         assert_ne!(digest, service_audit_hash([9_u8; 32], &changed));
+    }
+
+    #[test]
+    fn machine_token_audit_uses_distinct_hash_domain_without_changing_credential_vectors() {
+        let credential = record();
+        let credential_digest = service_audit_hash([0_u8; 32], &credential);
+        let mut token = credential.clone();
+        token.authentication =
+            ServiceAuthenticationRef::MachineAccessToken(oid("machine-token-jti-a"));
+        let token_digest = service_audit_hash([0_u8; 32], &token);
+        assert_ne!(credential_digest, token_digest);
+
+        let mut changed_token = token.clone();
+        changed_token.authentication =
+            ServiceAuthenticationRef::MachineAccessToken(oid("machine-token-jti-b"));
+        assert_ne!(token_digest, service_audit_hash([0_u8; 32], &changed_token));
+
+        let mut operation_bound = token;
+        operation_bound.operation = Some(ServiceAuditOperationRef {
+            operation_kind: SERVICE_AUDIT_COMMAND_OPERATION_KIND.to_owned(),
+            operation_id: oid("command-machine-a"),
+        });
+        assert_ne!(
+            token_digest,
+            service_audit_hash([0_u8; 32], &operation_bound)
+        );
     }
 
     #[test]

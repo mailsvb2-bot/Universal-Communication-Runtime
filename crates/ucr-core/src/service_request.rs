@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ucr_model::{
     AuditRecordId, AuthorizationRequest, ScopedPrincipal, ServiceAuditOperationRef,
-    ServiceAuditOutcome, ServiceAuditRecord, ServiceCredentialId, TenantScope,
+    ServiceAuditOutcome, ServiceAuditRecord, ServiceAuthenticationRef, ServiceCredentialId,
+    TenantScope,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, MAX_SERVICE_AUDIT_OPERATION_KIND_LEN,
@@ -409,7 +410,7 @@ fn new_audit_record(
     let audit_id = AuditRecordId::from_opaque(generate_opaque_id().map_err(map_id_error)?);
     Ok(ServiceAuditRecord {
         audit_id,
-        credential_id: context.credential_id.clone(),
+        authentication: ServiceAuthenticationRef::ServiceCredential(context.credential_id.clone()),
         presented_scope: context.presented_scope.clone(),
         subject,
         permission: context.permission.to_owned(),
