@@ -19,9 +19,16 @@ fn production_runtime_exposes_machine_auth_only_on_loopback_with_stable_key_load
     assert!(runtime.contains("machine_auth_service_server(service)"));
     assert!(runtime.contains("UCR_MACHINE_AUTH_READY endpoint=http://{address} tls_edge=required"));
     assert!(runtime.contains("MachineTokenSigningKey::from_seed"));
+    assert!(runtime.contains("MachineTokenPublicKeySet::new"));
+    assert!(runtime.contains("verification_keys"));
+    assert!(runtime.contains("with_previous_signing_key"));
 
     assert!(main.contains(r#""serve-auth" => serve_auth_command"#));
     assert!(main.contains("UCR_MACHINE_TOKEN_SIGNING_KEY_FILE"));
+    assert!(main.contains("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_ID"));
+    assert!(main.contains("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_FILE"));
+    assert!(main.contains("with_previous_signing_key"));
+    assert!(main.contains("must be configured together"));
     assert!(main.contains("Zeroizing::new"));
     assert!(main.contains("read_machine_token_signing_key"));
     assert!(main.contains("fs::symlink_metadata(path)"));

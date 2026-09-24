@@ -7,7 +7,7 @@ use ucr_core::{
     AuthorizationEvaluator, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock,
     ServiceQuotaStore,
 };
-use ucr_crypto::{MachineTokenPolicy, MachineTokenSigningKey};
+use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet, MachineTokenSigningKey};
 use ucr_machine_auth::{MachineAuthExchangeRequest, MachineAuthRuntime, SUPPORTED_MACHINE_SCOPES};
 use ucr_protocol::CanonicalError;
 
@@ -27,6 +27,7 @@ pub struct GrpcMachineAuthService<C, A, S> {
     authorization: Arc<A>,
     store: Arc<S>,
     signing_key: Arc<MachineTokenSigningKey>,
+    verification_keys: Arc<MachineTokenPublicKeySet>,
     policy: MachineTokenPolicy,
     discovery: MachineAuthDiscovery,
 }
@@ -38,6 +39,7 @@ impl<C, A, S> GrpcMachineAuthService<C, A, S> {
         authorization: Arc<A>,
         store: Arc<S>,
         signing_key: Arc<MachineTokenSigningKey>,
+        verification_keys: Arc<MachineTokenPublicKeySet>,
         policy: MachineTokenPolicy,
         discovery: MachineAuthDiscovery,
     ) -> Self {
@@ -46,6 +48,7 @@ impl<C, A, S> GrpcMachineAuthService<C, A, S> {
             authorization,
             store,
             signing_key,
+            verification_keys,
             policy,
             discovery,
         }
@@ -59,6 +62,7 @@ impl<C, A, S> Clone for GrpcMachineAuthService<C, A, S> {
             authorization: Arc::clone(&self.authorization),
             store: Arc::clone(&self.store),
             signing_key: Arc::clone(&self.signing_key),
+            verification_keys: Arc::clone(&self.verification_keys),
             policy: self.policy.clone(),
             discovery: self.discovery.clone(),
         }
@@ -72,6 +76,7 @@ impl<C, A, S> fmt::Debug for GrpcMachineAuthService<C, A, S> {
             .field("policy", &self.policy)
             .field("discovery", &self.discovery)
             .field("signing_key", &"<secret>")
+            .field("verification_keys", &self.verification_keys)
             .finish_non_exhaustive()
     }
 }
@@ -97,16 +102,20 @@ where
     S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore,
 {
     fn public_jwks(&self) -> pb::MachineAuthJwks {
-        let public_key = self.signing_key.public_key();
         pb::MachineAuthJwks {
-            keys: vec![pb::MachineAuthJwk {
-                kty: "OKP".to_owned(),
-                crv: "Ed25519".to_owned(),
-                r#use: "sig".to_owned(),
-                alg: "EdDSA".to_owned(),
-                kid: public_key.key_id.as_opaque().as_str().to_owned(),
-                x: URL_SAFE_NO_PAD.encode(public_key.verifying_key.0),
-            }],
+            keys: self
+                .verification_keys
+                .keys()
+                .iter()
+                .map(|public_key| pb::MachineAuthJwk {
+                    kty: "OKP".to_owned(),
+                    crv: "Ed25519".to_owned(),
+                    r#use: "sig".to_owned(),
+                    alg: "EdDSA".to_owned(),
+                    kid: public_key.key_id.as_opaque().as_str().to_owned(),
+                    x: URL_SAFE_NO_PAD.encode(public_key.verifying_key.0),
+                })
+                .collect(),
         }
     }
 
@@ -232,11 +241,25 @@ mod tests {
             ),
             [7_u8; 32],
         ));
+        let previous_key = MachineTokenSigningKey::from_seed(
+            ucr_model::KeyId::from_opaque(
+                ucr_model::OpaqueId::new("machine-jwks-key-previous").expect("previous key id"),
+            ),
+            [8_u8; 32],
+        );
+        let verification_keys = Arc::new(
+            MachineTokenPublicKeySet::new(vec![
+                signing_key.public_key(),
+                previous_key.public_key(),
+            ])
+            .expect("verification key set"),
+        );
         let service = GrpcMachineAuthService::new(
             Arc::new(ucr_core::SystemServiceQuotaClock),
             Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
             Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
             Arc::clone(&signing_key),
+            verification_keys,
             MachineTokenPolicy {
                 issuer: "https://auth.example.test".to_owned(),
                 audience: "ucr-api".to_owned(),
@@ -249,16 +272,24 @@ mod tests {
         );
 
         let jwks = service.public_jwks();
-        assert_eq!(jwks.keys.len(), 1);
-        let key = &jwks.keys[0];
-        assert_eq!(key.kty, "OKP");
-        assert_eq!(key.crv, "Ed25519");
-        assert_eq!(key.r#use, "sig");
-        assert_eq!(key.alg, "EdDSA");
-        assert_eq!(key.kid, "machine-jwks-key");
+        assert_eq!(jwks.keys.len(), 2);
+        let active = jwks
+            .keys
+            .iter()
+            .find(|key| key.kid == "machine-jwks-key")
+            .expect("active key");
+        assert_eq!(active.kty, "OKP");
+        assert_eq!(active.crv, "Ed25519");
+        assert_eq!(active.r#use, "sig");
+        assert_eq!(active.alg, "EdDSA");
         assert_eq!(
-            key.x,
+            active.x,
             URL_SAFE_NO_PAD.encode(signing_key.public_key().verifying_key.0)
+        );
+        assert!(
+            jwks.keys
+                .iter()
+                .any(|key| key.kid == "machine-jwks-key-previous")
         );
     }
 }
