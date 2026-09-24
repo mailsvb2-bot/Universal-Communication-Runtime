@@ -20,7 +20,8 @@ use ucr_core::{
     generate_opaque_id,
 };
 use ucr_crypto::{
-    MAX_MACHINE_TOKEN_BYTES, MachineTokenPolicy, MachineTokenPublicKeySet, TrustedSigningKeyResolver,
+    MAX_MACHINE_TOKEN_BYTES, MachineTokenPolicy, MachineTokenPublicKeySet,
+    TrustedSigningKeyResolver,
 };
 use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
 use ucr_machine_auth::MachineBearerRequestGate;
