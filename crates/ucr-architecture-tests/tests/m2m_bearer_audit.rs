@@ -6,13 +6,14 @@ fn machine_bearer_audit_has_typed_authentication_reference_and_distinct_hash_dom
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let model = fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs"))
-        .expect("model source");
+    let model =
+        fs::read_to_string(workspace.join("crates/ucr-model/src/lib.rs")).expect("model source");
     let protocol = fs::read_to_string(workspace.join("crates/ucr-protocol/src/service_control.rs"))
         .expect("service control protocol");
-    let sqlite =
-        fs::read_to_string(workspace.join("crates/ucr-storage-sqlite/src/service_control_store.rs"))
-            .expect("sqlite service control");
+    let sqlite = fs::read_to_string(
+        workspace.join("crates/ucr-storage-sqlite/src/service_control_store.rs"),
+    )
+    .expect("sqlite service control");
 
     assert!(model.contains("pub enum ServiceAuthenticationRef"));
     assert!(model.contains("ServiceCredential(ServiceCredentialId)"));
