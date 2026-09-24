@@ -20,7 +20,7 @@ fn oauth_client_secret_is_only_a_transport_binding_over_canonical_credentials() 
     assert!(source.contains("URL_SAFE_NO_PAD.encode_string"));
     assert!(source.contains("raw.zeroize()"));
     assert!(source.contains("secret_bytes.zeroize()"));
-    assert!(source.contains(r#".field(\"secret\", &\"<redacted>\")"#));
+    assert!(source.contains(r#".field("secret", &"<redacted>")"#));
 
     assert!(!source.contains("ServiceCredentialRecord {"));
     assert!(!source.contains("PermissionGrant {"));
