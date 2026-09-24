@@ -139,7 +139,11 @@ impl MachineTokenPublicKeySet {
     /// # Errors
     /// Rejects duplicate key IDs or a set that would exceed the bounded key count.
     pub fn insert(&mut self, key: MachineTokenPublicKey) -> Result<(), MachineTokenKeySetError> {
-        if self.keys.iter().any(|existing| existing.key_id == key.key_id) {
+        if self
+            .keys
+            .iter()
+            .any(|existing| existing.key_id == key.key_id)
+        {
             return Err(MachineTokenKeySetError::DuplicateKeyId);
         }
         if self.keys.len() >= MAX_MACHINE_TOKEN_PUBLIC_KEYS {
