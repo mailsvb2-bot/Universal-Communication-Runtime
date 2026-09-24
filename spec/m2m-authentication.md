@@ -69,7 +69,7 @@ Access tokens are signed by an asymmetric deployment signing key. A token header
 
 Key rotation MUST allow an overlap window: a new signing key may become active while the previous public key remains published until every token signed by it can no longer be valid. Revoking a key early intentionally invalidates outstanding tokens signed by that key.
 
-The public HTTPS edge MUST expose an RFC-compatible JWKS document and stable issuer metadata. `ucr-crypto` now provides a bounded `MachineTokenPublicKeySet` that implements the canonical verification-key resolver, supports overlap windows, explicit key removal, and RFC 8037 Ed25519 JWKS projection containing only public `kid`/`x` material. Private signing material never appears in JWKS, protobuf, logs, metrics, Event payloads, or general durable application storage.
+The public HTTPS edge MUST expose an RFC-compatible JWKS document and stable issuer metadata. `ucr-crypto` provides a bounded `MachineTokenPublicKeySet` that implements the canonical verification-key resolver, supports overlap windows, explicit key removal, and RFC 8037 Ed25519 JWKS projection containing only public `kid`/`x` material. The typed `MachineAuthService.GetJwks` contract now exposes the active deployment verification key as structured RFC 8037/JWKS fields (`OKP`, `Ed25519`, `sig`, `EdDSA`, `kid`, Base64URL `x`) so a future HTTPS adapter does not need signing-key access or duplicate key projection rules. Private signing material never appears in JWKS, protobuf, logs, metrics, Event payloads, or general durable application storage.
 
 ## Audience and issuer
 
@@ -91,7 +91,9 @@ The production OAuth2-compatible HTTPS edge will map:
 
 - token exchange to `POST /oauth2/token`;
 - authorization server metadata to a stable well-known document;
-- public signing keys to JWKS.
+- `MachineAuthService.GetJwks` to the public JWKS resource.
+
+Public discovery advertises `client_secret_basic` as the external token-endpoint authentication method. The internal loopback gRPC credential metadata remains an implementation transport and is not advertised to integrations.
 
 The HTTPS adapter must remain transport-only. It must not duplicate credential authentication, scope attenuation, tenant isolation or Permission Grant decisions.
 
@@ -167,4 +169,4 @@ The signing seed is read into zeroizing process memory and is never accepted as 
 
 The stable seed means the same deployment key survives daemon restart. The crypto layer now has a bounded public key-set primitive for overlap verification, explicit key removal, and JWKS projection. This is still not the final durable rotation owner: active/previous signing-key lifecycle, restart-safe key-set persistence and public HTTPS JWKS serving remain future work.
 
-The local auth daemon refuses non-loopback plaintext binding. External OAuth2 traffic must still terminate at a trusted HTTPS edge before reaching this local service. Consequently this wiring does not yet claim a public `POST /oauth2/token` endpoint, `client_secret_basic`, JWKS publication, bearer admission on public APIs, or production signing-key rotation.
+The local auth daemon refuses non-loopback plaintext binding. External OAuth2 traffic must still terminate at a trusted HTTPS edge before reaching this local service. The typed service now exposes public discovery plus the active public JWKS key and advertises `client_secret_basic`, but the concrete HTTP Basic parser, public `POST /oauth2/token`, public JWKS/metadata HTTP routes, bearer admission on public APIs, and durable active/previous signing-key rotation remain separate work.
