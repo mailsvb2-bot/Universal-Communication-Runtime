@@ -2952,6 +2952,41 @@ mod tests {
     }
 
     #[test]
+    fn machine_access_token_audit_survives_restart_with_exact_jti() {
+        let db = TestDb::new();
+        let mut record = audit(
+            "audit-machine-token",
+            ServiceAuditOutcome::Authorized,
+            Some(service("service-machine-token")),
+        );
+        record.authentication =
+            ServiceAuthenticationRef::MachineAccessToken(oid("machine-token-jti"));
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("open");
+            store
+                .append_service_audit(&record)
+                .expect("append machine token audit");
+            assert_eq!(
+                store
+                    .service_audit_records(&scope(), 10)
+                    .expect("read machine token audit"),
+                vec![record.clone()]
+            );
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen");
+        let rows = reopened
+            .service_audit_records(&scope(), 10)
+            .expect("read machine token audit after restart");
+        assert_eq!(rows, vec![record]);
+        assert!(matches!(
+            &rows[0].authentication,
+            ServiceAuthenticationRef::MachineAccessToken(token_id)
+                if token_id.as_str() == "machine-token-jti"
+        ));
+    }
+
+    #[test]
     fn operation_bound_audit_survives_restart_and_exact_lookup() {
         let db = TestDb::new();
         let operation = operation("command-operation-a");
