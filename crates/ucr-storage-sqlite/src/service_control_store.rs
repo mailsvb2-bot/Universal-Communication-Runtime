@@ -330,9 +330,19 @@ pub(super) fn verify_v42_objects(connection: &Connection) -> Result<(), DurableS
 }
 
 const V44_OBJECTS_SQL: &str = "
-ALTER TABLE service_audit_records
-ADD COLUMN authentication_kind TEXT NOT NULL DEFAULT 'service_credential'
-CHECK(authentication_kind IN ('service_credential','machine_access_token'));
+CREATE TABLE IF NOT EXISTS service_audit_authentication (
+    audit_seq INTEGER PRIMARY KEY,
+    authentication_kind TEXT NOT NULL CHECK(authentication_kind = 'machine_access_token'),
+    FOREIGN KEY(audit_seq) REFERENCES service_audit_records(audit_seq) ON DELETE CASCADE
+) WITHOUT ROWID;
+
+CREATE TRIGGER IF NOT EXISTS service_audit_authentication_no_update
+BEFORE UPDATE ON service_audit_authentication
+BEGIN SELECT RAISE(ABORT, 'service audit authentication is append-only'); END;
+
+CREATE TRIGGER IF NOT EXISTS service_audit_authentication_no_delete
+BEFORE DELETE ON service_audit_authentication
+BEGIN SELECT RAISE(ABORT, 'service audit authentication is append-only'); END;
 ";
 
 pub(super) fn create_v44_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
@@ -342,15 +352,41 @@ pub(super) fn create_v44_objects(transaction: &Transaction<'_>) -> Result<(), Du
 }
 
 pub(super) fn verify_v44_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_table_columns(
+        connection,
+        "service_audit_authentication",
+        &[
+            ("audit_seq", "INTEGER", 1, 1),
+            ("authentication_kind", "TEXT", 1, 0),
+        ],
+    )?;
+    verify_schema_object(
+        connection,
+        "trigger",
+        "service_audit_authentication_no_update",
+    )?;
+    verify_schema_object(
+        connection,
+        "trigger",
+        "service_audit_authentication_no_delete",
+    )?;
     let invalid: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM service_audit_records
-             WHERE authentication_kind NOT IN ('service_credential','machine_access_token')",
+            "SELECT COUNT(*) FROM service_audit_authentication
+             WHERE authentication_kind != 'machine_access_token'",
             [],
             |row| row.get(0),
         )
         .map_err(|error| map_sqlite_error(&error))?;
     if invalid != 0 {
+        return Err(DurableStoreError::Corrupt);
+    }
+    let foreign_key_violations: i64 = connection
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| map_sqlite_error(&error))?;
+    if foreign_key_violations != 0 {
         return Err(DurableStoreError::Corrupt);
     }
     verify_audit_chain_for_schema(connection)
@@ -501,57 +537,28 @@ pub(super) fn verify_schema_v14(connection: &Connection) -> Result<(), DurableSt
             ("last_observed_unix_ms", "INTEGER", 1, 0),
         ],
     )?;
-    let schema_version: u32 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|error| map_sqlite_error(&error))?;
-    if schema_version >= 44 {
-        verify_table_columns(
-            connection,
-            "service_audit_records",
-            &[
-                ("audit_seq", "INTEGER", 0, 1),
-                ("audit_id", "TEXT", 1, 0),
-                ("credential_id", "TEXT", 1, 0),
-                ("presented_tenant_id", "TEXT", 1, 0),
-                ("presented_namespace_present", "INTEGER", 1, 0),
-                ("presented_namespace_id", "TEXT", 1, 0),
-                ("subject_present", "INTEGER", 1, 0),
-                ("subject_principal_id", "TEXT", 1, 0),
-                ("permission", "TEXT", 1, 0),
-                ("resource_tenant_id", "TEXT", 1, 0),
-                ("resource_namespace_present", "INTEGER", 1, 0),
-                ("resource_namespace_id", "TEXT", 1, 0),
-                ("outcome", "TEXT", 1, 0),
-                ("occurred_at_unix_ms", "INTEGER", 1, 0),
-                ("previous_hash", "BLOB", 1, 0),
-                ("record_hash", "BLOB", 1, 0),
-                ("authentication_kind", "TEXT", 1, 0),
-            ],
-        )?;
-    } else {
-        verify_table_columns(
-            connection,
-            "service_audit_records",
-            &[
-                ("audit_seq", "INTEGER", 0, 1),
-                ("audit_id", "TEXT", 1, 0),
-                ("credential_id", "TEXT", 1, 0),
-                ("presented_tenant_id", "TEXT", 1, 0),
-                ("presented_namespace_present", "INTEGER", 1, 0),
-                ("presented_namespace_id", "TEXT", 1, 0),
-                ("subject_present", "INTEGER", 1, 0),
-                ("subject_principal_id", "TEXT", 1, 0),
-                ("permission", "TEXT", 1, 0),
-                ("resource_tenant_id", "TEXT", 1, 0),
-                ("resource_namespace_present", "INTEGER", 1, 0),
-                ("resource_namespace_id", "TEXT", 1, 0),
-                ("outcome", "TEXT", 1, 0),
-                ("occurred_at_unix_ms", "INTEGER", 1, 0),
-                ("previous_hash", "BLOB", 1, 0),
-                ("record_hash", "BLOB", 1, 0),
-            ],
-        )?;
-    }
+    verify_table_columns(
+        connection,
+        "service_audit_records",
+        &[
+            ("audit_seq", "INTEGER", 0, 1),
+            ("audit_id", "TEXT", 1, 0),
+            ("credential_id", "TEXT", 1, 0),
+            ("presented_tenant_id", "TEXT", 1, 0),
+            ("presented_namespace_present", "INTEGER", 1, 0),
+            ("presented_namespace_id", "TEXT", 1, 0),
+            ("subject_present", "INTEGER", 1, 0),
+            ("subject_principal_id", "TEXT", 1, 0),
+            ("permission", "TEXT", 1, 0),
+            ("resource_tenant_id", "TEXT", 1, 0),
+            ("resource_namespace_present", "INTEGER", 1, 0),
+            ("resource_namespace_id", "TEXT", 1, 0),
+            ("outcome", "TEXT", 1, 0),
+            ("occurred_at_unix_ms", "INTEGER", 1, 0),
+            ("previous_hash", "BLOB", 1, 0),
+            ("record_hash", "BLOB", 1, 0),
+        ],
+    )?;
     verify_schema_object(connection, "index", "service_audit_scope_sequence")?;
     verify_schema_object(connection, "trigger", "service_audit_no_update")?;
     verify_schema_object(connection, "trigger", "service_audit_no_delete")?;
@@ -1122,6 +1129,7 @@ impl ServiceAuditStore for SqliteLocalStore {
                         r.outcome, r.occurred_at_unix_ms, r.authentication_kind,
                         o.operation_kind, o.operation_id
                  FROM service_audit_records r
+                 LEFT JOIN service_audit_authentication a ON a.audit_seq = r.audit_seq
                  LEFT JOIN service_audit_operations o ON o.audit_seq = r.audit_seq
                  WHERE r.presented_tenant_id=?1 AND r.presented_namespace_present=?2
                    AND r.presented_namespace_id=?3
@@ -1139,7 +1147,7 @@ impl ServiceAuditStore for SqliteLocalStore {
                 |row| {
                     Ok((
                         decode_audit_row(row)?,
-                        row.get::<_, String>(13)?,
+                        row.get::<_, Option<String>>(13)?,
                         row.get::<_, Option<String>>(14)?,
                         row.get::<_, Option<String>>(15)?,
                     ))
@@ -1152,7 +1160,7 @@ impl ServiceAuditStore for SqliteLocalStore {
                     row.map_err(|error| map_sqlite_error(&error))?;
                 decode_audit_tuple_with_authentication_and_operation(
                     tuple,
-                    &authentication_kind,
+                    authentication_kind.as_deref(),
                     operation_kind,
                     operation_id,
                 )
@@ -1185,6 +1193,7 @@ impl ServiceAuditStore for SqliteLocalStore {
                         r.outcome, r.occurred_at_unix_ms, r.authentication_kind
                  FROM service_audit_operations o
                  JOIN service_audit_records r ON r.audit_seq = o.audit_seq
+                 LEFT JOIN service_audit_authentication a ON a.audit_seq = r.audit_seq
                  WHERE r.presented_tenant_id=?1 AND r.presented_namespace_present=?2
                    AND r.presented_namespace_id=?3
                    AND o.operation_kind=?4 AND o.operation_id=?5
@@ -1201,7 +1210,7 @@ impl ServiceAuditStore for SqliteLocalStore {
                     operation.operation_id.as_str(),
                     limit
                 ],
-                |row| Ok((decode_audit_row(row)?, row.get::<_, String>(13)?)),
+                |row| Ok((decode_audit_row(row)?, row.get::<_, Option<String>>(13)?)),
             )
             .map_err(|error| map_sqlite_error(&error))?;
         let mut records = rows
@@ -1209,7 +1218,10 @@ impl ServiceAuditStore for SqliteLocalStore {
                 let (tuple, authentication_kind) =
                     row.map_err(|error| map_sqlite_error(&error))?;
                 let mut record =
-                    decode_audit_tuple_with_authentication(tuple, &authentication_kind)?;
+                    decode_audit_tuple_with_authentication(
+                        tuple,
+                        authentication_kind.as_deref(),
+                    )?;
                 record.operation = Some(operation.clone());
                 validate_service_audit_record(&record).map_err(|_| DurableStoreError::Corrupt)?;
                 Ok(record)
@@ -1808,21 +1820,21 @@ fn decode_audit_tuple(row: AuditTuple) -> Result<ServiceAuditRecord, DurableStor
 
 fn decode_audit_authentication(
     stored_id: &str,
-    authentication_kind: &str,
+    authentication_kind: Option<&str>,
 ) -> Result<ServiceAuthenticationRef, DurableStoreError> {
     let id = decode_id(stored_id)?;
     match authentication_kind {
-        "service_credential" => Ok(ServiceAuthenticationRef::ServiceCredential(
+        None => Ok(ServiceAuthenticationRef::ServiceCredential(
             ServiceCredentialId::from_opaque(id),
         )),
-        "machine_access_token" => Ok(ServiceAuthenticationRef::MachineAccessToken(id)),
-        _ => Err(DurableStoreError::Corrupt),
+        Some("machine_access_token") => Ok(ServiceAuthenticationRef::MachineAccessToken(id)),
+        Some(_) => Err(DurableStoreError::Corrupt),
     }
 }
 
 fn decode_audit_tuple_with_authentication(
     row: AuditTuple,
-    authentication_kind: &str,
+    authentication_kind: Option<&str>,
 ) -> Result<ServiceAuditRecord, DurableStoreError> {
     let stored_id = row.1.clone();
     let mut record = decode_audit_tuple(row)?;
@@ -1863,7 +1875,7 @@ fn decode_audit_tuple_with_operation(
 
 fn decode_audit_tuple_with_authentication_and_operation(
     row: AuditTuple,
-    authentication_kind: &str,
+    authentication_kind: Option<&str>,
     operation_kind: Option<String>,
     operation_id: Option<String>,
 ) -> Result<ServiceAuditRecord, DurableStoreError> {
@@ -1891,8 +1903,8 @@ fn insert_audit_record(
                 audit_id, credential_id, presented_tenant_id, presented_namespace_present,
                 presented_namespace_id, subject_present, subject_principal_id, permission,
                 resource_tenant_id, resource_namespace_present, resource_namespace_id,
-                outcome, occurred_at_unix_ms, previous_hash, record_hash, authentication_kind
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                outcome, occurred_at_unix_ms, previous_hash, record_hash
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             params![
                 record.audit_id.as_opaque().as_str(),
                 record.authentication.as_opaque().as_str(),
@@ -1909,12 +1921,24 @@ fn insert_audit_record(
                 record.occurred_at_unix_ms,
                 previous_hash.as_slice(),
                 record_hash.as_slice(),
-                record.authentication.kind(),
             ],
         )
         .map_err(|error| map_sqlite_error(&error))?;
+    let audit_seq = transaction.last_insert_rowid();
+
+    if matches!(
+        record.authentication,
+        ServiceAuthenticationRef::MachineAccessToken(_)
+    ) {
+        transaction
+            .execute(
+                "INSERT INTO service_audit_authentication (audit_seq, authentication_kind)
+                 VALUES (?1, 'machine_access_token')",
+                params![audit_seq],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+    }
     if let Some(operation) = &record.operation {
-        let audit_seq = transaction.last_insert_rowid();
         transaction
             .execute(
                 "INSERT INTO service_audit_operations (audit_seq, operation_kind, operation_id)
@@ -1940,16 +1964,17 @@ fn load_audit_by_id(
                     r.presented_namespace_present, r.presented_namespace_id,
                     r.subject_present, r.subject_principal_id, r.permission,
                     r.resource_tenant_id, r.resource_namespace_present, r.resource_namespace_id,
-                    r.outcome, r.occurred_at_unix_ms, r.authentication_kind,
+                    r.outcome, r.occurred_at_unix_ms, a.authentication_kind,
                     o.operation_kind, o.operation_id
              FROM service_audit_records r
+             LEFT JOIN service_audit_authentication a ON a.audit_seq = r.audit_seq
              LEFT JOIN service_audit_operations o ON o.audit_seq = r.audit_seq
              WHERE r.audit_id=?1",
             params![audit_id.as_opaque().as_str()],
             |row| {
                 Ok((
                     decode_audit_row(row)?,
-                    row.get::<_, String>(13)?,
+                    row.get::<_, Option<String>>(13)?,
                     row.get::<_, Option<String>>(14)?,
                     row.get::<_, Option<String>>(15)?,
                 ))
@@ -1960,7 +1985,7 @@ fn load_audit_by_id(
         .map(|(tuple, authentication_kind, operation_kind, operation_id)| {
             decode_audit_tuple_with_authentication_and_operation(
                 tuple,
-                &authentication_kind,
+                authentication_kind.as_deref(),
                 operation_kind,
                 operation_id,
             )
@@ -2054,9 +2079,10 @@ fn verify_audit_chain_v44(connection: &Connection) -> Result<(), DurableStoreErr
                     r.presented_namespace_present, r.presented_namespace_id,
                     r.subject_present, r.subject_principal_id, r.permission,
                     r.resource_tenant_id, r.resource_namespace_present, r.resource_namespace_id,
-                    r.outcome, r.occurred_at_unix_ms, r.authentication_kind,
+                    r.outcome, r.occurred_at_unix_ms, a.authentication_kind,
                     r.previous_hash, r.record_hash, o.operation_kind, o.operation_id
              FROM service_audit_records r
+             LEFT JOIN service_audit_authentication a ON a.audit_seq = r.audit_seq
              LEFT JOIN service_audit_operations o ON o.audit_seq = r.audit_seq
              ORDER BY r.audit_seq",
         )
@@ -2065,7 +2091,7 @@ fn verify_audit_chain_v44(connection: &Connection) -> Result<(), DurableStoreErr
         .query_map([], |row| {
             Ok((
                 decode_audit_row(row)?,
-                row.get::<_, String>(13)?,
+                row.get::<_, Option<String>>(13)?,
                 row.get::<_, Vec<u8>>(14)?,
                 row.get::<_, Vec<u8>>(15)?,
                 row.get::<_, Option<String>>(16)?,
@@ -2085,7 +2111,7 @@ fn verify_audit_chain_v44(connection: &Connection) -> Result<(), DurableStoreErr
         ) = row.map_err(|error| map_sqlite_error(&error))?;
         let record = decode_audit_tuple_with_authentication_and_operation(
             tuple,
-            &authentication_kind,
+            authentication_kind.as_deref(),
             operation_kind,
             operation_id,
         )?;
