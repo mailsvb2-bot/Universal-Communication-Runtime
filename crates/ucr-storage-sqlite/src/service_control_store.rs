@@ -2291,7 +2291,9 @@ mod tests {
     ) -> ServiceAuditRecord {
         ServiceAuditRecord {
             audit_id: AuditRecordId::from_opaque(oid(id)),
-            credential_id: ucr_model::ServiceCredentialId::from_opaque(oid("credential-control")),
+            authentication: ServiceAuthenticationRef::ServiceCredential(
+                ucr_model::ServiceCredentialId::from_opaque(oid("credential-control")),
+            ),
             presented_scope: scope(),
             subject,
             permission: CONVERSATION_READ_PERMISSION.to_owned(),
