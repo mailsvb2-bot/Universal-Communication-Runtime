@@ -58,6 +58,6 @@ fn oauth_gateway_keeps_secrets_out_of_diagnostics() {
     assert!(source.contains("self.client_secret.zeroize()"));
     assert!(source.contains("decoded.zeroize()"));
     assert!(source.contains("input.zeroize()"));
-    assert!(!source.contains("println!("client_secret"));
-    assert!(!source.contains("eprintln!("client_secret"));
+    assert!(!source.contains(r#"println!("client_secret"#));
+    assert!(!source.contains(r#"eprintln!("client_secret"#));
 }
