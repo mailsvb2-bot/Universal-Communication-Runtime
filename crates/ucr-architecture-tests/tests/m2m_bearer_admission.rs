@@ -6,9 +6,8 @@ fn bearer_admission_is_shared_and_rechecks_canonical_authority() {
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let source =
-        fs::read_to_string(workspace.join("crates/ucr-machine-auth/src/bearer.rs"))
-            .expect("Bearer admission source");
+    let source = fs::read_to_string(workspace.join("crates/ucr-machine-auth/src/bearer.rs"))
+        .expect("Bearer admission source");
     let spec =
         fs::read_to_string(workspace.join("spec/m2m-authentication.md")).expect("M2M auth spec");
 
@@ -48,13 +47,10 @@ fn bearer_admission_keeps_token_scope_as_attenuation_not_authority() {
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let source =
-        fs::read_to_string(workspace.join("crates/ucr-machine-auth/src/bearer.rs"))
-            .expect("Bearer admission source");
+    let source = fs::read_to_string(workspace.join("crates/ucr-machine-auth/src/bearer.rs"))
+        .expect("Bearer admission source");
 
-    let scope_check = source
-        .find(".granted_scopes")
-        .expect("token scope check");
+    let scope_check = source.find(".granted_scopes").expect("token scope check");
     let authorization_check = source
         .find("self.authorization.authorize(&AuthorizationRequest")
         .expect("canonical authorization check");
