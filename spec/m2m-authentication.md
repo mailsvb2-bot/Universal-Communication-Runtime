@@ -87,15 +87,15 @@ Short-lived access tokens are intentionally bounded by expiry and signing-key va
 
 The normative typed contract is `ucr.v1.MachineAuthService`.
 
-The production OAuth2-compatible HTTPS edge will map:
+The `ucr-auth-web` transport adapter now maps:
 
 - token exchange to `POST /oauth2/token`;
-- authorization server metadata to a stable well-known document;
-- `MachineAuthService.GetJwks` to the public JWKS resource.
+- authorization server metadata to `GET /.well-known/oauth-authorization-server`;
+- `MachineAuthService.GetJwks` to `GET /oauth2/jwks`.
 
-Public discovery advertises `client_secret_basic` as the external token-endpoint authentication method. The internal loopback gRPC credential metadata remains an implementation transport and is not advertised to integrations.
+The token endpoint accepts standard HTTP `client_secret_basic` and `application/x-www-form-urlencoded` requests. The opaque external `client_secret` is decoded only into the existing canonical Service Credential locator/secret and exact tenant scope, then attached to the loopback `MachineAuthService` request as sensitive binary metadata. The independently presented `client_id` remains in the typed token request and is revalidated against the authenticated Service Account by the canonical machine-auth runtime.
 
-The HTTPS adapter must remain transport-only. It must not duplicate credential authentication, scope attenuation, tenant isolation or Permission Grant decisions.
+The gateway is bounded, returns `Cache-Control: no-store` / `Pragma: no-cache` for OAuth JSON, refuses non-loopback binding, and prints `tls_edge=required`. It therefore provides the HTTP/OAuth transport mapping while still requiring a trusted public HTTPS reverse proxy or equivalent TLS edge. It does not own credential authentication, scope attenuation, tenant isolation, Permission Grants, quota/audit, signing keys, or token issuance.
 
 ## Security logging
 
@@ -107,7 +107,7 @@ This contract does not claim human login, authorization-code flow, PKCE, refresh
 
 `ucr-crypto::machine_token` now provides the reference Ed25519 signed access-token issuer/verifier over an already authenticated canonical Service Account. It enforces bounded token size, issuer/audience, short lifetime, `kid`, canonical tenant/namespace/service-account identity, scope attenuation, expiry and redacted token/private-key diagnostics. A resolver abstraction allows overlapping public keys during rotation without exporting private key material.
 
-This runtime codec still does not make M2M authentication production-ready by itself. `MachineAuthService` composition with canonical Service Credential authentication, public HTTPS `POST /oauth2/token`, JWKS/metadata publication, bearer admission on public API boundaries, durable deployment key rotation and HTTPS conformance remain required.
+The machine-auth stack now includes canonical Service Credential composition, signed short-lived access tokens, typed discovery/JWKS, and a loopback OAuth HTTP adapter. Production public HTTPS termination, bearer admission on the broader public API boundary, durable active/previous signing-key rotation, live deployment evidence and HTTPS conformance remain required.
 
 
 ## Canonical MachineAuthService composition
@@ -133,7 +133,7 @@ The initial mapping is:
 
 Unknown or duplicate OAuth scopes fail closed. This mapping is an attenuation/projection of canonical authorization and does not persist OAuth scopes as a second permission owner.
 
-The gRPC composition still does not claim the production HTTPS `POST /oauth2/token` edge, JWKS serving, bearer middleware on public APIs, or durable deployment signing-key rotation. The shared machine-auth crate now defines the opaque `client_id + client_secret` transport binding required for standard HTTP `client_secret_basic`; the concrete HTTPS parser/response adapter remains separate transport work.
+The gRPC composition remains the semantic owner. The shared machine-auth crate defines the opaque `client_id + client_secret` binding, while `ucr-auth-web` now parses standard HTTP `client_secret_basic`, derives the internal credential metadata from that opaque secret, and delegates exchange to `MachineAuthService`. The adapter does not reimplement authorization or signing. Direct public TLS termination, bearer middleware on public APIs, and durable deployment signing-key rotation remain separate work.
 
 
 ## Shared machine-auth runtime owner and fixed token admission
@@ -169,4 +169,4 @@ The signing seed is read into zeroizing process memory and is never accepted as 
 
 The stable seed means the same deployment key survives daemon restart. The crypto layer now has a bounded public key-set primitive for overlap verification, explicit key removal, and JWKS projection. This is still not the final durable rotation owner: active/previous signing-key lifecycle, restart-safe key-set persistence and public HTTPS JWKS serving remain future work.
 
-The local auth daemon refuses non-loopback plaintext binding. External OAuth2 traffic must still terminate at a trusted HTTPS edge before reaching this local service. The typed service now exposes public discovery plus the active public JWKS key and advertises `client_secret_basic`, but the concrete HTTP Basic parser, public `POST /oauth2/token`, public JWKS/metadata HTTP routes, bearer admission on public APIs, and durable active/previous signing-key rotation remain separate work.
+The local auth daemon and `ucr-auth-web` both refuse non-loopback plaintext binding. `ucr-auth-web` now provides the concrete HTTP Basic parser, `POST /oauth2/token`, authorization-server metadata and JWKS HTTP routes, while delegating every security decision to the loopback `MachineAuthService`. External OAuth2 traffic must still terminate TLS at a trusted public edge before reaching the loopback gateway. Bearer admission on public APIs, direct/public TLS serving, and durable active/previous signing-key rotation remain separate work.
