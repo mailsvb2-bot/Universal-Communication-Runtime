@@ -7,6 +7,8 @@ members = [
     "crates/ucr-crypto",
     "crates/ucr-machine-auth",
     "crates/ucr-auth-web",
+    "crates/ucr-conference-web",
+    "crates/ucr-https-edge",
     "crates/ucr-storage-memory",
     "crates/ucr-storage-sqlite",
     "crates/ucr-architecture-tests",

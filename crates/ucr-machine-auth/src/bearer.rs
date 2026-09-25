@@ -12,7 +12,7 @@ use ucr_crypto::{
 use ucr_model::{AuthorizationRequest, KeyId, OpaqueId, ScopedPrincipal, TenantScope};
 use ucr_protocol::{CanonicalError, CanonicalErrorCode};
 
-use crate::canonical_permission_for_scope;
+use crate::{canonical_permission_for_scope, machine_scope_for_permission};
 
 /// Canonical result of admitting one short-lived machine Bearer token.
 ///
@@ -207,6 +207,27 @@ where
         resource_scope: &TenantScope,
     ) -> Result<ServicePrincipalRequestAuthorization<'a, C, A, S>, CanonicalError> {
         let (verified, permission) = self.bearer.authenticate_scope(encoded, required_scope)?;
+        self.request.bind_machine_bearer_request(
+            verified.subject,
+            verified.token_id,
+            permission,
+            resource_scope,
+        )
+    }
+
+    /// Verifies a Bearer for the OAuth scope owned by one canonical API permission.
+    ///
+    /// # Errors
+    /// Unknown public permission mappings fail closed as internal route configuration errors.
+    pub fn authenticate_permission_request(
+        &self,
+        encoded: &str,
+        permission: &str,
+        resource_scope: &TenantScope,
+    ) -> Result<ServicePrincipalRequestAuthorization<'a, C, A, S>, CanonicalError> {
+        let required_scope = machine_scope_for_permission(permission)
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+        let (verified, _) = self.bearer.authenticate_scope(encoded, required_scope)?;
         self.request.bind_machine_bearer_request(
             verified.subject,
             verified.token_id,

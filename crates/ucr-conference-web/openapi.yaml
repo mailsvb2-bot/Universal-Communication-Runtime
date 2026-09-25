@@ -1,0 +1,62 @@
+openapi: 3.0.3
+info:
+  title: UCR Universal Conference HTTP adapter
+  version: v1
+  description: >
+    Thin JSON transport over UniversalConferenceService. Paths select an RPC.
+    Request fields match that RPC. This document is not a second business API.
+paths:
+  /v1/conferences:
+    post:
+      operationId: createConference
+  /v1/conferences/resolve:
+    post:
+      operationId: resolveConference
+  /v1/conferences/get:
+    post:
+      operationId: getConference
+  /v1/conferences/lifecycle:
+    post:
+      operationId: transitionConference
+  /v1/conferences/entry:
+    post:
+      operationId: setEntryOpen
+  /v1/participants:
+    post:
+      operationId: ensureParticipant
+  /v1/participant-devices:
+    post:
+      operationId: ensureParticipantDevice
+  /v1/participants/update:
+    post:
+      operationId: updateParticipant
+  /v1/participants/remove:
+    post:
+      operationId: removeParticipant
+  /v1/participants/list:
+    post:
+      operationId: listParticipants
+  /v1/subscriptions:
+    post:
+      operationId: setSubscriptions
+  /v1/conferences/runtime:
+    post:
+      operationId: prepareConferenceRuntime
+  /v1/join-grants:
+    post:
+      operationId: issueJoinGrant
+  /v1/join-grants/revoke:
+    post:
+      operationId: revokeJoinGrant
+  /v1/attendance:
+    post:
+      operationId: getParticipantAttendance
+  /v1/capabilities:
+    post:
+      operationId: getCapabilities
+  /v1/openapi.yaml:
+    get:
+      operationId: getOpenApi
+  /healthz:
+    get:
+      operationId: healthz
