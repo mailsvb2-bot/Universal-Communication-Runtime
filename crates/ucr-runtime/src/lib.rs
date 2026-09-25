@@ -846,7 +846,7 @@ impl ProductionRuntime {
             Arc::clone(&clock),
             Arc::clone(&authorization),
             Arc::clone(&store),
-            conference_state,
+            Arc::clone(&conference_state),
         );
         if let Some(config) = machine_bearer {
             universal_service =
@@ -1091,7 +1091,7 @@ async fn serve_realtime_services(
             Arc::clone(&authorization),
             Arc::clone(&store),
             Arc::clone(&conference_state),
-            join_issuer,
+            Arc::clone(&join_issuer),
             runtime_capabilities,
         );
     if let Some(config) = machine_bearer {

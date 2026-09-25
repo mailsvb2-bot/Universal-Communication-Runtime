@@ -3731,8 +3731,8 @@ mod bearer_ingress_tests {
         ServiceQuotaStore,
     };
     use ucr_crypto::{
-        AccessTokenIssueRequest, MachineTokenPolicy, MachineTokenPublicKeySet,
-        MachineTokenSigningKey, issue_machine_access_token,
+        AccessTokenIssueRequest, MAX_MACHINE_TOKEN_BYTES, MachineTokenPolicy,
+        MachineTokenPublicKeySet, MachineTokenSigningKey, issue_machine_access_token,
     };
     use ucr_model::{
         IntegrationId, KeyId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
