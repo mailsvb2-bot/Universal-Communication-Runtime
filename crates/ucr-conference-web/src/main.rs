@@ -1523,6 +1523,7 @@ fn yaml_response(text: &'static str) -> HttpResponse {
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
+    use rustls::pki_types::pem::PemObject;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::Server;
@@ -1642,6 +1643,131 @@ mod tests {
             response.contains("UNAUTHENTICATED"),
             "canonical error must cross the HTTP adapter: {response}"
         );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn conference_http_adapter_is_reachable_through_the_tls_edge() {
+        let directory = std::env::temp_dir().join(format!(
+            "ucr-conference-edge-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let certificate = directory.join("cert.pem");
+        let private_key = directory.join("key.pem");
+        let status = std::process::Command::new("openssl")
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-keyout"])
+            .arg(&private_key)
+            .arg("-out")
+            .arg(&certificate)
+            .args([
+                "-days",
+                "1",
+                "-nodes",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=digitalSignature,keyEncipherment",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
+                "-addext",
+                "subjectAltName=DNS:localhost",
+            ])
+            .status()
+            .expect("openssl");
+        assert!(status.success());
+
+        let store =
+            Arc::new(SqliteLocalStore::open(directory.join("ucr.sqlite")).expect("sqlite store"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("grpc listener");
+        let grpc_address = listener.local_addr().expect("grpc address");
+        let incoming = TcpListenerStream::new(listener);
+        let service =
+            GrpcUniversalConferenceService::new(Arc::new(FixedClock), Arc::clone(&store), store);
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(universal_conference_service_server(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("grpc server");
+        });
+        let channel = tonic::transport::Channel::from_shared(format!("http://{grpc_address}"))
+            .expect("grpc uri")
+            .connect()
+            .await
+            .expect("grpc channel");
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("http listener");
+        let http_address = http_listener.local_addr().expect("http address");
+        tokio::spawn(async move {
+            serve(http_listener, AppState { upstream: channel })
+                .await
+                .expect("http adapter");
+        });
+
+        let edge_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("edge listener");
+        let edge_address = edge_listener.local_addr().expect("edge address");
+        let acceptor = ucr_https_edge::tls_acceptor(
+            certificate.to_str().expect("cert path"),
+            private_key.to_str().expect("key path"),
+        )
+        .expect("tls acceptor");
+        tokio::spawn(async move {
+            let (stream, _) = edge_listener.accept().await.expect("edge accept");
+            ucr_https_edge::proxy_connection(acceptor, stream, http_address)
+                .await
+                .expect("proxy");
+        });
+
+        let mut certificates =
+            std::io::BufReader::new(std::fs::File::open(&certificate).expect("cert"));
+        let certificate = rustls::pki_types::CertificateDer::pem_reader_iter(&mut certificates)
+            .next()
+            .expect("certificate")
+            .expect("parse certificate");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).expect("trust certificate");
+        let client = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
+        let tcp = tokio::net::TcpStream::connect(edge_address)
+            .await
+            .expect("connect edge");
+        let mut tls = connector
+            .connect(
+                rustls::pki_types::ServerName::try_from("localhost").expect("name"),
+                tcp,
+            )
+            .await
+            .expect("handshake");
+        let body = br#"{"scope":{"tenant_id":"tenant-a"},"integration_id":"integration-a"}"#;
+        let mut request = format!(
+            "POST /v1/capabilities HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(body);
+        tls.write_all(&request).await.expect("write");
+        let mut response = Vec::new();
+        tls.read_to_end(&mut response).await.expect("read");
+        let response = String::from_utf8(response).expect("utf-8");
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "edge must forward the unauthenticated capabilities call: {response}"
+        );
+        assert!(response.contains("UNAUTHENTICATED"));
         let _ = std::fs::remove_dir_all(directory);
     }
 }

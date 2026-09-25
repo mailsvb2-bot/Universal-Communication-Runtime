@@ -24,8 +24,11 @@ tonic = { version = "=0.14.6", features = ["transport"] }
 ucr-api-grpc = { path = "../ucr-api-grpc" }
 
 [dev-dependencies]
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "=0.26.4"
 tokio-stream = "=0.1.17"
 ucr-core = { path = "../ucr-core" }
+ucr-https-edge = { path = "../ucr-https-edge" }
 ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
 
 [lints]
