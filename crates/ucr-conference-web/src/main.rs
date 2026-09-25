@@ -211,10 +211,7 @@ async fn dispatch_post(path: &str, request: Request<Incoming>, state: &AppState)
     }
 }
 
-async fn dispatch_get_capabilities(
-    request: Request<Incoming>,
-    state: &AppState,
-) -> HttpResponse {
+async fn dispatch_get_capabilities(request: Request<Incoming>, state: &AppState) -> HttpResponse {
     let authorization = request
         .headers()
         .get(AUTHORIZATION)
@@ -234,10 +231,9 @@ async fn dispatch_get_capabilities(
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
-    let mut client =
-        pb::universal_conference_service_client::UniversalConferenceServiceClient::new(
-            state.upstream.clone(),
-        );
+    let mut client = pb::universal_conference_service_client::UniversalConferenceServiceClient::new(
+        state.upstream.clone(),
+    );
     forward_capabilities_input(&mut client, parsed, authorization.as_deref()).await
 }
 
@@ -1691,7 +1687,7 @@ mod tests {
     use ucr_realtime::{JoinTokenIssuer, JoinTokenKey};
     use ucr_storage_sqlite::SqliteLocalStore;
 
-    use super::{AppState, create_request, serve, validate_loopback_bind};
+    use super::{AppState, capabilities_query, create_request, serve, validate_loopback_bind};
 
     #[test]
     fn conference_http_adapter_refuses_non_loopback_bind() {
@@ -2464,15 +2460,10 @@ mod tests {
             .is_err()
         );
         assert!(
-            capabilities_query(
-                "tenant_id=tenant-a&integration_id=integration-a&unexpected=value"
-            )
-            .is_err()
-        );
-        assert!(
-            capabilities_query("tenant_id=tenant-a&integration_id=bad%ZZ")
+            capabilities_query("tenant_id=tenant-a&integration_id=integration-a&unexpected=value")
                 .is_err()
         );
+        assert!(capabilities_query("tenant_id=tenant-a&integration_id=bad%ZZ").is_err());
     }
 
     async fn post_json(
