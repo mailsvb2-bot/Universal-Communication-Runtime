@@ -3655,8 +3655,8 @@ dependencies = [
  "ucr-core",
  "ucr-crypto",
  "ucr-group-mls",
- "ucr-media-e2ee",
  "ucr-machine-auth",
+ "ucr-media-e2ee",
  "ucr-mesh",
  "ucr-model",
  "ucr-offline-groups",
@@ -3783,6 +3783,22 @@ dependencies = [
  "ucr-protocol",
  "ucr-sfu",
  "ucr-storage-memory",
+]
+
+[[package]]
+name = "ucr-conference-web"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "ucr-api-grpc",
 ]
 
 [[package]]
