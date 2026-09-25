@@ -72,6 +72,7 @@ fn tls_acceptor(
     certificate_path: &str,
     private_key_path: &str,
 ) -> Result<tokio_rustls::TlsAcceptor, String> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let certificates = load_certificates(certificate_path)?;
     let private_key = load_private_key(private_key_path)?;
     let mut config = rustls::ServerConfig::builder()
@@ -135,8 +136,20 @@ async fn proxy_connection(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_loopback_upstream;
-    use std::net::SocketAddr;
+    use std::{
+        net::SocketAddr,
+        process::Command,
+        sync::Arc,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use rustls::pki_types::ServerName;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
+
+    use super::{tls_acceptor, validate_loopback_upstream};
 
     #[test]
     fn https_edge_refuses_a_non_loopback_upstream() {
@@ -144,5 +157,89 @@ mod tests {
         assert!(validate_loopback_upstream(public).is_err());
         let loopback: SocketAddr = "127.0.0.1:8082".parse().expect("address");
         assert!(validate_loopback_upstream(loopback).is_ok());
+    }
+
+    #[tokio::test]
+    async fn https_edge_proxies_tls_bytes_to_loopback_upstream() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("ucr-https-edge-{stamp}"));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let certificate = directory.join("cert.pem");
+        let private_key = directory.join("key.pem");
+        let status = Command::new("openssl")
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-keyout"])
+            .arg(&private_key)
+            .arg("-out")
+            .arg(&certificate)
+            .args([
+                "-days",
+                "1",
+                "-nodes",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-addext",
+                "keyUsage=digitalSignature,keyEncipherment",
+                "-addext",
+                "extendedKeyUsage=serverAuth",
+                "-addext",
+                "subjectAltName=DNS:localhost",
+            ])
+            .status()
+            .expect("openssl");
+        assert!(status.success(), "openssl must mint the test certificate");
+
+        let upstream = TcpListener::bind("127.0.0.1:0").await.expect("upstream");
+        let upstream_address = upstream.local_addr().expect("upstream address");
+        let edge = TcpListener::bind("127.0.0.1:0").await.expect("edge");
+        let edge_address = edge.local_addr().expect("edge address");
+        let acceptor = tls_acceptor(
+            certificate.to_str().expect("certificate path"),
+            private_key.to_str().expect("key path"),
+        )
+        .expect("acceptor");
+
+        tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.expect("upstream accept");
+            let mut buffer = [0_u8; 4];
+            stream.read_exact(&mut buffer).await.expect("upstream read");
+            assert_eq!(&buffer, b"ping");
+            stream.write_all(b"pong").await.expect("upstream write");
+        });
+        tokio::spawn(async move {
+            let (stream, _) = edge.accept().await.expect("edge accept");
+            super::proxy_connection(acceptor, stream, upstream_address)
+                .await
+                .expect("proxy");
+        });
+
+        let mut certificates =
+            std::io::BufReader::new(std::fs::File::open(&certificate).expect("cert"));
+        let certificate = rustls_pemfile::certs(&mut certificates)
+            .next()
+            .expect("certificate")
+            .expect("parse certificate");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).expect("trust test certificate");
+        let client = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
+        let tcp = TcpStream::connect(edge_address)
+            .await
+            .expect("connect edge");
+        let mut tls = connector
+            .connect(ServerName::try_from("localhost").expect("server name"), tcp)
+            .await
+            .expect("tls handshake");
+        tls.write_all(b"ping").await.expect("client write");
+        let mut buffer = [0_u8; 4];
+        tls.read_exact(&mut buffer).await.expect("client read");
+        assert_eq!(&buffer, b"pong");
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

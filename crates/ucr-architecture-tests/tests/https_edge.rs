@@ -16,6 +16,7 @@ fn https_edge_terminates_tls_and_proxies_only_to_loopback() {
     assert!(source.contains("validate_loopback_upstream(upstream)?"));
     assert!(source.contains("TlsAcceptor"));
     assert!(source.contains("copy_bidirectional"));
+    assert!(source.contains("https_edge_proxies_tls_bytes_to_loopback_upstream"));
     assert!(source.contains("UCR_HTTPS_EDGE_CERT_FILE"));
     assert!(source.contains("UCR_HTTPS_EDGE_KEY_FILE"));
     assert!(spec.contains("ucr-https-edge"));
