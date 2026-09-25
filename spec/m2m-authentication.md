@@ -1,6 +1,6 @@
 # Machine-to-Machine Authentication
 
-Status: **Prepared v1 public contract with signed token codec/runtime, canonical MachineAuthService composition, loopback production-daemon wiring, restart-safe active/previous signing-key overlap, and bounded public verification-key/JWKS projection; public HTTPS edge is not yet claimed**.
+Status: **Prepared v1 public contract with signed token codec/runtime, canonical MachineAuthService composition, loopback production-daemon wiring, restart-safe active/previous signing-key overlap, bounded public verification-key/JWKS projection, and a TLS edge that proxies to one loopback upstream. Live public deployment evidence is not claimed**.
 
 This layer adds a standard machine-to-machine authentication boundary for external applications without creating a second identity, credential, authorization, tenant, or permission owner. The canonical Service Account remains the client identity and the existing Service Credential remains the long-lived client authentication proof.
 
@@ -133,7 +133,7 @@ The initial mapping is:
 
 Unknown or duplicate OAuth scopes fail closed. This mapping is an attenuation/projection of canonical authorization and does not persist OAuth scopes as a second permission owner.
 
-The gRPC composition remains the semantic owner. The shared machine-auth crate defines the opaque `client_id + client_secret` binding, while `ucr-auth-web` now parses standard HTTP `client_secret_basic`, derives the internal credential metadata from that opaque secret, and delegates exchange to `MachineAuthService`. The adapter does not reimplement authorization or signing. Direct public TLS termination and bearer middleware on public APIs remain separate work.
+The gRPC composition remains the semantic owner. The shared machine-auth crate defines the opaque `client_id + client_secret` binding, while `ucr-auth-web` now parses standard HTTP `client_secret_basic`, derives the internal credential metadata from that opaque secret, and delegates exchange to `MachineAuthService`. The adapter does not reimplement authorization or signing. `ucr-https-edge` terminates TLS and proxies bytes to one loopback listener; Bearer admission stays on the API ingress behind that listener. Live public deployment evidence remains separate work.
 
 
 ## Shared machine-auth runtime owner and fixed token admission

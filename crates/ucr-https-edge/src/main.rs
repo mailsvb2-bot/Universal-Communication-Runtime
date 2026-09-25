@@ -157,14 +157,7 @@ mod tests {
         assert!(validate_loopback_upstream(loopback).is_ok());
     }
 
-    #[tokio::test]
-    async fn https_edge_proxies_tls_bytes_to_loopback_upstream() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let directory = std::env::temp_dir().join(format!("ucr-https-edge-{stamp}"));
-        std::fs::create_dir_all(&directory).expect("temp directory");
+    fn mint_certificate(directory: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
         let certificate = directory.join("cert.pem");
         let private_key = directory.join("key.pem");
         let status = Command::new("openssl")
@@ -190,6 +183,43 @@ mod tests {
             .status()
             .expect("openssl");
         assert!(status.success(), "openssl must mint the test certificate");
+        (certificate, private_key)
+    }
+
+    async fn connect_edge(
+        certificate: &std::path::Path,
+        edge_address: SocketAddr,
+    ) -> tokio_rustls::client::TlsStream<TcpStream> {
+        let mut certificates =
+            std::io::BufReader::new(std::fs::File::open(certificate).expect("cert"));
+        let certificate = CertificateDer::pem_reader_iter(&mut certificates)
+            .next()
+            .expect("certificate")
+            .expect("parse certificate");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).expect("trust test certificate");
+        let client = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
+        let tcp = TcpStream::connect(edge_address)
+            .await
+            .expect("connect edge");
+        connector
+            .connect(ServerName::try_from("localhost").expect("server name"), tcp)
+            .await
+            .expect("tls handshake")
+    }
+
+    #[tokio::test]
+    async fn https_edge_proxies_tls_bytes_to_loopback_upstream() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("ucr-https-edge-{stamp}"));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let (certificate, private_key) = mint_certificate(&directory);
 
         let upstream = TcpListener::bind("127.0.0.1:0").await.expect("upstream");
         let upstream_address = upstream.local_addr().expect("upstream address");
@@ -215,29 +245,63 @@ mod tests {
                 .expect("proxy");
         });
 
-        let mut certificates =
-            std::io::BufReader::new(std::fs::File::open(&certificate).expect("cert"));
-        let certificate = CertificateDer::pem_reader_iter(&mut certificates)
-            .next()
-            .expect("certificate")
-            .expect("parse certificate");
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add(certificate).expect("trust test certificate");
-        let client = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
-        let tcp = TcpStream::connect(edge_address)
-            .await
-            .expect("connect edge");
-        let mut tls = connector
-            .connect(ServerName::try_from("localhost").expect("server name"), tcp)
-            .await
-            .expect("tls handshake");
+        let mut tls = connect_edge(&certificate, edge_address).await;
         tls.write_all(b"ping").await.expect("client write");
         let mut buffer = [0_u8; 4];
         tls.read_exact(&mut buffer).await.expect("client read");
         assert_eq!(&buffer, b"pong");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn https_edge_proxies_an_http1_request_to_loopback() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("ucr-https-edge-http-{stamp}"));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let (certificate, private_key) = mint_certificate(&directory);
+        let upstream = TcpListener::bind("127.0.0.1:0").await.expect("upstream");
+        let upstream_address = upstream.local_addr().expect("upstream address");
+        let edge = TcpListener::bind("127.0.0.1:0").await.expect("edge");
+        let edge_address = edge.local_addr().expect("edge address");
+        let acceptor = tls_acceptor(
+            certificate.to_str().expect("certificate path"),
+            private_key.to_str().expect("key path"),
+        )
+        .expect("acceptor");
+
+        tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.expect("upstream accept");
+            let mut received = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !received.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).await.expect("header byte");
+                received.push(byte[0]);
+                assert!(received.len() < 1024, "HTTP request stayed bounded");
+            }
+            assert!(received.starts_with(b"GET /healthz HTTP/1.1\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .expect("upstream write");
+        });
+        tokio::spawn(async move {
+            let (stream, _) = edge.accept().await.expect("edge accept");
+            super::proxy_connection(acceptor, stream, upstream_address)
+                .await
+                .expect("proxy");
+        });
+
+        let mut tls = connect_edge(&certificate, edge_address).await;
+        tls.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("client write");
+        let mut response = [0_u8; 40];
+        tls.read_exact(&mut response).await.expect("client read");
+        assert_eq!(&response[response.len() - 2..], b"ok");
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
         let _ = std::fs::remove_dir_all(directory);
     }
 }
