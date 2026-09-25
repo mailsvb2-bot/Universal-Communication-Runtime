@@ -2,8 +2,7 @@
 
 use std::{fs, net::SocketAddr, path::Path, sync::Arc};
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls_pemfile::{certs, private_key};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
@@ -88,7 +87,7 @@ fn load_certificates(path: &str) -> Result<Vec<CertificateDer<'static>>, String>
     let mut reader = std::io::BufReader::new(
         fs::File::open(path).map_err(|error| format!("open TLS certificate: {error}"))?,
     );
-    let certificates = certs(&mut reader)
+    let certificates = CertificateDer::pem_reader_iter(&mut reader)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("parse TLS certificate: {error}"))?;
     if certificates.is_empty() {
@@ -102,9 +101,8 @@ fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>, String> {
     let mut reader = std::io::BufReader::new(
         fs::File::open(path).map_err(|error| format!("open TLS private key: {error}"))?,
     );
-    private_key(&mut reader)
-        .map_err(|error| format!("parse TLS private key: {error}"))?
-        .ok_or_else(|| "TLS private key file contained no private key".to_owned())
+    PrivateKeyDer::from_pem_reader(&mut reader)
+        .map_err(|error| format!("parse TLS private key: {error}"))
 }
 
 fn bounded_file(path: &str, limit: u64, label: &str) -> Result<(), String> {
@@ -143,7 +141,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use rustls::pki_types::ServerName;
+    use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
@@ -219,7 +217,7 @@ mod tests {
 
         let mut certificates =
             std::io::BufReader::new(std::fs::File::open(&certificate).expect("cert"));
-        let certificate = rustls_pemfile::certs(&mut certificates)
+        let certificate = CertificateDer::pem_reader_iter(&mut certificates)
             .next()
             .expect("certificate")
             .expect("parse certificate");
