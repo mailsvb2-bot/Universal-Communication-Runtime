@@ -1539,7 +1539,7 @@ mod tests {
         IntegrationId, KeyId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceQuotaPolicy, TenantId, TenantScope,
     };
-    use ucr_protocol::CONFERENCE_CREATE_PERMISSION;
+    use ucr_protocol::{CONFERENCE_CREATE_PERMISSION, CONFERENCE_PARTICIPANT_ENSURE_PERMISSION};
     use ucr_storage_sqlite::SqliteLocalStore;
 
     use super::{AppState, create_request, serve, validate_loopback_bind};
@@ -1782,7 +1782,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
-    fn bearer_for_create() -> (String, Arc<MachineTokenPublicKeySet>, MachineTokenPolicy) {
+    fn bearer_for_scopes(
+        scopes: &[&str],
+    ) -> (String, Arc<MachineTokenPublicKeySet>, MachineTokenPolicy) {
         let key = MachineTokenSigningKey::from_seed(
             KeyId::from_opaque(OpaqueId::new("conference-create-key").expect("key id")),
             [0x46_u8; 32],
@@ -1810,7 +1812,10 @@ mod tests {
                 kind: PrincipalKind::ServiceAccount,
             },
         };
-        let scopes = vec![ucr_machine_auth::MACHINE_SCOPE_CONFERENCE_CREATE.to_owned()];
+        let scopes = scopes
+            .iter()
+            .map(|scope| (*scope).to_owned())
+            .collect::<Vec<_>>();
         let token = issue_machine_access_token(
             &key,
             &policy,
@@ -1876,7 +1881,8 @@ mod tests {
                 window_ms: 60_000,
             })
             .expect("quota");
-        let (token, keys, policy) = bearer_for_create();
+        let (token, keys, policy) =
+            bearer_for_scopes(&[ucr_machine_auth::MACHINE_SCOPE_CONFERENCE_CREATE]);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("grpc listener");
@@ -1911,8 +1917,8 @@ mod tests {
         });
 
         let body = br#"{"scope":{"tenant_id":"tenant-a","namespace_id":"ns-a"},"integration_id":"integration-a","external_conference_id_b64":"ZXZlbnQtMQ==","idempotency_key":"create-1","mode":"webinar","schedule":{"starts_at_unix_ms":10,"join_before_seconds":5}}"#;
-        let first = post_json(http_address, body, &token).await;
-        let second = post_json(http_address, body, &token).await;
+        let first = post_json(http_address, "/v1/conferences", body, &token).await;
+        let second = post_json(http_address, "/v1/conferences", body, &token).await;
         assert!(
             first.starts_with("HTTP/1.1 200"),
             "bearer create must succeed: {first}"
@@ -1928,9 +1934,144 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
-    async fn post_json(address: std::net::SocketAddr, body: &[u8], token: &str) -> String {
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn bearer_ensure_participant_is_idempotent_over_http() {
+        let directory = std::env::temp_dir().join(format!(
+            "ucr-conference-participant-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let store =
+            Arc::new(SqliteLocalStore::open(directory.join("ucr.sqlite")).expect("sqlite store"));
+        let scope = TenantScope {
+            tenant_id: TenantId::from_opaque(OpaqueId::new("tenant-a").expect("tenant")),
+            namespace_id: Some(NamespaceId::from_opaque(
+                OpaqueId::new("ns-a").expect("namespace"),
+            )),
+        };
+        let subject = ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(
+                    IntegrationId::from_opaque(
+                        OpaqueId::new("integration-a").expect("integration"),
+                    )
+                    .as_opaque()
+                    .clone(),
+                ),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
+        for permission in [
+            CONFERENCE_CREATE_PERMISSION,
+            CONFERENCE_PARTICIPANT_ENSURE_PERMISSION,
+        ] {
+            store
+                .grant_permission(&PermissionGrant {
+                    grantee: subject.clone(),
+                    permission: permission.to_owned(),
+                    scope: PermissionScope::Exact(scope.clone()),
+                })
+                .expect("grant");
+        }
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject,
+                max_requests: 8,
+                window_ms: 60_000,
+            })
+            .expect("quota");
+        let (token, keys, policy) = bearer_for_scopes(&[
+            ucr_machine_auth::MACHINE_SCOPE_CONFERENCE_CREATE,
+            ucr_machine_auth::MACHINE_SCOPE_CONFERENCE_MANAGE,
+        ]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("grpc listener");
+        let grpc_address = listener.local_addr().expect("grpc address");
+        let incoming = TcpListenerStream::new(listener);
+        let service = GrpcUniversalConferenceService::new(
+            Arc::new(FixedClock),
+            Arc::clone(&store),
+            Arc::clone(&store),
+        )
+        .with_machine_bearer_auth(keys, policy);
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(universal_conference_service_server(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("grpc server");
+        });
+        let channel = tonic::transport::Channel::from_shared(format!("http://{grpc_address}"))
+            .expect("grpc uri")
+            .connect()
+            .await
+            .expect("grpc channel");
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("http listener");
+        let http_address = http_listener.local_addr().expect("http address");
+        tokio::spawn(async move {
+            serve(http_listener, AppState { upstream: channel })
+                .await
+                .expect("http adapter");
+        });
+
+        let created = post_json(
+            http_address,
+            "/v1/conferences",
+            br#"{"scope":{"tenant_id":"tenant-a","namespace_id":"ns-a"},"integration_id":"integration-a","external_conference_id_b64":"ZXZlbnQtMQ==","idempotency_key":"create-1","mode":"meeting","schedule":{"starts_at_unix_ms":10}}"#,
+            &token,
+        )
+        .await;
+        assert!(
+            created.starts_with("HTTP/1.1 200"),
+            "create must succeed before participant ensure: {created}"
+        );
+        let conference_id = conference_id_from(&created);
+        let participant_body = format!(
+            r#"{{"scope":{{"tenant_id":"tenant-a","namespace_id":"ns-a"}},"conference_id":"{conference_id}","integration_id":"integration-a","external_user_id_b64":"dXNlci0x","role":"host","idempotency_key":"ensure-1"}}"#
+        );
+        let first = post_json(
+            http_address,
+            "/v1/participants",
+            participant_body.as_bytes(),
+            &token,
+        )
+        .await;
+        let second = post_json(
+            http_address,
+            "/v1/participants",
+            participant_body.as_bytes(),
+            &token,
+        )
+        .await;
+        assert!(
+            first.starts_with("HTTP/1.1 200"),
+            "ensure participant must succeed: {first}"
+        );
+        assert!(
+            second.starts_with("HTTP/1.1 200"),
+            "exact participant retry must succeed: {second}"
+        );
+        assert!(first.contains("dXNlci0x"));
+        assert!(second.contains("\"role\":\"host\""));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    async fn post_json(
+        address: std::net::SocketAddr,
+        path: &str,
+        body: &[u8],
+        token: &str,
+    ) -> String {
         let mut request = format!(
-            "POST /v1/conferences HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         )
         .into_bytes();

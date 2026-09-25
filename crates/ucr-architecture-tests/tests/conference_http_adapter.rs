@@ -25,6 +25,7 @@ fn conference_http_adapter_is_a_loopback_transport_over_universal_conference_grp
     assert!(source.contains("conference_http_adapter_forwards_unauthenticated_capabilities"));
     assert!(source.contains("conference_http_adapter_is_reachable_through_the_tls_edge"));
     assert!(source.contains("bearer_create_conference_is_idempotent_over_http"));
+    assert!(source.contains("bearer_ensure_participant_is_idempotent_over_http"));
     assert!(source.contains(r#".header(CACHE_CONTROL, "no-store")"#));
     assert!(source.contains(r#".header(PRAGMA, "no-cache")"#));
     assert!(source.contains("while let Some(frame) = body.frame().await"));
