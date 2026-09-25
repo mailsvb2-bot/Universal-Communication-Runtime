@@ -342,7 +342,8 @@ async function ensureLocalTrack(kind){
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error("Media capture is unavailable in this browser");
   if(!localStream){localStream=new MediaStream();ui.localVideo.srcObject=localStream;}
   const existing=kind==="audio"?localStream.getAudioTracks()[0]:localStream.getVideoTracks()[0];
-  if(existing)return existing;
+  if(existing&&existing.readyState==="live")return existing;
+  if(existing){localStream.removeTrack(existing);existing.stop();}
   const constraint=kind==="audio"?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):(ui.camera.value?{deviceId:{exact:ui.camera.value}}:true);
   const captured=await navigator.mediaDevices.getUserMedia(kind==="audio"?{audio:constraint,video:false}:{audio:false,video:constraint});
   const track=kind==="audio"?captured.getAudioTracks()[0]:captured.getVideoTracks()[0];
@@ -367,6 +368,18 @@ async function refreshDevices(){
   const selectedMic=ui.mic.value,selectedCamera=ui.camera.value;
   fillDevices(ui.mic,devices.filter(d=>d.kind==="audioinput"),"Default microphone",selectedMic);
   fillDevices(ui.camera,devices.filter(d=>d.kind==="videoinput"),"Default camera",selectedCamera);
+}
+async function handleMediaDeviceChange(){
+  try{
+    await refreshDevices();
+    if(!sessionActive||!mediaActive||!localStream)return;
+    const audio=localStream.getAudioTracks()[0],video=localStream.getVideoTracks()[0];
+    if(policyAllows("audio")&&audio&&audio.readyState==="ended")await replaceLocalTrack("audio");
+    if(policyAllows("camera")&&video&&video.readyState==="ended")await replaceLocalTrack("camera");
+    refreshLocalMediaControls();
+  }catch(e){
+    if(sessionActive)ui.status.textContent="Media device change failed: "+e.message;
+  }
 }
 function fillDevices(select,devices,fallback,selected){
   select.textContent="";
@@ -565,6 +578,9 @@ try{
   if(!scheduleWaitingRoom())ui.status.textContent="Signed grant loaded. Ready to join.";
 }catch(e){fail(e.message);}
 ui.join.addEventListener("click",join);ui.leave.addEventListener("click",leave);
+if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="function"){
+  navigator.mediaDevices.addEventListener("devicechange",()=>{handleMediaDeviceChange();});
+}
 window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry();}});
 window.addEventListener("pagehide",()=>{if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
