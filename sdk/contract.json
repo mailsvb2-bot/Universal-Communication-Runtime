@@ -1,13 +1,31 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "maturity": "prepared",
   "protocol_package": "ucr.v1",
   "proto_root": "proto/ucr/v1",
   "services": ["IntegrationService", "EventService", "CallService", "GroupService", "DeviceService", "SyncService", "StoreForwardService", "LocalTransportService", "MeshService", "RecoveryService", "UniversalConferenceService"],
   "authentication": {
-    "kind": "service_principal_binary_metadata",
-    "credential_id_key": "ucr-service-credential-id-bin",
-    "credential_secret_key": "ucr-service-credential-secret-bin"
+    "default": {
+      "kind": "service_principal_binary_metadata",
+      "credential_id_key": "ucr-service-credential-id-bin",
+      "credential_secret_key": "ucr-service-credential-secret-bin"
+    },
+    "service_overrides": {
+      "UniversalConferenceService": {
+        "accepted_schemes": [
+          "service_principal_binary_metadata",
+          "oauth2_bearer"
+        ],
+        "bearer_metadata_key": "authorization",
+        "bearer_scheme": "Bearer",
+        "mixed_schemes": "reject"
+      }
+    }
+  },
+  "http": {
+    "universal_conference_base_path": "/v1",
+    "openapi_path": "/v1/openapi.yaml",
+    "business_logic_owner": "ucr.v1 UniversalConferenceService"
   },
   "semantics": {
     "automatic_application_retry": false,

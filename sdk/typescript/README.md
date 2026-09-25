@@ -1,7 +1,14 @@
 # TypeScript SDK surface
 
 Generate TypeScript protobuf/gRPC clients from the repository `proto/ucr/v1` schema root.
-`src/auth.ts` supplies exact binary metadata entries for the generated external-consumer clients.
+`src/auth.ts` supplies exact binary Service Credential metadata entries for generated
+external-consumer clients.
+
+For `UniversalConferenceService`, callers may instead use the standard
+`Authorization: Bearer <access-token>` metadata accepted by the public Conference ingress.
+Do not send Bearer and Service Credential metadata together: mixed authentication schemes fail
+closed. The REST projection of the same typed Conference contract is available under `/v1`;
+`/v1/openapi.yaml` is the route description, not a second semantic contract.
 
 The helper clones credential bytes, redacts diagnostics and owns no UCR domain, storage or retry semantics.
 Generated code is derivative build output; canonical request/response envelopes remain defined by protobuf.
