@@ -52,8 +52,26 @@ paths:
     post:
       operationId: getParticipantAttendance
   /v1/capabilities:
-    post:
+    get:
       operationId: getCapabilities
+      parameters:
+        - name: tenant_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: namespace_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: integration_id
+          in: query
+          required: true
+          schema:
+            type: string
+    post:
+      operationId: getCapabilitiesLegacyPost
   /v1/openapi.yaml:
     get:
       operationId: getOpenApi
