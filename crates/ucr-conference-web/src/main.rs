@@ -122,6 +122,7 @@ async fn handle_request(
     let response = match (method, path.as_str()) {
         (Method::GET, "/healthz") => text_response(StatusCode::OK, "ok"),
         (Method::GET, "/v1/openapi.yaml") => yaml_response(OPENAPI),
+        (Method::GET, "/v1/capabilities") => dispatch_get_capabilities(request, &state).await,
         (Method::POST, path) => dispatch_post(path, request, &state).await,
         _ => TransportError::new(StatusCode::NOT_FOUND, "conference HTTP route not found")
             .into_response(),
@@ -207,6 +208,141 @@ async fn dispatch_post(path: &str, request: Request<Incoming>, state: &AppState)
         }
         _ => TransportError::new(StatusCode::NOT_FOUND, "conference HTTP route not found")
             .into_response(),
+    }
+}
+
+async fn dispatch_get_capabilities(
+    request: Request<Incoming>,
+    state: &AppState,
+) -> HttpResponse {
+    let authorization = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if authorization
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_AUTHORIZATION_HEADER_BYTES)
+    {
+        return TransportError::new(
+            StatusCode::UNAUTHORIZED,
+            "authorization header exceeds the bounded limit",
+        )
+        .into_response();
+    }
+    let parsed = match capabilities_query(request.uri().query().unwrap_or_default()) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let mut client =
+        pb::universal_conference_service_client::UniversalConferenceServiceClient::new(
+            state.upstream.clone(),
+        );
+    forward_capabilities_input(&mut client, parsed, authorization.as_deref()).await
+}
+
+fn capabilities_query(query: &str) -> Result<CapabilitiesJson, TransportError> {
+    const MAX_QUERY_BYTES: usize = 4 * 1024;
+    if query.len() > MAX_QUERY_BYTES {
+        return Err(TransportError::new(
+            StatusCode::BAD_REQUEST,
+            "capabilities query exceeds the bounded limit",
+        ));
+    }
+    let mut tenant_id = None;
+    let mut namespace_id = None;
+    let mut integration_id = None;
+    if !query.is_empty() {
+        for pair in query.split('&') {
+            let (name, value) = pair.split_once('=').ok_or_else(|| {
+                TransportError::new(StatusCode::BAD_REQUEST, "invalid capabilities query")
+            })?;
+            let name = decode_query_component(name)?;
+            let value = decode_query_component(value)?;
+            let slot = match name.as_str() {
+                "tenant_id" => &mut tenant_id,
+                "namespace_id" => &mut namespace_id,
+                "integration_id" => &mut integration_id,
+                _ => {
+                    return Err(TransportError::new(
+                        StatusCode::BAD_REQUEST,
+                        "unknown capabilities query field",
+                    ));
+                }
+            };
+            if slot.replace(value).is_some() {
+                return Err(TransportError::new(
+                    StatusCode::BAD_REQUEST,
+                    "duplicate capabilities query field",
+                ));
+            }
+        }
+    }
+    Ok(CapabilitiesJson {
+        scope: ScopeJson {
+            tenant_id: tenant_id.ok_or_else(|| {
+                TransportError::new(StatusCode::BAD_REQUEST, "tenant_id is required")
+            })?,
+            namespace_id,
+        },
+        integration_id: integration_id.ok_or_else(|| {
+            TransportError::new(StatusCode::BAD_REQUEST, "integration_id is required")
+        })?,
+    })
+}
+
+fn decode_query_component(value: &str) -> Result<String, TransportError> {
+    const MAX_COMPONENT_BYTES: usize = 512;
+    if value.len() > MAX_COMPONENT_BYTES {
+        return Err(TransportError::new(
+            StatusCode::BAD_REQUEST,
+            "capabilities query field exceeds the bounded limit",
+        ));
+    }
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' => {
+                if index + 2 >= bytes.len() {
+                    return Err(TransportError::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid capabilities query encoding",
+                    ));
+                }
+                let high = hex_nibble(bytes[index + 1])?;
+                let low = hex_nibble(bytes[index + 2])?;
+                decoded.push((high << 4) | low);
+                index += 3;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| {
+        TransportError::new(
+            StatusCode::BAD_REQUEST,
+            "capabilities query must be valid UTF-8",
+        )
+    })
+}
+
+fn hex_nibble(value: u8) -> Result<u8, TransportError> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err(TransportError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid capabilities query encoding",
+        )),
     }
 }
 
@@ -1269,6 +1405,14 @@ async fn forward_capabilities(
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
+    forward_capabilities_input(client, parsed, authorization).await
+}
+
+async fn forward_capabilities_input(
+    client: &mut ConferenceClient,
+    parsed: CapabilitiesJson,
+    authorization: Option<&str>,
+) -> HttpResponse {
     let request = match (|| -> Result<_, TransportError> {
         Ok(pb::UniversalGetCapabilitiesRequest {
             scope: Some(scope_of(&parsed.scope)?),
