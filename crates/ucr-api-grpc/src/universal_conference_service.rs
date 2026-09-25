@@ -3831,9 +3831,8 @@ mod bearer_ingress_tests {
                 .expect("authorization metadata"),
         );
 
-        let error = match decode_universal_conference_authentication(request.metadata()) {
-            Ok(_) => panic!("mixed authentication must fail closed"),
-            Err(error) => error,
+        let Err(error) = decode_universal_conference_authentication(request.metadata()) else {
+            panic!("mixed authentication must fail closed")
         };
         assert_eq!(error.code, CanonicalErrorCode::Unauthenticated);
     }
@@ -3847,9 +3846,8 @@ mod bearer_ingress_tests {
             value.parse().expect("oversized authorization metadata"),
         );
 
-        let error = match decode_universal_conference_authentication(request.metadata()) {
-            Ok(_) => panic!("oversized Bearer must fail closed"),
-            Err(error) => error,
+        let Err(error) = decode_universal_conference_authentication(request.metadata()) else {
+            panic!("oversized Bearer must fail closed")
         };
         assert_eq!(error.code, CanonicalErrorCode::Unauthenticated);
     }
