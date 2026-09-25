@@ -1539,7 +1539,12 @@ mod tests {
         IntegrationId, KeyId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceQuotaPolicy, TenantId, TenantScope,
     };
-    use ucr_protocol::{CONFERENCE_CREATE_PERMISSION, CONFERENCE_PARTICIPANT_ENSURE_PERMISSION};
+    use ucr_protocol::{
+        CONFERENCE_CREATE_PERMISSION, CONFERENCE_JOIN_ISSUE_PERMISSION,
+        CONFERENCE_MANAGE_PERMISSION, CONFERENCE_PARTICIPANT_ENSURE_PERMISSION,
+        DEVICE_REGISTER_PERMISSION,
+    };
+    use ucr_realtime::{JoinTokenIssuer, JoinTokenKey};
     use ucr_storage_sqlite::SqliteLocalStore;
 
     use super::{AppState, create_request, serve, validate_loopback_bind};
@@ -2064,6 +2069,231 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn bearer_issue_join_grant_is_idempotent_over_http() {
+        let directory = std::env::temp_dir().join(format!(
+            "ucr-conference-join-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let store =
+            Arc::new(SqliteLocalStore::open(directory.join("ucr.sqlite")).expect("sqlite store"));
+        let scope = TenantScope {
+            tenant_id: TenantId::from_opaque(OpaqueId::new("tenant-a").expect("tenant")),
+            namespace_id: Some(NamespaceId::from_opaque(
+                OpaqueId::new("ns-a").expect("namespace"),
+            )),
+        };
+        let subject = ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(
+                    IntegrationId::from_opaque(
+                        OpaqueId::new("integration-a").expect("integration"),
+                    )
+                    .as_opaque()
+                    .clone(),
+                ),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
+        for permission in [
+            CONFERENCE_CREATE_PERMISSION,
+            CONFERENCE_MANAGE_PERMISSION,
+            CONFERENCE_PARTICIPANT_ENSURE_PERMISSION,
+            DEVICE_REGISTER_PERMISSION,
+            CONFERENCE_JOIN_ISSUE_PERMISSION,
+        ] {
+            store
+                .grant_permission(&PermissionGrant {
+                    grantee: subject.clone(),
+                    permission: permission.to_owned(),
+                    scope: PermissionScope::Exact(scope.clone()),
+                })
+                .expect("grant");
+        }
+        store
+            .set_service_quota_policy(&ServiceQuotaPolicy {
+                subject,
+                max_requests: 16,
+                window_ms: 60_000,
+            })
+            .expect("quota");
+        let (token, keys, policy) = bearer_for_scopes(&[
+            ucr_machine_auth::MACHINE_SCOPE_CONFERENCE_CREATE,
+            ucr_machine_auth::MACHINE_SCOPE_CONFERENCE_MANAGE,
+            ucr_machine_auth::MACHINE_SCOPE_CONFERENCE_JOIN_ISSUE,
+        ]);
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([7_u8; 32]),
+                "https://join.example.test/join",
+            )
+            .expect("join issuer"),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("grpc listener");
+        let grpc_address = listener.local_addr().expect("grpc address");
+        let incoming = TcpListenerStream::new(listener);
+        let service = GrpcUniversalConferenceService::with_join_issuer(
+            Arc::new(FixedClock),
+            Arc::clone(&store),
+            Arc::clone(&store),
+            issuer,
+        )
+        .with_machine_bearer_auth(keys, policy);
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(universal_conference_service_server(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("grpc server");
+        });
+        let channel = tonic::transport::Channel::from_shared(format!("http://{grpc_address}"))
+            .expect("grpc uri")
+            .connect()
+            .await
+            .expect("grpc channel");
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("http listener");
+        let http_address = http_listener.local_addr().expect("http address");
+        tokio::spawn(async move {
+            serve(http_listener, AppState { upstream: channel })
+                .await
+                .expect("http adapter");
+        });
+
+        let created = post_json(
+            http_address,
+            "/v1/conferences",
+            br#"{"scope":{"tenant_id":"tenant-a","namespace_id":"ns-a"},"integration_id":"integration-a","external_conference_id_b64":"ZXZlbnQtMQ==","idempotency_key":"create-1","mode":"meeting","schedule":{"starts_at_unix_ms":1000000}}"#,
+            &token,
+        )
+        .await;
+        assert!(
+            created.starts_with("HTTP/1.1 200"),
+            "create must succeed before a join grant: {created}"
+        );
+        let conference_id = conference_id_from(&created);
+        let owner = format!(
+            r#"{{"scope":{{"tenant_id":"tenant-a","namespace_id":"ns-a"}},"conference_id":"{conference_id}","integration_id":"integration-a","external_user_id_b64":"dXNlci0x","role":"owner","idempotency_key":"ensure-owner"}}"#
+        );
+        let ensured_owner =
+            post_json(http_address, "/v1/participants", owner.as_bytes(), &token).await;
+        assert!(
+            ensured_owner.starts_with("HTTP/1.1 200"),
+            "owner ensure must succeed before a join grant: {ensured_owner}"
+        );
+        let attendee = format!(
+            r#"{{"scope":{{"tenant_id":"tenant-a","namespace_id":"ns-a"}},"conference_id":"{conference_id}","integration_id":"integration-a","external_user_id_b64":"dXNlci0y","role":"attendee","idempotency_key":"ensure-attendee"}}"#
+        );
+        let ensured_attendee = post_json(
+            http_address,
+            "/v1/participants",
+            attendee.as_bytes(),
+            &token,
+        )
+        .await;
+        assert!(
+            ensured_attendee.starts_with("HTTP/1.1 200"),
+            "attendee ensure must succeed before a join grant: {ensured_attendee}"
+        );
+        for (external_user_id_b64, idempotency_key) in [
+            ("dXNlci0x", "device-owner"),
+            ("dXNlci0y", "device-attendee"),
+        ] {
+            let device = format!(
+                r#"{{"scope":{{"tenant_id":"tenant-a","namespace_id":"ns-a"}},"conference_id":"{conference_id}","integration_id":"integration-a","external_user_id_b64":"{external_user_id_b64}","idempotency_key":"{idempotency_key}"}}"#
+            );
+            let enrolled = post_json(
+                http_address,
+                "/v1/participant-devices",
+                device.as_bytes(),
+                &token,
+            )
+            .await;
+            assert!(
+                enrolled.starts_with("HTTP/1.1 200"),
+                "device enrollment must succeed before a join grant: {enrolled}"
+            );
+        }
+        let runtime = format!(
+            r#"{{"scope":{{"tenant_id":"tenant-a","namespace_id":"ns-a"}},"conference_id":"{conference_id}","integration_id":"integration-a","idempotency_key":"runtime-1"}}"#
+        );
+        let prepared = post_json(
+            http_address,
+            "/v1/conferences/runtime",
+            runtime.as_bytes(),
+            &token,
+        )
+        .await;
+        assert!(
+            prepared.starts_with("HTTP/1.1 200"),
+            "runtime preparation must succeed before a join grant: {prepared}"
+        );
+        assert!(
+            prepared.contains("\"call_ready\":true"),
+            "runtime must admit a call before a join grant: {prepared}"
+        );
+        let lifecycle = format!(
+            r#"{{"scope":{{"tenant_id":"tenant-a","namespace_id":"ns-a"}},"conference_id":"{conference_id}","integration_id":"integration-a","target":"waiting","idempotency_key":"lifecycle-1"}}"#
+        );
+        let waiting = post_json(
+            http_address,
+            "/v1/conferences/lifecycle",
+            lifecycle.as_bytes(),
+            &token,
+        )
+        .await;
+        assert!(
+            waiting.starts_with("HTTP/1.1 200"),
+            "waiting lifecycle must succeed before a join grant: {waiting}"
+        );
+        assert!(waiting.contains("\"lifecycle\":\"waiting\""));
+        let grant_body = format!(
+            r#"{{"scope":{{"tenant_id":"tenant-a","namespace_id":"ns-a"}},"conference_id":"{conference_id}","integration_id":"integration-a","external_user_id_b64":"dXNlci0y","ttl_seconds":300,"use_policy":"single_use","idempotency_key":"join-1"}}"#
+        );
+        let first = post_json(
+            http_address,
+            "/v1/join-grants",
+            grant_body.as_bytes(),
+            &token,
+        )
+        .await;
+        let second = post_json(
+            http_address,
+            "/v1/join-grants",
+            grant_body.as_bytes(),
+            &token,
+        )
+        .await;
+        assert!(
+            first.starts_with("HTTP/1.1 200"),
+            "join grant must succeed: {first}"
+        );
+        assert!(
+            second.starts_with("HTTP/1.1 200"),
+            "exact join retry must succeed: {second}"
+        );
+        let first_grant = json_body(&first);
+        let second_grant = json_body(&second);
+        let session_id = first_grant["grant"]["session_id"]
+            .as_str()
+            .expect("session id");
+        let join_url = first_grant["grant"]["join_url"].as_str().expect("join url");
+        assert!(!session_id.is_empty());
+        assert!(join_url.starts_with("https://join.example.test/join#ucr_join="));
+        assert_eq!(first_grant["grant"]["expires_at_unix_ms"], 1_400_000);
+        assert_eq!(first_grant["grant"], second_grant["grant"]);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
     async fn post_json(
         address: std::net::SocketAddr,
         path: &str,
@@ -2089,11 +2319,14 @@ mod tests {
     }
 
     fn conference_id_from(response: &str) -> String {
-        let json = response.split("\r\n\r\n").nth(1).expect("http body");
-        let value: serde_json::Value = serde_json::from_str(json).expect("json body");
-        value["conference"]["conference_id"]
+        json_body(response)["conference"]["conference_id"]
             .as_str()
             .expect("conference id")
             .to_owned()
+    }
+
+    fn json_body(response: &str) -> serde_json::Value {
+        let json = response.split("\r\n\r\n").nth(1).expect("http body");
+        serde_json::from_str(json).expect("json body")
     }
 }

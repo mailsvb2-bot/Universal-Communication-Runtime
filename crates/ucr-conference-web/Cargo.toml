@@ -33,6 +33,7 @@ ucr-https-edge = { path = "../ucr-https-edge" }
 ucr-machine-auth = { path = "../ucr-machine-auth" }
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
+ucr-realtime = { path = "../ucr-realtime" }
 ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
 
 [lints]
