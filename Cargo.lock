@@ -3851,7 +3851,11 @@ dependencies = [
  "tonic",
  "ucr-api-grpc",
  "ucr-core",
+ "ucr-crypto",
  "ucr-https-edge",
+ "ucr-machine-auth",
+ "ucr-model",
+ "ucr-protocol",
  "ucr-storage-sqlite",
 ]
 

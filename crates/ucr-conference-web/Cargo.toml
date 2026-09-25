@@ -28,7 +28,11 @@ rustls = { version = "=0.23.45", default-features = false, features = ["ring", "
 tokio-rustls = "=0.26.4"
 tokio-stream = "=0.1.17"
 ucr-core = { path = "../ucr-core" }
+ucr-crypto = { path = "../ucr-crypto" }
 ucr-https-edge = { path = "../ucr-https-edge" }
+ucr-machine-auth = { path = "../ucr-machine-auth" }
+ucr-model = { path = "../ucr-model" }
+ucr-protocol = { path = "../ucr-protocol" }
 ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
 
 [lints]

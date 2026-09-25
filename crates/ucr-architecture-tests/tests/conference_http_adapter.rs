@@ -24,6 +24,7 @@ fn conference_http_adapter_is_a_loopback_transport_over_universal_conference_grp
     assert!(source.contains(r#""/v1/capabilities""#));
     assert!(source.contains("conference_http_adapter_forwards_unauthenticated_capabilities"));
     assert!(source.contains("conference_http_adapter_is_reachable_through_the_tls_edge"));
+    assert!(source.contains("bearer_create_conference_is_idempotent_over_http"));
     assert!(source.contains(r#".header(CACHE_CONTROL, "no-store")"#));
     assert!(source.contains(r#".header(PRAGMA, "no-cache")"#));
     assert!(source.contains("while let Some(frame) = body.frame().await"));
@@ -32,6 +33,9 @@ fn conference_http_adapter_is_a_loopback_transport_over_universal_conference_grp
     assert!(spec.contains("ucr-conference-web"));
     assert!(spec.contains("No REST-only business rules are allowed."));
 
+    let production = source
+        .split_once("#[cfg(test)]")
+        .map_or(source.as_str(), |(production, _)| production);
     for forbidden in [
         "MachineTokenSigningKey",
         "verify_machine_access_token(",
@@ -44,7 +48,7 @@ fn conference_http_adapter_is_a_loopback_transport_over_universal_conference_grp
         "advertising",
     ] {
         assert!(
-            !source.contains(forbidden),
+            !production.contains(forbidden),
             "non-transport concern leaked into the conference HTTP adapter: {forbidden}"
         );
     }
