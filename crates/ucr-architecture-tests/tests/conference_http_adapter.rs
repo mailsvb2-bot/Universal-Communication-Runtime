@@ -22,6 +22,7 @@ fn conference_http_adapter_is_a_loopback_transport_over_universal_conference_grp
     assert!(source.contains(r#""/v1/participants""#));
     assert!(source.contains(r#""/v1/join-grants""#));
     assert!(source.contains(r#""/v1/capabilities""#));
+    assert!(source.contains("conference_http_adapter_forwards_unauthenticated_capabilities"));
     assert!(source.contains(r#".header(CACHE_CONTROL, "no-store")"#));
     assert!(source.contains(r#".header(PRAGMA, "no-cache")"#));
     assert!(source.contains("while let Some(frame) = body.frame().await"));

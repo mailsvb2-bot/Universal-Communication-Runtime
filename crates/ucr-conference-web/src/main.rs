@@ -81,6 +81,10 @@ async fn run() -> Result<(), String> {
         .local_addr()
         .map_err(|error| format!("resolve conference HTTP adapter: {error}"))?;
     println!("UCR_CONFERENCE_WEB_READY endpoint=http://{address} tls_edge=required");
+    serve(listener, state).await
+}
+
+async fn serve(listener: TcpListener, state: AppState) -> Result<(), String> {
     loop {
         let (stream, _) = listener
             .accept()
@@ -1517,8 +1521,16 @@ fn yaml_response(text: &'static str) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_request, validate_loopback_bind};
-    use std::net::SocketAddr;
+    use std::{net::SocketAddr, sync::Arc};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::transport::Server;
+    use ucr_api_grpc::{GrpcUniversalConferenceService, universal_conference_service_server};
+    use ucr_core::{ServiceQuotaClock, ServiceQuotaClockError};
+    use ucr_storage_sqlite::SqliteLocalStore;
+
+    use super::{AppState, create_request, serve, validate_loopback_bind};
 
     #[test]
     fn conference_http_adapter_refuses_non_loopback_bind() {
@@ -1552,5 +1564,84 @@ mod tests {
                 .value,
             b"tenant-a"
         );
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct FixedClock;
+
+    impl ServiceQuotaClock for FixedClock {
+        fn now_unix_ms(&self) -> Result<i64, ServiceQuotaClockError> {
+            Ok(1_100_000)
+        }
+    }
+
+    #[tokio::test]
+    async fn conference_http_adapter_forwards_unauthenticated_capabilities() {
+        let directory = std::env::temp_dir().join(format!(
+            "ucr-conference-web-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let store =
+            Arc::new(SqliteLocalStore::open(directory.join("ucr.sqlite")).expect("sqlite store"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("grpc listener");
+        let grpc_address = listener.local_addr().expect("grpc address");
+        let incoming = TcpListenerStream::new(listener);
+        let service =
+            GrpcUniversalConferenceService::new(Arc::new(FixedClock), Arc::clone(&store), store);
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(universal_conference_service_server(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("grpc server");
+        });
+
+        let channel = tonic::transport::Channel::from_shared(format!("http://{grpc_address}"))
+            .expect("grpc uri")
+            .connect()
+            .await
+            .expect("grpc channel");
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("http listener");
+        let http_address = http_listener.local_addr().expect("http address");
+        tokio::spawn(async move {
+            serve(http_listener, AppState { upstream: channel })
+                .await
+                .expect("http adapter");
+        });
+
+        let body = br#"{"scope":{"tenant_id":"tenant-a"},"integration_id":"integration-a"}"#;
+        let mut request = format!(
+            "POST /v1/capabilities HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(body);
+        let mut stream = tokio::net::TcpStream::connect(http_address)
+            .await
+            .expect("connect http");
+        stream.write_all(&request).await.expect("write request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        let response = String::from_utf8(response).expect("utf-8 response");
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "unauthenticated capabilities must fail closed: {response}"
+        );
+        assert!(
+            response.contains("UNAUTHENTICATED"),
+            "canonical error must cross the HTTP adapter: {response}"
+        );
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

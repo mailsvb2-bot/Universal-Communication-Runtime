@@ -128,7 +128,7 @@ All create/mutate operations carry an explicit idempotency key where appropriate
 
 gRPC is the typed source contract. REST/JSON, OpenAPI, JavaScript/TypeScript, Python, Kotlin, Swift and Rust SDKs must remain thin adapters over the same contract. No REST-only business rules are allowed.
 
-`ucr-conference-web` is that HTTP adapter. It binds loopback only and forwards each `/v1/...` route to exactly one `UniversalConferenceService` RPC. The JSON body is the RPC request: opaque identifiers stay UTF-8 tokens, and external reference bytes are standard Base64. `Authorization` is copied into gRPC metadata and is not interpreted by the adapter. Canonical permission, quota, audit, idempotency and integration isolation remain in the gRPC ingress. `GET /v1/openapi.yaml` publishes the route map. A trusted HTTPS edge is still required before this listener is reachable outside the host.
+`ucr-conference-web` is that HTTP adapter. It binds loopback only and forwards each `/v1/...` route to exactly one `UniversalConferenceService` RPC. The JSON body is the RPC request: opaque identifiers stay UTF-8 tokens, and external reference bytes are standard Base64. `Authorization` is copied into gRPC metadata and is not interpreted by the adapter. Canonical permission, quota, audit, idempotency and integration isolation remain in the gRPC ingress. `GET /v1/openapi.yaml` publishes the route map. A loopback test posts `/v1/capabilities` without credentials and requires the canonical unauthenticated error from `UniversalConferenceService`, so the adapter is not only a JSON parser. A trusted HTTPS edge is still required before this listener is reachable outside the host.
 
 ## Product boundary
 

@@ -19,9 +19,14 @@ hyper = { version = "=1.11.1", features = ["http1", "server"] }
 hyper-util = { version = "=0.1.20", features = ["tokio"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread"] }
+tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread"] }
 tonic = { version = "=0.14.6", features = ["transport"] }
 ucr-api-grpc = { path = "../ucr-api-grpc" }
+
+[dev-dependencies]
+tokio-stream = "=0.1.17"
+ucr-core = { path = "../ucr-core" }
+ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
 
 [lints]
 workspace = true
