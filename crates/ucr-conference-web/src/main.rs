@@ -2438,6 +2438,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    #[test]
+    fn capabilities_get_query_maps_to_typed_request_fields() {
+        let parsed = capabilities_query(
+            "tenant_id=tenant-a&namespace_id=ns%2Fa&integration_id=integration%2D1",
+        )
+        .expect("capabilities query");
+        assert_eq!(parsed.scope.tenant_id, "tenant-a");
+        assert_eq!(parsed.scope.namespace_id.as_deref(), Some("ns/a"));
+        assert_eq!(parsed.integration_id, "integration-1");
+    }
+
+    #[test]
+    fn capabilities_get_query_requires_scope_and_integration() {
+        assert!(capabilities_query("integration_id=integration-a").is_err());
+        assert!(capabilities_query("tenant_id=tenant-a").is_err());
+    }
+
+    #[test]
+    fn capabilities_get_query_rejects_duplicates_unknown_fields_and_bad_encoding() {
+        assert!(
+            capabilities_query(
+                "tenant_id=tenant-a&tenant_id=tenant-b&integration_id=integration-a"
+            )
+            .is_err()
+        );
+        assert!(
+            capabilities_query(
+                "tenant_id=tenant-a&integration_id=integration-a&unexpected=value"
+            )
+            .is_err()
+        );
+        assert!(
+            capabilities_query("tenant_id=tenant-a&integration_id=bad%ZZ")
+                .is_err()
+        );
+    }
+
     async fn post_json(
         address: std::net::SocketAddr,
         path: &str,
