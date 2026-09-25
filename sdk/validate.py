@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SDK = ROOT / "sdk"
 ID_KEY = "ucr-service-credential-id-bin"
 SECRET_KEY = "ucr-service-credential-secret-bin"
+AUTHORIZATION_KEY = "authorization"
 LANGUAGES = ["rust", "python", "typescript", "kotlin", "swift"]
 HELPERS = [
     ROOT / "crates/ucr-sdk/src/lib.rs",
@@ -27,6 +28,7 @@ def require(condition: bool, message: str) -> None:
 
 def main() -> None:
     manifest = json.loads((SDK / "contract.json").read_text(encoding="utf-8"))
+    require(manifest["schema_version"] == 2, "wrong SDK contract schema version")
     require(manifest["protocol_package"] == "ucr.v1", "wrong protocol package")
     require(manifest["languages"] == LANGUAGES, "required SDK language set drifted")
     require(
@@ -34,8 +36,32 @@ def main() -> None:
         "required SDK service set drifted",
     )
     auth = manifest["authentication"]
-    require(auth["credential_id_key"] == ID_KEY, "credential id metadata drifted")
-    require(auth["credential_secret_key"] == SECRET_KEY, "credential secret metadata drifted")
+    default_auth = auth["default"]
+    require(default_auth["kind"] == "service_principal_binary_metadata", "default auth kind drifted")
+    require(default_auth["credential_id_key"] == ID_KEY, "credential id metadata drifted")
+    require(default_auth["credential_secret_key"] == SECRET_KEY, "credential secret metadata drifted")
+
+    conference_auth = auth["service_overrides"]["UniversalConferenceService"]
+    require(
+        conference_auth["accepted_schemes"]
+        == ["service_principal_binary_metadata", "oauth2_bearer"],
+        "UniversalConferenceService auth schemes drifted",
+    )
+    require(
+        conference_auth["bearer_metadata_key"] == AUTHORIZATION_KEY,
+        "UniversalConferenceService bearer metadata key drifted",
+    )
+    require(conference_auth["bearer_scheme"] == "Bearer", "Bearer scheme spelling drifted")
+    require(conference_auth["mixed_schemes"] == "reject", "mixed conference auth must fail closed")
+
+    http = manifest["http"]
+    require(http["universal_conference_base_path"] == "/v1", "conference REST base path drifted")
+    require(http["openapi_path"] == "/v1/openapi.yaml", "conference OpenAPI path drifted")
+    require(
+        http["business_logic_owner"] == "ucr.v1 UniversalConferenceService",
+        "REST adapter became a second business-logic owner",
+    )
+
     semantics = manifest["semantics"]
     require(semantics["automatic_application_retry"] is False, "hidden retry enabled")
     require(semantics["event_cursor"] == "opaque", "event cursor ceased to be opaque")
