@@ -41,14 +41,16 @@ use ucr_model::{
     UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
-    AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CALL_OBSERVE_PERMISSION,
+    AUDIO_MEDIA_CAPABILITY, AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CALL_OBSERVE_PERMISSION,
     CONFERENCE_ATTENDANCE_READ_PERMISSION, CONFERENCE_CREATE_PERMISSION,
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
     CONFERENCE_READ_PERMISSION, CONFERENCE_SUBSCRIBE_PERMISSION, CanonicalError,
     CanonicalErrorCode, CapabilityMaturity, CommandReceiptStatus, DEVICE_REGISTER_PERMISSION,
-    GROUP_MLS_CAPABILITY, MAX_CALL_PARTICIPANTS, MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT,
-    SCREEN_SHARE_SEND_PERMISSION, VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
+    GROUP_MLS_CAPABILITY, H264_VIDEO_CODEC_CAPABILITY, MAX_CALL_PARTICIPANTS,
+    MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT, OPUS_AUDIO_CODEC_CAPABILITY,
+    SCREEN_SHARE_SEND_PERMISSION, SCREEN_SHARE_VIDEO_CAPABILITY, VIDEO_MEDIA_CAPABILITY,
+    VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
     acknowledgement_for, canonical_capabilities, phase20_audio_capabilities,
     phase21_video_capabilities, phase22_media_e2ee_capabilities, phase29_sfu_capabilities,
     phase30_conference_capabilities,
@@ -3069,6 +3071,12 @@ fn universal_capabilities(
     capabilities.extend(phase30_conference_capabilities());
     let capabilities = canonical_capabilities(&capabilities)
         .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    let has_capability = |id: &str| capabilities.iter().any(|value| value.id == id);
+    let codecs = [OPUS_AUDIO_CODEC_CAPABILITY, H264_VIDEO_CODEC_CAPABILITY]
+        .into_iter()
+        .filter(|id| has_capability(id))
+        .map(str::to_owned)
+        .collect();
     Ok(pb::UniversalConferenceCapabilities {
         capabilities: capabilities.iter().map(pb_capability).collect(),
         max_participants: u32::try_from(MAX_CALL_PARTICIPANTS)
@@ -3078,6 +3086,12 @@ fn universal_capabilities(
         turn: runtime.turn,
         recording: runtime.recording,
         horizontal_sfu: runtime.horizontal_sfu,
+        audio: has_capability(AUDIO_MEDIA_CAPABILITY),
+        video: has_capability(VIDEO_MEDIA_CAPABILITY),
+        screen_share: has_capability(SCREEN_SHARE_VIDEO_CAPABILITY),
+        webinar: true,
+        rtmp: false,
+        codecs,
     })
 }
 
@@ -3933,6 +3947,28 @@ mod universal_runtime_tests {
         prepare_conference_runtime, resolve_join_call, resolve_join_device,
         resolve_person_principal, update_participant,
     };
+
+    #[test]
+    fn universal_capabilities_expose_explicit_media_contract_without_false_rtmp_claim() {
+        let capabilities =
+            super::universal_capabilities(super::UniversalConferenceRuntimeCapabilities::none())
+                .expect("capabilities");
+
+        assert!(capabilities.audio);
+        assert!(capabilities.video);
+        assert!(capabilities.screen_share);
+        assert!(capabilities.webinar);
+        assert!(!capabilities.rtmp);
+        assert!(!capabilities.recording);
+        assert_eq!(
+            capabilities.codecs,
+            vec![
+                "ucr.media.audio.opus".to_owned(),
+                "ucr.media.video.h264".to_owned()
+            ]
+        );
+        assert!(capabilities.max_participants > 0);
+    }
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
