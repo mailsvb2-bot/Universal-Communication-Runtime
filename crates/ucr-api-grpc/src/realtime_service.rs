@@ -578,8 +578,9 @@ where
             (Ok(token), Ok((scope, call_id, session_id)), Ok(telemetry)) => self
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
                 .and_then(|claims| {
+                    let now = self.now()?;
                     self.registry
-                        .heartbeat(&claims, self.now()?)
+                        .heartbeat(&claims, now)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
                     let actor = actor_for(&claims);
@@ -592,6 +593,9 @@ where
                             &telemetry,
                         )
                         .map_err(|error| map_conference_error(&error))?;
+                    self.registry
+                        .set_adaptive_media_stage(&claims, decision.stage, now)
+                        .map_err(map_registry_error)?;
                     Ok(pb_adaptive_media_decision(&decision))
                 }),
             (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
