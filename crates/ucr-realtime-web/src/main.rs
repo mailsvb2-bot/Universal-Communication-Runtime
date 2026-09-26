@@ -1640,6 +1640,14 @@ fn admission_state_name(value: i32) -> Option<&'static str> {
     }
 }
 
+fn empty_upstream() -> HttpResponse {
+    api_error(
+        StatusCode::BAD_GATEWAY,
+        "invalid_upstream_response",
+        "realtime upstream returned an incomplete response",
+    )
+}
+
 fn api_error(status: StatusCode, code: &'static str, message: impl Into<String>) -> HttpResponse {
     json_response(
         status,
