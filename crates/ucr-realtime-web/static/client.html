@@ -54,7 +54,16 @@ button:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 <button id="camera-toggle" class="secondary" disabled>Turn camera off</button>
 <button id="screen-toggle" class="secondary" disabled>Share screen</button>
 <button id="hand-toggle" class="secondary" disabled>Raise hand</button>
+<select id="reaction" aria-label="Reaction">
+  <option value="👍">👍</option>
+  <option value="👏">👏</option>
+  <option value="❤️">❤️</option>
+  <option value="😂">😂</option>
+  <option value="🎉">🎉</option>
+</select>
+<button id="reaction-send" class="secondary" disabled>React</button>
 </div>
+<div id="reactions" class="small" aria-live="polite"></div>
 <div class="grid">
 <button id="join" class="primary">Join conference</button>
 <button id="leave" class="secondary" disabled>Leave</button>
@@ -70,11 +79,12 @@ const ui={
   join:$("join"),leave:$("leave"),state:$("state"),webrtcState:$("webrtc-state"),
   packets:$("packets"),expires:$("expires"),status:$("status"),
   localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),
-  mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle")
+  mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions")
 };
-let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null;
+let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
+let reactionCursor=0;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_CHUNK_MAGIC="UCRCHK01";
 const E2EE_CHUNK_HEADER_BYTES=24;
@@ -495,19 +505,21 @@ async function restartWebRtc(forceMedia){
 }
 async function activateAdmittedMedia(){
   if(!sessionActive||mediaActive)return;
-  mediaActive=true;ui.state.textContent="Connected";ui.handToggle.disabled=false;refreshLocalMediaControls();
+  mediaActive=true;ui.state.textContent="Connected";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;refreshLocalMediaControls();
+  if(!reactionTimer){reactionTimer=setInterval(()=>{pollReactions().catch(()=>{});},1000);}
+  pollReactions().catch(()=>{});
   ui.status.textContent=policyAllows("audio")||policyAllows("camera")?"The host has started the conference. Requesting permitted camera/microphone access…":"The host has started the conference. Viewing mode does not request camera or microphone access.";
   openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive)ui.status.textContent="Realtime stream closed: "+e.message;});
   try{await startWebRtc(false);}catch(e){ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC start failed: "+e.message;scheduleWebRtcRetry();}
 }
 async function applyAdmissionState(state){
   if(state==="waiting_room"){
-    mediaActive=false;ui.handToggle.disabled=true;refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
+    mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
     ui.status.textContent="You are in the waiting room. Media will start automatically when the host starts the conference.";
     return;
   }
   if(state==="closed"){
-    mediaActive=false;ui.handToggle.disabled=true;
+    mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
     if(streamAbort){streamAbort.abort();streamAbort=null;}
@@ -553,7 +565,7 @@ async function leave(){
   teardownPeer();
   if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;ui.localVideo.srcObject=null;}
   if(wasActive)await closeServerPeer();
-  sessionActive=false;mediaActive=false;handRaised=false;ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;
+  sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
   if(wasActive){try{await api("/v1/realtime/leave",body());}catch(_){}}
   ui.state.textContent="Left";ui.status.textContent="Conference session closed.";ui.join.disabled=false;
@@ -566,6 +578,26 @@ function scheduleWaitingRoom(){
   waitTimer=setTimeout(()=>{waitTimer=null;ui.join.disabled=false;join();},delay);
   return true;
 }
+async function publishReaction(){
+  if(!sessionActive||!mediaActive)return;
+  const reaction=ui.reaction.value;
+  await api("/v1/realtime/reactions/publish",{...body(),reaction});
+}
+async function pollReactions(){
+  if(!sessionActive||!mediaActive)return;
+  const r=await api("/v1/realtime/reactions/list",{...body(),after_sequence:reactionCursor,max_items:64});
+  const data=await r.json();
+  if(!data.ok||!Array.isArray(data.reactions))return;
+  for(const item of data.reactions){
+    reactionCursor=Math.max(reactionCursor,Number(item.sequence||0));
+    const chip=document.createElement("span");
+    chip.textContent=item.reaction;
+    chip.setAttribute("data-sequence",String(item.sequence||0));
+    ui.reactions.appendChild(chip);
+    setTimeout(()=>{chip.remove();},5000);
+  }
+}
+ui.reactionSend.addEventListener("click",()=>{publishReaction().catch(e=>{ui.status.textContent="Reaction failed: "+e.message;});});
 async function toggleRaisedHand(){
   if(!sessionActive||!mediaActive)return;
   const next=!handRaised;
@@ -593,7 +625,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
 }
 window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry();}});
-window.addEventListener("pagehide",()=>{if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
+window.addEventListener("pagehide",()=>{if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;if(reactionTimer)clearInterval(reactionTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 </body>
 </html>
