@@ -13,8 +13,8 @@ use std::{
 };
 
 use ucr_core::{
-    AntiEntropyStore, AttachmentStore, AuthorizationEvaluator, BridgeActionStore, BridgeRegistrationStore,
-    CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore,
+    AntiEntropyStore, AttachmentStore, AuthorizationEvaluator, BridgeActionStore,
+    BridgeRegistrationStore, CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore,
     ConferenceJoinGrantStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, FederationPeerStore,
