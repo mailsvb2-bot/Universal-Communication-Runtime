@@ -13,7 +13,7 @@ use std::{
 };
 
 use ucr_core::{
-    AntiEntropyStore, AuthorizationEvaluator, BridgeActionStore, BridgeRegistrationStore,
+    AntiEntropyStore, AttachmentStore, AuthorizationEvaluator, BridgeActionStore, BridgeRegistrationStore,
     CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore,
     ConferenceJoinGrantStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
@@ -30,7 +30,8 @@ use ucr_crypto::{
     TrustedSigningKeyResolver, VerifyingKeyBytes,
 };
 use ucr_model::{
-    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, BridgeActionId, BridgeActionRecord,
+    AntiEntropyCursor, AntiEntropyPage, AttachmentChunk, AttachmentDescriptor, AttachmentId,
+    AuthorizationRequest, BridgeActionId, BridgeActionRecord,
     BridgeActionState, BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState,
     CallSession, CommandEnvelope, CommandId, CommunicationIntent, ConferenceJoinGrantRecord,
     ConferenceJoinGrantUsePolicy, ConferenceParticipantRole, ConversationId, ConversationRecord,
@@ -53,9 +54,11 @@ use ucr_model::{
     UniversalConferenceProfile,
 };
 use ucr_protocol::{
-    AntiEntropyError, CanonicalError, CanonicalErrorCode, CommandError, CommandReceipt, EventError,
+    AntiEntropyError, AttachmentProtocolError, CanonicalError, CanonicalErrorCode, CommandError,
+    CommandReceipt, EventError,
     IdempotencyDecision, MAX_EVENT_DELIVERY_BATCH_BYTES, MAX_SERVICE_AUDIT_READ_ITEMS,
     RecordingProtocolError, accepted_command_receipt, anti_entropy_session_binding,
+    validate_attachment_descriptor, verify_attachment_chunk,
     apply_recording_consent, canonical_bridge_registration, canonical_command,
     canonical_communication_intent, canonical_event, canonical_event_subscription,
     canonical_federation_peer, canonical_message, canonical_recovery_plan, canonical_sync_session,
@@ -93,6 +96,8 @@ type GroupKey = (ScopeKey, String);
 type GroupMembershipKey = (ScopeKey, String, ucr_model::PrincipalRef);
 type GroupChangeKey = (ScopeKey, String);
 type MessageKey = (ScopeKey, String);
+type AttachmentKey = (ScopeKey, String);
+type AttachmentChunkKey = (AttachmentKey, u32);
 type IntentKey = (ScopeKey, String);
 type BridgeRegistrationKey = (ScopeKey, String);
 type BridgeActionKey = (ScopeKey, String);
@@ -183,6 +188,8 @@ struct MemoryState {
     offline_group_next_sequence: u64,
     mesh_group_message_paths: HashMap<MessageKey, Vec<DeviceId>>,
     messages: HashMap<MessageKey, MessageEnvelope>,
+    attachment_descriptors: HashMap<AttachmentKey, AttachmentDescriptor>,
+    attachment_chunks: HashMap<AttachmentChunkKey, AttachmentChunk>,
     intents: HashMap<IntentKey, CommunicationIntent>,
     bridge_registrations: HashMap<BridgeRegistrationKey, BridgeRegistration>,
     bridge_actions: HashMap<BridgeActionKey, BridgeActionRecord>,
@@ -1212,6 +1219,21 @@ fn message_key(scope: &TenantScope, message_id: &MessageId) -> MessageKey {
     (scope_key(scope), message_id.as_opaque().as_str().to_owned())
 }
 
+fn attachment_key(scope: &TenantScope, attachment_id: &AttachmentId) -> AttachmentKey {
+    (
+        scope_key(scope),
+        attachment_id.as_opaque().as_str().to_owned(),
+    )
+}
+
+fn attachment_chunk_key(
+    scope: &TenantScope,
+    attachment_id: &AttachmentId,
+    index: u32,
+) -> AttachmentChunkKey {
+    (attachment_key(scope, attachment_id), index)
+}
+
 fn intent_key(scope: &TenantScope, intent_id: &IntentId) -> IntentKey {
     (scope_key(scope), intent_id.as_opaque().as_str().to_owned())
 }
@@ -1891,6 +1913,99 @@ fn persist_message_in_state(
     }
     state.messages.insert(key, persisted);
     Ok(DurableRecordStatus::Persisted)
+}
+
+impl AttachmentStore for MemoryLocalStore {
+    fn persist_attachment_descriptor(
+        &self,
+        descriptor: &AttachmentDescriptor,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        validate_attachment_descriptor(descriptor).map_err(map_attachment_protocol_error)?;
+        let key = attachment_key(&descriptor.scope, &descriptor.attachment_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.attachment_descriptors.get(&key) {
+            return if existing == descriptor {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.attachment_descriptors.insert(key, descriptor.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn attachment_descriptor(
+        &self,
+        scope: &TenantScope,
+        attachment_id: &AttachmentId,
+    ) -> Result<Option<AttachmentDescriptor>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .attachment_descriptors
+            .get(&attachment_key(scope, attachment_id))
+            .cloned())
+    }
+
+    fn persist_attachment_chunk(
+        &self,
+        scope: &TenantScope,
+        chunk: &AttachmentChunk,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let descriptor_key = attachment_key(scope, &chunk.attachment_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let descriptor = state
+            .attachment_descriptors
+            .get(&descriptor_key)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        verify_attachment_chunk(descriptor, chunk).map_err(map_attachment_protocol_error)?;
+
+        let key = (descriptor_key, chunk.index);
+        if let Some(existing) = state.attachment_chunks.get(&key) {
+            return if existing == chunk {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.attachment_chunks.insert(key, chunk.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn attachment_chunk(
+        &self,
+        scope: &TenantScope,
+        attachment_id: &AttachmentId,
+        index: u32,
+    ) -> Result<Option<AttachmentChunk>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .attachment_chunks
+            .get(&attachment_chunk_key(scope, attachment_id, index))
+            .cloned())
+    }
+
+    fn attachment_resume_index(
+        &self,
+        scope: &TenantScope,
+        attachment_id: &AttachmentId,
+    ) -> Result<u32, DurableStoreError> {
+        let key = attachment_key(scope, attachment_id);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let descriptor = state
+            .attachment_descriptors
+            .get(&key)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        for index in 0..descriptor.chunk_count {
+            if !state.attachment_chunks.contains_key(&(key.clone(), index)) {
+                return Ok(index);
+            }
+        }
+        Ok(descriptor.chunk_count)
+    }
+}
+
+const fn map_attachment_protocol_error(_error: AttachmentProtocolError) -> DurableStoreError {
+    DurableStoreError::InvalidRecord
 }
 
 impl MessageStore for MemoryLocalStore {
