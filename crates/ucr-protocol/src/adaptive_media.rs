@@ -156,10 +156,7 @@ pub fn reference_video_config(
 }
 
 #[must_use]
-pub const fn adaptive_stage_allows_media(
-    stage: AdaptiveMediaStage,
-    media_kind: MediaKind,
-) -> bool {
+pub const fn adaptive_stage_allows_media(stage: AdaptiveMediaStage, media_kind: MediaKind) -> bool {
     match (stage, media_kind) {
         (
             AdaptiveMediaStage::Video1080p
@@ -168,10 +165,9 @@ pub const fn adaptive_stage_allows_media(
             | AdaptiveMediaStage::VideoLowFps,
             MediaKind::Audio | MediaKind::Video,
         )
-        | (
-            AdaptiveMediaStage::Audio | AdaptiveMediaStage::AudioLowBitrate,
-            MediaKind::Audio,
-        ) => true,
+        | (AdaptiveMediaStage::Audio | AdaptiveMediaStage::AudioLowBitrate, MediaKind::Audio) => {
+            true
+        }
         (
             AdaptiveMediaStage::Audio
             | AdaptiveMediaStage::AudioLowBitrate
