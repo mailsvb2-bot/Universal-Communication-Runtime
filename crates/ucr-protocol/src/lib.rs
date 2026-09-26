@@ -4,6 +4,7 @@ mod acknowledgement;
 mod adaptive_media;
 mod addressing;
 mod anti_entropy;
+mod attachment;
 mod audio;
 mod authorization;
 mod bridge;
@@ -72,6 +73,13 @@ pub use anti_entropy::{
     MAX_ANTI_ENTROPY_CURSOR_LEN, MAX_ANTI_ENTROPY_PAGE_ITEMS, anti_entropy_session_binding,
     event_fingerprint, validate_anti_entropy_cursor, validate_anti_entropy_page_size,
     validate_anti_entropy_session, validate_anti_entropy_summary_count,
+};
+pub use attachment::{
+    ATTACHMENT_CONTENT_HASH_ALGORITHM, ATTACHMENT_CONTENT_HASH_LEN, AttachmentProtocolError,
+    MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_CHUNK_BYTES, MAX_ATTACHMENT_CHUNKS,
+    MAX_ATTACHMENT_FILE_NAME_BYTES, MAX_ATTACHMENT_MEDIA_TYPE_BYTES, attachment_content_id,
+    canonical_attachment_chunk, validate_attachment_descriptor, verify_attachment_chunk,
+    verify_complete_attachment,
 };
 pub use audio::{
     AUDIO_MEDIA_CAPABILITY, AudioProtocolError, MANDATORY_AUDIO_SAMPLE_RATE_HZ,
