@@ -244,6 +244,10 @@ message UniversalParticipantList {
   repeated UniversalConferenceParticipant participants = 1;
 }
 
+message UniversalRaisedHandList {
+  repeated bytes external_user_ids = 1;
+}
+
 message UniversalListParticipantsResponse {
   oneof result {
     UniversalParticipantList participants = 1;
@@ -257,6 +261,20 @@ message UniversalListParticipantsResponse {
 message UniversalConferenceMediaSubscription {
   bytes source_external_user_id = 1;
   MediaKind media_kind = 2;
+}
+
+message UniversalListRaisedHandsRequest {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId integration_id = 3;
+  uint32 max_items = 4;
+}
+
+message UniversalListRaisedHandsResponse {
+  oneof result {
+    UniversalRaisedHandList raised_hands = 1;
+    ErrorEnvelope error = 2;
+  }
 }
 
 message UniversalSetSubscriptionsRequest {
@@ -397,6 +415,7 @@ service UniversalConferenceService {
   rpc UpdateParticipant(UniversalUpdateParticipantRequest) returns (UniversalUpdateParticipantResponse);
   rpc RemoveParticipant(UniversalRemoveParticipantRequest) returns (UniversalRemoveParticipantResponse);
   rpc ListParticipants(UniversalListParticipantsRequest) returns (UniversalListParticipantsResponse);
+  rpc ListRaisedHands(UniversalListRaisedHandsRequest) returns (UniversalListRaisedHandsResponse);
   rpc SetSubscriptions(UniversalSetSubscriptionsRequest) returns (UniversalSetSubscriptionsResponse);
   rpc PrepareConferenceRuntime(UniversalPrepareConferenceRuntimeRequest) returns (UniversalPrepareConferenceRuntimeResponse);
   rpc IssueJoinGrant(UniversalIssueJoinGrantRequest) returns (UniversalIssueJoinGrantResponse);
