@@ -369,6 +369,9 @@ where
                     conference_runtime(self)
                         .clear_raised_hand(&claims.scope, &claims.call_id, &claims.participant)
                         .map_err(|error| map_conference_error(&error))?;
+                    conference_runtime(self)
+                        .clear_audio_level(&claims.scope, &claims.call_id, &claims.participant)
+                        .map_err(|error| map_conference_error(&error))?;
                     Ok(pb_acknowledgement(acknowledgement_for(
                         claims.session_id.as_opaque().clone(),
                     )))
@@ -544,6 +547,83 @@ where
             result: Some(match result {
                 Ok(reactions) => pb::realtime_list_reactions_response::Result::Reactions(reactions),
                 Err(error) => pb::realtime_list_reactions_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn report_audio_level(
+        &self,
+        request: Request<pb::RealtimeReportAudioLevelRequest>,
+    ) -> Result<Response<pb::RealtimeReportAudioLevelResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    let now = self.now()?;
+                    self.registry
+                        .heartbeat(&claims, now)
+                        .map_err(map_registry_error)?;
+                    self.require_live_universal_conference(&claims)?;
+                    let actor = actor_for(&claims);
+                    conference_runtime(self)
+                        .report_audio_level(&actor, &scope, &call_id, body.level, now)
+                        .map_err(|error| map_conference_error(&error))?;
+                    Ok(pb_acknowledgement(acknowledgement_for(
+                        claims.session_id.as_opaque().clone(),
+                    )))
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeReportAudioLevelResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::realtime_report_audio_level_response::Result::Acknowledgement(
+                        acknowledgement,
+                    )
+                }
+                Err(error) => {
+                    pb::realtime_report_audio_level_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
+    async fn get_active_speaker(
+        &self,
+        request: Request<pb::RealtimeGetActiveSpeakerRequest>,
+    ) -> Result<Response<pb::RealtimeGetActiveSpeakerResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let lookup = decode_realtime_lookup(request.into_inner());
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    let now = self.now()?;
+                    self.registry
+                        .heartbeat(&claims, now)
+                        .map_err(map_registry_error)?;
+                    self.require_live_universal_conference(&claims)?;
+                    let actor = actor_for(&claims);
+                    let participant = conference_runtime(self)
+                        .active_speaker(&actor, &scope, &call_id, now)
+                        .map_err(|error| map_conference_error(&error))?;
+                    Ok(pb::RealtimeActiveSpeaker {
+                        participant: participant.as_ref().map(pb_principal_ref),
+                    })
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeGetActiveSpeakerResponse {
+            result: Some(match result {
+                Ok(active_speaker) => {
+                    pb::realtime_get_active_speaker_response::Result::ActiveSpeaker(active_speaker)
+                }
+                Err(error) => {
+                    pb::realtime_get_active_speaker_response::Result::Error(pb_error(error))
+                }
             }),
         }))
     }
@@ -2057,6 +2137,9 @@ fn map_conference_error(error: &ConferenceError) -> CanonicalError {
         }
         ConferenceError::SubscriptionCapacityExceeded => {
             CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
+        }
+        ConferenceError::InvalidAudioLevel => {
+            CanonicalError::new(CanonicalErrorCode::InvalidArgument)
         }
         ConferenceError::Sfu(_) => CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable),
     }
