@@ -1088,11 +1088,13 @@ async fn report_adaptive_media(
                     },
                 )
             }
-            Some(pb::realtime_report_adaptive_media_response::Result::Error(_)) | None => api_error(
-                StatusCode::CONFLICT,
-                "adaptive_media_rejected",
-                "adaptive media telemetry rejected",
-            ),
+            Some(pb::realtime_report_adaptive_media_response::Result::Error(_)) | None => {
+                api_error(
+                    StatusCode::CONFLICT,
+                    "adaptive_media_rejected",
+                    "adaptive media telemetry rejected",
+                )
+            }
         },
         Err(status) => grpc_error(&status),
     }
