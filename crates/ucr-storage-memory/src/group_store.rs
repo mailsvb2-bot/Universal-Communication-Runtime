@@ -1388,6 +1388,53 @@ mod phase18_memory_security_tests {
     }
 
     #[test]
+    fn group_message_allocator_is_monotonic_idempotent_and_conflict_safe() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("allocator-owner", PrincipalKind::Person);
+        let (conversation, group) = group_fixture("allocator", &owner);
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+
+        let mut first = message(
+            &conversation.conversation,
+            &owner.principal.principal_id,
+            "allocator-first",
+        );
+        first.logical_order = 0;
+        let (first_status, first_persisted) = store
+            .persist_group_message_with_next_logical_order(&owner, &first)
+            .expect("first");
+        assert_eq!(first_status, DurableRecordStatus::Persisted);
+        assert_eq!(first_persisted.logical_order, 1);
+
+        let (retry_status, retry_persisted) = store
+            .persist_group_message_with_next_logical_order(&owner, &first)
+            .expect("retry");
+        assert_eq!(retry_status, DurableRecordStatus::Duplicate);
+        assert_eq!(retry_persisted.logical_order, 1);
+
+        let mut second = message(
+            &conversation.conversation,
+            &owner.principal.principal_id,
+            "allocator-second",
+        );
+        second.logical_order = 0;
+        let (second_status, second_persisted) = store
+            .persist_group_message_with_next_logical_order(&owner, &second)
+            .expect("second");
+        assert_eq!(second_status, DurableRecordStatus::Persisted);
+        assert_eq!(second_persisted.logical_order, 2);
+
+        let mut conflict = first;
+        conflict.content = b"different".to_vec();
+        assert_eq!(
+            store.persist_group_message_with_next_logical_order(&owner, &conflict),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
     fn group_change_event_id_is_scope_wide_and_cannot_alias_event_journal() {
         let store = MemoryLocalStore::default();
         let owner = subject("memory-event-owner", PrincipalKind::Person);
