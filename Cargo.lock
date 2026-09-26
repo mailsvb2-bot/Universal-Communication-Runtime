@@ -4058,6 +4058,7 @@ dependencies = [
  "tokio",
  "ucr-core",
  "ucr-model",
+ "ucr-protocol",
  "ucr-sfu",
 ]
 
