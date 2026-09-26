@@ -336,13 +336,8 @@ async fn handle_request(
             Ok(input) => list_reactions(&state, &token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/audio-level" => match decode_json::<AudioLevelRequest>(&body) {
-            Ok(input) => report_audio_level(&state, &token, input).await,
-            Err(error) => error.into_response(),
-        },
-        "/v1/realtime/active-speaker" => match decode_json::<SessionRequest>(&body) {
-            Ok(input) => get_active_speaker(&state, &token, input).await,
-            Err(error) => error.into_response(),
+        "/v1/realtime/audio-level" | "/v1/realtime/active-speaker" => {
+            handle_active_speaker_route(&state, &token, &path, &body).await
         },
         "/v1/realtime/media/publish" => match decode_json::<PublishRequest>(&body) {
             Ok(input) => publish_media(&state, &token, input).await,
@@ -715,6 +710,29 @@ async fn list_reactions(
             ),
         },
         Err(status) => grpc_error(&status),
+    }
+}
+
+async fn handle_active_speaker_route(
+    state: &AppState,
+    token: &str,
+    path: &str,
+    body: &[u8],
+) -> HttpResponse {
+    match path {
+        "/v1/realtime/audio-level" => match decode_json::<AudioLevelRequest>(body) {
+            Ok(input) => report_audio_level(state, token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/active-speaker" => match decode_json::<SessionRequest>(body) {
+            Ok(input) => get_active_speaker(state, token, input).await,
+            Err(error) => error.into_response(),
+        },
+        _ => api_error(
+            StatusCode::NOT_FOUND,
+            "route_not_found",
+            "realtime route not found",
+        ),
     }
 }
 
