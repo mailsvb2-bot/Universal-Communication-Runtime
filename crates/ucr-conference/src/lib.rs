@@ -647,27 +647,36 @@ where
             .chat_notifications
             .lock()
             .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
-        if let Some(existing) = state.events.iter().find(|entry| {
-            entry.scope == *scope && entry.call_id == *call_id && entry.message_id == *message_id
-        }) {
-            return Ok(existing.sequence);
-        }
-        let sequence = state.next_sequence;
-        state.next_sequence = sequence
-            .checked_add(1)
-            .ok_or(ConferenceError::SubscriptionCapacityExceeded)?;
-        state.events.push(ConferenceChatNotificationState {
-            scope: scope.clone(),
-            call_id: call_id.clone(),
-            sequence,
-            message_id: message_id.clone(),
-        });
-        if state.events.len() > MAX_TRACKED_CONFERENCE_CHAT_NOTIFICATIONS {
-            let overflow = state.events.len() - MAX_TRACKED_CONFERENCE_CHAT_NOTIFICATIONS;
-            state.events.drain(..overflow);
-        }
-        Ok(sequence)
+        append_chat_notification(&mut state, scope, call_id, message_id)
     }
+
+fn append_chat_notification(
+    state: &mut ConferenceChatNotificationLog,
+    scope: &TenantScope,
+    call_id: &CallId,
+    message_id: &MessageId,
+) -> Result<u64, ConferenceError> {
+    if let Some(existing) = state.events.iter().find(|entry| {
+        entry.scope == *scope && entry.call_id == *call_id && entry.message_id == *message_id
+    }) {
+        return Ok(existing.sequence);
+    }
+    let sequence = state.next_sequence;
+    state.next_sequence = sequence
+        .checked_add(1)
+        .ok_or(ConferenceError::SubscriptionCapacityExceeded)?;
+    state.events.push(ConferenceChatNotificationState {
+        scope: scope.clone(),
+        call_id: call_id.clone(),
+        sequence,
+        message_id: message_id.clone(),
+    });
+    if state.events.len() > MAX_TRACKED_CONFERENCE_CHAT_NOTIFICATIONS {
+        let overflow = state.events.len() - MAX_TRACKED_CONFERENCE_CHAT_NOTIFICATIONS;
+        state.events.drain(..overflow);
+    }
+    Ok(sequence)
+}
 
     /// Lists live-chat Message IDs after one ephemeral runtime cursor.
     ///
@@ -1170,6 +1179,32 @@ mod subscription_state_tests {
                 media_kind: MediaKind::Video,
             }],
         }
+    }
+
+    #[test]
+    fn chat_notification_append_is_idempotent_and_monotonic() {
+        let mut log = ConferenceChatNotificationLog {
+            next_sequence: 1,
+            events: Vec::new(),
+        };
+        let call_id = CallId::from_opaque(oid("call-chat"));
+        let first = MessageId::from_opaque(oid("message-one"));
+        let second = MessageId::from_opaque(oid("message-two"));
+
+        assert_eq!(
+            append_chat_notification(&mut log, &scope(), &call_id, &first),
+            Ok(1)
+        );
+        assert_eq!(
+            append_chat_notification(&mut log, &scope(), &call_id, &first),
+            Ok(1)
+        );
+        assert_eq!(log.events.len(), 1);
+        assert_eq!(
+            append_chat_notification(&mut log, &scope(), &call_id, &second),
+            Ok(2)
+        );
+        assert_eq!(log.events.len(), 2);
     }
 
     #[test]
