@@ -365,7 +365,9 @@ async function ensureLocalTrack(kind){
   if(e2eeChannel&&e2eeChannel.readyState==="open"){
     const adapter=e2eeAdapter();if(adapter&&typeof adapter.updateSources==="function")await syncEndpointMediaSources();
   }
-  await refreshDevices();refreshLocalMediaControls();return track;
+  await refreshDevices();refreshLocalMediaControls();
+  if(kind==="audio"&&sessionActive&&mediaActive)startActiveSpeakerMonitoring().catch(()=>{});
+  return track;
 }
 async function replaceLocalTrack(kind){
   if(!sessionActive||!mediaActive||!policyAllows(kind))return;
@@ -373,7 +375,6 @@ async function replaceLocalTrack(kind){
   const oldTracks=kind==="audio"?localStream.getAudioTracks():localStream.getVideoTracks();
   for(const track of oldTracks){localStream.removeTrack(track);track.stop();}
   await ensureLocalTrack(kind);
-  if(kind==="audio")startActiveSpeakerMonitoring().catch(()=>{});
 }
 async function refreshDevices(){
   if(!navigator.mediaDevices||!navigator.mediaDevices.enumerateDevices)return;
