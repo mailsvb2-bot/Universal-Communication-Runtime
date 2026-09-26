@@ -1501,6 +1501,12 @@ fn capabilities_json(capabilities: &pb::UniversalConferenceCapabilities) -> Valu
         "turn": capabilities.turn,
         "recording": capabilities.recording,
         "horizontal_sfu": capabilities.horizontal_sfu,
+        "audio": capabilities.audio,
+        "video": capabilities.video,
+        "screen_share": capabilities.screen_share,
+        "webinar": capabilities.webinar,
+        "rtmp": capabilities.rtmp,
+        "codecs": capabilities.codecs,
     })
 }
 
@@ -1687,7 +1693,42 @@ mod tests {
     use ucr_realtime::{JoinTokenIssuer, JoinTokenKey};
     use ucr_storage_sqlite::SqliteLocalStore;
 
-    use super::{AppState, capabilities_query, create_request, serve, validate_loopback_bind};
+    use super::{
+        AppState, capabilities_json, capabilities_query, create_request, pb, serve,
+        validate_loopback_bind,
+    };
+
+    #[test]
+    fn capabilities_json_preserves_explicit_media_summary() {
+        let json = capabilities_json(&pb::UniversalConferenceCapabilities {
+            capabilities: Vec::new(),
+            max_participants: 500,
+            browser_realtime_gateway: true,
+            production_webrtc: false,
+            turn: true,
+            recording: false,
+            horizontal_sfu: false,
+            audio: true,
+            video: true,
+            screen_share: true,
+            webinar: true,
+            rtmp: false,
+            codecs: vec![
+                "ucr.media.audio.opus".to_owned(),
+                "ucr.media.video.h264".to_owned(),
+            ],
+        });
+
+        assert_eq!(json["audio"], true);
+        assert_eq!(json["video"], true);
+        assert_eq!(json["screen_share"], true);
+        assert_eq!(json["webinar"], true);
+        assert_eq!(json["rtmp"], false);
+        assert_eq!(
+            json["codecs"],
+            serde_json::json!(["ucr.media.audio.opus", "ucr.media.video.h264"])
+        );
+    }
 
     #[test]
     fn conference_http_adapter_refuses_non_loopback_bind() {
