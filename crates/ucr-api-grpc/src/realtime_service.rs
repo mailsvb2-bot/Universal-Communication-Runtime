@@ -13,8 +13,7 @@ use ucr_conference::{
 use ucr_core::{
     AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
     DurableRecordStatus, DurableStoreError, EventJournalStore, GroupMessageStore,
-    PrincipalIdentityBindingStore,
-    ServiceQuotaStore, UniversalConferenceStore,
+    PrincipalIdentityBindingStore, ServiceQuotaStore, UniversalConferenceStore,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
@@ -22,12 +21,12 @@ use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipantState, CallSignal, CallSignalKind,
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
     ConferenceParticipantRole, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
-    DeviceId, DeviceLifecycleState, DeviceRef, DeliveryState, EncryptedGroupMediaFrame,
+    DeliveryState, DeviceId, DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame,
     EventEnvelope, EventId, GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature,
     IceServerConfig, KeyId, MediaKind, MessageEnvelope, MessageId, OpaqueId, OriginRef,
-    PrincipalId, PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope,
-    SfuForwardTarget, TenantScope, UniversalConferenceLifecycle, VideoSourceKind,
-    WebRtcIceCandidate, WebRtcSdpType, WebRtcSessionDescription,
+    PrincipalId, PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope, SfuForwardTarget,
+    TenantScope, UniversalConferenceLifecycle, VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
+    WebRtcSessionDescription,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
@@ -662,14 +661,11 @@ where
                     let message_id = MessageId::from_opaque(decode_opaque(
                         body.message_id.ok_or_else(invalid_argument)?,
                     )?);
-                    let correlation_id = decode_opaque(
-                        body.correlation_id.ok_or_else(invalid_argument)?,
-                    )?;
-                    if body
-                        .idempotency_key
-                        .as_ref()
-                        .is_some_and(|value| value.is_empty() || value.len() > MAX_IDEMPOTENCY_KEY_LEN)
-                    {
+                    let correlation_id =
+                        decode_opaque(body.correlation_id.ok_or_else(invalid_argument)?)?;
+                    if body.idempotency_key.as_ref().is_some_and(|value| {
+                        value.is_empty() || value.len() > MAX_IDEMPOTENCY_KEY_LEN
+                    }) {
                         return Err(invalid_argument());
                     }
 
@@ -681,7 +677,9 @@ where
                         .store
                         .group(&scope, &snapshot.group_id)
                         .map_err(map_store_error)?
-                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::FailedPrecondition))?;
+                        .ok_or_else(|| {
+                            CanonicalError::new(CanonicalErrorCode::FailedPrecondition)
+                        })?;
                     let author_device = validate_device_claim(&*self.store, &claims)?;
                     let message = MessageEnvelope {
                         message_id: message_id.clone(),
@@ -767,7 +765,9 @@ where
                         .store
                         .group(&scope, &snapshot.group_id)
                         .map_err(map_store_error)?
-                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::FailedPrecondition))?;
+                        .ok_or_else(|| {
+                            CanonicalError::new(CanonicalErrorCode::FailedPrecondition)
+                        })?;
                     let message = self
                         .store
                         .group_message(&actor, &scope, &message_id)
@@ -789,7 +789,9 @@ where
         Ok(Response::new(pb::RealtimeGetChatMessageResponse {
             result: Some(match result {
                 Ok(message) => pb::realtime_get_chat_message_response::Result::Message(message),
-                Err(error) => pb::realtime_get_chat_message_response::Result::Error(pb_error(error)),
+                Err(error) => {
+                    pb::realtime_get_chat_message_response::Result::Error(pb_error(error))
+                }
             }),
         }))
     }
