@@ -469,6 +469,85 @@ where
         }))
     }
 
+    async fn publish_reaction(
+        &self,
+        request: Request<pb::RealtimePublishReactionRequest>,
+    ) -> Result<Response<pb::RealtimePublishReactionResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    self.registry
+                        .heartbeat(&claims, self.now()?)
+                        .map_err(map_registry_error)?;
+                    self.require_live_universal_conference(&claims)?;
+                    let actor = actor_for(&claims);
+                    let sequence = conference_runtime(self)
+                        .publish_reaction(&actor, &scope, &call_id, &body.reaction)
+                        .map_err(|error| map_conference_error(&error))?;
+                    Ok(pb::RealtimeReactionReceipt { sequence })
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimePublishReactionResponse {
+            result: Some(match result {
+                Ok(receipt) => pb::realtime_publish_reaction_response::Result::Receipt(receipt),
+                Err(error) => pb::realtime_publish_reaction_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn list_reactions(
+        &self,
+        request: Request<pb::RealtimeListReactionsRequest>,
+    ) -> Result<Response<pb::RealtimeListReactionsResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let max_items = if body.max_items == 0 {
+            64
+        } else {
+            usize::try_from(body.max_items)
+                .map_err(|_| Status::invalid_argument("realtime request rejected"))?
+        };
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    self.registry
+                        .heartbeat(&claims, self.now()?)
+                        .map_err(map_registry_error)?;
+                    self.require_live_universal_conference(&claims)?;
+                    let actor = actor_for(&claims);
+                    let reactions = conference_runtime(self)
+                        .reactions_after(&actor, &scope, &call_id, body.after_sequence, max_items)
+                        .map_err(|error| map_conference_error(&error))?;
+                    Ok(pb::RealtimeReactionList {
+                        reactions: reactions
+                            .into_iter()
+                            .map(|reaction| pb::RealtimeReaction {
+                                sequence: reaction.sequence,
+                                participant: Some(pb_principal_ref(&reaction.participant)),
+                                reaction: reaction.value,
+                            })
+                            .collect(),
+                    })
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeListReactionsResponse {
+            result: Some(match result {
+                Ok(reactions) => {
+                    pb::realtime_list_reactions_response::Result::Reactions(reactions)
+                }
+                Err(error) => pb::realtime_list_reactions_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
     async fn publish_media(
         &self,
         request: Request<pb::RealtimePublishMediaRequest>,
