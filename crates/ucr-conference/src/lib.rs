@@ -57,6 +57,7 @@ pub enum ConferenceError {
     SourceUnavailable,
     SubscriptionStateUnavailable,
     SubscriptionCapacityExceeded,
+    InvalidAudioLevel,
     Sfu(SfuError),
 }
 
@@ -116,6 +117,17 @@ struct ConferenceReactionLog {
     events: Vec<ConferenceReactionState>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveSpeakerState {
+    scope: TenantScope,
+    call_id: CallId,
+    participant: PrincipalRef,
+    level: u8,
+    reported_at_unix_ms: i64,
+}
+
+const ACTIVE_SPEAKER_REPORT_TTL_MS: i64 = 3_000;
+
 /// Shared bounded non-durable Conference routing preferences.
 ///
 /// Network/service adapters may create a short-lived `ConferenceRuntime` per request while
@@ -126,6 +138,7 @@ pub struct ConferenceRuntimeState {
     subscriptions: Mutex<Vec<RecipientSubscriptionState>>,
     raised_hands: Mutex<Vec<RaisedHandState>>,
     reactions: Mutex<ConferenceReactionLog>,
+    active_speaker_reports: Mutex<Vec<ActiveSpeakerState>>,
 }
 
 impl ConferenceRuntimeState {
@@ -138,6 +151,7 @@ impl ConferenceRuntimeState {
                 next_sequence: 1,
                 events: Vec::new(),
             }),
+            active_speaker_reports: Mutex::new(Vec::new()),
         }
     }
 }
@@ -579,6 +593,121 @@ where
                 value: entry.value.clone(),
             })
             .collect())
+    }
+
+    /// Reports one authenticated endpoint's local audio activity level without exposing media
+    /// plaintext to the SFU. The level is a UI hint in the inclusive range 0..=100.
+    ///
+    /// # Errors
+    /// Rejects non-accepted participants, out-of-range levels, or unavailable runtime state.
+    pub fn report_audio_level(
+        &self,
+        actor: &ScopedPrincipal,
+        scope: &TenantScope,
+        call_id: &CallId,
+        level: u32,
+        reported_at_unix_ms: i64,
+    ) -> Result<(), ConferenceError> {
+        require_conference_stack(
+            self.conference_capabilities,
+            self.sfu_capabilities,
+            self.group_e2ee_capabilities,
+        )?;
+        authorize(self.authorization, actor, CALL_OBSERVE_PERMISSION)?;
+        let snapshot = conference_projection(self.store, actor, scope, call_id)?;
+        require_accepted_participant(&snapshot.call, &actor.principal)?;
+        let level = u8::try_from(level).map_err(|_| ConferenceError::InvalidAudioLevel)?;
+        if level > 100 {
+            return Err(ConferenceError::InvalidAudioLevel);
+        }
+
+        let mut state = self
+            .state
+            .active_speaker_reports
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        state.retain(|entry| {
+            entry.scope != *scope
+                || entry.call_id != *call_id
+                || entry.participant != actor.principal
+        });
+        if state.len() >= MAX_CALL_PARTICIPANTS {
+            return Err(ConferenceError::SubscriptionCapacityExceeded);
+        }
+        state.push(ActiveSpeakerState {
+            scope: scope.clone(),
+            call_id: call_id.clone(),
+            participant: actor.principal.clone(),
+            level,
+            reported_at_unix_ms,
+        });
+        Ok(())
+    }
+
+    /// Projects the freshest dominant speaker from endpoint-owned local audio-level reports.
+    ///
+    /// Reports older than three seconds are ignored. A zero-level report never becomes active.
+    ///
+    /// # Errors
+    /// Rejects non-accepted participants or unavailable runtime state.
+    pub fn active_speaker(
+        &self,
+        actor: &ScopedPrincipal,
+        scope: &TenantScope,
+        call_id: &CallId,
+        now_unix_ms: i64,
+    ) -> Result<Option<PrincipalRef>, ConferenceError> {
+        require_conference_stack(
+            self.conference_capabilities,
+            self.sfu_capabilities,
+            self.group_e2ee_capabilities,
+        )?;
+        authorize(self.authorization, actor, CALL_OBSERVE_PERMISSION)?;
+        let snapshot = conference_projection(self.store, actor, scope, call_id)?;
+        require_accepted_participant(&snapshot.call, &actor.principal)?;
+
+        let mut state = self
+            .state
+            .active_speaker_reports
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        state.retain(|entry| {
+            entry.scope != *scope
+                || entry.call_id != *call_id
+                || now_unix_ms.saturating_sub(entry.reported_at_unix_ms)
+                    <= ACTIVE_SPEAKER_REPORT_TTL_MS
+        });
+        Ok(state
+            .iter()
+            .filter(|entry| {
+                entry.scope == *scope
+                    && entry.call_id == *call_id
+                    && entry.level > 0
+                    && now_unix_ms >= entry.reported_at_unix_ms
+            })
+            .max_by_key(|entry| (entry.level, entry.reported_at_unix_ms))
+            .map(|entry| entry.participant.clone()))
+    }
+
+    /// Clears one endpoint's active-speaker report on realtime leave.
+    ///
+    /// # Errors
+    /// Returns temporary-unavailable if the in-memory state lock is poisoned.
+    pub fn clear_audio_level(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        participant: &PrincipalRef,
+    ) -> Result<(), ConferenceError> {
+        let mut state = self
+            .state
+            .active_speaker_reports
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        state.retain(|entry| {
+            entry.scope != *scope || entry.call_id != *call_id || entry.participant != *participant
+        });
+        Ok(())
     }
 
     /// Routes one already-encrypted Conference frame through the Phase-29 SFU boundary.
