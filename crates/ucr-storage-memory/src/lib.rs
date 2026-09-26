@@ -31,9 +31,9 @@ use ucr_crypto::{
 };
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AttachmentChunk, AttachmentDescriptor, AttachmentId,
-    AuthorizationRequest, BridgeActionId, BridgeActionRecord,
-    BridgeActionState, BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState,
-    CallSession, CommandEnvelope, CommandId, CommunicationIntent, ConferenceJoinGrantRecord,
+    AuthorizationRequest, BridgeActionId, BridgeActionRecord, BridgeActionState,
+    BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState, CallSession,
+    CommandEnvelope, CommandId, CommunicationIntent, ConferenceJoinGrantRecord,
     ConferenceJoinGrantUsePolicy, ConferenceParticipantRole, ConversationId, ConversationRecord,
     DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
     DeviceLifecycleState, EndpointId, EventConsumerCursor, EventDeadLetter, EventDeliveryBatch,
@@ -55,19 +55,18 @@ use ucr_model::{
 };
 use ucr_protocol::{
     AntiEntropyError, AttachmentProtocolError, CanonicalError, CanonicalErrorCode, CommandError,
-    CommandReceipt, EventError,
-    IdempotencyDecision, MAX_EVENT_DELIVERY_BATCH_BYTES, MAX_SERVICE_AUDIT_READ_ITEMS,
-    RecordingProtocolError, accepted_command_receipt, anti_entropy_session_binding,
-    validate_attachment_descriptor, verify_attachment_chunk,
-    apply_recording_consent, canonical_bridge_registration, canonical_command,
-    canonical_communication_intent, canonical_event, canonical_event_subscription,
-    canonical_federation_peer, canonical_message, canonical_recovery_plan, canonical_sync_session,
-    compare_command_idempotency, delete_recording, device_allows_protected_access,
-    duplicate_command_receipt, event_consumer_cursor_token, event_delivery_batch_next_size,
-    event_delivery_size, event_fingerprint, event_matches_subscription, event_retry_delay_ms,
-    expire_recording, service_audit_hash, start_recording, stop_recording,
-    validate_anti_entropy_cursor, validate_anti_entropy_page_size, validate_anti_entropy_session,
-    validate_anti_entropy_summary_count, validate_bridge_action_record,
+    CommandReceipt, EventError, IdempotencyDecision, MAX_EVENT_DELIVERY_BATCH_BYTES,
+    MAX_SERVICE_AUDIT_READ_ITEMS, RecordingProtocolError, accepted_command_receipt,
+    anti_entropy_session_binding, apply_recording_consent, canonical_bridge_registration,
+    canonical_command, canonical_communication_intent, canonical_event,
+    canonical_event_subscription, canonical_federation_peer, canonical_message,
+    canonical_recovery_plan, canonical_sync_session, compare_command_idempotency, delete_recording,
+    device_allows_protected_access, duplicate_command_receipt, event_consumer_cursor_token,
+    event_delivery_batch_next_size, event_delivery_size, event_fingerprint,
+    event_matches_subscription, event_retry_delay_ms, expire_recording, service_audit_hash,
+    start_recording, stop_recording, validate_anti_entropy_cursor, validate_anti_entropy_page_size,
+    validate_anti_entropy_session, validate_anti_entropy_summary_count,
+    validate_attachment_descriptor, validate_bridge_action_record,
     validate_bridge_action_transition, validate_bridge_registration_transition,
     validate_conversation, validate_conversation_parent_kind, validate_delivery_attempt,
     validate_delivery_evidence, validate_delivery_evidence_binding,
@@ -78,7 +77,7 @@ use ucr_protocol::{
     validate_principal_identity_binding, validate_recording_session, validate_service_audit_record,
     validate_service_quota_policy, validate_service_rate_limit_policy,
     validate_service_resource_quota_policy, validate_sync_checkpoint, validate_sync_transition,
-    validate_trusted_signing_key_descriptor,
+    validate_trusted_signing_key_descriptor, verify_attachment_chunk,
 };
 
 const SCHEMA_VERSION: u32 = 13;
