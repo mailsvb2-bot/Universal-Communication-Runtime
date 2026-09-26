@@ -79,7 +79,7 @@ pub fn tls_acceptor(
         .with_no_client_auth()
         .with_single_cert(certificates, private_key)
         .map_err(|error| format!("build TLS server config: {error}"))?;
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
