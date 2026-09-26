@@ -683,9 +683,9 @@ async function pollChat(){
     for(const item of data.messages){
       const sequence=Number(item.sequence||0);
       if(sequence<=chatCursor)continue;
-      chatCursor=sequence;
       appendChatMessage(item);
     }
+    chatCursor=Math.max(chatCursor,Number(data.next_sequence||0));
   }finally{
     chatPollInFlight=false;
   }
