@@ -49,15 +49,15 @@ Each chunk is independently verified before it contributes to complete-content v
 Complete verification:
 
 1. validates the descriptor and fixed bounds;
-2. accepts chunks in arbitrary arrival order so resume/retry does not require ordered transport delivery;
+2. consumes a canonical-order chunk iterator/reader; transfer and persistence layers may receive chunks out of order for retry/resume, but complete verification reads them back by canonical index;
 3. requires every canonical chunk index exactly once;
 4. verifies Attachment identity, index, offset, length and chunk SHA-256;
-5. hashes verified chunk bytes in canonical index order;
+5. hashes and releases each verified chunk before requesting the next one;
 6. requires the resulting SHA-256 to equal `AttachmentContentId`.
 
 Recomputing a forged per-chunk hash after payload tampering cannot defeat the final content identity check.
 
-Verification is streaming over chunk slices and does not concatenate the entire Attachment into one in-memory buffer.
+Verification consumes owned chunks one at a time and does not require the complete Attachment payload to be resident in memory. A durable resume store is expected to expose verified chunks in canonical index order for the final pass.
 
 ## Security and privacy
 
