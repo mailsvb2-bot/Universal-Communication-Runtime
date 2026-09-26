@@ -30,12 +30,8 @@ fn memory_attachment_store_deduplicates_and_rejects_conflicting_resume_chunk() {
     let store = MemoryLocalStore::default();
     let bytes = b"abcdefgh";
     let descriptor = descriptor(bytes);
-    let chunk = canonical_attachment_chunk(
-        descriptor.attachment_id.clone(),
-        0,
-        0,
-        bytes[..4].to_vec(),
-    );
+    let chunk =
+        canonical_attachment_chunk(descriptor.attachment_id.clone(), 0, 0, bytes[..4].to_vec());
 
     assert_eq!(
         store.persist_attachment_descriptor(&descriptor),
