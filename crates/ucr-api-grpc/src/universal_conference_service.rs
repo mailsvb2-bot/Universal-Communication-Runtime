@@ -41,8 +41,8 @@ use ucr_model::{
     UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
-    AUDIO_MEDIA_CAPABILITY, AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CALL_OBSERVE_PERMISSION,
-    CONFERENCE_ATTENDANCE_READ_PERMISSION, CONFERENCE_CREATE_PERMISSION,
+    AUDIO_MEDIA_CAPABILITY, AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION,
+    CALL_OBSERVE_PERMISSION, CONFERENCE_ATTENDANCE_READ_PERMISSION, CONFERENCE_CREATE_PERMISSION,
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
     CONFERENCE_READ_PERMISSION, CONFERENCE_SUBSCRIBE_PERMISSION, CanonicalError,
@@ -50,10 +50,9 @@ use ucr_protocol::{
     GROUP_MLS_CAPABILITY, H264_VIDEO_CODEC_CAPABILITY, MAX_CALL_PARTICIPANTS,
     MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT, OPUS_AUDIO_CODEC_CAPABILITY,
     SCREEN_SHARE_SEND_PERMISSION, SCREEN_SHARE_VIDEO_CAPABILITY, VIDEO_MEDIA_CAPABILITY,
-    VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
-    acknowledgement_for, canonical_capabilities, phase20_audio_capabilities,
-    phase21_video_capabilities, phase22_media_e2ee_capabilities, phase29_sfu_capabilities,
-    phase30_conference_capabilities,
+    VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, acknowledgement_for, canonical_capabilities,
+    phase20_audio_capabilities, phase21_video_capabilities, phase22_media_e2ee_capabilities,
+    phase29_sfu_capabilities, phase30_conference_capabilities,
 };
 use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
