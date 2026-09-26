@@ -1732,6 +1732,7 @@ mod tests {
             "id=\"chat-input\"",
             "sendChat",
             "pollChat",
+            "pendingChatPayload",
             "new Uint8Array(16)",
             "window.crypto.getRandomValues(bytes)",
             "/v1/realtime/webrtc/start",
