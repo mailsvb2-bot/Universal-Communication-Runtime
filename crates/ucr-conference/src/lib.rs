@@ -13,8 +13,8 @@ use ucr_media_e2ee::GroupMediaE2eeCapabilityProvider;
 use ucr_model::{
     AuthorizationRequest, CallId, CallParticipant, CallParticipantState, CallSession, CallSignal,
     CallSignalKind, CallSignallingState, ConferenceMediaSubscription, ConferenceSnapshot,
-    ConferenceStart, ConferenceSubscriptionSet, ConferenceTopology, DeviceId, GroupMemberState,
-    MediaKind, PrincipalRef, ScopedPrincipal, SfuForwardEnvelope, TenantScope,
+    ConferenceStart, ConferenceSubscriptionSet, ConferenceTopology, DeviceId, GroupId,
+    GroupMemberState, MediaKind, PrincipalRef, ScopedPrincipal, SfuForwardEnvelope, TenantScope,
 };
 use ucr_protocol::{
     AUDIO_RECEIVE_PERMISSION, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION,
@@ -85,6 +85,14 @@ struct RecipientSubscriptionState {
     subscriptions: Vec<ConferenceMediaSubscription>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RaisedHandState {
+    scope: TenantScope,
+    call_id: CallId,
+    conference_id: GroupId,
+    participant: PrincipalRef,
+}
+
 /// Shared bounded non-durable Conference routing preferences.
 ///
 /// Network/service adapters may create a short-lived `ConferenceRuntime` per request while
@@ -93,6 +101,7 @@ struct RecipientSubscriptionState {
 #[derive(Debug, Default)]
 pub struct ConferenceRuntimeState {
     subscriptions: Mutex<Vec<RecipientSubscriptionState>>,
+    raised_hands: Mutex<Vec<RaisedHandState>>,
 }
 
 impl ConferenceRuntimeState {
@@ -100,6 +109,7 @@ impl ConferenceRuntimeState {
     pub const fn new() -> Self {
         Self {
             subscriptions: Mutex::new(Vec::new()),
+            raised_hands: Mutex::new(Vec::new()),
         }
     }
 }
@@ -359,6 +369,101 @@ where
             subscriptions: set.subscriptions,
         });
         Ok(count)
+    }
+
+    /// Sets the authenticated participant's ephemeral raised-hand state.
+    ///
+    /// Raised-hand state is intentionally non-durable and shares the Conference runtime owner
+    /// with receive subscriptions. Restart clears it; clients may re-assert it after reconnect.
+    ///
+    /// # Errors
+    /// Rejects non-accepted participants, missing Conference stack/observe authority, or exhausted
+    /// bounded ephemeral state.
+    pub fn set_raised_hand(
+        &self,
+        actor: &ScopedPrincipal,
+        scope: &TenantScope,
+        call_id: &CallId,
+        raised: bool,
+    ) -> Result<(), ConferenceError> {
+        require_conference_stack(
+            self.conference_capabilities,
+            self.sfu_capabilities,
+            self.group_e2ee_capabilities,
+        )?;
+        authorize(self.authorization, actor, CALL_OBSERVE_PERMISSION)?;
+        let snapshot = conference_projection(self.store, actor, scope, call_id)?;
+        require_accepted_participant(&snapshot.call, &actor.principal)?;
+
+        let mut state = self
+            .state
+            .raised_hands
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        state.retain(|entry| {
+            entry.scope != *scope
+                || entry.call_id != *call_id
+                || entry.participant != actor.principal
+        });
+        if !raised {
+            return Ok(());
+        }
+        if state.len() >= MAX_TRACKED_CONFERENCE_RECIPIENT_SETS {
+            return Err(ConferenceError::SubscriptionCapacityExceeded);
+        }
+        state.push(RaisedHandState {
+            scope: scope.clone(),
+            call_id: call_id.clone(),
+            conference_id: snapshot.group_id,
+            participant: actor.principal.clone(),
+        });
+        Ok(())
+    }
+
+    /// Returns the bounded ephemeral raised-hand principals for one Conference.
+    ///
+    /// This is a projection only. Durable participant identity/role remains owned by the Universal
+    /// Conference store and callers must map principals back to their integration-facing identity.
+    ///
+    /// # Errors
+    /// Returns temporary-unavailable if the in-memory state lock is poisoned.
+    pub fn raised_hands(
+        &self,
+        scope: &TenantScope,
+        conference_id: &GroupId,
+    ) -> Result<Vec<PrincipalRef>, ConferenceError> {
+        let state = self
+            .state
+            .raised_hands
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        Ok(state
+            .iter()
+            .filter(|entry| entry.scope == *scope && entry.conference_id == *conference_id)
+            .map(|entry| entry.participant.clone())
+            .collect())
+    }
+
+    /// Clears one participant's raised-hand state for a realtime call without requiring the
+    /// participant to remain accepted after the leave transition.
+    ///
+    /// # Errors
+    /// Returns temporary-unavailable if the in-memory state lock is poisoned.
+    pub fn clear_raised_hand(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        participant: &PrincipalRef,
+    ) -> Result<(), ConferenceError> {
+        let mut state = self
+            .state
+            .raised_hands
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        state.retain(|entry| {
+            entry.scope != *scope || entry.call_id != *call_id || entry.participant != *participant
+        });
+        Ok(())
     }
 
     /// Routes one already-encrypted Conference frame through the Phase-29 SFU boundary.
