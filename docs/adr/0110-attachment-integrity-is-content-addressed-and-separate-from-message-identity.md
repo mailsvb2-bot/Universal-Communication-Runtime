@@ -38,7 +38,7 @@ UCR v1 defines:
 - `AttachmentDescriptor` with exact TenantScope, Attachment ID, content identity, size and bounded chunk layout;
 - `AttachmentChunk` with exact Attachment ID, index, offset, payload and per-chunk SHA-256;
 - deterministic chunk offsets and lengths;
-- complete verification that accepts out-of-order arrival but requires each canonical index exactly once;
+- complete verification over a canonical-order owned-chunk iterator; transport/storage may accept out-of-order resume chunks but must expose them by canonical index for the final pass;
 - independent chunk verification followed by full-content hash verification.
 
 The initial reference ceiling is 1 MiB per chunk, 65,536 chunks and therefore 64 GiB represented content.
@@ -55,9 +55,9 @@ Keeping Attachment bytes outside Message preserves one Message owner and keeps l
 
 - closes the missing canonical integrity/content-addressing primitive;
 - preserves Message/Event size boundaries;
-- supports retry/resume and out-of-order chunk arrival;
+- supports retry/resume and out-of-order chunk persistence;
 - makes integrity transport/provider independent;
-- avoids full-file concatenation during verification;
+- allows storage-backed verification that hashes and releases one owned chunk at a time instead of retaining the full payload;
 - creates a stable basis for local, Internet, P2P and future multi-source transfer.
 
 ## Disadvantages
@@ -102,7 +102,8 @@ Executable tests cover:
 
 - stable SHA-256 content identity including empty content;
 - bounded descriptor validation;
-- out-of-order/resumed chunk verification;
+- canonical-order streaming verification after out-of-order/resumed persistence;
+- rejection of out-of-order complete-verification streams;
 - chunk payload tampering;
 - forged recomputed chunk hash still failing full-content verification;
 - missing/duplicate chunk rejection;
