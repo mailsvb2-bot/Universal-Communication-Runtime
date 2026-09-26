@@ -1,8 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{AttachmentStore, DurableRecordStatus, DurableStoreError};
 use ucr_model::{
-    AttachmentChunk, AttachmentContentId, AttachmentDescriptor, AttachmentId, NamespaceId, OpaqueId,
-    TenantId, TenantScope,
+    AttachmentChunk, AttachmentContentId, AttachmentDescriptor, AttachmentId, NamespaceId,
+    OpaqueId, TenantId, TenantScope,
 };
 use ucr_protocol::{validate_attachment_descriptor, verify_attachment_chunk};
 
