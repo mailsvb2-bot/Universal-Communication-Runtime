@@ -120,6 +120,19 @@ struct ReactionReceiptResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct AudioLevelRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    level: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct ActiveSpeakerResponse {
+    ok: bool,
+    participant_id_b64: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct PublishRequest {
     #[serde(flatten)]
     session: SessionRequest,
@@ -321,6 +334,14 @@ async fn handle_request(
         },
         "/v1/realtime/reactions/list" => match decode_json::<ListReactionsRequest>(&body) {
             Ok(input) => list_reactions(&state, &token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/audio-level" => match decode_json::<AudioLevelRequest>(&body) {
+            Ok(input) => report_audio_level(&state, &token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/active-speaker" => match decode_json::<SessionRequest>(&body) {
+            Ok(input) => get_active_speaker(&state, &token, input).await,
             Err(error) => error.into_response(),
         },
         "/v1/realtime/media/publish" => match decode_json::<PublishRequest>(&body) {
@@ -691,6 +712,81 @@ async fn list_reactions(
                 StatusCode::CONFLICT,
                 "reactions_rejected",
                 "conference reaction list rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn report_audio_level(
+    state: &AppState,
+    token: &str,
+    input: AudioLevelRequest,
+) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeReportAudioLevelRequest {
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        level: input.level,
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.report_audio_level(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_report_audio_level_response::Result::Acknowledgement(_)) => api_ok(
+                "audio_level_reported",
+                "audio level reported",
+                None,
+                None,
+                None,
+            ),
+            Some(pb::realtime_report_audio_level_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "audio_level_rejected",
+                "audio level report rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn get_active_speaker(
+    state: &AppState,
+    token: &str,
+    input: SessionRequest,
+) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeGetActiveSpeakerRequest {
+        scope: Some(pb_scope(&input)),
+        call_id: Some(pb_id(&input.call)),
+        session_id: Some(pb_id(&input.session)),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.get_active_speaker(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_get_active_speaker_response::Result::ActiveSpeaker(value)) => {
+                let participant_id_b64 = value
+                    .participant
+                    .and_then(|participant| participant.principal_id)
+                    .map(|id| STANDARD.encode(id.value));
+                json_response(
+                    StatusCode::OK,
+                    &ActiveSpeakerResponse {
+                        ok: true,
+                        participant_id_b64,
+                    },
+                )
+            }
+            Some(pb::realtime_get_active_speaker_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "active_speaker_rejected",
+                "active speaker projection rejected",
             ),
         },
         Err(status) => grpc_error(&status),
