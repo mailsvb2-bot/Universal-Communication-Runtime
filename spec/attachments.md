@@ -1,6 +1,6 @@
 # Attachment Integrity and Content Addressing
 
-Status: **Prepared integrity foundation**. Durable Attachment storage, transfer scheduling, transport execution, public upload/download APIs and full file-transfer UX remain separate work.
+Status: **Prepared integrity + durable resume foundation**. Reference Memory/SQLite stores persist canonical Attachment descriptors and independently verified chunks; SQLite resume state survives restart and is derived from the earliest missing canonical chunk. Transfer scheduling, transport execution, public upload/download APIs and full file-transfer UX remain separate work.
 
 ## Canonical ownership
 
@@ -73,8 +73,6 @@ This slice does **not** claim that Canon file transfer is complete.
 
 Still required before the main Canon file-transfer/DoD path is closed:
 
-- durable Attachment metadata/content storage;
-- chunk persistence and restart-safe resume state;
 - upload/download public API/SDK surface;
 - transport execution and cancellation;
 - retry/backpressure/resource policy;
@@ -83,4 +81,4 @@ Still required before the main Canon file-transfer/DoD path is closed:
 - attachment retention/deletion/export behavior;
 - end-to-end file delivery tests through the Reference consumer.
 
-The purpose of this slice is to establish one canonical integrity/content-addressing contract that all later storage, APIs and transports must reuse.
+The canonical integrity/content-addressing contract is now reused by the reference Memory and SQLite stores. Durable chunk persistence is idempotent and conflict-safe; SQLite migration v45 adds descriptor/chunk tables and restart-safe resume derives from persisted chunk indices rather than a parallel transfer-state record.
