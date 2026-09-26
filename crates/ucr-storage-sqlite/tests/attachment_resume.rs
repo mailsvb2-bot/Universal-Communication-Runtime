@@ -4,10 +4,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use rusqlite::Connection;
 use ucr_core::{AttachmentStore, DurableRecordStatus, StorageProvider};
 use ucr_model::{AttachmentDescriptor, AttachmentId, OpaqueId, TenantId, TenantScope};
 use ucr_protocol::{attachment_content_id, canonical_attachment_chunk};
-use rusqlite::Connection;
 use ucr_storage_sqlite::{SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID};
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -113,7 +113,6 @@ fn sqlite_attachment_resume_state_survives_restart() {
         );
     }
 }
-
 
 #[test]
 fn sqlite_v44_migrates_to_v45_without_inventing_attachment_state() {
