@@ -817,6 +817,39 @@ where
         }))
     }
 
+    async fn list_raised_hands(
+        &self,
+        request: Request<pb::UniversalListRaisedHandsRequest>,
+    ) -> Result<Response<pb::UniversalListRaisedHandsResponse>, Status> {
+        let authentication = decode_universal_conference_authentication(request.metadata());
+        let decoded = decode_list_raised_hands(request.into_inner());
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok((scope, conference_id, integration_id, max_items))) => self
+                .admit_integration(
+                    &scope,
+                    authentication,
+                    &integration_id,
+                    CONFERENCE_READ_PERMISSION,
+                )
+                .and_then(|_| {
+                    list_raised_hands(self, &scope, &conference_id, &integration_id, max_items)
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::UniversalListRaisedHandsResponse {
+            result: Some(match result {
+                Ok(external_user_ids) => {
+                    pb::universal_list_raised_hands_response::Result::RaisedHands(
+                        pb::UniversalRaisedHandList { external_user_ids },
+                    )
+                }
+                Err(error) => {
+                    pb::universal_list_raised_hands_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
     async fn set_subscriptions(
         &self,
         request: Request<pb::UniversalSetSubscriptionsRequest>,
@@ -1230,6 +1263,23 @@ fn decode_remove_participant(
 
 fn decode_list_participants(
     value: pb::UniversalListParticipantsRequest,
+) -> Result<(TenantScope, GroupId, IntegrationId, usize), CanonicalError> {
+    let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
+    let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
+    let max_items = if value.max_items == 0 {
+        256
+    } else {
+        usize::try_from(value.max_items).map_err(|_| invalid_argument())?
+    };
+    if max_items > 1024 {
+        return Err(invalid_argument());
+    }
+    Ok((scope, conference_id, integration_id, max_items))
+}
+
+fn decode_list_raised_hands(
+    value: pb::UniversalListRaisedHandsRequest,
 ) -> Result<(TenantScope, GroupId, IntegrationId, usize), CanonicalError> {
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
@@ -2232,6 +2282,52 @@ fn list_participants<S: UniversalConferenceStore>(
     store
         .universal_conference_participants(scope, conference_id, max_items)
         .map_err(map_store_error)
+}
+
+fn list_raised_hands<C, A, S>(
+    service: &GrpcUniversalConferenceService<C, A, S>,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    integration_id: &IntegrationId,
+    max_items: usize,
+) -> Result<Vec<Vec<u8>>, CanonicalError>
+where
+    A: AuthorizationEvaluator,
+    S: UniversalConferenceStore
+        + GroupCallLookupStore
+        + CallStore
+        + GroupStore
+        + DeviceLifecycleStore
+        + PrincipalIdentityBindingStore
+        + TrustedSigningKeyResolver,
+{
+    conference_for_integration(&*service.store, scope, conference_id, integration_id)?;
+    let raised = prepared_conference_runtime(
+        &*service.authorization,
+        &*service.store,
+        Arc::clone(&service.state),
+    )
+    .raised_hands(scope, conference_id)
+    .map_err(|error| map_conference_error(&error))?;
+    if raised.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let participants = service
+        .store
+        .universal_conference_participants(scope, conference_id, MAX_CALL_PARTICIPANTS)
+        .map_err(map_store_error)?;
+    Ok(participants
+        .into_iter()
+        .filter(|participant| {
+            participant.active
+                && raised
+                    .iter()
+                    .any(|principal| principal == &participant.participant)
+        })
+        .take(max_items)
+        .map(|participant| participant.external_user_id)
+        .collect())
 }
 
 fn set_universal_subscriptions<C, A, S>(

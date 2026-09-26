@@ -192,6 +192,9 @@ async fn dispatch_post(path: &str, request: Request<Incoming>, state: &AppState)
         "/v1/participants/list" => {
             forward_list_participants(&mut client, &body, authorization.as_deref()).await
         }
+        "/v1/participants/raised-hands" => {
+            forward_list_raised_hands(&mut client, &body, authorization.as_deref()).await
+        }
         "/v1/subscriptions" => {
             forward_subscriptions(&mut client, &body, authorization.as_deref()).await
         }
@@ -612,6 +615,15 @@ struct RemoveParticipantJson {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListParticipantsJson {
+    scope: ScopeJson,
+    conference_id: String,
+    integration_id: String,
+    max_items: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListRaisedHandsJson {
     scope: ScopeJson,
     conference_id: String,
     integration_id: String,
@@ -1147,6 +1159,54 @@ async fn forward_list_participants(
         Some(pb::universal_list_participants_response::Result::Error(error)) => error_response(&error),
         None => empty_upstream(),
     })
+    .await
+}
+
+async fn forward_list_raised_hands(
+    client: &mut ConferenceClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<ListRaisedHandsJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let request = match (|| -> Result<_, TransportError> {
+        Ok(pb::UniversalListRaisedHandsRequest {
+            scope: Some(scope_of(&parsed.scope)?),
+            conference_id: Some(opaque(&parsed.conference_id)?),
+            integration_id: Some(opaque(&parsed.integration_id)?),
+            max_items: parsed.max_items,
+        })
+    })() {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(request, authorization) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(
+        client.list_raised_hands(request),
+        |response| match response.result {
+            Some(pb::universal_list_raised_hands_response::Result::RaisedHands(list)) => {
+                json_response(
+                    StatusCode::OK,
+                    &json!({
+                        "external_user_ids_b64": list
+                            .external_user_ids
+                            .iter()
+                            .map(|value| STANDARD.encode(value))
+                            .collect::<Vec<_>>()
+                    }),
+                )
+            }
+            Some(pb::universal_list_raised_hands_response::Result::Error(error)) => {
+                error_response(&error)
+            }
+            None => empty_upstream(),
+        },
+    )
     .await
 }
 

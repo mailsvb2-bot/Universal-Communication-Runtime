@@ -53,6 +53,7 @@ button:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 <button id="mic-toggle" class="secondary" disabled>Mute microphone</button>
 <button id="camera-toggle" class="secondary" disabled>Turn camera off</button>
 <button id="screen-toggle" class="secondary" disabled>Share screen</button>
+<button id="hand-toggle" class="secondary" disabled>Raise hand</button>
 </div>
 <div class="grid">
 <button id="join" class="primary">Join conference</button>
@@ -69,7 +70,7 @@ const ui={
   join:$("join"),leave:$("leave"),state:$("state"),webrtcState:$("webrtc-state"),
   packets:$("packets"),expires:$("expires"),status:$("status"),
   localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),
-  mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle")
+  mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle")
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
@@ -494,19 +495,19 @@ async function restartWebRtc(forceMedia){
 }
 async function activateAdmittedMedia(){
   if(!sessionActive||mediaActive)return;
-  mediaActive=true;ui.state.textContent="Connected";refreshLocalMediaControls();
+  mediaActive=true;ui.state.textContent="Connected";ui.handToggle.disabled=false;refreshLocalMediaControls();
   ui.status.textContent=policyAllows("audio")||policyAllows("camera")?"The host has started the conference. Requesting permitted camera/microphone access…":"The host has started the conference. Viewing mode does not request camera or microphone access.";
   openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive)ui.status.textContent="Realtime stream closed: "+e.message;});
   try{await startWebRtc(false);}catch(e){ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC start failed: "+e.message;scheduleWebRtcRetry();}
 }
 async function applyAdmissionState(state){
   if(state==="waiting_room"){
-    mediaActive=false;refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
+    mediaActive=false;ui.handToggle.disabled=true;refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
     ui.status.textContent="You are in the waiting room. Media will start automatically when the host starts the conference.";
     return;
   }
   if(state==="closed"){
-    mediaActive=false;
+    mediaActive=false;ui.handToggle.disabled=true;
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
     if(streamAbort){streamAbort.abort();streamAbort=null;}
@@ -552,7 +553,7 @@ async function leave(){
   teardownPeer();
   if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;ui.localVideo.srcObject=null;}
   if(wasActive)await closeServerPeer();
-  sessionActive=false;mediaActive=false;ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;
+  sessionActive=false;mediaActive=false;handRaised=false;ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
   if(wasActive){try{await api("/v1/realtime/leave",body());}catch(_){}}
   ui.state.textContent="Left";ui.status.textContent="Conference session closed.";ui.join.disabled=false;
@@ -565,6 +566,15 @@ function scheduleWaitingRoom(){
   waitTimer=setTimeout(()=>{waitTimer=null;ui.join.disabled=false;join();},delay);
   return true;
 }
+async function toggleRaisedHand(){
+  if(!sessionActive||!mediaActive)return;
+  const next=!handRaised;
+  await api("/v1/realtime/raised-hand",{...body(),raised:next});
+  handRaised=next;
+  ui.handToggle.textContent=handRaised?"Lower hand":"Raise hand";
+  ui.status.textContent=handRaised?"Your hand is raised.":"Your hand is lowered.";
+}
+ui.handToggle.addEventListener("click",()=>{toggleRaisedHand().catch(e=>{ui.status.textContent="Raised hand failed: "+e.message;});});
 ui.micToggle.addEventListener("click",async()=>{try{let track=localStream&&localStream.getAudioTracks()[0];if(!track){await ensureLocalTrack("audio");return;}track.enabled=!track.enabled;applyToggleLabels();}catch(e){ui.status.textContent="Microphone failed: "+e.message;}});
 ui.cameraToggle.addEventListener("click",async()=>{try{let track=localStream&&localStream.getVideoTracks()[0];if(!track){await ensureLocalTrack("camera");return;}track.enabled=!track.enabled;applyToggleLabels();}catch(e){ui.status.textContent="Camera failed: "+e.message;}});
 ui.screenToggle.addEventListener("click",async()=>{try{if(screenStream){await stopScreenShare(true);ui.status.textContent="Screen sharing stopped.";}else{await startScreenShare();ui.status.textContent="Screen sharing active through the endpoint E2EE adapter.";}}catch(e){ui.status.textContent="Screen sharing failed: "+e.message;}});

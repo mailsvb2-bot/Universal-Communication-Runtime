@@ -125,6 +125,19 @@ message RealtimeSetSubscriptionsResponse {
   }
 }
 
+message RealtimeSetRaisedHandRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  bool raised = 4;
+}
+
+message RealtimeSetRaisedHandResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
 
 enum WebRtcSdpType {
   WEB_RTC_SDP_TYPE_UNSPECIFIED = 0;
@@ -222,6 +235,7 @@ service RealtimeService {
   rpc HeartbeatRealtime(RealtimeHeartbeatRequest) returns (RealtimeHeartbeatResponse);
   rpc LeaveRealtime(RealtimeLeaveRequest) returns (RealtimeLeaveResponse);
   rpc SetSubscriptions(RealtimeSetSubscriptionsRequest) returns (RealtimeSetSubscriptionsResponse);
+  rpc SetRaisedHand(RealtimeSetRaisedHandRequest) returns (RealtimeSetRaisedHandResponse);
   rpc PublishMedia(RealtimePublishMediaRequest) returns (RealtimePublishMediaResponse);
   rpc SubscribeMedia(RealtimeSubscribeMediaRequest) returns (stream RealtimeDownlinkMedia);
   rpc StartWebRtc(RealtimeStartWebRtcRequest) returns (RealtimeStartWebRtcResponse);
