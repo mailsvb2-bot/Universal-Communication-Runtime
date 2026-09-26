@@ -310,7 +310,10 @@ mod tests {
     fn empty_attachment_has_stable_content_identity_and_zero_chunks() {
         let descriptor = descriptor_for(b"", 1024);
         assert_eq!(descriptor.chunk_count, 0);
-        assert_eq!(verify_complete_attachment(&descriptor, Vec::<AttachmentChunk>::new()), Ok(()));
+        assert_eq!(
+            verify_complete_attachment(&descriptor, Vec::<AttachmentChunk>::new()),
+            Ok(())
+        );
         assert_eq!(
             descriptor.content_id.sha256,
             [
