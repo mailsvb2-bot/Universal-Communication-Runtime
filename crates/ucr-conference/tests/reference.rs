@@ -360,6 +360,7 @@ fn accepted_recipient_can_drive_adaptive_media_to_audio_fallback() {
             &bob,
             &scope(),
             &start.call_id,
+            &SessionId::from_opaque(oid("adaptive-session")),
             &AdaptiveMediaTelemetry {
                 estimated_bandwidth_bps: 8_000_000,
                 packet_loss_basis_points: 20,
