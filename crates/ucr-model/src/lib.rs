@@ -3,6 +3,7 @@
 use core::fmt;
 
 mod adaptive_media;
+mod attachment;
 mod audio;
 mod bridge;
 mod call;
@@ -27,6 +28,7 @@ pub use adaptive_media::{
     AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage, AdaptiveMediaTelemetry,
     DeferredMediaFallback, MediaThermalState,
 };
+pub use attachment::{AttachmentChunk, AttachmentContentId, AttachmentDescriptor};
 pub use audio::{
     AudioChannelLayout, AudioCodecConfig, AudioFrameDuration, AudioStreamDescriptor,
     EncodedAudioFrame,

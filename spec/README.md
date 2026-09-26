@@ -30,4 +30,6 @@ Phase 40 adds `local-transport-api.md`: public `LocalTransportService` over the 
 Phase 40 also adds `mesh-api.md`: public `MeshService` over the existing Phase-28 Mesh runtime for bounded authenticated Group Message export/reconciliation, while peer identity/session evidence remains host-resolved and topology, Relay/NAT, route selection and retry stay outside the public client.
 Phase 40 also adds `recovery-api.md`: public `RecoveryService` over the canonical Recovery Plan and proof-gated Device recovery owners; Service Principal permissions admit the application channel but cannot replace recovery-authority or re-verification proofs.
 
+Post-roadmap Canon hardening adds `attachments.md`: a canonical Attachment descriptor, SHA-256 content identity, bounded chunks and fail-closed chunk/full-content integrity verification. Message remains reference-only; durable Attachment storage and transfer execution are not claimed by this integrity slice.
+
 Phase 46 begins the universal external-auth boundary with `m2m-authentication.md` and `m2m_auth.proto`: an OAuth2-compatible client-credentials contract over the existing canonical Service Account/Service Credential owner, explicit scope attenuation, audience/issuer metadata and JWKS/key-rotation requirements. This phase does not yet claim the production HTTPS token edge or bearer verification runtime.

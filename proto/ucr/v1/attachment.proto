@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+import "ucr/v1/identity.proto";
+
+// Immutable content identity for one attachment payload.
+// v1 is exactly SHA-256 over the complete attachment byte sequence.
+message AttachmentContentId {
+  bytes sha256 = 1;
+}
+
+// Canonical attachment metadata. Message carries only ordered attachment IDs.
+// Large binary payload never belongs in Message/Event bodies.
+message AttachmentDescriptor {
+  OpaqueId attachment_id = 1;
+  TenantScope scope = 2;
+  AttachmentContentId content_id = 3;
+  uint64 size_bytes = 4;
+  uint32 chunk_size_bytes = 5;
+  uint32 chunk_count = 6;
+  optional string media_type = 7;
+  optional string file_name = 8;
+}
+
+// One independently verifiable transfer chunk.
+// Chunks may be transferred/retried out of order; index + offset define canonical content order.
+message AttachmentChunk {
+  OpaqueId attachment_id = 1;
+  uint32 index = 2;
+  uint64 offset_bytes = 3;
+  bytes payload = 4;
+  bytes sha256 = 5;
+}

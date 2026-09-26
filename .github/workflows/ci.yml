@@ -162,6 +162,7 @@ jobs:
           test -s spec/crypto.md &&
           test -s spec/recovery.md &&
           test -s spec/conversation-message.md &&
+          test -s spec/attachments.md &&
           test -s spec/delivery.md &&
           test -s spec/sync.md &&
           test -s spec/integration-api.md &&
@@ -190,6 +191,7 @@ jobs:
         run: >-
           test -s proto/ucr/v1/runtime.proto &&
           test -s proto/ucr/v1/communication.proto &&
+          test -s proto/ucr/v1/attachment.proto &&
           test -s proto/ucr/v1/errors.proto &&
           test -s proto/ucr/v1/identity.proto &&
           test -s proto/ucr/v1/authorization.proto &&
