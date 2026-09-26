@@ -14,8 +14,7 @@ fn attachment_resume_reuses_canonical_storage_provider_and_sqlite_owner() {
     let memory = read("crates/ucr-storage-memory/src/lib.rs");
     let sqlite = read("crates/ucr-storage-sqlite/src/lib.rs");
     let sqlite_store = read("crates/ucr-storage-sqlite/src/attachment_store.rs");
-    let adr =
-        read("docs/adr/0111-attachment-resume-state-reuses-canonical-storage-provider.md");
+    let adr = read("docs/adr/0111-attachment-resume-state-reuses-canonical-storage-provider.md");
 
     assert!(core.contains("pub trait AttachmentStore: StorageProvider"));
     assert!(core.contains("fn persist_attachment_descriptor"));
