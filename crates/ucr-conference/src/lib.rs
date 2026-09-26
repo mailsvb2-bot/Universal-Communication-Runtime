@@ -641,6 +641,11 @@ where
             .chat_notifications
             .lock()
             .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        if let Some(existing) = state.events.iter().find(|entry| {
+            entry.scope == *scope && entry.call_id == *call_id && entry.message_id == *message_id
+        }) {
+            return Ok(existing.sequence);
+        }
         let sequence = state.next_sequence;
         state.next_sequence = sequence
             .checked_add(1)
