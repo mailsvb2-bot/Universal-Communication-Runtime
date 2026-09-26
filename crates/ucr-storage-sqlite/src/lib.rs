@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod anti_entropy_store;
+mod attachment_store;
 mod bridge_store;
 mod call_store;
 mod command_store;
@@ -90,7 +91,8 @@ const SQLITE_SCHEMA_V40: u32 = 40;
 const SQLITE_SCHEMA_V41: u32 = 41;
 const SQLITE_SCHEMA_V42: u32 = 42;
 const SQLITE_SCHEMA_V43: u32 = 43;
-pub const SQLITE_SCHEMA_VERSION: u32 = 44;
+const SQLITE_SCHEMA_V44: u32 = 44;
+pub const SQLITE_SCHEMA_VERSION: u32 = 45;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -472,7 +474,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v44(connection);
+        return verify_schema_v45(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -526,11 +528,17 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V41 => migrate_v41_to_v42(connection)?,
             SQLITE_SCHEMA_V42 => migrate_v42_to_v43(connection)?,
             SQLITE_SCHEMA_V43 => migrate_v43_to_v44(connection)?,
+            SQLITE_SCHEMA_V44 => migrate_v44_to_v45(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v44(connection)
+    verify_schema_v45(connection)
+}
+
+fn verify_schema_v45(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v44(connection)?;
+    attachment_store::verify_v45_objects(connection)
 }
 
 fn verify_schema_v44(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -655,6 +663,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     service_control_store::create_v42_objects(&transaction)?;
     runtime_worker_store::create_v43_objects(&transaction)?;
     service_control_store::create_v44_objects(&transaction)?;
+    attachment_store::create_v45_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1456,12 +1465,27 @@ fn migrate_v43_to_v44(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     service_control_store::create_v44_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V44)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v44(connection)
+}
+
+fn migrate_v44_to_v45(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v44(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    attachment_store::create_v45_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v45(connection)
 }
 
 fn verify_table_columns(
@@ -1612,7 +1636,26 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v45_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS attachment_chunks;
+         DROP TABLE IF EXISTS attachments;",
+    )
+}
+
+#[cfg(test)]
+fn test_remove_v44_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v45_objects(connection)?;
+    connection.execute_batch(
+        "DROP TRIGGER IF EXISTS service_audit_authentication_no_update;
+         DROP TRIGGER IF EXISTS service_audit_authentication_no_delete;
+         DROP TABLE IF EXISTS service_audit_authentication;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v38_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v44_objects(connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS runtime_worker_leases;
          DROP TABLE IF EXISTS service_recording_usage;

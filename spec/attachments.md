@@ -1,6 +1,6 @@
 # Attachment Integrity and Content Addressing
 
-Status: **Prepared integrity foundation**. Durable Attachment storage, transfer scheduling, transport execution, public upload/download APIs and full file-transfer UX remain separate work.
+Status: **Prepared integrity + durable resume foundation**. Canonical Attachment metadata/chunks now have Memory and SQLite storage owners with restart-safe chunk recovery. Transfer scheduling, transport execution, public upload/download APIs and full file-transfer UX remain separate work.
 
 ## Canonical ownership
 
@@ -73,8 +73,6 @@ This slice does **not** claim that Canon file transfer is complete.
 
 Still required before the main Canon file-transfer/DoD path is closed:
 
-- durable Attachment metadata/content storage;
-- chunk persistence and restart-safe resume state;
 - upload/download public API/SDK surface;
 - transport execution and cancellation;
 - retry/backpressure/resource policy;
