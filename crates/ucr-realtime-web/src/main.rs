@@ -1196,6 +1196,9 @@ mod tests {
         for required in [
             "navigator.mediaDevices.getUserMedia",
             "new RTCPeerConnection",
+            "/v1/realtime/raised-hand",
+            "id=\"hand-toggle\"",
+            "toggleRaisedHand",
             "/v1/realtime/webrtc/start",
             "/v1/realtime/webrtc/remote-description",
             "/v1/realtime/webrtc/ice",
