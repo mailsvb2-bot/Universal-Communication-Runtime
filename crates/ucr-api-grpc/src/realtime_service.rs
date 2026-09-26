@@ -376,6 +376,14 @@ where
                     conference_runtime(self)
                         .clear_audio_level(&claims.scope, &claims.call_id, &claims.participant)
                         .map_err(|error| map_conference_error(&error))?;
+                    conference_runtime(self)
+                        .clear_adaptive_media_session(
+                            &claims.scope,
+                            &claims.call_id,
+                            &claims.participant,
+                            &claims.session_id,
+                        )
+                        .map_err(|error| map_conference_error(&error))?;
                     Ok(pb_acknowledgement(acknowledgement_for(
                         claims.session_id.as_opaque().clone(),
                     )))
@@ -576,7 +584,13 @@ where
                     self.require_live_universal_conference(&claims)?;
                     let actor = actor_for(&claims);
                     let decision = conference_runtime(self)
-                        .observe_adaptive_media(&actor, &scope, &call_id, &telemetry)
+                        .observe_adaptive_media(
+                            &actor,
+                            &scope,
+                            &call_id,
+                            &claims.session_id,
+                            &telemetry,
+                        )
                         .map_err(|error| map_conference_error(&error))?;
                     Ok(pb_adaptive_media_decision(&decision))
                 }),
