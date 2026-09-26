@@ -12,7 +12,7 @@ use ucr_conference::{
 };
 use ucr_core::{
     AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
-    DurableRecordStatus, DurableStoreError, EventJournalStore, GroupMessageStore, GroupStore,
+    DurableRecordStatus, DurableStoreError, EventJournalStore, GroupMessageStore,
     PrincipalIdentityBindingStore,
     ServiceQuotaStore, UniversalConferenceStore,
 };
