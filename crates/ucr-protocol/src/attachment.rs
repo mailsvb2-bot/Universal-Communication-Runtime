@@ -130,38 +130,41 @@ pub fn verify_attachment_chunk(
     Ok(())
 }
 
-/// Verifies a complete attachment without concatenating the full payload in memory.
+/// Verifies a complete attachment from a canonical-order chunk stream.
 ///
-/// Input chunks may arrive out of order (resume/retry), but the complete set must contain each
-/// canonical index exactly once. Every chunk hash is checked before it contributes to the final
-/// content hash.
+/// Transfer/persistence layers may receive chunks out of order for retry/resume, but they must
+/// expose complete verification in canonical index order. The verifier consumes owned chunks one
+/// at a time, so a storage-backed iterator can release each payload after hashing instead of
+/// retaining the complete attachment in memory.
 ///
 /// # Errors
-/// Rejects invalid descriptors/chunks, missing or duplicate indices, or a full-content hash
-/// mismatch.
-pub fn verify_complete_attachment(
+/// Rejects invalid descriptors/chunks, missing, duplicate or out-of-order indices, or a
+/// full-content hash mismatch.
+pub fn verify_complete_attachment<I>(
     descriptor: &AttachmentDescriptor,
-    chunks: &[AttachmentChunk],
-) -> Result<(), AttachmentProtocolError> {
+    chunks: I,
+) -> Result<(), AttachmentProtocolError>
+where
+    I: IntoIterator<Item = AttachmentChunk>,
+{
     validate_attachment_descriptor(descriptor)?;
-    let expected_count = usize::try_from(descriptor.chunk_count)
-        .map_err(|_| AttachmentProtocolError::InvalidChunkCount)?;
-    if chunks.len() != expected_count {
-        return Err(AttachmentProtocolError::MissingOrDuplicateChunk);
-    }
-
-    let mut ordered: Vec<&AttachmentChunk> = chunks.iter().collect();
-    ordered.sort_unstable_by_key(|chunk| chunk.index);
 
     let mut content_hasher = Sha256::new();
-    for (expected_index, chunk) in ordered.into_iter().enumerate() {
-        let expected_index = u32::try_from(expected_index)
-            .map_err(|_| AttachmentProtocolError::InvalidChunkCount)?;
-        if chunk.index != expected_index {
+    let mut expected_index = 0_u32;
+
+    for chunk in chunks {
+        if expected_index >= descriptor.chunk_count || chunk.index != expected_index {
             return Err(AttachmentProtocolError::MissingOrDuplicateChunk);
         }
-        verify_attachment_chunk(descriptor, chunk)?;
+        verify_attachment_chunk(descriptor, &chunk)?;
         content_hasher.update(&chunk.bytes);
+        expected_index = expected_index
+            .checked_add(1)
+            .ok_or(AttachmentProtocolError::InvalidChunkCount)?;
+    }
+
+    if expected_index != descriptor.chunk_count {
+        return Err(AttachmentProtocolError::MissingOrDuplicateChunk);
     }
 
     let actual_content_id = AttachmentContentId {
@@ -242,14 +245,25 @@ mod tests {
     }
 
     #[test]
-    fn complete_attachment_verifies_out_of_order_resume_chunks() {
+    fn complete_attachment_verifies_canonical_stream_after_resume() {
+        let bytes = b"0123456789abcdef";
+        let descriptor = descriptor_for(bytes, 4);
+        let chunks = chunks_for(&descriptor, bytes);
+
+        assert_eq!(verify_complete_attachment(&descriptor, chunks), Ok(()));
+    }
+
+    #[test]
+    fn out_of_order_complete_stream_is_rejected() {
         let bytes = b"0123456789abcdef";
         let descriptor = descriptor_for(bytes, 4);
         let mut chunks = chunks_for(&descriptor, bytes);
         chunks.swap(0, 3);
-        chunks.swap(1, 2);
 
-        assert_eq!(verify_complete_attachment(&descriptor, &chunks), Ok(()));
+        assert_eq!(
+            verify_complete_attachment(&descriptor, chunks),
+            Err(AttachmentProtocolError::MissingOrDuplicateChunk)
+        );
     }
 
     #[test]
@@ -260,7 +274,7 @@ mod tests {
         chunks[1].bytes[0] ^= 0xff;
 
         assert_eq!(
-            verify_complete_attachment(&descriptor, &chunks),
+            verify_complete_attachment(&descriptor, chunks),
             Err(AttachmentProtocolError::ChunkIntegrityMismatch)
         );
     }
@@ -296,7 +310,7 @@ mod tests {
     fn empty_attachment_has_stable_content_identity_and_zero_chunks() {
         let descriptor = descriptor_for(b"", 1024);
         assert_eq!(descriptor.chunk_count, 0);
-        assert_eq!(verify_complete_attachment(&descriptor, &[]), Ok(()));
+        assert_eq!(verify_complete_attachment(&descriptor, Vec::<AttachmentChunk>::new()), Ok(()));
         assert_eq!(
             descriptor.content_id.sha256,
             [
