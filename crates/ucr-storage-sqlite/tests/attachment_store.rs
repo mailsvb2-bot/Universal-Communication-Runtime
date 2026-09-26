@@ -267,4 +267,8 @@ fn sqlite_corrupt_attachment_chunk_fails_closed_after_restart() {
         reopened.attachment_chunk(&descriptor.scope, &descriptor.attachment_id, 0),
         Err(DurableStoreError::Corrupt)
     );
+    assert_eq!(
+        reopened.attachment_resume_index(&descriptor.scope, &descriptor.attachment_id),
+        Err(DurableStoreError::Corrupt)
+    );
 }
