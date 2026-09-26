@@ -24,11 +24,11 @@ mod transport_orchestrator;
 mod universal_conference;
 mod video;
 mod webrtc;
-pub use attachment::{AttachmentChunk, AttachmentContentId, AttachmentDescriptor};
 pub use adaptive_media::{
     AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage, AdaptiveMediaTelemetry,
     DeferredMediaFallback, MediaThermalState,
 };
+pub use attachment::{AttachmentChunk, AttachmentContentId, AttachmentDescriptor};
 pub use audio::{
     AudioChannelLayout, AudioCodecConfig, AudioFrameDuration, AudioStreamDescriptor,
     EncodedAudioFrame,
