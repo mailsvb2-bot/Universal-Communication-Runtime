@@ -217,6 +217,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn https_edge_negotiates_http2_alpn() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("ucr-https-edge-h2-{stamp}"));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let (certificate, private_key) = mint_certificate(&directory);
+
+        let upstream = TcpListener::bind("127.0.0.1:0").await.expect("upstream");
+        let upstream_address = upstream.local_addr().expect("upstream address");
+        let edge = TcpListener::bind("127.0.0.1:0").await.expect("edge");
+        let edge_address = edge.local_addr().expect("edge address");
+        let acceptor = tls_acceptor(
+            certificate.to_str().expect("certificate path"),
+            private_key.to_str().expect("key path"),
+        )
+        .expect("acceptor");
+
+        tokio::spawn(async move {
+            let _ = upstream.accept().await.expect("upstream accept");
+        });
+        tokio::spawn(async move {
+            let (stream, _) = edge.accept().await.expect("edge accept");
+            super::proxy_connection(acceptor, stream, upstream_address)
+                .await
+                .expect("proxy");
+        });
+
+        let mut certificates =
+            std::io::BufReader::new(std::fs::File::open(&certificate).expect("cert"));
+        let certificate_der = CertificateDer::pem_reader_iter(&mut certificates)
+            .next()
+            .expect("certificate")
+            .expect("parse certificate");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate_der).expect("trust test certificate");
+        let mut client = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
+        let tcp = TcpStream::connect(edge_address).await.expect("connect edge");
+        let tls = connector
+            .connect(ServerName::try_from("localhost").expect("server name"), tcp)
+            .await
+            .expect("tls handshake");
+        assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
     async fn https_edge_proxies_tls_bytes_to_loopback_upstream() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
