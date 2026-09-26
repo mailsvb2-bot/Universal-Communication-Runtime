@@ -36,6 +36,9 @@ paths:
   /v1/participants/list:
     post:
       operationId: listParticipants
+  /v1/participants/raised-hands:
+    post:
+      operationId: listRaisedHands
   /v1/subscriptions:
     post:
       operationId: setSubscriptions
