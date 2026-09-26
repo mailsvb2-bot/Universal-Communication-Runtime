@@ -1876,6 +1876,7 @@ mod tests {
             "id=\"reaction-send\"",
             "publishReaction",
             "pollReactions",
+            "/v1/realtime/adaptive-media",
             "/v1/realtime/audio-level",
             "/v1/realtime/active-speaker",
             "startActiveSpeakerMonitoring",
