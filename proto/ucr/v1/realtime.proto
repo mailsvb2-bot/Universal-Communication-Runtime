@@ -218,11 +218,10 @@ message RealtimeSendChatMessageRequest {
   OpaqueId call_id = 2;
   OpaqueId session_id = 3;
   OpaqueId message_id = 4;
-  uint64 logical_order = 5;
-  int64 created_at_unix_ms = 6;
-  OpaqueId correlation_id = 7;
-  optional string idempotency_key = 8;
-  bytes content = 9;
+  int64 created_at_unix_ms = 5;
+  OpaqueId correlation_id = 6;
+  optional string idempotency_key = 7;
+  bytes content = 8;
 }
 
 message RealtimeChatMessageReceipt {
