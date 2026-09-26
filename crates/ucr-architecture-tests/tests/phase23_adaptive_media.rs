@@ -57,6 +57,28 @@ fn phase23_reuses_existing_media_controls_and_canon_signal_model() {
 }
 
 #[test]
+fn phase23_is_wired_into_conference_receive_routing_without_becoming_the_route_owner() {
+    let root = workspace();
+    let conference =
+        fs::read_to_string(root.join("crates/ucr-conference/src/lib.rs")).expect("conference");
+    let realtime =
+        fs::read_to_string(root.join("proto/ucr/v1/realtime.proto")).expect("realtime proto");
+
+    for required in [
+        "AdaptiveMediaController",
+        "observe_adaptive_media",
+        "adaptive_stage_allows_media",
+    ] {
+        assert!(
+            conference.contains(required),
+            "conference adaptive integration missing: {required}"
+        );
+    }
+    assert!(realtime.contains("rpc ReportAdaptiveMedia("));
+    assert!(realtime.contains("AdaptiveMediaTelemetry telemetry = 4;"));
+}
+
+#[test]
 fn phase23_creates_no_second_call_crypto_delivery_or_transport_brain() {
     let root = workspace();
     let sources = [
