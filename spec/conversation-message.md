@@ -27,7 +27,7 @@ Canonical IDs are offline-capable opaque IDs. No Message or Conversation identit
 
 `created_at_unix_ms` is display/context time. Security or durable ordering must not trust wall-clock time; `logical_order` is the canonical ordering field available in this foundation.
 
-Attachments are ordered references because user-visible attachment order can matter. Phase 9 does not yet implement Attachment storage/transfer.
+Attachments are ordered references because user-visible attachment order can matter. The canonical integrity/content-addressing contract now lives in `spec/attachments.md`; durable Attachment storage and transfer execution remain separate from Message ownership.
 
 Relations support `REPLY`, `QUOTE`, `EDIT`, `REACTION`, `THREAD_PARENT`, `FORWARD`, and `REFERENCE`. Relations are immutable references; reuse of one scoped Message ID with different semantics is a conflict, not an overwrite.
 ## 4. Canonicalization and validation
