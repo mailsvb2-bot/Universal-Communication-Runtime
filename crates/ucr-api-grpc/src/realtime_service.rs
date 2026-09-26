@@ -367,7 +367,7 @@ where
                         .map_err(map_registry_error)?;
                     self.append_attendance(&transition)?;
                     conference_runtime(self)
-                        .clear_raised_hand(&claims.scope, &claims.call_id, &claims.principal)
+                        .clear_raised_hand(&claims.scope, &claims.call_id, &claims.participant)
                         .map_err(|error| map_conference_error(&error))?;
                     Ok(pb_acknowledgement(acknowledgement_for(
                         claims.session_id.as_opaque().clone(),
