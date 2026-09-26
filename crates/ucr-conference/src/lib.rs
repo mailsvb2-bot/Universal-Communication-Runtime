@@ -14,7 +14,8 @@ use ucr_model::{
     AuthorizationRequest, CallId, CallParticipant, CallParticipantState, CallSession, CallSignal,
     CallSignalKind, CallSignallingState, ConferenceMediaSubscription, ConferenceSnapshot,
     ConferenceStart, ConferenceSubscriptionSet, ConferenceTopology, DeviceId, GroupId,
-    GroupMemberState, MediaKind, PrincipalRef, ScopedPrincipal, SfuForwardEnvelope, TenantScope,
+    GroupMemberState, MediaKind, MessageId, PrincipalRef, ScopedPrincipal, SfuForwardEnvelope,
+    TenantScope,
 };
 use ucr_protocol::{
     AUDIO_RECEIVE_PERMISSION, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION,
@@ -118,6 +119,28 @@ struct ConferenceReactionLog {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConferenceChatNotification {
+    pub sequence: u64,
+    pub message_id: MessageId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConferenceChatNotificationState {
+    scope: TenantScope,
+    call_id: CallId,
+    sequence: u64,
+    message_id: MessageId,
+}
+
+#[derive(Debug, Default)]
+struct ConferenceChatNotificationLog {
+    next_sequence: u64,
+    events: Vec<ConferenceChatNotificationState>,
+}
+
+const MAX_TRACKED_CONFERENCE_CHAT_NOTIFICATIONS: usize = 4096;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveSpeakerState {
     scope: TenantScope,
     call_id: CallId,
@@ -138,6 +161,7 @@ pub struct ConferenceRuntimeState {
     subscriptions: Mutex<Vec<RecipientSubscriptionState>>,
     raised_hands: Mutex<Vec<RaisedHandState>>,
     reactions: Mutex<ConferenceReactionLog>,
+    chat_notifications: Mutex<ConferenceChatNotificationLog>,
     active_speaker_reports: Mutex<Vec<ActiveSpeakerState>>,
 }
 
@@ -148,6 +172,10 @@ impl ConferenceRuntimeState {
             subscriptions: Mutex::new(Vec::new()),
             raised_hands: Mutex::new(Vec::new()),
             reactions: Mutex::new(ConferenceReactionLog {
+                next_sequence: 1,
+                events: Vec::new(),
+            }),
+            chat_notifications: Mutex::new(ConferenceChatNotificationLog {
                 next_sequence: 1,
                 events: Vec::new(),
             }),
@@ -591,6 +619,86 @@ where
                 sequence: entry.sequence,
                 participant: entry.participant.clone(),
                 value: entry.value.clone(),
+            })
+            .collect())
+    }
+
+    /// Appends one ephemeral notification for a newly persisted canonical Conference chat Message.
+    ///
+    /// Only the Message ID and runtime sequence are retained here; Message content remains owned by
+    /// the canonical Group/Message store.
+    ///
+    /// # Errors
+    /// Returns temporary-unavailable or resource-exhausted on bounded runtime-state failure.
+    pub fn notify_chat_message(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        message_id: &MessageId,
+    ) -> Result<u64, ConferenceError> {
+        let mut state = self
+            .state
+            .chat_notifications
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        let sequence = state.next_sequence;
+        state.next_sequence = sequence
+            .checked_add(1)
+            .ok_or(ConferenceError::SubscriptionCapacityExceeded)?;
+        state.events.push(ConferenceChatNotificationState {
+            scope: scope.clone(),
+            call_id: call_id.clone(),
+            sequence,
+            message_id: message_id.clone(),
+        });
+        if state.events.len() > MAX_TRACKED_CONFERENCE_CHAT_NOTIFICATIONS {
+            let overflow = state.events.len() - MAX_TRACKED_CONFERENCE_CHAT_NOTIFICATIONS;
+            state.events.drain(..overflow);
+        }
+        Ok(sequence)
+    }
+
+    /// Lists live-chat Message IDs after one ephemeral runtime cursor.
+    ///
+    /// Access is gated through the accepted Conference participant owner before notification IDs are
+    /// exposed; callers still read payloads through the canonical Group Message store.
+    ///
+    /// # Errors
+    /// Rejects non-accepted participants or unavailable runtime state.
+    pub fn chat_notifications_after(
+        &self,
+        actor: &ScopedPrincipal,
+        scope: &TenantScope,
+        call_id: &CallId,
+        after_sequence: u64,
+        max_items: usize,
+    ) -> Result<Vec<ConferenceChatNotification>, ConferenceError> {
+        require_conference_stack(
+            self.conference_capabilities,
+            self.sfu_capabilities,
+            self.group_e2ee_capabilities,
+        )?;
+        authorize(self.authorization, actor, CALL_OBSERVE_PERMISSION)?;
+        let snapshot = conference_projection(self.store, actor, scope, call_id)?;
+        require_accepted_participant(&snapshot.call, &actor.principal)?;
+
+        let state = self
+            .state
+            .chat_notifications
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        Ok(state
+            .events
+            .iter()
+            .filter(|entry| {
+                entry.scope == *scope
+                    && entry.call_id == *call_id
+                    && entry.sequence > after_sequence
+            })
+            .take(max_items.min(MAX_TRACKED_CONFERENCE_CHAT_NOTIFICATIONS))
+            .map(|entry| ConferenceChatNotification {
+                sequence: entry.sequence,
+                message_id: entry.message_id.clone(),
             })
             .collect())
     }
