@@ -46,7 +46,10 @@ impl fmt::Debug for AttachmentDescriptor {
             .field("size_bytes", &self.size_bytes)
             .field("chunk_size_bytes", &self.chunk_size_bytes)
             .field("chunk_count", &self.chunk_count)
-            .field("media_type", &self.media_type.as_ref().map(|_| "<redacted>"))
+            .field(
+                "media_type",
+                &self.media_type.as_ref().map(|_| "<redacted>"),
+            )
             .field("file_name", &self.file_name.as_ref().map(|_| "<redacted>"))
             .finish()
     }
