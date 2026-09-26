@@ -1644,8 +1644,18 @@ fn test_remove_v45_objects(connection: &Connection) -> Result<(), rusqlite::Erro
 }
 
 #[cfg(test)]
-fn test_remove_v38_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+fn test_remove_v44_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
     test_remove_v45_objects(connection)?;
+    connection.execute_batch(
+        "DROP TRIGGER IF EXISTS service_audit_authentication_no_update;
+         DROP TRIGGER IF EXISTS service_audit_authentication_no_delete;
+         DROP TABLE IF EXISTS service_audit_authentication;",
+    )
+}
+
+#[cfg(test)]
+fn test_remove_v38_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v44_objects(connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS runtime_worker_leases;
          DROP TABLE IF EXISTS service_recording_usage;
