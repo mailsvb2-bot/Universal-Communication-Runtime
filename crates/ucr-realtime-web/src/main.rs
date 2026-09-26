@@ -525,11 +525,7 @@ async fn leave(state: &AppState, token: &str, input: SessionRequest) -> HttpResp
     }
 }
 
-async fn set_raised_hand(
-    state: &AppState,
-    token: &str,
-    input: RaisedHandRequest,
-) -> HttpResponse {
+async fn set_raised_hand(state: &AppState, token: &str, input: RaisedHandRequest) -> HttpResponse {
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeSetRaisedHandRequest {
         scope: Some(pb_scope(&input.session)),
@@ -544,7 +540,11 @@ async fn set_raised_hand(
     match client.set_raised_hand(request).await {
         Ok(response) => match response.into_inner().result {
             Some(pb::realtime_set_raised_hand_response::Result::Acknowledgement(_)) => api_ok(
-                if input.raised { "hand_raised" } else { "hand_lowered" },
+                if input.raised {
+                    "hand_raised"
+                } else {
+                    "hand_lowered"
+                },
                 if input.raised {
                     "raised hand set"
                 } else {
