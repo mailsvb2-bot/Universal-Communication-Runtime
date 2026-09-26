@@ -190,6 +190,7 @@ struct SequencedChatMessageResponse {
 struct ChatMessageListResponse {
     ok: bool,
     messages: Vec<SequencedChatMessageResponse>,
+    next_sequence: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -905,6 +906,7 @@ async fn list_chat_messages(
                     &ChatMessageListResponse {
                         ok: true,
                         messages,
+                        next_sequence: list.next_sequence,
                     },
                 )
             }
