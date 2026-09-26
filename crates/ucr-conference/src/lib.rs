@@ -627,11 +627,22 @@ where
             .lock()
             .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
         state.retain(|entry| {
+            entry.reported_at_unix_ms <= reported_at_unix_ms
+                && reported_at_unix_ms.saturating_sub(entry.reported_at_unix_ms)
+                    <= ACTIVE_SPEAKER_REPORT_TTL_MS
+        });
+        state.retain(|entry| {
             entry.scope != *scope
                 || entry.call_id != *call_id
                 || entry.participant != actor.principal
         });
-        if state.len() >= MAX_CALL_PARTICIPANTS {
+        if state
+            .iter()
+            .filter(|entry| entry.scope == *scope && entry.call_id == *call_id)
+            .count()
+            >= MAX_CALL_PARTICIPANTS
+            || state.len() >= MAX_TRACKED_CONFERENCE_RECIPIENT_SETS
+        {
             return Err(ConferenceError::SubscriptionCapacityExceeded);
         }
         state.push(ActiveSpeakerState {
