@@ -1311,6 +1311,74 @@ mod subscription_state_tests {
     }
 
     #[test]
+    fn adaptive_stage_filters_realtime_media_without_changing_subscription_ownership() {
+        for stage in [
+            AdaptiveMediaStage::Video1080p,
+            AdaptiveMediaStage::Video720p,
+            AdaptiveMediaStage::Video480p,
+            AdaptiveMediaStage::VideoLowFps,
+        ] {
+            assert!(adaptive_stage_allows_media(stage, MediaKind::Video));
+            assert!(adaptive_stage_allows_media(stage, MediaKind::Audio));
+        }
+        for stage in [
+            AdaptiveMediaStage::Audio,
+            AdaptiveMediaStage::AudioLowBitrate,
+        ] {
+            assert!(!adaptive_stage_allows_media(stage, MediaKind::Video));
+            assert!(adaptive_stage_allows_media(stage, MediaKind::Audio));
+        }
+        assert!(!adaptive_stage_allows_media(
+            AdaptiveMediaStage::EventualFallbackRequired,
+            MediaKind::Video
+        ));
+        assert!(!adaptive_stage_allows_media(
+            AdaptiveMediaStage::EventualFallbackRequired,
+            MediaKind::Audio
+        ));
+    }
+
+    #[test]
+    fn adaptive_state_is_pruned_when_recipient_leaves_or_call_terminates() {
+        let call_id = CallId::from_opaque(oid("call-prune"));
+        let recipient = principal("bob");
+        let decision = AdaptiveMediaDecision {
+            stage: AdaptiveMediaStage::Audio,
+            changed: true,
+            requires_media_renegotiation: true,
+            video: None,
+            opus_target_bitrate_bps: Some(48_000),
+            deferred_fallbacks: Vec::new(),
+            pressures: Vec::new(),
+        };
+        let entry = AdaptiveRecipientState {
+            scope: scope(),
+            call_id: call_id.clone(),
+            recipient: recipient.clone(),
+            controller: AdaptiveMediaController::new(AdaptiveMediaStage::Audio),
+            decision,
+        };
+
+        let mut state = vec![entry.clone()];
+        let recipient_left = call(
+            CallSignallingState::Active,
+            CallParticipantState::Accepted,
+            CallParticipantState::Left,
+        );
+        prune_adaptive_state(&mut state, &scope(), &call_id, Some(&recipient_left));
+        assert!(state.is_empty());
+
+        let mut state = vec![entry];
+        let terminated = call(
+            CallSignallingState::Terminated,
+            CallParticipantState::Accepted,
+            CallParticipantState::Accepted,
+        );
+        prune_adaptive_state(&mut state, &scope(), &call_id, Some(&terminated));
+        assert!(state.is_empty());
+    }
+
+    #[test]
     fn chat_notification_append_is_idempotent_and_monotonic() {
         let mut log = ConferenceChatNotificationLog {
             next_sequence: 1,
