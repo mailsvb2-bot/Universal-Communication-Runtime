@@ -648,10 +648,10 @@ async function startActiveSpeakerMonitoring(){
   reportLocalAudioLevel().catch(()=>{});
   pollActiveSpeaker().catch(()=>{});
 }
-function newOpaqueId(prefix){
-  if(window.crypto&&typeof window.crypto.randomUUID==="function")return prefix+"-"+window.crypto.randomUUID();
-  const bytes=new Uint8Array(16);window.crypto.getRandomValues(bytes);
-  return prefix+"-"+Array.from(bytes,b=>b.toString(16).padStart(2,"0")).join("");
+function newOpaqueId(){
+  const bytes=new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes,b=>b.toString(16).padStart(2,"0")).join("");
 }
 function appendChatMessage(item){
   const row=document.createElement("div");
@@ -666,8 +666,8 @@ async function sendChat(){
   if(!sessionActive||!mediaActive)return;
   const content=ui.chatInput.value;
   if(!content.trim())return;
-  const message_id=newOpaqueId("msg");
-  const correlation_id=newOpaqueId("corr");
+  const message_id=newOpaqueId();
+  const correlation_id=newOpaqueId();
   const payload={...body(),message_id,created_at_unix_ms:Date.now(),correlation_id,idempotency_key:message_id,content};
   await api("/v1/realtime/chat/send",payload);
   ui.chatInput.value="";
