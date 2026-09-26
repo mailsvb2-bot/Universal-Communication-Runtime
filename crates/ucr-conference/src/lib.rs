@@ -16,7 +16,7 @@ use ucr_model::{
     CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, ConferenceMediaSubscription, ConferenceSnapshot, ConferenceStart,
     ConferenceSubscriptionSet, ConferenceTopology, DeviceId, GroupId, GroupMemberState, MediaKind,
-    MessageId, PrincipalRef, ScopedPrincipal, SfuForwardEnvelope, TenantScope,
+    MessageId, PrincipalRef, ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantScope,
 };
 use ucr_protocol::{
     AUDIO_RECEIVE_PERMISSION, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION,
