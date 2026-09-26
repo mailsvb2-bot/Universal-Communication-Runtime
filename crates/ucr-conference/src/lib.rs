@@ -9,10 +9,12 @@ use ucr_core::{
     DurableStoreError, GroupStore, PrincipalIdentityBindingStore,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
+use ucr_media_adaptive::{AdaptiveMediaController, AdaptiveMediaError};
 use ucr_media_e2ee::GroupMediaE2eeCapabilityProvider;
 use ucr_model::{
-    AuthorizationRequest, CallId, CallParticipant, CallParticipantState, CallSession, CallSignal,
-    CallSignalKind, CallSignallingState, ConferenceMediaSubscription, ConferenceSnapshot,
+    AdaptiveMediaDecision, AdaptiveMediaStage, AdaptiveMediaTelemetry, AuthorizationRequest, CallId,
+    CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
+    CallSignallingState, ConferenceMediaSubscription, ConferenceSnapshot,
     ConferenceStart, ConferenceSubscriptionSet, ConferenceTopology, DeviceId, GroupId,
     GroupMemberState, MediaKind, MessageId, PrincipalRef, ScopedPrincipal, SfuForwardEnvelope,
     TenantScope,
@@ -59,6 +61,7 @@ pub enum ConferenceError {
     SubscriptionStateUnavailable,
     SubscriptionCapacityExceeded,
     InvalidAudioLevel,
+    Adaptive(AdaptiveMediaError),
     Sfu(SfuError),
 }
 
@@ -74,6 +77,12 @@ impl From<DurableStoreError> for ConferenceError {
     }
 }
 
+impl From<AdaptiveMediaError> for ConferenceError {
+    fn from(error: AdaptiveMediaError) -> Self {
+        Self::Adaptive(error)
+    }
+}
+
 impl From<SfuError> for ConferenceError {
     fn from(error: SfuError) -> Self {
         Self::Sfu(error)
@@ -86,6 +95,15 @@ struct RecipientSubscriptionState {
     call_id: CallId,
     recipient: PrincipalRef,
     subscriptions: Vec<ConferenceMediaSubscription>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AdaptiveRecipientState {
+    scope: TenantScope,
+    call_id: CallId,
+    recipient: PrincipalRef,
+    controller: AdaptiveMediaController,
+    decision: AdaptiveMediaDecision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +181,7 @@ pub struct ConferenceRuntimeState {
     reactions: Mutex<ConferenceReactionLog>,
     chat_notifications: Mutex<ConferenceChatNotificationLog>,
     active_speaker_reports: Mutex<Vec<ActiveSpeakerState>>,
+    adaptive_media: Mutex<Vec<AdaptiveRecipientState>>,
 }
 
 impl Default for ConferenceRuntimeState {
@@ -186,6 +205,7 @@ impl ConferenceRuntimeState {
                 events: Vec::new(),
             }),
             active_speaker_reports: Mutex::new(Vec::new()),
+            adaptive_media: Mutex::new(Vec::new()),
         }
     }
 }
@@ -821,6 +841,59 @@ where
         Ok(())
     }
 
+    /// Observes one authenticated recipient's ephemeral adaptive-media telemetry.
+    ///
+    /// The Phase-23 controller remains the only policy owner. Conference stores only bounded
+    /// per-recipient controller state so the resulting stage can affect receive routing.
+    ///
+    /// # Errors
+    /// Rejects non-accepted participants, invalid telemetry, or exhausted ephemeral state.
+    pub fn observe_adaptive_media(
+        &self,
+        actor: &ScopedPrincipal,
+        scope: &TenantScope,
+        call_id: &CallId,
+        telemetry: &AdaptiveMediaTelemetry,
+    ) -> Result<AdaptiveMediaDecision, ConferenceError> {
+        require_conference_stack(
+            self.conference_capabilities,
+            self.sfu_capabilities,
+            self.group_e2ee_capabilities,
+        )?;
+        authorize(self.authorization, actor, CONFERENCE_SUBSCRIBE_PERMISSION)?;
+        self.prune_subscriptions(scope, call_id)?;
+        let snapshot = conference_projection(self.store, actor, scope, call_id)?;
+        require_accepted_participant(&snapshot.call, &actor.principal)?;
+
+        let mut state = self
+            .state
+            .adaptive_media
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        if let Some(existing) = state.iter_mut().find(|entry| {
+            entry.scope == *scope
+                && entry.call_id == *call_id
+                && entry.recipient == actor.principal
+        }) {
+            let decision = existing.controller.observe(telemetry)?;
+            existing.decision = decision.clone();
+            return Ok(decision);
+        }
+        if state.len() >= MAX_TRACKED_CONFERENCE_RECIPIENT_SETS {
+            return Err(ConferenceError::SubscriptionCapacityExceeded);
+        }
+        let mut controller = AdaptiveMediaController::new(AdaptiveMediaStage::Video1080p);
+        let decision = controller.observe(telemetry)?;
+        state.push(AdaptiveRecipientState {
+            scope: scope.clone(),
+            call_id: call_id.clone(),
+            recipient: actor.principal.clone(),
+            controller,
+            decision: decision.clone(),
+        });
+        Ok(decision)
+    }
+
     /// Routes one already-encrypted Conference frame through the Phase-29 SFU boundary.
     ///
     /// # Errors
@@ -877,6 +950,11 @@ where
             .subscriptions
             .lock()
             .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        let adaptive = self
+            .state
+            .adaptive_media
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
         let mut recipients = Vec::new();
         for entry in state.iter().filter(|entry| {
             entry.scope == call.scope
@@ -885,7 +963,17 @@ where
                     subscription.source == *source && subscription.media_kind == media_kind
                 })
         }) {
-            if is_accepted_participant(call, &entry.recipient) {
+            let stage = adaptive
+                .iter()
+                .find(|candidate| {
+                    candidate.scope == call.scope
+                        && candidate.call_id == call.call_id
+                        && candidate.recipient == entry.recipient
+                })
+                .map(|candidate| candidate.decision.stage);
+            if is_accepted_participant(call, &entry.recipient)
+                && stage.is_none_or(|stage| adaptive_stage_allows_media(stage, media_kind))
+            {
                 recipients.push(entry.recipient.clone());
             }
         }
@@ -904,6 +992,13 @@ where
             .lock()
             .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
         prune_subscription_state(&mut state, scope, call_id, call.as_ref());
+        drop(state);
+        let mut adaptive = self
+            .state
+            .adaptive_media
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        prune_adaptive_state(&mut adaptive, scope, call_id, call.as_ref());
         Ok(())
     }
 }
@@ -962,6 +1057,40 @@ fn prune_subscription_state(
             .retain(|subscription| is_accepted_participant(call, &subscription.source));
         !entry.subscriptions.is_empty()
     });
+}
+
+fn prune_adaptive_state(
+    state: &mut Vec<AdaptiveRecipientState>,
+    scope: &TenantScope,
+    call_id: &CallId,
+    call: Option<&CallSession>,
+) {
+    let Some(call) = call else {
+        state.retain(|entry| entry.scope != *scope || entry.call_id != *call_id);
+        return;
+    };
+    if call.signalling_state == CallSignallingState::Terminated {
+        state.retain(|entry| entry.scope != *scope || entry.call_id != *call_id);
+        return;
+    }
+    state.retain(|entry| {
+        entry.scope != *scope
+            || entry.call_id != *call_id
+            || is_accepted_participant(call, &entry.recipient)
+    });
+}
+
+const fn adaptive_stage_allows_media(stage: AdaptiveMediaStage, media_kind: MediaKind) -> bool {
+    match media_kind {
+        MediaKind::Video => matches!(
+            stage,
+            AdaptiveMediaStage::Video1080p
+                | AdaptiveMediaStage::Video720p
+                | AdaptiveMediaStage::Video480p
+                | AdaptiveMediaStage::VideoLowFps
+        ),
+        MediaKind::Audio => stage != AdaptiveMediaStage::EventualFallbackRequired,
+    }
 }
 
 fn is_accepted_participant(call: &CallSession, principal: &PrincipalRef) -> bool {
