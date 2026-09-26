@@ -22,13 +22,12 @@ use ucr_model::{
     AdaptiveMediaTelemetry, CallId, CallParticipantState, CallSignal, CallSignalKind,
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
     ConferenceParticipantRole, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
-    DeliveryState, DeviceId, DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame,
-    EventEnvelope, EventId, GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature,
-    DeferredMediaFallback, IceServerConfig, KeyId, MediaKind, MediaThermalState, MessageEnvelope,
-    MessageId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, ScopedPrincipal, SessionId,
-    SfuForwardEnvelope, SfuForwardTarget, TenantScope, UniversalConferenceLifecycle,
-    VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
-    WebRtcSessionDescription,
+    DeferredMediaFallback, DeliveryState, DeviceId, DeviceLifecycleState, DeviceRef,
+    EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
+    GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind, MediaThermalState,
+    MessageEnvelope, MessageId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, ScopedPrincipal,
+    SessionId, SfuForwardEnvelope, SfuForwardTarget, TenantScope, UniversalConferenceLifecycle,
+    VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType, WebRtcSessionDescription,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
@@ -1959,8 +1958,7 @@ fn decode_adaptive_media_telemetry(
         .map(u8::try_from)
         .transpose()
         .map_err(|_| invalid_argument())?;
-    let battery_percent =
-        u8::try_from(value.battery_percent).map_err(|_| invalid_argument())?;
+    let battery_percent = u8::try_from(value.battery_percent).map_err(|_| invalid_argument())?;
     let thermal_state = match pb::MediaThermalState::try_from(value.thermal_state)
         .map_err(|_| invalid_argument())?
     {
