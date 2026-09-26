@@ -1732,6 +1732,8 @@ mod tests {
             "id=\"chat-input\"",
             "sendChat",
             "pollChat",
+            "new Uint8Array(16)",
+            "window.crypto.getRandomValues(bytes)",
             "/v1/realtime/webrtc/start",
             "/v1/realtime/webrtc/remote-description",
             "/v1/realtime/webrtc/ice",
@@ -1759,6 +1761,7 @@ mod tests {
             );
         }
         assert!(!CLIENT_HTML.contains("UCR_WEBRTC_TURN_SECRET"));
+        assert!(!CLIENT_HTML.contains("randomUUID"));
     }
 
     #[test]
