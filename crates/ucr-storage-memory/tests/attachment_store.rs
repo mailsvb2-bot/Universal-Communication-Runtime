@@ -103,12 +103,8 @@ fn memory_attachment_store_rejects_missing_descriptor_and_semantic_conflicts() {
     let bytes = b"abcdefgh";
     let descriptor = descriptor(bytes, 4);
     let store = MemoryLocalStore::default();
-    let chunk0 = canonical_attachment_chunk(
-        descriptor.attachment_id.clone(),
-        0,
-        0,
-        bytes[0..4].to_vec(),
-    );
+    let chunk0 =
+        canonical_attachment_chunk(descriptor.attachment_id.clone(), 0, 0, bytes[0..4].to_vec());
 
     assert_eq!(
         store.persist_attachment_chunk(&descriptor.scope, &chunk0),
