@@ -408,69 +408,80 @@ async fn handle_request(
         Err(error) => return Ok(error.into_response()),
     };
 
-    let response = match path.as_str() {
-        "/v1/realtime/join" => match decode_json::<SessionRequest>(&body) {
-            Ok(input) => join(&state, &token, input).await,
+    let response = handle_post_route(&state, &token, &path, &body).await;
+
+    Ok(with_cors(response, origin.as_deref()))
+}
+
+async fn handle_post_route(
+    state: &AppState,
+    token: &str,
+    path: &str,
+    body: &[u8],
+) -> HttpResponse {
+    match path {
+        "/v1/realtime/join" => match decode_json::<SessionRequest>(body) {
+            Ok(input) => join(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/heartbeat" => match decode_json::<HeartbeatRequest>(&body) {
-            Ok(input) => heartbeat(&state, &token, input).await,
+        "/v1/realtime/heartbeat" => match decode_json::<HeartbeatRequest>(body) {
+            Ok(input) => heartbeat(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/leave" => match decode_json::<SessionRequest>(&body) {
-            Ok(input) => leave(&state, &token, input).await,
+        "/v1/realtime/leave" => match decode_json::<SessionRequest>(body) {
+            Ok(input) => leave(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/raised-hand" => match decode_json::<RaisedHandRequest>(&body) {
-            Ok(input) => set_raised_hand(&state, &token, input).await,
+        "/v1/realtime/raised-hand" => match decode_json::<RaisedHandRequest>(body) {
+            Ok(input) => set_raised_hand(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/reactions/publish" => match decode_json::<PublishReactionRequest>(&body) {
-            Ok(input) => publish_reaction(&state, &token, input).await,
+        "/v1/realtime/reactions/publish" => match decode_json::<PublishReactionRequest>(body) {
+            Ok(input) => publish_reaction(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/reactions/list" => match decode_json::<ListReactionsRequest>(&body) {
-            Ok(input) => list_reactions(&state, &token, input).await,
+        "/v1/realtime/reactions/list" => match decode_json::<ListReactionsRequest>(body) {
+            Ok(input) => list_reactions(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/adaptive-media" => match decode_json::<AdaptiveMediaRequest>(&body) {
-            Ok(input) => report_adaptive_media(&state, &token, input).await,
+        "/v1/realtime/adaptive-media" => match decode_json::<AdaptiveMediaRequest>(body) {
+            Ok(input) => report_adaptive_media(state, token, input).await,
             Err(error) => error.into_response(),
         },
         "/v1/realtime/audio-level" | "/v1/realtime/active-speaker" => {
-            handle_active_speaker_route(&state, &token, &path, &body).await
+            handle_active_speaker_route(state, token, path, body).await
         }
         "/v1/realtime/chat/send" | "/v1/realtime/chat/get" | "/v1/realtime/chat/list" => {
-            handle_chat_route(&state, &token, &path, &body).await
+            handle_chat_route(state, token, path, body).await
         }
-        "/v1/realtime/media/publish" => match decode_json::<PublishRequest>(&body) {
-            Ok(input) => publish_media(&state, &token, input).await,
+        "/v1/realtime/media/publish" => match decode_json::<PublishRequest>(body) {
+            Ok(input) => publish_media(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/media/stream" => match decode_json::<SessionRequest>(&body) {
-            Ok(input) => subscribe_media(&state, &token, input).await,
+        "/v1/realtime/media/stream" => match decode_json::<SessionRequest>(body) {
+            Ok(input) => subscribe_media(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/webrtc/start" => match decode_json::<SessionRequest>(&body) {
-            Ok(input) => start_webrtc(&state, &token, input).await,
+        "/v1/realtime/webrtc/start" => match decode_json::<SessionRequest>(body) {
+            Ok(input) => start_webrtc(state, token, input).await,
             Err(error) => error.into_response(),
         },
         "/v1/realtime/webrtc/remote-description" => {
-            match decode_json::<WebRtcRemoteDescriptionRequest>(&body) {
-                Ok(input) => set_webrtc_remote_description(&state, &token, input).await,
+            match decode_json::<WebRtcRemoteDescriptionRequest>(body) {
+                Ok(input) => set_webrtc_remote_description(state, token, input).await,
                 Err(error) => error.into_response(),
             }
         }
-        "/v1/realtime/webrtc/ice" => match decode_json::<WebRtcIceCandidateRequest>(&body) {
-            Ok(input) => add_webrtc_ice_candidate(&state, &token, input).await,
+        "/v1/realtime/webrtc/ice" => match decode_json::<WebRtcIceCandidateRequest>(body) {
+            Ok(input) => add_webrtc_ice_candidate(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/webrtc/restart" => match decode_json::<SessionRequest>(&body) {
-            Ok(input) => restart_webrtc(&state, &token, input).await,
+        "/v1/realtime/webrtc/restart" => match decode_json::<SessionRequest>(body) {
+            Ok(input) => restart_webrtc(state, token, input).await,
             Err(error) => error.into_response(),
         },
-        "/v1/realtime/webrtc/close" => match decode_json::<SessionRequest>(&body) {
-            Ok(input) => close_webrtc(&state, &token, input).await,
+        "/v1/realtime/webrtc/close" => match decode_json::<SessionRequest>(body) {
+            Ok(input) => close_webrtc(state, token, input).await,
             Err(error) => error.into_response(),
         },
         _ => api_error(
@@ -478,12 +489,10 @@ async fn handle_request(
             "not_found",
             "realtime route not found",
         ),
-    };
-
-    Ok(with_cors(response, origin.as_deref()))
+    }
 }
 
-fn parse_allowed_origins(raw: &str) -> Result<Vec<String>, String> {
+fn parse_allowed_originsfn parse_allowed_origins(raw: &str) -> Result<Vec<String>, String> {
     let mut origins = Vec::new();
     for candidate in raw
         .split(',')
