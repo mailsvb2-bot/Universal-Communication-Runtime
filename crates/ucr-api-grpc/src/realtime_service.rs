@@ -662,7 +662,8 @@ where
                     let correlation_id = decode_opaque(body.correlation_id)?;
                     if body.idempotency_key.as_ref().is_some_and(|value| {
                         value.is_empty() || value.len() > MAX_IDEMPOTENCY_KEY_LEN
-                    }) {
+                    }) || std::str::from_utf8(&body.content).is_err()
+                    {
                         return Err(invalid_argument());
                     }
 
