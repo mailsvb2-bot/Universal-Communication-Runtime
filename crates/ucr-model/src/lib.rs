@@ -3,6 +3,7 @@
 use core::fmt;
 
 mod adaptive_media;
+mod attachment;
 mod audio;
 mod bridge;
 mod call;
@@ -23,6 +24,7 @@ mod transport_orchestrator;
 mod universal_conference;
 mod video;
 mod webrtc;
+pub use attachment::{AttachmentChunk, AttachmentContentId, AttachmentDescriptor};
 pub use adaptive_media::{
     AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage, AdaptiveMediaTelemetry,
     DeferredMediaFallback, MediaThermalState,
