@@ -1848,6 +1848,75 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_stage_filters_exact_recipient_sessions() {
+        let now = system_now_unix_ms().expect("clock");
+        let call_id = CallId::from_opaque(id("adaptive-call"));
+        let recipient = participant();
+        let registry = RealtimeSessionRegistry::new(8, 2);
+        let constrained = RealtimeSessionClaims {
+            scope: scope(),
+            call_id: call_id.clone(),
+            participant: recipient.clone(),
+            device_id: Some(DeviceId::from_opaque(id("adaptive-device-a"))),
+            session_id: SessionId::from_opaque(id("adaptive-session-a")),
+            issued_at_unix_ms: now,
+            not_before_unix_ms: now,
+            expires_at_unix_ms: now + 60_000,
+            use_policy: JoinGrantUsePolicy::Reusable,
+        };
+        let healthy = RealtimeSessionClaims {
+            device_id: Some(DeviceId::from_opaque(id("adaptive-device-b"))),
+            session_id: SessionId::from_opaque(id("adaptive-session-b")),
+            ..constrained.clone()
+        };
+        registry
+            .join(constrained.clone(), now)
+            .expect("constrained join");
+        registry.join(healthy.clone(), now).expect("healthy join");
+        let mut constrained_downlink = registry
+            .take_downlink(&constrained, now)
+            .expect("constrained downlink");
+        let mut healthy_downlink = registry
+            .take_downlink(&healthy, now)
+            .expect("healthy downlink");
+
+        registry
+            .set_adaptive_media_stage(&constrained, AdaptiveMediaStage::Audio, now)
+            .expect("constrained stage");
+        registry
+            .set_adaptive_media_stage(&healthy, AdaptiveMediaStage::Video1080p, now)
+            .expect("healthy stage");
+
+        let frame = envelope(
+            call_id,
+            PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("adaptive-source")),
+                kind: PrincipalKind::Person,
+            },
+        );
+        let target = SfuForwardTarget { recipient };
+
+        registry
+            .forward_encrypted(&target, &frame)
+            .expect("session-aware fanout");
+        assert!(constrained_downlink.try_recv().is_err());
+        assert!(healthy_downlink.try_recv().is_ok());
+
+        registry
+            .set_adaptive_media_stage(
+                &healthy,
+                AdaptiveMediaStage::EventualFallbackRequired,
+                now,
+            )
+            .expect("healthy fallback");
+        registry
+            .forward_encrypted(&target, &frame)
+            .expect("intentional suppression is not transport failure");
+        assert!(constrained_downlink.try_recv().is_err());
+        assert!(healthy_downlink.try_recv().is_err());
+    }
+
+    #[test]
     fn multi_device_backpressure_is_preflighted_before_any_new_enqueue() {
         let now = system_now_unix_ms().expect("clock");
         let call_id = CallId::from_opaque(id("call"));
