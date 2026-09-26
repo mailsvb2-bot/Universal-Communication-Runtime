@@ -92,7 +92,7 @@ const ui={
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
-let reactionCursor=0,chatCursor=0,chatFallbackOrder=0,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
+let reactionCursor=0,chatCursor=0,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_CHUNK_MAGIC="UCRCHK01";
 const E2EE_CHUNK_HEADER_BYTES=24;
@@ -648,18 +648,6 @@ async function startActiveSpeakerMonitoring(){
   reportLocalAudioLevel().catch(()=>{});
   pollActiveSpeaker().catch(()=>{});
 }
-function nextChatLogicalOrder(){
-  const key="ucr.chat.order."+claims.tenant_id+"."+(claims.namespace_id||"")+"."+claims.call_id+"."+claims.participant_id;
-  try{
-    const current=Number(localStorage.getItem(key)||"0");
-    const next=Number.isSafeInteger(current)&&current>=0?current+1:1;
-    localStorage.setItem(key,String(next));
-    return next;
-  }catch(_){
-    chatFallbackOrder+=1;
-    return chatFallbackOrder;
-  }
-}
 function newOpaqueId(prefix){
   if(window.crypto&&typeof window.crypto.randomUUID==="function")return prefix+"-"+window.crypto.randomUUID();
   const bytes=new Uint8Array(16);window.crypto.getRandomValues(bytes);
@@ -680,7 +668,7 @@ async function sendChat(){
   if(!content.trim())return;
   const message_id=newOpaqueId("msg");
   const correlation_id=newOpaqueId("corr");
-  const payload={...body(),message_id,logical_order:nextChatLogicalOrder(),created_at_unix_ms:Date.now(),correlation_id,idempotency_key:message_id,content};
+  const payload={...body(),message_id,created_at_unix_ms:Date.now(),correlation_id,idempotency_key:message_id,content};
   await api("/v1/realtime/chat/send",payload);
   ui.chatInput.value="";
   await pollChat();
