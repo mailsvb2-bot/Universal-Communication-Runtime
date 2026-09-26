@@ -521,7 +521,9 @@ where
             .lock()
             .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
         let sequence = state.next_sequence;
-        state.next_sequence = state.next_sequence.saturating_add(1).max(sequence + 1);
+        state.next_sequence = sequence
+            .checked_add(1)
+            .ok_or(ConferenceError::SubscriptionCapacityExceeded)?;
         state.events.push(ConferenceReactionState {
             scope: scope.clone(),
             call_id: call_id.clone(),
