@@ -22,8 +22,8 @@ use ucr_protocol::{
     ConferenceProtocolError, GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MLS_CAPABILITY,
     MAX_CALL_PARTICIPANTS, MAX_TRACKED_CONFERENCE_REACTIONS, MAX_TRACKED_CONFERENCE_RECIPIENT_SETS,
     SFU_MEDIA_CAPABILITY, VIDEO_RECEIVE_PERMISSION, canonical_capabilities,
-    canonical_conference_reaction, canonical_conference_start, canonical_conference_subscription_set,
-    is_conference_group_kind,
+    canonical_conference_reaction, canonical_conference_start,
+    canonical_conference_subscription_set, is_conference_group_kind,
     phase30_conference_capabilities, validate_conference_snapshot,
 };
 use ucr_sfu::{SfuCapabilityProvider, SfuError, SfuForwardOutcome, SfuForwardSink, SfuRuntime};
