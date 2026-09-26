@@ -17,7 +17,8 @@ mod store_forward;
 mod universal_conference;
 
 use ucr_model::{
-    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, BridgeActionId, BridgeActionRecord,
+    AntiEntropyCursor, AntiEntropyPage, AttachmentChunk, AttachmentDescriptor, AttachmentId,
+    AuthorizationRequest, BridgeActionId, BridgeActionRecord,
     BridgeActionState, BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState,
     CapabilityDescriptor, CommandEnvelope, CommandId, CommunicationIntent, ConversationId,
     ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState,
@@ -752,6 +753,56 @@ pub trait StorageProvider: core::fmt::Debug + Send + Sync {
     /// # Errors
     /// Returns an explicit storage failure if health cannot be established.
     fn health(&self) -> Result<StorageHealth, DurableStoreError>;
+}
+
+/// Durable canonical Attachment metadata + chunk persistence.
+///
+/// This is the storage owner for Attachment payload state. Message remains reference-only.
+/// Equal retries deduplicate; the same scoped Attachment ID/chunk index cannot be redefined with
+/// different bytes or metadata.
+pub trait AttachmentStore: StorageProvider {
+    /// Persists or deduplicates one immutable Attachment descriptor.
+    ///
+    /// # Errors
+    /// Returns invalid/conflict/storage failures.
+    fn persist_attachment_descriptor(
+        &self,
+        descriptor: &AttachmentDescriptor,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one exact scoped Attachment descriptor.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn attachment_descriptor(
+        &self,
+        scope: &TenantScope,
+        attachment_id: &AttachmentId,
+    ) -> Result<Option<AttachmentDescriptor>, DurableStoreError>;
+
+    /// Persists or deduplicates one verified Attachment chunk.
+    ///
+    /// The descriptor must already exist and the chunk must satisfy the canonical integrity/layout
+    /// contract for that descriptor.
+    ///
+    /// # Errors
+    /// Returns invalid/conflict/storage failures.
+    fn persist_attachment_chunk(
+        &self,
+        scope: &TenantScope,
+        chunk: &AttachmentChunk,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one exact chunk for restart-safe resume/final verification.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn attachment_chunk(
+        &self,
+        scope: &TenantScope,
+        attachment_id: &AttachmentId,
+        index: u32,
+    ) -> Result<Option<AttachmentChunk>, DurableStoreError>;
 }
 
 /// Durable recovery-plan capability. Recovery secrets are not part of this store.
