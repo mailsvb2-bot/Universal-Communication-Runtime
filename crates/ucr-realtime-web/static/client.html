@@ -92,7 +92,7 @@ const ui={
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
-let reactionCursor=0,chatCursor=0,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
+let reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_CHUNK_MAGIC="UCRCHK01";
 const E2EE_CHUNK_HEADER_BYTES=24;
@@ -578,7 +578,7 @@ async function leave(){
   teardownPeer();
   if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;ui.localVideo.srcObject=null;}
   if(wasActive)await closeServerPeer();
-  sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
+  sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
   if(wasActive){try{await api("/v1/realtime/leave",body());}catch(_){}}
   ui.state.textContent="Left";ui.status.textContent="Conference session closed.";ui.join.disabled=false;
@@ -666,10 +666,12 @@ async function sendChat(){
   if(!sessionActive||!mediaActive)return;
   const content=ui.chatInput.value;
   if(!content.trim())return;
-  const message_id=newOpaqueId();
-  const correlation_id=newOpaqueId();
-  const payload={...body(),message_id,created_at_unix_ms:Date.now(),correlation_id,idempotency_key:message_id,content};
+  const payload=pendingChatPayload&&pendingChatPayload.content===content
+    ?pendingChatPayload
+    :(()=>{const message_id=newOpaqueId();return {...body(),message_id,created_at_unix_ms:Date.now(),correlation_id:newOpaqueId(),idempotency_key:message_id,content};})();
+  pendingChatPayload=payload;
   await api("/v1/realtime/chat/send",payload);
+  pendingChatPayload=null;
   ui.chatInput.value="";
   await pollChat();
 }
