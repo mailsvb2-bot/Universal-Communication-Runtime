@@ -495,7 +495,9 @@ where
         Ok(Response::new(pb::RealtimePublishReactionResponse {
             result: Some(match result {
                 Ok(receipt) => pb::realtime_publish_reaction_response::Result::Receipt(receipt),
-                Err(error) => pb::realtime_publish_reaction_response::Result::Error(pb_error(error)),
+                Err(error) => {
+                    pb::realtime_publish_reaction_response::Result::Error(pb_error(error))
+                }
             }),
         }))
     }
@@ -540,9 +542,7 @@ where
         };
         Ok(Response::new(pb::RealtimeListReactionsResponse {
             result: Some(match result {
-                Ok(reactions) => {
-                    pb::realtime_list_reactions_response::Result::Reactions(reactions)
-                }
+                Ok(reactions) => pb::realtime_list_reactions_response::Result::Reactions(reactions),
                 Err(error) => pb::realtime_list_reactions_response::Result::Error(pb_error(error)),
             }),
         }))
