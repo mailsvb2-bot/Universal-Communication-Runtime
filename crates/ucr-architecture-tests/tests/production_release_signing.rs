@@ -43,6 +43,7 @@ fn production_release_requires_exact_main_push_proof() {
         "REQUIRED_MAIN_WORKFLOWS",
         r#""CI""#,
         r#""Conformance""#,
+        r#""Browser Compatibility""#,
         r#""Phase 42 AI Actor""#,
         r#""Phase 43 Chaos Lab""#,
         r#""Phase 44 Supply Chain""#,
@@ -61,6 +62,7 @@ fn production_release_requires_exact_main_push_proof() {
     assert!(workflow.contains("gh run list"));
     assert!(workflow.contains(r#"--commit "$SOURCE_COMMIT""#));
     assert!(workflow.contains("tools/production_release.py emit-readiness"));
+    assert!(helper.contains(r#"evidence("Browser Compatibility", "Conformance", "CI")"#));
 }
 
 #[test]
