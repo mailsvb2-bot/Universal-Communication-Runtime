@@ -81,7 +81,7 @@ use ucr_protocol::{
     validate_trusted_signing_key_descriptor,
 };
 
-const SCHEMA_VERSION: u32 = 12;
+const SCHEMA_VERSION: u32 = 13;
 type ScopeKey = (String, Option<String>);
 type CommandKey = (ScopeKey, String);
 type CommandRefKey = (ScopeKey, String);
