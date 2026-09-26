@@ -825,6 +825,9 @@ where
                             max_items,
                         )
                         .map_err(|error| map_conference_error(&error))?;
+                    let next_sequence = notifications
+                        .last()
+                        .map_or(body.after_sequence, |notification| notification.sequence);
                     let mut messages = Vec::with_capacity(notifications.len());
                     for notification in notifications {
                         let Some(message) = self
@@ -839,7 +842,10 @@ where
                             message: Some(pb_realtime_chat_message(&message)),
                         });
                     }
-                    Ok(pb::RealtimeChatMessageList { messages })
+                    Ok(pb::RealtimeChatMessageList {
+                        messages,
+                        next_sequence,
+                    })
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
