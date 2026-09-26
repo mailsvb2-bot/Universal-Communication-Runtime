@@ -338,7 +338,7 @@ async fn handle_request(
         },
         "/v1/realtime/audio-level" | "/v1/realtime/active-speaker" => {
             handle_active_speaker_route(&state, &token, &path, &body).await
-        },
+        }
         "/v1/realtime/media/publish" => match decode_json::<PublishRequest>(&body) {
             Ok(input) => publish_media(&state, &token, input).await,
             Err(error) => error.into_response(),
