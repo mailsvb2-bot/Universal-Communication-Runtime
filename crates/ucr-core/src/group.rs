@@ -138,7 +138,7 @@ pub trait GroupMessageStore: GroupStore + MessageStore {
     ) -> Result<DurableRecordStatus, DurableStoreError>;
 
     /// Atomically assigns the next canonical logical order in the Group Conversation and persists
-    /// one Message. The caller must supply logical_order=0 as an allocation sentinel.
+    /// one Message. The caller must supply `logical_order=0` as an allocation sentinel.
     ///
     /// Identical retries preserve the originally allocated logical order and return Duplicate.
     ///
