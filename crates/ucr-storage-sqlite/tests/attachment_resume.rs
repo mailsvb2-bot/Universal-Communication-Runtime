@@ -7,7 +7,8 @@ use std::{
 use ucr_core::{AttachmentStore, DurableRecordStatus, StorageProvider};
 use ucr_model::{AttachmentDescriptor, AttachmentId, OpaqueId, TenantId, TenantScope};
 use ucr_protocol::{attachment_content_id, canonical_attachment_chunk};
-use ucr_storage_sqlite::{SQLITE_SCHEMA_VERSION, SqliteLocalStore};
+use rusqlite::Connection;
+use ucr_storage_sqlite::{SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID};
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -111,4 +112,45 @@ fn sqlite_attachment_resume_state_survives_restart() {
             Ok(Some(second))
         );
     }
+}
+
+
+#[test]
+fn sqlite_v44_migrates_to_v45_without_inventing_attachment_state() {
+    let db = TestDb::new();
+
+    {
+        let store = SqliteLocalStore::open(&db.0).expect("initialize current store");
+        assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+    }
+
+    {
+        let connection = Connection::open(&db.0).expect("open raw store");
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 DROP TABLE IF EXISTS attachment_chunks;
+                 DROP TABLE IF EXISTS attachments;
+                 PRAGMA foreign_keys=ON;",
+            )
+            .expect("remove v45 attachment objects");
+        connection
+            .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
+            .expect("preserve UCR store ownership");
+        connection
+            .pragma_update(None, "user_version", 44_u32)
+            .expect("simulate exact v44 store");
+    }
+
+    let migrated = SqliteLocalStore::open(&db.0).expect("migrate v44 to v45");
+    assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+    let descriptor = descriptor(b"abcdefgh");
+    assert_eq!(
+        migrated.attachment_descriptor(&descriptor.scope, &descriptor.attachment_id),
+        Ok(None)
+    );
+    assert_eq!(
+        migrated.persist_attachment_descriptor(&descriptor),
+        Ok(DurableRecordStatus::Persisted)
+    );
 }
