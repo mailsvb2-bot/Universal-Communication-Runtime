@@ -674,9 +674,7 @@ where
                         .store
                         .group(&scope, &snapshot.group_id)
                         .map_err(map_store_error)?
-                        .ok_or_else(|| {
-                            CanonicalError::new(CanonicalErrorCode::Internal)
-                        })?;
+                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
                     let author_device = validate_device_claim(&*self.store, &claims)?;
                     let message = MessageEnvelope {
                         message_id: message_id.clone(),
@@ -760,9 +758,7 @@ where
                         .store
                         .group(&scope, &snapshot.group_id)
                         .map_err(map_store_error)?
-                        .ok_or_else(|| {
-                            CanonicalError::new(CanonicalErrorCode::Internal)
-                        })?;
+                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
                     let message = self
                         .store
                         .group_message(&actor, &scope, &message_id)
