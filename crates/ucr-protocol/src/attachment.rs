@@ -301,7 +301,7 @@ mod tests {
         chunks[3] = chunks[2].clone();
 
         assert_eq!(
-            verify_complete_attachment(&descriptor, &chunks),
+            verify_complete_attachment(&descriptor, chunks),
             Err(AttachmentProtocolError::MissingOrDuplicateChunk)
         );
     }
