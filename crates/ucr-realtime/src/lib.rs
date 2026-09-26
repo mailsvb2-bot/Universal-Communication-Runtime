@@ -12,9 +12,8 @@ use sha2::Sha256;
 use tokio::sync::mpsc;
 use ucr_core::generate_opaque_id;
 use ucr_model::{
-    AdaptiveMediaStage, CallId, DeviceId, NamespaceId, OpaqueId, PrincipalId,
-    PrincipalKind, PrincipalRef, ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantId,
-    TenantScope,
+    AdaptiveMediaStage, CallId, DeviceId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind,
+    PrincipalRef, ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantId, TenantScope,
 };
 use ucr_protocol::adaptive_stage_allows_media;
 use ucr_sfu::{SfuForwardSink, SfuForwardSinkError};
@@ -1903,11 +1902,7 @@ mod tests {
         assert!(healthy_downlink.try_recv().is_ok());
 
         registry
-            .set_adaptive_media_stage(
-                &healthy,
-                AdaptiveMediaStage::EventualFallbackRequired,
-                now,
-            )
+            .set_adaptive_media_stage(&healthy, AdaptiveMediaStage::EventualFallbackRequired, now)
             .expect("healthy fallback");
         registry
             .forward_encrypted(&target, &frame)
