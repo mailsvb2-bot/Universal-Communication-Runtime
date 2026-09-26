@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 ucr-core = { path = "../ucr-core" }
 ucr-crypto = { path = "../ucr-crypto" }
+ucr-media-adaptive = { path = "../ucr-media-adaptive" }
 ucr-media-e2ee = { path = "../ucr-media-e2ee" }
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
