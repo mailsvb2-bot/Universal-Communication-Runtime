@@ -147,8 +147,10 @@ pub use commands::{
 };
 pub use conference::{
     CONFERENCE_CAPABILITY, ConferenceProtocolError, MAX_CONFERENCE_INVITEES,
-    MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT, MAX_TRACKED_CONFERENCE_RECIPIENT_SETS,
-    canonical_conference_start, canonical_conference_subscription_set, is_conference_group_kind,
+    MAX_CONFERENCE_REACTION_BYTES, MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT,
+    MAX_TRACKED_CONFERENCE_REACTIONS, MAX_TRACKED_CONFERENCE_RECIPIENT_SETS,
+    canonical_conference_reaction, canonical_conference_start, canonical_conference_subscription_set,
+    is_conference_group_kind,
     is_mls_conference_capability, phase30_conference_capabilities, validate_conference_snapshot,
 };
 pub use crypto_contract::{
