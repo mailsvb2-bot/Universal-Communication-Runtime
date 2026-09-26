@@ -213,6 +213,51 @@ message RealtimeGetActiveSpeakerResponse {
   }
 }
 
+message RealtimeSendChatMessageRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  OpaqueId message_id = 4;
+  uint64 logical_order = 5;
+  int64 created_at_unix_ms = 6;
+  OpaqueId correlation_id = 7;
+  optional string idempotency_key = 8;
+  bytes content = 9;
+}
+
+message RealtimeChatMessageReceipt {
+  OpaqueId message_id = 1;
+}
+
+message RealtimeSendChatMessageResponse {
+  oneof result {
+    RealtimeChatMessageReceipt receipt = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeGetChatMessageRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  OpaqueId message_id = 4;
+}
+
+message RealtimeChatMessage {
+  OpaqueId message_id = 1;
+  PrincipalRef author = 2;
+  int64 created_at_unix_ms = 3;
+  uint64 logical_order = 4;
+  bytes content = 5;
+}
+
+message RealtimeGetChatMessageResponse {
+  oneof result {
+    RealtimeChatMessage message = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 enum WebRtcSdpType {
   WEB_RTC_SDP_TYPE_UNSPECIFIED = 0;
   WEB_RTC_SDP_TYPE_OFFER = 1;
@@ -314,6 +359,8 @@ service RealtimeService {
   rpc ListReactions(RealtimeListReactionsRequest) returns (RealtimeListReactionsResponse);
   rpc ReportAudioLevel(RealtimeReportAudioLevelRequest) returns (RealtimeReportAudioLevelResponse);
   rpc GetActiveSpeaker(RealtimeGetActiveSpeakerRequest) returns (RealtimeGetActiveSpeakerResponse);
+  rpc SendChatMessage(RealtimeSendChatMessageRequest) returns (RealtimeSendChatMessageResponse);
+  rpc GetChatMessage(RealtimeGetChatMessageRequest) returns (RealtimeGetChatMessageResponse);
   rpc PublishMedia(RealtimePublishMediaRequest) returns (RealtimePublishMediaResponse);
   rpc SubscribeMedia(RealtimeSubscribeMediaRequest) returns (stream RealtimeDownlinkMedia);
   rpc StartWebRtc(RealtimeStartWebRtcRequest) returns (RealtimeStartWebRtcResponse);
