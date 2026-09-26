@@ -690,7 +690,7 @@ where
                         author: attendance_actor(&claims),
                         author_device,
                         created_at_unix_ms: body.created_at_unix_ms,
-                        logical_order: body.logical_order,
+                        logical_order: 0,
                         content: body.content,
                         attachment_ids: Vec::new(),
                         reply_to: None,
@@ -712,13 +712,13 @@ where
                         external_mappings: Vec::new(),
                         signature: None,
                     };
-                    let persisted = self
+                    let (status, persisted) = self
                         .store
-                        .persist_group_message(&actor, &message)
+                        .persist_group_message_with_next_logical_order(&actor, &message)
                         .map_err(map_store_error)?;
-                    if persisted == DurableRecordStatus::Persisted {
+                    if status == DurableRecordStatus::Persisted {
                         conference_runtime(self)
-                            .notify_chat_message(&scope, &call_id, &message_id)
+                            .notify_chat_message(&scope, &call_id, &persisted.message_id)
                             .map_err(|error| map_conference_error(&error))?;
                     }
                     Ok(pb::RealtimeChatMessageReceipt {
