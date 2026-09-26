@@ -61,9 +61,8 @@ fn phase23_is_wired_into_realtime_sessions_without_becoming_the_route_owner() {
     let root = workspace();
     let conference =
         fs::read_to_string(root.join("crates/ucr-conference/src/lib.rs")).expect("conference");
-    let protocol =
-        fs::read_to_string(root.join("crates/ucr-protocol/src/adaptive_media.rs"))
-            .expect("adaptive protocol");
+    let protocol = fs::read_to_string(root.join("crates/ucr-protocol/src/adaptive_media.rs"))
+        .expect("adaptive protocol");
     let realtime_runtime =
         fs::read_to_string(root.join("crates/ucr-realtime/src/lib.rs")).expect("realtime runtime");
     let realtime_service =
