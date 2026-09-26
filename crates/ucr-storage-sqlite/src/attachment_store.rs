@@ -271,36 +271,37 @@ fn verify_rows(connection: &Connection) -> Result<(), DurableStoreError> {
     drop(statement);
 
     for (scope, attachment_id) in descriptors {
-        let descriptor = load_descriptor_from(connection, &scope, &attachment_id)?
+        load_descriptor_from(connection, &scope, &attachment_id)?
             .ok_or(DurableStoreError::Corrupt)?;
-        for index in 0..descriptor.chunk_count {
-            if let Some(chunk) = load_chunk_from(connection, &scope, &attachment_id, index)? {
-                verify_attachment_chunk(&descriptor, &chunk)
-                    .map_err(|_| DurableStoreError::Corrupt)?;
-            }
-        }
-
-        let invalid_index: bool = connection
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM attachment_chunks
-                    WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
-                      AND attachment_id=?4 AND chunk_index>=?5
-                )",
-                params![
-                    scope.tenant_id.as_opaque().as_str(),
-                    namespace_storage_key(&scope).present,
-                    namespace_storage_key(&scope).value,
-                    attachment_id.as_opaque().as_str(),
-                    to_i64_u32(descriptor.chunk_count),
-                ],
-                |row| row.get(0),
-            )
-            .map_err(|error| map_sqlite_error(&error))?;
-        if invalid_index {
-            return Err(DurableStoreError::Corrupt);
-        }
     }
+
+    let invalid_chunk_layout: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM attachment_chunks AS c
+                JOIN attachments AS a
+                  ON a.tenant_id = c.tenant_id
+                 AND a.namespace_present = c.namespace_present
+                 AND a.namespace_id = c.namespace_id
+                 AND a.attachment_id = c.attachment_id
+                WHERE c.chunk_index >= a.chunk_count
+                   OR c.offset_bytes != c.chunk_index * a.chunk_size_bytes
+                   OR length(c.payload) !=
+                      CASE
+                        WHEN c.chunk_index + 1 = a.chunk_count
+                        THEN a.size_bytes - c.offset_bytes
+                        ELSE a.chunk_size_bytes
+                      END
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if invalid_chunk_layout {
+        return Err(DurableStoreError::Corrupt);
+    }
+
     Ok(())
 }
 
