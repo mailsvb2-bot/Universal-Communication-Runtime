@@ -137,7 +137,6 @@ struct SendChatMessageRequest {
     #[serde(flatten)]
     session: SessionRequest,
     message_id: String,
-    logical_order: u64,
     created_at_unix_ms: i64,
     correlation_id: String,
     idempotency_key: Option<String>,
@@ -815,7 +814,6 @@ async fn send_chat_message(
         call_id: Some(pb_id(&input.session.call)),
         session_id: Some(pb_id(&input.session.session)),
         message_id: Some(pb_id(&input.message_id)),
-        logical_order: input.logical_order,
         created_at_unix_ms: input.created_at_unix_ms,
         correlation_id: Some(pb_id(&input.correlation_id)),
         idempotency_key: input.idempotency_key,
