@@ -377,7 +377,7 @@ fn accepted_recipient_can_drive_adaptive_media_to_audio_fallback() {
 
     assert_eq!(decision.stage, AdaptiveMediaStage::AudioLowBitrate);
     assert_eq!(decision.opus_target_bitrate_bps, Some(16_000));
-    assert!(!decision.requires_media_renegotiation);
+    assert!(decision.requires_media_renegotiation);
 }
 
 #[test]
