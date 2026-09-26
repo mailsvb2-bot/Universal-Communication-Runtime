@@ -155,7 +155,12 @@ fn v28_migration_adds_empty_federation_state_without_inference() {
         let connection = rusqlite::Connection::open(&path).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE IF EXISTS runtime_worker_leases;
+                "DROP TABLE IF EXISTS attachment_chunks;
+                 DROP TABLE IF EXISTS attachments;
+                 DROP TRIGGER IF EXISTS service_audit_authentication_no_update;
+                 DROP TRIGGER IF EXISTS service_audit_authentication_no_delete;
+                 DROP TABLE IF EXISTS service_audit_authentication;
+                 DROP TABLE IF EXISTS runtime_worker_leases;
                  DROP TABLE IF EXISTS service_recording_usage;
                  DROP TABLE IF EXISTS service_resource_quota_policies;
                  DROP TABLE IF EXISTS service_rate_limit_usage;
