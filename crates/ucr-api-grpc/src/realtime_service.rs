@@ -662,10 +662,10 @@ where
                     let correlation_id = decode_opaque(body.correlation_id)?;
                     if body.idempotency_key.as_ref().is_some_and(|value| {
                         value.is_empty() || value.len() > MAX_IDEMPOTENCY_KEY_LEN
-                    }) || std::str::from_utf8(&body.content).is_err()
-                    {
+                    }) {
                         return Err(invalid_argument());
                     }
+                    validate_chat_text(&body.content)?;
 
                     let actor = actor_for(&claims);
                     let snapshot = conference_runtime(self)
@@ -2033,6 +2033,13 @@ fn pb_sfu_forward_envelope(value: &SfuForwardEnvelope) -> pb::SfuForwardEnvelope
     }
 }
 
+fn validate_chat_text(content: &[u8]) -> Result<(), CanonicalError> {
+    if content.is_empty() || std::str::from_utf8(content).is_err() {
+        return Err(invalid_argument());
+    }
+    Ok(())
+}
+
 fn pb_realtime_chat_message(message: &MessageEnvelope) -> pb::RealtimeChatMessage {
     pb::RealtimeChatMessage {
         message_id: Some(pb_opaque(message.message_id.as_opaque())),
@@ -2496,6 +2503,19 @@ mod bandwidth_quota_tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn conference_chat_text_validation_rejects_empty_and_binary_payloads() {
+        assert_eq!(validate_chat_text(b"hello"), Ok(()));
+        assert_eq!(
+            validate_chat_text(b""),
+            Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument))
+        );
+        assert_eq!(
+            validate_chat_text(&[0xff, 0xfe]),
+            Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument))
+        );
     }
 
     #[test]
