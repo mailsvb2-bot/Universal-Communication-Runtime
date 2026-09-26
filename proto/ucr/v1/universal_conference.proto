@@ -368,6 +368,13 @@ message UniversalConferenceCapabilities {
   bool turn = 5;
   bool recording = 6;
   bool horizontal_sfu = 7;
+  bool audio = 8;
+  bool video = 9;
+  bool screen_share = 10;
+  bool webinar = 11;
+  bool rtmp = 12;
+  // Canonical codec capability IDs, for example ucr.media.audio.opus and ucr.media.video.h264.
+  repeated string codecs = 13;
 }
 
 message UniversalGetCapabilitiesResponse {
