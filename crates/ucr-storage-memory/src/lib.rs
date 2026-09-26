@@ -13,8 +13,8 @@ use std::{
 };
 
 use ucr_core::{
-    AntiEntropyStore, AttachmentStore, AuthorizationEvaluator, BridgeActionStore, BridgeRegistrationStore,
-    CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore,
+    AntiEntropyStore, AttachmentStore, AuthorizationEvaluator, BridgeActionStore,
+    BridgeRegistrationStore, CommandAcceptanceStore, CommandOutcomeStore, CommunicationIntentStore,
     ConferenceJoinGrantStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, FederationPeerStore,
@@ -31,9 +31,9 @@ use ucr_crypto::{
 };
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AttachmentChunk, AttachmentDescriptor, AttachmentId,
-    AuthorizationRequest, BridgeActionId, BridgeActionRecord,
-    BridgeActionState, BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState,
-    CallSession, CommandEnvelope, CommandId, CommunicationIntent, ConferenceJoinGrantRecord,
+    AuthorizationRequest, BridgeActionId, BridgeActionRecord, BridgeActionState,
+    BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState, CallSession,
+    CommandEnvelope, CommandId, CommunicationIntent, ConferenceJoinGrantRecord,
     ConferenceJoinGrantUsePolicy, ConferenceParticipantRole, ConversationId, ConversationRecord,
     DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
     DeviceLifecycleState, EndpointId, EventConsumerCursor, EventDeadLetter, EventDeliveryBatch,
@@ -65,19 +65,19 @@ use ucr_protocol::{
     event_delivery_size, event_fingerprint, event_matches_subscription, event_retry_delay_ms,
     expire_recording, service_audit_hash, start_recording, stop_recording,
     validate_anti_entropy_cursor, validate_anti_entropy_page_size, validate_anti_entropy_session,
-    validate_anti_entropy_summary_count, validate_bridge_action_record,
-    validate_bridge_action_transition, validate_bridge_registration_transition,
-    validate_conversation, validate_conversation_parent_kind, validate_delivery_attempt,
-    validate_delivery_evidence, validate_delivery_evidence_binding,
-    validate_delivery_evidence_order, validate_delivery_transition, validate_event_batch_size,
-    validate_event_consumer_cursor, validate_external_identity_binding,
-    validate_external_identity_binding_key, validate_federation_credential_rotation,
-    validate_federation_transition, validate_identity_record, validate_permission_grant,
-    validate_principal_identity_binding, validate_recording_session, validate_service_audit_record,
-    validate_attachment_descriptor, verify_attachment_chunk,
-    validate_service_quota_policy, validate_service_rate_limit_policy,
-    validate_service_resource_quota_policy, validate_sync_checkpoint, validate_sync_transition,
-    validate_trusted_signing_key_descriptor,
+    validate_anti_entropy_summary_count, validate_attachment_descriptor,
+    validate_bridge_action_record, validate_bridge_action_transition,
+    validate_bridge_registration_transition, validate_conversation,
+    validate_conversation_parent_kind, validate_delivery_attempt, validate_delivery_evidence,
+    validate_delivery_evidence_binding, validate_delivery_evidence_order,
+    validate_delivery_transition, validate_event_batch_size, validate_event_consumer_cursor,
+    validate_external_identity_binding, validate_external_identity_binding_key,
+    validate_federation_credential_rotation, validate_federation_transition,
+    validate_identity_record, validate_permission_grant, validate_principal_identity_binding,
+    validate_recording_session, validate_service_audit_record, validate_service_quota_policy,
+    validate_service_rate_limit_policy, validate_service_resource_quota_policy,
+    validate_sync_checkpoint, validate_sync_transition, validate_trusted_signing_key_descriptor,
+    verify_attachment_chunk,
 };
 
 const SCHEMA_VERSION: u32 = 12;
@@ -285,7 +285,10 @@ impl AttachmentStore for MemoryLocalStore {
         let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         Ok(state
             .attachments
-            .get(&(scope_key(scope), attachment_id.as_opaque().as_str().to_owned()))
+            .get(&(
+                scope_key(scope),
+                attachment_id.as_opaque().as_str().to_owned(),
+            ))
             .cloned())
     }
 
