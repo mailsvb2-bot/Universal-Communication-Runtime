@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf, sync::atomic::{AtomicU64, Ordering}};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use rusqlite::Connection;
 use ucr_core::{AttachmentStore, DurableRecordStatus, DurableStoreError, StorageProvider};
@@ -6,9 +10,7 @@ use ucr_model::{
     AttachmentChunk, AttachmentDescriptor, AttachmentId, NamespaceId, OpaqueId, TenantId,
     TenantScope,
 };
-use ucr_protocol::{
-    attachment_content_id, canonical_attachment_chunk, verify_complete_attachment,
-};
+use ucr_protocol::{attachment_content_id, canonical_attachment_chunk, verify_complete_attachment};
 use ucr_storage_sqlite::{SQLITE_SCHEMA_VERSION, SqliteLocalStore};
 
 static DB_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -144,10 +146,7 @@ fn sqlite_attachment_resume_survives_restart_and_final_stream_verifies() {
                     .expect("chunk present")
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            verify_complete_attachment(&descriptor, persisted),
-            Ok(())
-        );
+        assert_eq!(verify_complete_attachment(&descriptor, persisted), Ok(()));
     }
 }
 
@@ -184,12 +183,8 @@ fn sqlite_attachment_descriptor_and_chunks_are_idempotent_and_conflict_safe() {
         Ok(DurableRecordStatus::Duplicate)
     );
 
-    let conflicting = canonical_attachment_chunk(
-        descriptor.attachment_id.clone(),
-        0,
-        0,
-        b"WXYZ".to_vec(),
-    );
+    let conflicting =
+        canonical_attachment_chunk(descriptor.attachment_id.clone(), 0, 0, b"WXYZ".to_vec());
     assert_eq!(
         store.persist_attachment_chunk(&descriptor.scope, &conflicting),
         Err(DurableStoreError::Conflict)
