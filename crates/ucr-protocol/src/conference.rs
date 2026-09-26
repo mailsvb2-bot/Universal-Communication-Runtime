@@ -7,12 +7,17 @@ use crate::{GROUP_MLS_CAPABILITY, MAX_CALL_PARTICIPANTS};
 
 pub const CONFERENCE_CAPABILITY: &str = "ucr.conference.sfu";
 pub const MAX_CONFERENCE_INVITEES: usize = MAX_CALL_PARTICIPANTS - 1;
+pub const MAX_CONFERENCE_REACTION_BYTES: usize = 32;
+pub const MAX_TRACKED_CONFERENCE_REACTIONS: usize = 4096;
 pub const MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT: usize = 32;
 pub const MAX_TRACKED_CONFERENCE_RECIPIENT_SETS: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConferenceProtocolError {
     ScopeMismatch,
+    EmptyReaction,
+    ReactionTooLarge,
+    ReactionControlCharacter,
     EmptyInvitees,
     TooManyInvitees,
     DuplicateInvitee,
@@ -33,6 +38,23 @@ pub fn phase30_conference_capabilities() -> Vec<CapabilityDescriptor> {
         maturity: CapabilityMaturity::Prepared,
         extensions: Vec::new(),
     }]
+}
+
+/// Canonicalizes one ephemeral participant reaction without assigning product semantics.
+///
+/// # Errors
+/// Rejects empty, oversized, or control-character reaction values.
+pub fn canonical_conference_reaction(value: &str) -> Result<String, ConferenceProtocolError> {
+    if value.is_empty() {
+        return Err(ConferenceProtocolError::EmptyReaction);
+    }
+    if value.len() > MAX_CONFERENCE_REACTION_BYTES {
+        return Err(ConferenceProtocolError::ReactionTooLarge);
+    }
+    if value.chars().any(char::is_control) {
+        return Err(ConferenceProtocolError::ReactionControlCharacter);
+    }
+    Ok(value.to_owned())
 }
 
 /// Canonicalizes bounded Conference start intent without creating a second Call owner.

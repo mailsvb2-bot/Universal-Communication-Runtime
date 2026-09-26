@@ -606,6 +606,9 @@ fn map_conference_protocol_error(error: ConferenceProtocolError) -> CanonicalErr
             CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
         }
         ConferenceProtocolError::ScopeMismatch
+        | ConferenceProtocolError::EmptyReaction
+        | ConferenceProtocolError::ReactionTooLarge
+        | ConferenceProtocolError::ReactionControlCharacter
         | ConferenceProtocolError::EmptyInvitees
         | ConferenceProtocolError::DuplicateInvitee
         | ConferenceProtocolError::InitiatorIncluded

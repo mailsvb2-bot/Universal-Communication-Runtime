@@ -139,6 +139,49 @@ message RealtimeSetRaisedHandResponse {
   }
 }
 
+message RealtimePublishReactionRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  string reaction = 4;
+}
+
+message RealtimeReactionReceipt {
+  uint64 sequence = 1;
+}
+
+message RealtimePublishReactionResponse {
+  oneof result {
+    RealtimeReactionReceipt receipt = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeListReactionsRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  uint64 after_sequence = 4;
+  uint32 max_items = 5;
+}
+
+message RealtimeReaction {
+  uint64 sequence = 1;
+  PrincipalRef participant = 2;
+  string reaction = 3;
+}
+
+message RealtimeReactionList {
+  repeated RealtimeReaction reactions = 1;
+}
+
+message RealtimeListReactionsResponse {
+  oneof result {
+    RealtimeReactionList reactions = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 enum WebRtcSdpType {
   WEB_RTC_SDP_TYPE_UNSPECIFIED = 0;
   WEB_RTC_SDP_TYPE_OFFER = 1;
@@ -236,6 +279,8 @@ service RealtimeService {
   rpc LeaveRealtime(RealtimeLeaveRequest) returns (RealtimeLeaveResponse);
   rpc SetSubscriptions(RealtimeSetSubscriptionsRequest) returns (RealtimeSetSubscriptionsResponse);
   rpc SetRaisedHand(RealtimeSetRaisedHandRequest) returns (RealtimeSetRaisedHandResponse);
+  rpc PublishReaction(RealtimePublishReactionRequest) returns (RealtimePublishReactionResponse);
+  rpc ListReactions(RealtimeListReactionsRequest) returns (RealtimeListReactionsResponse);
   rpc PublishMedia(RealtimePublishMediaRequest) returns (RealtimePublishMediaResponse);
   rpc SubscribeMedia(RealtimeSubscribeMediaRequest) returns (stream RealtimeDownlinkMedia);
   rpc StartWebRtc(RealtimeStartWebRtcRequest) returns (RealtimeStartWebRtcResponse);
