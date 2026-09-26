@@ -12,7 +12,7 @@ use sha2::Sha256;
 use tokio::sync::mpsc;
 use ucr_core::generate_opaque_id;
 use ucr_model::{
-    AdaptiveMediaStage, CallId, DeviceId, MediaKind, NamespaceId, OpaqueId, PrincipalId,
+    AdaptiveMediaStage, CallId, DeviceId, NamespaceId, OpaqueId, PrincipalId,
     PrincipalKind, PrincipalRef, ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantId,
     TenantScope,
 };
