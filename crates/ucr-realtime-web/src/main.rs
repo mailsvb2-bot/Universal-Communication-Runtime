@@ -777,12 +777,7 @@ async fn list_reactions(
     }
 }
 
-async fn handle_chat_route(
-    state: &AppState,
-    token: &str,
-    path: &str,
-    body: &[u8],
-) -> HttpResponse {
+async fn handle_chat_route(state: &AppState, token: &str, path: &str, body: &[u8]) -> HttpResponse {
     match path {
         "/v1/realtime/chat/send" => match decode_json::<SendChatMessageRequest>(body) {
             Ok(input) => send_chat_message(state, token, input).await,
