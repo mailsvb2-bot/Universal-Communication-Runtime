@@ -102,6 +102,7 @@ struct AdaptiveRecipientState {
     scope: TenantScope,
     call_id: CallId,
     recipient: PrincipalRef,
+    session_id: SessionId,
     controller: AdaptiveMediaController,
     decision: AdaptiveMediaDecision,
 }
@@ -844,7 +845,7 @@ where
     /// Observes one authenticated recipient's ephemeral adaptive-media telemetry.
     ///
     /// The Phase-23 controller remains the only policy owner. Conference stores only bounded
-    /// per-recipient controller state so the resulting stage can affect receive routing.
+    /// per-endpoint controller state so the resulting stage can affect receive routing.
     ///
     /// # Errors
     /// Rejects non-accepted participants, invalid telemetry, or exhausted ephemeral state.
@@ -853,6 +854,7 @@ where
         actor: &ScopedPrincipal,
         scope: &TenantScope,
         call_id: &CallId,
+        session_id: &SessionId,
         telemetry: &AdaptiveMediaTelemetry,
     ) -> Result<AdaptiveMediaDecision, ConferenceError> {
         require_conference_stack(
@@ -874,6 +876,7 @@ where
             entry.scope == *scope
                 && entry.call_id == *call_id
                 && entry.recipient == actor.principal
+                && entry.session_id == *session_id
         }) {
             let decision = existing.controller.observe(telemetry)?;
             existing.decision = decision.clone();
@@ -888,10 +891,36 @@ where
             scope: scope.clone(),
             call_id: call_id.clone(),
             recipient: actor.principal.clone(),
+            session_id: session_id.clone(),
             controller,
             decision: decision.clone(),
         });
         Ok(decision)
+    }
+
+    /// Clears one endpoint's ephemeral adaptive-media state after its realtime session leaves.
+    ///
+    /// # Errors
+    /// Returns unavailable state when the shared runtime lock is poisoned.
+    pub fn clear_adaptive_media_session(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        recipient: &PrincipalRef,
+        session_id: &SessionId,
+    ) -> Result<(), ConferenceError> {
+        let mut state = self
+            .state
+            .adaptive_media
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        state.retain(|entry| {
+            entry.scope != *scope
+                || entry.call_id != *call_id
+                || entry.recipient != *recipient
+                || entry.session_id != *session_id
+        });
+        Ok(())
     }
 
     /// Routes one already-encrypted Conference frame through the Phase-29 SFU boundary.
@@ -963,14 +992,12 @@ where
                     subscription.source == *source && subscription.media_kind == media_kind
                 })
         }) {
-            let stage = adaptive
-                .iter()
-                .find(|candidate| {
-                    candidate.scope == call.scope
-                        && candidate.call_id == call.call_id
-                        && candidate.recipient == entry.recipient
-                })
-                .map(|candidate| candidate.decision.stage);
+            let stage = adaptive_stage_for_recipient(
+                &adaptive,
+                &call.scope,
+                &call.call_id,
+                &entry.recipient,
+            );
             if is_accepted_participant(call, &entry.recipient)
                 && stage.is_none_or(|stage| adaptive_stage_allows_media(stage, media_kind))
             {
@@ -1080,7 +1107,22 @@ fn prune_adaptive_state(
     });
 }
 
-const fn adaptive_stage_allows_media(stage: AdaptiveMediaStage, media_kind: MediaKind) -> bool {
+fn adaptive_stage_for_recipient(
+    state: &[AdaptiveRecipientState],
+    scope: &TenantScope,
+    call_id: &CallId,
+    recipient: &PrincipalRef,
+) -> Option<AdaptiveMediaStage> {
+    state
+        .iter()
+        .filter(|entry| {
+            entry.scope == *scope && entry.call_id == *call_id && entry.recipient == *recipient
+        })
+        .map(|entry| entry.decision.stage)
+        .max()
+}
+
+fn adaptive_stage_allows_media(stage: AdaptiveMediaStage, media_kind: MediaKind) -> bool {
     match media_kind {
         MediaKind::Video => matches!(
             stage,
@@ -1339,6 +1381,44 @@ mod subscription_state_tests {
     }
 
     #[test]
+    fn adaptive_routing_uses_worst_stage_across_recipient_sessions() {
+        let recipient = principal("bob");
+        let call_id = CallId::from_opaque(oid("adaptive-call"));
+        let decision = |stage| AdaptiveMediaDecision {
+            stage,
+            changed: true,
+            requires_media_renegotiation: false,
+            video: None,
+            opus_target_bitrate_bps: None,
+            deferred_fallbacks: Vec::new(),
+            pressures: Vec::new(),
+        };
+        let state = vec![
+            AdaptiveRecipientState {
+                scope: scope(),
+                call_id: call_id.clone(),
+                recipient: recipient.clone(),
+                session_id: SessionId::from_opaque(oid("adaptive-session-good")),
+                controller: AdaptiveMediaController::new(AdaptiveMediaStage::Video1080p),
+                decision: decision(AdaptiveMediaStage::Video1080p),
+            },
+            AdaptiveRecipientState {
+                scope: scope(),
+                call_id: call_id.clone(),
+                recipient: recipient.clone(),
+                session_id: SessionId::from_opaque(oid("adaptive-session-poor")),
+                controller: AdaptiveMediaController::new(AdaptiveMediaStage::Audio),
+                decision: decision(AdaptiveMediaStage::Audio),
+            },
+        ];
+
+        assert_eq!(
+            adaptive_stage_for_recipient(&state, &scope(), &call_id, &recipient),
+            Some(AdaptiveMediaStage::Audio)
+        );
+    }
+
+    #[test]
     fn adaptive_state_is_pruned_when_recipient_leaves_or_call_terminates() {
         let call_id = CallId::from_opaque(oid("call-prune"));
         let recipient = principal("bob");
@@ -1355,6 +1435,7 @@ mod subscription_state_tests {
             scope: scope(),
             call_id: call_id.clone(),
             recipient: recipient.clone(),
+            session_id: SessionId::from_opaque(oid("adaptive-session")),
             controller: AdaptiveMediaController::new(AdaptiveMediaStage::Audio),
             decision,
         };
