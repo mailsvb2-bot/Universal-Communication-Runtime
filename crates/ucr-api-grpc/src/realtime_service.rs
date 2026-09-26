@@ -45,8 +45,8 @@ use ucr_webrtc::{
 
 use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_opaque,
-    decode_principal_ref, decode_scope, invalid_argument, pb, pb_acknowledgement, pb_crypto_suite,
-    pb_error, pb_opaque, pb_principal_ref, pb_scope,
+    decode_principal_ref, decode_scope, invalid_argument, pb, pb_acknowledgement, pb_actor_ref,
+    pb_crypto_suite, pb_error, pb_opaque, pb_principal_ref, pb_scope,
 };
 
 pub const REALTIME_AUTHORIZATION_METADATA_KEY: &str = "authorization";
@@ -218,7 +218,6 @@ where
     C: ucr_core::ServiceQuotaClock + 'static,
     A: AuthorizationEvaluator + 'static,
     S: CallStore
-        + GroupStore
         + GroupMessageStore
         + DeviceLifecycleStore
         + PrincipalIdentityBindingStore
@@ -240,7 +239,6 @@ where
     C: ucr_core::ServiceQuotaClock + 'static,
     A: AuthorizationEvaluator + 'static,
     S: CallStore
-        + GroupStore
         + GroupMessageStore
         + DeviceLifecycleStore
         + PrincipalIdentityBindingStore
@@ -772,15 +770,9 @@ where
                     if message.conversation != group.conversation {
                         return Err(CanonicalError::new(CanonicalErrorCode::NotFound));
                     }
-                    let author = PrincipalId::from_opaque(
-                        message.author.actor_id.as_opaque().clone(),
-                    );
                     Ok(pb::RealtimeChatMessage {
                         message_id: Some(pb_opaque(message.message_id.as_opaque())),
-                        author: Some(pb_principal_ref(&ucr_model::PrincipalRef {
-                            principal_id: author,
-                            kind: claims.participant.kind,
-                        })),
+                        author: Some(pb_actor_ref(&message.author)),
                         created_at_unix_ms: message.created_at_unix_ms,
                         logical_order: message.logical_order,
                         content: message.content,
@@ -1168,7 +1160,6 @@ where
     C: ucr_core::ServiceQuotaClock,
     A: AuthorizationEvaluator,
     S: CallStore
-        + GroupStore
         + GroupMessageStore
         + DeviceLifecycleStore
         + PrincipalIdentityBindingStore
@@ -1704,7 +1695,6 @@ fn conference_runtime<C, A, S>(
 where
     A: AuthorizationEvaluator,
     S: CallStore
-        + GroupStore
         + GroupMessageStore
         + DeviceLifecycleStore
         + PrincipalIdentityBindingStore
