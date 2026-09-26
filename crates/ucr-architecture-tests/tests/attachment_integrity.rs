@@ -75,8 +75,8 @@ fn attachment_integrity_contract_keeps_payload_and_hashes_out_of_debug() {
     for redaction in [
         r#".field("bytes", &"<redacted>")"#,
         r#".field("sha256", &"<opaque>")"#,
-        r#".field("file_name""#,
-        r#".field("media_type""#,
+        r#""file_name","#,
+        r#""media_type","#,
         r#".map(|_| "<redacted>")"#,
     ] {
         assert!(
