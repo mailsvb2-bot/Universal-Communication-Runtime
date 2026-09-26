@@ -272,6 +272,7 @@ message RealtimeSequencedChatMessage {
 
 message RealtimeChatMessageList {
   repeated RealtimeSequencedChatMessage messages = 1;
+  uint64 next_sequence = 2;
 }
 
 message RealtimeListChatMessagesResponse {
