@@ -86,6 +86,40 @@ struct RaisedHandRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct PublishReactionRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    reaction: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListReactionsRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    after_sequence: u64,
+    max_items: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct ReactionResponse {
+    sequence: u64,
+    participant_id_b64: String,
+    reaction: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ReactionListResponse {
+    ok: bool,
+    reactions: Vec<ReactionResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReactionReceiptResponse {
+    ok: bool,
+    sequence: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct PublishRequest {
     #[serde(flatten)]
     session: SessionRequest,
@@ -279,6 +313,14 @@ async fn handle_request(
         },
         "/v1/realtime/raised-hand" => match decode_json::<RaisedHandRequest>(&body) {
             Ok(input) => set_raised_hand(&state, &token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/reactions/publish" => match decode_json::<PublishReactionRequest>(&body) {
+            Ok(input) => publish_reaction(&state, &token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/reactions/list" => match decode_json::<ListReactionsRequest>(&body) {
+            Ok(input) => list_reactions(&state, &token, input).await,
             Err(error) => error.into_response(),
         },
         "/v1/realtime/media/publish" => match decode_json::<PublishRequest>(&body) {
@@ -558,6 +600,97 @@ async fn set_raised_hand(state: &AppState, token: &str, input: RaisedHandRequest
                 StatusCode::CONFLICT,
                 "raised_hand_rejected",
                 "raised hand update rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn publish_reaction(
+    state: &AppState,
+    token: &str,
+    input: PublishReactionRequest,
+) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimePublishReactionRequest {
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        reaction: input.reaction,
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.publish_reaction(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_publish_reaction_response::Result::Receipt(receipt)) => {
+                json_response(
+                    StatusCode::OK,
+                    &ReactionReceiptResponse {
+                        ok: true,
+                        sequence: receipt.sequence,
+                    },
+                )
+            }
+            Some(pb::realtime_publish_reaction_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "reaction_rejected",
+                "conference reaction rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn list_reactions(
+    state: &AppState,
+    token: &str,
+    input: ListReactionsRequest,
+) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeListReactionsRequest {
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        after_sequence: input.after_sequence,
+        max_items: input.max_items,
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.list_reactions(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_list_reactions_response::Result::Reactions(list)) => {
+                let reactions = list
+                    .reactions
+                    .into_iter()
+                    .map(|reaction| {
+                        let participant_id_b64 = reaction
+                            .participant
+                            .and_then(|participant| participant.principal_id)
+                            .map(|id| STANDARD.encode(id.value))
+                            .unwrap_or_default();
+                        ReactionResponse {
+                            sequence: reaction.sequence,
+                            participant_id_b64,
+                            reaction: reaction.reaction,
+                        }
+                    })
+                    .collect();
+                json_response(
+                    StatusCode::OK,
+                    &ReactionListResponse {
+                        ok: true,
+                        reactions,
+                    },
+                )
+            }
+            Some(pb::realtime_list_reactions_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "reactions_rejected",
+                "conference reaction list rejected",
             ),
         },
         Err(status) => grpc_error(&status),
