@@ -65,6 +65,13 @@ button:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 </div>
 <div id="reactions" class="small" aria-live="polite"></div>
 <div id="active-speaker" class="small" aria-live="polite">Active speaker: none</div>
+<div class="card" aria-label="Conference chat">
+  <div id="chat-messages" class="small" aria-live="polite"></div>
+  <div class="controls">
+    <input id="chat-input" type="text" maxlength="4096" placeholder="Message" disabled>
+    <button id="chat-send" class="secondary" disabled>Send</button>
+  </div>
+</div>
 <div class="grid">
 <button id="join" class="primary">Join conference</button>
 <button id="leave" class="secondary" disabled>Leave</button>
@@ -80,12 +87,12 @@ const ui={
   join:$("join"),leave:$("leave"),state:$("state"),webrtcState:$("webrtc-state"),
   packets:$("packets"),expires:$("expires"),status:$("status"),
   localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),
-  mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker")
+  mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker"),chatMessages:$("chat-messages"),chatInput:$("chat-input"),chatSend:$("chat-send")
 };
-let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false;
+let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
-let reactionCursor=0,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
+let reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_CHUNK_MAGIC="UCRCHK01";
 const E2EE_CHUNK_HEADER_BYTES=24;
@@ -508,9 +515,11 @@ async function restartWebRtc(forceMedia){
 }
 async function activateAdmittedMedia(){
   if(!sessionActive||mediaActive)return;
-  mediaActive=true;ui.state.textContent="Connected";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;refreshLocalMediaControls();
+  mediaActive=true;ui.state.textContent="Connected";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;ui.chatInput.disabled=false;ui.chatSend.disabled=false;refreshLocalMediaControls();
   if(!reactionTimer){reactionTimer=setInterval(()=>{pollReactions().catch(()=>{});},1000);}
+  if(!chatTimer){chatTimer=setInterval(()=>{pollChat().catch(()=>{});},1000);}
   pollReactions().catch(()=>{});
+  pollChat().catch(()=>{});
   ui.status.textContent=policyAllows("audio")||policyAllows("camera")?"The host has started the conference. Requesting permitted camera/microphone access…":"The host has started the conference. Viewing mode does not request camera or microphone access.";
   openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive)ui.status.textContent="Realtime stream closed: "+e.message;});
   try{await startWebRtc(false);}catch(e){ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC start failed: "+e.message;scheduleWebRtcRetry();}
@@ -518,12 +527,12 @@ async function activateAdmittedMedia(){
 }
 async function applyAdmissionState(state){
   if(state==="waiting_room"){
-    mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}stopActiveSpeakerMonitoring();refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
+    mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopActiveSpeakerMonitoring();refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
     ui.status.textContent="You are in the waiting room. Media will start automatically when the host starts the conference.";
     return;
   }
   if(state==="closed"){
-    mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}stopActiveSpeakerMonitoring();
+    mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopActiveSpeakerMonitoring();
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
     if(streamAbort){streamAbort.abort();streamAbort=null;}
@@ -569,7 +578,7 @@ async function leave(){
   teardownPeer();
   if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;ui.localVideo.srcObject=null;}
   if(wasActive)await closeServerPeer();
-  sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
+  sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
   if(wasActive){try{await api("/v1/realtime/leave",body());}catch(_){}}
   ui.state.textContent="Left";ui.status.textContent="Conference session closed.";ui.join.disabled=false;
@@ -639,6 +648,52 @@ async function startActiveSpeakerMonitoring(){
   reportLocalAudioLevel().catch(()=>{});
   pollActiveSpeaker().catch(()=>{});
 }
+function newOpaqueId(){
+  const bytes=new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes,b=>b.toString(16).padStart(2,"0")).join("");
+}
+function appendChatMessage(item){
+  const row=document.createElement("div");
+  row.setAttribute("data-message-id",item.message_id);
+  const author=document.createElement("b");
+  author.textContent=(item.author_id_b64||"participant").slice(0,12);
+  row.appendChild(author);
+  row.appendChild(document.createTextNode(": "+item.content));
+  ui.chatMessages.appendChild(row);
+}
+async function sendChat(){
+  if(!sessionActive||!mediaActive)return;
+  const content=ui.chatInput.value;
+  if(!content.trim())return;
+  const payload=pendingChatPayload&&pendingChatPayload.content===content
+    ?pendingChatPayload
+    :(()=>{const message_id=newOpaqueId();return {...body(),message_id,created_at_unix_ms:Date.now(),correlation_id:newOpaqueId(),idempotency_key:message_id,content};})();
+  pendingChatPayload=payload;
+  await api("/v1/realtime/chat/send",payload);
+  pendingChatPayload=null;
+  ui.chatInput.value="";
+  await pollChat();
+}
+async function pollChat(){
+  if(!sessionActive||!mediaActive||chatPollInFlight)return;
+  chatPollInFlight=true;
+  try{
+    const r=await api("/v1/realtime/chat/list",{...body(),after_sequence:chatCursor,max_items:64});
+    const data=await r.json();
+    if(!data.ok||!Array.isArray(data.messages))return;
+    for(const item of data.messages){
+      const sequence=Number(item.sequence||0);
+      if(sequence<=chatCursor)continue;
+      appendChatMessage(item);
+    }
+    chatCursor=Math.max(chatCursor,Number(data.next_sequence||0));
+  }finally{
+    chatPollInFlight=false;
+  }
+}
+ui.chatSend.addEventListener("click",()=>{sendChat().catch(e=>{ui.status.textContent="Chat failed: "+e.message;});});
+ui.chatInput.addEventListener("keydown",event=>{if(event.key==="Enter"&&!event.shiftKey){event.preventDefault();sendChat().catch(e=>{ui.status.textContent="Chat failed: "+e.message;});}});
 async function publishReaction(){
   if(!sessionActive||!mediaActive)return;
   const reaction=ui.reaction.value;
@@ -693,7 +748,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
 }
 window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry();}});
-window.addEventListener("pagehide",()=>{if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
+window.addEventListener("pagehide",()=>{if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 </body>
 </html>

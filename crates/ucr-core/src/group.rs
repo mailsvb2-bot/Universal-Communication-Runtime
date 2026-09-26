@@ -137,6 +137,20 @@ pub trait GroupMessageStore: GroupStore + MessageStore {
         message: &MessageEnvelope,
     ) -> Result<DurableRecordStatus, DurableStoreError>;
 
+    /// Atomically assigns the next canonical logical order in the Group Conversation and persists
+    /// one Message. The caller must supply `logical_order=0` as an allocation sentinel.
+    ///
+    /// Identical retries preserve the originally allocated logical order and return Duplicate.
+    ///
+    /// # Errors
+    /// Rejects non-group/cross-scope messages, nonzero caller-supplied order, inactive or
+    /// unauthorized members, conflicts, order exhaustion, and storage failures.
+    fn persist_group_message_with_next_logical_order(
+        &self,
+        subject: &ScopedPrincipal,
+        message: &MessageEnvelope,
+    ) -> Result<(DurableRecordStatus, MessageEnvelope), DurableStoreError>;
+
     /// Reads one group Message only while the authenticated subject may access its Group history.
     ///
     /// # Errors

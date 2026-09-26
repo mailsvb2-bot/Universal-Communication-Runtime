@@ -668,6 +668,106 @@ impl GroupMessageStore for SqliteLocalStore {
         Ok(DurableRecordStatus::Persisted)
     }
 
+    fn persist_group_message_with_next_logical_order(
+        &self,
+        subject: &ScopedPrincipal,
+        message: &MessageEnvelope,
+    ) -> Result<(DurableRecordStatus, MessageEnvelope), DurableStoreError> {
+        let mut persisted =
+            canonical_message(message).map_err(|_| DurableStoreError::InvalidRecord)?;
+        if persisted.logical_order != 0
+            || !is_group_conversation_kind(persisted.conversation.kind)
+            || !matches!(
+                persisted.delivery_state,
+                DeliveryState::Created | DeliveryState::Persisted
+            )
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        if persisted.scope != subject.scope
+            || persisted.origin.principal_id.as_ref() != Some(&subject.principal.principal_id)
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+        persisted.delivery_state = DeliveryState::Persisted;
+
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let group = load_group_for_conversation_from(
+            &transaction,
+            &persisted.scope,
+            &persisted.conversation.conversation_id,
+        )?
+        .ok_or(DurableStoreError::PermissionDenied)?;
+        if group.conversation != persisted.conversation
+            || group.delivery_policy != persisted.delivery_policy
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let membership = load_membership_from(
+            &transaction,
+            &group.scope,
+            &group.group_id,
+            &subject.principal,
+        )?
+        .ok_or(DurableStoreError::PermissionDenied)?;
+        if membership.state != GroupMemberState::Active
+            || !membership
+                .permissions
+                .contains(&GroupPermission::SendMessage)
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+
+        if let Some(existing) =
+            message_store::load_message_from(&transaction, &persisted.scope, &persisted.message_id)?
+        {
+            persisted.logical_order = existing.logical_order;
+            return if existing == persisted {
+                Ok((DurableRecordStatus::Duplicate, existing))
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+
+        let namespace = namespace_storage_key(&persisted.scope);
+        let latest = transaction
+            .query_row(
+                "SELECT logical_order FROM messages
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND conversation_id=?4
+                 ORDER BY logical_order DESC LIMIT 1",
+                params![
+                    persisted.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    persisted.conversation.conversation_id.as_opaque().as_str()
+                ],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(&error))?;
+        persisted.logical_order = latest.map_or(Ok(1), |bytes| {
+            decode_u64(&bytes)?
+                .checked_add(1)
+                .ok_or(DurableStoreError::Full)
+        })?;
+
+        message_store::insert_message_row(&transaction, &persisted)?;
+        message_store::insert_message_children(&transaction, &persisted)?;
+        super::offline_group_store::record_message_replica(
+            &transaction,
+            subject,
+            &group,
+            &persisted,
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok((DurableRecordStatus::Persisted, persisted))
+    }
+
     fn group_message(
         &self,
         subject: &ScopedPrincipal,
@@ -1883,6 +1983,46 @@ mod phase18_restart_security_tests {
         assert_eq!(
             store.group_memberships_for_active_member(&caller, &scope(), &group.group_id, 16),
             Err(DurableStoreError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn sqlite_group_message_allocator_is_monotonic_idempotent_and_conflict_safe() {
+        let db = TestDb::new();
+        let (conversation, group, owner) = group_fixture();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+
+        let mut first = member_message(&conversation.conversation, &owner.principal, "alloc-first");
+        first.logical_order = 0;
+        let (first_status, first_persisted) = store
+            .persist_group_message_with_next_logical_order(&owner, &first)
+            .expect("first");
+        assert_eq!(first_status, DurableRecordStatus::Persisted);
+        assert_eq!(first_persisted.logical_order, 1);
+
+        let (retry_status, retry_persisted) = store
+            .persist_group_message_with_next_logical_order(&owner, &first)
+            .expect("retry");
+        assert_eq!(retry_status, DurableRecordStatus::Duplicate);
+        assert_eq!(retry_persisted.logical_order, 1);
+
+        let mut second =
+            member_message(&conversation.conversation, &owner.principal, "alloc-second");
+        second.logical_order = 0;
+        let (second_status, second_persisted) = store
+            .persist_group_message_with_next_logical_order(&owner, &second)
+            .expect("second");
+        assert_eq!(second_status, DurableRecordStatus::Persisted);
+        assert_eq!(second_persisted.logical_order, 2);
+
+        let mut conflict = first;
+        conflict.content = b"different".to_vec();
+        assert_eq!(
+            store.persist_group_message_with_next_logical_order(&owner, &conflict),
+            Err(DurableStoreError::Conflict)
         );
     }
 

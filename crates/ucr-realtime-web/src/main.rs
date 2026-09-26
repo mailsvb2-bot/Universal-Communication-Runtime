@@ -133,6 +133,67 @@ struct ActiveSpeakerResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct SendChatMessageRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    message_id: String,
+    created_at_unix_ms: i64,
+    correlation_id: String,
+    idempotency_key: Option<String>,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetChatMessageRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    message_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatMessageReceiptResponse {
+    ok: bool,
+    message_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatMessageResponse {
+    ok: bool,
+    message_id: String,
+    author_id_b64: String,
+    author_kind: i32,
+    created_at_unix_ms: i64,
+    logical_order: u64,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListChatMessagesRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    after_sequence: u64,
+    max_items: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct SequencedChatMessageResponse {
+    sequence: u64,
+    message_id: String,
+    author_id_b64: String,
+    author_kind: i32,
+    created_at_unix_ms: i64,
+    logical_order: u64,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatMessageListResponse {
+    ok: bool,
+    messages: Vec<SequencedChatMessageResponse>,
+    next_sequence: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct PublishRequest {
     #[serde(flatten)]
     session: SessionRequest,
@@ -338,6 +399,9 @@ async fn handle_request(
         },
         "/v1/realtime/audio-level" | "/v1/realtime/active-speaker" => {
             handle_active_speaker_route(&state, &token, &path, &body).await
+        }
+        "/v1/realtime/chat/send" | "/v1/realtime/chat/get" | "/v1/realtime/chat/list" => {
+            handle_chat_route(&state, &token, &path, &body).await
         }
         "/v1/realtime/media/publish" => match decode_json::<PublishRequest>(&body) {
             Ok(input) => publish_media(&state, &token, input).await,
@@ -707,6 +771,205 @@ async fn list_reactions(
                 StatusCode::CONFLICT,
                 "reactions_rejected",
                 "conference reaction list rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn handle_chat_route(state: &AppState, token: &str, path: &str, body: &[u8]) -> HttpResponse {
+    match path {
+        "/v1/realtime/chat/send" => match decode_json::<SendChatMessageRequest>(body) {
+            Ok(input) => send_chat_message(state, token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/chat/get" => match decode_json::<GetChatMessageRequest>(body) {
+            Ok(input) => get_chat_message(state, token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/chat/list" => match decode_json::<ListChatMessagesRequest>(body) {
+            Ok(input) => list_chat_messages(state, token, input).await,
+            Err(error) => error.into_response(),
+        },
+        _ => api_error(
+            StatusCode::NOT_FOUND,
+            "route_not_found",
+            "realtime route not found",
+        ),
+    }
+}
+
+async fn send_chat_message(
+    state: &AppState,
+    token: &str,
+    input: SendChatMessageRequest,
+) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeSendChatMessageRequest {
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        message_id: Some(pb_id(&input.message_id)),
+        created_at_unix_ms: input.created_at_unix_ms,
+        correlation_id: Some(pb_id(&input.correlation_id)),
+        idempotency_key: input.idempotency_key,
+        content: input.content.into_bytes(),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.send_chat_message(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_send_chat_message_response::Result::Receipt(receipt)) => {
+                let Some(message_id) = receipt.message_id else {
+                    return empty_upstream();
+                };
+                match String::from_utf8(message_id.value) {
+                    Ok(message_id) => json_response(
+                        StatusCode::OK,
+                        &ChatMessageReceiptResponse {
+                            ok: true,
+                            message_id,
+                        },
+                    ),
+                    Err(_) => empty_upstream(),
+                }
+            }
+            Some(pb::realtime_send_chat_message_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "chat_message_rejected",
+                "conference chat message rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn list_chat_messages(
+    state: &AppState,
+    token: &str,
+    input: ListChatMessagesRequest,
+) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeListChatMessagesRequest {
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        after_sequence: input.after_sequence,
+        max_items: input.max_items,
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.list_chat_messages(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_list_chat_messages_response::Result::Messages(list)) => {
+                let mut messages = Vec::with_capacity(list.messages.len());
+                for entry in list.messages {
+                    let Some(message) = entry.message else {
+                        continue;
+                    };
+                    let Some(message_id) = message.message_id else {
+                        continue;
+                    };
+                    let Some(author) = message.author else {
+                        continue;
+                    };
+                    let Some(actor_id) = author.actor_id else {
+                        continue;
+                    };
+                    let Ok(message_id) = String::from_utf8(message_id.value) else {
+                        continue;
+                    };
+                    let Ok(content) = String::from_utf8(message.content) else {
+                        continue;
+                    };
+                    messages.push(SequencedChatMessageResponse {
+                        sequence: entry.sequence,
+                        message_id,
+                        author_id_b64: STANDARD.encode(actor_id.value),
+                        author_kind: author.kind,
+                        created_at_unix_ms: message.created_at_unix_ms,
+                        logical_order: message.logical_order,
+                        content,
+                    });
+                }
+                json_response(
+                    StatusCode::OK,
+                    &ChatMessageListResponse {
+                        ok: true,
+                        messages,
+                        next_sequence: list.next_sequence,
+                    },
+                )
+            }
+            Some(pb::realtime_list_chat_messages_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "chat_list_rejected",
+                "conference chat list rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn get_chat_message(
+    state: &AppState,
+    token: &str,
+    input: GetChatMessageRequest,
+) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeGetChatMessageRequest {
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        message_id: Some(pb_id(&input.message_id)),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.get_chat_message(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_get_chat_message_response::Result::Message(message)) => {
+                let Some(message_id) = message.message_id else {
+                    return empty_upstream();
+                };
+                let Some(author) = message.author else {
+                    return empty_upstream();
+                };
+                let Some(actor_id) = author.actor_id else {
+                    return empty_upstream();
+                };
+                let Ok(message_id) = String::from_utf8(message_id.value) else {
+                    return empty_upstream();
+                };
+                let Ok(content) = String::from_utf8(message.content) else {
+                    return api_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "chat_content_not_text",
+                        "conference chat content is not UTF-8 text",
+                    );
+                };
+                json_response(
+                    StatusCode::OK,
+                    &ChatMessageResponse {
+                        ok: true,
+                        message_id,
+                        author_id_b64: STANDARD.encode(actor_id.value),
+                        author_kind: author.kind,
+                        created_at_unix_ms: message.created_at_unix_ms,
+                        logical_order: message.logical_order,
+                        content,
+                    },
+                )
+            }
+            Some(pb::realtime_get_chat_message_response::Result::Error(_)) | None => api_error(
+                StatusCode::NOT_FOUND,
+                "chat_message_not_found",
+                "conference chat message not found",
             ),
         },
         Err(status) => grpc_error(&status),
@@ -1373,6 +1636,14 @@ fn admission_state_name(value: i32) -> Option<&'static str> {
     }
 }
 
+fn empty_upstream() -> HttpResponse {
+    api_error(
+        StatusCode::BAD_GATEWAY,
+        "invalid_upstream_response",
+        "realtime upstream returned an incomplete response",
+    )
+}
+
 fn api_error(status: StatusCode, code: &'static str, message: impl Into<String>) -> HttpResponse {
     json_response(
         status,
@@ -1452,6 +1723,14 @@ mod tests {
             "startActiveSpeakerMonitoring",
             "createAnalyser",
             "id=\"active-speaker\"",
+            "/v1/realtime/chat/send",
+            "/v1/realtime/chat/list",
+            "id=\"chat-input\"",
+            "sendChat",
+            "pollChat",
+            "pendingChatPayload",
+            "new Uint8Array(16)",
+            "window.crypto.getRandomValues(bytes)",
             "/v1/realtime/webrtc/start",
             "/v1/realtime/webrtc/remote-description",
             "/v1/realtime/webrtc/ice",
@@ -1479,6 +1758,7 @@ mod tests {
             );
         }
         assert!(!CLIENT_HTML.contains("UCR_WEBRTC_TURN_SECRET"));
+        assert!(!CLIENT_HTML.contains("randomUUID"));
     }
 
     #[test]

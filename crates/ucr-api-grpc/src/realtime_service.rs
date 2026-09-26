@@ -12,7 +12,7 @@ use ucr_conference::{
 };
 use ucr_core::{
     AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
-    DurableStoreError, EventJournalStore, GroupStore, PrincipalIdentityBindingStore,
+    DurableStoreError, EventJournalStore, GroupMessageStore, PrincipalIdentityBindingStore,
     ServiceQuotaStore, UniversalConferenceStore,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
@@ -21,15 +21,17 @@ use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipantState, CallSignal, CallSignalKind,
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
     ConferenceParticipantRole, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
-    DeviceId, DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId,
-    GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind,
-    OpaqueId, PrincipalId, PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope,
-    SfuForwardTarget, TenantScope, UniversalConferenceLifecycle, VideoSourceKind,
-    WebRtcIceCandidate, WebRtcSdpType, WebRtcSessionDescription,
+    DeliveryState, DeviceId, DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame,
+    EventEnvelope, EventId, GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature,
+    IceServerConfig, KeyId, MediaKind, MessageEnvelope, MessageId, OpaqueId, OriginRef,
+    PrincipalId, PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope, SfuForwardTarget,
+    TenantScope, UniversalConferenceLifecycle, VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
+    WebRtcSessionDescription,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
-    RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for, canonical_event, encode_sfu_forward_envelope,
+    MAX_IDEMPOTENCY_KEY_LEN, RUNTIME_ENVELOPE_SCHEMA_V1, acknowledgement_for, canonical_event,
+    encode_sfu_forward_envelope,
 };
 use ucr_realtime::{
     AttendanceTransition, AttendanceTransitionKind, JoinTokenError, JoinTokenIssuer,
@@ -42,8 +44,8 @@ use ucr_webrtc::{
 
 use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_opaque,
-    decode_principal_ref, decode_scope, invalid_argument, pb, pb_acknowledgement, pb_crypto_suite,
-    pb_error, pb_opaque, pb_principal_ref, pb_scope,
+    decode_principal_ref, decode_scope, invalid_argument, pb, pb_acknowledgement, pb_actor_ref,
+    pb_crypto_suite, pb_error, pb_opaque, pb_principal_ref, pb_scope,
 };
 
 pub const REALTIME_AUTHORIZATION_METADATA_KEY: &str = "authorization";
@@ -215,7 +217,7 @@ where
     C: ucr_core::ServiceQuotaClock + 'static,
     A: AuthorizationEvaluator + 'static,
     S: CallStore
-        + GroupStore
+        + GroupMessageStore
         + DeviceLifecycleStore
         + PrincipalIdentityBindingStore
         + TrustedSigningKeyResolver
@@ -236,7 +238,7 @@ where
     C: ucr_core::ServiceQuotaClock + 'static,
     A: AuthorizationEvaluator + 'static,
     S: CallStore
-        + GroupStore
+        + GroupMessageStore
         + DeviceLifecycleStore
         + PrincipalIdentityBindingStore
         + TrustedSigningKeyResolver
@@ -636,6 +638,221 @@ where
         }))
     }
 
+    async fn send_chat_message(
+        &self,
+        request: Request<pb::RealtimeSendChatMessageRequest>,
+    ) -> Result<Response<pb::RealtimeSendChatMessageResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(
+            body.scope.clone(),
+            body.call_id.clone(),
+            body.session_id.clone(),
+        );
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    let now = self.now()?;
+                    self.registry
+                        .heartbeat(&claims, now)
+                        .map_err(map_registry_error)?;
+                    self.require_live_universal_conference(&claims)?;
+                    let message_id = MessageId::from_opaque(decode_opaque(body.message_id)?);
+                    let correlation_id = decode_opaque(body.correlation_id)?;
+                    if body.idempotency_key.as_ref().is_some_and(|value| {
+                        value.is_empty() || value.len() > MAX_IDEMPOTENCY_KEY_LEN
+                    }) {
+                        return Err(invalid_argument());
+                    }
+                    validate_chat_text(&body.content)?;
+
+                    let actor = actor_for(&claims);
+                    let snapshot = conference_runtime(self)
+                        .snapshot(&actor, &scope, &call_id)
+                        .map_err(|error| map_conference_error(&error))?;
+                    let group = self
+                        .store
+                        .group(&scope, &snapshot.group_id)
+                        .map_err(map_store_error)?
+                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+                    let author_device = validate_device_claim(&*self.store, &claims)?;
+                    let message = MessageEnvelope {
+                        message_id: message_id.clone(),
+                        scope: scope.clone(),
+                        conversation: group.conversation,
+                        author: attendance_actor(&claims),
+                        author_device,
+                        created_at_unix_ms: body.created_at_unix_ms,
+                        logical_order: 0,
+                        content: body.content,
+                        attachment_ids: Vec::new(),
+                        reply_to: None,
+                        relations: Vec::new(),
+                        crypto_metadata: None,
+                        delivery_policy: group.delivery_policy,
+                        delivery_state: DeliveryState::Created,
+                        origin: OriginRef {
+                            principal_id: Some(claims.participant.principal_id.clone()),
+                            endpoint_id: None,
+                            integration_id: None,
+                        },
+                        correlation: CorrelationContext {
+                            correlation_id,
+                            causation_id: None,
+                            idempotency_key: body.idempotency_key,
+                        },
+                        extensions: Vec::new(),
+                        external_mappings: Vec::new(),
+                        signature: None,
+                    };
+                    let (_, persisted) = self
+                        .store
+                        .persist_group_message_with_next_logical_order(&actor, &message)
+                        .map_err(map_store_error)?;
+                    conference_runtime(self)
+                        .notify_chat_message(&scope, &call_id, &persisted.message_id)
+                        .map_err(|error| map_conference_error(&error))?;
+                    Ok(pb::RealtimeChatMessageReceipt {
+                        message_id: Some(pb_opaque(message_id.as_opaque())),
+                    })
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeSendChatMessageResponse {
+            result: Some(match result {
+                Ok(receipt) => pb::realtime_send_chat_message_response::Result::Receipt(receipt),
+                Err(error) => {
+                    pb::realtime_send_chat_message_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
+    async fn get_chat_message(
+        &self,
+        request: Request<pb::RealtimeGetChatMessageRequest>,
+    ) -> Result<Response<pb::RealtimeGetChatMessageResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(
+            body.scope.clone(),
+            body.call_id.clone(),
+            body.session_id.clone(),
+        );
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    self.registry
+                        .heartbeat(&claims, self.now()?)
+                        .map_err(map_registry_error)?;
+                    self.require_live_universal_conference(&claims)?;
+                    let message_id = MessageId::from_opaque(decode_opaque(body.message_id)?);
+                    let actor = actor_for(&claims);
+                    let snapshot = conference_runtime(self)
+                        .snapshot(&actor, &scope, &call_id)
+                        .map_err(|error| map_conference_error(&error))?;
+                    let group = self
+                        .store
+                        .group(&scope, &snapshot.group_id)
+                        .map_err(map_store_error)?
+                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+                    let message = self
+                        .store
+                        .group_message(&actor, &scope, &message_id)
+                        .map_err(map_store_error)?
+                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+                    if message.conversation != group.conversation {
+                        return Err(CanonicalError::new(CanonicalErrorCode::NotFound));
+                    }
+                    Ok(pb::RealtimeChatMessage {
+                        message_id: Some(pb_opaque(message.message_id.as_opaque())),
+                        author: Some(pb_actor_ref(&message.author)),
+                        created_at_unix_ms: message.created_at_unix_ms,
+                        logical_order: message.logical_order,
+                        content: message.content,
+                    })
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeGetChatMessageResponse {
+            result: Some(match result {
+                Ok(message) => pb::realtime_get_chat_message_response::Result::Message(message),
+                Err(error) => {
+                    pb::realtime_get_chat_message_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
+    async fn list_chat_messages(
+        &self,
+        request: Request<pb::RealtimeListChatMessagesRequest>,
+    ) -> Result<Response<pb::RealtimeListChatMessagesResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let max_items = if body.max_items == 0 {
+            64
+        } else {
+            usize::try_from(body.max_items)
+                .map_err(|_| Status::invalid_argument("realtime request rejected"))?
+        };
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    self.registry
+                        .heartbeat(&claims, self.now()?)
+                        .map_err(map_registry_error)?;
+                    self.require_live_universal_conference(&claims)?;
+                    let actor = actor_for(&claims);
+                    let notifications = conference_runtime(self)
+                        .chat_notifications_after(
+                            &actor,
+                            &scope,
+                            &call_id,
+                            body.after_sequence,
+                            max_items,
+                        )
+                        .map_err(|error| map_conference_error(&error))?;
+                    let next_sequence = notifications
+                        .last()
+                        .map_or(body.after_sequence, |notification| notification.sequence);
+                    let mut messages = Vec::with_capacity(notifications.len());
+                    for notification in notifications {
+                        let Some(message) = self
+                            .store
+                            .group_message(&actor, &scope, &notification.message_id)
+                            .map_err(map_store_error)?
+                        else {
+                            continue;
+                        };
+                        messages.push(pb::RealtimeSequencedChatMessage {
+                            sequence: notification.sequence,
+                            message: Some(pb_realtime_chat_message(&message)),
+                        });
+                    }
+                    Ok(pb::RealtimeChatMessageList {
+                        messages,
+                        next_sequence,
+                    })
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeListChatMessagesResponse {
+            result: Some(match result {
+                Ok(messages) => {
+                    pb::realtime_list_chat_messages_response::Result::Messages(messages)
+                }
+                Err(error) => {
+                    pb::realtime_list_chat_messages_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
     async fn publish_media(
         &self,
         request: Request<pb::RealtimePublishMediaRequest>,
@@ -1008,7 +1225,7 @@ where
     C: ucr_core::ServiceQuotaClock,
     A: AuthorizationEvaluator,
     S: CallStore
-        + GroupStore
+        + GroupMessageStore
         + DeviceLifecycleStore
         + PrincipalIdentityBindingStore
         + TrustedSigningKeyResolver
@@ -1543,7 +1760,7 @@ fn conference_runtime<C, A, S>(
 where
     A: AuthorizationEvaluator,
     S: CallStore
-        + GroupStore
+        + GroupMessageStore
         + DeviceLifecycleStore
         + PrincipalIdentityBindingStore
         + TrustedSigningKeyResolver,
@@ -1811,6 +2028,23 @@ fn pb_sfu_forward_envelope(value: &SfuForwardEnvelope) -> pb::SfuForwardEnvelope
                 signature: value.frame.source_signature.signature.clone(),
             }),
         }),
+    }
+}
+
+fn validate_chat_text(content: &[u8]) -> Result<(), CanonicalError> {
+    if content.is_empty() || std::str::from_utf8(content).is_err() {
+        return Err(invalid_argument());
+    }
+    Ok(())
+}
+
+fn pb_realtime_chat_message(message: &MessageEnvelope) -> pb::RealtimeChatMessage {
+    pb::RealtimeChatMessage {
+        message_id: Some(pb_opaque(message.message_id.as_opaque())),
+        author: Some(pb_actor_ref(&message.author)),
+        created_at_unix_ms: message.created_at_unix_ms,
+        logical_order: message.logical_order,
+        content: message.content.clone(),
     }
 }
 
@@ -2267,6 +2501,19 @@ mod bandwidth_quota_tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn conference_chat_text_validation_rejects_empty_and_binary_payloads() {
+        assert_eq!(validate_chat_text(b"hello"), Ok(()));
+        assert_eq!(
+            validate_chat_text(b""),
+            Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument))
+        );
+        assert_eq!(
+            validate_chat_text(&[0xff, 0xfe]),
+            Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument))
+        );
     }
 
     #[test]

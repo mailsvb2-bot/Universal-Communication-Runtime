@@ -213,6 +213,75 @@ message RealtimeGetActiveSpeakerResponse {
   }
 }
 
+message RealtimeSendChatMessageRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  OpaqueId message_id = 4;
+  int64 created_at_unix_ms = 5;
+  OpaqueId correlation_id = 6;
+  optional string idempotency_key = 7;
+  bytes content = 8;
+}
+
+message RealtimeChatMessageReceipt {
+  OpaqueId message_id = 1;
+}
+
+message RealtimeSendChatMessageResponse {
+  oneof result {
+    RealtimeChatMessageReceipt receipt = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeGetChatMessageRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  OpaqueId message_id = 4;
+}
+
+message RealtimeChatMessage {
+  OpaqueId message_id = 1;
+  ActorRef author = 2;
+  int64 created_at_unix_ms = 3;
+  uint64 logical_order = 4;
+  bytes content = 5;
+}
+
+message RealtimeGetChatMessageResponse {
+  oneof result {
+    RealtimeChatMessage message = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeListChatMessagesRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  uint64 after_sequence = 4;
+  uint32 max_items = 5;
+}
+
+message RealtimeSequencedChatMessage {
+  uint64 sequence = 1;
+  RealtimeChatMessage message = 2;
+}
+
+message RealtimeChatMessageList {
+  repeated RealtimeSequencedChatMessage messages = 1;
+  uint64 next_sequence = 2;
+}
+
+message RealtimeListChatMessagesResponse {
+  oneof result {
+    RealtimeChatMessageList messages = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 enum WebRtcSdpType {
   WEB_RTC_SDP_TYPE_UNSPECIFIED = 0;
   WEB_RTC_SDP_TYPE_OFFER = 1;
@@ -314,6 +383,9 @@ service RealtimeService {
   rpc ListReactions(RealtimeListReactionsRequest) returns (RealtimeListReactionsResponse);
   rpc ReportAudioLevel(RealtimeReportAudioLevelRequest) returns (RealtimeReportAudioLevelResponse);
   rpc GetActiveSpeaker(RealtimeGetActiveSpeakerRequest) returns (RealtimeGetActiveSpeakerResponse);
+  rpc SendChatMessage(RealtimeSendChatMessageRequest) returns (RealtimeSendChatMessageResponse);
+  rpc GetChatMessage(RealtimeGetChatMessageRequest) returns (RealtimeGetChatMessageResponse);
+  rpc ListChatMessages(RealtimeListChatMessagesRequest) returns (RealtimeListChatMessagesResponse);
   rpc PublishMedia(RealtimePublishMediaRequest) returns (RealtimePublishMediaResponse);
   rpc SubscribeMedia(RealtimeSubscribeMediaRequest) returns (stream RealtimeDownlinkMedia);
   rpc StartWebRtc(RealtimeStartWebRtcRequest) returns (RealtimeStartWebRtcResponse);

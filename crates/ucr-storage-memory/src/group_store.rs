@@ -465,6 +465,105 @@ impl GroupMessageStore for MemoryLocalStore {
         Ok(status)
     }
 
+    fn persist_group_message_with_next_logical_order(
+        &self,
+        subject: &ScopedPrincipal,
+        message: &MessageEnvelope,
+    ) -> Result<(DurableRecordStatus, MessageEnvelope), DurableStoreError> {
+        let mut canonical =
+            canonical_message(message).map_err(|_| DurableStoreError::InvalidRecord)?;
+        if canonical.logical_order != 0
+            || !is_group_conversation_kind(canonical.conversation.kind)
+            || !matches!(
+                canonical.delivery_state,
+                DeliveryState::Created | DeliveryState::Persisted
+            )
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        if canonical.scope != subject.scope
+            || canonical.origin.principal_id.as_ref() != Some(&subject.principal.principal_id)
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let group = state
+            .groups
+            .values()
+            .find(|group| {
+                group.scope == canonical.scope && group.conversation == canonical.conversation
+            })
+            .cloned()
+            .ok_or(DurableStoreError::PermissionDenied)?;
+        if canonical.delivery_policy != group.delivery_policy {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let membership = state
+            .group_memberships
+            .get(&membership_key(
+                &group.scope,
+                &group.group_id,
+                &subject.principal,
+            ))
+            .filter(|membership| membership.member == subject.principal)
+            .ok_or(DurableStoreError::PermissionDenied)?;
+        if membership.state != GroupMemberState::Active
+            || !membership
+                .permissions
+                .contains(&GroupPermission::SendMessage)
+        {
+            return Err(DurableStoreError::PermissionDenied);
+        }
+
+        let key = message_key(&canonical.scope, &canonical.message_id);
+        if let Some(existing) = state.messages.get(&key).cloned() {
+            canonical.logical_order = existing.logical_order;
+            canonical.delivery_state = DeliveryState::Persisted;
+            return if canonical == existing {
+                Ok((DurableRecordStatus::Duplicate, existing))
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+
+        let next_order = state
+            .messages
+            .values()
+            .filter(|existing| {
+                existing.scope == canonical.scope && existing.conversation == canonical.conversation
+            })
+            .map(|existing| existing.logical_order)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(DurableStoreError::Full)?;
+        canonical.logical_order = next_order;
+
+        let replica_sequence = checked_next_offline_group_sequence(&state)?;
+        let status = persist_message_in_state(&mut state, &canonical)?;
+        let persisted = state
+            .messages
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::Internal)?;
+        if status == DurableRecordStatus::Persisted {
+            let replica = OfflineGroupMessageReplica {
+                author: subject.clone(),
+                group_id: group.group_id.clone(),
+                group_generation: group.replication_generation,
+                message: persisted.clone(),
+            };
+            if canonical_offline_group_message_replica(&replica).is_ok() {
+                state.offline_group_next_sequence = replica_sequence;
+                state
+                    .offline_group_message_replicas
+                    .push((replica_sequence, replica));
+            }
+        }
+        Ok((status, persisted))
+    }
+
     fn group_message(
         &self,
         subject: &ScopedPrincipal,
@@ -1285,6 +1384,53 @@ mod phase18_memory_security_tests {
         assert_eq!(
             store.persist_group_message(&alias, &forged),
             Err(DurableStoreError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn group_message_allocator_is_monotonic_idempotent_and_conflict_safe() {
+        let store = MemoryLocalStore::default();
+        let owner = subject("allocator-owner", PrincipalKind::Person);
+        let (conversation, group) = group_fixture("allocator", &owner);
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+
+        let mut first = message(
+            &conversation.conversation,
+            &owner.principal.principal_id,
+            "allocator-first",
+        );
+        first.logical_order = 0;
+        let (first_status, first_persisted) = store
+            .persist_group_message_with_next_logical_order(&owner, &first)
+            .expect("first");
+        assert_eq!(first_status, DurableRecordStatus::Persisted);
+        assert_eq!(first_persisted.logical_order, 1);
+
+        let (retry_status, retry_persisted) = store
+            .persist_group_message_with_next_logical_order(&owner, &first)
+            .expect("retry");
+        assert_eq!(retry_status, DurableRecordStatus::Duplicate);
+        assert_eq!(retry_persisted.logical_order, 1);
+
+        let mut second = message(
+            &conversation.conversation,
+            &owner.principal.principal_id,
+            "allocator-second",
+        );
+        second.logical_order = 0;
+        let (second_status, second_persisted) = store
+            .persist_group_message_with_next_logical_order(&owner, &second)
+            .expect("second");
+        assert_eq!(second_status, DurableRecordStatus::Persisted);
+        assert_eq!(second_persisted.logical_order, 2);
+
+        let mut conflict = first;
+        conflict.content = b"different".to_vec();
+        assert_eq!(
+            store.persist_group_message_with_next_logical_order(&owner, &conflict),
+            Err(DurableStoreError::Conflict)
         );
     }
 
