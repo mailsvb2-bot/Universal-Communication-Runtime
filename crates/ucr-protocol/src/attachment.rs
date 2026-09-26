@@ -288,7 +288,7 @@ mod tests {
         chunks[1].sha256 = Sha256::digest(&chunks[1].bytes).into();
 
         assert_eq!(
-            verify_complete_attachment(&descriptor, &chunks),
+            verify_complete_attachment(&descriptor, chunks),
             Err(AttachmentProtocolError::ContentIntegrityMismatch)
         );
     }
