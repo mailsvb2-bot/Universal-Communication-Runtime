@@ -20,9 +20,10 @@ use ucr_protocol::{
     AUDIO_RECEIVE_PERMISSION, CALL_OBSERVE_PERMISSION, CALL_SIGNAL_PERMISSION,
     CALL_START_PERMISSION, CONFERENCE_CAPABILITY, CONFERENCE_SUBSCRIBE_PERMISSION,
     ConferenceProtocolError, GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MLS_CAPABILITY,
-    MAX_CALL_PARTICIPANTS, MAX_TRACKED_CONFERENCE_RECIPIENT_SETS, SFU_MEDIA_CAPABILITY,
-    VIDEO_RECEIVE_PERMISSION, canonical_capabilities, canonical_conference_start,
-    canonical_conference_subscription_set, is_conference_group_kind,
+    MAX_CALL_PARTICIPANTS, MAX_TRACKED_CONFERENCE_REACTIONS, MAX_TRACKED_CONFERENCE_RECIPIENT_SETS,
+    SFU_MEDIA_CAPABILITY, VIDEO_RECEIVE_PERMISSION, canonical_capabilities,
+    canonical_conference_reaction, canonical_conference_start, canonical_conference_subscription_set,
+    is_conference_group_kind,
     phase30_conference_capabilities, validate_conference_snapshot,
 };
 use ucr_sfu::{SfuCapabilityProvider, SfuError, SfuForwardOutcome, SfuForwardSink, SfuRuntime};
@@ -93,6 +94,28 @@ struct RaisedHandState {
     participant: PrincipalRef,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConferenceReaction {
+    pub sequence: u64,
+    pub participant: PrincipalRef,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConferenceReactionState {
+    scope: TenantScope,
+    call_id: CallId,
+    sequence: u64,
+    participant: PrincipalRef,
+    value: String,
+}
+
+#[derive(Debug, Default)]
+struct ConferenceReactionLog {
+    next_sequence: u64,
+    events: Vec<ConferenceReactionState>,
+}
+
 /// Shared bounded non-durable Conference routing preferences.
 ///
 /// Network/service adapters may create a short-lived `ConferenceRuntime` per request while
@@ -102,6 +125,7 @@ struct RaisedHandState {
 pub struct ConferenceRuntimeState {
     subscriptions: Mutex<Vec<RecipientSubscriptionState>>,
     raised_hands: Mutex<Vec<RaisedHandState>>,
+    reactions: Mutex<ConferenceReactionLog>,
 }
 
 impl ConferenceRuntimeState {
@@ -110,6 +134,10 @@ impl ConferenceRuntimeState {
         Self {
             subscriptions: Mutex::new(Vec::new()),
             raised_hands: Mutex::new(Vec::new()),
+            reactions: Mutex::new(ConferenceReactionLog {
+                next_sequence: 1,
+                events: Vec::new(),
+            }),
         }
     }
 }
@@ -464,6 +492,91 @@ where
             entry.scope != *scope || entry.call_id != *call_id || entry.participant != *participant
         });
         Ok(())
+    }
+
+    /// Appends one authenticated participant reaction to the bounded ephemeral Conference log.
+    ///
+    /// # Errors
+    /// Rejects non-accepted participants, invalid reaction values, or unavailable runtime state.
+    pub fn publish_reaction(
+        &self,
+        actor: &ScopedPrincipal,
+        scope: &TenantScope,
+        call_id: &CallId,
+        value: &str,
+    ) -> Result<u64, ConferenceError> {
+        require_conference_stack(
+            self.conference_capabilities,
+            self.sfu_capabilities,
+            self.group_e2ee_capabilities,
+        )?;
+        authorize(self.authorization, actor, CALL_OBSERVE_PERMISSION)?;
+        let snapshot = conference_projection(self.store, actor, scope, call_id)?;
+        require_accepted_participant(&snapshot.call, &actor.principal)?;
+        let value = canonical_conference_reaction(value)?;
+
+        let mut state = self
+            .state
+            .reactions
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        let sequence = state.next_sequence;
+        state.next_sequence = state.next_sequence.saturating_add(1).max(sequence + 1);
+        state.events.push(ConferenceReactionState {
+            scope: scope.clone(),
+            call_id: call_id.clone(),
+            sequence,
+            participant: actor.principal.clone(),
+            value,
+        });
+        if state.events.len() > MAX_TRACKED_CONFERENCE_REACTIONS {
+            let overflow = state.events.len() - MAX_TRACKED_CONFERENCE_REACTIONS;
+            state.events.drain(..overflow);
+        }
+        Ok(sequence)
+    }
+
+    /// Lists bounded ephemeral reactions after one sequence cursor for an authenticated participant.
+    ///
+    /// # Errors
+    /// Rejects non-accepted participants or unavailable runtime state.
+    pub fn reactions_after(
+        &self,
+        actor: &ScopedPrincipal,
+        scope: &TenantScope,
+        call_id: &CallId,
+        after_sequence: u64,
+        max_items: usize,
+    ) -> Result<Vec<ConferenceReaction>, ConferenceError> {
+        require_conference_stack(
+            self.conference_capabilities,
+            self.sfu_capabilities,
+            self.group_e2ee_capabilities,
+        )?;
+        authorize(self.authorization, actor, CALL_OBSERVE_PERMISSION)?;
+        let snapshot = conference_projection(self.store, actor, scope, call_id)?;
+        require_accepted_participant(&snapshot.call, &actor.principal)?;
+
+        let state = self
+            .state
+            .reactions
+            .lock()
+            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+        Ok(state
+            .events
+            .iter()
+            .filter(|entry| {
+                entry.scope == *scope
+                    && entry.call_id == *call_id
+                    && entry.sequence > after_sequence
+            })
+            .take(max_items.min(MAX_TRACKED_CONFERENCE_REACTIONS))
+            .map(|entry| ConferenceReaction {
+                sequence: entry.sequence,
+                participant: entry.participant.clone(),
+                value: entry.value.clone(),
+            })
+            .collect())
     }
 
     /// Routes one already-encrypted Conference frame through the Phase-29 SFU boundary.
