@@ -43,6 +43,7 @@ fn production_release_requires_exact_main_push_proof() {
         "REQUIRED_MAIN_WORKFLOWS",
         r#""CI""#,
         r#""Conformance""#,
+        r#""Browser Compatibility""#,
         r#""Phase 42 AI Actor""#,
         r#""Phase 43 Chaos Lab""#,
         r#""Phase 44 Supply Chain""#,
@@ -61,6 +62,7 @@ fn production_release_requires_exact_main_push_proof() {
     assert!(workflow.contains("gh run list"));
     assert!(workflow.contains(r#"--commit "$SOURCE_COMMIT""#));
     assert!(workflow.contains("tools/production_release.py emit-readiness"));
+    assert!(helper.contains(r#"evidence("Browser Compatibility", "Conformance", "CI")"#));
 }
 
 #[test]
@@ -121,6 +123,7 @@ fn production_bundle_is_complete_and_supply_chain_attested() {
 fn canon_boundary_is_documented_without_false_production_claim() {
     let spec = read("spec/production-release.md");
     let adr = read("docs/adr/0094-production-release-requires-publisher-owned-platform-signing.md");
+    let readme = read("README.md");
 
     for marker in [
         "Production artifact signing is proven only by a successful protected workflow execution",
@@ -139,6 +142,8 @@ fn canon_boundary_is_documented_without_false_production_claim() {
     );
     assert!(adr.contains("publisher-signed release execution is required"));
     assert!(adr.contains("GitHub Environment secrets"));
+    assert!(readme.contains("Phase 45 — Production Hardening"));
+    assert!(readme.contains("Production 1.0 not claimed"));
 }
 
 #[test]
