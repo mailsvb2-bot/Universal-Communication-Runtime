@@ -150,9 +150,7 @@ impl AttachmentStore for SqliteLocalStore {
             .ok_or(DurableStoreError::InvalidRecord)?;
         verify_attachment_chunk(&descriptor, chunk).map_err(map_attachment_write_error)?;
 
-        if let Some(existing) =
-            load_chunk(&transaction, &descriptor, chunk.index)?
-        {
+        if let Some(existing) = load_chunk(&transaction, &descriptor, chunk.index)? {
             return if existing == *chunk {
                 Ok(DurableRecordStatus::Duplicate)
             } else {
@@ -219,9 +217,7 @@ impl AttachmentStore for SqliteLocalStore {
             if stored != expected {
                 return Ok(expected);
             }
-            expected = expected
-                .checked_add(1)
-                .ok_or(DurableStoreError::Corrupt)?;
+            expected = expected.checked_add(1).ok_or(DurableStoreError::Corrupt)?;
         }
         Ok(expected)
     }
@@ -263,8 +259,7 @@ fn insert_chunk(
     chunk: &AttachmentChunk,
 ) -> Result<(), DurableStoreError> {
     let namespace = namespace_storage_key(scope);
-    let offset =
-        i64::try_from(chunk.offset_bytes).map_err(|_| DurableStoreError::InvalidRecord)?;
+    let offset = i64::try_from(chunk.offset_bytes).map_err(|_| DurableStoreError::InvalidRecord)?;
     transaction
         .execute(
             "INSERT INTO attachment_chunks (
@@ -331,7 +326,8 @@ fn load_descriptor(
         scope: scope.clone(),
         content_id: AttachmentContentId { sha256 },
         size_bytes: u64::try_from(size_bytes).map_err(|_| DurableStoreError::Corrupt)?,
-        chunk_size_bytes: u32::try_from(chunk_size_bytes).map_err(|_| DurableStoreError::Corrupt)?,
+        chunk_size_bytes: u32::try_from(chunk_size_bytes)
+            .map_err(|_| DurableStoreError::Corrupt)?,
         chunk_count: u32::try_from(chunk_count).map_err(|_| DurableStoreError::Corrupt)?,
         media_type,
         file_name,
@@ -372,9 +368,7 @@ fn load_chunk(
     let Some((offset_bytes, bytes, sha256)) = stored else {
         return Ok(None);
     };
-    let sha256: [u8; 32] = sha256
-        .try_into()
-        .map_err(|_| DurableStoreError::Corrupt)?;
+    let sha256: [u8; 32] = sha256.try_into().map_err(|_| DurableStoreError::Corrupt)?;
     let chunk = AttachmentChunk {
         attachment_id: descriptor.attachment_id.clone(),
         index,
