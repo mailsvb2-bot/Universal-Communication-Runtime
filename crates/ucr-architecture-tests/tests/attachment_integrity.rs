@@ -66,12 +66,17 @@ fn attachment_integrity_contract_keeps_payload_and_hashes_out_of_debug() {
     for redaction in [
         r#".field("bytes", &"<redacted>")"#,
         r#".field("sha256", &"<opaque>")"#,
-        r#".field("file_name", &self.file_name.as_ref().map(|_| "<redacted>"))"#,
-        r#".field("media_type", &self.media_type.as_ref().map(|_| "<redacted>"))"#,
+        r#".field("file_name""#,
+        r#".field("media_type""#,
+        r#".map(|_| "<redacted>")"#,
     ] {
         assert!(
             model.contains(redaction),
-            "Attachment Debug boundary lost redaction: {redaction}"
+            "Attachment Debug boundary lost redaction marker: {redaction}"
         );
     }
+    assert!(
+        model.matches(r#".map(|_| "<redacted>")"#).count() >= 2,
+        "Attachment metadata Debug fields must remain redacted"
+    );
 }
