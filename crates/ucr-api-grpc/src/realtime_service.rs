@@ -12,7 +12,7 @@ use ucr_conference::{
 };
 use ucr_core::{
     AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
-    DurableStoreError, EventJournalStore, GroupMessageStore, GroupStore,
+    DurableRecordStatus, DurableStoreError, EventJournalStore, GroupMessageStore, GroupStore,
     PrincipalIdentityBindingStore,
     ServiceQuotaStore, UniversalConferenceStore,
 };
@@ -712,9 +712,15 @@ where
                         external_mappings: Vec::new(),
                         signature: None,
                     };
-                    self.store
+                    let persisted = self
+                        .store
                         .persist_group_message(&actor, &message)
                         .map_err(map_store_error)?;
+                    if persisted == DurableRecordStatus::Persisted {
+                        conference_runtime(self)
+                            .notify_chat_message(&scope, &call_id, &message_id)
+                            .map_err(|error| map_conference_error(&error))?;
+                    }
                     Ok(pb::RealtimeChatMessageReceipt {
                         message_id: Some(pb_opaque(message_id.as_opaque())),
                     })
@@ -784,6 +790,67 @@ where
             result: Some(match result {
                 Ok(message) => pb::realtime_get_chat_message_response::Result::Message(message),
                 Err(error) => pb::realtime_get_chat_message_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn list_chat_messages(
+        &self,
+        request: Request<pb::RealtimeListChatMessagesRequest>,
+    ) -> Result<Response<pb::RealtimeListChatMessagesResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let max_items = if body.max_items == 0 {
+            64
+        } else {
+            usize::try_from(body.max_items)
+                .map_err(|_| Status::invalid_argument("realtime request rejected"))?
+        };
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    self.registry
+                        .heartbeat(&claims, self.now()?)
+                        .map_err(map_registry_error)?;
+                    self.require_live_universal_conference(&claims)?;
+                    let actor = actor_for(&claims);
+                    let notifications = conference_runtime(self)
+                        .chat_notifications_after(
+                            &actor,
+                            &scope,
+                            &call_id,
+                            body.after_sequence,
+                            max_items,
+                        )
+                        .map_err(|error| map_conference_error(&error))?;
+                    let mut messages = Vec::with_capacity(notifications.len());
+                    for notification in notifications {
+                        let Some(message) = self
+                            .store
+                            .group_message(&actor, &scope, &notification.message_id)
+                            .map_err(map_store_error)?
+                        else {
+                            continue;
+                        };
+                        messages.push(pb::RealtimeSequencedChatMessage {
+                            sequence: notification.sequence,
+                            message: Some(pb_realtime_chat_message(&message)),
+                        });
+                    }
+                    Ok(pb::RealtimeChatMessageList { messages })
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeListChatMessagesResponse {
+            result: Some(match result {
+                Ok(messages) => {
+                    pb::realtime_list_chat_messages_response::Result::Messages(messages)
+                }
+                Err(error) => {
+                    pb::realtime_list_chat_messages_response::Result::Error(pb_error(error))
+                }
             }),
         }))
     }
@@ -1963,6 +2030,16 @@ fn pb_sfu_forward_envelope(value: &SfuForwardEnvelope) -> pb::SfuForwardEnvelope
                 signature: value.frame.source_signature.signature.clone(),
             }),
         }),
+    }
+}
+
+fn pb_realtime_chat_message(message: &MessageEnvelope) -> pb::RealtimeChatMessage {
+    pb::RealtimeChatMessage {
+        message_id: Some(pb_opaque(message.message_id.as_opaque())),
+        author: Some(pb_actor_ref(&message.author)),
+        created_at_unix_ms: message.created_at_unix_ms,
+        logical_order: message.logical_order,
+        content: message.content.clone(),
     }
 }
 
