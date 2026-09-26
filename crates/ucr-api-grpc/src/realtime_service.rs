@@ -1609,6 +1609,16 @@ impl From<pb::RealtimeLeaveRequest> for RealtimeLookupFields {
     }
 }
 
+impl From<pb::RealtimeGetActiveSpeakerRequest> for RealtimeLookupFields {
+    fn from(value: pb::RealtimeGetActiveSpeakerRequest) -> Self {
+        Self {
+            scope: value.scope,
+            call_id: value.call_id,
+            session_id: value.session_id,
+        }
+    }
+}
+
 impl From<pb::RealtimeStartWebRtcRequest> for RealtimeLookupFields {
     fn from(value: pb::RealtimeStartWebRtcRequest) -> Self {
         Self {
