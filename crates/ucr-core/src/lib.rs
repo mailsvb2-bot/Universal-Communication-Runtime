@@ -17,7 +17,8 @@ mod store_forward;
 mod universal_conference;
 
 use ucr_model::{
-    AntiEntropyCursor, AntiEntropyPage, AuthorizationRequest, BridgeActionId, BridgeActionRecord,
+    AntiEntropyCursor, AntiEntropyPage, AttachmentChunk, AttachmentDescriptor, AttachmentId,
+    AuthorizationRequest, BridgeActionId, BridgeActionRecord,
     BridgeActionState, BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState,
     CapabilityDescriptor, CommandEnvelope, CommandId, CommunicationIntent, ConversationId,
     ConversationRecord, DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState,
@@ -973,6 +974,69 @@ pub trait ConversationStore: StorageProvider {
         scope: &TenantScope,
         conversation_id: &ConversationId,
     ) -> Result<Option<ConversationRecord>, DurableStoreError>;
+}
+
+/// Durable canonical Attachment metadata/chunk capability.
+///
+/// Attachment identity/integrity is separate from Message identity. Chunks may arrive out of
+/// order for retry/resume; storage persists each verified chunk independently and exposes the
+/// earliest missing canonical index after restart.
+pub trait AttachmentStore: StorageProvider {
+    /// Persists or deduplicates one immutable canonical Attachment descriptor.
+    ///
+    /// # Errors
+    /// Returns validation, same-ID semantic conflict, or explicit storage failures.
+    fn persist_attachment_descriptor(
+        &self,
+        descriptor: &AttachmentDescriptor,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one exact scoped Attachment descriptor when present.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn attachment_descriptor(
+        &self,
+        scope: &TenantScope,
+        attachment_id: &AttachmentId,
+    ) -> Result<Option<AttachmentDescriptor>, DurableStoreError>;
+
+    /// Persists or deduplicates one independently verified Attachment chunk.
+    ///
+    /// The referenced descriptor must already exist in the exact scope.
+    ///
+    /// # Errors
+    /// Returns validation, index conflict, missing descriptor, or storage failures.
+    fn persist_attachment_chunk(
+        &self,
+        scope: &TenantScope,
+        chunk: &AttachmentChunk,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Loads one exact chunk when present.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn attachment_chunk(
+        &self,
+        scope: &TenantScope,
+        attachment_id: &AttachmentId,
+        index: u32,
+    ) -> Result<Option<AttachmentChunk>, DurableStoreError>;
+
+    /// Returns the earliest missing canonical chunk index.
+    ///
+    /// A return value equal to `descriptor.chunk_count` means every chunk is durably present.
+    /// This is durable resume state derived from canonical chunk persistence, not a second
+    /// transfer-state brain.
+    ///
+    /// # Errors
+    /// Returns missing-descriptor, corruption, or storage failures.
+    fn attachment_resume_index(
+        &self,
+        scope: &TenantScope,
+        attachment_id: &AttachmentId,
+    ) -> Result<u32, DurableStoreError>;
 }
 
 /// Durable canonical Message capability. Delivery transitions after Persisted
