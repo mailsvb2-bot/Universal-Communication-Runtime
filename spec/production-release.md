@@ -39,6 +39,7 @@ successful `push` runs for:
 
 - CI;
 - Conformance;
+- Browser Compatibility;
 - Phase 42 AI Actor;
 - Phase 43 Chaos Lab;
 - Phase 44 Supply Chain;
