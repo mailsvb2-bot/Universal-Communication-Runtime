@@ -18,14 +18,16 @@ use ucr_core::{
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
-    ActorId, ActorKind, ActorRef, CallId, CallParticipantState, CallSignal, CallSignalKind,
+    ActorId, ActorKind, ActorRef, AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage,
+    AdaptiveMediaTelemetry, CallId, CallParticipantState, CallSignal, CallSignalKind,
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
     ConferenceParticipantRole, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
     DeliveryState, DeviceId, DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame,
     EventEnvelope, EventId, GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature,
-    IceServerConfig, KeyId, MediaKind, MessageEnvelope, MessageId, OpaqueId, OriginRef,
-    PrincipalId, PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope, SfuForwardTarget,
-    TenantScope, UniversalConferenceLifecycle, VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
+    DeferredMediaFallback, IceServerConfig, KeyId, MediaKind, MediaThermalState, MessageEnvelope,
+    MessageId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, ScopedPrincipal, SessionId,
+    SfuForwardEnvelope, SfuForwardTarget, TenantScope, UniversalConferenceLifecycle,
+    VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
     WebRtcSessionDescription,
 };
 use ucr_protocol::{
@@ -549,6 +551,45 @@ where
             result: Some(match result {
                 Ok(reactions) => pb::realtime_list_reactions_response::Result::Reactions(reactions),
                 Err(error) => pb::realtime_list_reactions_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn report_adaptive_media(
+        &self,
+        request: Request<pb::RealtimeReportAdaptiveMediaRequest>,
+    ) -> Result<Response<pb::RealtimeReportAdaptiveMediaResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let telemetry = body
+            .telemetry
+            .ok_or_else(invalid_argument)
+            .and_then(decode_adaptive_media_telemetry);
+        let result = match (token, lookup, telemetry) {
+            (Ok(token), Ok((scope, call_id, session_id)), Ok(telemetry)) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    self.registry
+                        .heartbeat(&claims, self.now()?)
+                        .map_err(map_registry_error)?;
+                    self.require_live_universal_conference(&claims)?;
+                    let actor = actor_for(&claims);
+                    let decision = conference_runtime(self)
+                        .observe_adaptive_media(&actor, &scope, &call_id, &telemetry)
+                        .map_err(|error| map_conference_error(&error))?;
+                    Ok(pb_adaptive_media_decision(&decision))
+                }),
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeReportAdaptiveMediaResponse {
+            result: Some(match result {
+                Ok(decision) => {
+                    pb::realtime_report_adaptive_media_response::Result::Decision(decision)
+                }
+                Err(error) => {
+                    pb::realtime_report_adaptive_media_response::Result::Error(pb_error(error))
+                }
             }),
         }))
     }
@@ -1888,6 +1929,97 @@ fn decode_realtime_lookup_fields(
     ))
 }
 
+fn decode_adaptive_media_telemetry(
+    value: pb::AdaptiveMediaTelemetry,
+) -> Result<AdaptiveMediaTelemetry, CanonicalError> {
+    let packet_loss_basis_points =
+        u16::try_from(value.packet_loss_basis_points).map_err(|_| invalid_argument())?;
+    let cpu_utilization_percent =
+        u8::try_from(value.cpu_utilization_percent).map_err(|_| invalid_argument())?;
+    let gpu_utilization_percent = value
+        .gpu_utilization_percent
+        .map(u8::try_from)
+        .transpose()
+        .map_err(|_| invalid_argument())?;
+    let battery_percent =
+        u8::try_from(value.battery_percent).map_err(|_| invalid_argument())?;
+    let thermal_state = match pb::MediaThermalState::try_from(value.thermal_state)
+        .map_err(|_| invalid_argument())?
+    {
+        pb::MediaThermalState::Nominal => MediaThermalState::Nominal,
+        pb::MediaThermalState::Elevated => MediaThermalState::Elevated,
+        pb::MediaThermalState::Serious => MediaThermalState::Serious,
+        pb::MediaThermalState::Critical => MediaThermalState::Critical,
+        pb::MediaThermalState::Unspecified => return Err(invalid_argument()),
+    };
+    Ok(AdaptiveMediaTelemetry {
+        estimated_bandwidth_bps: value.estimated_bandwidth_bps,
+        packet_loss_basis_points,
+        jitter_ms: value.jitter_ms,
+        rtt_ms: value.rtt_ms,
+        cpu_utilization_percent,
+        gpu_utilization_percent,
+        battery_percent,
+        external_power: value.external_power,
+        thermal_state,
+    })
+}
+
+fn pb_adaptive_media_decision(value: &AdaptiveMediaDecision) -> pb::AdaptiveMediaDecision {
+    pb::AdaptiveMediaDecision {
+        stage: match value.stage {
+            AdaptiveMediaStage::Video1080p => pb::AdaptiveMediaStage::Video1080p,
+            AdaptiveMediaStage::Video720p => pb::AdaptiveMediaStage::Video720p,
+            AdaptiveMediaStage::Video480p => pb::AdaptiveMediaStage::Video480p,
+            AdaptiveMediaStage::VideoLowFps => pb::AdaptiveMediaStage::VideoLowFps,
+            AdaptiveMediaStage::Audio => pb::AdaptiveMediaStage::Audio,
+            AdaptiveMediaStage::AudioLowBitrate => pb::AdaptiveMediaStage::AudioLowBitrate,
+            AdaptiveMediaStage::EventualFallbackRequired => {
+                pb::AdaptiveMediaStage::EventualFallbackRequired
+            }
+        } as i32,
+        changed: value.changed,
+        requires_media_renegotiation: value.requires_media_renegotiation,
+        video: value.video.as_ref().map(|video| pb::VideoCodecConfig {
+            codec_capability_id: video.codec_capability_id.clone(),
+            width: video.width,
+            height: video.height,
+            frame_rate: video.frame_rate,
+            target_bitrate_bps: video.target_bitrate_bps,
+        }),
+        opus_target_bitrate_bps: value.opus_target_bitrate_bps,
+        deferred_fallbacks: value
+            .deferred_fallbacks
+            .iter()
+            .map(|fallback| {
+                (match fallback {
+                    DeferredMediaFallback::VoiceMessage => pb::DeferredMediaFallback::VoiceMessage,
+                    DeferredMediaFallback::Text => pb::DeferredMediaFallback::Text,
+                    DeferredMediaFallback::StoreAndForward => {
+                        pb::DeferredMediaFallback::StoreAndForward
+                    }
+                }) as i32
+            })
+            .collect(),
+        pressures: value
+            .pressures
+            .iter()
+            .map(|pressure| {
+                (match pressure {
+                    AdaptiveMediaPressure::Bandwidth => pb::AdaptiveMediaPressure::Bandwidth,
+                    AdaptiveMediaPressure::PacketLoss => pb::AdaptiveMediaPressure::PacketLoss,
+                    AdaptiveMediaPressure::Jitter => pb::AdaptiveMediaPressure::Jitter,
+                    AdaptiveMediaPressure::Rtt => pb::AdaptiveMediaPressure::Rtt,
+                    AdaptiveMediaPressure::Cpu => pb::AdaptiveMediaPressure::Cpu,
+                    AdaptiveMediaPressure::Gpu => pb::AdaptiveMediaPressure::Gpu,
+                    AdaptiveMediaPressure::Battery => pb::AdaptiveMediaPressure::Battery,
+                    AdaptiveMediaPressure::Thermal => pb::AdaptiveMediaPressure::Thermal,
+                }) as i32
+            })
+            .collect(),
+    }
+}
+
 fn decode_media_subscription(
     value: pb::ConferenceMediaSubscription,
 ) -> Result<ConferenceMediaSubscription, CanonicalError> {
@@ -2390,7 +2522,7 @@ fn map_conference_error(error: &ConferenceError) -> CanonicalError {
         ConferenceError::SubscriptionCapacityExceeded => {
             CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
         }
-        ConferenceError::InvalidAudioLevel => {
+        ConferenceError::InvalidAudioLevel | ConferenceError::Adaptive(_) => {
             CanonicalError::new(CanonicalErrorCode::InvalidArgument)
         }
         ConferenceError::Sfu(_) => CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable),
