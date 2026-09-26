@@ -366,6 +366,9 @@ where
                         .leave(&claims, self.now()?)
                         .map_err(map_registry_error)?;
                     self.append_attendance(&transition)?;
+                    conference_runtime(self)
+                        .clear_raised_hand(&claims.scope, &claims.call_id, &claims.principal)
+                        .map_err(|error| map_conference_error(&error))?;
                     Ok(pb_acknowledgement(acknowledgement_for(
                         claims.session_id.as_opaque().clone(),
                     )))
@@ -427,6 +430,41 @@ where
                 Err(error) => {
                     pb::realtime_set_subscriptions_response::Result::Error(pb_error(error))
                 }
+            }),
+        }))
+    }
+
+    async fn set_raised_hand(
+        &self,
+        request: Request<pb::RealtimeSetRaisedHandRequest>,
+    ) -> Result<Response<pb::RealtimeSetRaisedHandResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    self.registry
+                        .heartbeat(&claims, self.now()?)
+                        .map_err(map_registry_error)?;
+                    self.require_live_universal_conference(&claims)?;
+                    let actor = actor_for(&claims);
+                    conference_runtime(self)
+                        .set_raised_hand(&actor, &scope, &call_id, body.raised)
+                        .map_err(|error| map_conference_error(&error))?;
+                    Ok(pb_acknowledgement(acknowledgement_for(
+                        claims.session_id.as_opaque().clone(),
+                    )))
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeSetRaisedHandResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::realtime_set_raised_hand_response::Result::Acknowledgement(acknowledgement)
+                }
+                Err(error) => pb::realtime_set_raised_hand_response::Result::Error(pb_error(error)),
             }),
         }))
     }
