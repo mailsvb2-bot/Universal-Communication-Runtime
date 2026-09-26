@@ -1987,6 +1987,46 @@ mod phase18_restart_security_tests {
     }
 
     #[test]
+    fn sqlite_group_message_allocator_is_monotonic_idempotent_and_conflict_safe() {
+        let db = TestDb::new();
+        let (conversation, group, owner) = group_fixture();
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        store
+            .create_group(&conversation, &group, &owner)
+            .expect("group");
+
+        let mut first = member_message(&conversation.conversation, &owner.principal, "alloc-first");
+        first.logical_order = 0;
+        let (first_status, first_persisted) = store
+            .persist_group_message_with_next_logical_order(&owner, &first)
+            .expect("first");
+        assert_eq!(first_status, DurableRecordStatus::Persisted);
+        assert_eq!(first_persisted.logical_order, 1);
+
+        let (retry_status, retry_persisted) = store
+            .persist_group_message_with_next_logical_order(&owner, &first)
+            .expect("retry");
+        assert_eq!(retry_status, DurableRecordStatus::Duplicate);
+        assert_eq!(retry_persisted.logical_order, 1);
+
+        let mut second =
+            member_message(&conversation.conversation, &owner.principal, "alloc-second");
+        second.logical_order = 0;
+        let (second_status, second_persisted) = store
+            .persist_group_message_with_next_logical_order(&owner, &second)
+            .expect("second");
+        assert_eq!(second_status, DurableRecordStatus::Persisted);
+        assert_eq!(second_persisted.logical_order, 2);
+
+        let mut conflict = first;
+        conflict.content = b"different".to_vec();
+        assert_eq!(
+            store.persist_group_message_with_next_logical_order(&owner, &conflict),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
     fn private_group_message_read_is_non_oracular_for_kind_alias() {
         let db = TestDb::new();
         let (conversation, group, owner) = group_fixture();
