@@ -245,7 +245,7 @@ message RealtimeGetChatMessageRequest {
 
 message RealtimeChatMessage {
   OpaqueId message_id = 1;
-  PrincipalRef author = 2;
+  ActorRef author = 2;
   int64 created_at_unix_ms = 3;
   uint64 logical_order = 4;
   bytes content = 5;
