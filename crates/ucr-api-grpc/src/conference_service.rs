@@ -595,6 +595,9 @@ pub(crate) fn map_conference_error(error: &ConferenceError) -> CanonicalError {
         ConferenceError::SubscriptionCapacityExceeded => {
             CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
         }
+        ConferenceError::InvalidAudioLevel => {
+            CanonicalError::new(CanonicalErrorCode::InvalidArgument)
+        }
         ConferenceError::Sfu(_) => CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable),
     }
 }

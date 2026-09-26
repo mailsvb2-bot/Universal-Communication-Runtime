@@ -182,6 +182,37 @@ message RealtimeListReactionsResponse {
   }
 }
 
+message RealtimeReportAudioLevelRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  uint32 level = 4;
+}
+
+message RealtimeReportAudioLevelResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeGetActiveSpeakerRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+}
+
+message RealtimeActiveSpeaker {
+  optional PrincipalRef participant = 1;
+}
+
+message RealtimeGetActiveSpeakerResponse {
+  oneof result {
+    RealtimeActiveSpeaker active_speaker = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 enum WebRtcSdpType {
   WEB_RTC_SDP_TYPE_UNSPECIFIED = 0;
   WEB_RTC_SDP_TYPE_OFFER = 1;
@@ -281,6 +312,8 @@ service RealtimeService {
   rpc SetRaisedHand(RealtimeSetRaisedHandRequest) returns (RealtimeSetRaisedHandResponse);
   rpc PublishReaction(RealtimePublishReactionRequest) returns (RealtimePublishReactionResponse);
   rpc ListReactions(RealtimeListReactionsRequest) returns (RealtimeListReactionsResponse);
+  rpc ReportAudioLevel(RealtimeReportAudioLevelRequest) returns (RealtimeReportAudioLevelResponse);
+  rpc GetActiveSpeaker(RealtimeGetActiveSpeakerRequest) returns (RealtimeGetActiveSpeakerResponse);
   rpc PublishMedia(RealtimePublishMediaRequest) returns (RealtimePublishMediaResponse);
   rpc SubscribeMedia(RealtimeSubscribeMediaRequest) returns (stream RealtimeDownlinkMedia);
   rpc StartWebRtc(RealtimeStartWebRtcRequest) returns (RealtimeStartWebRtcResponse);
