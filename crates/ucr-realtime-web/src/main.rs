@@ -492,7 +492,7 @@ async fn handle_post_route(
     }
 }
 
-fn parse_allowed_originsfn parse_allowed_origins(raw: &str) -> Result<Vec<String>, String> {
+fn parse_allowed_origins(raw: &str) -> Result<Vec<String>, String> {
     let mut origins = Vec::new();
     for candidate in raw
         .split(',')
