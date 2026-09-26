@@ -979,11 +979,6 @@ where
             .subscriptions
             .lock()
             .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
-        let adaptive = self
-            .state
-            .adaptive_media
-            .lock()
-            .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
         let mut recipients = Vec::new();
         for entry in state.iter().filter(|entry| {
             entry.scope == call.scope
@@ -992,15 +987,7 @@ where
                     subscription.source == *source && subscription.media_kind == media_kind
                 })
         }) {
-            let stage = adaptive_stage_for_recipient(
-                &adaptive,
-                &call.scope,
-                &call.call_id,
-                &entry.recipient,
-            );
-            if is_accepted_participant(call, &entry.recipient)
-                && stage.is_none_or(|stage| adaptive_stage_allows_media(stage, media_kind))
-            {
+            if is_accepted_participant(call, &entry.recipient) {
                 recipients.push(entry.recipient.clone());
             }
         }
@@ -1105,34 +1092,6 @@ fn prune_adaptive_state(
             || entry.call_id != *call_id
             || is_accepted_participant(call, &entry.recipient)
     });
-}
-
-fn adaptive_stage_for_recipient(
-    state: &[AdaptiveRecipientState],
-    scope: &TenantScope,
-    call_id: &CallId,
-    recipient: &PrincipalRef,
-) -> Option<AdaptiveMediaStage> {
-    state
-        .iter()
-        .filter(|entry| {
-            entry.scope == *scope && entry.call_id == *call_id && entry.recipient == *recipient
-        })
-        .map(|entry| entry.decision.stage)
-        .max()
-}
-
-fn adaptive_stage_allows_media(stage: AdaptiveMediaStage, media_kind: MediaKind) -> bool {
-    match media_kind {
-        MediaKind::Video => matches!(
-            stage,
-            AdaptiveMediaStage::Video1080p
-                | AdaptiveMediaStage::Video720p
-                | AdaptiveMediaStage::Video480p
-                | AdaptiveMediaStage::VideoLowFps
-        ),
-        MediaKind::Audio => stage != AdaptiveMediaStage::EventualFallbackRequired,
-    }
 }
 
 fn is_accepted_participant(call: &CallSession, principal: &PrincipalRef) -> bool {
@@ -1353,69 +1312,36 @@ mod subscription_state_tests {
     }
 
     #[test]
-    fn adaptive_stage_filters_realtime_media_without_changing_subscription_ownership() {
-        for stage in [
-            AdaptiveMediaStage::Video1080p,
-            AdaptiveMediaStage::Video720p,
-            AdaptiveMediaStage::Video480p,
-            AdaptiveMediaStage::VideoLowFps,
-        ] {
-            assert!(adaptive_stage_allows_media(stage, MediaKind::Video));
-            assert!(adaptive_stage_allows_media(stage, MediaKind::Audio));
-        }
-        for stage in [
-            AdaptiveMediaStage::Audio,
-            AdaptiveMediaStage::AudioLowBitrate,
-        ] {
-            assert!(!adaptive_stage_allows_media(stage, MediaKind::Video));
-            assert!(adaptive_stage_allows_media(stage, MediaKind::Audio));
-        }
-        assert!(!adaptive_stage_allows_media(
-            AdaptiveMediaStage::EventualFallbackRequired,
-            MediaKind::Video
-        ));
-        assert!(!adaptive_stage_allows_media(
-            AdaptiveMediaStage::EventualFallbackRequired,
-            MediaKind::Audio
-        ));
-    }
-
-    #[test]
-    fn adaptive_routing_uses_worst_stage_across_recipient_sessions() {
+    fn adaptive_state_is_scoped_to_realtime_session() {
         let recipient = principal("bob");
         let call_id = CallId::from_opaque(oid("adaptive-call"));
-        let decision = |stage| AdaptiveMediaDecision {
-            stage,
+        let decision = AdaptiveMediaDecision {
+            stage: AdaptiveMediaStage::Audio,
             changed: true,
             requires_media_renegotiation: false,
             video: None,
-            opus_target_bitrate_bps: None,
+            opus_target_bitrate_bps: Some(48_000),
             deferred_fallbacks: Vec::new(),
             pressures: Vec::new(),
         };
-        let state = vec![
-            AdaptiveRecipientState {
-                scope: scope(),
-                call_id: call_id.clone(),
-                recipient: recipient.clone(),
-                session_id: SessionId::from_opaque(oid("adaptive-session-good")),
-                controller: AdaptiveMediaController::new(AdaptiveMediaStage::Video1080p),
-                decision: decision(AdaptiveMediaStage::Video1080p),
-            },
-            AdaptiveRecipientState {
-                scope: scope(),
-                call_id: call_id.clone(),
-                recipient: recipient.clone(),
-                session_id: SessionId::from_opaque(oid("adaptive-session-poor")),
-                controller: AdaptiveMediaController::new(AdaptiveMediaStage::Audio),
-                decision: decision(AdaptiveMediaStage::Audio),
-            },
-        ];
+        let first = AdaptiveRecipientState {
+            scope: scope(),
+            call_id: call_id.clone(),
+            recipient: recipient.clone(),
+            session_id: SessionId::from_opaque(oid("adaptive-session-a")),
+            controller: AdaptiveMediaController::new(AdaptiveMediaStage::Audio),
+            decision: decision.clone(),
+        };
+        let second = AdaptiveRecipientState {
+            scope: scope(),
+            call_id,
+            recipient,
+            session_id: SessionId::from_opaque(oid("adaptive-session-b")),
+            controller: AdaptiveMediaController::new(AdaptiveMediaStage::Audio),
+            decision,
+        };
 
-        assert_eq!(
-            adaptive_stage_for_recipient(&state, &scope(), &call_id, &recipient),
-            Some(AdaptiveMediaStage::Audio)
-        );
+        assert_ne!(first.session_id, second.session_id);
     }
 
     #[test]
