@@ -1,6 +1,6 @@
 use ucr_model::{
     AdaptiveMediaPressure, AdaptiveMediaStage, AdaptiveMediaTelemetry, CapabilityDescriptor,
-    CapabilityMaturity, DeferredMediaFallback, MediaThermalState, VideoCodecConfig,
+    CapabilityMaturity, DeferredMediaFallback, MediaKind, MediaThermalState, VideoCodecConfig,
 };
 
 use crate::{H264_VIDEO_CODEC_CAPABILITY, canonical_video_codec_config};
@@ -153,6 +153,33 @@ pub fn reference_video_config(
                 .map_err(|_| AdaptiveMediaProtocolError::VideoProfileInvalid)
         })
         .transpose()
+}
+
+#[must_use]
+pub const fn adaptive_stage_allows_media(
+    stage: AdaptiveMediaStage,
+    media_kind: MediaKind,
+) -> bool {
+    match (stage, media_kind) {
+        (
+            AdaptiveMediaStage::Video1080p
+            | AdaptiveMediaStage::Video720p
+            | AdaptiveMediaStage::Video480p
+            | AdaptiveMediaStage::VideoLowFps,
+            MediaKind::Audio | MediaKind::Video,
+        )
+        | (
+            AdaptiveMediaStage::Audio | AdaptiveMediaStage::AudioLowBitrate,
+            MediaKind::Audio,
+        ) => true,
+        (
+            AdaptiveMediaStage::Audio
+            | AdaptiveMediaStage::AudioLowBitrate
+            | AdaptiveMediaStage::EventualFallbackRequired,
+            MediaKind::Video,
+        )
+        | (AdaptiveMediaStage::EventualFallbackRequired, MediaKind::Audio) => false,
+    }
 }
 
 #[must_use]
@@ -400,6 +427,34 @@ mod tests {
             reference_opus_target_bitrate(AdaptiveMediaStage::AudioLowBitrate),
             Some(16_000)
         );
+    }
+
+    #[test]
+    fn adaptive_stage_media_allowance_preserves_realtime_degradation_boundary() {
+        for stage in [
+            AdaptiveMediaStage::Video1080p,
+            AdaptiveMediaStage::Video720p,
+            AdaptiveMediaStage::Video480p,
+            AdaptiveMediaStage::VideoLowFps,
+        ] {
+            assert!(adaptive_stage_allows_media(stage, MediaKind::Video));
+            assert!(adaptive_stage_allows_media(stage, MediaKind::Audio));
+        }
+        for stage in [
+            AdaptiveMediaStage::Audio,
+            AdaptiveMediaStage::AudioLowBitrate,
+        ] {
+            assert!(!adaptive_stage_allows_media(stage, MediaKind::Video));
+            assert!(adaptive_stage_allows_media(stage, MediaKind::Audio));
+        }
+        assert!(!adaptive_stage_allows_media(
+            AdaptiveMediaStage::EventualFallbackRequired,
+            MediaKind::Video
+        ));
+        assert!(!adaptive_stage_allows_media(
+            AdaptiveMediaStage::EventualFallbackRequired,
+            MediaKind::Audio
+        ));
     }
 
     #[test]
