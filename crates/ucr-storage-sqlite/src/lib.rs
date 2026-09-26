@@ -1636,7 +1636,16 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v45_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "DROP TABLE IF EXISTS attachment_chunks;
+         DROP TABLE IF EXISTS attachments;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v38_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v45_objects(connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS runtime_worker_leases;
          DROP TABLE IF EXISTS service_recording_usage;
