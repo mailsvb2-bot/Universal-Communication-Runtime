@@ -658,11 +658,8 @@ where
                         .heartbeat(&claims, now)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
-                    let message_id = MessageId::from_opaque(decode_opaque(
-                        body.message_id.ok_or_else(invalid_argument)?,
-                    )?);
-                    let correlation_id =
-                        decode_opaque(body.correlation_id.ok_or_else(invalid_argument)?)?;
+                    let message_id = MessageId::from_opaque(decode_opaque(body.message_id)?);
+                    let correlation_id = decode_opaque(body.correlation_id)?;
                     if body.idempotency_key.as_ref().is_some_and(|value| {
                         value.is_empty() || value.len() > MAX_IDEMPOTENCY_KEY_LEN
                     }) {
@@ -678,7 +675,7 @@ where
                         .group(&scope, &snapshot.group_id)
                         .map_err(map_store_error)?
                         .ok_or_else(|| {
-                            CanonicalError::new(CanonicalErrorCode::FailedPrecondition)
+                            CanonicalError::new(CanonicalErrorCode::Internal)
                         })?;
                     let author_device = validate_device_claim(&*self.store, &claims)?;
                     let message = MessageEnvelope {
@@ -754,9 +751,7 @@ where
                         .heartbeat(&claims, self.now()?)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
-                    let message_id = MessageId::from_opaque(decode_opaque(
-                        body.message_id.ok_or_else(invalid_argument)?,
-                    )?);
+                    let message_id = MessageId::from_opaque(decode_opaque(body.message_id)?);
                     let actor = actor_for(&claims);
                     let snapshot = conference_runtime(self)
                         .snapshot(&actor, &scope, &call_id)
@@ -766,7 +761,7 @@ where
                         .group(&scope, &snapshot.group_id)
                         .map_err(map_store_error)?
                         .ok_or_else(|| {
-                            CanonicalError::new(CanonicalErrorCode::FailedPrecondition)
+                            CanonicalError::new(CanonicalErrorCode::Internal)
                         })?;
                     let message = self
                         .store
