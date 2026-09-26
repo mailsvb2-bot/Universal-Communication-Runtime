@@ -413,12 +413,7 @@ async fn handle_request(
     Ok(with_cors(response, origin.as_deref()))
 }
 
-async fn handle_post_route(
-    state: &AppState,
-    token: &str,
-    path: &str,
-    body: &[u8],
-) -> HttpResponse {
+async fn handle_post_route(state: &AppState, token: &str, path: &str, body: &[u8]) -> HttpResponse {
     match path {
         "/v1/realtime/join" => match decode_json::<SessionRequest>(body) {
             Ok(input) => join(state, token, input).await,
