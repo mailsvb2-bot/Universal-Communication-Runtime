@@ -567,6 +567,14 @@ where
                         .heartbeat(&claims, now)
                         .map_err(map_registry_error)?;
                     self.require_live_universal_conference(&claims)?;
+                    if body.level > 0 {
+                        let policy = self
+                            .effective_universal_media_policy(&claims)?
+                            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+                        if !policy.publish_audio_allowed {
+                            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+                        }
+                    }
                     let actor = actor_for(&claims);
                     conference_runtime(self)
                         .report_audio_level(&actor, &scope, &call_id, body.level, now)
