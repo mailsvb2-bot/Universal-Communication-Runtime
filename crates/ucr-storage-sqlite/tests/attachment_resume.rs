@@ -58,18 +58,10 @@ fn sqlite_attachment_resume_state_survives_restart() {
     let db = TestDb::new();
     let bytes = b"abcdefgh";
     let descriptor = descriptor(bytes);
-    let first = canonical_attachment_chunk(
-        descriptor.attachment_id.clone(),
-        0,
-        0,
-        bytes[..4].to_vec(),
-    );
-    let second = canonical_attachment_chunk(
-        descriptor.attachment_id.clone(),
-        1,
-        4,
-        bytes[4..].to_vec(),
-    );
+    let first =
+        canonical_attachment_chunk(descriptor.attachment_id.clone(), 0, 0, bytes[..4].to_vec());
+    let second =
+        canonical_attachment_chunk(descriptor.attachment_id.clone(), 1, 4, bytes[4..].to_vec());
 
     {
         let store = SqliteLocalStore::open(&db.0).expect("open store");
