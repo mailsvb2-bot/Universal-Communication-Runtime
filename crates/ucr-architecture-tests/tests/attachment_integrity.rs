@@ -25,7 +25,10 @@ fn attachment_integrity_contract_is_canonical_and_message_stays_reference_only()
         "pub struct AttachmentDescriptor",
         "pub struct AttachmentChunk",
     ] {
-        assert!(model.contains(marker), "missing canonical Attachment model: {marker}");
+        assert!(
+            model.contains(marker),
+            "missing canonical Attachment model: {marker}"
+        );
     }
 
     for marker in [
@@ -36,7 +39,10 @@ fn attachment_integrity_contract_is_canonical_and_message_stays_reference_only()
         "verify_complete_attachment",
         "Sha256::digest",
     ] {
-        assert!(protocol.contains(marker), "missing Attachment integrity rule: {marker}");
+        assert!(
+            protocol.contains(marker),
+            "missing Attachment integrity rule: {marker}"
+        );
     }
 
     assert!(message_model.contains("pub attachment_ids: Vec<AttachmentId>"));
@@ -50,7 +56,10 @@ fn attachment_integrity_contract_is_canonical_and_message_stays_reference_only()
         "message AttachmentChunk",
         "bytes sha256 = 1;",
     ] {
-        assert!(proto.contains(marker), "missing public Attachment contract: {marker}");
+        assert!(
+            proto.contains(marker),
+            "missing public Attachment contract: {marker}"
+        );
     }
 
     assert!(spec.contains("SHA-256(exact attachment bytes)"));
