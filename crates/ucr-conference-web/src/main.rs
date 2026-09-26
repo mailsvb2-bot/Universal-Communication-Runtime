@@ -1186,24 +1186,27 @@ async fn forward_list_raised_hands(
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };
-    call(client.list_raised_hands(request), |response| match response.result {
-        Some(pb::universal_list_raised_hands_response::Result::RaisedHands(list)) => {
-            json_response(
-                StatusCode::OK,
-                &json!({
-                    "external_user_ids_b64": list
-                        .external_user_ids
-                        .iter()
-                        .map(|value| STANDARD.encode(value))
-                        .collect::<Vec<_>>()
-                }),
-            )
-        }
-        Some(pb::universal_list_raised_hands_response::Result::Error(error)) => {
-            error_response(&error)
-        }
-        None => empty_upstream(),
-    })
+    call(
+        client.list_raised_hands(request),
+        |response| match response.result {
+            Some(pb::universal_list_raised_hands_response::Result::RaisedHands(list)) => {
+                json_response(
+                    StatusCode::OK,
+                    &json!({
+                        "external_user_ids_b64": list
+                            .external_user_ids
+                            .iter()
+                            .map(|value| STANDARD.encode(value))
+                            .collect::<Vec<_>>()
+                    }),
+                )
+            }
+            Some(pb::universal_list_raised_hands_response::Result::Error(error)) => {
+                error_response(&error)
+            }
+            None => empty_upstream(),
+        },
+    )
     .await
 }
 
