@@ -79,6 +79,13 @@ struct HeartbeatRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct RaisedHandRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    raised: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct PublishRequest {
     #[serde(flatten)]
     session: SessionRequest,
@@ -268,6 +275,10 @@ async fn handle_request(
         },
         "/v1/realtime/leave" => match decode_json::<SessionRequest>(&body) {
             Ok(input) => leave(&state, &token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/raised-hand" => match decode_json::<RaisedHandRequest>(&body) {
+            Ok(input) => set_raised_hand(&state, &token, input).await,
             Err(error) => error.into_response(),
         },
         "/v1/realtime/media/publish" => match decode_json::<PublishRequest>(&body) {
@@ -508,6 +519,45 @@ async fn leave(state: &AppState, token: &str, input: SessionRequest) -> HttpResp
                 StatusCode::CONFLICT,
                 "leave_rejected",
                 "realtime leave rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn set_raised_hand(
+    state: &AppState,
+    token: &str,
+    input: RaisedHandRequest,
+) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeSetRaisedHandRequest {
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        raised: input.raised,
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.set_raised_hand(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_set_raised_hand_response::Result::Acknowledgement(_)) => api_ok(
+                if input.raised { "hand_raised" } else { "hand_lowered" },
+                if input.raised {
+                    "raised hand set"
+                } else {
+                    "raised hand cleared"
+                },
+                None,
+                None,
+                None,
+            ),
+            Some(pb::realtime_set_raised_hand_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "raised_hand_rejected",
+                "raised hand update rejected",
             ),
         },
         Err(status) => grpc_error(&status),
