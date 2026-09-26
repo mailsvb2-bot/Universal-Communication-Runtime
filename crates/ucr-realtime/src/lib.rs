@@ -12,9 +12,10 @@ use sha2::Sha256;
 use tokio::sync::mpsc;
 use ucr_core::generate_opaque_id;
 use ucr_model::{
-    CallId, DeviceId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
-    ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantId, TenantScope,
+    AdaptiveMediaStage, CallId, DeviceId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind,
+    PrincipalRef, ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantId, TenantScope,
 };
+use ucr_protocol::adaptive_stage_allows_media;
 use ucr_sfu::{SfuForwardSink, SfuForwardSinkError};
 
 pub const MIN_JOIN_TTL_SECONDS: u32 = 30;
@@ -534,6 +535,7 @@ struct SessionEntry {
     receiver: Option<mpsc::Receiver<SfuForwardEnvelope>>,
     sequence: u64,
     media_ready: bool,
+    adaptive_stage: Option<AdaptiveMediaStage>,
     publisher_owner: Option<ScopedPrincipal>,
 }
 
@@ -544,6 +546,7 @@ impl fmt::Debug for SessionEntry {
             .field("claims", &self.claims)
             .field("sequence", &self.sequence)
             .field("media_ready", &self.media_ready)
+            .field("adaptive_stage", &self.adaptive_stage)
             .field("publisher_active", &self.publisher_owner.is_some())
             .field("queue_capacity", &self.sender.capacity())
             .finish_non_exhaustive()
@@ -690,6 +693,7 @@ impl RealtimeSessionRegistry {
             receiver: Some(receiver),
             sequence: 1,
             media_ready: false,
+            adaptive_stage: None,
             publisher_owner: None,
         });
         Ok(RealtimeJoinOutcome { claims, transition })
@@ -854,6 +858,39 @@ impl RealtimeSessionRegistry {
             return Err(RealtimeRegistryError::ClaimMismatch);
         }
         Ok(entry.sequence)
+    }
+
+    /// Applies one already-evaluated adaptive-media stage to the exact live realtime session.
+    ///
+    /// This registry owns only endpoint delivery state. Adaptive policy/hysteresis remains in the
+    /// Phase-23 controller; the stage is used solely to suppress media that the endpoint should no
+    /// longer receive.
+    ///
+    /// # Errors
+    /// Fails for expiry, claim mismatch, missing session, or unavailable registry state.
+    pub fn set_adaptive_media_stage(
+        &self,
+        claims: &RealtimeSessionClaims,
+        stage: AdaptiveMediaStage,
+        now_unix_ms: i64,
+    ) -> Result<(), RealtimeRegistryError> {
+        if now_unix_ms >= claims.expires_at_unix_ms {
+            return Err(RealtimeRegistryError::Expired);
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        prune_expired(&mut entries, now_unix_ms);
+        let entry = entries
+            .iter_mut()
+            .find(|entry| same_session(entry, claims))
+            .ok_or(RealtimeRegistryError::SessionUnavailable)?;
+        if entry.claims != *claims {
+            return Err(RealtimeRegistryError::ClaimMismatch);
+        }
+        entry.adaptive_stage = Some(stage);
+        Ok(())
     }
 
     /// Atomically claims one publisher slot for the exact live realtime session.
@@ -1075,7 +1112,7 @@ impl SfuForwardSink for RealtimeSessionRegistry {
             .map_err(|_| SfuForwardSinkError::Unavailable)?;
         prune_expired(&mut entries, now_unix_ms);
 
-        let matching = entries
+        let recipient_sessions = entries
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
@@ -1086,8 +1123,19 @@ impl SfuForwardSink for RealtimeSessionRegistry {
             })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
-        if matching.is_empty() {
+        if recipient_sessions.is_empty() {
             return Err(SfuForwardSinkError::Unavailable);
+        }
+        let matching = recipient_sessions
+            .into_iter()
+            .filter(|index| {
+                entries[*index].adaptive_stage.is_none_or(|stage| {
+                    adaptive_stage_allows_media(stage, envelope.frame.header.media_kind)
+                })
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            return Ok(());
         }
         if matching
             .iter()
@@ -1796,6 +1844,71 @@ mod tests {
         assert_eq!(transition.kind, AttendanceTransitionKind::Reconnected);
         assert_eq!(transition.session_sequence, 2);
         assert_eq!(registry.active_session_count(), 1);
+    }
+
+    #[test]
+    fn adaptive_stage_filters_exact_recipient_sessions() {
+        let now = system_now_unix_ms().expect("clock");
+        let call_id = CallId::from_opaque(id("adaptive-call"));
+        let recipient = participant();
+        let registry = RealtimeSessionRegistry::new(8, 2);
+        let constrained = RealtimeSessionClaims {
+            scope: scope(),
+            call_id: call_id.clone(),
+            participant: recipient.clone(),
+            device_id: Some(DeviceId::from_opaque(id("adaptive-device-a"))),
+            session_id: SessionId::from_opaque(id("adaptive-session-a")),
+            issued_at_unix_ms: now,
+            not_before_unix_ms: now,
+            expires_at_unix_ms: now + 60_000,
+            use_policy: JoinGrantUsePolicy::Reusable,
+        };
+        let healthy = RealtimeSessionClaims {
+            device_id: Some(DeviceId::from_opaque(id("adaptive-device-b"))),
+            session_id: SessionId::from_opaque(id("adaptive-session-b")),
+            ..constrained.clone()
+        };
+        registry
+            .join(constrained.clone(), now)
+            .expect("constrained join");
+        registry.join(healthy.clone(), now).expect("healthy join");
+        let mut constrained_downlink = registry
+            .take_downlink(&constrained, now)
+            .expect("constrained downlink");
+        let mut healthy_downlink = registry
+            .take_downlink(&healthy, now)
+            .expect("healthy downlink");
+
+        registry
+            .set_adaptive_media_stage(&constrained, AdaptiveMediaStage::Audio, now)
+            .expect("constrained stage");
+        registry
+            .set_adaptive_media_stage(&healthy, AdaptiveMediaStage::Video1080p, now)
+            .expect("healthy stage");
+
+        let frame = envelope(
+            call_id,
+            PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("adaptive-source")),
+                kind: PrincipalKind::Person,
+            },
+        );
+        let target = SfuForwardTarget { recipient };
+
+        registry
+            .forward_encrypted(&target, &frame)
+            .expect("session-aware fanout");
+        assert!(constrained_downlink.try_recv().is_err());
+        assert!(healthy_downlink.try_recv().is_ok());
+
+        registry
+            .set_adaptive_media_stage(&healthy, AdaptiveMediaStage::EventualFallbackRequired, now)
+            .expect("healthy fallback");
+        registry
+            .forward_encrypted(&target, &frame)
+            .expect("intentional suppression is not transport failure");
+        assert!(constrained_downlink.try_recv().is_err());
+        assert!(healthy_downlink.try_recv().is_err());
     }
 
     #[test]

@@ -3826,6 +3826,7 @@ version = "0.0.1"
 dependencies = [
  "ucr-core",
  "ucr-crypto",
+ "ucr-media-adaptive",
  "ucr-media-e2ee",
  "ucr-model",
  "ucr-protocol",
@@ -4057,6 +4058,7 @@ dependencies = [
  "tokio",
  "ucr-core",
  "ucr-model",
+ "ucr-protocol",
  "ucr-sfu",
 ]
 

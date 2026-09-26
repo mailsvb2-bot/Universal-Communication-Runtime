@@ -57,6 +57,48 @@ fn phase23_reuses_existing_media_controls_and_canon_signal_model() {
 }
 
 #[test]
+fn phase23_is_wired_into_realtime_sessions_without_becoming_the_route_owner() {
+    let root = workspace();
+    let conference =
+        fs::read_to_string(root.join("crates/ucr-conference/src/lib.rs")).expect("conference");
+    let protocol = fs::read_to_string(root.join("crates/ucr-protocol/src/adaptive_media.rs"))
+        .expect("adaptive protocol");
+    let realtime_runtime =
+        fs::read_to_string(root.join("crates/ucr-realtime/src/lib.rs")).expect("realtime runtime");
+    let realtime_service =
+        fs::read_to_string(root.join("crates/ucr-api-grpc/src/realtime_service.rs"))
+            .expect("realtime service");
+    let realtime_proto =
+        fs::read_to_string(root.join("proto/ucr/v1/realtime.proto")).expect("realtime proto");
+
+    for required in [
+        "AdaptiveMediaController",
+        "observe_adaptive_media",
+        "session_id: &SessionId",
+    ] {
+        assert!(
+            conference.contains(required),
+            "conference adaptive controller integration missing: {required}"
+        );
+    }
+    assert!(protocol.contains("adaptive_stage_allows_media"));
+    for required in [
+        "adaptive_stage: Option<AdaptiveMediaStage>",
+        "set_adaptive_media_stage",
+        "adaptive_stage_allows_media",
+        "prune_expired(&mut entries",
+    ] {
+        assert!(
+            realtime_runtime.contains(required),
+            "realtime session delivery integration missing: {required}"
+        );
+    }
+    assert!(realtime_service.contains("set_adaptive_media_stage"));
+    assert!(realtime_proto.contains("rpc ReportAdaptiveMedia("));
+    assert!(realtime_proto.contains("AdaptiveMediaTelemetry telemetry = 4;"));
+}
+
+#[test]
 fn phase23_creates_no_second_call_crypto_delivery_or_transport_brain() {
     let root = workspace();
     let sources = [

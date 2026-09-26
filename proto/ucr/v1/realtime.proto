@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package ucr.v1;
 
+import "ucr/v1/adaptive_media.proto";
 import "ucr/v1/common.proto";
 import "ucr/v1/conference.proto";
 import "ucr/v1/errors.proto";
@@ -178,6 +179,20 @@ message RealtimeReactionList {
 message RealtimeListReactionsResponse {
   oneof result {
     RealtimeReactionList reactions = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeReportAdaptiveMediaRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  AdaptiveMediaTelemetry telemetry = 4;
+}
+
+message RealtimeReportAdaptiveMediaResponse {
+  oneof result {
+    AdaptiveMediaDecision decision = 1;
     ErrorEnvelope error = 2;
   }
 }
@@ -381,6 +396,7 @@ service RealtimeService {
   rpc SetRaisedHand(RealtimeSetRaisedHandRequest) returns (RealtimeSetRaisedHandResponse);
   rpc PublishReaction(RealtimePublishReactionRequest) returns (RealtimePublishReactionResponse);
   rpc ListReactions(RealtimeListReactionsRequest) returns (RealtimeListReactionsResponse);
+  rpc ReportAdaptiveMedia(RealtimeReportAdaptiveMediaRequest) returns (RealtimeReportAdaptiveMediaResponse);
   rpc ReportAudioLevel(RealtimeReportAudioLevelRequest) returns (RealtimeReportAudioLevelResponse);
   rpc GetActiveSpeaker(RealtimeGetActiveSpeakerRequest) returns (RealtimeGetActiveSpeakerResponse);
   rpc SendChatMessage(RealtimeSendChatMessageRequest) returns (RealtimeSendChatMessageResponse);

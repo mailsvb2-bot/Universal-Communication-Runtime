@@ -57,8 +57,8 @@ pub use adaptive_media::{
     ADAPTIVE_DEGRADE_CONFIRM_SAMPLES, ADAPTIVE_MEDIA_CAPABILITY, ADAPTIVE_RECOVERY_CONFIRM_SAMPLES,
     AdaptiveMediaProtocolError, MAX_ADAPTIVE_BANDWIDTH_BPS, MAX_ADAPTIVE_LATENCY_MS,
     OPUS_LOW_TARGET_BITRATE_BPS, OPUS_NORMAL_TARGET_BITRATE_BPS, adaptive_media_pressures,
-    canonical_adaptive_media_telemetry, is_video_stage, one_step_better,
-    phase23_adaptive_media_capabilities, reference_deferred_fallbacks,
+    adaptive_stage_allows_media, canonical_adaptive_media_telemetry, is_video_stage,
+    one_step_better, phase23_adaptive_media_capabilities, reference_deferred_fallbacks,
     reference_opus_target_bitrate, reference_stage_for_telemetry, reference_video_config,
     stage_requires_media_renegotiation,
 };

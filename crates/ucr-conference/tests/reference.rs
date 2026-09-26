@@ -324,6 +324,63 @@ fn subscriptions_require_accepted_sources_and_are_recipient_owned() {
 }
 
 #[test]
+fn accepted_recipient_can_drive_adaptive_media_to_audio_fallback() {
+    let store = MemoryLocalStore::default();
+    let alice = subject("alice-adaptive");
+    let bob = subject("bob-adaptive");
+    let mut group = base_group(&store, &alice);
+    group = add_member(
+        &store,
+        &alice,
+        &group,
+        bob.principal.clone(),
+        "add-bob-adaptive",
+    );
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let conference = PreparedConferenceCapabilities;
+    let coordinator = runtime(&AllowAll, &store, &e2ee, &sfu, &conference);
+    let start = start_request(&group, vec![bob.principal.clone()]);
+    let (_, initial) = coordinator.start(&alice, &start).expect("start");
+    coordinator
+        .signal(
+            &bob,
+            &CallSignal {
+                event_id: EventId::from_opaque(oid("bob-accept-adaptive")),
+                scope: scope(),
+                call_id: start.call_id.clone(),
+                expected_revision: initial.call.revision,
+                kind: CallSignalKind::Accept,
+            },
+        )
+        .expect("accept");
+
+    let decision = coordinator
+        .observe_adaptive_media(
+            &bob,
+            &scope(),
+            &start.call_id,
+            &SessionId::from_opaque(oid("adaptive-session")),
+            &AdaptiveMediaTelemetry {
+                estimated_bandwidth_bps: 8_000_000,
+                packet_loss_basis_points: 20,
+                jitter_ms: 5,
+                rtt_ms: 30,
+                cpu_utilization_percent: 20,
+                gpu_utilization_percent: Some(20),
+                battery_percent: 80,
+                external_power: true,
+                thermal_state: MediaThermalState::Critical,
+            },
+        )
+        .expect("adaptive decision");
+
+    assert_eq!(decision.stage, AdaptiveMediaStage::AudioLowBitrate);
+    assert_eq!(decision.opus_target_bitrate_bps, Some(16_000));
+    assert!(decision.requires_media_renegotiation);
+}
+
+#[test]
 fn thousand_person_sfu_conference_fits_bounded_call_ceiling() {
     assert_eq!(MAX_CALL_PARTICIPANTS, 1024);
     let store = MemoryLocalStore::default();
