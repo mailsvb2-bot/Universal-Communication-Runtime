@@ -120,6 +120,42 @@ struct ReactionReceiptResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct AdaptiveMediaRequest {
+    #[serde(flatten)]
+    session: SessionRequest,
+    estimated_bandwidth_bps: u64,
+    packet_loss_basis_points: u32,
+    jitter_ms: u32,
+    rtt_ms: u32,
+    cpu_utilization_percent: u32,
+    gpu_utilization_percent: Option<u32>,
+    battery_percent: u32,
+    external_power: bool,
+    thermal_state: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AdaptiveVideoResponse {
+    codec_capability_id: String,
+    width: u32,
+    height: u32,
+    frame_rate: u32,
+    target_bitrate_bps: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct AdaptiveMediaResponse {
+    ok: bool,
+    stage: String,
+    changed: bool,
+    requires_media_renegotiation: bool,
+    video: Option<AdaptiveVideoResponse>,
+    opus_target_bitrate_bps: Option<u32>,
+    deferred_fallbacks: Vec<String>,
+    pressures: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AudioLevelRequest {
     #[serde(flatten)]
     session: SessionRequest,
@@ -395,6 +431,10 @@ async fn handle_request(
         },
         "/v1/realtime/reactions/list" => match decode_json::<ListReactionsRequest>(&body) {
             Ok(input) => list_reactions(&state, &token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/adaptive-media" => match decode_json::<AdaptiveMediaRequest>(&body) {
+            Ok(input) => report_adaptive_media(&state, &token, input).await,
             Err(error) => error.into_response(),
         },
         "/v1/realtime/audio-level" | "/v1/realtime/active-speaker" => {
@@ -973,6 +1013,124 @@ async fn get_chat_message(
             ),
         },
         Err(status) => grpc_error(&status),
+    }
+}
+
+async fn report_adaptive_media(
+    state: &AppState,
+    token: &str,
+    input: AdaptiveMediaRequest,
+) -> HttpResponse {
+    let thermal_state = match input.thermal_state.as_str() {
+        "nominal" => pb::MediaThermalState::Nominal,
+        "elevated" => pb::MediaThermalState::Elevated,
+        "serious" => pb::MediaThermalState::Serious,
+        "critical" => pb::MediaThermalState::Critical,
+        _ => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_thermal_state",
+                "thermal_state must be nominal, elevated, serious, or critical",
+            );
+        }
+    };
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeReportAdaptiveMediaRequest {
+        scope: Some(pb_scope(&input.session)),
+        call_id: Some(pb_id(&input.session.call)),
+        session_id: Some(pb_id(&input.session.session)),
+        telemetry: Some(pb::AdaptiveMediaTelemetry {
+            estimated_bandwidth_bps: input.estimated_bandwidth_bps,
+            packet_loss_basis_points: input.packet_loss_basis_points,
+            jitter_ms: input.jitter_ms,
+            rtt_ms: input.rtt_ms,
+            cpu_utilization_percent: input.cpu_utilization_percent,
+            gpu_utilization_percent: input.gpu_utilization_percent,
+            battery_percent: input.battery_percent,
+            external_power: input.external_power,
+            thermal_state: thermal_state as i32,
+        }),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.report_adaptive_media(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_report_adaptive_media_response::Result::Decision(value)) => {
+                json_response(
+                    StatusCode::OK,
+                    &AdaptiveMediaResponse {
+                        ok: true,
+                        stage: adaptive_stage_name(value.stage).to_owned(),
+                        changed: value.changed,
+                        requires_media_renegotiation: value.requires_media_renegotiation,
+                        video: value.video.map(|video| AdaptiveVideoResponse {
+                            codec_capability_id: video.codec_capability_id,
+                            width: video.width,
+                            height: video.height,
+                            frame_rate: video.frame_rate,
+                            target_bitrate_bps: video.target_bitrate_bps,
+                        }),
+                        opus_target_bitrate_bps: value.opus_target_bitrate_bps,
+                        deferred_fallbacks: value
+                            .deferred_fallbacks
+                            .into_iter()
+                            .map(deferred_fallback_name)
+                            .map(str::to_owned)
+                            .collect(),
+                        pressures: value
+                            .pressures
+                            .into_iter()
+                            .map(adaptive_pressure_name)
+                            .map(str::to_owned)
+                            .collect(),
+                    },
+                )
+            }
+            Some(pb::realtime_report_adaptive_media_response::Result::Error(_)) | None => api_error(
+                StatusCode::CONFLICT,
+                "adaptive_media_rejected",
+                "adaptive media telemetry rejected",
+            ),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+fn adaptive_stage_name(value: i32) -> &'static str {
+    match pb::AdaptiveMediaStage::try_from(value) {
+        Ok(pb::AdaptiveMediaStage::Video1080p) => "video_1080p",
+        Ok(pb::AdaptiveMediaStage::Video720p) => "video_720p",
+        Ok(pb::AdaptiveMediaStage::Video480p) => "video_480p",
+        Ok(pb::AdaptiveMediaStage::VideoLowFps) => "video_low_fps",
+        Ok(pb::AdaptiveMediaStage::Audio) => "audio",
+        Ok(pb::AdaptiveMediaStage::AudioLowBitrate) => "audio_low_bitrate",
+        Ok(pb::AdaptiveMediaStage::EventualFallbackRequired) => "eventual_fallback_required",
+        Ok(pb::AdaptiveMediaStage::Unspecified) | Err(_) => "unspecified",
+    }
+}
+
+fn deferred_fallback_name(value: i32) -> &'static str {
+    match pb::DeferredMediaFallback::try_from(value) {
+        Ok(pb::DeferredMediaFallback::VoiceMessage) => "voice_message",
+        Ok(pb::DeferredMediaFallback::Text) => "text",
+        Ok(pb::DeferredMediaFallback::StoreAndForward) => "store_and_forward",
+        Ok(pb::DeferredMediaFallback::Unspecified) | Err(_) => "unspecified",
+    }
+}
+
+fn adaptive_pressure_name(value: i32) -> &'static str {
+    match pb::AdaptiveMediaPressure::try_from(value) {
+        Ok(pb::AdaptiveMediaPressure::Bandwidth) => "bandwidth",
+        Ok(pb::AdaptiveMediaPressure::PacketLoss) => "packet_loss",
+        Ok(pb::AdaptiveMediaPressure::Jitter) => "jitter",
+        Ok(pb::AdaptiveMediaPressure::Rtt) => "rtt",
+        Ok(pb::AdaptiveMediaPressure::Cpu) => "cpu",
+        Ok(pb::AdaptiveMediaPressure::Gpu) => "gpu",
+        Ok(pb::AdaptiveMediaPressure::Battery) => "battery",
+        Ok(pb::AdaptiveMediaPressure::Thermal) => "thermal",
+        Ok(pb::AdaptiveMediaPressure::Unspecified) | Err(_) => "unspecified",
     }
 }
 
