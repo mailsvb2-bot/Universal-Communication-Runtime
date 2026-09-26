@@ -2561,7 +2561,7 @@ mod tests {
         }
 
         let connection = Connection::open(db.path()).expect("open raw sqlite");
-        crate::test_remove_v45_objects(&connection).expect("remove v45 attachment objects");
+        crate::test_remove_v44_objects(&connection).expect("remove post-v43 objects");
         let namespace = super::namespace_storage_key(&subject.scope);
         connection
             .execute(
@@ -2630,7 +2630,7 @@ mod tests {
         }
 
         let connection = Connection::open(db.path()).expect("open raw sqlite");
-        crate::test_remove_v45_objects(&connection).expect("remove v45 attachment objects");
+        crate::test_remove_v44_objects(&connection).expect("remove post-v43 objects");
         connection
             .execute_batch(
                 "DROP TABLE runtime_worker_leases;
@@ -2679,7 +2679,7 @@ mod tests {
         }
 
         let connection = Connection::open(db.path()).expect("open raw sqlite");
-        crate::test_remove_v45_objects(&connection).expect("remove v45 attachment objects");
+        crate::test_remove_v44_objects(&connection).expect("remove post-v43 objects");
         connection
             .execute_batch(
                 "DROP TABLE runtime_worker_leases;
@@ -2737,7 +2737,7 @@ mod tests {
         }
 
         let connection = Connection::open(db.path()).expect("open raw sqlite");
-        crate::test_remove_v45_objects(&connection).expect("remove v45 attachment objects");
+        crate::test_remove_v44_objects(&connection).expect("remove post-v43 objects");
         connection
             .execute_batch(
                 "DROP TABLE runtime_worker_leases;
@@ -2799,7 +2799,7 @@ mod tests {
         }
 
         let connection = Connection::open(db.path()).expect("open raw sqlite");
-        crate::test_remove_v45_objects(&connection).expect("remove v45 attachment objects");
+        crate::test_remove_v44_objects(&connection).expect("remove post-v43 objects");
         connection
             .execute_batch(
                 "DROP TABLE runtime_worker_leases;
@@ -2866,7 +2866,7 @@ mod tests {
         }
 
         let connection = Connection::open(db.path()).expect("open raw sqlite");
-        crate::test_remove_v45_objects(&connection).expect("remove v45 attachment objects");
+        crate::test_remove_v44_objects(&connection).expect("remove post-v43 objects");
         connection
             .execute_batch(
                 "DROP TABLE runtime_worker_leases;
