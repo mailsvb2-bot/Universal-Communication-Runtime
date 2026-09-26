@@ -21,6 +21,7 @@ SOURCE_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_MAIN_WORKFLOWS = (
     "CI",
     "Conformance",
+    "Browser Compatibility",
     "Phase 42 AI Actor",
     "Phase 43 Chaos Lab",
     "Phase 44 Supply Chain",
@@ -127,7 +128,7 @@ def build_readiness(
         },
         "compatibility": {
             "status": "pass",
-            "evidence": evidence("Conformance", "CI"),
+            "evidence": evidence("Browser Compatibility", "Conformance", "CI"),
         },
         "conformance": {
             "status": "pass",
