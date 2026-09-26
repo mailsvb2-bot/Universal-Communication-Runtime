@@ -12,8 +12,8 @@ use ucr_conference::{
 };
 use ucr_core::{
     AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
-    DurableRecordStatus, DurableStoreError, EventJournalStore, GroupMessageStore,
-    PrincipalIdentityBindingStore, ServiceQuotaStore, UniversalConferenceStore,
+    DurableStoreError, EventJournalStore, GroupMessageStore, PrincipalIdentityBindingStore,
+    ServiceQuotaStore, UniversalConferenceStore,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
@@ -706,15 +706,13 @@ where
                         external_mappings: Vec::new(),
                         signature: None,
                     };
-                    let (status, persisted) = self
+                    let (_, persisted) = self
                         .store
                         .persist_group_message_with_next_logical_order(&actor, &message)
                         .map_err(map_store_error)?;
-                    if status == DurableRecordStatus::Persisted {
-                        conference_runtime(self)
-                            .notify_chat_message(&scope, &call_id, &persisted.message_id)
-                            .map_err(|error| map_conference_error(&error))?;
-                    }
+                    conference_runtime(self)
+                        .notify_chat_message(&scope, &call_id, &persisted.message_id)
+                        .map_err(|error| map_conference_error(&error))?;
                     Ok(pb::RealtimeChatMessageReceipt {
                         message_id: Some(pb_opaque(message_id.as_opaque())),
                     })
