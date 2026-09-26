@@ -37,7 +37,7 @@ Deleting a descriptor cascades its chunks at the schema boundary, though public 
 
 Stores must validate descriptors before persistence and must validate every chunk against its persisted descriptor before accepting it.
 
-Loading persisted chunks revalidates the chunk against the descriptor. Corrupt on-disk state fails closed as `DurableStoreError::Corrupt`.
+Opening the SQLite store validates descriptor semantics and persisted chunk layout with set-oriented metadata checks; it does not reread/hash every payload byte. Loading a persisted chunk revalidates its payload hash against the descriptor. Corrupt on-disk state fails closed as `DurableStoreError::Corrupt` when the affected descriptor/chunk is verified.
 
 The store does not claim delivery, authorization, malware safety, encryption, or Message ownership. Message continues to carry Attachment IDs only.
 
