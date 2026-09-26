@@ -832,13 +832,7 @@ where
                     CONFERENCE_READ_PERMISSION,
                 )
                 .and_then(|_| {
-                    list_raised_hands(
-                        self,
-                        &scope,
-                        &conference_id,
-                        &integration_id,
-                        max_items,
-                    )
+                    list_raised_hands(self, &scope, &conference_id, &integration_id, max_items)
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
@@ -2307,12 +2301,7 @@ where
         + PrincipalIdentityBindingStore
         + TrustedSigningKeyResolver,
 {
-    conference_for_integration(
-        &*service.store,
-        scope,
-        conference_id,
-        integration_id,
-    )?;
+    conference_for_integration(&*service.store, scope, conference_id, integration_id)?;
     let raised = prepared_conference_runtime(
         &*service.authorization,
         &*service.store,
