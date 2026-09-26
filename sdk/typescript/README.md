@@ -42,3 +42,20 @@ with `mediaKind: "video"` and `videoSourceKind: "screen_share"`; a legacy v1 vid
 camera-only and cannot assert screen-share authority. The reference browser stops display capture
 locally before awaiting server-side Leave cleanup and also stops it if the encrypted media
 DataChannel closes.
+
+## Embeddable conference UI
+
+`src/conference_embed.ts` adds the thin `mountConference(...)` browser helper required for
+embedding the existing UCR join surface without introducing a second conference model.
+
+- `mode: "iframe"` mounts the issued UCR join URL into a caller-owned container.
+- `mode: "headless"` validates and returns the same join URL without creating DOM.
+- join URLs must use HTTP(S) and retain the personal `#ucr_join` fragment issued by UCR.
+- iframe mounts use a bounded permission surface for camera, microphone, display capture and
+  fullscreen, a sandbox, and `no-referrer`.
+- the helper owns no identity, conference lifecycle, authorization, media encryption, storage,
+  routing or retry semantics.
+
+Applications may wrap this primitive as a widget, component or full-page experience while keeping
+all conference semantics in the public UCR contract.
+
