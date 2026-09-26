@@ -64,10 +64,10 @@ fn attachment_integrity_contract_keeps_payload_and_hashes_out_of_debug() {
     let model = read("crates/ucr-model/src/attachment.rs");
 
     for redaction in [
-        ".field("bytes", &"<redacted>")",
-        ".field("sha256", &"<opaque>")",
-        ".field("file_name", &self.file_name.as_ref().map(|_| "<redacted>"))",
-        ".field("media_type", &self.media_type.as_ref().map(|_| "<redacted>"))",
+        r#".field("bytes", &"<redacted>")"#,
+        r#".field("sha256", &"<opaque>")"#,
+        r#".field("file_name", &self.file_name.as_ref().map(|_| "<redacted>"))"#,
+        r#".field("media_type", &self.media_type.as_ref().map(|_| "<redacted>"))"#,
     ] {
         assert!(
             model.contains(redaction),
