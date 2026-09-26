@@ -358,6 +358,7 @@ mod tests {
         }
         {
             let connection = rusqlite::Connection::open(&path).expect("raw connection");
+            crate::test_remove_v45_objects(&connection).expect("remove v45 attachment objects");
             connection
                 .execute_batch("DROP TABLE runtime_worker_leases;")
                 .expect("remove v43 worker table");
