@@ -943,19 +943,15 @@ async fn get_chat_message(
                 let Some(actor_id) = author.actor_id else {
                     return empty_upstream();
                 };
-                let message_id = match String::from_utf8(message_id.value) {
-                    Ok(value) => value,
-                    Err(_) => return empty_upstream(),
+                let Ok(message_id) = String::from_utf8(message_id.value) else {
+                    return empty_upstream();
                 };
-                let content = match String::from_utf8(message.content) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        return api_error(
-                            StatusCode::UNPROCESSABLE_ENTITY,
-                            "chat_content_not_text",
-                            "conference chat content is not UTF-8 text",
-                        );
-                    }
+                let Ok(content) = String::from_utf8(message.content) else {
+                    return api_error(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "chat_content_not_text",
+                        "conference chat content is not UTF-8 text",
+                    );
                 };
                 json_response(
                     StatusCode::OK,
