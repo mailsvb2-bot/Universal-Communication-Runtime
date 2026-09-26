@@ -753,11 +753,7 @@ async fn report_audio_level(
     }
 }
 
-async fn get_active_speaker(
-    state: &AppState,
-    token: &str,
-    input: SessionRequest,
-) -> HttpResponse {
+async fn get_active_speaker(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeGetActiveSpeakerRequest {
         scope: Some(pb_scope(&input)),
