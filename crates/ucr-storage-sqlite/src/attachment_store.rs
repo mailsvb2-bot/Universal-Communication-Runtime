@@ -186,40 +186,13 @@ impl AttachmentStore for SqliteLocalStore {
         let connection = self.lock_connection()?;
         let descriptor = load_descriptor(&connection, scope, attachment_id)?
             .ok_or(DurableStoreError::InvalidRecord)?;
-        let namespace = namespace_storage_key(scope);
-        let mut statement = connection
-            .prepare(
-                "SELECT chunk_index FROM attachment_chunks
-                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
-                   AND attachment_id=?4
-                 ORDER BY chunk_index ASC",
-            )
-            .map_err(|error| map_sqlite_error(&error))?;
-        let indices = statement
-            .query_map(
-                params![
-                    scope.tenant_id.as_opaque().as_str(),
-                    namespace.present,
-                    namespace.value,
-                    attachment_id.as_opaque().as_str(),
-                ],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(|error| map_sqlite_error(&error))?;
-
-        let mut expected = 0_u32;
-        for stored in indices {
-            let stored = stored.map_err(|error| map_sqlite_error(&error))?;
-            let stored = u32::try_from(stored).map_err(|_| DurableStoreError::Corrupt)?;
-            if stored >= descriptor.chunk_count {
-                return Err(DurableStoreError::Corrupt);
+        for index in 0..descriptor.chunk_count {
+            match load_chunk(&connection, &descriptor, index)? {
+                Some(_) => {}
+                None => return Ok(index),
             }
-            if stored != expected {
-                return Ok(expected);
-            }
-            expected = expected.checked_add(1).ok_or(DurableStoreError::Corrupt)?;
         }
-        Ok(expected)
+        Ok(descriptor.chunk_count)
     }
 }
 
