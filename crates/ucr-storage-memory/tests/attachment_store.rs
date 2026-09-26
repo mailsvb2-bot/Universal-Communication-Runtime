@@ -1,7 +1,5 @@
 use ucr_core::{AttachmentStore, DurableRecordStatus, DurableStoreError, StorageProvider};
-use ucr_model::{
-    AttachmentDescriptor, AttachmentId, NamespaceId, OpaqueId, TenantId, TenantScope,
-};
+use ucr_model::{AttachmentDescriptor, AttachmentId, NamespaceId, OpaqueId, TenantId, TenantScope};
 use ucr_protocol::{attachment_content_id, canonical_attachment_chunk};
 use ucr_storage_memory::MemoryLocalStore;
 
@@ -55,18 +53,10 @@ fn memory_attachment_chunks_are_idempotent_and_resume_from_first_gap() {
         Ok(DurableRecordStatus::Duplicate)
     );
 
-    let chunk0 = canonical_attachment_chunk(
-        descriptor.attachment_id.clone(),
-        0,
-        0,
-        bytes[0..4].to_vec(),
-    );
-    let chunk1 = canonical_attachment_chunk(
-        descriptor.attachment_id.clone(),
-        1,
-        4,
-        bytes[4..8].to_vec(),
-    );
+    let chunk0 =
+        canonical_attachment_chunk(descriptor.attachment_id.clone(), 0, 0, bytes[0..4].to_vec());
+    let chunk1 =
+        canonical_attachment_chunk(descriptor.attachment_id.clone(), 1, 4, bytes[4..8].to_vec());
     let chunk2 = canonical_attachment_chunk(
         descriptor.attachment_id.clone(),
         2,
@@ -138,12 +128,8 @@ fn memory_attachment_store_rejects_missing_descriptor_and_semantic_conflicts() {
     store
         .persist_attachment_chunk(&descriptor.scope, &chunk0)
         .expect("persist chunk");
-    let conflicting_chunk = canonical_attachment_chunk(
-        descriptor.attachment_id.clone(),
-        0,
-        0,
-        b"WXYZ".to_vec(),
-    );
+    let conflicting_chunk =
+        canonical_attachment_chunk(descriptor.attachment_id.clone(), 0, 0, b"WXYZ".to_vec());
     assert_eq!(
         store.persist_attachment_chunk(&descriptor.scope, &conflicting_chunk),
         Err(DurableStoreError::Conflict)
