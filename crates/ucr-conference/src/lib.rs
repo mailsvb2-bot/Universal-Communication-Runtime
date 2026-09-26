@@ -156,13 +156,19 @@ const ACTIVE_SPEAKER_REPORT_TTL_MS: i64 = 3_000;
 /// Network/service adapters may create a short-lived `ConferenceRuntime` per request while
 /// reusing this state across requests. This state is intentionally in-memory only: restart drops
 /// routing preferences and clients re-establish them; canonical Call/Group/MLS state stays durable.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ConferenceRuntimeState {
     subscriptions: Mutex<Vec<RecipientSubscriptionState>>,
     raised_hands: Mutex<Vec<RaisedHandState>>,
     reactions: Mutex<ConferenceReactionLog>,
     chat_notifications: Mutex<ConferenceChatNotificationLog>,
     active_speaker_reports: Mutex<Vec<ActiveSpeakerState>>,
+}
+
+impl Default for ConferenceRuntimeState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConferenceRuntimeState {
@@ -1164,6 +1170,23 @@ mod subscription_state_tests {
                 media_kind: MediaKind::Video,
             }],
         }
+    }
+
+    #[test]
+    fn default_runtime_state_uses_live_cursor_sequence_origin() {
+        let state = ConferenceRuntimeState::default();
+        assert_eq!(
+            state.reactions.lock().expect("reactions").next_sequence,
+            1
+        );
+        assert_eq!(
+            state
+                .chat_notifications
+                .lock()
+                .expect("chat notifications")
+                .next_sequence,
+            1
+        );
     }
 
     #[test]
