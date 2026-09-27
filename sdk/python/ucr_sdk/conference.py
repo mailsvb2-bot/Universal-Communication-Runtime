@@ -101,7 +101,7 @@ class UniversalConferenceClient:
     @staticmethod
     def _raise_for_error(status: int, payload: Mapping[str, Any]) -> None:
         error = payload.get("error")
-        if status < 400 and not isinstance(error, Mapping):
+        if 200 <= status < 300 and not isinstance(error, Mapping):
             return
         envelope = error if isinstance(error, Mapping) else {}
         raise UniversalConferenceHttpError(
