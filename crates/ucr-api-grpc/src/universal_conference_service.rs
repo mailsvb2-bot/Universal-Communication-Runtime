@@ -8,6 +8,9 @@ use super::{
         MachineApiAuthentication, MachineBearerConfig, admit_machine_api,
         decode_machine_api_authentication,
     },
+    mutation_idempotency::{
+        accept_mutation, accept_mutation_id, validate_mutation_idempotency_key,
+    },
     pb, pb_acknowledgement, pb_error, pb_opaque, pb_scope,
 };
 use prost::Message;
@@ -1080,7 +1083,7 @@ fn decode_create(
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     validate_external_id(&value.external_conference_id)?;
-    validate_idempotency_key(&value.idempotency_key)?;
+    validate_mutation_idempotency_key(&value.idempotency_key)?;
     let mode = decode_mode(value.mode)?;
     let schedule = decode_schedule(value.schedule.ok_or_else(invalid_argument)?)?;
     Ok(CreateInput {
@@ -1100,7 +1103,7 @@ fn decode_ensure_participant(
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     validate_external_user_id(&value.external_user_id)?;
-    validate_idempotency_key(&value.idempotency_key)?;
+    validate_mutation_idempotency_key(&value.idempotency_key)?;
     let role = decode_participant_role(value.role)?;
     Ok(EnsureParticipantInput {
         scope,
@@ -1119,7 +1122,7 @@ fn decode_ensure_participant_device(
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     validate_external_user_id(&value.external_user_id)?;
-    validate_idempotency_key(&value.idempotency_key)?;
+    validate_mutation_idempotency_key(&value.idempotency_key)?;
     Ok(EnsureParticipantDeviceInput {
         scope,
         conference_id,
@@ -1147,7 +1150,7 @@ fn decode_update_participant(
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     validate_external_user_id(&value.external_user_id)?;
-    validate_idempotency_key(&value.idempotency_key)?;
+    validate_mutation_idempotency_key(&value.idempotency_key)?;
     let role = value.role.map(decode_participant_role).transpose()?;
     Ok(UpdateParticipantInput {
         scope,
@@ -1171,7 +1174,7 @@ fn decode_remove_participant(
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     validate_external_user_id(&value.external_user_id)?;
-    validate_idempotency_key(&value.idempotency_key)?;
+    validate_mutation_idempotency_key(&value.idempotency_key)?;
     Ok(RemoveParticipantInput {
         scope,
         conference_id,
@@ -1259,7 +1262,7 @@ fn decode_prepare_conference_runtime(
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
-    validate_idempotency_key(&value.idempotency_key)?;
+    validate_mutation_idempotency_key(&value.idempotency_key)?;
     Ok(PrepareConferenceRuntimeInput {
         scope,
         conference_id,
@@ -1275,7 +1278,7 @@ fn decode_issue_join_grant(
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
     validate_external_user_id(&value.external_user_id)?;
-    validate_idempotency_key(&value.idempotency_key)?;
+    validate_mutation_idempotency_key(&value.idempotency_key)?;
     let use_policy =
         match pb::JoinGrantUsePolicy::try_from(value.use_policy).map_err(|_| invalid_argument())? {
             pb::JoinGrantUsePolicy::Unspecified => return Err(invalid_argument()),
@@ -1298,7 +1301,7 @@ fn decode_issue_join_grant(
 fn decode_revoke_join_grant(
     value: pb::UniversalRevokeJoinGrantRequest,
 ) -> Result<(TenantScope, GroupId, IntegrationId, SessionId, String), CanonicalError> {
-    validate_idempotency_key(&value.idempotency_key)?;
+    validate_mutation_idempotency_key(&value.idempotency_key)?;
     Ok((
         decode_scope(value.scope.ok_or_else(invalid_argument)?)?,
         GroupId::from_opaque(decode_opaque(value.conference_id)?),
@@ -1344,7 +1347,7 @@ fn decode_lifecycle_request(
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
-    validate_idempotency_key(&value.idempotency_key)?;
+    validate_mutation_idempotency_key(&value.idempotency_key)?;
     let target = match pb::UniversalConferenceLifecycle::try_from(value.target)
         .map_err(|_| invalid_argument())?
     {
@@ -1370,7 +1373,7 @@ fn decode_entry_request(
     let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
     let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
     let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
-    validate_idempotency_key(&value.idempotency_key)?;
+    validate_mutation_idempotency_key(&value.idempotency_key)?;
     Ok((
         scope,
         conference_id,
@@ -3492,49 +3495,6 @@ fn pb_participant(
     }
 }
 
-fn accept_mutation_id<S: CommandAcceptanceStore>(
-    store: &S,
-    scope: &TenantScope,
-    command_type: &str,
-    idempotency_key: &str,
-    payload: Vec<u8>,
-) -> Result<CommandId, CanonicalError> {
-    validate_idempotency_key(idempotency_key)?;
-    let command_id = CommandId::from_opaque(
-        generate_opaque_id().map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
-    );
-    let command = CommandEnvelope {
-        command_id: command_id.clone(),
-        scope: scope.clone(),
-        command_type: command_type.to_owned(),
-        payload,
-        correlation: CorrelationContext {
-            correlation_id: command_id.as_opaque().clone(),
-            causation_id: None,
-            idempotency_key: Some(idempotency_key.to_owned()),
-        },
-        schema_version: ProtocolVersion::new(1, 0),
-        extensions: Vec::new(),
-    };
-    let receipt = store.accept_command(&command).map_err(map_store_error)?;
-    match receipt.status {
-        CommandReceiptStatus::Accepted => Ok(receipt.command_id),
-        CommandReceiptStatus::Duplicate => receipt
-            .original_command_id
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal)),
-    }
-}
-
-fn accept_mutation<S: CommandAcceptanceStore>(
-    store: &S,
-    scope: &TenantScope,
-    command_type: &str,
-    idempotency_key: &str,
-    payload: Vec<u8>,
-) -> Result<(), CanonicalError> {
-    accept_mutation_id(store, scope, command_type, idempotency_key, payload).map(|_| ())
-}
-
 fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
     store: &S,
     input: CreateInput,
@@ -3718,17 +3678,6 @@ fn validate_external_user_id(value: &[u8]) -> Result<(), CanonicalError> {
 
 fn validate_external_id(value: &[u8]) -> Result<(), CanonicalError> {
     if value.is_empty() || value.len() > MAX_EXTERNAL_CONFERENCE_ID_BYTES {
-        Err(invalid_argument())
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_idempotency_key(value: &str) -> Result<(), CanonicalError> {
-    if value.is_empty()
-        || value.len() > MAX_IDEMPOTENCY_KEY_BYTES
-        || value.chars().any(char::is_control)
-    {
         Err(invalid_argument())
     } else {
         Ok(())
