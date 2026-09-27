@@ -45,9 +45,9 @@ use ucr_model::{
     OrganizationManagedDeviceBinding, OrganizationManagedIdentityBinding, OrganizationModeProfile,
     PermissionGrant, PersonalNodeObject, PersonalNodeProfile, PrincipalIdentityBinding,
     PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecordingConsentState, RecordingId,
-    RecordingSession, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
-    ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
-    ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
+    RecordingSession, RecordingState, RecoveryPlan, RecoveryPlanId, ScopedPrincipal,
+    ServiceAuditOperationRef, ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord,
+    ServiceCredentialState, ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
     ServiceResourceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId,
     SyncCheckpoint, SyncSession, SyncState, TenantScope, TrustedSigningKeyRecord,
     TrustedSigningKeyState, UniversalConferenceLifecycle, UniversalConferenceParticipantProfile,
@@ -2682,6 +2682,18 @@ impl EventJournalStore for MemoryLocalStore {
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError> {
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         append_event_to_memory_state(&mut state, event)
+    }
+
+    fn event(
+        &self,
+        scope: &TenantScope,
+        event_id: &EventId,
+    ) -> Result<Option<EventEnvelope>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .events
+            .get(&(scope_key(scope), event_id.as_opaque().as_str().to_owned()))
+            .cloned())
     }
 
     fn events_for_types(
@@ -8712,6 +8724,72 @@ where
     Ok(next)
 }
 
+const fn recording_lifecycle_event_type(state: RecordingState) -> Option<&'static str> {
+    match state {
+        RecordingState::Active => Some("ucr.recording.started"),
+        RecordingState::Stopped => Some("ucr.recording.stopped"),
+        RecordingState::Expired => Some("ucr.recording.expired"),
+        RecordingState::Deleted => Some("ucr.recording.deleted"),
+        RecordingState::WaitingForConsent | RecordingState::Ready => None,
+    }
+}
+
+fn validate_recording_lifecycle_event(
+    current: &RecordingSession,
+    next: &RecordingSession,
+    event: Option<&EventEnvelope>,
+) -> Result<(), DurableStoreError> {
+    let expected_type = if current.state == next.state {
+        None
+    } else {
+        recording_lifecycle_event_type(next.state)
+    };
+    match (expected_type, event) {
+        (None, None) => Ok(()),
+        (Some(expected_type), Some(event))
+            if event.scope == current.scope
+                && event.event_type == expected_type
+                && event.logical_order == next.revision =>
+        {
+            canonical_event(event).map(|_| ()).map_err(map_event_error)
+        }
+        _ => Err(DurableStoreError::InvalidRecord),
+    }
+}
+
+fn transition_recording_with_event<F>(
+    state: &mut MemoryState,
+    key: &RecordingKey,
+    expected_revision: u64,
+    transition: F,
+    event: Option<&EventEnvelope>,
+) -> Result<RecordingSession, DurableStoreError>
+where
+    F: FnOnce(&RecordingSession) -> Result<RecordingSession, RecordingProtocolError>,
+{
+    let current = state
+        .recordings
+        .get(key)
+        .cloned()
+        .ok_or(DurableStoreError::Conflict)?;
+    if current.revision != expected_revision {
+        return Err(DurableStoreError::Conflict);
+    }
+    let next = transition(&current).map_err(map_recording_protocol_error)?;
+    validate_recording_lifecycle_event(&current, &next, event)?;
+    if next == current {
+        return Ok(current);
+    }
+    state.recordings.insert(key.clone(), next.clone());
+    if let Some(event) = event
+        && let Err(error) = append_event_to_memory_state(state, event)
+    {
+        state.recordings.insert(key.clone(), current);
+        return Err(error);
+    }
+    Ok(next)
+}
+
 impl RecordingStore for MemoryLocalStore {
     fn persist_recording(
         &self,
@@ -8809,6 +8887,80 @@ impl RecordingStore for MemoryLocalStore {
         )
     }
 
+    fn set_recording_consent_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        participant: &PrincipalRef,
+        consent_state: RecordingConsentState,
+        now_unix_ms: i64,
+        event: Option<&EventEnvelope>,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording_with_event(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| apply_recording_consent(current, participant, consent_state, now_unix_ms),
+            event,
+        )
+    }
+
+    fn start_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording_with_event(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| start_recording(current, now_unix_ms),
+            Some(event),
+        )
+    }
+
+    fn stop_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording_with_event(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| stop_recording(current, now_unix_ms),
+            Some(event),
+        )
+    }
+
+    fn expire_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording_with_event(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| expire_recording(current, now_unix_ms),
+            Some(event),
+        )
+    }
+
     fn delete_recording(
         &self,
         scope: &TenantScope,
@@ -8822,6 +8974,24 @@ impl RecordingStore for MemoryLocalStore {
             &recording_key(scope, recording_id),
             expected_revision,
             |current| delete_recording(current, now_unix_ms),
+        )
+    }
+
+    fn delete_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording_with_event(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| delete_recording(current, now_unix_ms),
+            Some(event),
         )
     }
 }

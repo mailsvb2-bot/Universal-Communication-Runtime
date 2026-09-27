@@ -56,6 +56,7 @@ pub mod pb {
 }
 
 mod machine_api_auth;
+mod mutation_idempotency;
 
 mod mesh_service;
 pub use mesh_service::{

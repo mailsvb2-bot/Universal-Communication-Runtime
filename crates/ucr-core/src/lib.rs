@@ -1162,6 +1162,22 @@ pub trait EventJournalStore: StorageProvider {
     /// scoped event ID with different semantics is a conflict.
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError>;
 
+    /// Loads one exact canonical Event by scoped ID from the same append-only journal.
+    ///
+    /// This is a read-only identity lookup, not a second Event owner. It is used when callers need
+    /// durable proof that a specific mutation Event committed atomically.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption failures.
+    fn event(
+        &self,
+        scope: &TenantScope,
+        event_id: &EventId,
+    ) -> Result<Option<EventEnvelope>, DurableStoreError> {
+        let _ = (scope, event_id);
+        Err(DurableStoreError::Unavailable)
+    }
+
     /// Returns a bounded oldest-first projection of canonical events matching any requested type.
     ///
     /// This is a read-only view over the same append-only Event journal. Implementations must not

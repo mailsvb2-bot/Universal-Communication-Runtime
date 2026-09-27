@@ -804,6 +804,8 @@ struct RecordingMutationJson {
     scope: ScopeJson,
     recording_id: String,
     expected_revision: u64,
+    #[serde(default)]
+    idempotency_key: Option<String>,
 }
 
 fn principal_kind_code(kind: &str) -> Result<i32, TransportError> {
@@ -973,11 +975,12 @@ async fn forward_recording_consent(
 
 fn recording_mutation_request(
     parsed: &RecordingMutationJson,
-) -> Result<(pb::TenantScope, pb::OpaqueId, u64), TransportError> {
+) -> Result<(pb::TenantScope, pb::OpaqueId, u64, Option<String>), TransportError> {
     Ok((
         scope_of(&parsed.scope)?,
         opaque(&parsed.recording_id)?,
         parsed.expected_revision,
+        parsed.idempotency_key.clone(),
     ))
 }
 
@@ -990,15 +993,17 @@ async fn forward_start_recording(
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
-    let (scope, recording_id, expected_revision) = match recording_mutation_request(&parsed) {
-        Ok(request) => request,
-        Err(error) => return error.into_response(),
-    };
+    let (scope, recording_id, expected_revision, idempotency_key) =
+        match recording_mutation_request(&parsed) {
+            Ok(request) => request,
+            Err(error) => return error.into_response(),
+        };
     let request = match authorized(
         pb::RecordingStartRequest {
             scope: Some(scope),
             recording_id: Some(recording_id),
             expected_revision,
+            idempotency_key,
         },
         authorization,
     ) {
@@ -1027,15 +1032,17 @@ async fn forward_stop_recording(
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
-    let (scope, recording_id, expected_revision) = match recording_mutation_request(&parsed) {
-        Ok(request) => request,
-        Err(error) => return error.into_response(),
-    };
+    let (scope, recording_id, expected_revision, idempotency_key) =
+        match recording_mutation_request(&parsed) {
+            Ok(request) => request,
+            Err(error) => return error.into_response(),
+        };
     let request = match authorized(
         pb::RecordingStopRequest {
             scope: Some(scope),
             recording_id: Some(recording_id),
             expected_revision,
+            idempotency_key,
         },
         authorization,
     ) {
@@ -1064,15 +1071,17 @@ async fn forward_delete_recording(
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
-    let (scope, recording_id, expected_revision) = match recording_mutation_request(&parsed) {
-        Ok(request) => request,
-        Err(error) => return error.into_response(),
-    };
+    let (scope, recording_id, expected_revision, idempotency_key) =
+        match recording_mutation_request(&parsed) {
+            Ok(request) => request,
+            Err(error) => return error.into_response(),
+        };
     let request = match authorized(
         pb::RecordingDeleteRequest {
             scope: Some(scope),
             recording_id: Some(recording_id),
             expected_revision,
+            idempotency_key,
         },
         authorization,
     ) {
