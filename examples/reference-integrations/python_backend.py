@@ -1,112 +1,61 @@
 #!/usr/bin/env python3
-import argparse
-import base64
-import json
-import os
-import time
-import urllib.parse
-import urllib.request
+import argparse, base64, json, os, time, urllib.parse, urllib.request, uuid
 
+def b64(v): return base64.b64encode(v.encode()).decode()
 
-def b64(value: str) -> str:
-    return base64.b64encode(value.encode("utf-8")).decode("ascii")
+def validate_base_url(value):
+    url=urllib.parse.urlsplit(value.rstrip("/"))
+    loopback=url.hostname in {"127.0.0.1","localhost","::1"}
+    if url.scheme!="https" and not (url.scheme=="http" and loopback):
+        raise ValueError("UCR_BASE_URL must use HTTPS outside loopback development")
+    return value.rstrip("/")
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs):
+        raise urllib.error.HTTPError(args[0].full_url, args[2], "redirect blocked for authenticated UCR request", args[3], args[4])
 
 def config():
-    required = ["UCR_BASE_URL", "UCR_ACCESS_TOKEN", "UCR_TENANT_ID", "UCR_INTEGRATION_ID"]
-    missing = [name for name in required if not os.environ.get(name)]
-    if missing:
-        raise SystemExit("missing environment: " + ", ".join(missing))
-    return {name: os.environ[name] for name in required}
+    names=["UCR_BASE_URL","UCR_ACCESS_TOKEN","UCR_TENANT_ID","UCR_INTEGRATION_ID"]
+    missing=[n for n in names if not os.environ.get(n)]
+    if missing: raise SystemExit("missing environment: "+", ".join(missing))
+    cfg={n:os.environ[n] for n in names}; cfg["UCR_BASE_URL"]=validate_base_url(cfg["UCR_BASE_URL"]); return cfg
 
+def post(cfg,path,body,opener=None):
+    req=urllib.request.Request(cfg["UCR_BASE_URL"]+path,data=json.dumps(body).encode(),headers={"authorization":"Bearer "+cfg["UCR_ACCESS_TOKEN"],"content-type":"application/json"},method="POST")
+    with (opener or urllib.request.build_opener(NoRedirect)).open(req,timeout=15) as resp: return json.load(resp)
 
-def post(cfg, path, body):
-    request = urllib.request.Request(
-        cfg["UCR_BASE_URL"].rstrip("/") + path,
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "authorization": "Bearer " + cfg["UCR_ACCESS_TOKEN"],
-            "content-type": "application/json",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        return json.load(response)
+def flow_payloads(cfg, now_ms=None, run_id=None):
+    now_ms=now_ms or int(time.time()*1000); run_id=run_id or uuid.uuid4().hex
+    scope={"tenant_id":cfg["UCR_TENANT_ID"]}; integration_id=cfg["UCR_INTEGRATION_ID"]; prefix="reference-"+run_id
+    create={"scope":scope,"integration_id":integration_id,"external_conference_id_b64":b64(prefix),"idempotency_key":prefix+"-create","mode":"webinar","schedule":{"starts_at_unix_ms":now_ms+300000,"planned_end_unix_ms":now_ms+3900000,"join_before_seconds":900,"join_after_seconds":300,"timezone":"UTC"}}
+    return scope,integration_id,prefix,create
 
+def execute_flow(cfg, transport=post, now_ms=None, run_id=None):
+    scope,i,prefix,create=flow_payloads(cfg,now_ms,run_id); c=transport(cfg,"/v1/conferences",create)["conference"]; cid=c["conference_id"]
+    for user,role in [("owner","owner"),("attendee","attendee")]:
+        transport(cfg,"/v1/participants",{"scope":scope,"conference_id":cid,"integration_id":i,"external_user_id_b64":b64(prefix+"-"+user),"role":role,"idempotency_key":prefix+"-"+user})
+        transport(cfg,"/v1/participant-devices",{"scope":scope,"conference_id":cid,"integration_id":i,"external_user_id_b64":b64(prefix+"-"+user),"idempotency_key":prefix+"-"+user+"-device"})
+    transport(cfg,"/v1/conferences/runtime",{"scope":scope,"conference_id":cid,"integration_id":i,"idempotency_key":prefix+"-runtime"})
+    for target in ("waiting","live"): transport(cfg,"/v1/conferences/lifecycle",{"scope":scope,"conference_id":cid,"integration_id":i,"target":target,"idempotency_key":prefix+"-"+target})
+    grant=transport(cfg,"/v1/join-grants",{"scope":scope,"conference_id":cid,"integration_id":i,"external_user_id_b64":b64(prefix+"-attendee"),"ttl_seconds":900,"use_policy":"single_use","idempotency_key":prefix+"-join"})["grant"]
+    return {"conference_id":cid,"join_url":grant["join_url"]}
 
-def flow_payloads(cfg, now_ms=None):
-    now_ms = now_ms or int(time.time() * 1000)
-    scope = {"tenant_id": cfg["UCR_TENANT_ID"]}
-    integration_id = cfg["UCR_INTEGRATION_ID"]
-    external_conference = b64("reference-webinar-001")
-    create = {
-        "scope": scope,
-        "integration_id": integration_id,
-        "external_conference_id_b64": external_conference,
-        "idempotency_key": "reference-create-001",
-        "mode": "webinar",
-        "schedule": {
-            "starts_at_unix_ms": now_ms + 300_000,
-            "planned_end_unix_ms": now_ms + 3_900_000,
-            "join_before_seconds": 900,
-            "join_after_seconds": 300,
-            "timezone": "UTC",
-        },
-    }
-    return scope, integration_id, create
-
-
-def run():
-    cfg = config()
-    scope, integration_id, create = flow_payloads(cfg)
-    conference = post(cfg, "/v1/conferences", create)["conference"]
-    conference_id = conference["conference_id"]
-
-    def participant(external_user, role, key):
-        return post(cfg, "/v1/participants", {
-            "scope": scope, "conference_id": conference_id, "integration_id": integration_id,
-            "external_user_id_b64": b64(external_user), "role": role, "idempotency_key": key,
-        })
-
-    participant("owner-001", "owner", "reference-owner-001")
-    participant("attendee-001", "attendee", "reference-attendee-001")
-    for external_user, key in [("owner-001", "reference-owner-device-001"), ("attendee-001", "reference-attendee-device-001")]:
-        post(cfg, "/v1/participant-devices", {
-            "scope": scope, "conference_id": conference_id, "integration_id": integration_id,
-            "external_user_id_b64": b64(external_user), "idempotency_key": key,
-        })
-
-    post(cfg, "/v1/conferences/runtime", {
-        "scope": scope, "conference_id": conference_id, "integration_id": integration_id,
-        "idempotency_key": "reference-runtime-001",
-    })
-    for target in ("waiting", "live"):
-        post(cfg, "/v1/conferences/lifecycle", {
-            "scope": scope, "conference_id": conference_id, "integration_id": integration_id,
-            "target": target, "idempotency_key": "reference-lifecycle-" + target,
-        })
-    grant = post(cfg, "/v1/join-grants", {
-        "scope": scope, "conference_id": conference_id, "integration_id": integration_id,
-        "external_user_id_b64": b64("attendee-001"), "ttl_seconds": 900,
-        "use_policy": "single_use", "idempotency_key": "reference-join-001",
-    })["grant"]
-    print(json.dumps({"conference_id": conference_id, "join_url": grant["join_url"]}))
-
+def run(): print(json.dumps(execute_flow(config())))
 
 def self_test():
-    cfg = {"UCR_TENANT_ID": "tenant", "UCR_INTEGRATION_ID": "integration"}
-    scope, integration_id, create = flow_payloads(cfg, 1_700_000_000_000)
-    assert scope == {"tenant_id": "tenant"}
-    assert integration_id == "integration"
-    assert create["mode"] == "webinar"
-    assert create["external_conference_id_b64"] == b64("reference-webinar-001")
-    assert create["idempotency_key"] == "reference-create-001"
-    assert create["schedule"]["join_before_seconds"] == 900
+    cfg={"UCR_BASE_URL":"https://ucr.example","UCR_ACCESS_TOKEN":"token","UCR_TENANT_ID":"tenant","UCR_INTEGRATION_ID":"integration"}
+    calls=[]
+    def fake(cfg,path,body,opener=None):
+        calls.append((path,body))
+        if path=="/v1/conferences": return {"conference":{"conference_id":"conference-1"}}
+        if path=="/v1/join-grants": return {"grant":{"join_url":"https://join.example/#ucr_join=opaque"}}
+        return {"ok":True}
+    result=execute_flow(cfg,fake,1700000000000,"selftest")
+    assert result["conference_id"]=="conference-1" and result["join_url"].endswith("#ucr_join=opaque")
+    assert [p for p,_ in calls]==["/v1/conferences","/v1/participants","/v1/participant-devices","/v1/participants","/v1/participant-devices","/v1/conferences/runtime","/v1/conferences/lifecycle","/v1/conferences/lifecycle","/v1/join-grants"]
+    try: validate_base_url("http://public.example"); raise AssertionError("plaintext public URL accepted")
+    except ValueError: pass
     print("reference Python integration self-test: PASS")
 
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--self-test", action="store_true")
-    args = parser.parse_args()
-    self_test() if args.self_test else run()
+if __name__=="__main__":
+    p=argparse.ArgumentParser(); p.add_argument("--self-test",action="store_true"); a=p.parse_args(); self_test() if a.self_test else run()
