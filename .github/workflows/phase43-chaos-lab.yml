@@ -21,12 +21,6 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Install pinned Rust toolchain
         run: rustup show
-      - name: Generate standalone lockfile for review
-        run: |
-          cargo generate-lockfile --manifest-path crates/ucr-chaos-lab/Cargo.toml
-          echo '---UCR_CHAOS_LOCK_BEGIN---'
-          cat crates/ucr-chaos-lab/Cargo.lock
-          echo '---UCR_CHAOS_LOCK_END---'
       - name: Format standalone lab
         run: cargo fmt --manifest-path crates/ucr-chaos-lab/Cargo.toml -- --check
       - name: Check standalone lab
