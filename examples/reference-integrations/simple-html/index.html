@@ -24,7 +24,8 @@
     const target=document.getElementById("conference");
     mount.addEventListener("click",()=>{
       const url=new URL(input.value.trim());
-      if(!["https:","http:"].includes(url.protocol)||!new URLSearchParams(url.hash.slice(1)).get("ucr_join")){
+      const loopback=["localhost","127.0.0.1","[::1]"].includes(url.hostname);
+      if(!((url.protocol==="https:")||(url.protocol==="http:"&&loopback))||!new URLSearchParams(url.hash.slice(1)).get("ucr_join")){
         alert("A UCR join URL with #ucr_join is required"); return;
       }
       const frame=document.createElement("iframe");
