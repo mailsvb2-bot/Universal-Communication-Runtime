@@ -441,6 +441,15 @@ impl EventJournalStore for SqliteLocalStore {
         Ok(status)
     }
 
+    fn event(
+        &self,
+        scope: &TenantScope,
+        event_id: &EventId,
+    ) -> Result<Option<EventEnvelope>, DurableStoreError> {
+        let connection = self.lock_connection()?;
+        load_event_by_id(&connection, scope, event_id)
+    }
+
     fn events_for_types(
         &self,
         scope: &TenantScope,
