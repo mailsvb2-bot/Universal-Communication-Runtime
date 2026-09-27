@@ -61,7 +61,8 @@ fn phase41_rust_sdk_keeps_the_eight_canonical_semantics_observable() {
     assert!(manifest.contains("\"canonical_errors_preserved\": true"));
     assert!(manifest.contains("\"direct_database_access\": false"));
     assert!(manifest.contains("\"RecordingService\""));
-    assert!(manifest.contains("\"participant_consent_scheme\": \"join_bearer\""));
+    assert!(manifest.contains("\"SetRecordingConsent\""));
+    assert!(manifest.contains("\"accepted_schemes\": [\"join_bearer\"]"));
     assert!(runtime.contains("message NegotiationHello"));
     assert!(runtime.contains("message NegotiationResult"));
     assert!(runtime.contains("COMMAND_RECEIPT_STATUS_DUPLICATE"));
