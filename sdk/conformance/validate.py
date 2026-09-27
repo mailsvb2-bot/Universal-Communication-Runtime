@@ -108,6 +108,13 @@ def main() -> None:
         "Recording participant consent ceased to be join-Bearer authenticated",
     )
 
+    transport = contract["transport"]
+    require(transport.get("default_grpc_role") == "api", "default SDK gRPC endpoint role drifted")
+    require(
+        transport.get("service_endpoint_roles", {}).get("RecordingService") == "realtime",
+        "RecordingService realtime endpoint role drifted",
+    )
+
     semantics = contract["semantics"]
     require(semantics["automatic_application_retry"] is False, "hidden SDK retry enabled")
     require(semantics["event_cursor"] == "opaque", "Event cursor ceased to be opaque")
