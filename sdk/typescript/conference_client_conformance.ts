@@ -20,6 +20,54 @@ const fakeFetch = async (url, init) => {
       revision: 1,
     }}), { status: 200, headers: { "content-type": "application/json" } });
   }
+  if (path === "/v1/conferences/resolve") {
+    return new Response(JSON.stringify({ conference: {
+      scope: { tenant_id: "tenant" },
+      conference_id: "conference-1",
+      integration_id: "integration",
+      external_conference_id_b64: "ZXZlbnQtMQ==",
+      mode: "webinar",
+      lifecycle: "scheduled",
+      schedule: { starts_at_unix_ms: 1000 },
+      entry_open: true,
+      revision: 1,
+    }}), { status: 200, headers: { "content-type": "application/json" } });
+  }
+  if (path === "/v1/participants/list") {
+    return new Response(JSON.stringify({ participants: { participants: [{
+      external_user_id_b64: "dXNlci0x",
+      role: "attendee",
+      audio_muted: false,
+      camera_allowed: true,
+      publish_audio_allowed: false,
+      publish_video_allowed: false,
+      active: true,
+      screen_share_allowed: false,
+    }]}}), { status: 200, headers: { "content-type": "application/json" } });
+  }
+  if (path === "/v1/participants/raised-hands") {
+    return new Response(JSON.stringify({ raised_hands: { external_user_ids_b64: ["dXNlci0x"] }}), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  if (path === "/v1/capabilities") {
+    return new Response(JSON.stringify({ capabilities: {
+      capabilities: [],
+      max_participants: 500,
+      browser_realtime_gateway: true,
+      production_webrtc: false,
+      turn: true,
+      recording: false,
+      horizontal_sfu: false,
+      audio: true,
+      video: true,
+      screen_share: true,
+      webinar: true,
+      rtmp: false,
+      codecs: ["ucr.media.audio.opus"],
+    }}), { status: 200, headers: { "content-type": "application/json" } });
+  }
   if (path === "/v1/participant-devices") {
     return new Response(JSON.stringify({ device: {
       external_user_id_b64: "dXNlci0x",
@@ -95,7 +143,17 @@ const grant = await client.issueJoinGrant({
 });
 if (!grant.join_url.includes("#ucr_join=")) throw new Error("join grant boundary drift");
 
-if (calls.length !== 4) throw new Error("client performed hidden retries");
+const resolved = await client.resolveConference({ tenant_id: "tenant" }, "integration", "event-1");
+if (resolved.conference_id !== "conference-1") throw new Error("resolveConference response drift");
+const participants = await client.listParticipants(context, 25);
+if (participants.length !== 1 || participants[0].role !== "attendee") throw new Error("participant list drift");
+const raisedHands = await client.listRaisedHands(context, 25);
+if (raisedHands.length !== 1 || raisedHands[0] !== "dXNlci0x") throw new Error("raised-hands drift");
+const capabilities = await client.getCapabilities({ tenant_id: "tenant" }, "integration");
+if (!capabilities.browser_realtime_gateway || capabilities.production_webrtc) throw new Error("capability truth drift");
+await client.removeParticipant(context, "user-1", "remove-1");
+
+if (calls.length !== 9) throw new Error("client performed hidden retries");
 for (const call of calls) {
   if (call.init.headers.authorization !== "Bearer machine-token") throw new Error("Bearer admission drift");
 }
@@ -114,7 +172,16 @@ try {
   denied = true;
 }
 if (!denied) throw new Error("canonical error was converted to success");
-if (calls.length !== 5) throw new Error("error path performed hidden retries");
+if (calls.length !== 10) throw new Error("error path performed hidden retries");
+
+const resolveBody = JSON.parse(calls[4].init.body);
+if (resolveBody.external_conference_id_b64 !== "ZXZlbnQtMQ==") throw new Error("resolve external ID encoding drift");
+const listBody = JSON.parse(calls[5].init.body);
+if (listBody.max_items !== 25) throw new Error("participant list bound drift");
+const raisedHandsBody = JSON.parse(calls[6].init.body);
+if (raisedHandsBody.max_items !== 25) throw new Error("raised-hands bound drift");
+const removeBody = JSON.parse(calls[8].init.body);
+if (removeBody.external_user_id_b64 !== "dXNlci0x") throw new Error("remove participant encoding drift");
 
 let rejectedInsecure = false;
 try {
