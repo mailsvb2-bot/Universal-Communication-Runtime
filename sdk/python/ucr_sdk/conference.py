@@ -138,6 +138,19 @@ class UniversalConferenceClient:
         })
         return value["conference"]
 
+    def resolve_conference(
+        self,
+        *,
+        scope: Mapping[str, Any],
+        integration_id: str,
+        external_conference_id: str,
+    ) -> Mapping[str, Any]:
+        return self._post("/v1/conferences/resolve", {
+            "scope": dict(scope),
+            "integration_id": integration_id,
+            "external_conference_id_b64": _b64_utf8(external_conference_id),
+        })["conference"]
+
     def get_conference(self, context: Mapping[str, Any]) -> Mapping[str, Any]:
         return self._post("/v1/conferences/get", self._context_body(context))["conference"]
 
@@ -208,6 +221,41 @@ class UniversalConferenceClient:
             **changes,
         })
         return self._post("/v1/participants/update", body)["participant"]
+
+    def remove_participant(
+        self,
+        context: Mapping[str, Any],
+        external_user_id: str,
+        idempotency_key: str,
+    ) -> None:
+        body = self._context_body(context)
+        body.update({
+            "external_user_id_b64": _b64_utf8(external_user_id),
+            "idempotency_key": idempotency_key,
+        })
+        self._post("/v1/participants/remove", body)
+
+    def list_participants(
+        self, context: Mapping[str, Any], max_items: int = 100
+    ) -> Sequence[Mapping[str, Any]]:
+        body = self._context_body(context)
+        body["max_items"] = max_items
+        return self._post("/v1/participants/list", body)["participants"]
+
+    def list_raised_hands(
+        self, context: Mapping[str, Any], max_items: int = 100
+    ) -> Sequence[str]:
+        body = self._context_body(context)
+        body["max_items"] = max_items
+        return self._post("/v1/participants/raised-hands", body)["external_user_ids_b64"]
+
+    def get_capabilities(
+        self, scope: Mapping[str, Any], integration_id: str
+    ) -> Mapping[str, Any]:
+        return self._post("/v1/capabilities", {
+            "scope": dict(scope),
+            "integration_id": integration_id,
+        })["capabilities"]
 
     def prepare_runtime(
         self, context: Mapping[str, Any], idempotency_key: str

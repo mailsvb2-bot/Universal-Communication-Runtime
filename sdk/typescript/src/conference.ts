@@ -45,6 +45,22 @@ export interface ParticipantDeviceStatus {
   readonly active: boolean;
 }
 
+export interface ConferenceCapabilities {
+  readonly capabilities: readonly { readonly id: string; readonly maturity: number }[];
+  readonly max_participants: number;
+  readonly browser_realtime_gateway: boolean;
+  readonly production_webrtc: boolean;
+  readonly turn: boolean;
+  readonly recording: boolean;
+  readonly horizontal_sfu: boolean;
+  readonly audio: boolean;
+  readonly video: boolean;
+  readonly screen_share: boolean;
+  readonly webinar: boolean;
+  readonly rtmp: boolean;
+  readonly codecs: readonly string[];
+}
+
 export interface JoinGrant {
   readonly session_id: string;
   readonly join_url: string;
@@ -210,6 +226,19 @@ export class UniversalConferenceClient {
     return value.conference as ConferenceDescriptor;
   }
 
+  async resolveConference(
+    scope: TenantScope,
+    integrationId: string,
+    externalConferenceId: string,
+  ): Promise<ConferenceDescriptor> {
+    const value = await this.#post("/v1/conferences/resolve", {
+      scope,
+      integration_id: integrationId,
+      external_conference_id_b64: base64Utf8(externalConferenceId),
+    });
+    return value.conference as ConferenceDescriptor;
+  }
+
   async getConference(context: ConferenceMutationContext): Promise<ConferenceDescriptor> {
     const value = await this.#post("/v1/conferences/get", {
       scope: context.scope,
@@ -292,6 +321,54 @@ export class UniversalConferenceClient {
     if (input.screenShareAllowed !== undefined) body.screen_share_allowed = input.screenShareAllowed;
     const value = await this.#post("/v1/participants/update", body);
     return value.participant as ConferenceParticipant;
+  }
+
+  async removeParticipant(
+    context: ConferenceMutationContext,
+    externalUserId: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    await this.#post("/v1/participants/remove", {
+      scope: context.scope,
+      conference_id: context.conferenceId,
+      integration_id: context.integrationId,
+      external_user_id_b64: base64Utf8(externalUserId),
+      idempotency_key: idempotencyKey,
+    });
+  }
+
+  async listParticipants(
+    context: ConferenceMutationContext,
+    maxItems = 100,
+  ): Promise<readonly ConferenceParticipant[]> {
+    const value = await this.#post("/v1/participants/list", {
+      scope: context.scope,
+      conference_id: context.conferenceId,
+      integration_id: context.integrationId,
+      max_items: maxItems,
+    });
+    return value.participants as readonly ConferenceParticipant[];
+  }
+
+  async listRaisedHands(
+    context: ConferenceMutationContext,
+    maxItems = 100,
+  ): Promise<readonly string[]> {
+    const value = await this.#post("/v1/participants/raised-hands", {
+      scope: context.scope,
+      conference_id: context.conferenceId,
+      integration_id: context.integrationId,
+      max_items: maxItems,
+    });
+    return value.external_user_ids_b64 as readonly string[];
+  }
+
+  async getCapabilities(scope: TenantScope, integrationId: string): Promise<ConferenceCapabilities> {
+    const value = await this.#post("/v1/capabilities", {
+      scope,
+      integration_id: integrationId,
+    });
+    return value.capabilities as ConferenceCapabilities;
   }
 
   async prepareRuntime(context: ConferenceMutationContext, idempotencyKey: string): Promise<any> {
