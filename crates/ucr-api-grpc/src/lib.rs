@@ -55,6 +55,8 @@ pub mod pb {
     tonic::include_proto!("ucr.v1");
 }
 
+mod machine_api_auth;
+
 mod mesh_service;
 pub use mesh_service::{
     AuthenticatedMeshPeerSession, GrpcMeshService, MeshPeerSessionResolver, mesh_service_server,
@@ -71,6 +73,9 @@ pub use realtime_service::{
     GrpcRealtimeService, REALTIME_AUTHORIZATION_METADATA_KEY, RealtimeWebRtcDependencies,
     realtime_service_server,
 };
+
+mod recording_service;
+pub use recording_service::{GrpcRecordingService, recording_service_server};
 
 mod universal_conference_service;
 pub use universal_conference_service::{

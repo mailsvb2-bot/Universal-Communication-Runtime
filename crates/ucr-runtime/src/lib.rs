@@ -13,12 +13,13 @@ use tonic::transport::Server;
 use ucr_api_grpc::{
     GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
     GrpcIntegrationService, GrpcMachineAuthService, GrpcOperatorRuntimeService,
-    GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService, GrpcUniversalConferenceService,
-    MachineAuthDiscovery, OperatorRuntimeHealthSource, RealtimeWebRtcDependencies,
-    UniversalConferenceRuntimeCapabilities, call_service_server, conference_service_server,
-    device_service_server, event_service_server, group_service_server, integration_service_server,
-    machine_auth_service_server, operator_runtime_service_server, pb, realtime_service_server,
-    store_forward_service_server, sync_service_server, universal_conference_service_server,
+    GrpcRealtimeService, GrpcRecordingService, GrpcStoreForwardService, GrpcSyncService,
+    GrpcUniversalConferenceService, MachineAuthDiscovery, OperatorRuntimeHealthSource,
+    RealtimeWebRtcDependencies, UniversalConferenceRuntimeCapabilities, call_service_server,
+    conference_service_server, device_service_server, event_service_server, group_service_server,
+    integration_service_server, machine_auth_service_server, operator_runtime_service_server, pb,
+    realtime_service_server, recording_service_server, store_forward_service_server,
+    sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
@@ -1094,9 +1095,18 @@ async fn serve_realtime_services(
             Arc::clone(&join_issuer),
             runtime_capabilities,
         );
+    let mut recording_service = GrpcRecordingService::new(
+        Arc::clone(&clock),
+        Arc::clone(&authorization),
+        Arc::clone(&store),
+        Arc::clone(&join_issuer),
+        runtime_capabilities.recording,
+    );
     if let Some(config) = machine_bearer {
-        universal_service =
-            universal_service.with_machine_bearer_auth(config.verification_keys, config.policy);
+        universal_service = universal_service
+            .with_machine_bearer_auth(Arc::clone(&config.verification_keys), config.policy.clone());
+        recording_service =
+            recording_service.with_machine_bearer_auth(config.verification_keys, config.policy);
     }
 
     Server::builder()
@@ -1139,6 +1149,7 @@ async fn serve_realtime_services(
         ))
         .add_service(realtime_service_server(realtime_service))
         .add_service(universal_conference_service_server(universal_service))
+        .add_service(recording_service_server(recording_service))
         .add_service(event_service_server(GrpcEventService::new(
             Arc::clone(&clock),
             event_clock,

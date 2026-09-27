@@ -1,6 +1,6 @@
 # Conference Recording
 
-Status: **separate opt-in contract; disabled unless capability is advertised**.
+Status: **public gRPC lifecycle binding present; separate opt-in capability remains disabled unless a concrete provider is advertised**.
 
 Recording is intentionally independent from SFU forwarding. `ucr.conference.recording` must be explicitly advertised before `RecordingService` is available. A deployment that does not advertise the capability records nothing.
 
@@ -19,6 +19,18 @@ An explicit `DENIED` or `REVOKED` decision always blocks starting the recording 
 `expires_at_unix_ms` is derived from the accepted retention policy and is durable. Expiry stops further recording and schedules deletion of controlled storage/key material. Delete acknowledgement means the controlled recording owner accepted/performed its defined deletion transition; it is not a claim that an already exported copy on an external or compromised system was physically erased.
 
 Retention extension is not implicit. A future extension must be an explicit authorized lifecycle operation with audit evidence.
+
+## Public API binding
+
+The versioned `ucr.v1.RecordingService` is bound in `ucr-api-grpc` to the canonical
+`RecordingStore`. Management requests reuse the same Service Credential / machine Bearer admission,
+quota, audit and `ucr.conference.recording.manage` permission owner as the universal Conference API.
+Participant consent does not accept Service Account authority: it reuses the device-bound realtime
+join-token verifier and requires the verified token scope, Call and participant to match the durable
+recording consent subject.
+
+The binding is fail-closed when recording runtime capability is unavailable. Merely compiling or
+serving this lifecycle contract is not permission to advertise Production recording.
 
 ## Output/provider boundary
 
