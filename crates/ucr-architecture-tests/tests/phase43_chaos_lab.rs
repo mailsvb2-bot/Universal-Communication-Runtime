@@ -87,6 +87,7 @@ fn phase43_is_test_infrastructure_not_a_second_communication_brain() {
 #[test]
 fn phase43_locks_data_safety_and_explicit_failure_evidence() {
     let implementation = read("crates/ucr-chaos-lab/src/lib.rs");
+    let adversity = read("crates/ucr-chaos-lab/tests/network_adversity.rs");
     let workflow = read(".github/workflows/phase43-chaos-lab.yml");
 
     for test in [
@@ -104,6 +105,21 @@ fn phase43_locks_data_safety_and_explicit_failure_evidence() {
         assert!(
             implementation.contains(test),
             "missing executable chaos evidence {test}"
+        );
+    }
+    for marker in [
+        "network_switch_recovers_single_use_realtime_downlink_without_second_redemption",
+        "packet_loss_recovery_restarts_ice_for_the_same_live_webrtc_session",
+        "RealtimeSessionRegistry",
+        "LiveWebRtcProvider",
+        "Fault::SwitchNetwork",
+        "Fault::DropNext",
+        "restart_session",
+        "JoinGrantUsePolicy::SingleUse",
+    ] {
+        assert!(
+            adversity.contains(marker),
+            "missing cross-boundary network-adversity evidence {marker}"
         );
     }
     assert!(workflow.contains("cargo clippy"));
