@@ -725,6 +725,109 @@ impl ProductionRuntime {
         }
     }
 
+    /// Runs the durable finite-retention executor for Recording lifecycle state.
+    ///
+    /// The worker owns no recording/media state. It only discovers bounded due snapshots and
+    /// delegates each candidate to the canonical atomic expiry+Event transition. A durable worker
+    /// lease prevents concurrent active workers against the same SQLite store.
+    ///
+    /// # Errors
+    /// Rejects unsafe polling intervals, lease loss, clock failures, and durable-store errors.
+    pub async fn run_recording_retention_worker(
+        self: Arc<Self>,
+        poll_interval: Duration,
+    ) -> Result<(), String> {
+        if !(MIN_RECORDING_RETENTION_POLL_INTERVAL..=MAX_RECORDING_RETENTION_POLL_INTERVAL)
+            .contains(&poll_interval)
+        {
+            return Err(
+                "recording retention poll interval must be between 100 ms and 60 s".to_owned(),
+            );
+        }
+
+        let holder_id = generate_opaque_id()
+            .map_err(|_| "generate recording retention worker lease holder id".to_owned())?
+            .as_str()
+            .to_owned();
+        let now_unix_ms = runtime_now_unix_ms()?;
+        let acquired = self
+            .store
+            .try_acquire_runtime_worker_lease(
+                RECORDING_RETENTION_WORKER_KIND,
+                &holder_id,
+                now_unix_ms,
+                RECORDING_RETENTION_WORKER_LEASE_DURATION_MS,
+            )
+            .map_err(|error| format!("acquire recording retention worker lease: {error:?}"))?;
+        if !acquired {
+            return Err("another recording retention worker holds the durable lease".to_owned());
+        }
+
+        println!(
+            "UCR_RECORDING_RETENTION_WORKER_READY poll_interval_ms={}",
+            poll_interval.as_millis()
+        );
+
+        loop {
+            if let Err(error) = self.renew_recording_retention_worker_lease(&holder_id) {
+                let _ = self
+                    .store
+                    .release_runtime_worker_lease(RECORDING_RETENTION_WORKER_KIND, &holder_id);
+                return Err(error);
+            }
+            let now_unix_ms = runtime_now_unix_ms()?;
+            let sweep = match expire_due_recordings_once(
+                self.store.as_ref(),
+                now_unix_ms,
+                MAX_RECORDING_RETENTION_BATCH,
+            ) {
+                Ok(sweep) => sweep,
+                Err(error) => {
+                    let _ = self
+                        .store
+                        .release_runtime_worker_lease(RECORDING_RETENTION_WORKER_KIND, &holder_id);
+                    return Err(format!("expire due recordings: {error:?}"));
+                }
+            };
+            if sweep.examined > 0 {
+                println!(
+                    "UCR_RECORDING_RETENTION_SWEEP examined={} expired={} stale={}",
+                    sweep.examined, sweep.expired, sweep.stale
+                );
+            }
+
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => {
+                    result.map_err(|error| format!("recording retention shutdown signal: {error}"))?;
+                    self.store
+                        .release_runtime_worker_lease(RECORDING_RETENTION_WORKER_KIND, &holder_id)
+                        .map_err(|error| format!("release recording retention worker lease: {error:?}"))?;
+                    println!("UCR_RECORDING_RETENTION_WORKER_STOPPED");
+                    return Ok(());
+                }
+                () = tokio::time::sleep(poll_interval) => {}
+            }
+        }
+    }
+
+    fn renew_recording_retention_worker_lease(&self, holder_id: &str) -> Result<(), String> {
+        let now_unix_ms = runtime_now_unix_ms()?;
+        let renewed = self
+            .store
+            .renew_runtime_worker_lease(
+                RECORDING_RETENTION_WORKER_KIND,
+                holder_id,
+                now_unix_ms,
+                RECORDING_RETENTION_WORKER_LEASE_DURATION_MS,
+            )
+            .map_err(|error| format!("renew recording retention worker lease: {error:?}"))?;
+        if renewed {
+            Ok(())
+        } else {
+            Err("recording retention worker durable lease was lost or expired".to_owned())
+        }
+    }
+
     fn dispatch_webhook_sweep(
         &self,
         clock: SystemEventDeliveryClock,
