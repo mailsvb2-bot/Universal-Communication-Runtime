@@ -32,6 +32,12 @@
       }
     }
   },
+  "transport": {
+    "default_grpc_role": "api",
+    "service_endpoint_roles": {
+      "RecordingService": "realtime"
+    }
+  },
   "http": {
     "universal_conference_base_path": "/v1",
     "openapi_path": "/v1/openapi.yaml",
