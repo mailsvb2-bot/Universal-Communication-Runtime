@@ -11,8 +11,8 @@ use ucr_protocol::{
 };
 
 use super::{
-    SqliteLocalStore, map_schema_change_error, map_sqlite_error, namespace_storage_key,
-    event_journal, universal_conference_store, verify_table_columns,
+    SqliteLocalStore, event_journal, map_schema_change_error, map_sqlite_error,
+    namespace_storage_key, universal_conference_store, verify_table_columns,
 };
 
 const V33_OBJECTS_SQL: &str = r"
