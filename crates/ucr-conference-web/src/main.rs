@@ -2144,7 +2144,10 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::Server;
-    use ucr_api_grpc::{GrpcUniversalConferenceService, universal_conference_service_server};
+    use ucr_api_grpc::{
+        GrpcRecordingService, GrpcUniversalConferenceService, recording_service_server,
+        universal_conference_service_server,
+    };
     use ucr_core::{
         PermissionGrantStore, ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore,
     };
@@ -2310,6 +2313,96 @@ mod tests {
         assert!(
             response.contains("UNAUTHENTICATED"),
             "canonical error must cross the HTTP adapter: {response}"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn recording_consent_http_route_reaches_canonical_bearer_auth() {
+        let directory = std::env::temp_dir().join(format!(
+            "ucr-recording-web-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let store =
+            Arc::new(SqliteLocalStore::open(directory.join("ucr.sqlite")).expect("sqlite store"));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([9_u8; 32]),
+                "https://join.example.test/join",
+            )
+            .expect("join issuer"),
+        );
+        let service = GrpcRecordingService::new(
+            Arc::new(FixedClock),
+            Arc::clone(&store),
+            Arc::clone(&store),
+            issuer,
+            false,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("grpc listener");
+        let grpc_address = listener.local_addr().expect("grpc address");
+        let incoming = TcpListenerStream::new(listener);
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(recording_service_server(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("grpc server");
+        });
+
+        let channel = tonic::transport::Channel::from_shared(format!("http://{grpc_address}"))
+            .expect("grpc uri")
+            .connect()
+            .await
+            .expect("grpc channel");
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("http listener");
+        let http_address = http_listener.local_addr().expect("http address");
+        tokio::spawn(async move {
+            serve(http_listener, AppState { upstream: channel })
+                .await
+                .expect("http adapter");
+        });
+
+        let body = br#"{
+            "scope":{"tenant_id":"tenant-a"},
+            "recording_id":"recording-a",
+            "consent":{
+                "participant":{"principal_id":"person-a","kind":"person"},
+                "state":"granted"
+            },
+            "expected_revision":1
+        }"#;
+        let mut request = format!(
+            "POST /v1/recordings/consent HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(body);
+        let mut stream = tokio::net::TcpStream::connect(http_address)
+            .await
+            .expect("connect http");
+        stream.write_all(&request).await.expect("write request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        let response = String::from_utf8(response).expect("utf-8 response");
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "recording consent must reach canonical bearer auth: {response}"
+        );
+        assert!(
+            response.contains("UNAUTHENTICATED"),
+            "canonical recording auth error must cross HTTP adapter: {response}"
         );
         let _ = std::fs::remove_dir_all(directory);
     }
