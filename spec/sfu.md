@@ -41,8 +41,10 @@ capacity, and a bounded lease expiry. Placement is deterministic for the canonic
 identity or durable route store.
 
 Draining is fail-safe: an explicitly current session may remain on a live draining worker, but
-draining workers never receive fresh placements. Expired, unavailable, and full workers are
-excluded. If the sticky worker becomes unavailable, the directory deterministically selects a
+draining workers never receive fresh placements. Fresh placement reserves one session slot inside
+the directory before returning, and explicit release returns that slot; sequential placement through
+one directory therefore cannot overbook the last advertised capacity unit. Expired, unavailable,
+and full workers are excluded. If the sticky worker becomes unavailable, the directory deterministically selects a
 healthy replacement. Region preference is a routing hint only; strict policy fails closed when no
 capacity exists in-region, while an explicitly enabled cross-region policy may choose a healthy
 worker elsewhere and reports that fact in the placement decision.
