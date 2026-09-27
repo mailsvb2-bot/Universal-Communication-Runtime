@@ -240,16 +240,14 @@ class UniversalConferenceClient:
     ) -> Sequence[Mapping[str, Any]]:
         body = self._context_body(context)
         body["max_items"] = max_items
-        return self._post("/v1/participants/list", body)["participants"]["participants"]
+        return self._post("/v1/participants/list", body)["participants"]
 
     def list_raised_hands(
         self, context: Mapping[str, Any], max_items: int = 100
     ) -> Sequence[str]:
         body = self._context_body(context)
         body["max_items"] = max_items
-        return self._post("/v1/participants/raised-hands", body)["raised_hands"][
-            "external_user_ids_b64"
-        ]
+        return self._post("/v1/participants/raised-hands", body)["external_user_ids_b64"]
 
     def get_capabilities(
         self, scope: Mapping[str, Any], integration_id: str
