@@ -1477,33 +1477,16 @@ where
         call_id: &CallId,
         session_id: &SessionId,
     ) -> Result<RealtimeSessionClaims, CanonicalError> {
-        let claims = self
-            .join_issuer
-            .verify_signed_claims(token, self.now()?)
-            .map_err(map_join_token_error)?;
+        let claims = authenticate_realtime_bearer_claims(
+            &*self.store,
+            &self.join_issuer,
+            token,
+            self.now()?,
+        )?;
         if claims.scope != *scope || claims.call_id != *call_id || claims.session_id != *session_id
         {
             return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
         }
-        if let Some(record) = self
-            .store
-            .conference_join_grant(scope, session_id)
-            .map_err(map_store_error)?
-        {
-            require_durable_grant_matches_claims(&record, &claims)?;
-            if record.revoked {
-                return Err(map_join_token_error(JoinTokenError::Revoked));
-            }
-        } else {
-            let legacy = self
-                .join_issuer
-                .verify(token, self.now()?)
-                .map_err(map_join_token_error)?;
-            if legacy != claims {
-                return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
-            }
-        }
-        validate_device_claim(&*self.store, &claims)?;
         Ok(claims)
     }
 
@@ -2223,6 +2206,38 @@ fn pb_realtime_session(
         admission_state: admission as i32,
         media_policy: media_policy.map(pb_realtime_media_policy),
     }
+}
+
+pub(crate) fn authenticate_realtime_bearer_claims<S>(
+    store: &S,
+    join_issuer: &JoinTokenIssuer,
+    token: &str,
+    now_unix_ms: i64,
+) -> Result<RealtimeSessionClaims, CanonicalError>
+where
+    S: ConferenceJoinGrantStore + DeviceLifecycleStore + PrincipalIdentityBindingStore,
+{
+    let claims = join_issuer
+        .verify_signed_claims(token, now_unix_ms)
+        .map_err(map_join_token_error)?;
+    if let Some(record) = store
+        .conference_join_grant(&claims.scope, &claims.session_id)
+        .map_err(map_store_error)?
+    {
+        require_durable_grant_matches_claims(&record, &claims)?;
+        if record.revoked {
+            return Err(map_join_token_error(JoinTokenError::Revoked));
+        }
+    } else {
+        let legacy = join_issuer
+            .verify(token, now_unix_ms)
+            .map_err(map_join_token_error)?;
+        if legacy != claims {
+            return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
+        }
+    }
+    validate_device_claim(store, &claims)?;
+    Ok(claims)
 }
 
 fn validate_device_claim<S>(
