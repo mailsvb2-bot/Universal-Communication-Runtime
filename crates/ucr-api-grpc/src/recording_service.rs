@@ -655,6 +655,63 @@ where
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RecordingRetentionSweep {
+    pub examined: usize,
+    pub expired: usize,
+    pub stale: usize,
+}
+
+/// Applies one bounded retention sweep using the canonical Recording store and Event journal.
+///
+/// Discovery is only a hint. Every candidate is re-checked by optimistic revision inside the
+/// atomic `expire_recording_with_event` transition, so a concurrent lifecycle mutation becomes
+/// stale work rather than an incorrect expiry.
+///
+/// # Errors
+/// Returns explicit durable-store/event construction failures. Revision conflicts are counted as
+/// stale work and do not abort the sweep.
+pub fn expire_due_recordings_once<S: RecordingStore>(
+    store: &S,
+    now_unix_ms: i64,
+    limit: usize,
+) -> Result<RecordingRetentionSweep, CanonicalError> {
+    let due = store
+        .recordings_due_for_expiry(now_unix_ms, limit)
+        .map_err(map_store_error)?;
+    let mut sweep = RecordingRetentionSweep::default();
+
+    for current in due {
+        sweep.examined = sweep.examined.saturating_add(1);
+        let event = recording_lifecycle_event(
+            &current,
+            RecordingState::Expired,
+            fresh_event_id()?,
+            None,
+            None,
+            now_unix_ms,
+        )?;
+        match store.expire_recording_with_event(
+            &current.scope,
+            &current.recording_id,
+            current.revision,
+            now_unix_ms,
+            &event,
+        ) {
+            Ok(expired) if expired.state == RecordingState::Expired => {
+                sweep.expired = sweep.expired.saturating_add(1);
+            }
+            Ok(_) => return Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+            Err(DurableStoreError::Conflict) => {
+                sweep.stale = sweep.stale.saturating_add(1);
+            }
+            Err(error) => return Err(map_store_error(error)),
+        }
+    }
+
+    Ok(sweep)
+}
+
 fn recording_request_matches(
     existing: &RecordingSession,
     call_id: &ucr_model::CallId,
