@@ -473,13 +473,22 @@ where
             fresh_event_id()?
         };
 
-        if accepted.as_ref().is_some_and(|accepted| accepted.duplicate)
-            && self
+        if let Some(accepted) = accepted.as_ref().filter(|accepted| accepted.duplicate)
+            && let Some(existing_event) = self
                 .store
                 .event(&scope, &event_id)
                 .map_err(map_store_error)?
-                .is_some()
         {
+            validate_applied_recording_event(
+                &existing_event,
+                &scope,
+                &recording_id,
+                mutation,
+                &accepted.command_id,
+                idempotency_key
+                    .as_deref()
+                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?,
+            )?;
             return self
                 .store
                 .recording(&scope, &recording_id)
@@ -652,6 +661,39 @@ const fn recording_lifecycle_event_type(state: RecordingState) -> Option<&'stati
         RecordingState::Deleted => Some("ucr.recording.deleted"),
         RecordingState::WaitingForConsent | RecordingState::Ready => None,
     }
+}
+
+fn validate_applied_recording_event(
+    event: &EventEnvelope,
+    scope: &TenantScope,
+    recording_id: &RecordingId,
+    mutation: RecordingLifecycleMutation,
+    command_id: &CommandId,
+    idempotency_key: &str,
+) -> Result<(), CanonicalError> {
+    let expected_type = recording_lifecycle_event_type(mutation.target_state())
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    if event.scope != *scope
+        || event.event_type != expected_type
+        || event.correlation.causation_id.as_ref() != Some(command_id.as_opaque())
+        || event.correlation.idempotency_key.as_deref() != Some(idempotency_key)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+    let payload = pb::RecordingLifecycleEvent::decode(event.payload.as_slice())
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Conflict))?;
+    let payload_recording_id = decode_opaque(payload.recording_id)
+        .map(RecordingId::from_opaque)
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Conflict))?;
+    let payload_state = pb::RecordingState::try_from(payload.current)
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Conflict))?;
+    if payload_recording_id != *recording_id
+        || payload_state != pb_recording_state(mutation.target_state())
+        || payload.revision != event.logical_order
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+    }
+    Ok(())
 }
 
 fn recording_event_id(command_id: &CommandId) -> Result<EventId, CanonicalError> {
