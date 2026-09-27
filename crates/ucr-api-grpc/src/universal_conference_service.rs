@@ -69,7 +69,6 @@ fn decode_universal_conference_authentication(
 }
 
 const MAX_EXTERNAL_CONFERENCE_ID_BYTES: usize = 512;
-const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 const MAX_TIMEZONE_BYTES: usize = 128;
 const MAX_JOIN_WINDOW_SECONDS: u32 = 31_536_000;
 const MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS: usize = MAX_CALL_PARTICIPANTS + 1;
