@@ -88,19 +88,20 @@ pub enum SfuPlacementError {
 
 /// Ephemeral horizontal-SFU placement directory.
 ///
-/// The directory owns no canonical Call, Conference, membership, permission or media state. Callers
-/// pass an existing node ID when reconnecting so a healthy or draining node remains sticky. New
-/// placement never targets draining/unavailable/expired/full nodes. If the sticky node is gone or
-/// unhealthy, deterministic rendezvous-style scoring selects a healthy replacement.
+/// The directory owns no canonical Call, Conference, membership, permission or media state. It
+/// keeps only an in-process Call-to-worker placement map so stickiness cannot be forged by a caller.
+/// New placement never targets draining/unavailable/expired/full nodes. If the sticky node is gone
+/// or unhealthy, deterministic rendezvous-style scoring selects a healthy replacement.
 #[derive(Debug, Default)]
 pub struct SfuClusterDirectory {
     nodes: BTreeMap<String, SfuNodeDescriptor>,
+    placements: BTreeMap<Vec<u8>, String>,
 }
 
 impl SfuClusterDirectory {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.nodes.is_empty() && self.placements.is_empty()
     }
 
     /// Registers or refreshes one ephemeral worker heartbeat.
@@ -127,7 +128,7 @@ impl SfuClusterDirectory {
     /// placements immediately stop selecting it.
     ///
     /// # Errors
-    /// Returns InvalidNode when the worker is unknown.
+    /// Returns `InvalidNode` when the worker is unknown.
     pub fn mark_draining(&mut self, node_id: &ucr_model::OpaqueId) -> Result<(), SfuPlacementError> {
         let node = self
             .nodes
@@ -139,34 +140,41 @@ impl SfuClusterDirectory {
 
     /// Places one already-authorized canonical Call and reserves capacity for a fresh placement.
     ///
-    /// The optional current node is infrastructure stickiness only. It grants no Conference or
-    /// media authority. A draining node is retained only when it is the explicit current placement.
-    /// Fresh placement increments the selected worker's active-session count before returning, so
-    /// one directory instance cannot overbook the last slot through sequential placement calls.
+    /// Stickiness is resolved only from this directory's ephemeral Call-to-worker map; callers
+    /// cannot claim an arbitrary current worker. A draining worker is retained only for a Call
+    /// already mapped to it. Fresh placement increments the selected worker's active-session count
+    /// before returning, so one directory instance cannot overbook the last slot.
     ///
     /// # Errors
-    /// Returns NoHealthyCapacity when policy leaves no live worker capacity.
+    /// Returns `NoHealthyCapacity` when policy leaves no live worker capacity.
     pub fn place_session(
         &mut self,
         scope: &ucr_model::TenantScope,
         call_id: &ucr_model::CallId,
-        current_node_id: Option<&ucr_model::OpaqueId>,
         policy: &SfuPlacementPolicy,
         now_unix_ms: i64,
     ) -> Result<SfuPlacementDecision, SfuPlacementError> {
-        if let Some(current_node_id) = current_node_id
-            && let Some(current) = self.nodes.get(current_node_id.as_str())
-            && current.is_live_at(now_unix_ms)
-            && current.active_sessions <= current.max_sessions
-        {
-            let preferred = policy.preferred_region.as_deref();
-            let crossed_region = preferred.is_some_and(|region| current.region != region);
-            if !crossed_region || policy.allow_cross_region_failover {
-                return Ok(SfuPlacementDecision {
-                    node_id: current.node_id.clone(),
-                    retained_sticky_placement: true,
-                    crossed_region,
-                });
+        let key = placement_key(scope, call_id);
+        if let Some(current_node_id) = self.placements.get(&key).cloned() {
+            if let Some(current) = self.nodes.get(&current_node_id)
+                && current.is_live_at(now_unix_ms)
+                && current.active_sessions <= current.max_sessions
+            {
+                let preferred = policy.preferred_region.as_deref();
+                let crossed_region = preferred.is_some_and(|region| current.region != region);
+                if !crossed_region || policy.allow_cross_region_failover {
+                    return Ok(SfuPlacementDecision {
+                        node_id: current.node_id.clone(),
+                        retained_sticky_placement: true,
+                        crossed_region,
+                    });
+                }
+            }
+            self.placements.remove(&key);
+            if let Some(current) = self.nodes.get_mut(&current_node_id)
+                && current.active_sessions > 0
+            {
+                current.active_sessions -= 1;
             }
         }
 
@@ -189,7 +197,6 @@ impl SfuClusterDirectory {
             }
         }
 
-        let key = placement_key(scope, call_id);
         let selected = candidates
             .into_iter()
             .max_by_key(|node| placement_score(&key, node.node_id.as_wire_bytes()))
@@ -207,6 +214,7 @@ impl SfuClusterDirectory {
             .active_sessions
             .checked_add(1)
             .ok_or(SfuPlacementError::NoHealthyCapacity)?;
+        self.placements.insert(key, selected_id);
         Ok(SfuPlacementDecision {
             node_id: node.node_id.clone(),
             retained_sticky_placement: false,
@@ -217,14 +225,20 @@ impl SfuClusterDirectory {
     /// Releases one previously reserved horizontal-SFU session slot.
     ///
     /// # Errors
-    /// Returns InvalidNode when the worker is unknown or has no reserved sessions.
+    /// Returns `InvalidNode` when the Call has no placement or its worker has no reserved session.
     pub fn release_session(
         &mut self,
-        node_id: &ucr_model::OpaqueId,
+        scope: &ucr_model::TenantScope,
+        call_id: &ucr_model::CallId,
     ) -> Result<(), SfuPlacementError> {
+        let key = placement_key(scope, call_id);
+        let node_id = self
+            .placements
+            .remove(&key)
+            .ok_or(SfuPlacementError::InvalidNode)?;
         let node = self
             .nodes
-            .get_mut(node_id.as_str())
+            .get_mut(&node_id)
             .ok_or(SfuPlacementError::InvalidNode)?;
         if node.active_sessions == 0 {
             return Err(SfuPlacementError::InvalidNode);
