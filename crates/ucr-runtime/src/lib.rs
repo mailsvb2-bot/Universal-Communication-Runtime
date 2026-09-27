@@ -1103,10 +1103,8 @@ async fn serve_realtime_services(
         runtime_capabilities.recording,
     );
     if let Some(config) = machine_bearer {
-        universal_service = universal_service.with_machine_bearer_auth(
-            Arc::clone(&config.verification_keys),
-            config.policy.clone(),
-        );
+        universal_service = universal_service
+            .with_machine_bearer_auth(Arc::clone(&config.verification_keys), config.policy.clone());
         recording_service =
             recording_service.with_machine_bearer_auth(config.verification_keys, config.policy);
     }
