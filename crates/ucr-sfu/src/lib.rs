@@ -131,7 +131,10 @@ impl SfuClusterDirectory {
     ///
     /// # Errors
     /// Returns `InvalidNode` when the worker is unknown.
-    pub fn mark_draining(&mut self, node_id: &ucr_model::OpaqueId) -> Result<(), SfuPlacementError> {
+    pub fn mark_draining(
+        &mut self,
+        node_id: &ucr_model::OpaqueId,
+    ) -> Result<(), SfuPlacementError> {
         let node = self
             .nodes
             .get_mut(node_id.as_str())
@@ -619,12 +622,10 @@ const fn permissions(
     }
 }
 
-
 #[cfg(test)]
 mod horizontal_placement_tests {
     use super::{
-        SfuClusterDirectory, SfuNodeDescriptor, SfuNodeState, SfuPlacementError,
-        SfuPlacementPolicy,
+        SfuClusterDirectory, SfuNodeDescriptor, SfuNodeState, SfuPlacementError, SfuPlacementPolicy,
     };
     use ucr_model::{CallId, NamespaceId, OpaqueId, TenantId, TenantScope};
 
@@ -672,12 +673,22 @@ mod horizontal_placement_tests {
             .expect("node b");
 
         let first = directory
-            .place_session(&scope(), &call("call-a"), &SfuPlacementPolicy::default(), 100)
+            .place_session(
+                &scope(),
+                &call("call-a"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
             .expect("placement");
         assert!(!first.retained_sticky_placement);
 
         let sticky = directory
-            .place_session(&scope(), &call("call-a"), &SfuPlacementPolicy::default(), 100)
+            .place_session(
+                &scope(),
+                &call("call-a"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
             .expect("sticky");
         assert_eq!(sticky.node_id, first.node_id);
         assert!(sticky.retained_sticky_placement);
@@ -710,7 +721,9 @@ mod horizontal_placement_tests {
         directory
             .upsert_node(node("sfu-new", "eu", SfuNodeState::Healthy, 0, 100, 10_000))
             .expect("new candidate");
-        directory.mark_draining(&draining_id).expect("mark draining");
+        directory
+            .mark_draining(&draining_id)
+            .expect("mark draining");
 
         let sticky = directory
             .place_session(
@@ -770,7 +783,14 @@ mod horizontal_placement_tests {
             ))
             .expect("expire node");
         directory
-            .upsert_node(node("sfu-live", "eu", SfuNodeState::Healthy, 0, 100, 10_000))
+            .upsert_node(node(
+                "sfu-live",
+                "eu",
+                SfuNodeState::Healthy,
+                0,
+                100,
+                10_000,
+            ))
             .expect("live node");
 
         let decision = directory
@@ -901,7 +921,9 @@ mod horizontal_placement_tests {
                     100,
                 )
                 .expect("placement");
-            *counts.entry(decision.node_id.as_str().to_owned()).or_default() += 1;
+            *counts
+                .entry(decision.node_id.as_str().to_owned())
+                .or_default() += 1;
         }
 
         assert_eq!(counts.len(), 4);
