@@ -18,6 +18,19 @@ Generated code is derivative build output; canonical request/response envelopes 
 Phase 39 does not publish an npm artifact or select a permanent generator plugin; that is later release hardening.
 
 
+## Universal Conference HTTP client
+
+`src/conference.ts` provides a high-level TypeScript client over the same thin `/v1` REST adapter.
+It exposes `createConference()`, `getConference()`, `transitionConference()`,
+`setEntryOpen()`, `ensureParticipant()`, `ensureParticipantDevice()`,
+`updateParticipant()`, `prepareRuntime()`, `issueJoinGrant()`,
+`revokeJoinGrant()`, `setSubscriptions()` and `getAttendance()`.
+
+The client accepts integration-owned external references, Base64-encodes them exactly for the REST
+transport, preserves canonical server errors, performs no hidden application retries and requires
+HTTPS outside loopback development. Machine Bearer credentials stay caller-supplied and are never
+included in thrown diagnostics.
+
 ## WebRTC endpoint E2EE transport
 
 `src/webrtc_e2ee.ts` provides the bounded ordered DataChannel framing for already-encrypted
