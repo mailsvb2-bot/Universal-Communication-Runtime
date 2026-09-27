@@ -7,6 +7,8 @@ use ucr_model::{
 
 use crate::{DurableRecordStatus, DurableStoreError, StorageProvider};
 
+pub const MAX_RECORDING_RETENTION_BATCH: usize = 256;
+
 /// Provider-side operation requested after the canonical Recording lifecycle authorizes it.
 ///
 /// This is deliberately not another Recording state machine. The durable `RecordingStore` remains
