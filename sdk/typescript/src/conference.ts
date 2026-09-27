@@ -347,7 +347,7 @@ export class UniversalConferenceClient {
       integration_id: context.integrationId,
       max_items: maxItems,
     });
-    return value.participants?.participants as readonly ConferenceParticipant[];
+    return value.participants as readonly ConferenceParticipant[];
   }
 
   async listRaisedHands(
@@ -360,7 +360,7 @@ export class UniversalConferenceClient {
       integration_id: context.integrationId,
       max_items: maxItems,
     });
-    return value.raised_hands?.external_user_ids_b64 as readonly string[];
+    return value.external_user_ids_b64 as readonly string[];
   }
 
   async getCapabilities(scope: TenantScope, integrationId: string): Promise<ConferenceCapabilities> {
