@@ -1819,7 +1819,7 @@ where
     )
 }
 
-fn decode_bearer_token(metadata: &MetadataMap) -> Result<String, CanonicalError> {
+pub(crate) fn decode_bearer_token(metadata: &MetadataMap) -> Result<String, CanonicalError> {
     let value = metadata
         .get(REALTIME_AUTHORIZATION_METADATA_KEY)
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?
