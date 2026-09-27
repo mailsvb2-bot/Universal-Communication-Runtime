@@ -40,6 +40,11 @@ export interface ConferenceParticipant {
   readonly screen_share_allowed: boolean;
 }
 
+export interface ParticipantDeviceStatus {
+  readonly external_user_id_b64: string;
+  readonly active: boolean;
+}
+
 export interface JoinGrant {
   readonly session_id: string;
   readonly join_url: string;
@@ -48,9 +53,9 @@ export interface JoinGrant {
 
 export interface ParticipantAttendance {
   readonly external_user_id_b64: string;
-  readonly first_join_at_unix_ms?: number;
-  readonly last_leave_at_unix_ms?: number;
-  readonly first_media_ready_at_unix_ms?: number;
+  readonly first_join_at_unix_ms: number | null;
+  readonly last_leave_at_unix_ms: number | null;
+  readonly first_media_ready_at_unix_ms: number | null;
   readonly total_connected_seconds: number;
   readonly current_connected_seconds: number;
   readonly join_count: number;
@@ -114,12 +119,16 @@ export interface MediaSubscription {
 export class UniversalConferenceHttpError extends Error {
   readonly status: number;
   readonly code?: string;
+  readonly retryable?: boolean;
+  readonly retryAfterMs?: number;
 
-  constructor(status: number, message: string, code?: string) {
+  constructor(status: number, message: string, code?: string, retryable?: boolean, retryAfterMs?: number) {
     super(message);
     this.name = "UniversalConferenceHttpError";
     this.status = status;
     this.code = code;
+    this.retryable = retryable;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -182,6 +191,8 @@ export class UniversalConferenceClient {
         response.status,
         typeof error?.message === "string" ? error.message : "UCR request failed",
         typeof error?.code === "string" ? error.code : undefined,
+        typeof error?.retryable === "boolean" ? error.retryable : undefined,
+        typeof error?.retry_after_ms === "number" ? error.retry_after_ms : undefined,
       );
     }
     return value;
@@ -254,14 +265,15 @@ export class UniversalConferenceClient {
     context: ConferenceMutationContext,
     externalUserId: string,
     idempotencyKey: string,
-  ): Promise<void> {
-    await this.#post("/v1/participant-devices", {
+  ): Promise<ParticipantDeviceStatus> {
+    const value = await this.#post("/v1/participant-devices", {
       scope: context.scope,
       conference_id: context.conferenceId,
       integration_id: context.integrationId,
       external_user_id_b64: base64Utf8(externalUserId),
       idempotency_key: idempotencyKey,
     });
+    return value.device as ParticipantDeviceStatus;
   }
 
   async updateParticipant(input: UpdateParticipantInput): Promise<ConferenceParticipant> {
