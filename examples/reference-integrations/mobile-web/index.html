@@ -27,7 +27,8 @@
       const value=document.getElementById("join").value.trim();
       const url=new URL(value);
       const token=new URLSearchParams(url.hash.startsWith("#")?url.hash.slice(1):url.hash).get("ucr_join");
-      if(!token||!["https:","http:"].includes(url.protocol)){alert("Invalid UCR join URL");return}
+      const loopback=["localhost","127.0.0.1","[::1]"].includes(url.hostname);
+      if(!token||!((url.protocol==="https:")||(url.protocol==="http:"&&loopback))){alert("Invalid UCR join URL");return}
       const frame=document.createElement("iframe");
       frame.src=url.toString(); frame.title="UCR conference";
       frame.allow="camera; microphone; display-capture; fullscreen";
