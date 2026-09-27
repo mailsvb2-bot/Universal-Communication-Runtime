@@ -27,8 +27,9 @@ fn phase30_supports_thousand_person_reference_with_one_bounded_ceiling() {
     let conference = read("crates/ucr-conference/tests/reference.rs");
     let spec = read("spec/conference.md");
     assert!(call.contains("MAX_CALL_PARTICIPANTS: usize = 1024"));
+    assert!(conference.contains("fn assert_sfu_conference_profile(participant_count: usize)"));
     assert!(conference.contains("thousand_person_sfu_conference_fits_bounded_call_ceiling"));
-    assert!(conference.contains("snapshot.call.participants.len(), 1000"));
+    assert!(conference.contains("assert_sfu_conference_profile(1000)"));
     assert!(spec.contains("shared bounded Call/Audio/Video/SFU ceiling is **1024 participants**"));
 }
 

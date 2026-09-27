@@ -135,12 +135,22 @@ fn performance_budget_is_fixed_in_source_and_governed_by_adr() {
     let spec = read("spec/production-hardening.md");
 
     for marker in [
-        "WORKLOAD = \"1000-person-sfu-conference-lifecycle\"",
+        "SCHEMA = \"ucr.performance-evidence.v2\"",
         "SAMPLES = 3",
-        "MAX_SAMPLE_SECONDS = 10.0",
+        "\"participants\": 10",
+        "\"participants\": 100",
+        "\"participants\": 500",
+        "\"participants\": 1000",
+        "\"max_sample_seconds\": 5.0",
+        "\"max_sample_seconds\": 6.0",
+        "\"max_sample_seconds\": 8.0",
+        "\"max_sample_seconds\": 10.0",
+        "ten_person_sfu_conference_profile",
+        "hundred_person_sfu_conference_profile",
+        "five_hundred_person_sfu_conference_profile",
+        "thousand_person_sfu_conference_fits_bounded_call_ceiling",
         "--profile",
         "production",
-        "thousand_person_sfu_conference_fits_bounded_call_ceiling",
     ] {
         assert!(
             gate.contains(marker),
@@ -148,10 +158,16 @@ fn performance_budget_is_fixed_in_source_and_governed_by_adr() {
         );
     }
     assert!(!gate.contains("--max-sample-seconds"));
-    assert!(adr.contains("**10.0 seconds per sample**"));
+    assert!(adr.contains("fixed **5.0 seconds per sample**"));
+    assert!(adr.contains("fixed **6.0 seconds per sample**"));
+    assert!(adr.contains("fixed **8.0 seconds per sample**"));
+    assert!(adr.contains("fixed **10.0 seconds per sample**"));
     assert!(adr.contains("A red build by itself is not sufficient justification"));
-    assert!(spec.contains("10.0 seconds maximum per sample"));
-    assert!(spec.contains("intentionally not a workflow parameter"));
+    assert!(spec.contains("10 participants"));
+    assert!(spec.contains("100 participants"));
+    assert!(spec.contains("500 participants"));
+    assert!(spec.contains("1000 participants"));
+    assert!(spec.contains("They are intentionally not workflow parameters"));
 }
 
 #[test]

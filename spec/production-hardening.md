@@ -67,18 +67,19 @@ Conformance and public-contract checks remain independent release evidence and a
 
 The Canon forbids weakening a fixed SLO merely to make CI green without an ADR and evidence.
 
-ADR 0092 fixes the initial Phase-45 production-profile performance regression contract:
+ADR 0092 fixes the Phase-45 production-profile performance regression contract. The original 1000-person ceiling remains unchanged and the same canonical Conference lifecycle is now exercised at four required load levels:
 
-- canonical workload: `1000-person-sfu-conference-lifecycle`;
-- existing reference test: `thousand_person_sfu_conference_fits_bounded_call_ceiling`;
-- three measured samples;
-- **10.0 seconds maximum per sample**;
-- GitHub-hosted Ubuntu 24.04 with the repository-pinned Rust toolchain;
-- machine-readable evidence tied to the exact source commit.
+- 10 participants: `ten_person_sfu_conference_profile`, three samples, **5.0 seconds maximum per sample**;
+- 100 participants: `hundred_person_sfu_conference_profile`, three samples, **6.0 seconds maximum per sample**;
+- 500 participants: `five_hundred_person_sfu_conference_profile`, three samples, **8.0 seconds maximum per sample**;
+- 1000 participants: `thousand_person_sfu_conference_fits_bounded_call_ceiling`, three samples, **10.0 seconds maximum per sample**;
+- build profile: Cargo `production`;
+- runner family: GitHub-hosted Ubuntu 24.04 with the repository-pinned Rust toolchain;
+- machine-readable evidence tied to the exact source commit, with per-profile samples, median and worst duration.
 
-`tools/performance_gate.py` owns the threshold as source code. It is intentionally not a workflow parameter. Changing the workload, sample count or threshold requires a follow-up ADR and replacement evidence; a red CI run alone is not a reason to relax it.
+`tools/performance_gate.py` owns every participant level and threshold as source code. They are intentionally not workflow parameters. Adding a stronger profile does not weaken the existing 1000-person baseline. Removing a level, reducing sample count, or relaxing any threshold requires an explicit ADR and replacement evidence; a red CI run alone is not a reason to relax it.
 
-The existing 1000-person test remains a bounded functional-scale model rather than a public Internet/media latency SLA. Phase 45 adds a concrete production-profile regression budget without overclaiming WAN throughput, codec density or hardware-wide capacity planning.
+These profiles remain bounded functional-scale models rather than a public Internet/media latency SLA. Phase 45 supplies concrete production-profile regression budgets without overclaiming WAN throughput, codec density or hardware-wide capacity planning.
 
 ## Observability and telemetry privacy
 
