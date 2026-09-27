@@ -174,99 +174,10 @@ where
         request: Request<pb::RecordingRequest>,
     ) -> Result<Response<pb::RecordingRequestResponse>, Status> {
         let authentication = decode_machine_api_authentication(request.metadata());
-        let body = request.into_inner();
-        let decoded = decode_recording_request(body);
+        let decoded = decode_recording_request(request.into_inner());
         let result = match (authentication, decoded) {
             (Ok(authentication), Ok((scope, recording_id, call_id, policy))) => self
-                .admit_management(&scope, authentication)
-                .and_then(|actor| {
-                    if let Some(existing) = self
-                        .store
-                        .recording(&scope, &recording_id)
-                        .map_err(map_store_error)?
-                    {
-                        if recording_request_matches(&existing, &call_id, &policy, &actor.principal)
-                        {
-                            return Ok(existing);
-                        }
-                        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
-                    }
-                    let call = self
-                        .store
-                        .call(&scope, &call_id)
-                        .map_err(map_store_error)?
-                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
-                    if call.signalling_state == CallSignallingState::Terminated {
-                        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
-                    }
-                    let participants = call
-                        .participants
-                        .iter()
-                        .filter(|participant| {
-                            participant.state == CallParticipantState::Accepted
-                                && participant.left_revision.is_none()
-                        })
-                        .map(|participant| RecordingConsent {
-                            participant: participant.principal.clone(),
-                            state: RecordingConsentState::Pending,
-                            decided_at_unix_ms: 0,
-                        })
-                        .collect::<Vec<_>>();
-                    if participants.is_empty() || participants.len() > MAX_RECORDING_CONSENTS {
-                        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
-                    }
-                    let now = self.now()?;
-                    let retention_ms = i64::try_from(policy.retention_seconds)
-                        .ok()
-                        .and_then(|seconds| seconds.checked_mul(1000))
-                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
-                    let expires_at_unix_ms = now
-                        .checked_add(retention_ms)
-                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
-                    let recording = RecordingSession {
-                        scope: scope.clone(),
-                        recording_id: recording_id.clone(),
-                        call_id,
-                        requested_by: actor.principal,
-                        state: if policy.require_all_participant_consent {
-                            RecordingState::WaitingForConsent
-                        } else {
-                            RecordingState::Ready
-                        },
-                        policy,
-                        consents: participants,
-                        requested_at_unix_ms: now,
-                        started_at_unix_ms: None,
-                        stopped_at_unix_ms: None,
-                        expires_at_unix_ms,
-                        revision: 1,
-                    };
-                    match self.store.persist_recording(&recording) {
-                        Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => self
-                            .store
-                            .recording(&scope, &recording_id)
-                            .map_err(map_store_error)?
-                            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal)),
-                        Err(DurableStoreError::Conflict) => {
-                            let winner = self
-                                .store
-                                .recording(&scope, &recording_id)
-                                .map_err(map_store_error)?
-                                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
-                            if recording_request_matches(
-                                &winner,
-                                &recording.call_id,
-                                &recording.policy,
-                                &recording.requested_by,
-                            ) {
-                                Ok(winner)
-                            } else {
-                                Err(CanonicalError::new(CanonicalErrorCode::Conflict))
-                            }
-                        }
-                        Err(error) => Err(map_store_error(error)),
-                    }
-                }),
+                .request_recording_inner(authentication, scope, recording_id, call_id, policy),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RecordingRequestResponse {
@@ -316,7 +227,7 @@ where
         let decoded = decode_consent_request(body);
         let result = match (token, decoded) {
             (Ok(token), Ok((scope, recording_id, participant, state, expected_revision))) => {
-                self.require_available().and_then(|_| {
+                self.require_available().and_then(|()| {
                     let claims = authenticate_realtime_bearer_claims(
                         &*self.store,
                         &self.join_issuer,
@@ -386,7 +297,7 @@ where
         let result = self.management_transition(
             authentication,
             decoded,
-            |store, scope, id, revision, now| store.start_recording(scope, id, revision, now),
+            RecordingStore::start_recording,
         );
         Ok(Response::new(pb::RecordingStartResponse {
             result: Some(match result {
@@ -409,7 +320,7 @@ where
         let result = self.management_transition(
             authentication,
             decoded,
-            |store, scope, id, revision, now| store.stop_recording(scope, id, revision, now),
+            RecordingStore::stop_recording,
         );
         Ok(Response::new(pb::RecordingStopResponse {
             result: Some(match result {
@@ -433,7 +344,7 @@ where
         let result = self.management_transition(
             authentication,
             decoded,
-            |store, scope, id, revision, now| store.delete_recording(scope, id, revision, now),
+            RecordingStore::delete_recording,
         );
         Ok(Response::new(pb::RecordingDeleteResponse {
             result: Some(match result {
@@ -448,6 +359,117 @@ where
                 Err(error) => pb::recording_delete_response::Result::Error(pb_error(error)),
             }),
         }))
+    }
+}
+
+impl<C, A, S> GrpcRecordingService<C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore
+        + ServiceQuotaStore
+        + ServiceAuditStore
+        + RecordingStore
+        + CallStore,
+{
+    fn request_recording_inner(
+        &self,
+        authentication: MachineApiAuthentication,
+        scope: TenantScope,
+        recording_id: RecordingId,
+        call_id: ucr_model::CallId,
+        policy: RecordingPolicy,
+    ) -> Result<RecordingSession, CanonicalError> {
+        let actor = self.admit_management(&scope, authentication)?;
+        if let Some(existing) = self
+            .store
+            .recording(&scope, &recording_id)
+            .map_err(map_store_error)?
+        {
+            if recording_request_matches(&existing, &call_id, &policy, &actor.principal) {
+                return Ok(existing);
+            }
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        }
+
+        let call = self
+            .store
+            .call(&scope, &call_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+        if call.signalling_state == CallSignallingState::Terminated {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        }
+
+        let participants = call
+            .participants
+            .iter()
+            .filter(|participant| {
+                participant.state == CallParticipantState::Accepted
+                    && participant.left_revision.is_none()
+            })
+            .map(|participant| RecordingConsent {
+                participant: participant.principal.clone(),
+                state: RecordingConsentState::Pending,
+                decided_at_unix_ms: 0,
+            })
+            .collect::<Vec<_>>();
+        if participants.is_empty() || participants.len() > MAX_RECORDING_CONSENTS {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        }
+
+        let now = self.now()?;
+        let retention_ms = i64::try_from(policy.retention_seconds)
+            .ok()
+            .and_then(|seconds| seconds.checked_mul(1000))
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+        let expires_at_unix_ms = now
+            .checked_add(retention_ms)
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+        let recording = RecordingSession {
+            scope: scope.clone(),
+            recording_id: recording_id.clone(),
+            call_id,
+            requested_by: actor.principal,
+            state: if policy.require_all_participant_consent {
+                RecordingState::WaitingForConsent
+            } else {
+                RecordingState::Ready
+            },
+            policy,
+            consents: participants,
+            requested_at_unix_ms: now,
+            started_at_unix_ms: None,
+            stopped_at_unix_ms: None,
+            expires_at_unix_ms,
+            revision: 1,
+        };
+
+        match self.store.persist_recording(&recording) {
+            Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => self
+                .store
+                .recording(&scope, &recording_id)
+                .map_err(map_store_error)?
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal)),
+            Err(DurableStoreError::Conflict) => {
+                let winner = self
+                    .store
+                    .recording(&scope, &recording_id)
+                    .map_err(map_store_error)?
+                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
+                if recording_request_matches(
+                    &winner,
+                    &recording.call_id,
+                    &recording.policy,
+                    &recording.requested_by,
+                ) {
+                    Ok(winner)
+                } else {
+                    Err(CanonicalError::new(CanonicalErrorCode::Conflict))
+                }
+            }
+            Err(error) => Err(map_store_error(error)),
+        }
     }
 }
 
