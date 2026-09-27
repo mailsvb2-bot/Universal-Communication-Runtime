@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{DurableRecordStatus, DurableStoreError, RecordingStore};
 use ucr_model::{
-    CallId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingConsent,
+    CallId, EventEnvelope, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingConsent,
     RecordingConsentState, RecordingId, RecordingPolicy, RecordingSession, RecordingState,
     TenantScope,
 };
@@ -12,7 +12,7 @@ use ucr_protocol::{
 
 use super::{
     SqliteLocalStore, map_schema_change_error, map_sqlite_error, namespace_storage_key,
-    universal_conference_store, verify_table_columns,
+    event_journal, universal_conference_store, verify_table_columns,
 };
 
 const V33_OBJECTS_SQL: &str = r"
@@ -211,6 +211,80 @@ impl RecordingStore for SqliteLocalStore {
         })
     }
 
+    fn set_recording_consent_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        participant: &PrincipalRef,
+        consent_state: RecordingConsentState,
+        now_unix_ms: i64,
+        event: Option<&EventEnvelope>,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        transition_recording_with_event(
+            self,
+            scope,
+            recording_id,
+            expected_revision,
+            |current| apply_recording_consent(current, participant, consent_state, now_unix_ms),
+            event,
+        )
+    }
+
+    fn start_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        transition_recording_with_event(
+            self,
+            scope,
+            recording_id,
+            expected_revision,
+            |current| start_recording(current, now_unix_ms),
+            Some(event),
+        )
+    }
+
+    fn stop_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        transition_recording_with_event(
+            self,
+            scope,
+            recording_id,
+            expected_revision,
+            |current| stop_recording(current, now_unix_ms),
+            Some(event),
+        )
+    }
+
+    fn expire_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        transition_recording_with_event(
+            self,
+            scope,
+            recording_id,
+            expected_revision,
+            |current| expire_recording(current, now_unix_ms),
+            Some(event),
+        )
+    }
+
     fn delete_recording(
         &self,
         scope: &TenantScope,
@@ -221,6 +295,24 @@ impl RecordingStore for SqliteLocalStore {
         transition_recording(self, scope, recording_id, expected_revision, |current| {
             delete_recording(current, now_unix_ms)
         })
+    }
+
+    fn delete_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        transition_recording_with_event(
+            self,
+            scope,
+            recording_id,
+            expected_revision,
+            |current| delete_recording(current, now_unix_ms),
+            Some(event),
+        )
     }
 }
 
@@ -248,6 +340,74 @@ where
         return Ok(current);
     }
     replace_recording_snapshot(&transaction, &next, expected_revision)?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    Ok(next)
+}
+
+const fn recording_lifecycle_event_type(state: RecordingState) -> Option<&'static str> {
+    match state {
+        RecordingState::Active => Some("ucr.recording.started"),
+        RecordingState::Stopped => Some("ucr.recording.stopped"),
+        RecordingState::Expired => Some("ucr.recording.expired"),
+        RecordingState::Deleted => Some("ucr.recording.deleted"),
+        RecordingState::WaitingForConsent | RecordingState::Ready => None,
+    }
+}
+
+fn validate_recording_lifecycle_event(
+    current: &RecordingSession,
+    next: &RecordingSession,
+    event: Option<&EventEnvelope>,
+) -> Result<(), DurableStoreError> {
+    let expected_type = if current.state != next.state {
+        recording_lifecycle_event_type(next.state)
+    } else {
+        None
+    };
+    match (expected_type, event) {
+        (None, None) => Ok(()),
+        (Some(expected_type), Some(event))
+            if event.scope == current.scope
+                && event.event_type == expected_type
+                && event.logical_order == next.revision =>
+        {
+            Ok(())
+        }
+        _ => Err(DurableStoreError::InvalidRecord),
+    }
+}
+
+fn transition_recording_with_event<F>(
+    store: &SqliteLocalStore,
+    scope: &TenantScope,
+    recording_id: &RecordingId,
+    expected_revision: u64,
+    transition: F,
+    event: Option<&EventEnvelope>,
+) -> Result<RecordingSession, DurableStoreError>
+where
+    F: FnOnce(&RecordingSession) -> Result<RecordingSession, RecordingProtocolError>,
+{
+    let mut connection = store.lock_connection()?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    let current =
+        load_recording(&transaction, scope, recording_id)?.ok_or(DurableStoreError::Conflict)?;
+    if current.revision != expected_revision {
+        return Err(DurableStoreError::Conflict);
+    }
+    let next = transition(&current).map_err(map_recording_protocol_error)?;
+    validate_recording_lifecycle_event(&current, &next, event)?;
+    if next == current {
+        return Ok(current);
+    }
+    replace_recording_snapshot(&transaction, &next, expected_revision)?;
+    if let Some(event) = event {
+        let _ = event_journal::append_event_in_transaction(&transaction, event)?;
+    }
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
