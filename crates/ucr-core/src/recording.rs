@@ -77,10 +77,7 @@ pub trait RecordingMediaProvider: fmt::Debug + Send + Sync {
     /// # Errors
     /// Returns a bounded provider failure. A changed request reusing an already-applied canonical
     /// operation identity must fail with `Conflict` rather than silently widening behavior.
-    fn apply(
-        &self,
-        request: &RecordingProviderRequest,
-    ) -> Result<(), RecordingProviderError>;
+    fn apply(&self, request: &RecordingProviderRequest) -> Result<(), RecordingProviderError>;
 }
 
 /// Durable owner of recording policy, consent evidence and lifecycle only.
@@ -270,7 +267,6 @@ pub trait RecordingStore: StorageProvider {
         Err(DurableStoreError::Unavailable)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
