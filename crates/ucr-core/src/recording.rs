@@ -104,6 +104,18 @@ pub trait RecordingStore: StorageProvider {
         recording_id: &RecordingId,
     ) -> Result<Option<RecordingSession>, DurableStoreError>;
 
+    /// Returns a bounded deterministic batch of non-final recordings whose retention deadline
+    /// has elapsed. This is discovery only; callers must still apply expiry through the atomic
+    /// `expire_recording_with_event` transition.
+    ///
+    /// # Errors
+    /// Rejects zero/oversized limits and explicit durable-store failures.
+    fn recordings_due_for_expiry(
+        &self,
+        now_unix_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<RecordingSession>, DurableStoreError>;
+
     /// Applies one participant-authenticated consent decision under optimistic revision.
     ///
     /// # Errors
