@@ -3771,9 +3771,11 @@ mod bearer_ingress_tests {
     use ucr_protocol::{CONFERENCE_READ_PERMISSION, CanonicalErrorCode};
     use ucr_storage_memory::MemoryLocalStore;
 
+    use crate::machine_api_auth::AUTHORIZATION_METADATA_KEY;
+
     use super::{
-        AUTHORIZATION_METADATA_KEY, GrpcUniversalConferenceService,
-        UniversalConferenceAuthentication, decode_universal_conference_authentication,
+        GrpcUniversalConferenceService, UniversalConferenceAuthentication,
+        decode_universal_conference_authentication,
     };
 
     #[derive(Debug, Clone, Copy)]
