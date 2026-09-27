@@ -33,6 +33,7 @@ jobs:
           case "${{ matrix.language }}" in
             python)
               PYTHONPATH=sdk/python python3 sdk/python/phase41_conformance.py
+              PYTHONPATH=sdk/python python3 sdk/python/conference_client_conformance.py
               ;;
             typescript)
               node --experimental-strip-types sdk/typescript/phase41_conformance.ts
