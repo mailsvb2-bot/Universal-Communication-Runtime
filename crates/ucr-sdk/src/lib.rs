@@ -179,7 +179,7 @@ impl UcrSdkClient {
         let recording =
             pb::recording_service_client::RecordingServiceClient::new(recording_channel)
                 .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
-            .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+                .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         Ok(Self {
             credential,
             integration,
