@@ -61,6 +61,7 @@ fn phase43_chaos_lab_covers_the_canonical_failure_surface() {
 #[test]
 fn phase43_is_test_infrastructure_not_a_second_communication_brain() {
     let manifest = read("crates/ucr-chaos-lab/Cargo.toml");
+    let lock = read("crates/ucr-chaos-lab/Cargo.lock");
     let implementation = read("crates/ucr-chaos-lab/src/lib.rs");
     let adr = read("docs/adr/0089-phase43-chaos-lab-is-deterministic-test-infrastructure.md");
 
@@ -68,6 +69,10 @@ fn phase43_is_test_infrastructure_not_a_second_communication_brain() {
     assert!(!manifest.contains("ucr-storage"));
     assert!(!manifest.contains("ucr-transport"));
     assert!(!manifest.contains("ucr-protocol"));
+    assert!(manifest.contains("ucr-realtime"));
+    assert!(manifest.contains("ucr-webrtc"));
+    assert!(lock.contains("name = \"ucr-realtime\""));
+    assert!(lock.contains("name = \"ucr-webrtc\""));
     for forbidden in [
         "struct MessageEngine",
         "struct DeliveryEngine",
@@ -87,6 +92,7 @@ fn phase43_is_test_infrastructure_not_a_second_communication_brain() {
 #[test]
 fn phase43_locks_data_safety_and_explicit_failure_evidence() {
     let implementation = read("crates/ucr-chaos-lab/src/lib.rs");
+    let adversity = read("crates/ucr-chaos-lab/tests/network_adversity.rs");
     let workflow = read(".github/workflows/phase43-chaos-lab.yml");
 
     for test in [
@@ -106,8 +112,25 @@ fn phase43_locks_data_safety_and_explicit_failure_evidence() {
             "missing executable chaos evidence {test}"
         );
     }
+    for marker in [
+        "network_switch_recovers_single_use_realtime_downlink_without_second_redemption",
+        "packet_loss_recovery_restarts_ice_for_the_same_live_webrtc_session",
+        "RealtimeSessionRegistry",
+        "LiveWebRtcProvider",
+        "Fault::SwitchNetwork",
+        "Fault::DropNext",
+        "restart_session",
+        "JoinGrantUsePolicy::SingleUse",
+    ] {
+        assert!(
+            adversity.contains(marker),
+            "missing cross-boundary network-adversity evidence {marker}"
+        );
+    }
     assert!(workflow.contains("cargo clippy"));
     assert!(workflow.contains("cargo test"));
+    assert!(workflow.matches("--locked").count() >= 3);
+    assert!(!workflow.contains("cargo generate-lockfile"));
     assert!(!workflow.contains("continue-on-error"));
     assert!(!workflow.contains("|| true"));
 }
