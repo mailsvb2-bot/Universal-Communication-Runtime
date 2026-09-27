@@ -3,7 +3,7 @@
   "maturity": "prepared",
   "protocol_package": "ucr.v1",
   "proto_root": "proto/ucr/v1",
-  "services": ["IntegrationService", "EventService", "CallService", "GroupService", "DeviceService", "SyncService", "StoreForwardService", "LocalTransportService", "MeshService", "RecoveryService", "UniversalConferenceService"],
+  "services": ["IntegrationService", "EventService", "CallService", "GroupService", "DeviceService", "SyncService", "StoreForwardService", "LocalTransportService", "MeshService", "RecoveryService", "UniversalConferenceService", "RecordingService"],
   "authentication": {
     "default": {
       "kind": "service_principal_binary_metadata",
@@ -19,13 +19,23 @@
         "bearer_metadata_key": "authorization",
         "bearer_scheme": "Bearer",
         "mixed_schemes": "reject"
+      },
+      "RecordingService": {
+        "management_schemes": [
+          "service_principal_binary_metadata",
+          "oauth2_bearer"
+        ],
+        "participant_consent_scheme": "join_bearer",
+        "bearer_metadata_key": "authorization",
+        "bearer_scheme": "Bearer",
+        "mixed_schemes": "reject"
       }
     }
   },
   "http": {
     "universal_conference_base_path": "/v1",
     "openapi_path": "/v1/openapi.yaml",
-    "business_logic_owner": "ucr.v1 UniversalConferenceService"
+    "business_logic_owner": "ucr.v1 UniversalConferenceService and RecordingService"
   },
   "semantics": {
     "automatic_application_retry": false,
