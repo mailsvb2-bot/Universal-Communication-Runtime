@@ -90,6 +90,7 @@ pub struct UcrSdkClient {
     recovery: pb::recovery_service_client::RecoveryServiceClient<Channel>,
     universal_conference:
         pb::universal_conference_service_client::UniversalConferenceServiceClient<Channel>,
+    recording: pb::recording_service_client::RecordingServiceClient<Channel>,
 }
 
 impl fmt::Debug for UcrSdkClient {
@@ -146,9 +147,14 @@ impl UcrSdkClient {
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         let universal_conference =
-            pb::universal_conference_service_client::UniversalConferenceServiceClient::new(channel)
-                .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
-                .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+            pb::universal_conference_service_client::UniversalConferenceServiceClient::new(
+                channel.clone(),
+            )
+            .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+            .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+        let recording = pb::recording_service_client::RecordingServiceClient::new(channel)
+            .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+            .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         Ok(Self {
             credential,
             integration,
@@ -162,6 +168,7 @@ impl UcrSdkClient {
             mesh,
             recovery,
             universal_conference,
+            recording,
         })
     }
     /// Creates one authenticated request without changing its protobuf body.
@@ -1044,6 +1051,69 @@ impl UcrSdkClient {
             .get_capabilities(request)
             .await?
             .into_inner())
+    }
+
+    /// Requests one canonical recording session through machine-authenticated management.
+    ///
+    /// Participant consent is intentionally not wrapped here because `SetRecordingConsent`
+    /// requires the participant's short-lived join Bearer rather than this SDK's Service Credential.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn request_recording(
+        &mut self,
+        message: pb::RecordingRequest,
+    ) -> Result<pb::RecordingRequestResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recording.request_recording(request).await?.into_inner())
+    }
+
+    /// Reads one canonical recording session through machine-authenticated management.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_recording(
+        &mut self,
+        message: pb::RecordingGetRequest,
+    ) -> Result<pb::RecordingGetResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recording.get_recording(request).await?.into_inner())
+    }
+
+    /// Starts one consent-ready canonical recording session.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn start_recording(
+        &mut self,
+        message: pb::RecordingStartRequest,
+    ) -> Result<pb::RecordingStartResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recording.start_recording(request).await?.into_inner())
+    }
+
+    /// Stops one active canonical recording session.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn stop_recording(
+        &mut self,
+        message: pb::RecordingStopRequest,
+    ) -> Result<pb::RecordingStopResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recording.stop_recording(request).await?.into_inner())
+    }
+
+    /// Deletes one canonical recording session through expected-revision management.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn delete_recording(
+        &mut self,
+        message: pb::RecordingDeleteRequest,
+    ) -> Result<pb::RecordingDeleteResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recording.delete_recording(request).await?.into_inner())
     }
 
     /// Lists canonical dead letters for one Event subscription.
