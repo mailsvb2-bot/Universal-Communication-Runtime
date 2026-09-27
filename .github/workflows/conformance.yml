@@ -59,6 +59,43 @@ jobs:
               ;;
           esac
 
+  reference-integrations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Python reference integration self-test
+        run: python3 examples/reference-integrations/python_backend.py --self-test
+      - name: Node reference integration self-test
+        run: node examples/reference-integrations/node_backend.mjs --self-test
+      - name: Keep browser examples credential-free and on canonical join boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in examples/reference-integrations/simple-html/index.html examples/reference-integrations/mobile-web/index.html; do
+            grep -F '#ucr_join' "$file"
+            grep -F 'camera; microphone; display-capture; fullscreen' "$file"
+            if grep -Eq 'UCR_ACCESS_TOKEN|Authorization:[[:space:]]*Bearer|client_secret' "$file"; then
+              echo "browser reference integration contains a machine credential surface: $file" >&2
+              exit 1
+            fi
+          done
+      - name: Keep backend examples on the universal public contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in examples/reference-integrations/python_backend.py examples/reference-integrations/node_backend.mjs; do
+            grep -F '/v1/conferences' "$file"
+            grep -F '/v1/participants' "$file"
+            grep -F '/v1/participant-devices' "$file"
+            grep -F '/v1/conferences/runtime' "$file"
+            grep -F '/v1/join-grants' "$file"
+            if grep -Eiq 'clientplatform|PrincipalId|DeviceId|CallId|GroupId' "$file"; then
+              echo "reference integration leaked product-specific or internal UCR identifiers: $file" >&2
+              exit 1
+            fi
+          done
+
   rust-sdk:
     runs-on: ubuntu-24.04
     timeout-minutes: 5

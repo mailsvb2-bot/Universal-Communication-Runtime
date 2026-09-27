@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>UCR reference conference</title>
+  <style>
+    body{font:16px system-ui,sans-serif;max-width:760px;margin:3rem auto;padding:0 1rem}
+    input,button{font:inherit;padding:.7rem}
+    input{width:100%;box-sizing:border-box;margin:.5rem 0 1rem}
+    iframe{width:100%;height:70vh;border:1px solid #ccc;border-radius:12px}
+  </style>
+</head>
+<body>
+  <h1>UCR reference conference</h1>
+  <p>Paste a personal join URL issued by your trusted backend. This page never receives machine credentials.</p>
+  <label for="join">Join URL</label>
+  <input id="join" autocomplete="off" placeholder="https://ucr.example/#ucr_join=…">
+  <button id="mount" type="button">Join conference</button>
+  <div id="conference"></div>
+  <script>
+    const input=document.getElementById("join");
+    const mount=document.getElementById("mount");
+    const target=document.getElementById("conference");
+    mount.addEventListener("click",()=>{
+      const url=new URL(input.value.trim());
+      const loopback=["localhost","127.0.0.1","[::1]"].includes(url.hostname);
+      if(!((url.protocol==="https:")||(url.protocol==="http:"&&loopback))||!new URLSearchParams(url.hash.slice(1)).get("ucr_join")){
+        alert("A UCR join URL with #ucr_join is required"); return;
+      }
+      const frame=document.createElement("iframe");
+      frame.src=url.toString();
+      frame.title="UCR conference";
+      frame.allow="camera; microphone; display-capture; fullscreen";
+      frame.referrerPolicy="no-referrer";
+      frame.sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups-to-escape-sandbox";
+      target.replaceChildren(frame);
+    });
+  </script>
+</body>
+</html>
