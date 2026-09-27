@@ -1,4 +1,6 @@
-use ucr_model::{PrincipalRef, RecordingConsentState, RecordingId, RecordingSession, TenantScope};
+use ucr_model::{
+    EventEnvelope, PrincipalRef, RecordingConsentState, RecordingId, RecordingSession, TenantScope,
+};
 
 use crate::{DurableRecordStatus, DurableStoreError, StorageProvider};
 
@@ -40,6 +42,31 @@ pub trait RecordingStore: StorageProvider {
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError>;
 
+    /// Applies consent and, when it changes the lifecycle (for example ACTIVE -> STOPPED),
+    /// atomically persists the matching canonical Event with the new snapshot.
+    fn set_recording_consent_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        participant: &PrincipalRef,
+        state: RecordingConsentState,
+        now_unix_ms: i64,
+        event: Option<&EventEnvelope>,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        if event.is_some() {
+            return Err(DurableStoreError::Unavailable);
+        }
+        self.set_recording_consent(
+            scope,
+            recording_id,
+            expected_revision,
+            participant,
+            state,
+            now_unix_ms,
+        )
+    }
+
     /// Starts recording lifecycle after consent and retention gates pass.
     ///
     /// # Errors
@@ -51,6 +78,19 @@ pub trait RecordingStore: StorageProvider {
         expected_revision: u64,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError>;
+
+    /// Starts lifecycle and atomically persists its canonical lifecycle Event.
+    fn start_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
+        Err(DurableStoreError::Unavailable)
+    }
 
     /// Stops a waiting, ready or active lifecycle.
     ///
@@ -64,6 +104,19 @@ pub trait RecordingStore: StorageProvider {
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError>;
 
+    /// Stops lifecycle and atomically persists its canonical lifecycle Event.
+    fn stop_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
+        Err(DurableStoreError::Unavailable)
+    }
+
     /// Applies finite-retention expiry.
     ///
     /// # Errors
@@ -75,6 +128,19 @@ pub trait RecordingStore: StorageProvider {
         expected_revision: u64,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError>;
+
+    /// Expires lifecycle and atomically persists its canonical lifecycle Event.
+    fn expire_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
+        Err(DurableStoreError::Unavailable)
+    }
 
     /// Marks controlled recording state deleted.
     ///
@@ -90,4 +156,17 @@ pub trait RecordingStore: StorageProvider {
         expected_revision: u64,
         now_unix_ms: i64,
     ) -> Result<RecordingSession, DurableStoreError>;
+
+    /// Marks lifecycle deleted and atomically persists its canonical lifecycle Event.
+    fn delete_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
+        Err(DurableStoreError::Unavailable)
+    }
 }
