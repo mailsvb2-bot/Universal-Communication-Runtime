@@ -8853,6 +8853,27 @@ impl RecordingStore for MemoryLocalStore {
                         .cmp(right.scope.tenant_id.as_opaque().as_str())
                 })
                 .then_with(|| {
+                    left.scope
+                        .namespace_id
+                        .is_some()
+                        .cmp(&right.scope.namespace_id.is_some())
+                })
+                .then_with(|| {
+                    left.scope
+                        .namespace_id
+                        .as_ref()
+                        .map(|value| value.as_opaque().as_str())
+                        .unwrap_or_default()
+                        .cmp(
+                            right
+                                .scope
+                                .namespace_id
+                                .as_ref()
+                                .map(|value| value.as_opaque().as_str())
+                                .unwrap_or_default(),
+                        )
+                })
+                .then_with(|| {
                     left.recording_id
                         .as_opaque()
                         .as_str()
