@@ -181,37 +181,7 @@ async fn dispatch_post(path: &str, request: Request<Incoming>, state: &AppState)
         Err(error) => return error.into_response(),
     };
     if path.starts_with("/v1/recordings") {
-        let Some(recording_upstream) = state.recording_upstream.as_ref() else {
-            return TransportError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "recording gRPC upstream is not configured",
-            )
-            .into_response();
-        };
-        let mut client =
-            pb::recording_service_client::RecordingServiceClient::new(recording_upstream.clone());
-        return match path {
-            "/v1/recordings" => {
-                forward_request_recording(&mut client, &body, authorization.as_deref()).await
-            }
-            "/v1/recordings/get" => {
-                forward_get_recording(&mut client, &body, authorization.as_deref()).await
-            }
-            "/v1/recordings/consent" => {
-                forward_recording_consent(&mut client, &body, authorization.as_deref()).await
-            }
-            "/v1/recordings/start" => {
-                forward_start_recording(&mut client, &body, authorization.as_deref()).await
-            }
-            "/v1/recordings/stop" => {
-                forward_stop_recording(&mut client, &body, authorization.as_deref()).await
-            }
-            "/v1/recordings/delete" => {
-                forward_delete_recording(&mut client, &body, authorization.as_deref()).await
-            }
-            _ => TransportError::new(StatusCode::NOT_FOUND, "recording HTTP route not found")
-                .into_response(),
-        };
+        return dispatch_recording_post(path, &body, authorization.as_deref(), state).await;
     }
     let mut client = pb::universal_conference_service_client::UniversalConferenceServiceClient::new(
         state.upstream.clone(),
@@ -261,6 +231,35 @@ async fn dispatch_post(path: &str, request: Request<Incoming>, state: &AppState)
             forward_capabilities(&mut client, &body, authorization.as_deref()).await
         }
         _ => TransportError::new(StatusCode::NOT_FOUND, "conference HTTP route not found")
+            .into_response(),
+    }
+}
+
+async fn dispatch_recording_post(
+    path: &str,
+    body: &[u8],
+    authorization: Option<&str>,
+    state: &AppState,
+) -> HttpResponse {
+    let Some(recording_upstream) = state.recording_upstream.as_ref() else {
+        return TransportError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "recording gRPC upstream is not configured",
+        )
+        .into_response();
+    };
+    let mut client =
+        pb::recording_service_client::RecordingServiceClient::new(recording_upstream.clone());
+    match path {
+        "/v1/recordings" => forward_request_recording(&mut client, body, authorization).await,
+        "/v1/recordings/get" => forward_get_recording(&mut client, body, authorization).await,
+        "/v1/recordings/consent" => {
+            forward_recording_consent(&mut client, body, authorization).await
+        }
+        "/v1/recordings/start" => forward_start_recording(&mut client, body, authorization).await,
+        "/v1/recordings/stop" => forward_stop_recording(&mut client, body, authorization).await,
+        "/v1/recordings/delete" => forward_delete_recording(&mut client, body, authorization).await,
+        _ => TransportError::new(StatusCode::NOT_FOUND, "recording HTTP route not found")
             .into_response(),
     }
 }
