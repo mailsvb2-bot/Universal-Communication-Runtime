@@ -19,7 +19,7 @@ def fake_transport(path, token, body):
     if path == "/v1/conferences/resolve":
         return {"conference": {"conference_id": "conference-1"}}
     if path == "/v1/participants/list":
-        return {"participants": {"participants": [{
+        return {"participants": [{
             "external_user_id_b64": "dXNlci0x",
             "role": "attendee",
             "audio_muted": False,
@@ -28,9 +28,9 @@ def fake_transport(path, token, body):
             "publish_video_allowed": True,
             "active": True,
             "screen_share_allowed": False,
-        }]}}
+        }]}
     if path == "/v1/participants/raised-hands":
-        return {"raised_hands": {"external_user_ids_b64": ["dXNlci0x"]}}
+        return {"external_user_ids_b64": ["dXNlci0x"]}
     if path == "/v1/capabilities":
         return {"capabilities": {
             "capabilities": [],
