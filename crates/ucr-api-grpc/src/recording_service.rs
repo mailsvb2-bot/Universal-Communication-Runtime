@@ -185,10 +185,12 @@ where
                         .recording(&scope, &recording_id)
                         .map_err(map_store_error)?
                     {
-                        if existing.call_id == call_id
-                            && existing.policy == policy
-                            && existing.requested_by == actor.principal
-                        {
+                        if recording_request_matches(
+                            &existing,
+                            &call_id,
+                            &policy,
+                            &actor.principal,
+                        ) {
                             return Ok(existing);
                         }
                         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
@@ -243,17 +245,30 @@ where
                         expires_at_unix_ms,
                         revision: 1,
                     };
-                    match self
-                        .store
-                        .persist_recording(&recording)
-                        .map_err(map_store_error)?
-                    {
-                        DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate => {
-                            self.store
+                    match self.store.persist_recording(&recording) {
+                        Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => self
+                            .store
+                            .recording(&scope, &recording_id)
+                            .map_err(map_store_error)?
+                            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal)),
+                        Err(DurableStoreError::Conflict) => {
+                            let winner = self
+                                .store
                                 .recording(&scope, &recording_id)
                                 .map_err(map_store_error)?
-                                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))
+                                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
+                            if recording_request_matches(
+                                &winner,
+                                &recording.call_id,
+                                &recording.policy,
+                                &recording.requested_by,
+                            ) {
+                                Ok(winner)
+                            } else {
+                                Err(CanonicalError::new(CanonicalErrorCode::Conflict))
+                            }
                         }
+                        Err(error) => Err(map_store_error(error)),
                     }
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
@@ -306,21 +321,21 @@ where
         let result = match (token, decoded) {
             (Ok(token), Ok((scope, recording_id, participant, state, expected_revision))) => {
                 self.require_available().and_then(|_| {
-                    let recording = self
-                        .store
-                        .recording(&scope, &recording_id)
-                        .map_err(map_store_error)?
-                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
                     let claims = authenticate_realtime_bearer_claims(
                         &*self.store,
                         &self.join_issuer,
                         &token,
                         self.now()?,
                     )?;
-                    if claims.scope != scope
-                        || claims.call_id != recording.call_id
-                        || claims.participant != participant
-                    {
+                    if claims.scope != scope || claims.participant != participant {
+                        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+                    }
+                    let recording = self
+                        .store
+                        .recording(&scope, &recording_id)
+                        .map_err(map_store_error)?
+                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+                    if claims.call_id != recording.call_id {
                         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
                     }
                     let scoped = ScopedPrincipal {
@@ -461,6 +476,17 @@ where
             (Err(error), _) | (_, Err(error)) => Err(error),
         }
     }
+}
+
+fn recording_request_matches(
+    existing: &RecordingSession,
+    call_id: &ucr_model::CallId,
+    policy: &RecordingPolicy,
+    requested_by: &PrincipalRef,
+) -> bool {
+    existing.call_id == *call_id
+        && existing.policy == *policy
+        && existing.requested_by == *requested_by
 }
 
 fn decode_recording_request(
