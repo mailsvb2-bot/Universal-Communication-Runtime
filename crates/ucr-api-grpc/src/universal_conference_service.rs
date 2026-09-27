@@ -24,7 +24,7 @@ use ucr_core::{
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet, TrustedSigningKeyResolver};
 use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
 use ucr_model::{
-    ActorId, ActorKind, ActorRef, AuthorizationRequest, CallId, CallParticipant,
+    ActorId, ActorKind, ActorRef, CallId, CallParticipant,
     CallParticipantState, CallParticipantUpdateKind, CallSession, CallSignal, CallSignalKind,
     CallSignallingState, CommandEnvelope, CommandId, ConferenceJoinGrantRecord,
     ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription, ConferenceParticipantRole,
