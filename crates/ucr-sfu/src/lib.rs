@@ -555,3 +555,201 @@ const fn permissions(
         (MediaKind::Audio, _) => (AUDIO_SEND_PERMISSION, AUDIO_RECEIVE_PERMISSION),
     }
 }
+
+
+#[cfg(test)]
+mod horizontal_placement_tests {
+    use super::{
+        SfuClusterDirectory, SfuNodeDescriptor, SfuNodeState, SfuPlacementError,
+        SfuPlacementPolicy,
+    };
+    use ucr_model::{CallId, NamespaceId, OpaqueId, TenantId, TenantScope};
+
+    fn opaque(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("opaque id")
+    }
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(opaque("tenant-a")),
+            namespace_id: Some(NamespaceId::from_opaque(opaque("namespace-a"))),
+        }
+    }
+
+    fn call(value: &str) -> CallId {
+        CallId::from_opaque(opaque(value))
+    }
+
+    fn node(
+        id: &str,
+        region: &str,
+        state: SfuNodeState,
+        active_sessions: u32,
+        max_sessions: u32,
+        lease_expires_at_unix_ms: i64,
+    ) -> SfuNodeDescriptor {
+        SfuNodeDescriptor {
+            node_id: opaque(id),
+            region: region.to_owned(),
+            state,
+            active_sessions,
+            max_sessions,
+            lease_expires_at_unix_ms,
+        }
+    }
+
+    #[test]
+    fn deterministic_placement_is_sticky_without_mutating_call_state() {
+        let mut directory = SfuClusterDirectory::default();
+        directory
+            .upsert_node(node("sfu-a", "eu", SfuNodeState::Healthy, 1, 100, 10_000))
+            .expect("node a");
+        directory
+            .upsert_node(node("sfu-b", "eu", SfuNodeState::Healthy, 1, 100, 10_000))
+            .expect("node b");
+
+        let first = directory
+            .select_node(&scope(), &call("call-a"), None, &SfuPlacementPolicy::default(), 100)
+            .expect("placement");
+        let repeated = directory
+            .select_node(&scope(), &call("call-a"), None, &SfuPlacementPolicy::default(), 100)
+            .expect("repeat");
+        assert_eq!(first.node_id, repeated.node_id);
+        assert!(!first.retained_sticky_placement);
+
+        let sticky = directory
+            .select_node(
+                &scope(),
+                &call("call-a"),
+                Some(&first.node_id),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("sticky");
+        assert_eq!(sticky.node_id, first.node_id);
+        assert!(sticky.retained_sticky_placement);
+    }
+
+    #[test]
+    fn draining_node_keeps_existing_session_but_receives_no_new_placement() {
+        let mut directory = SfuClusterDirectory::default();
+        let draining_id = opaque("sfu-drain");
+        directory
+            .upsert_node(node(
+                draining_id.as_str(),
+                "eu",
+                SfuNodeState::Healthy,
+                4,
+                100,
+                10_000,
+            ))
+            .expect("draining candidate");
+        directory
+            .upsert_node(node("sfu-new", "eu", SfuNodeState::Healthy, 4, 100, 10_000))
+            .expect("new candidate");
+        directory.mark_draining(&draining_id).expect("mark draining");
+
+        let sticky = directory
+            .select_node(
+                &scope(),
+                &call("call-draining"),
+                Some(&draining_id),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("sticky draining");
+        assert_eq!(sticky.node_id, draining_id);
+        assert!(sticky.retained_sticky_placement);
+
+        let fresh = directory
+            .select_node(
+                &scope(),
+                &call("call-fresh"),
+                None,
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("fresh placement");
+        assert_eq!(fresh.node_id.as_str(), "sfu-new");
+        assert!(!fresh.retained_sticky_placement);
+    }
+
+    #[test]
+    fn expired_or_unavailable_sticky_node_fails_over_to_live_capacity() {
+        let mut directory = SfuClusterDirectory::default();
+        let expired = opaque("sfu-expired");
+        directory
+            .upsert_node(node(
+                expired.as_str(),
+                "eu",
+                SfuNodeState::Healthy,
+                1,
+                100,
+                99,
+            ))
+            .expect("expired node");
+        directory
+            .upsert_node(node("sfu-live", "eu", SfuNodeState::Healthy, 1, 100, 10_000))
+            .expect("live node");
+
+        let decision = directory
+            .select_node(
+                &scope(),
+                &call("call-failover"),
+                Some(&expired),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("failover");
+        assert_eq!(decision.node_id.as_str(), "sfu-live");
+        assert!(!decision.retained_sticky_placement);
+    }
+
+    #[test]
+    fn region_policy_fails_closed_without_allowed_cross_region_capacity() {
+        let mut directory = SfuClusterDirectory::default();
+        directory
+            .upsert_node(node("sfu-us", "us", SfuNodeState::Healthy, 1, 100, 10_000))
+            .expect("us node");
+        let strict = SfuPlacementPolicy {
+            preferred_region: Some("eu".to_owned()),
+            allow_cross_region_failover: false,
+        };
+        assert_eq!(
+            directory.select_node(&scope(), &call("call-region"), None, &strict, 100),
+            Err(SfuPlacementError::NoHealthyCapacity)
+        );
+
+        let permissive = SfuPlacementPolicy {
+            allow_cross_region_failover: true,
+            ..strict
+        };
+        let decision = directory
+            .select_node(&scope(), &call("call-region"), None, &permissive, 100)
+            .expect("cross-region failover");
+        assert_eq!(decision.node_id.as_str(), "sfu-us");
+        assert!(decision.crossed_region);
+    }
+
+    #[test]
+    fn invalid_or_full_nodes_never_become_new_placements() {
+        let mut directory = SfuClusterDirectory::default();
+        assert_eq!(
+            directory.upsert_node(node("bad", "", SfuNodeState::Healthy, 0, 10, 10_000)),
+            Err(SfuPlacementError::InvalidNode)
+        );
+        directory
+            .upsert_node(node("full", "eu", SfuNodeState::Healthy, 10, 10, 10_000))
+            .expect("full node registration");
+        assert_eq!(
+            directory.select_node(
+                &scope(),
+                &call("call-full"),
+                None,
+                &SfuPlacementPolicy::default(),
+                100,
+            ),
+            Err(SfuPlacementError::NoHealthyCapacity)
+        );
+    }
+}
