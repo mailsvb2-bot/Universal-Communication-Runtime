@@ -185,12 +185,8 @@ where
                         .recording(&scope, &recording_id)
                         .map_err(map_store_error)?
                     {
-                        if recording_request_matches(
-                            &existing,
-                            &call_id,
-                            &policy,
-                            &actor.principal,
-                        ) {
+                        if recording_request_matches(&existing, &call_id, &policy, &actor.principal)
+                        {
                             return Ok(existing);
                         }
                         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
@@ -291,14 +287,14 @@ where
         let body = request.into_inner();
         let decoded = decode_recording_lookup(body.scope, body.recording_id);
         let result = match (authentication, decoded) {
-            (Ok(authentication), Ok((scope, recording_id))) => self
-                .admit_management(&scope, authentication)
-                .and_then(|_| {
+            (Ok(authentication), Ok((scope, recording_id))) => {
+                self.admit_management(&scope, authentication).and_then(|_| {
                     self.store
                         .recording(&scope, &recording_id)
                         .map_err(map_store_error)?
                         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
-                }),
+                })
+            }
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RecordingGetResponse {
@@ -385,10 +381,13 @@ where
     ) -> Result<Response<pb::RecordingStartResponse>, Status> {
         let authentication = decode_machine_api_authentication(request.metadata());
         let body = request.into_inner();
-        let decoded = decode_recording_mutation(body.scope, body.recording_id, body.expected_revision);
-        let result = self.management_transition(authentication, decoded, |store, scope, id, revision, now| {
-            store.start_recording(scope, id, revision, now)
-        });
+        let decoded =
+            decode_recording_mutation(body.scope, body.recording_id, body.expected_revision);
+        let result = self.management_transition(
+            authentication,
+            decoded,
+            |store, scope, id, revision, now| store.start_recording(scope, id, revision, now),
+        );
         Ok(Response::new(pb::RecordingStartResponse {
             result: Some(match result {
                 Ok(recording) => {
@@ -405,10 +404,13 @@ where
     ) -> Result<Response<pb::RecordingStopResponse>, Status> {
         let authentication = decode_machine_api_authentication(request.metadata());
         let body = request.into_inner();
-        let decoded = decode_recording_mutation(body.scope, body.recording_id, body.expected_revision);
-        let result = self.management_transition(authentication, decoded, |store, scope, id, revision, now| {
-            store.stop_recording(scope, id, revision, now)
-        });
+        let decoded =
+            decode_recording_mutation(body.scope, body.recording_id, body.expected_revision);
+        let result = self.management_transition(
+            authentication,
+            decoded,
+            |store, scope, id, revision, now| store.stop_recording(scope, id, revision, now),
+        );
         Ok(Response::new(pb::RecordingStopResponse {
             result: Some(match result {
                 Ok(recording) => {
@@ -425,16 +427,22 @@ where
     ) -> Result<Response<pb::RecordingDeleteResponse>, Status> {
         let authentication = decode_machine_api_authentication(request.metadata());
         let body = request.into_inner();
-        let decoded = decode_recording_mutation(body.scope, body.recording_id, body.expected_revision);
+        let decoded =
+            decode_recording_mutation(body.scope, body.recording_id, body.expected_revision);
         let recording_id = decoded.as_ref().ok().map(|(_, id, _)| id.clone());
-        let result = self.management_transition(authentication, decoded, |store, scope, id, revision, now| {
-            store.delete_recording(scope, id, revision, now)
-        });
+        let result = self.management_transition(
+            authentication,
+            decoded,
+            |store, scope, id, revision, now| store.delete_recording(scope, id, revision, now),
+        );
         Ok(Response::new(pb::RecordingDeleteResponse {
             result: Some(match result {
                 Ok(_) => pb::recording_delete_response::Result::Acknowledgement(
                     pb_acknowledgement(acknowledgement_for(
-                        recording_id.expect("successful recording delete has decoded id").as_opaque().clone(),
+                        recording_id
+                            .expect("successful recording delete has decoded id")
+                            .as_opaque()
+                            .clone(),
                     )),
                 ),
                 Err(error) => pb::recording_delete_response::Result::Error(pb_error(error)),
@@ -447,10 +455,7 @@ impl<C, A, S> GrpcRecordingService<C, A, S>
 where
     C: ServiceQuotaClock,
     A: AuthorizationEvaluator,
-    S: ServiceCredentialStore
-        + ServiceQuotaStore
-        + ServiceAuditStore
-        + RecordingStore,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + RecordingStore,
 {
     fn management_transition<F>(
         &self,
@@ -459,7 +464,13 @@ where
         transition: F,
     ) -> Result<RecordingSession, CanonicalError>
     where
-        F: FnOnce(&S, &TenantScope, &RecordingId, u64, i64) -> Result<RecordingSession, DurableStoreError>,
+        F: FnOnce(
+            &S,
+            &TenantScope,
+            &RecordingId,
+            u64,
+            i64,
+        ) -> Result<RecordingSession, DurableStoreError>,
     {
         match (authentication, decoded) {
             (Ok(authentication), Ok((scope, recording_id, expected_revision))) => {
@@ -533,7 +544,16 @@ fn decode_recording_mutation(
 
 fn decode_consent_request(
     value: pb::RecordingSetConsentRequest,
-) -> Result<(TenantScope, RecordingId, PrincipalRef, RecordingConsentState, u64), CanonicalError> {
+) -> Result<
+    (
+        TenantScope,
+        RecordingId,
+        PrincipalRef,
+        RecordingConsentState,
+        u64,
+    ),
+    CanonicalError,
+> {
     if value.expected_revision == 0 {
         return Err(invalid_argument());
     }
@@ -541,15 +561,22 @@ fn decode_consent_request(
     let recording_id = RecordingId::from_opaque(decode_opaque(value.recording_id)?);
     let consent = value.consent.ok_or_else(invalid_argument)?;
     let participant = decode_principal_ref(consent.participant.ok_or_else(invalid_argument)?)?;
-    let state = match pb::RecordingConsentState::try_from(consent.state).map_err(|_| invalid_argument())? {
-        pb::RecordingConsentState::Granted => RecordingConsentState::Granted,
-        pb::RecordingConsentState::Denied => RecordingConsentState::Denied,
-        pb::RecordingConsentState::Revoked => RecordingConsentState::Revoked,
-        pb::RecordingConsentState::Pending | pb::RecordingConsentState::Unspecified => {
-            return Err(invalid_argument());
-        }
-    };
-    Ok((scope, recording_id, participant, state, value.expected_revision))
+    let state =
+        match pb::RecordingConsentState::try_from(consent.state).map_err(|_| invalid_argument())? {
+            pb::RecordingConsentState::Granted => RecordingConsentState::Granted,
+            pb::RecordingConsentState::Denied => RecordingConsentState::Denied,
+            pb::RecordingConsentState::Revoked => RecordingConsentState::Revoked,
+            pb::RecordingConsentState::Pending | pb::RecordingConsentState::Unspecified => {
+                return Err(invalid_argument());
+            }
+        };
+    Ok((
+        scope,
+        recording_id,
+        participant,
+        state,
+        value.expected_revision,
+    ))
 }
 
 fn pb_recording(value: &RecordingSession) -> pb::RecordingSession {
