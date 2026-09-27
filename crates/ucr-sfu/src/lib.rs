@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
+use std::collections::BTreeMap;
 
 use ucr_core::{
     AuthorizationEvaluator, CallStore, DeviceLifecycleStore, DurableStoreError, GroupStore,
@@ -22,6 +23,203 @@ use ucr_protocol::{
     canonical_sfu_forward_envelope, phase29_sfu_capabilities,
 };
 
+/// Ephemeral health state for one SFU worker in a horizontal deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SfuNodeState {
+    Healthy,
+    Draining,
+    Unavailable,
+}
+
+/// Ephemeral operator-supplied description of one SFU worker.
+///
+/// This is infrastructure routing state only. It is not a durable Conference roster, membership
+/// record, media archive, or authorization source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SfuNodeDescriptor {
+    pub node_id: ucr_model::OpaqueId,
+    pub region: String,
+    pub state: SfuNodeState,
+    pub active_sessions: u32,
+    pub max_sessions: u32,
+    pub lease_expires_at_unix_ms: i64,
+}
+
+impl SfuNodeDescriptor {
+    fn is_live_at(&self, now_unix_ms: i64) -> bool {
+        self.lease_expires_at_unix_ms > now_unix_ms && self.state != SfuNodeState::Unavailable
+    }
+
+    fn accepts_new_session_at(&self, now_unix_ms: i64) -> bool {
+        self.is_live_at(now_unix_ms)
+            && self.state == SfuNodeState::Healthy
+            && self.max_sessions > 0
+            && self.active_sessions < self.max_sessions
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SfuPlacementPolicy {
+    pub preferred_region: Option<String>,
+    pub allow_cross_region_failover: bool,
+}
+
+impl Default for SfuPlacementPolicy {
+    fn default() -> Self {
+        Self {
+            preferred_region: None,
+            allow_cross_region_failover: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SfuPlacementDecision {
+    pub node_id: ucr_model::OpaqueId,
+    pub retained_sticky_placement: bool,
+    pub crossed_region: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SfuPlacementError {
+    InvalidNode,
+    NoHealthyCapacity,
+}
+
+/// Ephemeral horizontal-SFU placement directory.
+///
+/// The directory owns no canonical Call, Conference, membership, permission or media state. Callers
+/// pass an existing node ID when reconnecting so a healthy or draining node remains sticky. New
+/// placement never targets draining/unavailable/expired/full nodes. If the sticky node is gone or
+/// unhealthy, deterministic rendezvous-style scoring selects a healthy replacement.
+#[derive(Debug, Default)]
+pub struct SfuClusterDirectory {
+    nodes: BTreeMap<String, SfuNodeDescriptor>,
+}
+
+impl SfuClusterDirectory {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    /// Registers or refreshes one ephemeral worker heartbeat.
+    ///
+    /// # Errors
+    /// Rejects empty region labels, zero capacity, over-capacity counters, or non-positive leases.
+    pub fn upsert_node(&mut self, node: SfuNodeDescriptor) -> Result<(), SfuPlacementError> {
+        if node.region.is_empty()
+            || node.max_sessions == 0
+            || node.active_sessions > node.max_sessions
+            || node.lease_expires_at_unix_ms <= 0
+        {
+            return Err(SfuPlacementError::InvalidNode);
+        }
+        self.nodes.insert(node.node_id.as_str().to_owned(), node);
+        Ok(())
+    }
+
+    pub fn remove_node(&mut self, node_id: &ucr_model::OpaqueId) {
+        self.nodes.remove(node_id.as_str());
+    }
+
+    /// Marks a live worker as draining. Existing sticky sessions may remain on it, while new
+    /// placements immediately stop selecting it.
+    ///
+    /// # Errors
+    /// Returns InvalidNode when the worker is unknown.
+    pub fn mark_draining(&mut self, node_id: &ucr_model::OpaqueId) -> Result<(), SfuPlacementError> {
+        let node = self
+            .nodes
+            .get_mut(node_id.as_str())
+            .ok_or(SfuPlacementError::InvalidNode)?;
+        node.state = SfuNodeState::Draining;
+        Ok(())
+    }
+
+    /// Selects one worker for an already-authorized canonical Call.
+    ///
+    /// The optional current node is infrastructure stickiness only. It grants no Conference or
+    /// media authority. A draining node is retained only when it is the explicit current placement.
+    ///
+    /// # Errors
+    /// Returns NoHealthyCapacity when policy leaves no live worker capacity.
+    pub fn select_node(
+        &self,
+        scope: &ucr_model::TenantScope,
+        call_id: &ucr_model::CallId,
+        current_node_id: Option<&ucr_model::OpaqueId>,
+        policy: &SfuPlacementPolicy,
+        now_unix_ms: i64,
+    ) -> Result<SfuPlacementDecision, SfuPlacementError> {
+        if let Some(current_node_id) = current_node_id
+            && let Some(current) = self.nodes.get(current_node_id.as_str())
+            && current.is_live_at(now_unix_ms)
+            && current.active_sessions <= current.max_sessions
+        {
+            let preferred = policy.preferred_region.as_deref();
+            let crossed_region = preferred.is_some_and(|region| current.region != region);
+            if !crossed_region || policy.allow_cross_region_failover {
+                return Ok(SfuPlacementDecision {
+                    node_id: current.node_id.clone(),
+                    retained_sticky_placement: true,
+                    crossed_region,
+                });
+            }
+        }
+
+        let mut candidates = self
+            .nodes
+            .values()
+            .filter(|node| node.accepts_new_session_at(now_unix_ms))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Err(SfuPlacementError::NoHealthyCapacity);
+        }
+
+        let preferred = policy.preferred_region.as_deref();
+        if let Some(region) = preferred {
+            let has_preferred = candidates.iter().any(|node| node.region == region);
+            if has_preferred {
+                candidates.retain(|node| node.region == region);
+            } else if !policy.allow_cross_region_failover {
+                return Err(SfuPlacementError::NoHealthyCapacity);
+            }
+        }
+
+        let key = placement_key(scope, call_id);
+        let selected = candidates
+            .into_iter()
+            .max_by_key(|node| placement_score(&key, node.node_id.as_wire_bytes()))
+            .ok_or(SfuPlacementError::NoHealthyCapacity)?;
+        Ok(SfuPlacementDecision {
+            node_id: selected.node_id.clone(),
+            retained_sticky_placement: false,
+            crossed_region: preferred.is_some_and(|region| selected.region != region),
+        })
+    }
+}
+
+fn placement_key(scope: &ucr_model::TenantScope, call_id: &ucr_model::CallId) -> Vec<u8> {
+    let mut key = Vec::new();
+    key.extend_from_slice(scope.tenant_id.as_opaque().as_wire_bytes());
+    key.push(0);
+    if let Some(namespace_id) = scope.namespace_id.as_ref() {
+        key.extend_from_slice(namespace_id.as_opaque().as_wire_bytes());
+    }
+    key.push(0);
+    key.extend_from_slice(call_id.as_opaque().as_wire_bytes());
+    key
+}
+
+fn placement_score(key: &[u8], node_id: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in key.iter().chain(node_id.iter()) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfuForwardSinkError {
     Unavailable,
