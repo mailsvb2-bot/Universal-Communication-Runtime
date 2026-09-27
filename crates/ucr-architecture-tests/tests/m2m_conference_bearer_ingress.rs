@@ -10,16 +10,19 @@ fn universal_conference_ingress_accepts_one_canonical_authentication_scheme() {
         workspace.join("crates/ucr-api-grpc/src/universal_conference_service.rs"),
     )
     .expect("Universal Conference gRPC source");
+    let shared_auth = fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/machine_api_auth.rs"))
+        .expect("shared machine API auth source");
     let spec = fs::read_to_string(workspace.join("spec/universal-conference-api.md"))
         .expect("Universal Conference API spec");
 
     assert!(source.contains("decode_universal_conference_authentication"));
-    assert!(source.contains("UniversalConferenceAuthentication::ServiceCredential"));
-    assert!(source.contains("UniversalConferenceAuthentication::MachineBearer"));
-    assert!(source.contains("MachineBearerRequestGate"));
-    assert!(source.contains("authenticate_permission_request"));
+    assert!(source.contains("type UniversalConferenceAuthentication = MachineApiAuthentication"));
+    assert!(shared_auth.contains("MachineApiAuthentication::ServiceCredential"));
+    assert!(shared_auth.contains("MachineApiAuthentication::MachineBearer"));
+    assert!(shared_auth.contains("MachineBearerRequestGate"));
+    assert!(shared_auth.contains("authenticate_permission_request"));
     assert!(source.contains("with_machine_bearer_auth"));
-    assert!(source.contains("has_credential_id || has_credential_secret"));
+    assert!(shared_auth.contains("has_credential_id || has_credential_secret"));
     assert!(spec.contains("exactly one machine-authentication scheme per request"));
     assert!(spec.contains("Authorization: Bearer <access-token>"));
     assert!(spec.contains("still re-evaluates the exact canonical permission"));
