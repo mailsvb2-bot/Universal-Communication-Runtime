@@ -50,7 +50,10 @@ pub use integration_api::{
 pub use mesh::MeshGroupStore;
 pub use organization::OrganizationModeStore;
 pub use personal_node::PersonalNodeStore;
-pub use recording::RecordingStore;
+pub use recording::{
+    RecordingMediaProvider, RecordingProviderError, RecordingProviderHealth,
+    RecordingProviderOperation, RecordingProviderRequest, RecordingStore,
+};
 pub use recovery_workflow::{
     DeviceReverificationGate, DeviceReverificationProof, DeviceReverificationVerificationError,
     DeviceReverificationVerifier, RecoveryAdmissionProof, RecoveryAuthorityVerificationError,
