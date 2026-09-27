@@ -1,16 +1,19 @@
 use std::{fmt, sync::Arc};
 
+use prost::Message;
 use tonic::{Request, Response, Status};
 use ucr_core::{
-    AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
-    DurableRecordStatus, DurableStoreError, PrincipalIdentityBindingStore, RecordingStore,
-    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
+    AuthorizationEvaluator, CallStore, CommandAcceptanceStore, ConferenceJoinGrantStore,
+    DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventJournalStore,
+    PrincipalIdentityBindingStore, RecordingStore, ServiceAuditStore, ServiceCredentialStore,
+    ServiceQuotaClock, ServiceQuotaStore, generate_opaque_id,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet};
 use ucr_model::{
-    CallParticipantState, CallSignallingState, PrincipalRef, RecordingConsent,
-    RecordingConsentState, RecordingId, RecordingPolicy, RecordingSession, RecordingState,
-    ScopedPrincipal, TenantScope,
+    ActorId, ActorKind, ActorRef, CallParticipantState, CallSignallingState, CommandId,
+    CorrelationContext, DeviceId, DeviceRef, EventEnvelope, EventId, IdentityId, OpaqueId,
+    PrincipalId, PrincipalRef, ProtocolVersion, RecordingConsent, RecordingConsentState,
+    RecordingId, RecordingPolicy, RecordingSession, RecordingState, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
     CONFERENCE_RECORDING_MANAGE_PERMISSION, CanonicalError, CanonicalErrorCode,
@@ -25,6 +28,7 @@ use super::{
         MachineApiAuthentication, MachineBearerConfig, admit_machine_api,
         decode_machine_api_authentication,
     },
+    mutation_idempotency::accept_mutation_receipt,
     pb, pb_acknowledgement, pb_error, pb_opaque, pb_principal_ref, pb_scope,
     realtime_service::{authenticate_realtime_bearer_claims, decode_bearer_token},
 };
@@ -142,6 +146,8 @@ where
     S: ServiceCredentialStore
         + ServiceQuotaStore
         + ServiceAuditStore
+        + CommandAcceptanceStore
+        + EventJournalStore
         + RecordingStore
         + CallStore
         + ConferenceJoinGrantStore
@@ -162,6 +168,8 @@ where
     S: ServiceCredentialStore
         + ServiceQuotaStore
         + ServiceAuditStore
+        + CommandAcceptanceStore
+        + EventJournalStore
         + RecordingStore
         + CallStore
         + ConferenceJoinGrantStore
@@ -263,14 +271,30 @@ where
                     if !accepted {
                         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
                     }
+                    let now_unix_ms = self.now()?;
+                    let event = if recording.state == RecordingState::Active
+                        && state != RecordingConsentState::Granted
+                    {
+                        Some(recording_lifecycle_event(
+                            &recording,
+                            RecordingState::Stopped,
+                            fresh_event_id()?,
+                            None,
+                            None,
+                            now_unix_ms,
+                        )?)
+                    } else {
+                        None
+                    };
                     self.store
-                        .set_recording_consent(
+                        .set_recording_consent_with_event(
                             &scope,
                             &recording_id,
                             expected_revision,
                             &participant,
                             state,
-                            self.now()?,
+                            now_unix_ms,
+                            event.as_ref(),
                         )
                         .map_err(map_store_error)
                 })
@@ -293,10 +317,19 @@ where
     ) -> Result<Response<pb::RecordingStartResponse>, Status> {
         let authentication = decode_machine_api_authentication(request.metadata());
         let body = request.into_inner();
-        let decoded =
-            decode_recording_mutation(body.scope, body.recording_id, body.expected_revision);
-        let result =
-            self.management_transition(authentication, decoded, RecordingStore::start_recording);
+        let payload = body.encode_to_vec();
+        let decoded = decode_recording_mutation(
+            body.scope,
+            body.recording_id,
+            body.expected_revision,
+            body.idempotency_key,
+        );
+        let result = self.management_lifecycle_transition(
+            authentication,
+            decoded,
+            payload,
+            RecordingLifecycleMutation::Start,
+        );
         Ok(Response::new(pb::RecordingStartResponse {
             result: Some(match result {
                 Ok(recording) => {
@@ -313,10 +346,19 @@ where
     ) -> Result<Response<pb::RecordingStopResponse>, Status> {
         let authentication = decode_machine_api_authentication(request.metadata());
         let body = request.into_inner();
-        let decoded =
-            decode_recording_mutation(body.scope, body.recording_id, body.expected_revision);
-        let result =
-            self.management_transition(authentication, decoded, RecordingStore::stop_recording);
+        let payload = body.encode_to_vec();
+        let decoded = decode_recording_mutation(
+            body.scope,
+            body.recording_id,
+            body.expected_revision,
+            body.idempotency_key,
+        );
+        let result = self.management_lifecycle_transition(
+            authentication,
+            decoded,
+            payload,
+            RecordingLifecycleMutation::Stop,
+        );
         Ok(Response::new(pb::RecordingStopResponse {
             result: Some(match result {
                 Ok(recording) => {
@@ -333,16 +375,25 @@ where
     ) -> Result<Response<pb::RecordingDeleteResponse>, Status> {
         let authentication = decode_machine_api_authentication(request.metadata());
         let body = request.into_inner();
-        let decoded =
-            decode_recording_mutation(body.scope, body.recording_id, body.expected_revision);
-        let recording_id = decoded.as_ref().ok().map(|(_, id, _)| id.clone());
-        let result =
-            self.management_transition(authentication, decoded, RecordingStore::delete_recording);
+        let payload = body.encode_to_vec();
+        let decoded = decode_recording_mutation(
+            body.scope,
+            body.recording_id,
+            body.expected_revision,
+            body.idempotency_key,
+        );
+        let acknowledgement_id = decoded.as_ref().ok().map(|(_, id, _, _)| id.clone());
+        let result = self.management_lifecycle_transition(
+            authentication,
+            decoded,
+            payload,
+            RecordingLifecycleMutation::Delete,
+        );
         Ok(Response::new(pb::RecordingDeleteResponse {
             result: Some(match result {
                 Ok(_) => pb::recording_delete_response::Result::Acknowledgement(
                     pb_acknowledgement(acknowledgement_for(
-                        recording_id
+                        acknowledgement_id
                             .expect("successful recording delete has decoded id")
                             .as_opaque()
                             .clone(),
@@ -354,109 +405,27 @@ where
     }
 }
 
-impl<C, A, S> GrpcRecordingService<C, A, S>
-where
-    C: ServiceQuotaClock,
-    A: AuthorizationEvaluator,
-    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + RecordingStore + CallStore,
-{
-    fn request_recording_inner(
-        &self,
-        authentication: MachineApiAuthentication,
-        scope: &TenantScope,
-        recording_id: &RecordingId,
-        call_id: ucr_model::CallId,
-        policy: RecordingPolicy,
-    ) -> Result<RecordingSession, CanonicalError> {
-        let actor = self.admit_management(scope, authentication)?;
-        if let Some(existing) = self
-            .store
-            .recording(scope, recording_id)
-            .map_err(map_store_error)?
-        {
-            if recording_request_matches(&existing, &call_id, &policy, &actor.principal) {
-                return Ok(existing);
-            }
-            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordingLifecycleMutation {
+    Start,
+    Stop,
+    Delete,
+}
+
+impl RecordingLifecycleMutation {
+    const fn command_type(self) -> &'static str {
+        match self {
+            Self::Start => "ucr.recording.start.v1",
+            Self::Stop => "ucr.recording.stop.v1",
+            Self::Delete => "ucr.recording.delete.v1",
         }
+    }
 
-        let call = self
-            .store
-            .call(scope, &call_id)
-            .map_err(map_store_error)?
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
-        if call.signalling_state == CallSignallingState::Terminated {
-            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
-        }
-
-        let participants = call
-            .participants
-            .iter()
-            .filter(|participant| {
-                participant.state == CallParticipantState::Accepted
-                    && participant.left_revision.is_none()
-            })
-            .map(|participant| RecordingConsent {
-                participant: participant.principal.clone(),
-                state: RecordingConsentState::Pending,
-                decided_at_unix_ms: 0,
-            })
-            .collect::<Vec<_>>();
-        if participants.is_empty() || participants.len() > MAX_RECORDING_CONSENTS {
-            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
-        }
-
-        let now = self.now()?;
-        let retention_ms = i64::try_from(policy.retention_seconds)
-            .ok()
-            .and_then(|seconds| seconds.checked_mul(1000))
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
-        let expires_at_unix_ms = now
-            .checked_add(retention_ms)
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
-        let recording = RecordingSession {
-            scope: scope.clone(),
-            recording_id: recording_id.clone(),
-            call_id,
-            requested_by: actor.principal,
-            state: if policy.require_all_participant_consent {
-                RecordingState::WaitingForConsent
-            } else {
-                RecordingState::Ready
-            },
-            policy,
-            consents: participants,
-            requested_at_unix_ms: now,
-            started_at_unix_ms: None,
-            stopped_at_unix_ms: None,
-            expires_at_unix_ms,
-            revision: 1,
-        };
-
-        match self.store.persist_recording(&recording) {
-            Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => self
-                .store
-                .recording(scope, recording_id)
-                .map_err(map_store_error)?
-                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal)),
-            Err(DurableStoreError::Conflict) => {
-                let winner = self
-                    .store
-                    .recording(scope, recording_id)
-                    .map_err(map_store_error)?
-                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
-                if recording_request_matches(
-                    &winner,
-                    &recording.call_id,
-                    &recording.policy,
-                    &recording.requested_by,
-                ) {
-                    Ok(winner)
-                } else {
-                    Err(CanonicalError::new(CanonicalErrorCode::Conflict))
-                }
-            }
-            Err(error) => Err(map_store_error(error)),
+    const fn target_state(self) -> RecordingState {
+        match self {
+            Self::Start => RecordingState::Active,
+            Self::Stop => RecordingState::Stopped,
+            Self::Delete => RecordingState::Deleted,
         }
     }
 }
@@ -465,37 +434,108 @@ impl<C, A, S> GrpcRecordingService<C, A, S>
 where
     C: ServiceQuotaClock,
     A: AuthorizationEvaluator,
-    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + RecordingStore,
+    S: ServiceCredentialStore
+        + ServiceQuotaStore
+        + ServiceAuditStore
+        + CommandAcceptanceStore
+        + EventJournalStore
+        + RecordingStore,
 {
-    fn management_transition<F>(
+    fn management_lifecycle_transition(
         &self,
         authentication: Result<MachineApiAuthentication, CanonicalError>,
-        decoded: Result<(TenantScope, RecordingId, u64), CanonicalError>,
-        transition: F,
-    ) -> Result<RecordingSession, CanonicalError>
-    where
-        F: FnOnce(
-            &S,
-            &TenantScope,
-            &RecordingId,
-            u64,
-            i64,
-        ) -> Result<RecordingSession, DurableStoreError>,
-    {
-        match (authentication, decoded) {
-            (Ok(authentication), Ok((scope, recording_id, expected_revision))) => {
-                self.admit_management(&scope, authentication)?;
-                transition(
-                    &*self.store,
-                    &scope,
-                    &recording_id,
-                    expected_revision,
-                    self.now()?,
-                )
-                .map_err(map_store_error)
-            }
-            (Err(error), _) | (_, Err(error)) => Err(error),
+        decoded: Result<(TenantScope, RecordingId, u64, Option<String>), CanonicalError>,
+        payload: Vec<u8>,
+        mutation: RecordingLifecycleMutation,
+    ) -> Result<RecordingSession, CanonicalError> {
+        let (authentication, (scope, recording_id, expected_revision, idempotency_key)) =
+            match (authentication, decoded) {
+                (Ok(authentication), Ok(decoded)) => (authentication, decoded),
+                (Err(error), _) | (_, Err(error)) => return Err(error),
+            };
+        self.admit_management(&scope, authentication)?;
+
+        let accepted = if let Some(key) = idempotency_key.as_deref() {
+            Some(accept_mutation_receipt(
+                &*self.store,
+                &scope,
+                mutation.command_type(),
+                key,
+                payload,
+            )?)
+        } else {
+            None
+        };
+
+        let event_id = if let Some(accepted) = accepted.as_ref() {
+            recording_event_id(&accepted.command_id)?
+        } else {
+            fresh_event_id()?
+        };
+
+        if accepted.as_ref().is_some_and(|accepted| accepted.duplicate)
+            && self
+                .store
+                .event(&scope, &event_id)
+                .map_err(map_store_error)?
+                .is_some()
+        {
+            return self
+                .store
+                .recording(&scope, &recording_id)
+                .map_err(map_store_error)?
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal));
         }
+
+        let current = self
+            .store
+            .recording(&scope, &recording_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+
+        if current.revision != expected_revision {
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        }
+        if mutation == RecordingLifecycleMutation::Delete
+            && current.state == RecordingState::Deleted
+        {
+            return Ok(current);
+        }
+
+        let now_unix_ms = self.now()?;
+        let event = recording_lifecycle_event(
+            &current,
+            mutation.target_state(),
+            event_id,
+            accepted.as_ref().map(|value| &value.command_id),
+            idempotency_key.as_deref(),
+            now_unix_ms,
+        )?;
+
+        match mutation {
+            RecordingLifecycleMutation::Start => self.store.start_recording_with_event(
+                &scope,
+                &recording_id,
+                expected_revision,
+                now_unix_ms,
+                &event,
+            ),
+            RecordingLifecycleMutation::Stop => self.store.stop_recording_with_event(
+                &scope,
+                &recording_id,
+                expected_revision,
+                now_unix_ms,
+                &event,
+            ),
+            RecordingLifecycleMutation::Delete => self.store.delete_recording_with_event(
+                &scope,
+                &recording_id,
+                expected_revision,
+                now_unix_ms,
+                &event,
+            ),
+        }
+        .map_err(map_store_error)
     }
 }
 
@@ -544,12 +584,16 @@ fn decode_recording_mutation(
     scope: Option<pb::TenantScope>,
     recording_id: Option<pb::OpaqueId>,
     expected_revision: u64,
-) -> Result<(TenantScope, RecordingId, u64), CanonicalError> {
+    idempotency_key: Option<String>,
+) -> Result<(TenantScope, RecordingId, u64, Option<String>), CanonicalError> {
     if expected_revision == 0 {
         return Err(invalid_argument());
     }
     let (scope, recording_id) = decode_recording_lookup(scope, recording_id)?;
-    Ok((scope, recording_id, expected_revision))
+    if idempotency_key.as_ref().is_some_and(|value| value.is_empty()) {
+        return Err(invalid_argument());
+    }
+    Ok((scope, recording_id, expected_revision, idempotency_key))
 }
 
 fn decode_consent_request(
@@ -589,6 +633,116 @@ fn decode_consent_request(
     ))
 }
 
+const fn pb_recording_state(value: RecordingState) -> pb::RecordingState {
+    match value {
+        RecordingState::WaitingForConsent => pb::RecordingState::WaitingForConsent,
+        RecordingState::Ready => pb::RecordingState::Ready,
+        RecordingState::Active => pb::RecordingState::Active,
+        RecordingState::Stopped => pb::RecordingState::Stopped,
+        RecordingState::Expired => pb::RecordingState::Expired,
+        RecordingState::Deleted => pb::RecordingState::Deleted,
+    }
+}
+
+const fn recording_lifecycle_event_type(state: RecordingState) -> Option<&'static str> {
+    match state {
+        RecordingState::Active => Some("ucr.recording.started"),
+        RecordingState::Stopped => Some("ucr.recording.stopped"),
+        RecordingState::Expired => Some("ucr.recording.expired"),
+        RecordingState::Deleted => Some("ucr.recording.deleted"),
+        RecordingState::WaitingForConsent | RecordingState::Ready => None,
+    }
+}
+
+fn recording_event_id(command_id: &CommandId) -> Result<EventId, CanonicalError> {
+    OpaqueId::new(format!(
+        "recording-event-{}",
+        command_id.as_opaque().as_str()
+    ))
+    .map(EventId::from_opaque)
+    .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+}
+
+fn fresh_event_id() -> Result<EventId, CanonicalError> {
+    generate_opaque_id()
+        .map(EventId::from_opaque)
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+}
+
+fn fresh_actor_id() -> Result<ActorId, CanonicalError> {
+    generate_opaque_id()
+        .map(ActorId::from_opaque)
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+}
+
+fn fresh_device_id() -> Result<DeviceId, CanonicalError> {
+    generate_opaque_id()
+        .map(DeviceId::from_opaque)
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+}
+
+fn fresh_identity_id() -> Result<IdentityId, CanonicalError> {
+    generate_opaque_id()
+        .map(IdentityId::from_opaque)
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+}
+
+fn recording_lifecycle_event(
+    current: &RecordingSession,
+    target: RecordingState,
+    event_id: EventId,
+    command_id: Option<&CommandId>,
+    idempotency_key: Option<&str>,
+    occurred_at_unix_ms: i64,
+) -> Result<EventEnvelope, CanonicalError> {
+    let event_type = recording_lifecycle_event_type(target)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    let revision = current
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    let payload = pb::RecordingLifecycleEvent {
+        scope: Some(pb_scope(&current.scope)),
+        recording_id: Some(pb_opaque(current.recording_id.as_opaque())),
+        call_id: Some(pb_opaque(current.call_id.as_opaque())),
+        previous: pb_recording_state(current.state) as i32,
+        current: pb_recording_state(target) as i32,
+        revision,
+        occurred_at_unix_ms,
+    }
+    .encode_to_vec();
+    let correlation_id = command_id
+        .map(|value| value.as_opaque().clone())
+        .unwrap_or_else(|| event_id.as_opaque().clone());
+    Ok(EventEnvelope {
+        event_id,
+        scope: current.scope.clone(),
+        event_type: event_type.to_owned(),
+        payload,
+        actor: ActorRef {
+            actor_id: fresh_actor_id()?,
+            kind: ActorKind::System,
+            on_behalf_of: Some(PrincipalId::from_opaque(
+                current.requested_by.principal_id.as_opaque().clone(),
+            )),
+        },
+        source_device: DeviceRef {
+            device_id: fresh_device_id()?,
+            identity_id: fresh_identity_id()?,
+        },
+        wall_time_unix_ms: occurred_at_unix_ms,
+        logical_order: revision,
+        correlation: CorrelationContext {
+            correlation_id,
+            causation_id: command_id.map(|value| value.as_opaque().clone()),
+            idempotency_key: idempotency_key.map(str::to_owned),
+        },
+        schema_version: ProtocolVersion::new(1, 0),
+        integrity_metadata: Vec::new(),
+        extensions: Vec::new(),
+    })
+}
+
 fn pb_recording(value: &RecordingSession) -> pb::RecordingSession {
     pb::RecordingSession {
         scope: Some(pb_scope(&value.scope)),
@@ -601,14 +755,7 @@ fn pb_recording(value: &RecordingSession) -> pb::RecordingSession {
             retention_seconds: value.policy.retention_seconds,
             policy_reference: value.policy.policy_reference.clone(),
         }),
-        state: match value.state {
-            RecordingState::WaitingForConsent => pb::RecordingState::WaitingForConsent as i32,
-            RecordingState::Ready => pb::RecordingState::Ready as i32,
-            RecordingState::Active => pb::RecordingState::Active as i32,
-            RecordingState::Stopped => pb::RecordingState::Stopped as i32,
-            RecordingState::Expired => pb::RecordingState::Expired as i32,
-            RecordingState::Deleted => pb::RecordingState::Deleted as i32,
-        },
+        state: pb_recording_state(value.state) as i32,
         consents: value.consents.iter().map(pb_consent).collect(),
         requested_at_unix_ms: value.requested_at_unix_ms,
         started_at_unix_ms: value.started_at_unix_ms,
