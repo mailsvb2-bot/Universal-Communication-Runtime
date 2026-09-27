@@ -34,7 +34,7 @@ const fakeFetch = async (url, init) => {
     }}), { status: 200, headers: { "content-type": "application/json" } });
   }
   if (path === "/v1/participants/list") {
-    return new Response(JSON.stringify({ participants: { participants: [{
+    return new Response(JSON.stringify({ participants: [{
       external_user_id_b64: "dXNlci0x",
       role: "attendee",
       audio_muted: false,
@@ -43,10 +43,10 @@ const fakeFetch = async (url, init) => {
       publish_video_allowed: false,
       active: true,
       screen_share_allowed: false,
-    }]}}), { status: 200, headers: { "content-type": "application/json" } });
+    }]}), { status: 200, headers: { "content-type": "application/json" } });
   }
   if (path === "/v1/participants/raised-hands") {
-    return new Response(JSON.stringify({ raised_hands: { external_user_ids_b64: ["dXNlci0x"] }}), {
+    return new Response(JSON.stringify({ external_user_ids_b64: ["dXNlci0x"] }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
