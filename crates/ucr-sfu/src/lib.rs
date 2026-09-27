@@ -122,6 +122,8 @@ impl SfuClusterDirectory {
 
     pub fn remove_node(&mut self, node_id: &ucr_model::OpaqueId) {
         self.nodes.remove(node_id.as_str());
+        self.placements
+            .retain(|_, assigned_node_id| assigned_node_id != node_id.as_str());
     }
 
     /// Marks a live worker as draining. Existing sticky sessions may remain on it, while new
@@ -781,6 +783,38 @@ mod horizontal_placement_tests {
             .expect("failover");
         assert_eq!(decision.node_id.as_str(), "sfu-live");
         assert!(!decision.retained_sticky_placement);
+    }
+
+    #[test]
+    fn removing_worker_clears_stale_stickiness_and_allows_fresh_failover() {
+        let mut directory = SfuClusterDirectory::default();
+        directory
+            .upsert_node(node("sfu-old", "eu", SfuNodeState::Healthy, 0, 100, 10_000))
+            .expect("old node");
+        let initial = directory
+            .place_session(
+                &scope(),
+                &call("call-remove"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("initial placement");
+        assert_eq!(initial.node_id.as_str(), "sfu-old");
+
+        directory.remove_node(&initial.node_id);
+        directory
+            .upsert_node(node("sfu-new", "eu", SfuNodeState::Healthy, 0, 100, 10_000))
+            .expect("new node");
+        let failover = directory
+            .place_session(
+                &scope(),
+                &call("call-remove"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("fresh failover");
+        assert_eq!(failover.node_id.as_str(), "sfu-new");
+        assert!(!failover.retained_sticky_placement);
     }
 
     #[test]
