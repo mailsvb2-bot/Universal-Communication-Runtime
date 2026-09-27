@@ -9,10 +9,12 @@ use hyper::{
     Method, Request, Response, StatusCode,
     body::Incoming,
     header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, PRAGMA, WWW_AUTHENTICATE},
-    server::conn::http1,
     service::service_fn,
 };
-use hyper_util::rt::TokioIo;
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto,
+};
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tonic::{Request as GrpcRequest, metadata::BinaryMetadataValue, transport::Channel};
@@ -205,7 +207,8 @@ async fn run() -> Result<(), String> {
         tokio::spawn(async move {
             let service =
                 service_fn(move |request| handle_request(request, connection_state.clone()));
-            if let Err(error) = http1::Builder::new().serve_connection(io, service).await {
+            let builder = auto::Builder::new(TokioExecutor::new());
+            if let Err(error) = builder.serve_connection(io, service).await {
                 eprintln!("ucr-auth-web: connection closed: {error}");
             }
         });

@@ -12,10 +12,12 @@ use hyper::{
         ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
         AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HOST, ORIGIN, VARY,
     },
-    server::conn::http1,
     service::service_fn,
 };
-use hyper_util::rt::TokioIo;
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto,
+};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use tokio::{net::TcpListener, sync::mpsc};
@@ -351,7 +353,8 @@ async fn run() -> Result<(), String> {
         tokio::spawn(async move {
             let service =
                 service_fn(move |request| handle_request(request, connection_state.clone()));
-            if let Err(error) = http1::Builder::new().serve_connection(io, service).await {
+            let builder = auto::Builder::new(TokioExecutor::new());
+            if let Err(error) = builder.serve_connection(io, service).await {
                 eprintln!("ucr-realtime-web: connection closed: {error}");
             }
         });
