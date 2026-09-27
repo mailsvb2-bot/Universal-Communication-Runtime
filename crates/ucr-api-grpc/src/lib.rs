@@ -74,6 +74,9 @@ pub use realtime_service::{
     realtime_service_server,
 };
 
+mod recording_service;
+pub use recording_service::{GrpcRecordingService, recording_service_server};
+
 mod universal_conference_service;
 pub use universal_conference_service::{
     GrpcUniversalConferenceService, UniversalConferenceRuntimeCapabilities,
