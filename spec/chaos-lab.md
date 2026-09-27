@@ -74,6 +74,17 @@ The lab integrity tag is deliberately non-cryptographic. It exists only to make 
 
 The canonical simulation fixture instantiates 100 peers and supports per-link latency, packet loss injection, partitions/merge and peer mobility/network-switch state. It enforces an explicit minimum send-battery threshold: a peer below the configured battery limit fails with an explicit `BatteryLimited` result instead of silently transmitting or dropping data. This is a deterministic resource constraint, not a claim of complete mobile battery/thermal fidelity.
 
+## Realtime and WebRTC adversity composition
+
+Chaos Lab remains the only deterministic fault substrate; it does not implement a second realtime or WebRTC state machine. Cross-boundary tests compose its faults with the existing production-facing owners:
+
+- a network switch is observed through the Chaos Transport generation and a dropped realtime downlink is resumed through `RealtimeSessionRegistry::attach_downlink`;
+- a single-use join grant remains single-use during reconnect: a second redemption is rejected while the already authenticated realtime session resumes with a `Reconnected` attendance transition;
+- deterministic packet loss is followed by `LiveWebRtcProvider::restart_session` for the same `SessionId`, proving ICE restart returns a fresh offer without creating another canonical Call/Conference;
+- post-restart link latency remains explicit in Chaos Transport evidence rather than being hidden as success.
+
+These are executable integration boundaries, not claims of kernel packet shaping, WAN quality, browser-radio behavior, TURN reachability, or automatic failure detection. Higher-fidelity jitter/loss/RTT and real deployment evidence remain separate production work.
+
 ## Non-claims
 
 Prepared Phase 43 does not claim:
