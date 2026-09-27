@@ -3,8 +3,8 @@ use ucr_core::{
     DurableRecordStatus, DurableStoreError, MAX_RECORDING_RETENTION_BATCH, RecordingStore,
 };
 use ucr_model::{
-    CallId, EventEnvelope, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingConsent,
-    NamespaceId, RecordingConsentState, RecordingId, RecordingPolicy, RecordingSession,
+    CallId, EventEnvelope, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
+    RecordingConsent, RecordingConsentState, RecordingId, RecordingPolicy, RecordingSession,
     RecordingState, TenantId, TenantScope,
 };
 use ucr_protocol::{
