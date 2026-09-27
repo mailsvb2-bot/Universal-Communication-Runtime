@@ -107,6 +107,12 @@ except UniversalConferenceHttpError as error:
 require(len(calls) == 5, "error path performed hidden retries")
 
 try:
+    UniversalConferenceClient._raise_for_error(302, {"redirect": "https://other.example"})
+    raise SystemExit("redirect status was accepted as success")
+except UniversalConferenceHttpError as redirect_error:
+    require(redirect_error.status == 302, "redirect status was not preserved")
+
+try:
     UniversalConferenceClient("http://public.example", "token")
     raise SystemExit("plaintext public base URL was accepted")
 except ValueError:
