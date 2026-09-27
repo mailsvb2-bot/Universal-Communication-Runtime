@@ -32,6 +32,29 @@ Recipients are derived only from current canonical Call participants plus recipi
 
 `SfuForwardSink` receives the same canonical encrypted frame for each ephemeral target. Successful sink acceptance is infrastructure routing acceptance only. It is not Device receipt, decrypt evidence, canonical Delivery state, user presentation or Read evidence. Partial acceptance is reported truthfully; there is no rollback or exactly-once fan-out claim.
 
+## Horizontal placement foundation
+
+`SfuClusterDirectory` is the prepared horizontal control-plane boundary. It stores only ephemeral
+worker metadata: opaque node ID, deployment region, health/draining state, active/max session
+capacity, and a bounded lease expiry. Placement is deterministic for the canonical
+`TenantScope + CallId` pair so reconnects can remain sticky without inventing a second Conference
+identity or durable route store.
+
+Draining is fail-safe: an explicitly current session may remain on a live draining worker, but
+draining workers never receive fresh placements. Fresh placement reserves one session slot inside
+the directory before returning, and explicit release returns that slot; sequential placement through
+one directory therefore cannot overbook the last advertised capacity unit. Expired, unavailable,
+and full workers are excluded. If the sticky worker becomes unavailable, the directory deterministically selects a
+healthy replacement. Region preference is a routing hint only; strict policy fails closed when no
+capacity exists in-region, while an explicitly enabled cross-region policy may choose a healthy
+worker elsewhere and reports that fact in the placement decision.
+
+This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
+true. Production horizontal SFU still requires a concrete inter-node encrypted-media transport,
+worker registration/heartbeat wiring, runtime integration, failure/drain operational evidence, and
+load/adversity evidence. The placement directory must never become a Call, Conference, membership,
+authorization, media-key, plaintext-media, Delivery, or recording owner.
+
 ## Public realtime transport
 
 `ucr.v1.RealtimeService` is the stable external binding over the SFU. It authenticates a short-lived Conference session and then delegates encrypted uplink/downlink to the same runtime. A concrete production sink uses bounded per-session queues and explicit backpressure; no unbounded media buffer is allowed.
