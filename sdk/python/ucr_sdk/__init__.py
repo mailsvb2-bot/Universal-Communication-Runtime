@@ -5,9 +5,12 @@ from .auth import (
     CREDENTIAL_SECRET_METADATA_KEY,
     ServiceCredential,
 )
+from .conference import UniversalConferenceClient, UniversalConferenceHttpError
 
 __all__ = [
     "CREDENTIAL_ID_METADATA_KEY",
     "CREDENTIAL_SECRET_METADATA_KEY",
     "ServiceCredential",
+    "UniversalConferenceClient",
+    "UniversalConferenceHttpError",
 ]
