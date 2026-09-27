@@ -34,7 +34,9 @@ mod sync_store;
 mod trusted_key_store;
 mod universal_conference_store;
 
-pub use runtime_worker_store::{RuntimeWorkerLease, WEBHOOK_DELIVERY_WORKER_KIND};
+pub use runtime_worker_store::{
+    RECORDING_RETENTION_WORKER_KIND, RuntimeWorkerLease, WEBHOOK_DELIVERY_WORKER_KIND,
+};
 
 use std::{fmt, path::Path, sync::Mutex, time::Duration};
 
