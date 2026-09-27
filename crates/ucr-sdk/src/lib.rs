@@ -113,11 +113,11 @@ impl UcrSdkClient {
         Self::connect_with_recording_endpoint(endpoint.clone(), endpoint, credential).await
     }
 
-    /// Connects the ordinary public services and RecordingService to explicit gRPC endpoints.
+    /// Connects the ordinary public services and `RecordingService` to explicit gRPC endpoints.
     ///
-    /// Direct UCR deployments serve RecordingService from the realtime daemon because participant
-    /// consent reuses the realtime JoinTokenIssuer. A trusted public gateway may co-host both
-    /// service paths, in which case callers can continue using Self::connect.
+    /// Direct UCR deployments serve `RecordingService` from the realtime daemon because participant
+    /// consent reuses the realtime `JoinTokenIssuer`. A trusted public gateway may co-host both
+    /// service paths, in which case callers can continue using `Self::connect`.
     ///
     /// # Errors
     /// Returns a transport error from either endpoint parsing or connection establishment.
