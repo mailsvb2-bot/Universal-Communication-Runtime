@@ -167,7 +167,7 @@ fn performance_budget_is_fixed_in_source_and_governed_by_adr() {
     assert!(spec.contains("100 participants"));
     assert!(spec.contains("500 participants"));
     assert!(spec.contains("1000 participants"));
-    assert!(spec.contains("intentionally not a workflow parameter"));
+    assert!(spec.contains("They are intentionally not workflow parameters"));
 }
 
 #[test]
