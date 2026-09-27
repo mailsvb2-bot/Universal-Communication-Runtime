@@ -345,18 +345,12 @@ mod tests {
             RecordingProviderHealth::Healthy
         }
 
-        fn apply(
-            &self,
-            request: &RecordingProviderRequest,
-        ) -> Result<(), RecordingProviderError> {
-            self.applied
-                .lock()
-                .expect("provider lock")
-                .insert((
-                    request.recording_id.as_opaque().as_str().to_owned(),
-                    request.lifecycle_revision,
-                    request.operation,
-                ));
+        fn apply(&self, request: &RecordingProviderRequest) -> Result<(), RecordingProviderError> {
+            self.applied.lock().expect("provider lock").insert((
+                request.recording_id.as_opaque().as_str().to_owned(),
+                request.lifecycle_revision,
+                request.operation,
+            ));
             Ok(())
         }
     }
