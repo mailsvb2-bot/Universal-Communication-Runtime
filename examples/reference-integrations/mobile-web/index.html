@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#ffffff">
+  <title>UCR mobile join</title>
+  <style>
+    html,body,#app{height:100%;margin:0} body{font:16px system-ui,sans-serif}
+    #gate{padding:max(1rem,env(safe-area-inset-top)) 1rem 1rem}
+    input,button{font:inherit;width:100%;box-sizing:border-box;padding:.9rem;margin:.4rem 0}
+    iframe{border:0;width:100%;height:100%;display:block}
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="gate">
+      <h1>Join UCR</h1>
+      <p>Enter the personal join URL from your application backend.</p>
+      <input id="join" inputmode="url" autocomplete="off" aria-label="Join URL">
+      <button id="open" type="button">Open conference</button>
+    </div>
+  </div>
+  <script>
+    const app=document.getElementById("app");
+    document.getElementById("open").addEventListener("click",()=>{
+      const value=document.getElementById("join").value.trim();
+      const url=new URL(value);
+      const token=new URLSearchParams(url.hash.startsWith("#")?url.hash.slice(1):url.hash).get("ucr_join");
+      if(!token||!["https:","http:"].includes(url.protocol)){alert("Invalid UCR join URL");return}
+      const frame=document.createElement("iframe");
+      frame.src=url.toString(); frame.title="UCR conference";
+      frame.allow="camera; microphone; display-capture; fullscreen";
+      frame.referrerPolicy="no-referrer";
+      frame.sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups-to-escape-sandbox";
+      app.replaceChildren(frame);
+    });
+  </script>
+</body>
+</html>
