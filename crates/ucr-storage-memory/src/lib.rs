@@ -24,6 +24,7 @@ use ucr_core::{
     ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
     ServiceQuotaConsumeError, ServiceQuotaStore, ServiceResourceQuotaConsumeError, StorageHealth,
     StorageProvider, SyncStore, TrustedSigningKeyStore, UniversalConferenceStore,
+    MAX_RECORDING_RETENTION_BATCH,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
