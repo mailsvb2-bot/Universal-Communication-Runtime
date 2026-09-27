@@ -26,7 +26,10 @@ fn public_sdk_contract_includes_canonical_recording_service() {
         "pub async fn stop_recording",
         "pub async fn delete_recording",
     ] {
-        assert!(rust.contains(method), "missing recording SDK management method: {method}");
+        assert!(
+            rust.contains(method),
+            "missing recording SDK management method: {method}"
+        );
     }
 }
 
