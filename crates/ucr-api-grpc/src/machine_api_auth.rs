@@ -15,7 +15,7 @@ use super::{
     unauthenticated,
 };
 
-const AUTHORIZATION_METADATA_KEY: &str = "authorization";
+pub(crate) const AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const MAX_BEARER_AUTHORIZATION_METADATA_BYTES: usize = MAX_MACHINE_TOKEN_BYTES + 32;
 
 pub(crate) struct MachineBearerConfig {
