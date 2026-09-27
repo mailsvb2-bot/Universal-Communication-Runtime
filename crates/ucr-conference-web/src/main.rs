@@ -2174,6 +2174,7 @@ fn yaml_response(text: &'static str) -> HttpResponse {
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
+    use hyper::StatusCode;
     use rustls::pki_types::pem::PemObject;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_stream::wrappers::TcpListenerStream;
