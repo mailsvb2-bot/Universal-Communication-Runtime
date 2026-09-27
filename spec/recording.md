@@ -17,7 +17,9 @@ Externally observable recording lifecycle facts use the one canonical Event jour
 - transition to `STOPPED` emits `ucr.recording.stopped`, including an ACTIVE recording stopped by participant denial/revocation;
 - transition to `DELETED` emits `ucr.recording.deleted`.
 
-The store contract also provides an atomic `expire_recording_with_event` path for a future retention worker, but no public/runtime expiry scheduler is claimed yet. `ucr.recording.expired` therefore remains Prepared until that scheduler/provider path has executable evidence.
+The store contract provides an atomic `expire_recording_with_event` path and the runtime now has a bounded, lease-coordinated retention worker. It enumerates only non-final recordings whose durable `expires_at_unix_ms` has elapsed, then re-checks each exact revision inside the atomic expiry+Event transition. Concurrent lifecycle changes become stale work and are skipped rather than force-expired. Successful expiry emits `ucr.recording.expired` through the canonical Event journal.
+
+The retention worker owns no media bytes and does not make recording Production-ready. It is finite-retention lifecycle enforcement only; controlled encrypted-media deletion still requires a concrete `RecordingMediaProvider` implementation and provider conformance evidence.
 
 The Event payload is `RecordingLifecycleEvent` and contains only the scoped recording/call identifiers, previous/current state, resulting revision and occurrence timestamp. Recording snapshot mutation and Event append are one durable atomic store action. Memory performs both under one mutex with rollback on Event conflict; SQLite performs compare-and-swap plus Event append in one immediate transaction. A store that cannot prove this atomicity fails closed rather than performing two independent writes. This lifecycle evidence still does not make a concrete media recorder Production-ready.
 
