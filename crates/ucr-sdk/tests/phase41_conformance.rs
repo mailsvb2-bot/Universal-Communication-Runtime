@@ -49,6 +49,8 @@ fn phase41_rust_sdk_keeps_the_eight_canonical_semantics_observable() {
         "pub async fn submit_command",
         "pub async fn publish_event",
         "pub async fn poll_events",
+        "pub async fn request_recording",
+        "pub async fn delete_recording",
         "authenticated_request",
     ] {
         assert!(sdk.contains(marker), "missing Rust SDK marker: {marker}");
@@ -58,6 +60,8 @@ fn phase41_rust_sdk_keeps_the_eight_canonical_semantics_observable() {
     assert!(manifest.contains("\"event_cursor\": \"opaque\""));
     assert!(manifest.contains("\"canonical_errors_preserved\": true"));
     assert!(manifest.contains("\"direct_database_access\": false"));
+    assert!(manifest.contains("\"RecordingService\""));
+    assert!(manifest.contains("\"participant_consent_scheme\": \"join_bearer\""));
     assert!(runtime.contains("message NegotiationHello"));
     assert!(runtime.contains("message NegotiationResult"));
     assert!(runtime.contains("COMMAND_RECEIPT_STATUS_DUPLICATE"));
