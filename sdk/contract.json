@@ -21,14 +21,21 @@
         "mixed_schemes": "reject"
       },
       "RecordingService": {
-        "management_schemes": [
+        "accepted_schemes": [
           "service_principal_binary_metadata",
           "oauth2_bearer"
         ],
-        "participant_consent_scheme": "join_bearer",
         "bearer_metadata_key": "authorization",
         "bearer_scheme": "Bearer",
-        "mixed_schemes": "reject"
+        "mixed_schemes": "reject",
+        "method_overrides": {
+          "SetRecordingConsent": {
+            "accepted_schemes": ["join_bearer"],
+            "bearer_metadata_key": "authorization",
+            "bearer_scheme": "Bearer",
+            "mixed_schemes": "reject"
+          }
+        }
       }
     }
   },
