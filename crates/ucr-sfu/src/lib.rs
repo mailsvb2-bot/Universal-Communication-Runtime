@@ -766,6 +766,49 @@ mod horizontal_placement_tests {
     }
 
     #[test]
+    fn fresh_placement_reserves_and_release_returns_capacity() {
+        let mut directory = SfuClusterDirectory::default();
+        directory
+            .upsert_node(node("single", "eu", SfuNodeState::Healthy, 0, 1, 10_000))
+            .expect("single node");
+
+        let first = directory
+            .place_session(
+                &scope(),
+                &call("call-one"),
+                None,
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("first placement");
+        assert_eq!(first.node_id.as_str(), "single");
+        assert_eq!(
+            directory.place_session(
+                &scope(),
+                &call("call-two"),
+                None,
+                &SfuPlacementPolicy::default(),
+                100,
+            ),
+            Err(SfuPlacementError::NoHealthyCapacity)
+        );
+
+        directory
+            .release_session(&first.node_id)
+            .expect("release capacity");
+        let second = directory
+            .place_session(
+                &scope(),
+                &call("call-two"),
+                None,
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("second placement");
+        assert_eq!(second.node_id.as_str(), "single");
+    }
+
+    #[test]
     fn invalid_or_full_nodes_never_become_new_placements() {
         let mut directory = SfuClusterDirectory::default();
         assert_eq!(
