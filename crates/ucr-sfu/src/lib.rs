@@ -137,15 +137,17 @@ impl SfuClusterDirectory {
         Ok(())
     }
 
-    /// Selects one worker for an already-authorized canonical Call.
+    /// Places one already-authorized canonical Call and reserves capacity for a fresh placement.
     ///
     /// The optional current node is infrastructure stickiness only. It grants no Conference or
     /// media authority. A draining node is retained only when it is the explicit current placement.
+    /// Fresh placement increments the selected worker's active-session count before returning, so
+    /// one directory instance cannot overbook the last slot through sequential placement calls.
     ///
     /// # Errors
     /// Returns NoHealthyCapacity when policy leaves no live worker capacity.
-    pub fn select_node(
-        &self,
+    pub fn place_session(
+        &mut self,
         scope: &ucr_model::TenantScope,
         call_id: &ucr_model::CallId,
         current_node_id: Option<&ucr_model::OpaqueId>,
@@ -192,11 +194,43 @@ impl SfuClusterDirectory {
             .into_iter()
             .max_by_key(|node| placement_score(&key, node.node_id.as_wire_bytes()))
             .ok_or(SfuPlacementError::NoHealthyCapacity)?;
+        let selected_id = selected.node_id.as_str().to_owned();
+        let selected_region = selected.region.clone();
+        let node = self
+            .nodes
+            .get_mut(&selected_id)
+            .ok_or(SfuPlacementError::NoHealthyCapacity)?;
+        if !node.accepts_new_session_at(now_unix_ms) {
+            return Err(SfuPlacementError::NoHealthyCapacity);
+        }
+        node.active_sessions = node
+            .active_sessions
+            .checked_add(1)
+            .ok_or(SfuPlacementError::NoHealthyCapacity)?;
         Ok(SfuPlacementDecision {
-            node_id: selected.node_id.clone(),
+            node_id: node.node_id.clone(),
             retained_sticky_placement: false,
-            crossed_region: preferred.is_some_and(|region| selected.region != region),
+            crossed_region: preferred.is_some_and(|region| selected_region != region),
         })
+    }
+
+    /// Releases one previously reserved horizontal-SFU session slot.
+    ///
+    /// # Errors
+    /// Returns InvalidNode when the worker is unknown or has no reserved sessions.
+    pub fn release_session(
+        &mut self,
+        node_id: &ucr_model::OpaqueId,
+    ) -> Result<(), SfuPlacementError> {
+        let node = self
+            .nodes
+            .get_mut(node_id.as_str())
+            .ok_or(SfuPlacementError::InvalidNode)?;
+        if node.active_sessions == 0 {
+            return Err(SfuPlacementError::InvalidNode);
+        }
+        node.active_sessions -= 1;
+        Ok(())
     }
 }
 
@@ -609,16 +643,16 @@ mod horizontal_placement_tests {
             .expect("node b");
 
         let first = directory
-            .select_node(&scope(), &call("call-a"), None, &SfuPlacementPolicy::default(), 100)
+            .place_session(&scope(), &call("call-a"), None, &SfuPlacementPolicy::default(), 100)
             .expect("placement");
         let repeated = directory
-            .select_node(&scope(), &call("call-a"), None, &SfuPlacementPolicy::default(), 100)
+            .place_session(&scope(), &call("call-a"), None, &SfuPlacementPolicy::default(), 100)
             .expect("repeat");
         assert_eq!(first.node_id, repeated.node_id);
         assert!(!first.retained_sticky_placement);
 
         let sticky = directory
-            .select_node(
+            .place_session(
                 &scope(),
                 &call("call-a"),
                 Some(&first.node_id),
@@ -650,7 +684,7 @@ mod horizontal_placement_tests {
         directory.mark_draining(&draining_id).expect("mark draining");
 
         let sticky = directory
-            .select_node(
+            .place_session(
                 &scope(),
                 &call("call-draining"),
                 Some(&draining_id),
@@ -662,7 +696,7 @@ mod horizontal_placement_tests {
         assert!(sticky.retained_sticky_placement);
 
         let fresh = directory
-            .select_node(
+            .place_session(
                 &scope(),
                 &call("call-fresh"),
                 None,
@@ -693,7 +727,7 @@ mod horizontal_placement_tests {
             .expect("live node");
 
         let decision = directory
-            .select_node(
+            .place_session(
                 &scope(),
                 &call("call-failover"),
                 Some(&expired),
@@ -716,7 +750,7 @@ mod horizontal_placement_tests {
             allow_cross_region_failover: false,
         };
         assert_eq!(
-            directory.select_node(&scope(), &call("call-region"), None, &strict, 100),
+            directory.place_session(&scope(), &call("call-region"), None, &strict, 100),
             Err(SfuPlacementError::NoHealthyCapacity)
         );
 
@@ -725,7 +759,7 @@ mod horizontal_placement_tests {
             ..strict
         };
         let decision = directory
-            .select_node(&scope(), &call("call-region"), None, &permissive, 100)
+            .place_session(&scope(), &call("call-region"), None, &permissive, 100)
             .expect("cross-region failover");
         assert_eq!(decision.node_id.as_str(), "sfu-us");
         assert!(decision.crossed_region);
@@ -742,7 +776,7 @@ mod horizontal_placement_tests {
             .upsert_node(node("full", "eu", SfuNodeState::Healthy, 10, 10, 10_000))
             .expect("full node registration");
         assert_eq!(
-            directory.select_node(
+            directory.place_session(
                 &scope(),
                 &call("call-full"),
                 None,
