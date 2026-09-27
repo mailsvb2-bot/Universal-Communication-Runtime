@@ -55,6 +55,8 @@ pub mod pb {
     tonic::include_proto!("ucr.v1");
 }
 
+mod machine_api_auth;
+
 mod mesh_service;
 pub use mesh_service::{
     AuthenticatedMeshPeerSession, GrpcMeshService, MeshPeerSessionResolver, mesh_service_server,
