@@ -61,6 +61,7 @@ fn phase43_chaos_lab_covers_the_canonical_failure_surface() {
 #[test]
 fn phase43_is_test_infrastructure_not_a_second_communication_brain() {
     let manifest = read("crates/ucr-chaos-lab/Cargo.toml");
+    let lock = read("crates/ucr-chaos-lab/Cargo.lock");
     let implementation = read("crates/ucr-chaos-lab/src/lib.rs");
     let adr = read("docs/adr/0089-phase43-chaos-lab-is-deterministic-test-infrastructure.md");
 
@@ -68,6 +69,10 @@ fn phase43_is_test_infrastructure_not_a_second_communication_brain() {
     assert!(!manifest.contains("ucr-storage"));
     assert!(!manifest.contains("ucr-transport"));
     assert!(!manifest.contains("ucr-protocol"));
+    assert!(manifest.contains("ucr-realtime"));
+    assert!(manifest.contains("ucr-webrtc"));
+    assert!(lock.contains("name = \"ucr-realtime\""));
+    assert!(lock.contains("name = \"ucr-webrtc\""));
     for forbidden in [
         "struct MessageEngine",
         "struct DeliveryEngine",
@@ -124,6 +129,8 @@ fn phase43_locks_data_safety_and_explicit_failure_evidence() {
     }
     assert!(workflow.contains("cargo clippy"));
     assert!(workflow.contains("cargo test"));
+    assert!(workflow.matches("--locked").count() >= 3);
+    assert!(!workflow.contains("cargo generate-lockfile"));
     assert!(!workflow.contains("continue-on-error"));
     assert!(!workflow.contains("|| true"));
 }
