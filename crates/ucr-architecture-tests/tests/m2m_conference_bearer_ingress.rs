@@ -10,8 +10,9 @@ fn universal_conference_ingress_accepts_one_canonical_authentication_scheme() {
         workspace.join("crates/ucr-api-grpc/src/universal_conference_service.rs"),
     )
     .expect("Universal Conference gRPC source");
-    let shared_auth = fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/machine_api_auth.rs"))
-        .expect("shared machine API auth source");
+    let shared_auth =
+        fs::read_to_string(workspace.join("crates/ucr-api-grpc/src/machine_api_auth.rs"))
+            .expect("shared machine API auth source");
     let spec = fs::read_to_string(workspace.join("spec/universal-conference-api.md"))
         .expect("Universal Conference API spec");
 
