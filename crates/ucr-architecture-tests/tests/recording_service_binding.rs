@@ -25,6 +25,9 @@ fn recording_service_reuses_canonical_auth_and_store_owners() {
     assert!(auth.contains("MachineBearerRequestGate"));
     assert!(realtime.contains("pub(crate) fn authenticate_realtime_bearer_claims"));
     assert!(runtime.contains("recording: false"));
+    assert!(runtime.contains("GrpcRecordingService::new("));
+    assert!(runtime.contains("recording_service_server(recording_service)"));
+    assert!(runtime.contains("runtime_capabilities.recording"));
     assert!(spec.contains("Capability discovery must continue to report recording unavailable"));
 }
 
