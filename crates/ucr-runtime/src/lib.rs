@@ -16,6 +16,7 @@ use ucr_api_grpc::{
     GrpcRealtimeService, GrpcRecordingService, GrpcStoreForwardService, GrpcSyncService,
     GrpcUniversalConferenceService, MachineAuthDiscovery, OperatorRuntimeHealthSource,
     RealtimeWebRtcDependencies, UniversalConferenceRuntimeCapabilities, call_service_server,
+    expire_due_recordings_once,
     conference_service_server, device_service_server, event_service_server, group_service_server,
     integration_service_server, machine_auth_service_server, operator_runtime_service_server, pb,
     realtime_service_server, recording_service_server, store_forward_service_server,
@@ -23,8 +24,9 @@ use ucr_api_grpc::{
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
-    DurableStoreError, EventWebhookDispatcher, StorageHealth, StorageProvider,
-    SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome, generate_opaque_id,
+    DurableStoreError, EventWebhookDispatcher, MAX_RECORDING_RETENTION_BATCH, StorageHealth,
+    StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome,
+    generate_opaque_id,
 };
 use ucr_crypto::{
     MAX_MACHINE_TOKEN_TTL_SECONDS, MachineTokenPolicy, MachineTokenPublicKeySet,
@@ -36,7 +38,9 @@ use ucr_model::{
 };
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_sfu::{SfuForwardSink, SfuForwardSinkError};
-use ucr_storage_sqlite::{SqliteLocalStore, WEBHOOK_DELIVERY_WORKER_KIND};
+use ucr_storage_sqlite::{
+    RECORDING_RETENTION_WORKER_KIND, SqliteLocalStore, WEBHOOK_DELIVERY_WORKER_KIND,
+};
 use ucr_webhook::{
     HardenedWebhookSink, NativeTlsWebhookExecutor, SystemWebhookDnsResolver, WebhookSigningSecret,
 };
@@ -54,6 +58,11 @@ pub const DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_secs(1
 pub const MIN_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub const MAX_WEBHOOK_WORKER_POLL_INTERVAL: Duration = Duration::from_mins(1);
 const WEBHOOK_WORKER_LEASE_DURATION_MS: i64 = 120_000;
+
+pub const DEFAULT_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_secs(1);
+pub const MIN_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+pub const MAX_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_mins(1);
+const RECORDING_RETENTION_WORKER_LEASE_DURATION_MS: i64 = 120_000;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct WebhookWorkerSweep {
