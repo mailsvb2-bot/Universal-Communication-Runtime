@@ -405,6 +405,113 @@ where
     }
 }
 
+impl<C, A, S> GrpcRecordingService<C, A, S>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + RecordingStore + CallStore,
+{
+    fn request_recording_inner(
+        &self,
+        authentication: MachineApiAuthentication,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        call_id: ucr_model::CallId,
+        policy: RecordingPolicy,
+    ) -> Result<RecordingSession, CanonicalError> {
+        let actor = self.admit_management(scope, authentication)?;
+        if let Some(existing) = self
+            .store
+            .recording(scope, recording_id)
+            .map_err(map_store_error)?
+        {
+            if recording_request_matches(&existing, &call_id, &policy, &actor.principal) {
+                return Ok(existing);
+            }
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        }
+
+        let call = self
+            .store
+            .call(scope, &call_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+        if call.signalling_state == CallSignallingState::Terminated {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        }
+
+        let participants = call
+            .participants
+            .iter()
+            .filter(|participant| {
+                participant.state == CallParticipantState::Accepted
+                    && participant.left_revision.is_none()
+            })
+            .map(|participant| RecordingConsent {
+                participant: participant.principal.clone(),
+                state: RecordingConsentState::Pending,
+                decided_at_unix_ms: 0,
+            })
+            .collect::<Vec<_>>();
+        if participants.is_empty() || participants.len() > MAX_RECORDING_CONSENTS {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        }
+
+        let now = self.now()?;
+        let retention_ms = i64::try_from(policy.retention_seconds)
+            .ok()
+            .and_then(|seconds| seconds.checked_mul(1000))
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+        let expires_at_unix_ms = now
+            .checked_add(retention_ms)
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?;
+        let recording = RecordingSession {
+            scope: scope.clone(),
+            recording_id: recording_id.clone(),
+            call_id,
+            requested_by: actor.principal,
+            state: if policy.require_all_participant_consent {
+                RecordingState::WaitingForConsent
+            } else {
+                RecordingState::Ready
+            },
+            policy,
+            consents: participants,
+            requested_at_unix_ms: now,
+            started_at_unix_ms: None,
+            stopped_at_unix_ms: None,
+            expires_at_unix_ms,
+            revision: 1,
+        };
+
+        match self.store.persist_recording(&recording) {
+            Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => self
+                .store
+                .recording(scope, recording_id)
+                .map_err(map_store_error)?
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal)),
+            Err(DurableStoreError::Conflict) => {
+                let winner = self
+                    .store
+                    .recording(scope, recording_id)
+                    .map_err(map_store_error)?
+                    .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
+                if recording_request_matches(
+                    &winner,
+                    &recording.call_id,
+                    &recording.policy,
+                    &recording.requested_by,
+                ) {
+                    Ok(winner)
+                } else {
+                    Err(CanonicalError::new(CanonicalErrorCode::Conflict))
+                }
+            }
+            Err(error) => Err(map_store_error(error)),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecordingLifecycleMutation {
     Start,
