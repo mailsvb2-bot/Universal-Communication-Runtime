@@ -2684,6 +2684,18 @@ impl EventJournalStore for MemoryLocalStore {
         append_event_to_memory_state(&mut state, event)
     }
 
+    fn event(
+        &self,
+        scope: &TenantScope,
+        event_id: &EventId,
+    ) -> Result<Option<EventEnvelope>, DurableStoreError> {
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .events
+            .get(&(scope_key(scope), event_id.as_opaque().as_str().to_owned()))
+            .cloned())
+    }
+
     fn events_for_types(
         &self,
         scope: &TenantScope,
