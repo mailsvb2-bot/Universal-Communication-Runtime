@@ -8739,10 +8739,10 @@ fn validate_recording_lifecycle_event(
     next: &RecordingSession,
     event: Option<&EventEnvelope>,
 ) -> Result<(), DurableStoreError> {
-    let expected_type = if current.state != next.state {
-        recording_lifecycle_event_type(next.state)
-    } else {
+    let expected_type = if current.state == next.state {
         None
+    } else {
+        recording_lifecycle_event_type(next.state)
     };
     match (expected_type, event) {
         (None, None) => Ok(()),
@@ -8781,11 +8781,11 @@ where
         return Ok(current);
     }
     state.recordings.insert(key.clone(), next.clone());
-    if let Some(event) = event {
-        if let Err(error) = append_event_to_memory_state(state, event) {
-            state.recordings.insert(key.clone(), current);
-            return Err(error);
-        }
+    if let Some(event) = event
+        && let Err(error) = append_event_to_memory_state(state, event)
+    {
+        state.recordings.insert(key.clone(), current);
+        return Err(error);
     }
     Ok(next)
 }
