@@ -1,10 +1,10 @@
 openapi: 3.0.3
 info:
-  title: UCR Universal Conference HTTP adapter
+  title: UCR Conference and Recording HTTP adapter
   version: v1
   description: >
-    Thin JSON transport over UniversalConferenceService. Paths select an RPC.
-    Request fields match that RPC. This document is not a second business API.
+    Thin JSON transport over UniversalConferenceService and RecordingService. Paths select one
+    canonical gRPC RPC. Request fields match that RPC. This document is not a second business API.
 paths:
   /v1/conferences:
     post:
@@ -54,6 +54,24 @@ paths:
   /v1/attendance:
     post:
       operationId: getParticipantAttendance
+  /v1/recordings:
+    post:
+      operationId: requestRecording
+  /v1/recordings/get:
+    post:
+      operationId: getRecording
+  /v1/recordings/consent:
+    post:
+      operationId: setRecordingConsent
+  /v1/recordings/start:
+    post:
+      operationId: startRecording
+  /v1/recordings/stop:
+    post:
+      operationId: stopRecording
+  /v1/recordings/delete:
+    post:
+      operationId: deleteRecording
   /v1/capabilities:
     get:
       operationId: getCapabilities

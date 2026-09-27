@@ -33,6 +33,7 @@ type HttpResponse = Response<HttpBody>;
 #[derive(Clone, Debug)]
 struct AppState {
     upstream: Channel,
+    recording_upstream: Option<Channel>,
 }
 
 #[derive(Debug)]
@@ -75,7 +76,21 @@ async fn run() -> Result<(), String> {
         .connect()
         .await
         .map_err(|error| format!("connect conference upstream: {error}"))?;
-    let state = AppState { upstream: channel };
+    let recording_upstream = match std::env::var("UCR_RECORDING_GRPC_UPSTREAM") {
+        Ok(value) => Some(
+            Channel::from_shared(value)
+                .map_err(|error| format!("invalid recording upstream URI: {error}"))?
+                .connect()
+                .await
+                .map_err(|error| format!("connect recording upstream: {error}"))?,
+        ),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(format!("read UCR_RECORDING_GRPC_UPSTREAM: {error}")),
+    };
+    let state = AppState {
+        upstream: channel,
+        recording_upstream,
+    };
     let listener = TcpListener::bind(bind)
         .await
         .map_err(|error| format!("bind conference HTTP adapter: {error}"))?;
@@ -165,6 +180,9 @@ async fn dispatch_post(path: &str, request: Request<Incoming>, state: &AppState)
         Ok(body) => body,
         Err(error) => return error.into_response(),
     };
+    if path.starts_with("/v1/recordings") {
+        return dispatch_recording_post(path, &body, authorization.as_deref(), state).await;
+    }
     let mut client = pb::universal_conference_service_client::UniversalConferenceServiceClient::new(
         state.upstream.clone(),
     );
@@ -213,6 +231,35 @@ async fn dispatch_post(path: &str, request: Request<Incoming>, state: &AppState)
             forward_capabilities(&mut client, &body, authorization.as_deref()).await
         }
         _ => TransportError::new(StatusCode::NOT_FOUND, "conference HTTP route not found")
+            .into_response(),
+    }
+}
+
+async fn dispatch_recording_post(
+    path: &str,
+    body: &[u8],
+    authorization: Option<&str>,
+    state: &AppState,
+) -> HttpResponse {
+    let Some(recording_upstream) = state.recording_upstream.as_ref() else {
+        return TransportError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "recording gRPC upstream is not configured",
+        )
+        .into_response();
+    };
+    let mut client =
+        pb::recording_service_client::RecordingServiceClient::new(recording_upstream.clone());
+    match path {
+        "/v1/recordings" => forward_request_recording(&mut client, body, authorization).await,
+        "/v1/recordings/get" => forward_get_recording(&mut client, body, authorization).await,
+        "/v1/recordings/consent" => {
+            forward_recording_consent(&mut client, body, authorization).await
+        }
+        "/v1/recordings/start" => forward_start_recording(&mut client, body, authorization).await,
+        "/v1/recordings/stop" => forward_stop_recording(&mut client, body, authorization).await,
+        "/v1/recordings/delete" => forward_delete_recording(&mut client, body, authorization).await,
+        _ => TransportError::new(StatusCode::NOT_FOUND, "recording HTTP route not found")
             .into_response(),
     }
 }
@@ -350,6 +397,7 @@ fn hex_nibble(value: u8) -> Result<u8, TransportError> {
 
 type ConferenceClient =
     pb::universal_conference_service_client::UniversalConferenceServiceClient<Channel>;
+type RecordingClient = pb::recording_service_client::RecordingServiceClient<Channel>;
 
 fn attach_authorization<T>(
     request: &mut GrpcRequest<T>,
@@ -699,6 +747,350 @@ struct AttendanceJson {
 struct CapabilitiesJson {
     scope: ScopeJson,
     integration_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingPolicyJson {
+    require_all_participant_consent: bool,
+    notify_all_participants: bool,
+    retention_seconds: u64,
+    #[serde(default)]
+    policy_reference: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingRequestJson {
+    scope: ScopeJson,
+    recording_id: String,
+    call_id: String,
+    policy: RecordingPolicyJson,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingLookupJson {
+    scope: ScopeJson,
+    recording_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrincipalJson {
+    principal_id: String,
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingConsentJson {
+    participant: PrincipalJson,
+    state: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingSetConsentJson {
+    scope: ScopeJson,
+    recording_id: String,
+    consent: RecordingConsentJson,
+    expected_revision: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingMutationJson {
+    scope: ScopeJson,
+    recording_id: String,
+    expected_revision: u64,
+}
+
+fn principal_kind_code(kind: &str) -> Result<i32, TransportError> {
+    match kind {
+        "unspecified" => Ok(pb::PrincipalKind::Unspecified as i32),
+        "person" => Ok(pb::PrincipalKind::Person as i32),
+        "device" => Ok(pb::PrincipalKind::Device as i32),
+        "service_account" => Ok(pb::PrincipalKind::ServiceAccount as i32),
+        "ai_agent" => Ok(pb::PrincipalKind::AiAgent as i32),
+        "bot" => Ok(pb::PrincipalKind::Bot as i32),
+        "organization" => Ok(pb::PrincipalKind::Organization as i32),
+        "automation" => Ok(pb::PrincipalKind::Automation as i32),
+        "external_platform" => Ok(pb::PrincipalKind::ExternalPlatform as i32),
+        _ => Err(TransportError::new(
+            StatusCode::BAD_REQUEST,
+            "unknown principal kind",
+        )),
+    }
+}
+
+fn recording_consent_state_code(state: &str) -> Result<i32, TransportError> {
+    match state {
+        "granted" => Ok(pb::RecordingConsentState::Granted as i32),
+        "denied" => Ok(pb::RecordingConsentState::Denied as i32),
+        "revoked" => Ok(pb::RecordingConsentState::Revoked as i32),
+        _ => Err(TransportError::new(
+            StatusCode::BAD_REQUEST,
+            "recording consent must be granted, denied, or revoked",
+        )),
+    }
+}
+
+fn principal_of(value: &PrincipalJson) -> Result<pb::PrincipalRef, TransportError> {
+    Ok(pb::PrincipalRef {
+        principal_id: Some(opaque(&value.principal_id)?),
+        kind: principal_kind_code(&value.kind)?,
+    })
+}
+
+fn recording_policy_of(value: &RecordingPolicyJson) -> pb::RecordingPolicy {
+    pb::RecordingPolicy {
+        require_all_participant_consent: value.require_all_participant_consent,
+        notify_all_participants: value.notify_all_participants,
+        retention_seconds: value.retention_seconds,
+        policy_reference: value.policy_reference.clone(),
+    }
+}
+
+async fn forward_request_recording(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingRequestJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let request = match (|| -> Result<_, TransportError> {
+        Ok(pb::RecordingRequest {
+            scope: Some(scope_of(&parsed.scope)?),
+            recording_id: Some(opaque(&parsed.recording_id)?),
+            call_id: Some(opaque(&parsed.call_id)?),
+            policy: Some(recording_policy_of(&parsed.policy)),
+        })
+    })() {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(request, authorization) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(
+        client.request_recording(request),
+        |response| match response.result {
+            Some(pb::recording_request_response::Result::Recording(recording)) => json_response(
+                StatusCode::OK,
+                &json!({ "recording": recording_json(&recording) }),
+            ),
+            Some(pb::recording_request_response::Result::Error(error)) => error_response(&error),
+            None => empty_upstream(),
+        },
+    )
+    .await
+}
+
+async fn forward_get_recording(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingLookupJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let request = match (|| -> Result<_, TransportError> {
+        Ok(pb::RecordingGetRequest {
+            scope: Some(scope_of(&parsed.scope)?),
+            recording_id: Some(opaque(&parsed.recording_id)?),
+        })
+    })() {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(request, authorization) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(client.get_recording(request), |response| {
+        match response.result {
+            Some(pb::recording_get_response::Result::Recording(recording)) => json_response(
+                StatusCode::OK,
+                &json!({ "recording": recording_json(&recording) }),
+            ),
+            Some(pb::recording_get_response::Result::Error(error)) => error_response(&error),
+            None => empty_upstream(),
+        }
+    })
+    .await
+}
+
+async fn forward_recording_consent(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingSetConsentJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let request = match (|| -> Result<_, TransportError> {
+        Ok(pb::RecordingSetConsentRequest {
+            scope: Some(scope_of(&parsed.scope)?),
+            recording_id: Some(opaque(&parsed.recording_id)?),
+            consent: Some(pb::RecordingConsent {
+                participant: Some(principal_of(&parsed.consent.participant)?),
+                state: recording_consent_state_code(&parsed.consent.state)?,
+                decided_at_unix_ms: 0,
+            }),
+            expected_revision: parsed.expected_revision,
+        })
+    })() {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(request, authorization) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(
+        client.set_recording_consent(request),
+        |response| match response.result {
+            Some(pb::recording_set_consent_response::Result::Recording(recording)) => {
+                json_response(
+                    StatusCode::OK,
+                    &json!({ "recording": recording_json(&recording) }),
+                )
+            }
+            Some(pb::recording_set_consent_response::Result::Error(error)) => {
+                error_response(&error)
+            }
+            None => empty_upstream(),
+        },
+    )
+    .await
+}
+
+fn recording_mutation_request(
+    parsed: &RecordingMutationJson,
+) -> Result<(pb::TenantScope, pb::OpaqueId, u64), TransportError> {
+    Ok((
+        scope_of(&parsed.scope)?,
+        opaque(&parsed.recording_id)?,
+        parsed.expected_revision,
+    ))
+}
+
+async fn forward_start_recording(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingMutationJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let (scope, recording_id, expected_revision) = match recording_mutation_request(&parsed) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(
+        pb::RecordingStartRequest {
+            scope: Some(scope),
+            recording_id: Some(recording_id),
+            expected_revision,
+        },
+        authorization,
+    ) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(client.start_recording(request), |response| {
+        match response.result {
+            Some(pb::recording_start_response::Result::Recording(recording)) => json_response(
+                StatusCode::OK,
+                &json!({ "recording": recording_json(&recording) }),
+            ),
+            Some(pb::recording_start_response::Result::Error(error)) => error_response(&error),
+            None => empty_upstream(),
+        }
+    })
+    .await
+}
+
+async fn forward_stop_recording(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingMutationJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let (scope, recording_id, expected_revision) = match recording_mutation_request(&parsed) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(
+        pb::RecordingStopRequest {
+            scope: Some(scope),
+            recording_id: Some(recording_id),
+            expected_revision,
+        },
+        authorization,
+    ) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(client.stop_recording(request), |response| {
+        match response.result {
+            Some(pb::recording_stop_response::Result::Recording(recording)) => json_response(
+                StatusCode::OK,
+                &json!({ "recording": recording_json(&recording) }),
+            ),
+            Some(pb::recording_stop_response::Result::Error(error)) => error_response(&error),
+            None => empty_upstream(),
+        }
+    })
+    .await
+}
+
+async fn forward_delete_recording(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingMutationJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let (scope, recording_id, expected_revision) = match recording_mutation_request(&parsed) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(
+        pb::RecordingDeleteRequest {
+            scope: Some(scope),
+            recording_id: Some(recording_id),
+            expected_revision,
+        },
+        authorization,
+    ) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(
+        client.delete_recording(request),
+        |response| match response.result {
+            Some(pb::recording_delete_response::Result::Acknowledgement(ack)) => json_response(
+                StatusCode::OK,
+                &json!({ "acknowledgement": acknowledgement_json(&ack) }),
+            ),
+            Some(pb::recording_delete_response::Result::Error(error)) => error_response(&error),
+            None => empty_upstream(),
+        },
+    )
+    .await
 }
 
 async fn forward_create(
@@ -1503,6 +1895,62 @@ async fn forward_capabilities_input(
     .await
 }
 
+fn principal_json(principal: Option<&pb::PrincipalRef>) -> Value {
+    let Some(principal) = principal else {
+        return Value::Null;
+    };
+    json!({
+        "principal_id": opaque_str(principal.principal_id.as_ref()),
+        "kind": enum_name(
+            principal.kind,
+            &[
+                "unspecified",
+                "person",
+                "device",
+                "service_account",
+                "ai_agent",
+                "bot",
+                "organization",
+                "automation",
+                "external_platform",
+            ],
+        ),
+    })
+}
+
+fn recording_json(recording: &pb::RecordingSession) -> Value {
+    let policy = recording.policy.as_ref();
+    json!({
+        "scope": scope_json(recording.scope.as_ref()),
+        "recording_id": opaque_str(recording.recording_id.as_ref()),
+        "call_id": opaque_str(recording.call_id.as_ref()),
+        "requested_by": principal_json(recording.requested_by.as_ref()),
+        "policy": policy.map(|item| json!({
+            "require_all_participant_consent": item.require_all_participant_consent,
+            "notify_all_participants": item.notify_all_participants,
+            "retention_seconds": item.retention_seconds,
+            "policy_reference": item.policy_reference,
+        })),
+        "state": enum_name(
+            recording.state,
+            &["unspecified", "waiting_for_consent", "ready", "active", "stopped", "expired", "deleted"],
+        ),
+        "consents": recording.consents.iter().map(|consent| json!({
+            "participant": principal_json(consent.participant.as_ref()),
+            "state": enum_name(
+                consent.state,
+                &["unspecified", "pending", "granted", "denied", "revoked"],
+            ),
+            "decided_at_unix_ms": consent.decided_at_unix_ms,
+        })).collect::<Vec<_>>(),
+        "requested_at_unix_ms": recording.requested_at_unix_ms,
+        "started_at_unix_ms": recording.started_at_unix_ms,
+        "stopped_at_unix_ms": recording.stopped_at_unix_ms,
+        "expires_at_unix_ms": recording.expires_at_unix_ms,
+        "revision": recording.revision,
+    })
+}
+
 fn conference_json(conference: &pb::UniversalConferenceDescriptor) -> Value {
     let schedule = conference.schedule.as_ref();
     json!({
@@ -1620,11 +2068,20 @@ fn error_response(error: &pb::ErrorEnvelope) -> HttpResponse {
 fn error_name(code: i32) -> &'static str {
     match code {
         1 => "INVALID_ARGUMENT",
+        2 => "MALFORMED_FRAME",
+        3 => "UNSUPPORTED_PROTOCOL_VERSION",
+        4 => "DOWNGRADE_REJECTED",
+        5 => "UNSUPPORTED_CRITICAL_EXTENSION",
+        6 => "CAPABILITY_MISMATCH",
         7 => "UNAUTHENTICATED",
         8 => "PERMISSION_DENIED",
         9 => "POLICY_DENIED",
         10 => "RATE_LIMITED",
         11 => "RESOURCE_EXHAUSTED",
+        12 => "DEADLINE_EXCEEDED",
+        13 => "CANCELLED",
+        14 => "TEMPORARILY_UNAVAILABLE",
+        15 => "INTEGRITY_FAILURE",
         16 => "CONFLICT",
         17 => "NOT_FOUND",
         18 => "INTERNAL",
@@ -1634,10 +2091,13 @@ fn error_name(code: i32) -> &'static str {
 
 fn error_status(code: i32) -> StatusCode {
     match code {
+        6 | 16 => StatusCode::CONFLICT,
         7 => StatusCode::UNAUTHORIZED,
         8 | 9 => StatusCode::FORBIDDEN,
         10 | 11 => StatusCode::TOO_MANY_REQUESTS,
-        16 => StatusCode::CONFLICT,
+        12 => StatusCode::GATEWAY_TIMEOUT,
+        13 => StatusCode::REQUEST_TIMEOUT,
+        14 => StatusCode::SERVICE_UNAVAILABLE,
         17 => StatusCode::NOT_FOUND,
         18 => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::BAD_REQUEST,
@@ -1732,11 +2192,15 @@ fn yaml_response(text: &'static str) -> HttpResponse {
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
+    use hyper::StatusCode;
     use rustls::pki_types::pem::PemObject;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::Server;
-    use ucr_api_grpc::{GrpcUniversalConferenceService, universal_conference_service_server};
+    use ucr_api_grpc::{
+        GrpcRecordingService, GrpcUniversalConferenceService, recording_service_server,
+        universal_conference_service_server,
+    };
     use ucr_core::{
         PermissionGrantStore, ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore,
     };
@@ -1791,6 +2255,15 @@ mod tests {
             json["codecs"],
             serde_json::json!(["ucr.media.audio.opus", "ucr.media.video.h264"])
         );
+    }
+
+    #[test]
+    fn canonical_error_names_survive_the_http_transport() {
+        assert_eq!(super::error_name(6), "CAPABILITY_MISMATCH");
+        assert_eq!(super::error_status(6), StatusCode::CONFLICT);
+        assert_eq!(super::error_name(12), "DEADLINE_EXCEEDED");
+        assert_eq!(super::error_name(14), "TEMPORARILY_UNAVAILABLE");
+        assert_eq!(super::error_name(15), "INTEGRITY_FAILURE");
     }
 
     #[test]
@@ -1873,9 +2346,15 @@ mod tests {
             .expect("http listener");
         let http_address = http_listener.local_addr().expect("http address");
         tokio::spawn(async move {
-            serve(http_listener, AppState { upstream: channel })
-                .await
-                .expect("http adapter");
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel,
+                    recording_upstream: None,
+                },
+            )
+            .await
+            .expect("http adapter");
         });
 
         let body = br#"{"scope":{"tenant_id":"tenant-a"},"integration_id":"integration-a"}"#;
@@ -1902,6 +2381,233 @@ mod tests {
         assert!(
             response.contains("UNAUTHENTICATED"),
             "canonical error must cross the HTTP adapter: {response}"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn recording_http_routes_fail_closed_without_recording_upstream() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("http listener");
+        let http_address = http_listener.local_addr().expect("http address");
+        tokio::spawn(async move {
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel,
+                    recording_upstream: None,
+                },
+            )
+            .await
+            .expect("http adapter");
+        });
+
+        let body = br#"{"scope":{"tenant_id":"tenant-a"},"recording_id":"recording-a"}"#;
+        let mut request = format!(
+            "POST /v1/recordings/get HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(body);
+        let mut stream = tokio::net::TcpStream::connect(http_address)
+            .await
+            .expect("connect http");
+        stream.write_all(&request).await.expect("write request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        let response = String::from_utf8(response).expect("utf-8 response");
+        assert!(
+            response.starts_with("HTTP/1.1 503"),
+            "recording route must fail closed without its realtime upstream: {response}"
+        );
+        assert!(
+            response.contains("recording gRPC upstream is not configured"),
+            "misconfiguration must be explicit: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recording_request_http_preserves_capability_mismatch() {
+        let directory = std::env::temp_dir().join(format!(
+            "ucr-recording-capability-web-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let store =
+            Arc::new(SqliteLocalStore::open(directory.join("ucr.sqlite")).expect("sqlite store"));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([10_u8; 32]),
+                "https://join.example.test/join",
+            )
+            .expect("join issuer"),
+        );
+        let (token, keys, policy) =
+            bearer_for_scopes(&[ucr_machine_auth::MACHINE_SCOPE_RECORDING_MANAGE]);
+        let service = GrpcRecordingService::new(
+            Arc::new(FixedClock),
+            Arc::clone(&store),
+            Arc::clone(&store),
+            issuer,
+            false,
+        )
+        .with_machine_bearer_auth(keys, policy);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("grpc listener");
+        let grpc_address = listener.local_addr().expect("grpc address");
+        let incoming = TcpListenerStream::new(listener);
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(recording_service_server(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("grpc server");
+        });
+
+        let channel = tonic::transport::Channel::from_shared(format!("http://{grpc_address}"))
+            .expect("grpc uri")
+            .connect()
+            .await
+            .expect("grpc channel");
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("http listener");
+        let http_address = http_listener.local_addr().expect("http address");
+        tokio::spawn(async move {
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel.clone(),
+                    recording_upstream: Some(channel),
+                },
+            )
+            .await
+            .expect("http adapter");
+        });
+
+        let body = br#"{
+            "scope":{"tenant_id":"tenant-a","namespace_id":"ns-a"},
+            "recording_id":"recording-a",
+            "call_id":"call-a",
+            "policy":{
+                "require_all_participant_consent":true,
+                "notify_all_participants":true,
+                "retention_seconds":3600
+            }
+        }"#;
+        let response = post_json(http_address, "/v1/recordings", body, &token).await;
+        assert!(
+            response.starts_with("HTTP/1.1 409"),
+            "disabled recording capability must preserve conflict-class status: {response}"
+        );
+        assert!(
+            response.contains("CAPABILITY_MISMATCH"),
+            "canonical capability mismatch must survive HTTP transport: {response}"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn recording_consent_http_route_reaches_canonical_bearer_auth() {
+        let directory = std::env::temp_dir().join(format!(
+            "ucr-recording-web-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let store =
+            Arc::new(SqliteLocalStore::open(directory.join("ucr.sqlite")).expect("sqlite store"));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([9_u8; 32]),
+                "https://join.example.test/join",
+            )
+            .expect("join issuer"),
+        );
+        let service = GrpcRecordingService::new(
+            Arc::new(FixedClock),
+            Arc::clone(&store),
+            Arc::clone(&store),
+            issuer,
+            false,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("grpc listener");
+        let grpc_address = listener.local_addr().expect("grpc address");
+        let incoming = TcpListenerStream::new(listener);
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(recording_service_server(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("grpc server");
+        });
+
+        let channel = tonic::transport::Channel::from_shared(format!("http://{grpc_address}"))
+            .expect("grpc uri")
+            .connect()
+            .await
+            .expect("grpc channel");
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("http listener");
+        let http_address = http_listener.local_addr().expect("http address");
+        tokio::spawn(async move {
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel.clone(),
+                    recording_upstream: Some(channel),
+                },
+            )
+            .await
+            .expect("http adapter");
+        });
+
+        let body = br#"{
+            "scope":{"tenant_id":"tenant-a"},
+            "recording_id":"recording-a",
+            "consent":{
+                "participant":{"principal_id":"person-a","kind":"person"},
+                "state":"granted"
+            },
+            "expected_revision":1
+        }"#;
+        let mut request = format!(
+            "POST /v1/recordings/consent HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(body);
+        let mut stream = tokio::net::TcpStream::connect(http_address)
+            .await
+            .expect("connect http");
+        stream.write_all(&request).await.expect("write request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        let response = String::from_utf8(response).expect("utf-8 response");
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "recording consent must reach canonical bearer auth: {response}"
+        );
+        assert!(
+            response.contains("UNAUTHENTICATED"),
+            "canonical recording auth error must cross HTTP adapter: {response}"
         );
         let _ = std::fs::remove_dir_all(directory);
     }
@@ -1969,9 +2675,15 @@ mod tests {
             .expect("http listener");
         let http_address = http_listener.local_addr().expect("http address");
         tokio::spawn(async move {
-            serve(http_listener, AppState { upstream: channel })
-                .await
-                .expect("http adapter");
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel,
+                    recording_upstream: None,
+                },
+            )
+            .await
+            .expect("http adapter");
         });
 
         let edge_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -2160,9 +2872,15 @@ mod tests {
             .expect("http listener");
         let http_address = http_listener.local_addr().expect("http address");
         tokio::spawn(async move {
-            serve(http_listener, AppState { upstream: channel })
-                .await
-                .expect("http adapter");
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel,
+                    recording_upstream: None,
+                },
+            )
+            .await
+            .expect("http adapter");
         });
 
         let body = br#"{"scope":{"tenant_id":"tenant-a","namespace_id":"ns-a"},"integration_id":"integration-a","external_conference_id_b64":"ZXZlbnQtMQ==","idempotency_key":"create-1","mode":"webinar","schedule":{"starts_at_unix_ms":10,"join_before_seconds":5}}"#;
@@ -2266,9 +2984,15 @@ mod tests {
             .expect("http listener");
         let http_address = http_listener.local_addr().expect("http address");
         tokio::spawn(async move {
-            serve(http_listener, AppState { upstream: channel })
-                .await
-                .expect("http adapter");
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel,
+                    recording_upstream: None,
+                },
+            )
+            .await
+            .expect("http adapter");
         });
 
         let created = post_json(
@@ -2408,9 +3132,15 @@ mod tests {
             .expect("http listener");
         let http_address = http_listener.local_addr().expect("http address");
         tokio::spawn(async move {
-            serve(http_listener, AppState { upstream: channel })
-                .await
-                .expect("http adapter");
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel,
+                    recording_upstream: None,
+                },
+            )
+            .await
+            .expect("http adapter");
         });
 
         let created = post_json(
