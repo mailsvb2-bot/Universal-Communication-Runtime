@@ -56,14 +56,21 @@ def main() -> None:
 
     recording_auth = auth["service_overrides"]["RecordingService"]
     require(
-        recording_auth["management_schemes"]
+        recording_auth["accepted_schemes"]
         == ["service_principal_binary_metadata", "oauth2_bearer"],
         "RecordingService management auth schemes drifted",
     )
+    consent_auth = recording_auth["method_overrides"]["SetRecordingConsent"]
     require(
-        recording_auth["participant_consent_scheme"] == "join_bearer",
+        consent_auth["accepted_schemes"] == ["join_bearer"],
         "RecordingService participant consent auth drifted",
     )
+    require(
+        consent_auth["bearer_metadata_key"] == AUTHORIZATION_KEY,
+        "RecordingService consent bearer metadata key drifted",
+    )
+    require(consent_auth["bearer_scheme"] == "Bearer", "RecordingService consent Bearer spelling drifted")
+    require(consent_auth["mixed_schemes"] == "reject", "mixed recording consent auth must fail closed")
     require(
         recording_auth["bearer_metadata_key"] == AUTHORIZATION_KEY,
         "RecordingService bearer metadata key drifted",
