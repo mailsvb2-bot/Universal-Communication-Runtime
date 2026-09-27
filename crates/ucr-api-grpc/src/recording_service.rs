@@ -1004,7 +1004,6 @@ const fn map_store_error(error: DurableStoreError) -> CanonicalError {
     CanonicalError::new(code)
 }
 
-
 #[cfg(test)]
 mod retention_tests {
     use ucr_core::RecordingStore as _;
