@@ -775,7 +775,15 @@ impl ProductionRuntime {
                     .release_runtime_worker_lease(RECORDING_RETENTION_WORKER_KIND, &holder_id);
                 return Err(error);
             }
-            let now_unix_ms = runtime_now_unix_ms()?;
+            let now_unix_ms = match runtime_now_unix_ms() {
+                Ok(now_unix_ms) => now_unix_ms,
+                Err(error) => {
+                    let _ = self
+                        .store
+                        .release_runtime_worker_lease(RECORDING_RETENTION_WORKER_KIND, &holder_id);
+                    return Err(error);
+                }
+            };
             let sweep = match expire_due_recordings_once(
                 self.store.as_ref(),
                 now_unix_ms,
@@ -798,7 +806,13 @@ impl ProductionRuntime {
 
             tokio::select! {
                 result = tokio::signal::ctrl_c() => {
-                    result.map_err(|error| format!("recording retention shutdown signal: {error}"))?;
+                    if let Err(error) = result {
+                        let _ = self.store.release_runtime_worker_lease(
+                            RECORDING_RETENTION_WORKER_KIND,
+                            &holder_id,
+                        );
+                        return Err(format!("recording retention shutdown signal: {error}"));
+                    }
                     self.store
                         .release_runtime_worker_lease(RECORDING_RETENTION_WORKER_KIND, &holder_id)
                         .map_err(|error| format!("release recording retention worker lease: {error:?}"))?;
