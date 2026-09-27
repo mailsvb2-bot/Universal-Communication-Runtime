@@ -9,7 +9,7 @@ They are clients of the single versioned `ucr.v1` public contract; they are not 
 
 The checked-in protobuf contract under `proto/ucr/v1` remains the language-independent source of wire truth.
 SDK code may provide transport setup, generated types/stubs, credential attachment and ergonomic call helpers.
-The Service Principal SDK surface includes the business-neutral `UniversalConferenceService`; realtime participant-session authentication remains a separate join/session-token boundary rather than being reinterpreted as Service Principal authentication.
+The Service Principal SDK surface includes the business-neutral `UniversalConferenceService` and the machine-management RPCs of `RecordingService`. `RecordingService.SetRecordingConsent` is excluded from the Service Credential convenience surface because participant consent must be authenticated by the participant's short-lived join Bearer. Realtime participant-session authentication remains a separate join/session-token boundary rather than being reinterpreted as Service Principal authentication.
 It must not own Identity, Conversation, Message, Delivery, Event, routing, policy, permission or retry semantics.
 
 SDKs have no direct database API and no privileged path into `ucr-core` or a storage provider.
@@ -67,3 +67,4 @@ version negotiation, errors and idempotency. Phase 39 must nevertheless keep tho
 4. Credential diagnostics redact secrets.
 5. SDK documentation explicitly forbids hidden business/domain models and automatic application retry.
 6. Repository guards require this specification, the Phase 39 ADR and every language surface.
+7. The shared SDK contract includes `RecordingService`, preserves Service Credential / machine Bearer management admission, and keeps participant consent on the separate join-Bearer boundary.
