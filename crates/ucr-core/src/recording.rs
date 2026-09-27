@@ -44,6 +44,11 @@ pub trait RecordingStore: StorageProvider {
 
     /// Applies consent and, when it changes the lifecycle (for example ACTIVE -> STOPPED),
     /// atomically persists the matching canonical Event with the new snapshot.
+    ///
+    /// # Errors
+    /// Rejects invalid/stale consent transitions, mismatched Event evidence, unsupported atomic
+    /// persistence, or explicit durable-store failures.
+    #[allow(clippy::too_many_arguments)]
     fn set_recording_consent_with_event(
         &self,
         scope: &TenantScope,
@@ -80,6 +85,10 @@ pub trait RecordingStore: StorageProvider {
     ) -> Result<RecordingSession, DurableStoreError>;
 
     /// Starts lifecycle and atomically persists its canonical lifecycle Event.
+    ///
+    /// # Errors
+    /// Rejects stale/non-ready recording state, invalid Event evidence, unsupported atomic
+    /// persistence, or explicit durable-store failures.
     fn start_recording_with_event(
         &self,
         scope: &TenantScope,
@@ -105,6 +114,10 @@ pub trait RecordingStore: StorageProvider {
     ) -> Result<RecordingSession, DurableStoreError>;
 
     /// Stops lifecycle and atomically persists its canonical lifecycle Event.
+    ///
+    /// # Errors
+    /// Rejects stale/final recording state, invalid Event evidence, unsupported atomic
+    /// persistence, or explicit durable-store failures.
     fn stop_recording_with_event(
         &self,
         scope: &TenantScope,
@@ -130,6 +143,10 @@ pub trait RecordingStore: StorageProvider {
     ) -> Result<RecordingSession, DurableStoreError>;
 
     /// Expires lifecycle and atomically persists its canonical lifecycle Event.
+    ///
+    /// # Errors
+    /// Rejects early/stale recording state, invalid Event evidence, unsupported atomic
+    /// persistence, or explicit durable-store failures.
     fn expire_recording_with_event(
         &self,
         scope: &TenantScope,
@@ -158,6 +175,10 @@ pub trait RecordingStore: StorageProvider {
     ) -> Result<RecordingSession, DurableStoreError>;
 
     /// Marks lifecycle deleted and atomically persists its canonical lifecycle Event.
+    ///
+    /// # Errors
+    /// Rejects stale/malformed recording state, invalid Event evidence, unsupported atomic
+    /// persistence, or explicit durable-store failures.
     fn delete_recording_with_event(
         &self,
         scope: &TenantScope,
