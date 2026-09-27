@@ -177,7 +177,13 @@ where
         let decoded = decode_recording_request(request.into_inner());
         let result = match (authentication, decoded) {
             (Ok(authentication), Ok((scope, recording_id, call_id, policy))) => {
-                self.request_recording_inner(authentication, scope, recording_id, call_id, policy)
+                self.request_recording_inner(
+                    authentication,
+                    &scope,
+                    &recording_id,
+                    call_id,
+                    policy,
+                )
             }
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
@@ -202,7 +208,7 @@ where
             (Ok(authentication), Ok((scope, recording_id))) => {
                 self.admit_management(&scope, authentication).and_then(|_| {
                     self.store
-                        .recording(&scope, &recording_id)
+                        .recording(scope, recording_id)
                         .map_err(map_store_error)?
                         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
                 })
@@ -240,7 +246,7 @@ where
                     }
                     let recording = self
                         .store
-                        .recording(&scope, &recording_id)
+                        .recording(scope, recording_id)
                         .map_err(map_store_error)?
                         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
                     if claims.call_id != recording.call_id {
@@ -363,15 +369,15 @@ where
     fn request_recording_inner(
         &self,
         authentication: MachineApiAuthentication,
-        scope: TenantScope,
-        recording_id: RecordingId,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
         call_id: ucr_model::CallId,
         policy: RecordingPolicy,
     ) -> Result<RecordingSession, CanonicalError> {
-        let actor = self.admit_management(&scope, authentication)?;
+        let actor = self.admit_management(scope, authentication)?;
         if let Some(existing) = self
             .store
-            .recording(&scope, &recording_id)
+            .recording(scope, recording_id)
             .map_err(map_store_error)?
         {
             if recording_request_matches(&existing, &call_id, &policy, &actor.principal) {
@@ -382,7 +388,7 @@ where
 
         let call = self
             .store
-            .call(&scope, &call_id)
+            .call(scope, &call_id)
             .map_err(map_store_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
         if call.signalling_state == CallSignallingState::Terminated {
@@ -436,13 +442,13 @@ where
         match self.store.persist_recording(&recording) {
             Ok(DurableRecordStatus::Persisted | DurableRecordStatus::Duplicate) => self
                 .store
-                .recording(&scope, &recording_id)
+                .recording(scope, recording_id)
                 .map_err(map_store_error)?
                 .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal)),
             Err(DurableStoreError::Conflict) => {
                 let winner = self
                     .store
-                    .recording(&scope, &recording_id)
+                    .recording(scope, recording_id)
                     .map_err(map_store_error)?
                     .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
                 if recording_request_matches(
@@ -484,7 +490,7 @@ where
     {
         match (authentication, decoded) {
             (Ok(authentication), Ok((scope, recording_id, expected_revision))) => {
-                self.admit_management(&scope, authentication)?;
+                self.admit_management(scope, authentication)?;
                 transition(
                     &*self.store,
                     &scope,
