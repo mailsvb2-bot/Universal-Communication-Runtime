@@ -2050,11 +2050,20 @@ fn error_response(error: &pb::ErrorEnvelope) -> HttpResponse {
 fn error_name(code: i32) -> &'static str {
     match code {
         1 => "INVALID_ARGUMENT",
+        2 => "MALFORMED_FRAME",
+        3 => "UNSUPPORTED_PROTOCOL_VERSION",
+        4 => "DOWNGRADE_REJECTED",
+        5 => "UNSUPPORTED_CRITICAL_EXTENSION",
+        6 => "CAPABILITY_MISMATCH",
         7 => "UNAUTHENTICATED",
         8 => "PERMISSION_DENIED",
         9 => "POLICY_DENIED",
         10 => "RATE_LIMITED",
         11 => "RESOURCE_EXHAUSTED",
+        12 => "DEADLINE_EXCEEDED",
+        13 => "CANCELLED",
+        14 => "TEMPORARILY_UNAVAILABLE",
+        15 => "INTEGRITY_FAILURE",
         16 => "CONFLICT",
         17 => "NOT_FOUND",
         18 => "INTERNAL",
@@ -2064,10 +2073,13 @@ fn error_name(code: i32) -> &'static str {
 
 fn error_status(code: i32) -> StatusCode {
     match code {
+        6 | 16 => StatusCode::CONFLICT,
         7 => StatusCode::UNAUTHORIZED,
         8 | 9 => StatusCode::FORBIDDEN,
         10 | 11 => StatusCode::TOO_MANY_REQUESTS,
-        16 => StatusCode::CONFLICT,
+        12 => StatusCode::GATEWAY_TIMEOUT,
+        13 => StatusCode::REQUEST_TIMEOUT,
+        14 => StatusCode::SERVICE_UNAVAILABLE,
         17 => StatusCode::NOT_FOUND,
         18 => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::BAD_REQUEST,
@@ -2224,6 +2236,15 @@ mod tests {
             json["codecs"],
             serde_json::json!(["ucr.media.audio.opus", "ucr.media.video.h264"])
         );
+    }
+
+    #[test]
+    fn canonical_error_names_survive_the_http_transport() {
+        assert_eq!(super::error_name(6), "CAPABILITY_MISMATCH");
+        assert_eq!(super::error_status(6), StatusCode::CONFLICT);
+        assert_eq!(super::error_name(12), "DEADLINE_EXCEEDED");
+        assert_eq!(super::error_name(14), "TEMPORARILY_UNAVAILABLE");
+        assert_eq!(super::error_name(15), "INTEGRITY_FAILURE");
     }
 
     #[test]
