@@ -176,8 +176,9 @@ where
         let authentication = decode_machine_api_authentication(request.metadata());
         let decoded = decode_recording_request(request.into_inner());
         let result = match (authentication, decoded) {
-            (Ok(authentication), Ok((scope, recording_id, call_id, policy))) => self
-                .request_recording_inner(authentication, scope, recording_id, call_id, policy),
+            (Ok(authentication), Ok((scope, recording_id, call_id, policy))) => {
+                self.request_recording_inner(authentication, scope, recording_id, call_id, policy)
+            }
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RecordingRequestResponse {
@@ -294,11 +295,8 @@ where
         let body = request.into_inner();
         let decoded =
             decode_recording_mutation(body.scope, body.recording_id, body.expected_revision);
-        let result = self.management_transition(
-            authentication,
-            decoded,
-            RecordingStore::start_recording,
-        );
+        let result =
+            self.management_transition(authentication, decoded, RecordingStore::start_recording);
         Ok(Response::new(pb::RecordingStartResponse {
             result: Some(match result {
                 Ok(recording) => {
@@ -317,11 +315,8 @@ where
         let body = request.into_inner();
         let decoded =
             decode_recording_mutation(body.scope, body.recording_id, body.expected_revision);
-        let result = self.management_transition(
-            authentication,
-            decoded,
-            RecordingStore::stop_recording,
-        );
+        let result =
+            self.management_transition(authentication, decoded, RecordingStore::stop_recording);
         Ok(Response::new(pb::RecordingStopResponse {
             result: Some(match result {
                 Ok(recording) => {
@@ -341,11 +336,8 @@ where
         let decoded =
             decode_recording_mutation(body.scope, body.recording_id, body.expected_revision);
         let recording_id = decoded.as_ref().ok().map(|(_, id, _)| id.clone());
-        let result = self.management_transition(
-            authentication,
-            decoded,
-            RecordingStore::delete_recording,
-        );
+        let result =
+            self.management_transition(authentication, decoded, RecordingStore::delete_recording);
         Ok(Response::new(pb::RecordingDeleteResponse {
             result: Some(match result {
                 Ok(_) => pb::recording_delete_response::Result::Acknowledgement(
@@ -366,11 +358,7 @@ impl<C, A, S> GrpcRecordingService<C, A, S>
 where
     C: ServiceQuotaClock,
     A: AuthorizationEvaluator,
-    S: ServiceCredentialStore
-        + ServiceQuotaStore
-        + ServiceAuditStore
-        + RecordingStore
-        + CallStore,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + RecordingStore + CallStore,
 {
     fn request_recording_inner(
         &self,
