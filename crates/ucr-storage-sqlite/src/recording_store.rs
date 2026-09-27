@@ -221,8 +221,8 @@ impl RecordingStore for SqliteLocalStore {
 
         let mut due = Vec::with_capacity(keys.len());
         for (scope, recording_id) in keys {
-            let recording =
-                load_recording(&connection, &scope, &recording_id)?.ok_or(DurableStoreError::Corrupt)?;
+            let recording = load_recording(&connection, &scope, &recording_id)?
+                .ok_or(DurableStoreError::Corrupt)?;
             due.push(recording);
         }
         Ok(due)
