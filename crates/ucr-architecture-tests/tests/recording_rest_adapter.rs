@@ -15,6 +15,9 @@ fn recording_rest_routes_remain_thin_grpc_adapters() {
 
     assert!(web.contains("pb::recording_service_client::RecordingServiceClient"));
     assert!(web.contains("type RecordingClient"));
+    assert!(web.contains("UCR_RECORDING_GRPC_UPSTREAM"));
+    assert!(web.contains("recording gRPC upstream is not configured"));
+    assert!(web.contains("state.recording_upstream.as_ref()"));
     for (route, rpc) in [
         ("/v1/recordings", "request_recording"),
         ("/v1/recordings/get", "get_recording"),
