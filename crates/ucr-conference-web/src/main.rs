@@ -33,6 +33,7 @@ type HttpResponse = Response<HttpBody>;
 #[derive(Clone, Debug)]
 struct AppState {
     upstream: Channel,
+    recording_upstream: Option<Channel>,
 }
 
 #[derive(Debug)]
@@ -75,7 +76,21 @@ async fn run() -> Result<(), String> {
         .connect()
         .await
         .map_err(|error| format!("connect conference upstream: {error}"))?;
-    let state = AppState { upstream: channel };
+    let recording_upstream = match std::env::var("UCR_RECORDING_GRPC_UPSTREAM") {
+        Ok(value) => Some(
+            Channel::from_shared(value)
+                .map_err(|error| format!("invalid recording upstream URI: {error}"))?
+                .connect()
+                .await
+                .map_err(|error| format!("connect recording upstream: {error}"))?,
+        ),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(format!("read UCR_RECORDING_GRPC_UPSTREAM: {error}")),
+    };
+    let state = AppState {
+        upstream: channel,
+        recording_upstream,
+    };
     let listener = TcpListener::bind(bind)
         .await
         .map_err(|error| format!("bind conference HTTP adapter: {error}"))?;
@@ -166,8 +181,15 @@ async fn dispatch_post(path: &str, request: Request<Incoming>, state: &AppState)
         Err(error) => return error.into_response(),
     };
     if path.starts_with("/v1/recordings") {
+        let Some(recording_upstream) = state.recording_upstream.as_ref() else {
+            return TransportError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "recording gRPC upstream is not configured",
+            )
+            .into_response();
+        };
         let mut client =
-            pb::recording_service_client::RecordingServiceClient::new(state.upstream.clone());
+            pb::recording_service_client::RecordingServiceClient::new(recording_upstream.clone());
         return match path {
             "/v1/recordings" => {
                 forward_request_recording(&mut client, &body, authorization.as_deref()).await
@@ -2284,7 +2306,13 @@ mod tests {
             .expect("http listener");
         let http_address = http_listener.local_addr().expect("http address");
         tokio::spawn(async move {
-            serve(http_listener, AppState { upstream: channel })
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel,
+                    recording_upstream: None,
+                },
+            )
                 .await
                 .expect("http adapter");
         });
@@ -2366,9 +2394,15 @@ mod tests {
             .expect("http listener");
         let http_address = http_listener.local_addr().expect("http address");
         tokio::spawn(async move {
-            serve(http_listener, AppState { upstream: channel })
-                .await
-                .expect("http adapter");
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel.clone(),
+                    recording_upstream: Some(channel),
+                },
+            )
+            .await
+            .expect("http adapter");
         });
 
         let body = br#"{
@@ -2470,7 +2504,13 @@ mod tests {
             .expect("http listener");
         let http_address = http_listener.local_addr().expect("http address");
         tokio::spawn(async move {
-            serve(http_listener, AppState { upstream: channel })
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel,
+                    recording_upstream: None,
+                },
+            )
                 .await
                 .expect("http adapter");
         });
@@ -2661,7 +2701,13 @@ mod tests {
             .expect("http listener");
         let http_address = http_listener.local_addr().expect("http address");
         tokio::spawn(async move {
-            serve(http_listener, AppState { upstream: channel })
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel,
+                    recording_upstream: None,
+                },
+            )
                 .await
                 .expect("http adapter");
         });
@@ -2767,7 +2813,13 @@ mod tests {
             .expect("http listener");
         let http_address = http_listener.local_addr().expect("http address");
         tokio::spawn(async move {
-            serve(http_listener, AppState { upstream: channel })
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel,
+                    recording_upstream: None,
+                },
+            )
                 .await
                 .expect("http adapter");
         });
@@ -2909,7 +2961,13 @@ mod tests {
             .expect("http listener");
         let http_address = http_listener.local_addr().expect("http address");
         tokio::spawn(async move {
-            serve(http_listener, AppState { upstream: channel })
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel,
+                    recording_upstream: None,
+                },
+            )
                 .await
                 .expect("http adapter");
         });
