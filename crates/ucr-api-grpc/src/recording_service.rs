@@ -706,10 +706,7 @@ fn decode_recording_mutation(
         return Err(invalid_argument());
     }
     let (scope, recording_id) = decode_recording_lookup(scope, recording_id)?;
-    if idempotency_key
-        .as_ref()
-        .is_some_and(String::is_empty)
-    {
+    if idempotency_key.as_ref().is_some_and(String::is_empty) {
         return Err(invalid_argument());
     }
     Ok((scope, recording_id, expected_revision, idempotency_key))
