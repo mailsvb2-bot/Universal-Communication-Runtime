@@ -708,7 +708,7 @@ fn decode_recording_mutation(
     let (scope, recording_id) = decode_recording_lookup(scope, recording_id)?;
     if idempotency_key
         .as_ref()
-        .is_some_and(|value| value.is_empty())
+        .is_some_and(String::is_empty)
     {
         return Err(invalid_argument());
     }
@@ -863,9 +863,10 @@ fn recording_lifecycle_event(
         occurred_at_unix_ms,
     }
     .encode_to_vec();
-    let correlation_id = command_id
-        .map(|value| value.as_opaque().clone())
-        .unwrap_or_else(|| event_id.as_opaque().clone());
+    let correlation_id = command_id.map_or_else(
+        || event_id.as_opaque().clone(),
+        |value| value.as_opaque().clone(),
+    );
     Ok(EventEnvelope {
         event_id,
         scope: current.scope.clone(),
