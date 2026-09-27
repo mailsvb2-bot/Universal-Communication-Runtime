@@ -1079,6 +1079,9 @@ mod retention_tests {
     fn retention_sweep_rejects_unbounded_batches() {
         let store = MemoryLocalStore::default();
         let error = expire_due_recordings_once(&store, 61_000, 0).expect_err("zero batch rejected");
-        assert_eq!(error.code, ucr_protocol::CanonicalErrorCode::InvalidArgument);
+        assert_eq!(
+            error.code,
+            ucr_protocol::CanonicalErrorCode::InvalidArgument
+        );
     }
 }
