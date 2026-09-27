@@ -1090,7 +1090,11 @@ impl UcrSdkClient {
         message: pb::RecordingRequest,
     ) -> Result<pb::RecordingRequestResponse, tonic::Status> {
         let request = self.authenticated_request(message);
-        Ok(self.recording.request_recording(request).await?.into_inner())
+        Ok(self
+            .recording
+            .request_recording(request)
+            .await?
+            .into_inner())
     }
 
     /// Reads one canonical recording session through machine-authenticated management.
