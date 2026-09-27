@@ -20,6 +20,12 @@ const fakeFetch = async (url, init) => {
       revision: 1,
     }}), { status: 200, headers: { "content-type": "application/json" } });
   }
+  if (path === "/v1/participant-devices") {
+    return new Response(JSON.stringify({ device: {
+      external_user_id_b64: "dXNlci0x",
+      active: true,
+    }}), { status: 200, headers: { "content-type": "application/json" } });
+  }
   if (path === "/v1/participants") {
     return new Response(JSON.stringify({ participant: {
       external_user_id_b64: "dXNlci0x",
@@ -40,7 +46,7 @@ const fakeFetch = async (url, init) => {
     }}), { status: 200, headers: { "content-type": "application/json" } });
   }
   if (path === "/v1/attendance") {
-    return new Response(JSON.stringify({ error: { code: "PERMISSION_DENIED", message: "denied" } }), {
+    return new Response(JSON.stringify({ error: { code: "RATE_LIMITED", message: "slow down", retryable: true, retry_after_ms: 2500 } }), {
       status: 403,
       headers: { "content-type": "application/json" },
     });
@@ -78,6 +84,8 @@ await client.ensureParticipant({
   role: "attendee",
   idempotencyKey: "participant-1",
 });
+const device = await client.ensureParticipantDevice(context, "user-1", "device-1");
+if (!device.active) throw new Error("device readiness was discarded");
 const grant = await client.issueJoinGrant({
   ...context,
   externalUserId: "user-1",
@@ -87,7 +95,7 @@ const grant = await client.issueJoinGrant({
 });
 if (!grant.join_url.includes("#ucr_join=")) throw new Error("join grant boundary drift");
 
-if (calls.length !== 3) throw new Error("client performed hidden retries");
+if (calls.length !== 4) throw new Error("client performed hidden retries");
 for (const call of calls) {
   if (call.init.headers.authorization !== "Bearer machine-token") throw new Error("Bearer admission drift");
 }
@@ -101,12 +109,12 @@ try {
   await client.getAttendance(context, "user-1");
 } catch (error) {
   if (!(error instanceof UniversalConferenceHttpError)) throw error;
-  if (error.status !== 403 || error.code !== "PERMISSION_DENIED") throw new Error("canonical error drift");
+  if (error.status !== 403 || error.code !== "RATE_LIMITED" || error.retryable !== true || error.retryAfterMs !== 2500) throw new Error("canonical error drift");
   if (String(error).includes("machine-token")) throw new Error("access token leaked through diagnostics");
   denied = true;
 }
 if (!denied) throw new Error("canonical error was converted to success");
-if (calls.length !== 4) throw new Error("error path performed hidden retries");
+if (calls.length !== 5) throw new Error("error path performed hidden retries");
 
 let rejectedInsecure = false;
 try {
