@@ -98,8 +98,7 @@ jobs:
           UCR_SOURCE_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
-          cargo test --locked --profile production -p ucr-conference \
-            --test reference thousand_person_sfu_conference_fits_bounded_call_ceiling --no-run
+          cargo test --locked --profile production -p ucr-conference --test reference --no-run
           python3 tools/performance_gate.py \
             --output dist/phase45/performance-evidence.json \
             --source-commit "$UCR_SOURCE_COMMIT"
@@ -163,7 +162,7 @@ jobs:
               "conformance": passed("Python/TypeScript/Kotlin/Swift/Rust Phase-41 conformance probes on exact commit"),
               "critical_chaos": passed("ucr-chaos-lab complete locked test suite on exact commit"),
               "public_contract": passed("canonical protobuf descriptor compilation plus SDK conformance on exact commit"),
-              "performance": passed("fixed 1000-participant production-profile gate; see performance-evidence.json"),
+              "performance": passed("fixed 10/100/500/1000-participant production-profile gates; see performance-evidence.json"),
               "metrics": passed("production-profile ucr-runtime emitted bounded metadata-only Prometheus metrics"),
               "diagnostics": passed("production-profile ucr-runtime opened exact SQLite schema and emitted health diagnostics"),
               "telemetry_privacy": passed("operator smoke rejected sensitive-data markers in runtime diagnostics/metrics outputs"),
