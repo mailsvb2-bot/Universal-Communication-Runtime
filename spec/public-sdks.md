@@ -12,6 +12,8 @@ SDK code may provide transport setup, generated types/stubs, credential attachme
 The Service Principal SDK surface includes the business-neutral `UniversalConferenceService` and the machine-management RPCs of `RecordingService`. `RecordingService.SetRecordingConsent` is excluded from the Service Credential convenience surface because participant consent must be authenticated by the participant's short-lived join Bearer. Realtime participant-session authentication remains a separate join/session-token boundary rather than being reinterpreted as Service Principal authentication.
 It must not own Identity, Conversation, Message, Delivery, Event, routing, policy, permission or retry semantics.
 
+Direct deployments may expose different loopback gRPC listeners for canonical services. The SDK contract therefore declares endpoint roles: ordinary machine APIs use the `api` role while `RecordingService` uses the `realtime` role because participant consent depends on the realtime `JoinTokenIssuer`. SDK transport helpers may route to those explicit endpoints or to one trusted gateway that co-hosts/routes both; this does not create a second business API.
+
 SDKs have no direct database API and no privileged path into `ucr-core` or a storage provider.
 A consumer using an SDK has exactly the authority represented by its authenticated Service Principal.
 
