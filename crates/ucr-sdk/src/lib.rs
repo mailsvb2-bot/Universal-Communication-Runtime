@@ -90,6 +90,7 @@ pub struct UcrSdkClient {
     recovery: pb::recovery_service_client::RecoveryServiceClient<Channel>,
     universal_conference:
         pb::universal_conference_service_client::UniversalConferenceServiceClient<Channel>,
+    recording: pb::recording_service_client::RecordingServiceClient<Channel>,
 }
 
 impl fmt::Debug for UcrSdkClient {
@@ -109,9 +110,33 @@ impl UcrSdkClient {
         endpoint: String,
         credential: ServiceCredential,
     ) -> Result<Self, tonic::transport::Error> {
+        Self::connect_with_recording_endpoint(endpoint.clone(), endpoint, credential).await
+    }
+
+    /// Connects the ordinary public services and `RecordingService` to explicit gRPC endpoints.
+    ///
+    /// Direct UCR deployments serve `RecordingService` from the realtime daemon because participant
+    /// consent reuses the realtime `JoinTokenIssuer`. A trusted public gateway may co-host both
+    /// service paths, in which case callers can continue using `Self::connect`.
+    ///
+    /// # Errors
+    /// Returns a transport error from either endpoint parsing or connection establishment.
+    pub async fn connect_with_recording_endpoint(
+        endpoint: String,
+        recording_endpoint: String,
+        credential: ServiceCredential,
+    ) -> Result<Self, tonic::transport::Error> {
+        let shared_endpoint = endpoint == recording_endpoint;
         let channel = tonic::transport::Endpoint::from_shared(endpoint)?
             .connect()
             .await?;
+        let recording_channel = if shared_endpoint {
+            channel.clone()
+        } else {
+            tonic::transport::Endpoint::from_shared(recording_endpoint)?
+                .connect()
+                .await?
+        };
         let integration =
             pb::integration_service_client::IntegrationServiceClient::new(channel.clone())
                 .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
@@ -146,7 +171,13 @@ impl UcrSdkClient {
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         let universal_conference =
-            pb::universal_conference_service_client::UniversalConferenceServiceClient::new(channel)
+            pb::universal_conference_service_client::UniversalConferenceServiceClient::new(
+                channel.clone(),
+            )
+            .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+            .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
+        let recording =
+            pb::recording_service_client::RecordingServiceClient::new(recording_channel)
                 .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
                 .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         Ok(Self {
@@ -162,6 +193,7 @@ impl UcrSdkClient {
             mesh,
             recovery,
             universal_conference,
+            recording,
         })
     }
     /// Creates one authenticated request without changing its protobuf body.
@@ -1044,6 +1076,73 @@ impl UcrSdkClient {
             .get_capabilities(request)
             .await?
             .into_inner())
+    }
+
+    /// Requests one canonical recording session through machine-authenticated management.
+    ///
+    /// Participant consent is intentionally not wrapped here because `SetRecordingConsent`
+    /// requires the participant's short-lived join Bearer rather than this SDK's Service Credential.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn request_recording(
+        &mut self,
+        message: pb::RecordingRequest,
+    ) -> Result<pb::RecordingRequestResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .recording
+            .request_recording(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Reads one canonical recording session through machine-authenticated management.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn get_recording(
+        &mut self,
+        message: pb::RecordingGetRequest,
+    ) -> Result<pb::RecordingGetResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recording.get_recording(request).await?.into_inner())
+    }
+
+    /// Starts one consent-ready canonical recording session.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn start_recording(
+        &mut self,
+        message: pb::RecordingStartRequest,
+    ) -> Result<pb::RecordingStartResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recording.start_recording(request).await?.into_inner())
+    }
+
+    /// Stops one active canonical recording session.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn stop_recording(
+        &mut self,
+        message: pb::RecordingStopRequest,
+    ) -> Result<pb::RecordingStopResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recording.stop_recording(request).await?.into_inner())
+    }
+
+    /// Deletes one canonical recording session through expected-revision management.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn delete_recording(
+        &mut self,
+        message: pb::RecordingDeleteRequest,
+    ) -> Result<pb::RecordingDeleteResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recording.delete_recording(request).await?.into_inner())
     }
 
     /// Lists canonical dead letters for one Event subscription.

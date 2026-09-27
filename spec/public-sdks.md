@@ -9,8 +9,10 @@ They are clients of the single versioned `ucr.v1` public contract; they are not 
 
 The checked-in protobuf contract under `proto/ucr/v1` remains the language-independent source of wire truth.
 SDK code may provide transport setup, generated types/stubs, credential attachment and ergonomic call helpers.
-The Service Principal SDK surface includes the business-neutral `UniversalConferenceService`; realtime participant-session authentication remains a separate join/session-token boundary rather than being reinterpreted as Service Principal authentication.
+The Service Principal SDK surface includes the business-neutral `UniversalConferenceService` and the machine-management RPCs of `RecordingService`. Direct deployments use the ordinary API listener for the existing Service Principal services and the realtime listener for `RecordingService`; SDKs may expose this as two transport endpoints without creating a second semantic API. A trusted gateway may present both through one endpoint. `RecordingService.SetRecordingConsent` is excluded from the Service Credential convenience surface because participant consent must be authenticated by the participant's short-lived join Bearer. Realtime participant-session authentication remains a separate join/session-token boundary rather than being reinterpreted as Service Principal authentication.
 It must not own Identity, Conversation, Message, Delivery, Event, routing, policy, permission or retry semantics.
+
+Direct deployments may expose different loopback gRPC listeners for canonical services. The SDK contract therefore declares endpoint roles: ordinary machine APIs use the `api` role while `RecordingService` uses the `realtime` role because participant consent depends on the realtime `JoinTokenIssuer`. SDK transport helpers may route to those explicit endpoints or to one trusted gateway that co-hosts/routes both; this does not create a second business API.
 
 SDKs have no direct database API and no privileged path into `ucr-core` or a storage provider.
 A consumer using an SDK has exactly the authority represented by its authenticated Service Principal.
@@ -67,3 +69,4 @@ version negotiation, errors and idempotency. Phase 39 must nevertheless keep tho
 4. Credential diagnostics redact secrets.
 5. SDK documentation explicitly forbids hidden business/domain models and automatic application retry.
 6. Repository guards require this specification, the Phase 39 ADR and every language surface.
+7. The shared SDK contract includes `RecordingService`, preserves Service Credential / machine Bearer management admission, and keeps participant consent on the separate join-Bearer boundary.

@@ -93,6 +93,30 @@ def main() -> None:
         for forbidden in ("ucr-storage", "ucr_core", "ucr-core", "sqlite"):
             require(forbidden not in lowered, f"SDK helper imports canonical owner {forbidden}: {language}")
 
+    services = contract["services"]
+    require("UniversalConferenceService" in services, "UniversalConferenceService disappeared from SDK contract")
+    require("RecordingService" in services, "RecordingService disappeared from SDK contract")
+    recording_auth = contract["authentication"]["service_overrides"].get("RecordingService")
+    require(isinstance(recording_auth, dict), "RecordingService auth boundary missing")
+    require(
+        recording_auth.get("accepted_schemes")
+        == ["service_principal_binary_metadata", "oauth2_bearer"],
+        "RecordingService management auth schemes drifted",
+    )
+    consent_auth = recording_auth.get("method_overrides", {}).get("SetRecordingConsent")
+    require(isinstance(consent_auth, dict), "Recording consent method override missing")
+    require(
+        consent_auth.get("accepted_schemes") == ["join_bearer"],
+        "Recording participant consent ceased to be join-Bearer authenticated",
+    )
+
+    transport = contract["transport"]
+    require(transport.get("default_grpc_role") == "api", "default SDK gRPC endpoint role drifted")
+    require(
+        transport.get("service_endpoint_roles", {}).get("RecordingService") == "realtime",
+        "RecordingService realtime endpoint role drifted",
+    )
+
     semantics = contract["semantics"]
     require(semantics["automatic_application_retry"] is False, "hidden SDK retry enabled")
     require(semantics["event_cursor"] == "opaque", "Event cursor ceased to be opaque")

@@ -4,13 +4,15 @@ Generate TypeScript protobuf/gRPC clients from the repository `proto/ucr/v1` sch
 `src/auth.ts` supplies exact binary Service Credential metadata entries for generated
 external-consumer clients.
 
-For `UniversalConferenceService`, callers may instead use the standard
-`Authorization: Bearer <access-token>` metadata accepted by the public Conference ingress.
+For `UniversalConferenceService` and Recording management RPCs, callers may instead use the standard
+`Authorization: Bearer <access-token>` metadata accepted by the public ingress.
 Do not send Bearer and Service Credential metadata together: mixed authentication schemes fail
-closed. The REST projection of the same typed Conference contract is available under `/v1`;
+closed. `RecordingService.SetRecordingConsent` is different by design: it requires the participant's
+short-lived join Bearer and must not be called with Service Credential metadata. The REST projection
+of the same typed Conference and Recording contracts is available under `/v1`;
 `/v1/openapi.yaml` is the route description, not a second semantic contract.
 
-The helper clones credential bytes, redacts diagnostics and owns no UCR domain, storage or retry semantics.
+In a direct UCR deployment, generated `RecordingService` clients target the realtime gRPC listener while ordinary machine APIs target the API listener; a trusted gateway may co-host or route both. The helper clones credential bytes, redacts diagnostics and owns no UCR domain, storage or retry semantics.
 Generated code is derivative build output; canonical request/response envelopes remain defined by protobuf.
 
 Phase 39 does not publish an npm artifact or select a permanent generator plugin; that is later release hardening.
