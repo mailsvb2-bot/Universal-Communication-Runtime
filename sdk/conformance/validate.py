@@ -99,12 +99,14 @@ def main() -> None:
     recording_auth = contract["authentication"]["service_overrides"].get("RecordingService")
     require(isinstance(recording_auth, dict), "RecordingService auth boundary missing")
     require(
-        recording_auth.get("management_schemes")
+        recording_auth.get("accepted_schemes")
         == ["service_principal_binary_metadata", "oauth2_bearer"],
         "RecordingService management auth schemes drifted",
     )
+    consent_auth = recording_auth.get("method_overrides", {}).get("SetRecordingConsent")
+    require(isinstance(consent_auth, dict), "Recording consent method override missing")
     require(
-        recording_auth.get("participant_consent_scheme") == "join_bearer",
+        consent_auth.get("accepted_schemes") == ["join_bearer"],
         "Recording participant consent ceased to be join-Bearer authenticated",
     )
 
