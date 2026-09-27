@@ -61,6 +61,14 @@ The Prepared Phase-41 cross-language SDK proof requires `contract + host-probe` 
 - `crates/ucr-sdk/tests/phase41_conformance.rs` is the Rust runtime-binding proof;
 - `.github/workflows/conformance.yml` runs the five language probes independently on the same Ubuntu runner family used by repository CI.
 
+## Reference integration profile
+
+The repository carries four business-neutral reference consumers under `examples/reference-integrations/`: a plain HTML site, a Python backend, a Node.js backend and a mobile-web client. The two backend examples execute the same public REST sequence over `/v1`: create Conference, ensure participants, ensure devices, prepare runtime, transition lifecycle and issue a join grant. They address people only by integration-owned external references and never require `PrincipalId`, `DeviceId`, `CallId` or `GroupId`.
+
+Browser and mobile-web examples receive only the short-lived personal `join_url` minted by a trusted backend. Machine Bearer credentials are forbidden from those surfaces. Conformance CI executes backend self-tests and statically rejects machine credential markers or product-specific ClientPlatform coupling in the reference examples.
+
+These examples are integration evidence, not alternate SDK or domain owners. The protobuf/gRPC contract and its thin REST adapter remain authoritative.
+
 ## No second brain
 
 Conformance code may inspect or call public SDK surfaces. It must not import UCR Core, direct storage providers, internal schedulers, route owners, provider workers, or privileged test-only bypasses into an SDK.
