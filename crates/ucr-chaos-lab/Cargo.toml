@@ -14,3 +14,8 @@ missing_debug_implementations = "warn"
 [lints.clippy]
 all = "deny"
 pedantic = "deny"
+
+[dev-dependencies]
+ucr-model = { path = "../ucr-model" }
+ucr-realtime = { path = "../ucr-realtime" }
+ucr-webrtc = { path = "../ucr-webrtc" }
