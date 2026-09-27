@@ -380,21 +380,20 @@ fn accepted_recipient_can_drive_adaptive_media_to_audio_fallback() {
     assert!(decision.requires_media_renegotiation);
 }
 
-#[test]
-fn thousand_person_sfu_conference_fits_bounded_call_ceiling() {
-    assert_eq!(MAX_CALL_PARTICIPANTS, 1024);
+fn assert_sfu_conference_profile(participant_count: usize) {
+    assert!((2..=MAX_CALL_PARTICIPANTS).contains(&participant_count));
     let store = MemoryLocalStore::default();
-    let host = subject("person-000");
+    let host = subject("person-0000");
     let mut group = base_group(&store, &host);
-    let mut invitees = Vec::new();
-    for index in 1..1000 {
-        let member = principal(format!("person-{index:03}"));
+    let mut invitees = Vec::with_capacity(participant_count - 1);
+    for index in 1..participant_count {
+        let member = principal(format!("person-{index:04}"));
         group = add_member(
             &store,
             &host,
             &group,
             member.clone(),
-            format!("add-person-{index:03}"),
+            format!("add-person-{index:04}"),
         );
         invitees.push(member);
     }
@@ -405,13 +404,13 @@ fn thousand_person_sfu_conference_fits_bounded_call_ceiling() {
     let start = start_request(&group, invitees.clone());
     let (_, snapshot) = coordinator
         .start(&host, &start)
-        .expect("1000-person conference");
-    assert_eq!(snapshot.call.participants.len(), 1000);
+        .expect("profile conference start");
+    assert_eq!(snapshot.call.participants.len(), participant_count);
     assert_eq!(snapshot.topology, ConferenceTopology::Sfu);
 
     for (offset, participant) in invitees.iter().enumerate() {
         let accept = CallSignal {
-            event_id: EventId::from_opaque(oid(format!("accept-person-{:03}", offset + 1))),
+            event_id: EventId::from_opaque(oid(format!("accept-person-{:04}", offset + 1))),
             scope: scope(),
             call_id: start.call_id.clone(),
             expected_revision: offset as u64,
@@ -429,7 +428,7 @@ fn thousand_person_sfu_conference_fits_bounded_call_ceiling() {
     }
     let active = coordinator
         .snapshot(&host, &scope(), &start.call_id)
-        .expect("1000 accepted snapshot");
+        .expect("accepted profile snapshot");
     assert_eq!(
         active
             .call
@@ -437,7 +436,28 @@ fn thousand_person_sfu_conference_fits_bounded_call_ceiling() {
             .iter()
             .filter(|participant| participant.state == CallParticipantState::Accepted)
             .count(),
-        1000
+        participant_count
     );
     assert_eq!(active.call.signalling_state, CallSignallingState::Active);
+}
+
+#[test]
+fn ten_person_sfu_conference_profile() {
+    assert_sfu_conference_profile(10);
+}
+
+#[test]
+fn hundred_person_sfu_conference_profile() {
+    assert_sfu_conference_profile(100);
+}
+
+#[test]
+fn five_hundred_person_sfu_conference_profile() {
+    assert_sfu_conference_profile(500);
+}
+
+#[test]
+fn thousand_person_sfu_conference_fits_bounded_call_ceiling() {
+    assert_eq!(MAX_CALL_PARTICIPANTS, 1024);
+    assert_sfu_conference_profile(1000);
 }
