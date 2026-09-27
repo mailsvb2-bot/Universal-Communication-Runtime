@@ -116,7 +116,10 @@ pub trait RecordingStore: StorageProvider {
         &self,
         now_unix_ms: i64,
         limit: usize,
-    ) -> Result<Vec<RecordingSession>, DurableStoreError>;
+    ) -> Result<Vec<RecordingSession>, DurableStoreError> {
+        let _ = (now_unix_ms, limit);
+        Err(DurableStoreError::Unavailable)
+    }
 
     /// Applies one participant-authenticated consent decision under optimistic revision.
     ///
