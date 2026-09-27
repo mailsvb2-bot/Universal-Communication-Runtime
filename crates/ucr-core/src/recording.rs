@@ -1,8 +1,87 @@
+use core::fmt;
+
 use ucr_model::{
-    EventEnvelope, PrincipalRef, RecordingConsentState, RecordingId, RecordingSession, TenantScope,
+    CallId, EventEnvelope, PrincipalRef, RecordingConsentState, RecordingId, RecordingSession,
+    TenantScope,
 };
 
 use crate::{DurableRecordStatus, DurableStoreError, StorageProvider};
+
+/// Provider-side operation requested after the canonical Recording lifecycle authorizes it.
+///
+/// This is deliberately not another Recording state machine. The durable `RecordingStore` remains
+/// authoritative; providers only perform bounded media/storage side effects for an already
+/// authorized lifecycle revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecordingProviderOperation {
+    Start,
+    Stop,
+    Delete,
+}
+
+/// Minimal non-secret context a media provider may use to bind side effects to canonical state.
+///
+/// The tuple `(scope, recording_id, lifecycle_revision, operation)` is the provider idempotency
+/// identity. Exact retries must not duplicate capture, finalization, or deletion effects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingProviderRequest {
+    pub scope: TenantScope,
+    pub recording_id: RecordingId,
+    pub call_id: CallId,
+    pub lifecycle_revision: u64,
+    pub operation: RecordingProviderOperation,
+    pub expires_at_unix_ms: i64,
+}
+
+impl RecordingProviderRequest {
+    #[must_use]
+    pub fn for_session(session: &RecordingSession, operation: RecordingProviderOperation) -> Self {
+        Self {
+            scope: session.scope.clone(),
+            recording_id: session.recording_id.clone(),
+            call_id: session.call_id.clone(),
+            lifecycle_revision: session.revision,
+            operation,
+            expires_at_unix_ms: session.expires_at_unix_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingProviderHealth {
+    Healthy,
+    Degraded,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingProviderError {
+    Conflict,
+    CapacityExceeded,
+    TemporarilyUnavailable,
+    PolicyDenied,
+    Internal,
+}
+
+/// Pluggable encoded-media/storage boundary for Conference recording.
+///
+/// Implementations may represent an in-process recorder, S3-compatible encrypted object pipeline,
+/// or an external media system. They must not own Conference/Call/Recording lifecycle state, must
+/// not persist UCR MLS keys, and must treat exact provider requests idempotently across retries.
+pub trait RecordingMediaProvider: fmt::Debug + Send + Sync {
+    fn provider_id(&self) -> &'static str;
+    fn health(&self) -> RecordingProviderHealth;
+
+    /// Applies one already-authorized provider side effect.
+    ///
+    /// # Errors
+    /// Returns a bounded provider failure. A changed request reusing an already-applied canonical
+    /// operation identity must fail with `Conflict` rather than silently widening behavior.
+    fn apply(
+        &self,
+        request: &RecordingProviderRequest,
+    ) -> Result<(), RecordingProviderError>;
+}
 
 /// Durable owner of recording policy, consent evidence and lifecycle only.
 ///
