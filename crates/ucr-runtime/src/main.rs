@@ -343,9 +343,13 @@ async fn run_recording_retention_worker(database: &PathBuf) -> Result<(), String
     let poll_interval = std::env::var("UCR_RECORDING_RETENTION_POLL_INTERVAL_MS")
         .ok()
         .map(|value| {
-            value.parse::<u64>().map(Duration::from_millis).map_err(|_| {
-                "UCR_RECORDING_RETENTION_POLL_INTERVAL_MS must be an unsigned integer".to_owned()
-            })
+            value
+                .parse::<u64>()
+                .map(Duration::from_millis)
+                .map_err(|_| {
+                    "UCR_RECORDING_RETENTION_POLL_INTERVAL_MS must be an unsigned integer"
+                        .to_owned()
+                })
         })
         .transpose()?
         .unwrap_or(DEFAULT_RECORDING_RETENTION_POLL_INTERVAL);
