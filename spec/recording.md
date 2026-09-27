@@ -15,8 +15,9 @@ Recording lifecycle mutations are optimistic-revision operations. Start, stop an
 Externally observable recording lifecycle facts use the one canonical Event journal:
 - transition to `ACTIVE` emits `ucr.recording.started`;
 - transition to `STOPPED` emits `ucr.recording.stopped`, including an ACTIVE recording stopped by participant denial/revocation;
-- transition to `EXPIRED` emits `ucr.recording.expired`;
 - transition to `DELETED` emits `ucr.recording.deleted`.
+
+The store contract also provides an atomic `expire_recording_with_event` path for a future retention worker, but no public/runtime expiry scheduler is claimed yet. `ucr.recording.expired` therefore remains Prepared until that scheduler/provider path has executable evidence.
 
 The Event payload is `RecordingLifecycleEvent` and contains only the scoped recording/call identifiers, previous/current state, resulting revision and occurrence timestamp. Recording snapshot mutation and Event append are one durable atomic store action. Memory performs both under one mutex with rollback on Event conflict; SQLite performs compare-and-swap plus Event append in one immediate transaction. A store that cannot prove this atomicity fails closed rather than performing two independent writes. This lifecycle evidence still does not make a concrete media recorder Production-ready.
 
