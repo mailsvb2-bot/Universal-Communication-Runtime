@@ -45,7 +45,7 @@ use ucr_model::{
     OrganizationManagedDeviceBinding, OrganizationManagedIdentityBinding, OrganizationModeProfile,
     PermissionGrant, PersonalNodeObject, PersonalNodeProfile, PrincipalIdentityBinding,
     PrincipalKind, PrincipalRef, PublicKeyDescriptor, RecordingConsentState, RecordingId,
-    RecordingSession, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
+    RecordingSession, RecordingState, RecoveryPlan, RecoveryPlanId, ScopedPrincipal, ServiceAuditOperationRef,
     ServiceAuditRecord, ServiceCredentialId, ServiceCredentialRecord, ServiceCredentialState,
     ServiceQuotaPolicy, ServiceRateLimitPolicy, ServiceRequestRateClass,
     ServiceResourceQuotaPolicy, SessionId, StoreForwardId, StoreForwardJob, StoreForwardLeaseId,
