@@ -16,8 +16,9 @@ fn horizontal_sfu_placement_remains_ephemeral_and_non_authoritative() {
     assert!(sfu.contains("pub struct SfuClusterDirectory"));
     assert!(sfu.contains("pub struct SfuNodeDescriptor"));
     assert!(sfu.contains("pub enum SfuNodeState"));
-    assert!(sfu.contains("pub fn select_node"));
+    assert!(sfu.contains("pub fn place_session"));
     assert!(sfu.contains("pub fn mark_draining"));
+    assert!(sfu.contains("pub fn release_session"));
     assert!(sfu.contains("placement_score"));
     assert!(spec.contains("Horizontal placement foundation"));
 
