@@ -165,6 +165,32 @@ async fn dispatch_post(path: &str, request: Request<Incoming>, state: &AppState)
         Ok(body) => body,
         Err(error) => return error.into_response(),
     };
+    if path.starts_with("/v1/recordings") {
+        let mut client =
+            pb::recording_service_client::RecordingServiceClient::new(state.upstream.clone());
+        return match path {
+            "/v1/recordings" => {
+                forward_request_recording(&mut client, &body, authorization.as_deref()).await
+            }
+            "/v1/recordings/get" => {
+                forward_get_recording(&mut client, &body, authorization.as_deref()).await
+            }
+            "/v1/recordings/consent" => {
+                forward_recording_consent(&mut client, &body, authorization.as_deref()).await
+            }
+            "/v1/recordings/start" => {
+                forward_start_recording(&mut client, &body, authorization.as_deref()).await
+            }
+            "/v1/recordings/stop" => {
+                forward_stop_recording(&mut client, &body, authorization.as_deref()).await
+            }
+            "/v1/recordings/delete" => {
+                forward_delete_recording(&mut client, &body, authorization.as_deref()).await
+            }
+            _ => TransportError::new(StatusCode::NOT_FOUND, "recording HTTP route not found")
+                .into_response(),
+        };
+    }
     let mut client = pb::universal_conference_service_client::UniversalConferenceServiceClient::new(
         state.upstream.clone(),
     );
@@ -350,6 +376,7 @@ fn hex_nibble(value: u8) -> Result<u8, TransportError> {
 
 type ConferenceClient =
     pb::universal_conference_service_client::UniversalConferenceServiceClient<Channel>;
+type RecordingClient = pb::recording_service_client::RecordingServiceClient<Channel>;
 
 fn attach_authorization<T>(
     request: &mut GrpcRequest<T>,
@@ -699,6 +726,331 @@ struct AttendanceJson {
 struct CapabilitiesJson {
     scope: ScopeJson,
     integration_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingPolicyJson {
+    require_all_participant_consent: bool,
+    notify_all_participants: bool,
+    retention_seconds: u64,
+    #[serde(default)]
+    policy_reference: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingRequestJson {
+    scope: ScopeJson,
+    recording_id: String,
+    call_id: String,
+    policy: RecordingPolicyJson,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingLookupJson {
+    scope: ScopeJson,
+    recording_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrincipalJson {
+    principal_id: String,
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingConsentJson {
+    participant: PrincipalJson,
+    state: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingSetConsentJson {
+    scope: ScopeJson,
+    recording_id: String,
+    consent: RecordingConsentJson,
+    expected_revision: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordingMutationJson {
+    scope: ScopeJson,
+    recording_id: String,
+    expected_revision: u64,
+}
+
+
+fn principal_kind_code(kind: &str) -> Result<i32, TransportError> {
+    match kind {
+        "unspecified" => Ok(pb::PrincipalKind::Unspecified as i32),
+        "person" => Ok(pb::PrincipalKind::Person as i32),
+        "device" => Ok(pb::PrincipalKind::Device as i32),
+        "service_account" => Ok(pb::PrincipalKind::ServiceAccount as i32),
+        "ai_agent" => Ok(pb::PrincipalKind::AiAgent as i32),
+        "bot" => Ok(pb::PrincipalKind::Bot as i32),
+        "organization" => Ok(pb::PrincipalKind::Organization as i32),
+        "automation" => Ok(pb::PrincipalKind::Automation as i32),
+        "external_platform" => Ok(pb::PrincipalKind::ExternalPlatform as i32),
+        _ => Err(TransportError::new(
+            StatusCode::BAD_REQUEST,
+            "unknown principal kind",
+        )),
+    }
+}
+
+fn recording_consent_state_code(state: &str) -> Result<i32, TransportError> {
+    match state {
+        "granted" => Ok(pb::RecordingConsentState::Granted as i32),
+        "denied" => Ok(pb::RecordingConsentState::Denied as i32),
+        "revoked" => Ok(pb::RecordingConsentState::Revoked as i32),
+        _ => Err(TransportError::new(
+            StatusCode::BAD_REQUEST,
+            "recording consent must be granted, denied, or revoked",
+        )),
+    }
+}
+
+fn principal_of(value: &PrincipalJson) -> Result<pb::PrincipalRef, TransportError> {
+    Ok(pb::PrincipalRef {
+        principal_id: Some(opaque(&value.principal_id)?),
+        kind: principal_kind_code(&value.kind)?,
+    })
+}
+
+fn recording_policy_of(value: &RecordingPolicyJson) -> pb::RecordingPolicy {
+    pb::RecordingPolicy {
+        require_all_participant_consent: value.require_all_participant_consent,
+        notify_all_participants: value.notify_all_participants,
+        retention_seconds: value.retention_seconds,
+        policy_reference: value.policy_reference.clone(),
+    }
+}
+
+async fn forward_request_recording(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingRequestJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let request = match (|| -> Result<_, TransportError> {
+        Ok(pb::RecordingRequest {
+            scope: Some(scope_of(&parsed.scope)?),
+            recording_id: Some(opaque(&parsed.recording_id)?),
+            call_id: Some(opaque(&parsed.call_id)?),
+            policy: Some(recording_policy_of(&parsed.policy)),
+        })
+    })() {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(request, authorization) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(client.request_recording(request), |response| match response.result {
+        Some(pb::recording_request_response::Result::Recording(recording)) => {
+            json_response(StatusCode::OK, &json!({ "recording": recording_json(&recording) }))
+        }
+        Some(pb::recording_request_response::Result::Error(error)) => error_response(&error),
+        None => empty_upstream(),
+    })
+    .await
+}
+
+async fn forward_get_recording(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingLookupJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let request = match (|| -> Result<_, TransportError> {
+        Ok(pb::RecordingGetRequest {
+            scope: Some(scope_of(&parsed.scope)?),
+            recording_id: Some(opaque(&parsed.recording_id)?),
+        })
+    })() {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(request, authorization) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(client.get_recording(request), |response| match response.result {
+        Some(pb::recording_get_response::Result::Recording(recording)) => {
+            json_response(StatusCode::OK, &json!({ "recording": recording_json(&recording) }))
+        }
+        Some(pb::recording_get_response::Result::Error(error)) => error_response(&error),
+        None => empty_upstream(),
+    })
+    .await
+}
+
+async fn forward_recording_consent(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingSetConsentJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let request = match (|| -> Result<_, TransportError> {
+        Ok(pb::RecordingSetConsentRequest {
+            scope: Some(scope_of(&parsed.scope)?),
+            recording_id: Some(opaque(&parsed.recording_id)?),
+            consent: Some(pb::RecordingConsent {
+                participant: Some(principal_of(&parsed.consent.participant)?),
+                state: recording_consent_state_code(&parsed.consent.state)?,
+                decided_at_unix_ms: 0,
+            }),
+            expected_revision: parsed.expected_revision,
+        })
+    })() {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(request, authorization) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(client.set_recording_consent(request), |response| {
+        match response.result {
+            Some(pb::recording_set_consent_response::Result::Recording(recording)) => {
+                json_response(StatusCode::OK, &json!({ "recording": recording_json(&recording) }))
+            }
+            Some(pb::recording_set_consent_response::Result::Error(error)) => {
+                error_response(&error)
+            }
+            None => empty_upstream(),
+        }
+    })
+    .await
+}
+
+fn recording_mutation_request(
+    parsed: &RecordingMutationJson,
+) -> Result<(pb::TenantScope, pb::OpaqueId, u64), TransportError> {
+    Ok((
+        scope_of(&parsed.scope)?,
+        opaque(&parsed.recording_id)?,
+        parsed.expected_revision,
+    ))
+}
+
+async fn forward_start_recording(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingMutationJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let (scope, recording_id, expected_revision) = match recording_mutation_request(&parsed) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(
+        pb::RecordingStartRequest {
+            scope: Some(scope),
+            recording_id: Some(recording_id),
+            expected_revision,
+        },
+        authorization,
+    ) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(client.start_recording(request), |response| match response.result {
+        Some(pb::recording_start_response::Result::Recording(recording)) => {
+            json_response(StatusCode::OK, &json!({ "recording": recording_json(&recording) }))
+        }
+        Some(pb::recording_start_response::Result::Error(error)) => error_response(&error),
+        None => empty_upstream(),
+    })
+    .await
+}
+
+async fn forward_stop_recording(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingMutationJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let (scope, recording_id, expected_revision) = match recording_mutation_request(&parsed) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(
+        pb::RecordingStopRequest {
+            scope: Some(scope),
+            recording_id: Some(recording_id),
+            expected_revision,
+        },
+        authorization,
+    ) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(client.stop_recording(request), |response| match response.result {
+        Some(pb::recording_stop_response::Result::Recording(recording)) => {
+            json_response(StatusCode::OK, &json!({ "recording": recording_json(&recording) }))
+        }
+        Some(pb::recording_stop_response::Result::Error(error)) => error_response(&error),
+        None => empty_upstream(),
+    })
+    .await
+}
+
+async fn forward_delete_recording(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingMutationJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let (scope, recording_id, expected_revision) = match recording_mutation_request(&parsed) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(
+        pb::RecordingDeleteRequest {
+            scope: Some(scope),
+            recording_id: Some(recording_id),
+            expected_revision,
+        },
+        authorization,
+    ) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(client.delete_recording(request), |response| match response.result {
+        Some(pb::recording_delete_response::Result::Acknowledgement(ack)) => json_response(
+            StatusCode::OK,
+            &json!({ "acknowledgement": acknowledgement_json(&ack) }),
+        ),
+        Some(pb::recording_delete_response::Result::Error(error)) => error_response(&error),
+        None => empty_upstream(),
+    })
+    .await
 }
 
 async fn forward_create(
@@ -1501,6 +1853,62 @@ async fn forward_capabilities_input(
         },
     )
     .await
+}
+
+fn principal_json(principal: Option<&pb::PrincipalRef>) -> Value {
+    let Some(principal) = principal else {
+        return Value::Null;
+    };
+    json!({
+        "principal_id": opaque_str(principal.principal_id.as_ref()),
+        "kind": enum_name(
+            principal.kind,
+            &[
+                "unspecified",
+                "person",
+                "device",
+                "service_account",
+                "ai_agent",
+                "bot",
+                "organization",
+                "automation",
+                "external_platform",
+            ],
+        ),
+    })
+}
+
+fn recording_json(recording: &pb::RecordingSession) -> Value {
+    let policy = recording.policy.as_ref();
+    json!({
+        "scope": scope_json(recording.scope.as_ref()),
+        "recording_id": opaque_str(recording.recording_id.as_ref()),
+        "call_id": opaque_str(recording.call_id.as_ref()),
+        "requested_by": principal_json(recording.requested_by.as_ref()),
+        "policy": policy.map(|item| json!({
+            "require_all_participant_consent": item.require_all_participant_consent,
+            "notify_all_participants": item.notify_all_participants,
+            "retention_seconds": item.retention_seconds,
+            "policy_reference": item.policy_reference,
+        })),
+        "state": enum_name(
+            recording.state,
+            &["unspecified", "waiting_for_consent", "ready", "active", "stopped", "expired", "deleted"],
+        ),
+        "consents": recording.consents.iter().map(|consent| json!({
+            "participant": principal_json(consent.participant.as_ref()),
+            "state": enum_name(
+                consent.state,
+                &["unspecified", "pending", "granted", "denied", "revoked"],
+            ),
+            "decided_at_unix_ms": consent.decided_at_unix_ms,
+        })).collect::<Vec<_>>(),
+        "requested_at_unix_ms": recording.requested_at_unix_ms,
+        "started_at_unix_ms": recording.started_at_unix_ms,
+        "stopped_at_unix_ms": recording.stopped_at_unix_ms,
+        "expires_at_unix_ms": recording.expires_at_unix_ms,
+        "revision": recording.revision,
+    })
 }
 
 fn conference_json(conference: &pb::UniversalConferenceDescriptor) -> Value {
