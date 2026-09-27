@@ -259,7 +259,9 @@ mod tests {
             .with_no_client_auth();
         client.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
-        let tcp = TcpStream::connect(edge_address).await.expect("connect edge");
+        let tcp = TcpStream::connect(edge_address)
+            .await
+            .expect("connect edge");
         let tls = connector
             .connect(ServerName::try_from("localhost").expect("server name"), tcp)
             .await
