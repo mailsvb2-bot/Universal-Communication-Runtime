@@ -208,7 +208,7 @@ where
             (Ok(authentication), Ok((scope, recording_id))) => {
                 self.admit_management(&scope, authentication).and_then(|_| {
                     self.store
-                        .recording(scope, recording_id)
+                        .recording(&scope, &recording_id)
                         .map_err(map_store_error)?
                         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))
                 })
@@ -246,7 +246,7 @@ where
                     }
                     let recording = self
                         .store
-                        .recording(scope, recording_id)
+                        .recording(&scope, &recording_id)
                         .map_err(map_store_error)?
                         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
                     if claims.call_id != recording.call_id {
@@ -490,7 +490,7 @@ where
     {
         match (authentication, decoded) {
             (Ok(authentication), Ok((scope, recording_id, expected_revision))) => {
-                self.admit_management(scope, authentication)?;
+                self.admit_management(&scope, authentication)?;
                 transition(
                     &*self.store,
                     &scope,
