@@ -807,7 +807,6 @@ struct RecordingMutationJson {
     expected_revision: u64,
 }
 
-
 fn principal_kind_code(kind: &str) -> Result<i32, TransportError> {
     match kind {
         "unspecified" => Ok(pb::PrincipalKind::Unspecified as i32),
@@ -878,13 +877,17 @@ async fn forward_request_recording(
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };
-    call(client.request_recording(request), |response| match response.result {
-        Some(pb::recording_request_response::Result::Recording(recording)) => {
-            json_response(StatusCode::OK, &json!({ "recording": recording_json(&recording) }))
-        }
-        Some(pb::recording_request_response::Result::Error(error)) => error_response(&error),
-        None => empty_upstream(),
-    })
+    call(
+        client.request_recording(request),
+        |response| match response.result {
+            Some(pb::recording_request_response::Result::Recording(recording)) => json_response(
+                StatusCode::OK,
+                &json!({ "recording": recording_json(&recording) }),
+            ),
+            Some(pb::recording_request_response::Result::Error(error)) => error_response(&error),
+            None => empty_upstream(),
+        },
+    )
     .await
 }
 
@@ -910,12 +913,15 @@ async fn forward_get_recording(
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };
-    call(client.get_recording(request), |response| match response.result {
-        Some(pb::recording_get_response::Result::Recording(recording)) => {
-            json_response(StatusCode::OK, &json!({ "recording": recording_json(&recording) }))
+    call(client.get_recording(request), |response| {
+        match response.result {
+            Some(pb::recording_get_response::Result::Recording(recording)) => json_response(
+                StatusCode::OK,
+                &json!({ "recording": recording_json(&recording) }),
+            ),
+            Some(pb::recording_get_response::Result::Error(error)) => error_response(&error),
+            None => empty_upstream(),
         }
-        Some(pb::recording_get_response::Result::Error(error)) => error_response(&error),
-        None => empty_upstream(),
     })
     .await
 }
@@ -948,17 +954,21 @@ async fn forward_recording_consent(
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };
-    call(client.set_recording_consent(request), |response| {
-        match response.result {
+    call(
+        client.set_recording_consent(request),
+        |response| match response.result {
             Some(pb::recording_set_consent_response::Result::Recording(recording)) => {
-                json_response(StatusCode::OK, &json!({ "recording": recording_json(&recording) }))
+                json_response(
+                    StatusCode::OK,
+                    &json!({ "recording": recording_json(&recording) }),
+                )
             }
             Some(pb::recording_set_consent_response::Result::Error(error)) => {
                 error_response(&error)
             }
             None => empty_upstream(),
-        }
-    })
+        },
+    )
     .await
 }
 
@@ -996,12 +1006,15 @@ async fn forward_start_recording(
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };
-    call(client.start_recording(request), |response| match response.result {
-        Some(pb::recording_start_response::Result::Recording(recording)) => {
-            json_response(StatusCode::OK, &json!({ "recording": recording_json(&recording) }))
+    call(client.start_recording(request), |response| {
+        match response.result {
+            Some(pb::recording_start_response::Result::Recording(recording)) => json_response(
+                StatusCode::OK,
+                &json!({ "recording": recording_json(&recording) }),
+            ),
+            Some(pb::recording_start_response::Result::Error(error)) => error_response(&error),
+            None => empty_upstream(),
         }
-        Some(pb::recording_start_response::Result::Error(error)) => error_response(&error),
-        None => empty_upstream(),
     })
     .await
 }
@@ -1030,12 +1043,15 @@ async fn forward_stop_recording(
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };
-    call(client.stop_recording(request), |response| match response.result {
-        Some(pb::recording_stop_response::Result::Recording(recording)) => {
-            json_response(StatusCode::OK, &json!({ "recording": recording_json(&recording) }))
+    call(client.stop_recording(request), |response| {
+        match response.result {
+            Some(pb::recording_stop_response::Result::Recording(recording)) => json_response(
+                StatusCode::OK,
+                &json!({ "recording": recording_json(&recording) }),
+            ),
+            Some(pb::recording_stop_response::Result::Error(error)) => error_response(&error),
+            None => empty_upstream(),
         }
-        Some(pb::recording_stop_response::Result::Error(error)) => error_response(&error),
-        None => empty_upstream(),
     })
     .await
 }
@@ -1064,14 +1080,17 @@ async fn forward_delete_recording(
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };
-    call(client.delete_recording(request), |response| match response.result {
-        Some(pb::recording_delete_response::Result::Acknowledgement(ack)) => json_response(
-            StatusCode::OK,
-            &json!({ "acknowledgement": acknowledgement_json(&ack) }),
-        ),
-        Some(pb::recording_delete_response::Result::Error(error)) => error_response(&error),
-        None => empty_upstream(),
-    })
+    call(
+        client.delete_recording(request),
+        |response| match response.result {
+            Some(pb::recording_delete_response::Result::Acknowledgement(ack)) => json_response(
+                StatusCode::OK,
+                &json!({ "acknowledgement": acknowledgement_json(&ack) }),
+            ),
+            Some(pb::recording_delete_response::Result::Error(error)) => error_response(&error),
+            None => empty_upstream(),
+        },
+    )
     .await
 }
 
@@ -2335,8 +2354,8 @@ mod tests {
                     recording_upstream: None,
                 },
             )
-                .await
-                .expect("http adapter");
+            .await
+            .expect("http adapter");
         });
 
         let body = br#"{"scope":{"tenant_id":"tenant-a"},"integration_id":"integration-a"}"#;
@@ -2369,8 +2388,7 @@ mod tests {
 
     #[tokio::test]
     async fn recording_http_routes_fail_closed_without_recording_upstream() {
-        let channel =
-            tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy();
         let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("http listener");
@@ -2665,8 +2683,8 @@ mod tests {
                     recording_upstream: None,
                 },
             )
-                .await
-                .expect("http adapter");
+            .await
+            .expect("http adapter");
         });
 
         let edge_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -2862,8 +2880,8 @@ mod tests {
                     recording_upstream: None,
                 },
             )
-                .await
-                .expect("http adapter");
+            .await
+            .expect("http adapter");
         });
 
         let body = br#"{"scope":{"tenant_id":"tenant-a","namespace_id":"ns-a"},"integration_id":"integration-a","external_conference_id_b64":"ZXZlbnQtMQ==","idempotency_key":"create-1","mode":"webinar","schedule":{"starts_at_unix_ms":10,"join_before_seconds":5}}"#;
@@ -2974,8 +2992,8 @@ mod tests {
                     recording_upstream: None,
                 },
             )
-                .await
-                .expect("http adapter");
+            .await
+            .expect("http adapter");
         });
 
         let created = post_json(
@@ -3122,8 +3140,8 @@ mod tests {
                     recording_upstream: None,
                 },
             )
-                .await
-                .expect("http adapter");
+            .await
+            .expect("http adapter");
         });
 
         let created = post_json(
