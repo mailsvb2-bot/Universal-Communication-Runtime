@@ -361,10 +361,10 @@ fn validate_recording_lifecycle_event(
     next: &RecordingSession,
     event: Option<&EventEnvelope>,
 ) -> Result<(), DurableStoreError> {
-    let expected_type = if current.state != next.state {
-        recording_lifecycle_event_type(next.state)
-    } else {
+    let expected_type = if current.state == next.state {
         None
+    } else {
+        recording_lifecycle_event_type(next.state)
     };
     match (expected_type, event) {
         (None, None) => Ok(()),
