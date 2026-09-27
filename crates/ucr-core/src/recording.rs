@@ -270,3 +270,104 @@ pub trait RecordingStore: StorageProvider {
         Err(DurableStoreError::Unavailable)
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashSet, sync::Mutex};
+
+    use ucr_model::{
+        CallId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingId, RecordingPolicy,
+        RecordingSession, RecordingState, TenantId, TenantScope,
+    };
+
+    use super::{
+        RecordingMediaProvider, RecordingProviderError, RecordingProviderHealth,
+        RecordingProviderOperation, RecordingProviderRequest,
+    };
+
+    fn opaque(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid test id")
+    }
+
+    fn session() -> RecordingSession {
+        RecordingSession {
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(opaque("tenant")),
+                namespace_id: None,
+            },
+            recording_id: RecordingId::from_opaque(opaque("recording")),
+            call_id: CallId::from_opaque(opaque("call")),
+            requested_by: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(opaque("service")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+            policy: RecordingPolicy {
+                require_all_participant_consent: true,
+                notify_all_participants: true,
+                retention_seconds: 3_600,
+                policy_reference: None,
+            },
+            state: RecordingState::Active,
+            consents: Vec::new(),
+            requested_at_unix_ms: 10,
+            started_at_unix_ms: Some(20),
+            stopped_at_unix_ms: None,
+            expires_at_unix_ms: 3_600_010,
+            revision: 7,
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct IdempotentProvider {
+        applied: Mutex<HashSet<(String, u64, RecordingProviderOperation)>>,
+    }
+
+    impl RecordingMediaProvider for IdempotentProvider {
+        fn provider_id(&self) -> &'static str {
+            "test.idempotent"
+        }
+
+        fn health(&self) -> RecordingProviderHealth {
+            RecordingProviderHealth::Healthy
+        }
+
+        fn apply(
+            &self,
+            request: &RecordingProviderRequest,
+        ) -> Result<(), RecordingProviderError> {
+            self.applied
+                .lock()
+                .expect("provider lock")
+                .insert((
+                    request.recording_id.as_opaque().as_str().to_owned(),
+                    request.lifecycle_revision,
+                    request.operation,
+                ));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn provider_request_copies_only_bounded_canonical_recording_context() {
+        let session = session();
+        let request =
+            RecordingProviderRequest::for_session(&session, RecordingProviderOperation::Start);
+        assert_eq!(request.scope, session.scope);
+        assert_eq!(request.recording_id, session.recording_id);
+        assert_eq!(request.call_id, session.call_id);
+        assert_eq!(request.lifecycle_revision, session.revision);
+        assert_eq!(request.expires_at_unix_ms, session.expires_at_unix_ms);
+        assert_eq!(request.operation, RecordingProviderOperation::Start);
+    }
+
+    #[test]
+    fn provider_contract_supports_exact_retry_without_duplicate_effect_identity() {
+        let provider = IdempotentProvider::default();
+        let request =
+            RecordingProviderRequest::for_session(&session(), RecordingProviderOperation::Delete);
+        provider.apply(&request).expect("first apply");
+        provider.apply(&request).expect("exact retry");
+        assert_eq!(provider.applied.lock().expect("provider lock").len(), 1);
+    }
+}
