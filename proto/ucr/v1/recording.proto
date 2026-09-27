@@ -101,8 +101,6 @@ message RecordingSetConsentRequest {
   OpaqueId recording_id = 2;
   RecordingConsent consent = 3;
   uint64 expected_revision = 4;
-  // Optional for backward compatibility. New clients should provide a stable key for retry safety.
-  optional string idempotency_key = 5;
 }
 
 message RecordingSetConsentResponse {
