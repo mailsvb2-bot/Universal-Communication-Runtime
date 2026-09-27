@@ -32,7 +32,7 @@ def main() -> None:
     require(manifest["protocol_package"] == "ucr.v1", "wrong protocol package")
     require(manifest["languages"] == LANGUAGES, "required SDK language set drifted")
     require(
-        manifest["services"] == ["IntegrationService", "EventService", "CallService", "GroupService", "DeviceService", "SyncService", "StoreForwardService", "LocalTransportService", "MeshService", "RecoveryService", "UniversalConferenceService"],
+        manifest["services"] == ["IntegrationService", "EventService", "CallService", "GroupService", "DeviceService", "SyncService", "StoreForwardService", "LocalTransportService", "MeshService", "RecoveryService", "UniversalConferenceService", "RecordingService"],
         "required SDK service set drifted",
     )
     auth = manifest["authentication"]
@@ -54,11 +54,35 @@ def main() -> None:
     require(conference_auth["bearer_scheme"] == "Bearer", "Bearer scheme spelling drifted")
     require(conference_auth["mixed_schemes"] == "reject", "mixed conference auth must fail closed")
 
+    recording_auth = auth["service_overrides"]["RecordingService"]
+    require(
+        recording_auth["management_schemes"]
+        == ["service_principal_binary_metadata", "oauth2_bearer"],
+        "RecordingService management auth schemes drifted",
+    )
+    require(
+        recording_auth["participant_consent_scheme"] == "join_bearer",
+        "RecordingService participant consent auth drifted",
+    )
+    require(
+        recording_auth["bearer_metadata_key"] == AUTHORIZATION_KEY,
+        "RecordingService bearer metadata key drifted",
+    )
+    require(recording_auth["bearer_scheme"] == "Bearer", "RecordingService Bearer spelling drifted")
+    require(recording_auth["mixed_schemes"] == "reject", "mixed recording auth must fail closed")
+
+    transport = manifest["transport"]
+    require(transport["default_grpc_role"] == "api", "default SDK gRPC role drifted")
+    require(
+        transport["service_endpoint_roles"]["RecordingService"] == "realtime",
+        "RecordingService endpoint role drifted",
+    )
+
     http = manifest["http"]
     require(http["universal_conference_base_path"] == "/v1", "conference REST base path drifted")
     require(http["openapi_path"] == "/v1/openapi.yaml", "conference OpenAPI path drifted")
     require(
-        http["business_logic_owner"] == "ucr.v1 UniversalConferenceService",
+        http["business_logic_owner"] == "ucr.v1 UniversalConferenceService and RecordingService",
         "REST adapter became a second business-logic owner",
     )
 
@@ -96,8 +120,13 @@ def main() -> None:
     require("pb::mesh_service_client::MeshServiceClient<Channel>" in rust_sdk, "Rust SDK missing MeshService client")
     require("pb::recovery_service_client::RecoveryServiceClient<Channel>" in rust_sdk, "Rust SDK missing RecoveryService client")
     require("pb::universal_conference_service_client::UniversalConferenceServiceClient<Channel>" in rust_sdk, "Rust SDK missing UniversalConferenceService client")
+    require("pb::recording_service_client::RecordingServiceClient<Channel>" in rust_sdk, "Rust SDK missing RecordingService client")
+    require("pub async fn connect_with_recording_endpoint" in rust_sdk, "Rust SDK missing explicit RecordingService endpoint support")
     for method in ("create_conference", "resolve_conference", "get_conference", "transition_conference", "set_entry_open", "ensure_participant", "ensure_participant_device", "update_participant", "remove_participant", "list_participants", "set_subscriptions", "prepare_conference_runtime", "issue_join_grant", "revoke_join_grant", "get_participant_attendance", "get_conference_capabilities"):
         require(f"pub async fn {method}" in rust_sdk, f"Rust SDK missing UniversalConferenceService method: {method}")
+    for method in ("request_recording", "get_recording", "start_recording", "stop_recording", "delete_recording"):
+        require(f"pub async fn {method}" in rust_sdk, f"Rust SDK missing RecordingService management method: {method}")
+    require("pub async fn set_recording_consent" not in rust_sdk, "Service Credential SDK must not impersonate participant recording consent")
     for method in ("register_device", "get_device", "revoke_device", "create_sync_session", "get_sync_session", "transition_sync", "record_sync_checkpoint", "get_latest_sync_checkpoint"):
         require(f"pub async fn {method}" in rust_sdk, f"Rust SDK missing multi-device method: {method}")
     for method in ("enqueue_store_forward", "get_store_forward_status"):
