@@ -55,6 +55,18 @@ message RecordingSession {
   uint64 revision = 12;
 }
 
+// Payload carried by canonical recording lifecycle Events. EventEnvelope owns actor/correlation
+// evidence; this payload owns only the recording transition facts.
+message RecordingLifecycleEvent {
+  TenantScope scope = 1;
+  OpaqueId recording_id = 2;
+  OpaqueId call_id = 3;
+  RecordingState previous = 4;
+  RecordingState current = 5;
+  uint64 revision = 6;
+  int64 occurred_at_unix_ms = 7;
+}
+
 message RecordingRequest {
   TenantScope scope = 1;
   OpaqueId recording_id = 2;
@@ -89,6 +101,8 @@ message RecordingSetConsentRequest {
   OpaqueId recording_id = 2;
   RecordingConsent consent = 3;
   uint64 expected_revision = 4;
+  // Optional for backward compatibility. New clients should provide a stable key for retry safety.
+  optional string idempotency_key = 5;
 }
 
 message RecordingSetConsentResponse {
@@ -102,6 +116,7 @@ message RecordingStartRequest {
   TenantScope scope = 1;
   OpaqueId recording_id = 2;
   uint64 expected_revision = 3;
+  optional string idempotency_key = 4;
 }
 
 message RecordingStartResponse {
@@ -115,6 +130,7 @@ message RecordingStopRequest {
   TenantScope scope = 1;
   OpaqueId recording_id = 2;
   uint64 expected_revision = 3;
+  optional string idempotency_key = 4;
 }
 
 message RecordingStopResponse {
@@ -128,6 +144,7 @@ message RecordingDeleteRequest {
   TenantScope scope = 1;
   OpaqueId recording_id = 2;
   uint64 expected_revision = 3;
+  optional string idempotency_key = 4;
 }
 
 message RecordingDeleteResponse {
