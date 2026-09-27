@@ -74,3 +74,5 @@ embedding the existing UCR join surface without introducing a second conference 
 Applications may wrap this primitive as a widget, component or full-page experience while keeping
 all conference semantics in the public UCR contract.
 
+
+The high-level client also covers conference resolution, participant removal/listing, raised-hand listing and capability discovery, so integrations do not need to drop down to internal identifiers or a second transport surface.
