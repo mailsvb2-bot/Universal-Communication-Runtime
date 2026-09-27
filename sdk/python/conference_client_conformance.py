@@ -102,9 +102,9 @@ except UniversalConferenceHttpError as error:
     require(error.code == "RATE_LIMITED", "canonical error code drifted")
     require(error.retryable is True, "canonical retryability was discarded")
     require(error.retry_after_ms == 2500, "canonical retry delay was discarded")
+    require("machine-token" not in str(error), "error diagnostics leaked machine token")
 
 require(len(calls) == 5, "error path performed hidden retries")
-require("machine-token" not in str(error), "error diagnostics leaked machine token")
 
 try:
     UniversalConferenceClient("http://public.example", "token")
