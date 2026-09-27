@@ -20,7 +20,7 @@ use ucr_core::{
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, FederationPeerStore,
     IdentityDeviceLookupStore, IdentityStore, MessageStore, PermissionGrantStore,
     PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, RecordingStore,
-    RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
+    MAX_RECORDING_RETENTION_BATCH, RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
     ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
     ServiceQuotaConsumeError, ServiceQuotaStore, ServiceResourceQuotaConsumeError, StorageHealth,
     StorageProvider, SyncStore, TrustedSigningKeyStore, UniversalConferenceStore,
@@ -8819,6 +8819,48 @@ impl RecordingStore for MemoryLocalStore {
             .recordings
             .get(&recording_key(scope, recording_id))
             .cloned())
+    }
+
+    fn recordings_due_for_expiry(
+        &self,
+        now_unix_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<RecordingSession>, DurableStoreError> {
+        if limit == 0 || limit > MAX_RECORDING_RETENTION_BATCH {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut due = state
+            .recordings
+            .values()
+            .filter(|recording| {
+                recording.expires_at_unix_ms <= now_unix_ms
+                    && !matches!(
+                        recording.state,
+                        RecordingState::Expired | RecordingState::Deleted
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        due.sort_by(|left, right| {
+            left.expires_at_unix_ms
+                .cmp(&right.expires_at_unix_ms)
+                .then_with(|| {
+                    left.scope
+                        .tenant_id
+                        .as_opaque()
+                        .as_str()
+                        .cmp(right.scope.tenant_id.as_opaque().as_str())
+                })
+                .then_with(|| {
+                    left.recording_id
+                        .as_opaque()
+                        .as_str()
+                        .cmp(right.recording_id.as_opaque().as_str())
+                })
+        });
+        due.truncate(limit);
+        Ok(due)
     }
 
     fn set_recording_consent(
