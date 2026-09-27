@@ -3,9 +3,9 @@
 The executable Prepared Rust SDK lives in `crates/ucr-sdk`.
 Its build script generates client-only Tonic bindings from every checked-in `proto/ucr/v1/*.proto` file.
 
-`UcrSdkClient` wraps the `IntegrationService`, `EventService`, `CallService`, `GroupService`, `DeviceService`, `SyncService`, `StoreForwardService`, `LocalTransportService`, `MeshService`, `RecoveryService` and `UniversalConferenceService` RPCs, attaches Service Credential authentication automatically, and returns canonical generated responses unchanged.
+`UcrSdkClient` wraps the `IntegrationService`, `EventService`, `CallService`, `GroupService`, `DeviceService`, `SyncService`, `StoreForwardService`, `LocalTransportService`, `MeshService`, `RecoveryService`, `UniversalConferenceService` and `RecordingService` management RPCs, attaches Service Credential authentication automatically, and returns canonical generated responses unchanged.
 
-The public Conference ingress also accepts standard `Authorization: Bearer <access-token>` machine credentials. The current `UcrSdkClient` helper is the Service Credential path; callers using Bearer must construct the generated `UniversalConferenceServiceClient` request metadata explicitly and must not mix Bearer with Service Credential metadata. Participant-session services such as `RealtimeService` remain join/session-credential boundaries.
+The public Conference and Recording management ingress also accepts standard `Authorization: Bearer <access-token>` machine credentials. The current `UcrSdkClient` helper is the Service Credential path; callers using machine Bearer must construct the generated client request metadata explicitly and must not mix Bearer with Service Credential metadata. `RecordingService.SetRecordingConsent` is deliberately not wrapped by the Service Credential helper: participant consent requires the participant's short-lived join Bearer and remains a join/session credential boundary, like `RealtimeService`.
 
 It has no runtime dependency on `ucr-core` or a storage crate and performs no automatic UCR operation retry.
 
