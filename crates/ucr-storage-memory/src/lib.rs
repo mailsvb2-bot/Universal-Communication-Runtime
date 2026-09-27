@@ -20,7 +20,7 @@ use ucr_core::{
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, FederationPeerStore,
     IdentityDeviceLookupStore, IdentityStore, MessageStore, PermissionGrantStore,
     PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, RecordingStore,
-    MAX_RECORDING_RETENTION_BATCH, RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
+    RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
     ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
     ServiceQuotaConsumeError, ServiceQuotaStore, ServiceResourceQuotaConsumeError, StorageHealth,
     StorageProvider, SyncStore, TrustedSigningKeyStore, UniversalConferenceStore,
