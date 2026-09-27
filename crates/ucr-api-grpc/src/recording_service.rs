@@ -177,13 +177,7 @@ where
         let decoded = decode_recording_request(request.into_inner());
         let result = match (authentication, decoded) {
             (Ok(authentication), Ok((scope, recording_id, call_id, policy))) => {
-                self.request_recording_inner(
-                    authentication,
-                    &scope,
-                    &recording_id,
-                    call_id,
-                    policy,
-                )
+                self.request_recording_inner(authentication, &scope, &recording_id, call_id, policy)
             }
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
