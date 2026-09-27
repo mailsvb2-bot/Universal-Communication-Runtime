@@ -16,6 +16,37 @@ def fake_transport(path, token, body):
     calls.append((path, token, body))
     if path == "/v1/conferences":
         return {"conference": {"conference_id": "conference-1"}}
+    if path == "/v1/conferences/resolve":
+        return {"conference": {"conference_id": "conference-1"}}
+    if path == "/v1/participants/list":
+        return {"participants": {"participants": [{
+            "external_user_id_b64": "dXNlci0x",
+            "role": "attendee",
+            "audio_muted": False,
+            "camera_allowed": True,
+            "publish_audio_allowed": True,
+            "publish_video_allowed": True,
+            "active": True,
+            "screen_share_allowed": False,
+        }]}}
+    if path == "/v1/participants/raised-hands":
+        return {"raised_hands": {"external_user_ids_b64": ["dXNlci0x"]}}
+    if path == "/v1/capabilities":
+        return {"capabilities": {
+            "capabilities": [],
+            "max_participants": 500,
+            "browser_realtime_gateway": True,
+            "production_webrtc": False,
+            "turn": True,
+            "recording": False,
+            "horizontal_sfu": False,
+            "audio": True,
+            "video": True,
+            "screen_share": True,
+            "webinar": True,
+            "rtmp": False,
+            "codecs": ["ucr.media.audio.opus"],
+        }}
     if path == "/v1/participants":
         return {
             "participant": {
@@ -83,7 +114,25 @@ grant = client.issue_join_grant(
 )
 require("#ucr_join=" in grant["join_url"], "join URL boundary drifted")
 
-require(len(calls) == 4, "client performed hidden retries")
+resolved = client.resolve_conference(
+    scope={"tenant_id": "tenant"},
+    integration_id="integration",
+    external_conference_id="event-1",
+)
+require(resolved["conference_id"] == "conference-1", "resolve response drifted")
+participants = client.list_participants(context, 25)
+require(len(participants) == 1 and participants[0]["role"] == "attendee", "participant list drifted")
+raised_hands = client.list_raised_hands(context, 25)
+require(raised_hands == ["dXNlci0x"], "raised-hands drifted")
+capabilities = client.get_capabilities({"tenant_id": "tenant"}, "integration")
+require(
+    capabilities["browser_realtime_gateway"] is True
+    and capabilities["production_webrtc"] is False,
+    "capability truth drifted",
+)
+client.remove_participant(context, "user-1", "remove-1")
+
+require(len(calls) == 9, "client performed hidden retries")
 require(all(call[1] == "machine-token" for call in calls), "Bearer token transport drifted")
 require(
     calls[0][2]["external_conference_id_b64"] == "ZXZlbnQtMQ==",
@@ -104,7 +153,11 @@ except UniversalConferenceHttpError as error:
     require(error.retry_after_ms == 2500, "canonical retry delay was discarded")
     require("machine-token" not in str(error), "error diagnostics leaked machine token")
 
-require(len(calls) == 5, "error path performed hidden retries")
+require(len(calls) == 10, "error path performed hidden retries")
+require(calls[4][2]["external_conference_id_b64"] == "ZXZlbnQtMQ==", "resolve encoding drifted")
+require(calls[5][2]["max_items"] == 25, "participant list bound drifted")
+require(calls[6][2]["max_items"] == 25, "raised-hands bound drifted")
+require(calls[8][2]["external_user_id_b64"] == "dXNlci0x", "remove participant encoding drifted")
 
 try:
     UniversalConferenceClient._raise_for_error(302, {"redirect": "https://other.example"})
