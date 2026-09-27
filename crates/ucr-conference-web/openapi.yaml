@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: UCR Universal Conference HTTP adapter
+  title: UCR Conference and Recording HTTP adapter
   version: v1
   description: >
     Thin JSON transport over UniversalConferenceService and RecordingService. Paths select one
