@@ -657,22 +657,12 @@ mod horizontal_placement_tests {
             .expect("node b");
 
         let first = directory
-            .place_session(&scope(), &call("call-a"), None, &SfuPlacementPolicy::default(), 100)
+            .place_session(&scope(), &call("call-a"), &SfuPlacementPolicy::default(), 100)
             .expect("placement");
-        let repeated = directory
-            .place_session(&scope(), &call("call-a"), None, &SfuPlacementPolicy::default(), 100)
-            .expect("repeat");
-        assert_eq!(first.node_id, repeated.node_id);
         assert!(!first.retained_sticky_placement);
 
         let sticky = directory
-            .place_session(
-                &scope(),
-                &call("call-a"),
-                Some(&first.node_id),
-                &SfuPlacementPolicy::default(),
-                100,
-            )
+            .place_session(&scope(), &call("call-a"), &SfuPlacementPolicy::default(), 100)
             .expect("sticky");
         assert_eq!(sticky.node_id, first.node_id);
         assert!(sticky.retained_sticky_placement);
@@ -687,13 +677,23 @@ mod horizontal_placement_tests {
                 draining_id.as_str(),
                 "eu",
                 SfuNodeState::Healthy,
-                4,
+                0,
                 100,
                 10_000,
             ))
             .expect("draining candidate");
+        let initial = directory
+            .place_session(
+                &scope(),
+                &call("call-draining"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("initial placement");
+        assert_eq!(initial.node_id, draining_id);
+
         directory
-            .upsert_node(node("sfu-new", "eu", SfuNodeState::Healthy, 4, 100, 10_000))
+            .upsert_node(node("sfu-new", "eu", SfuNodeState::Healthy, 0, 100, 10_000))
             .expect("new candidate");
         directory.mark_draining(&draining_id).expect("mark draining");
 
@@ -701,7 +701,6 @@ mod horizontal_placement_tests {
             .place_session(
                 &scope(),
                 &call("call-draining"),
-                Some(&draining_id),
                 &SfuPlacementPolicy::default(),
                 100,
             )
@@ -713,7 +712,6 @@ mod horizontal_placement_tests {
             .place_session(
                 &scope(),
                 &call("call-fresh"),
-                None,
                 &SfuPlacementPolicy::default(),
                 100,
             )
@@ -731,20 +729,39 @@ mod horizontal_placement_tests {
                 expired.as_str(),
                 "eu",
                 SfuNodeState::Healthy,
+                0,
+                100,
+                10_000,
+            ))
+            .expect("initial node");
+        let initial = directory
+            .place_session(
+                &scope(),
+                &call("call-failover"),
+                &SfuPlacementPolicy::default(),
+                50,
+            )
+            .expect("initial placement");
+        assert_eq!(initial.node_id, expired);
+
+        directory
+            .upsert_node(node(
+                expired.as_str(),
+                "eu",
+                SfuNodeState::Healthy,
                 1,
                 100,
                 99,
             ))
-            .expect("expired node");
+            .expect("expire node");
         directory
-            .upsert_node(node("sfu-live", "eu", SfuNodeState::Healthy, 1, 100, 10_000))
+            .upsert_node(node("sfu-live", "eu", SfuNodeState::Healthy, 0, 100, 10_000))
             .expect("live node");
 
         let decision = directory
             .place_session(
                 &scope(),
                 &call("call-failover"),
-                Some(&expired),
                 &SfuPlacementPolicy::default(),
                 100,
             )
@@ -764,7 +781,7 @@ mod horizontal_placement_tests {
             allow_cross_region_failover: false,
         };
         assert_eq!(
-            directory.place_session(&scope(), &call("call-region"), None, &strict, 100),
+            directory.place_session(&scope(), &call("call-region"), &strict, 100),
             Err(SfuPlacementError::NoHealthyCapacity)
         );
 
@@ -773,7 +790,7 @@ mod horizontal_placement_tests {
             ..strict
         };
         let decision = directory
-            .place_session(&scope(), &call("call-region"), None, &permissive, 100)
+            .place_session(&scope(), &call("call-region"), &permissive, 100)
             .expect("cross-region failover");
         assert_eq!(decision.node_id.as_str(), "sfu-us");
         assert!(decision.crossed_region);
@@ -790,7 +807,6 @@ mod horizontal_placement_tests {
             .place_session(
                 &scope(),
                 &call("call-one"),
-                None,
                 &SfuPlacementPolicy::default(),
                 100,
             )
@@ -800,7 +816,6 @@ mod horizontal_placement_tests {
             directory.place_session(
                 &scope(),
                 &call("call-two"),
-                None,
                 &SfuPlacementPolicy::default(),
                 100,
             ),
@@ -808,13 +823,12 @@ mod horizontal_placement_tests {
         );
 
         directory
-            .release_session(&first.node_id)
+            .release_session(&scope(), &call("call-one"))
             .expect("release capacity");
         let second = directory
             .place_session(
                 &scope(),
                 &call("call-two"),
-                None,
                 &SfuPlacementPolicy::default(),
                 100,
             )
@@ -836,7 +850,6 @@ mod horizontal_placement_tests {
             directory.place_session(
                 &scope(),
                 &call("call-full"),
-                None,
                 &SfuPlacementPolicy::default(),
                 100,
             ),
