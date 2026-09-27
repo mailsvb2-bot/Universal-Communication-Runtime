@@ -14,7 +14,8 @@ fn public_sdk_contract_includes_canonical_recording_service() {
     let rust = read("crates/ucr-sdk/src/lib.rs");
 
     assert!(manifest.contains("\"RecordingService\""));
-    assert!(manifest.contains("\"participant_consent_scheme\": \"join_bearer\""));
+    assert!(manifest.contains("\"SetRecordingConsent\""));
+    assert!(manifest.contains("\"accepted_schemes\": [\"join_bearer\"]"));
     assert!(manifest.contains("\"RecordingService\": \"realtime\""));
     assert!(rust.contains("pb::recording_service_client::RecordingServiceClient"));
     assert!(rust.contains("pub async fn connect_with_recording_endpoint"));
