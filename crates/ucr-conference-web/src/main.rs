@@ -2414,6 +2414,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recording_request_http_preserves_capability_mismatch() {
+        let directory = std::env::temp_dir().join(format!(
+            "ucr-recording-capability-web-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let store =
+            Arc::new(SqliteLocalStore::open(directory.join("ucr.sqlite")).expect("sqlite store"));
+        let issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([10_u8; 32]),
+                "https://join.example.test/join",
+            )
+            .expect("join issuer"),
+        );
+        let (token, keys, policy) =
+            bearer_for_scopes(&[ucr_machine_auth::MACHINE_SCOPE_RECORDING_MANAGE]);
+        let service = GrpcRecordingService::new(
+            Arc::new(FixedClock),
+            Arc::clone(&store),
+            Arc::clone(&store),
+            issuer,
+            false,
+        )
+        .with_machine_bearer_auth(keys, policy);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("grpc listener");
+        let grpc_address = listener.local_addr().expect("grpc address");
+        let incoming = TcpListenerStream::new(listener);
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(recording_service_server(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("grpc server");
+        });
+
+        let channel = tonic::transport::Channel::from_shared(format!("http://{grpc_address}"))
+            .expect("grpc uri")
+            .connect()
+            .await
+            .expect("grpc channel");
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("http listener");
+        let http_address = http_listener.local_addr().expect("http address");
+        tokio::spawn(async move {
+            serve(
+                http_listener,
+                AppState {
+                    upstream: channel.clone(),
+                    recording_upstream: Some(channel),
+                },
+            )
+            .await
+            .expect("http adapter");
+        });
+
+        let body = br#"{
+            "scope":{"tenant_id":"tenant-a","namespace_id":"ns-a"},
+            "recording_id":"recording-a",
+            "call_id":"call-a",
+            "policy":{
+                "require_all_participant_consent":true,
+                "notify_all_participants":true,
+                "retention_seconds":3600
+            }
+        }"#;
+        let response = post_json(http_address, "/v1/recordings", body, &token).await;
+        assert!(
+            response.starts_with("HTTP/1.1 409"),
+            "disabled recording capability must preserve conflict-class status: {response}"
+        );
+        assert!(
+            response.contains("CAPABILITY_MISMATCH"),
+            "canonical capability mismatch must survive HTTP transport: {response}"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
     async fn recording_consent_http_route_reaches_canonical_bearer_auth() {
         let directory = std::env::temp_dir().join(format!(
             "ucr-recording-web-{}",
