@@ -110,9 +110,33 @@ impl UcrSdkClient {
         endpoint: String,
         credential: ServiceCredential,
     ) -> Result<Self, tonic::transport::Error> {
+        Self::connect_with_recording_endpoint(endpoint.clone(), endpoint, credential).await
+    }
+
+    /// Connects the ordinary public services and RecordingService to explicit gRPC endpoints.
+    ///
+    /// Direct UCR deployments serve RecordingService from the realtime daemon because participant
+    /// consent reuses the realtime JoinTokenIssuer. A trusted public gateway may co-host both
+    /// service paths, in which case callers can continue using Self::connect.
+    ///
+    /// # Errors
+    /// Returns a transport error from either endpoint parsing or connection establishment.
+    pub async fn connect_with_recording_endpoint(
+        endpoint: String,
+        recording_endpoint: String,
+        credential: ServiceCredential,
+    ) -> Result<Self, tonic::transport::Error> {
+        let shared_endpoint = endpoint == recording_endpoint;
         let channel = tonic::transport::Endpoint::from_shared(endpoint)?
             .connect()
             .await?;
+        let recording_channel = if shared_endpoint {
+            channel.clone()
+        } else {
+            tonic::transport::Endpoint::from_shared(recording_endpoint)?
+                .connect()
+                .await?
+        };
         let integration =
             pb::integration_service_client::IntegrationServiceClient::new(channel.clone())
                 .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
@@ -152,8 +176,9 @@ impl UcrSdkClient {
             )
             .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
-        let recording = pb::recording_service_client::RecordingServiceClient::new(channel)
-            .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
+        let recording =
+            pb::recording_service_client::RecordingServiceClient::new(recording_channel)
+                .max_decoding_message_size(SDK_GRPC_MESSAGE_CEILING)
             .max_encoding_message_size(SDK_GRPC_MESSAGE_CEILING);
         Ok(Self {
             credential,
