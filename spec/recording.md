@@ -10,7 +10,17 @@ Every recording has an explicit `RecordingPolicy` with finite retention. Media i
 
 The Recording owner stores recording lifecycle and consent evidence only. Group/Call membership stays canonical elsewhere. SFU must not silently archive ciphertext, and diagnostics/telemetry must not contain recorded media.
 
-Recording lifecycle mutations are optimistic-revision operations. Consent is participant-authenticated: `SetRecordingConsent` must verify the device-bound realtime bearer token and require its exact scope, Call and participant claims to match the Recording session and consent subject. Integration or Service Account authority may request/manage the recording lifecycle but is never evidence of an individual participant's consent.
+Recording lifecycle mutations are optimistic-revision operations. Start, stop and delete management requests may also carry an optional `idempotency_key`. When present, the public ingress reuses the canonical `CommandAcceptanceStore`; exact retries deduplicate durably across restart, while a changed request under the same key conflicts. Older clients that omit the key retain the legacy optimistic-revision contract and do not gain a new hidden retry guarantee.
+
+Externally observable recording lifecycle facts use the one canonical Event journal:
+- transition to `ACTIVE` emits `ucr.recording.started`;
+- transition to `STOPPED` emits `ucr.recording.stopped`, including an ACTIVE recording stopped by participant denial/revocation;
+- transition to `EXPIRED` emits `ucr.recording.expired`;
+- transition to `DELETED` emits `ucr.recording.deleted`.
+
+The Event payload is `RecordingLifecycleEvent` and contains only the scoped recording/call identifiers, previous/current state, resulting revision and occurrence timestamp. Recording snapshot mutation and Event append are one durable atomic store action. Memory performs both under one mutex with rollback on Event conflict; SQLite performs compare-and-swap plus Event append in one immediate transaction. A store that cannot prove this atomicity fails closed rather than performing two independent writes. This lifecycle evidence still does not make a concrete media recorder Production-ready.
+
+Consent is participant-authenticated: `SetRecordingConsent` must verify the device-bound realtime bearer token and require its exact scope, Call and participant claims to match the Recording session and consent subject. Integration or Service Account authority may request/manage the recording lifecycle but is never evidence of an individual participant's consent.
 
 An explicit `DENIED` or `REVOKED` decision always blocks starting the recording and immediately stops an ACTIVE lifecycle, even when the policy does not require every participant to affirmatively grant consent. Pending consent may be tolerated only when `require_all_participant_consent=false`; silence is never converted into a granted decision.
 
