@@ -43,6 +43,16 @@ recording consent subject.
 The binding is fail-closed when recording runtime capability is unavailable. Merely compiling or
 serving this lifecycle contract is not permission to advertise Production recording.
 
+## Pluggable provider boundary
+
+Concrete recording side effects use one pluggable `RecordingMediaProvider` boundary. The provider receives only bounded canonical context: scope, Recording ID, Call ID, lifecycle revision, operation and retention expiry. It does not receive a second Conference/Call/Recording model, join credentials, media crypto keys or arbitrary integration metadata through this control contract.
+
+The provider operation identity is the exact `(scope, recording_id, lifecycle_revision, operation)` tuple. Exact retries must be idempotent. A changed request that collides with an already-applied provider operation must fail closed rather than duplicating capture/finalization/deletion effects.
+
+A provider may represent an in-process recorder, S3-compatible encrypted object pipeline, or an external media pipeline, but it must not become a second Recording lifecycle owner. Canonical lifecycle, participant consent, authorization, retention timestamps and Event evidence remain owned by the existing UCR Recording/Event boundaries.
+
+This contract establishes the replaceable provider seam only. It does not enable `ucr.conference.recording` by itself and is not evidence of encryption-at-rest, retention deletion, export authorization, provider recovery, media composition or recording-ready delivery. Those require a concrete provider plus conformance evidence.
+
 ## Output/provider boundary
 
 When an integration has `max_recording_minutes` configured, a concrete recording provider must reserve the accepted recording duration through the canonical Service resource-quota boundary before treating that duration as provider work. The quota counter is durable and integration-scoped; billing/calendar renewal semantics remain outside UCR and use an explicit authorized reset.
