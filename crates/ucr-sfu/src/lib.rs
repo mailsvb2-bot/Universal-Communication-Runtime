@@ -262,11 +262,24 @@ fn placement_key(scope: &ucr_model::TenantScope, call_id: &ucr_model::CallId) ->
 
 fn placement_score(key: &[u8], node_id: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in key.iter().chain(node_id.iter()) {
+    for byte in key {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    hash
+    hash ^= 0xff;
+    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    for byte in node_id {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+
+    // SplitMix64 finalization gives the rendezvous comparison strong avalanche behavior even when
+    // worker IDs share long prefixes such as sfu-1, sfu-2, sfu-3 and sfu-4.
+    hash ^= hash >> 30;
+    hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    hash ^= hash >> 27;
+    hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
+    hash ^ (hash >> 31)
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfuForwardSinkError {
@@ -834,6 +847,36 @@ mod horizontal_placement_tests {
             )
             .expect("second placement");
         assert_eq!(second.node_id.as_str(), "single");
+    }
+
+    #[test]
+    fn rendezvous_distribution_does_not_collapse_common_prefix_workers() {
+        let mut counts = std::collections::BTreeMap::<String, usize>::new();
+        for index in 0..1_024_u32 {
+            let mut directory = SfuClusterDirectory::default();
+            for id in ["sfu-1", "sfu-2", "sfu-3", "sfu-4"] {
+                directory
+                    .upsert_node(node(id, "eu", SfuNodeState::Healthy, 0, 2_000, 10_000))
+                    .expect("worker");
+            }
+            let decision = directory
+                .place_session(
+                    &scope(),
+                    &call(&format!("call-{index}")),
+                    &SfuPlacementPolicy::default(),
+                    100,
+                )
+                .expect("placement");
+            *counts.entry(decision.node_id.as_str().to_owned()).or_default() += 1;
+        }
+
+        assert_eq!(counts.len(), 4);
+        for (node_id, count) in counts {
+            assert!(
+                (160..=352).contains(&count),
+                "rendezvous distribution collapsed for {node_id}: {count}"
+            );
+        }
     }
 
     #[test]
