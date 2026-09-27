@@ -2,10 +2,13 @@ use std::{fmt, sync::Arc};
 
 use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE,
-    SERVICE_CREDENTIAL_ID_METADATA_KEY, SERVICE_CREDENTIAL_SECRET_METADATA_KEY,
     conference_service::{map_conference_error, prepared_conference_runtime},
-    decode_credentials, decode_opaque, decode_scope, invalid_argument, pb, pb_acknowledgement,
-    pb_error, pb_opaque, pb_scope, unauthenticated,
+    decode_opaque, decode_scope, invalid_argument,
+    machine_api_auth::{
+        MachineApiAuthentication, MachineBearerConfig, admit_machine_api,
+        decode_machine_api_authentication,
+    },
+    pb, pb_acknowledgement, pb_error, pb_opaque, pb_scope,
 };
 use prost::Message;
 use tonic::{Request, Response, Status, metadata::MetadataMap};
@@ -15,16 +18,11 @@ use ucr_core::{
     DeviceLifecycleStore, DurableStoreError, EventJournalStore, ExternalIdentityBindingStore,
     GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore, IdentityStore,
     PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
-    ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
-    ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore, UniversalConferenceStore,
-    generate_opaque_id,
+    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
+    UniversalConferenceStore, generate_opaque_id,
 };
-use ucr_crypto::{
-    MAX_MACHINE_TOKEN_BYTES, MachineTokenPolicy, MachineTokenPublicKeySet,
-    TrustedSigningKeyResolver,
-};
+use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet, TrustedSigningKeyResolver};
 use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
-use ucr_machine_auth::MachineBearerRequestGate;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AuthorizationRequest, CallId, CallParticipant,
     CallParticipantState, CallParticipantUpdateKind, CallSession, CallSignal, CallSignalKind,
@@ -58,69 +56,13 @@ use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
     RealtimeSessionClaims,
 };
-const AUTHORIZATION_METADATA_KEY: &str = "authorization";
-const MAX_BEARER_AUTHORIZATION_METADATA_BYTES: usize = MAX_MACHINE_TOKEN_BYTES + 32;
-
-struct UniversalConferenceMachineBearer {
-    verification_keys: Arc<MachineTokenPublicKeySet>,
-    policy: MachineTokenPolicy,
-}
-
-enum UniversalConferenceAuthentication {
-    ServiceCredential {
-        credential_id: ucr_model::ServiceCredentialId,
-        secret: ServiceCredentialSecret,
-    },
-    MachineBearer(String),
-}
+type UniversalConferenceMachineBearer = MachineBearerConfig;
+type UniversalConferenceAuthentication = MachineApiAuthentication;
 
 fn decode_universal_conference_authentication(
     metadata: &MetadataMap,
 ) -> Result<UniversalConferenceAuthentication, CanonicalError> {
-    let has_credential_id = metadata
-        .get_bin(SERVICE_CREDENTIAL_ID_METADATA_KEY)
-        .is_some();
-    let has_credential_secret = metadata
-        .get_bin(SERVICE_CREDENTIAL_SECRET_METADATA_KEY)
-        .is_some();
-
-    let mut authorization_values = metadata.get_all(AUTHORIZATION_METADATA_KEY).iter();
-    let authorization = authorization_values.next();
-    if authorization_values.next().is_some() {
-        return Err(unauthenticated());
-    }
-
-    if let Some(value) = authorization {
-        if has_credential_id || has_credential_secret {
-            return Err(unauthenticated());
-        }
-        let value = value.to_str().map_err(|_| unauthenticated())?;
-        if value.len() > MAX_BEARER_AUTHORIZATION_METADATA_BYTES {
-            return Err(unauthenticated());
-        }
-        let mut parts = value.split_ascii_whitespace();
-        let scheme = parts.next().ok_or_else(unauthenticated)?;
-        let token = parts.next().ok_or_else(unauthenticated)?;
-        if !scheme.eq_ignore_ascii_case("bearer")
-            || token.is_empty()
-            || token.len() > MAX_MACHINE_TOKEN_BYTES
-            || parts.next().is_some()
-        {
-            return Err(unauthenticated());
-        }
-        return Ok(UniversalConferenceAuthentication::MachineBearer(
-            token.to_owned(),
-        ));
-    }
-
-    if has_credential_id != has_credential_secret {
-        return Err(unauthenticated());
-    }
-    let (credential_id, secret) = decode_credentials(metadata)?;
-    Ok(UniversalConferenceAuthentication::ServiceCredential {
-        credential_id,
-        secret,
-    })
+    decode_machine_api_authentication(metadata)
 }
 
 const MAX_EXTERNAL_CONFERENCE_ID_BYTES: usize = 512;
@@ -300,37 +242,15 @@ where
         authentication: UniversalConferenceAuthentication,
         permission: &str,
     ) -> Result<ScopedPrincipal, CanonicalError> {
-        let admission = match authentication {
-            UniversalConferenceAuthentication::ServiceCredential {
-                credential_id,
-                secret,
-            } => {
-                let gate = ServicePrincipalRequestGate::new(
-                    &*self.clock,
-                    &*self.authorization,
-                    &*self.store,
-                );
-                gate.authenticate_request(scope, &credential_id, &secret, permission, scope)?
-            }
-            UniversalConferenceAuthentication::MachineBearer(encoded) => {
-                let config = self.machine_bearer.as_deref().ok_or_else(unauthenticated)?;
-                let gate = MachineBearerRequestGate::new(
-                    &*self.clock,
-                    &*self.authorization,
-                    &*self.store,
-                    &*config.verification_keys,
-                    &config.policy,
-                );
-                gate.authenticate_permission_request(&encoded, permission, scope)?
-            }
-        };
-        let actor = admission.subject().clone();
-        admission.authorize(&AuthorizationRequest {
-            subject: actor.clone(),
-            permission: permission.to_owned(),
-            resource_scope: scope.clone(),
-        })?;
-        Ok(actor)
+        admit_machine_api(
+            &*self.clock,
+            &*self.authorization,
+            &*self.store,
+            self.machine_bearer.as_deref(),
+            scope,
+            authentication,
+            permission,
+        )
     }
 
     fn admit_integration(
