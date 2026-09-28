@@ -1541,11 +1541,8 @@ async fn serve_realtime_services(
         Arc::clone(&join_issuer),
         runtime_capabilities.recording,
     );
-    (universal_service, recording_service) = apply_realtime_machine_bearer(
-        universal_service,
-        recording_service,
-        machine_bearer,
-    );
+    (universal_service, recording_service) =
+        apply_realtime_machine_bearer(universal_service, recording_service, machine_bearer);
 
     Server::builder()
         .add_service(operator_runtime_service_server(
