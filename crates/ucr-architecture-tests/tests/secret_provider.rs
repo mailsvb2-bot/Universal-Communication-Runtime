@@ -37,7 +37,7 @@ fn secret_material_is_bounded_redacted_and_overlap_rotation_is_explicit() {
     let secrets = read("crates/ucr-secrets/src/lib.rs");
 
     assert!(secrets.contains("MAX_SECRET_BYTES: usize = 64 * 1024"));
-    assert!(secrets.contains(".field("bytes", &"<redacted>")"));
+    assert!(secrets.contains(r#".field("bytes", &"<redacted>")"#));
     assert!(secrets.contains("self.0.zeroize()"));
     assert!(secrets.contains("pub previous: Option<SecretVersion>"));
     assert!(secrets.contains("Exact retries of the same version/material are idempotent"));
