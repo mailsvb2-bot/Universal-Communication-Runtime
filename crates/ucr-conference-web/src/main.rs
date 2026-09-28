@@ -1403,20 +1403,21 @@ async fn forward_metadata(
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };
-    call(client.set_conference_metadata(request), |response| {
-        match response.result {
-            Some(pb::universal_set_conference_metadata_response::Result::Conference(conference)) => {
-                json_response(
-                    StatusCode::OK,
-                    &json!({ "conference": conference_json(&conference) }),
-                )
-            }
+    call(
+        client.set_conference_metadata(request),
+        |response| match response.result {
+            Some(pb::universal_set_conference_metadata_response::Result::Conference(
+                conference,
+            )) => json_response(
+                StatusCode::OK,
+                &json!({ "conference": conference_json(&conference) }),
+            ),
             Some(pb::universal_set_conference_metadata_response::Result::Error(error)) => {
                 error_response(&error)
             }
             None => empty_upstream(),
-        }
-    })
+        },
+    )
     .await
 }
 
