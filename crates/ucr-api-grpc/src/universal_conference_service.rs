@@ -4508,6 +4508,18 @@ mod universal_runtime_tests {
         )
         .expect_err("legacy changed retry conflicts");
         assert_eq!(changed.code, CanonicalErrorCode::Conflict);
+
+        let foreign = IntegrationId::from_opaque(oid("integration-legacy-foreign"));
+        let cross_integration = accept_integration_mutation_id(
+            &store,
+            &scope(),
+            &foreign,
+            "ucr.conference.entry.v1",
+            "legacy-user-key",
+            b"foreign-payload".to_vec(),
+        )
+        .expect_err("legacy key must not become a foreign side effect");
+        assert_eq!(cross_integration.code, CanonicalErrorCode::Conflict);
     }
 
     #[test]
