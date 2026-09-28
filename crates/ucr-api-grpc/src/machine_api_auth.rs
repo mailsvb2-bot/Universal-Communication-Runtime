@@ -18,9 +18,70 @@ use super::{
 pub(crate) const AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const MAX_BEARER_AUTHORIZATION_METADATA_BYTES: usize = MAX_MACHINE_TOKEN_BYTES + 32;
 
+pub trait MachineTokenVerificationKeyProvider: std::fmt::Debug + Send + Sync {
+    /// Resolves the currently accepted machine-token verification keys.
+    ///
+    /// # Errors
+    /// Returns a canonical fail-closed error when verification material cannot be resolved.
+    fn current_verification_keys(&self) -> Result<MachineTokenPublicKeySet, CanonicalError>;
+}
+
+#[derive(Clone)]
+enum MachineBearerVerificationSource {
+    Static(Arc<MachineTokenPublicKeySet>),
+    Provider(Arc<dyn MachineTokenVerificationKeyProvider>),
+}
+
+impl std::fmt::Debug for MachineBearerVerificationSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static(keys) => formatter
+                .debug_tuple("Static")
+                .field(&keys.keys().len())
+                .finish(),
+            Self::Provider(_) => formatter
+                .debug_tuple("Provider")
+                .field(&"<dynamic>")
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct MachineBearerConfig {
-    pub(crate) verification_keys: Arc<MachineTokenPublicKeySet>,
+    verification: MachineBearerVerificationSource,
     pub(crate) policy: MachineTokenPolicy,
+}
+
+impl MachineBearerConfig {
+    pub(crate) fn static_keys(
+        verification_keys: Arc<MachineTokenPublicKeySet>,
+        policy: MachineTokenPolicy,
+    ) -> Self {
+        Self {
+            verification: MachineBearerVerificationSource::Static(verification_keys),
+            policy,
+        }
+    }
+
+    pub(crate) fn provider(
+        provider: Arc<dyn MachineTokenVerificationKeyProvider>,
+        policy: MachineTokenPolicy,
+    ) -> Self {
+        Self {
+            verification: MachineBearerVerificationSource::Provider(provider),
+            policy,
+        }
+    }
+
+    fn current_verification_keys(&self) -> Result<MachineTokenPublicKeySet, CanonicalError> {
+        match &self.verification {
+            MachineBearerVerificationSource::Static(keys) => Ok((**keys).clone()),
+            MachineBearerVerificationSource::Provider(provider) => {
+                provider.current_verification_keys()
+            }
+        }
+    }
 }
 
 pub(crate) enum MachineApiAuthentication {
@@ -92,34 +153,105 @@ where
     A: AuthorizationEvaluator,
     S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore,
 {
-    let admission = match authentication {
+    let actor = match authentication {
         MachineApiAuthentication::ServiceCredential {
             credential_id,
             secret,
         } => {
             let gate = ServicePrincipalRequestGate::new(clock, authorization, store);
-            gate.authenticate_request(scope, &credential_id, &secret, permission, scope)?
+            let admission =
+                gate.authenticate_request(scope, &credential_id, &secret, permission, scope)?;
+            let actor = admission.subject().clone();
+            admission.authorize(&AuthorizationRequest {
+                subject: actor.clone(),
+                permission: permission.to_owned(),
+                resource_scope: scope.clone(),
+            })?;
+            actor
         }
         MachineApiAuthentication::MachineBearer(encoded) => {
             let config = machine_bearer.ok_or_else(unauthenticated)?;
+            let verification_keys = config.current_verification_keys()?;
             let gate = MachineBearerRequestGate::new(
                 clock,
                 authorization,
                 store,
-                &*config.verification_keys,
+                &verification_keys,
                 &config.policy,
             );
-            gate.authenticate_permission_request(&encoded, permission, scope)?
+            let admission = gate.authenticate_permission_request(&encoded, permission, scope)?;
+            let actor = admission.subject().clone();
+            admission.authorize(&AuthorizationRequest {
+                subject: actor.clone(),
+                permission: permission.to_owned(),
+                resource_scope: scope.clone(),
+            })?;
+            actor
         }
     };
-    let actor = admission.subject().clone();
-    admission.authorize(&AuthorizationRequest {
-        subject: actor.clone(),
-        permission: permission.to_owned(),
-        resource_scope: scope.clone(),
-    })?;
     if actor.principal.kind != ucr_model::PrincipalKind::ServiceAccount {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
     }
     Ok(actor)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, RwLock};
+
+    use ucr_crypto::{MachineTokenPublicKeySet, MachineTokenSigningKey};
+    use ucr_model::{KeyId, OpaqueId};
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct MutableVerificationProvider {
+        keys: RwLock<MachineTokenPublicKeySet>,
+    }
+
+    impl MachineTokenVerificationKeyProvider for MutableVerificationProvider {
+        fn current_verification_keys(&self) -> Result<MachineTokenPublicKeySet, CanonicalError> {
+            self.keys
+                .read()
+                .map(|keys| keys.clone())
+                .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))
+        }
+    }
+
+    fn key(id: &str, seed: u8) -> ucr_crypto::MachineTokenPublicKey {
+        MachineTokenSigningKey::from_seed(
+            KeyId::from_opaque(OpaqueId::new(id).expect("key id")),
+            [seed; 32],
+        )
+        .public_key()
+    }
+
+    #[test]
+    fn dynamic_machine_bearer_config_observes_rotated_verification_keys() {
+        let provider = Arc::new(MutableVerificationProvider {
+            keys: RwLock::new(
+                MachineTokenPublicKeySet::new(vec![key("machine-v1", 7)]).expect("initial keys"),
+            ),
+        });
+        let config = MachineBearerConfig::provider(
+            provider.clone(),
+            MachineTokenPolicy {
+                issuer: "https://auth.example.test".to_owned(),
+                audience: "ucr-api".to_owned(),
+                max_ttl_seconds: 900,
+            },
+        );
+
+        let before = config.current_verification_keys().expect("initial keys");
+        assert_eq!(before.keys()[0].key_id.as_opaque().as_str(), "machine-v1");
+
+        *provider.keys.write().expect("write keys") =
+            MachineTokenPublicKeySet::new(vec![key("machine-v2", 8), key("machine-v1", 7)])
+                .expect("rotated keys");
+
+        let after = config.current_verification_keys().expect("rotated keys");
+        assert_eq!(after.keys().len(), 2);
+        assert_eq!(after.keys()[0].key_id.as_opaque().as_str(), "machine-v2");
+        assert_eq!(after.keys()[1].key_id.as_opaque().as_str(), "machine-v1");
+    }
 }

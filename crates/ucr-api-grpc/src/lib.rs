@@ -56,6 +56,7 @@ pub mod pb {
 }
 
 mod machine_api_auth;
+pub use machine_api_auth::MachineTokenVerificationKeyProvider;
 mod mutation_idempotency;
 
 mod mesh_service;

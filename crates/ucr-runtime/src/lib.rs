@@ -14,13 +14,13 @@ use ucr_api_grpc::{
     GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
     GrpcIntegrationService, GrpcMachineAuthService, GrpcOperatorRuntimeService,
     GrpcRealtimeService, GrpcRecordingService, GrpcStoreForwardService, GrpcSyncService,
-    GrpcUniversalConferenceService, MachineAuthDiscovery, OperatorRuntimeHealthSource,
-    RealtimeWebRtcDependencies, UniversalConferenceRuntimeCapabilities, call_service_server,
-    conference_service_server, device_service_server, event_service_server,
-    expire_due_recordings_once, group_service_server, integration_service_server,
-    machine_auth_service_server, operator_runtime_service_server, pb, realtime_service_server,
-    recording_service_server, store_forward_service_server, sync_service_server,
-    universal_conference_service_server,
+    GrpcUniversalConferenceService, MachineAuthDiscovery, MachineTokenVerificationKeyProvider,
+    OperatorRuntimeHealthSource, RealtimeWebRtcDependencies,
+    UniversalConferenceRuntimeCapabilities, call_service_server, conference_service_server,
+    device_service_server, event_service_server, expire_due_recordings_once, group_service_server,
+    integration_service_server, machine_auth_service_server, operator_runtime_service_server, pb,
+    realtime_service_server, recording_service_server, store_forward_service_server,
+    sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
@@ -37,7 +37,7 @@ use ucr_model::{
     TenantId, TenantScope,
 };
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
-use ucr_secrets::{SecretHandle, SecretProvider};
+use ucr_secrets::{SecretHandle, SecretProvider, SecretPurpose};
 use ucr_sfu::{SfuForwardSink, SfuForwardSinkError};
 use ucr_storage_sqlite::{
     RECORDING_RETENTION_WORKER_KIND, SqliteLocalStore, WEBHOOK_DELIVERY_WORKER_KIND,
@@ -74,11 +74,40 @@ struct WebhookWorkerSweep {
     rejected: usize,
 }
 
+#[derive(Clone)]
+enum MachineAuthSigningConfig {
+    Static {
+        signing_key: Arc<MachineTokenSigningKey>,
+        verification_keys: Arc<MachineTokenPublicKeySet>,
+    },
+    Provider {
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+    },
+}
+
+impl core::fmt::Debug for MachineAuthSigningConfig {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Static { .. } => formatter
+                .debug_struct("MachineAuthSigningConfig")
+                .field("mode", &"static")
+                .field("material", &"<redacted>")
+                .finish_non_exhaustive(),
+            Self::Provider { handle, .. } => formatter
+                .debug_struct("MachineAuthSigningConfig")
+                .field("mode", &"provider")
+                .field("handle", handle)
+                .field("material", &"<redacted>")
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MachineAuthRuntimeConfig {
     policy: MachineTokenPolicy,
-    signing_key: Arc<MachineTokenSigningKey>,
-    verification_keys: Arc<MachineTokenPublicKeySet>,
+    signing: MachineAuthSigningConfig,
     discovery: MachineAuthDiscovery,
 }
 
@@ -130,8 +159,73 @@ impl MachineAuthRuntimeConfig {
                 audience,
                 max_ttl_seconds,
             },
-            signing_key,
-            verification_keys,
+            signing: MachineAuthSigningConfig::Static {
+                signing_key,
+                verification_keys,
+            },
+            discovery: MachineAuthDiscovery {
+                token_endpoint,
+                jwks_uri,
+            },
+        })
+    }
+
+    /// Builds machine-auth configuration backed by the shared secret provider.
+    ///
+    /// # Errors
+    /// Rejects invalid URLs/policy, a wrong-purpose handle, unavailable provider material, or a
+    /// signing seed that is not exactly 32 bytes.
+    pub fn with_secret_provider(
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+        token_endpoint: impl Into<String>,
+        jwks_uri: impl Into<String>,
+        max_ttl_seconds: u32,
+    ) -> Result<Self, String> {
+        if handle.purpose != SecretPurpose::MachineTokenSigning {
+            return Err(
+                "machine token signing handle must use MachineTokenSigning purpose".to_owned(),
+            );
+        }
+        let active = provider
+            .active_secret_set(&handle)
+            .map_err(|error| format!("resolve machine token signing secret: {error:?}"))?;
+        if active.current.material.as_bytes().len() != 32
+            || active
+                .previous
+                .as_ref()
+                .is_some_and(|version| version.material.as_bytes().len() != 32)
+        {
+            return Err("machine token signing secret must be exactly 32 bytes".to_owned());
+        }
+
+        let issuer = issuer.into();
+        let audience = audience.into();
+        let token_endpoint = token_endpoint.into();
+        let jwks_uri = jwks_uri.into();
+        validate_public_https_url(&issuer, "machine token issuer")?;
+        validate_public_https_url(&token_endpoint, "machine token endpoint")?;
+        validate_public_https_url(&jwks_uri, "machine token JWKS URI")?;
+        if audience.is_empty() || audience.chars().any(char::is_whitespace) {
+            return Err(
+                "machine token audience must be a non-empty token without whitespace".to_owned(),
+            );
+        }
+        if max_ttl_seconds == 0 || max_ttl_seconds > MAX_MACHINE_TOKEN_TTL_SECONDS {
+            return Err(format!(
+                "machine token max TTL must be between 1 and {MAX_MACHINE_TOKEN_TTL_SECONDS} seconds"
+            ));
+        }
+
+        Ok(Self {
+            policy: MachineTokenPolicy {
+                issuer,
+                audience,
+                max_ttl_seconds,
+            },
+            signing: MachineAuthSigningConfig::Provider { provider, handle },
             discovery: MachineAuthDiscovery {
                 token_endpoint,
                 jwks_uri,
@@ -157,19 +251,49 @@ impl MachineAuthRuntimeConfig {
             "previous machine token signing key id",
         )?);
         let previous_key = MachineTokenSigningKey::from_seed(previous_key_id, previous_seed);
-        let mut verification_keys = (*self.verification_keys).clone();
-        verification_keys
+        let MachineAuthSigningConfig::Static {
+            verification_keys, ..
+        } = &mut self.signing
+        else {
+            return Err(
+                "previous machine token key is managed by SecretProvider in provider mode"
+                    .to_owned(),
+            );
+        };
+        let mut updated = (**verification_keys).clone();
+        updated
             .insert(previous_key.public_key())
             .map_err(|error| format!("add previous machine token verification key: {error:?}"))?;
-        self.verification_keys = Arc::new(verification_keys);
+        *verification_keys = Arc::new(updated);
         Ok(self)
+    }
+}
+
+#[derive(Clone)]
+enum MachineBearerVerificationConfig {
+    Static(Arc<MachineTokenPublicKeySet>),
+    Provider(Arc<dyn MachineTokenVerificationKeyProvider>),
+}
+
+impl core::fmt::Debug for MachineBearerVerificationConfig {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Static(keys) => formatter
+                .debug_tuple("Static")
+                .field(&keys.keys().len())
+                .finish(),
+            Self::Provider(_) => formatter
+                .debug_tuple("Provider")
+                .field(&"<dynamic>")
+                .finish(),
+        }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct MachineBearerRuntimeConfig {
     policy: MachineTokenPolicy,
-    verification_keys: Arc<MachineTokenPublicKeySet>,
+    verification: MachineBearerVerificationConfig,
 }
 
 impl MachineBearerRuntimeConfig {
@@ -208,7 +332,46 @@ impl MachineBearerRuntimeConfig {
                 audience,
                 max_ttl_seconds,
             },
-            verification_keys: Arc::new(verification_keys),
+            verification: MachineBearerVerificationConfig::Static(Arc::new(verification_keys)),
+        })
+    }
+
+    /// Builds machine Bearer verification over a dynamically reloaded public-key provider.
+    ///
+    /// # Errors
+    /// Rejects invalid policy or an unavailable/empty provider key set.
+    pub fn with_verification_provider(
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        max_ttl_seconds: u32,
+        provider: Arc<dyn MachineTokenVerificationKeyProvider>,
+    ) -> Result<Self, String> {
+        let issuer = issuer.into();
+        let audience = audience.into();
+        validate_public_https_url(&issuer, "machine token issuer")?;
+        if audience.is_empty() || audience.chars().any(char::is_whitespace) {
+            return Err(
+                "machine token audience must be a non-empty token without whitespace".to_owned(),
+            );
+        }
+        if max_ttl_seconds == 0 || max_ttl_seconds > MAX_MACHINE_TOKEN_TTL_SECONDS {
+            return Err(format!(
+                "machine token max TTL must be between 1 and {MAX_MACHINE_TOKEN_TTL_SECONDS} seconds"
+            ));
+        }
+        let keys = provider
+            .current_verification_keys()
+            .map_err(|error| format!("resolve machine token verification keys: {error:?}"))?;
+        if keys.keys().is_empty() {
+            return Err("machine token verification key set must not be empty".to_owned());
+        }
+        Ok(Self {
+            policy: MachineTokenPolicy {
+                issuer,
+                audience,
+                max_ttl_seconds,
+            },
+            verification: MachineBearerVerificationConfig::Provider(provider),
         })
     }
 }
@@ -1104,8 +1267,14 @@ impl ProductionRuntime {
             Arc::clone(&conference_state),
         );
         if let Some(config) = machine_bearer {
-            universal_service =
-                universal_service.with_machine_bearer_auth(config.verification_keys, config.policy);
+            universal_service = match config.verification {
+                MachineBearerVerificationConfig::Static(keys) => {
+                    universal_service.with_machine_bearer_auth(keys, config.policy)
+                }
+                MachineBearerVerificationConfig::Provider(provider) => {
+                    universal_service.with_machine_bearer_auth_provider(provider, config.policy)
+                }
+            };
         }
 
         Server::builder()
@@ -1193,15 +1362,31 @@ impl ProductionRuntime {
         let clock = Arc::new(SystemServiceQuotaClock);
         let store = Arc::clone(&self.store);
         let operator_health = Arc::new(ProductionOperatorHealthSource::basic(Arc::clone(&store)));
-        let service = GrpcMachineAuthService::new(
-            clock,
-            Arc::clone(&store),
-            store,
-            config.signing_key,
-            config.verification_keys,
-            config.policy,
-            config.discovery,
-        );
+        let service = match config.signing {
+            MachineAuthSigningConfig::Static {
+                signing_key,
+                verification_keys,
+            } => GrpcMachineAuthService::new(
+                clock,
+                Arc::clone(&store),
+                store,
+                signing_key,
+                verification_keys,
+                config.policy,
+                config.discovery,
+            ),
+            MachineAuthSigningConfig::Provider { provider, handle } => {
+                GrpcMachineAuthService::with_secret_provider(
+                    clock,
+                    Arc::clone(&store),
+                    store,
+                    provider,
+                    handle,
+                    config.policy,
+                    config.discovery,
+                )?
+            }
+        };
 
         Server::builder()
             .add_service(operator_runtime_service_server(
@@ -1356,12 +1541,8 @@ async fn serve_realtime_services(
         Arc::clone(&join_issuer),
         runtime_capabilities.recording,
     );
-    if let Some(config) = machine_bearer {
-        universal_service = universal_service
-            .with_machine_bearer_auth(Arc::clone(&config.verification_keys), config.policy.clone());
-        recording_service =
-            recording_service.with_machine_bearer_auth(config.verification_keys, config.policy);
-    }
+    (universal_service, recording_service) =
+        apply_realtime_machine_bearer(universal_service, recording_service, machine_bearer);
 
     Server::builder()
         .add_service(operator_runtime_service_server(
@@ -1417,6 +1598,42 @@ async fn serve_realtime_services(
         )))
         .serve_with_incoming(incoming)
         .await
+}
+
+fn apply_realtime_machine_bearer(
+    mut universal_service: GrpcUniversalConferenceService<
+        SystemServiceQuotaClock,
+        SqliteLocalStore,
+        SqliteLocalStore,
+    >,
+    mut recording_service: GrpcRecordingService<
+        SystemServiceQuotaClock,
+        SqliteLocalStore,
+        SqliteLocalStore,
+    >,
+    machine_bearer: Option<MachineBearerRuntimeConfig>,
+) -> (
+    GrpcUniversalConferenceService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+    GrpcRecordingService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+) {
+    if let Some(config) = machine_bearer {
+        match config.verification {
+            MachineBearerVerificationConfig::Static(keys) => {
+                universal_service = universal_service
+                    .with_machine_bearer_auth(Arc::clone(&keys), config.policy.clone());
+                recording_service = recording_service.with_machine_bearer_auth(keys, config.policy);
+            }
+            MachineBearerVerificationConfig::Provider(provider) => {
+                universal_service = universal_service.with_machine_bearer_auth_provider(
+                    Arc::clone(&provider),
+                    config.policy.clone(),
+                );
+                recording_service =
+                    recording_service.with_machine_bearer_auth_provider(provider, config.policy);
+            }
+        }
+    }
+    (universal_service, recording_service)
 }
 
 struct RealtimeRuntimeDependencies {
@@ -1646,6 +1863,19 @@ const fn health_label(health: StorageHealth) -> &'static str {
 mod tests {
     use super::*;
 
+    fn static_machine_auth_verification_keys(
+        config: &MachineAuthRuntimeConfig,
+    ) -> &MachineTokenPublicKeySet {
+        match &config.signing {
+            MachineAuthSigningConfig::Static {
+                verification_keys, ..
+            } => verification_keys,
+            MachineAuthSigningConfig::Provider { .. } => {
+                panic!("expected static machine auth config")
+            }
+        }
+    }
+
     #[test]
     fn machine_auth_config_requires_https_and_redacts_signing_key() {
         let config = MachineAuthRuntimeConfig::new(
@@ -1660,23 +1890,26 @@ mod tests {
         .expect("machine auth config")
         .with_previous_signing_key("key-2026-08", [6_u8; 32])
         .expect("previous signing key");
-        assert_eq!(config.verification_keys.keys().len(), 2);
         assert_eq!(
-            config.verification_keys.keys()[0]
+            static_machine_auth_verification_keys(&config).keys().len(),
+            2
+        );
+        assert_eq!(
+            static_machine_auth_verification_keys(&config).keys()[0]
                 .key_id
                 .as_opaque()
                 .as_str(),
             "key-2026-09"
         );
         assert_eq!(
-            config.verification_keys.keys()[1]
+            static_machine_auth_verification_keys(&config).keys()[1]
                 .key_id
                 .as_opaque()
                 .as_str(),
             "key-2026-08"
         );
         let debug = format!("{config:?}");
-        assert!(debug.contains("<secret>"));
+        assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("[7, 7, 7"));
         assert!(
             MachineAuthRuntimeConfig::new(
@@ -1712,10 +1945,15 @@ mod tests {
         let before_restart = build();
         let after_restart = build();
         assert_eq!(
-            before_restart.verification_keys.as_ref(),
-            after_restart.verification_keys.as_ref()
+            static_machine_auth_verification_keys(&before_restart),
+            static_machine_auth_verification_keys(&after_restart)
         );
-        assert_eq!(after_restart.verification_keys.keys().len(), 2);
+        assert_eq!(
+            static_machine_auth_verification_keys(&after_restart)
+                .keys()
+                .len(),
+            2
+        );
 
         let retired = MachineAuthRuntimeConfig::new(
             "https://auth.example.test",
@@ -1727,9 +1965,12 @@ mod tests {
             900,
         )
         .expect("retired previous key config");
-        assert_eq!(retired.verification_keys.keys().len(), 1);
         assert_eq!(
-            retired.verification_keys.keys()[0]
+            static_machine_auth_verification_keys(&retired).keys().len(),
+            1
+        );
+        assert_eq!(
+            static_machine_auth_verification_keys(&retired).keys()[0]
                 .key_id
                 .as_opaque()
                 .as_str(),

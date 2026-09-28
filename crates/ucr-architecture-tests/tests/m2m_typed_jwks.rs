@@ -40,7 +40,8 @@ fn typed_machine_jwks_exposes_only_public_ed25519_material() {
     assert!(service.contains(r#"crv: "Ed25519".to_owned()"#));
     assert!(service.contains(r#"r#use: "sig".to_owned()"#));
     assert!(service.contains(r#"alg: "EdDSA".to_owned()"#));
-    assert!(service.contains("self.verification_keys"));
+    assert!(service.contains("jwks_from_verification_keys"));
+    assert!(service.contains("provider_key_material"));
     assert!(service.contains(".keys()"));
     assert!(service.contains("URL_SAFE_NO_PAD.encode(public_key.verifying_key.0)"));
     assert!(service.contains(
