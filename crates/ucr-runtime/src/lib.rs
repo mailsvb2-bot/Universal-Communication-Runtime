@@ -14,7 +14,8 @@ use ucr_api_grpc::{
     GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
     GrpcIntegrationService, GrpcMachineAuthService, GrpcOperatorRuntimeService,
     GrpcRealtimeService, GrpcRecordingService, GrpcStoreForwardService, GrpcSyncService,
-    GrpcUniversalConferenceService, MachineAuthDiscovery, OperatorRuntimeHealthSource,
+    GrpcUniversalConferenceService, MachineAuthDiscovery, MachineTokenVerificationKeyProvider,
+    OperatorRuntimeHealthSource,
     RealtimeWebRtcDependencies, UniversalConferenceRuntimeCapabilities, call_service_server,
     conference_service_server, device_service_server, event_service_server,
     expire_due_recordings_once, group_service_server, integration_service_server,
@@ -269,10 +270,31 @@ impl MachineAuthRuntimeConfig {
     }
 }
 
+#[derive(Clone)]
+enum MachineBearerVerificationConfig {
+    Static(Arc<MachineTokenPublicKeySet>),
+    Provider(Arc<dyn MachineTokenVerificationKeyProvider>),
+}
+
+impl core::fmt::Debug for MachineBearerVerificationConfig {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Static(keys) => formatter
+                .debug_tuple("Static")
+                .field(&keys.keys().len())
+                .finish(),
+            Self::Provider(_) => formatter
+                .debug_tuple("Provider")
+                .field(&"<dynamic>")
+                .finish(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MachineBearerRuntimeConfig {
     policy: MachineTokenPolicy,
-    verification_keys: Arc<MachineTokenPublicKeySet>,
+    verification: MachineBearerVerificationConfig,
 }
 
 impl MachineBearerRuntimeConfig {
@@ -311,7 +333,46 @@ impl MachineBearerRuntimeConfig {
                 audience,
                 max_ttl_seconds,
             },
-            verification_keys: Arc::new(verification_keys),
+            verification: MachineBearerVerificationConfig::Static(Arc::new(verification_keys)),
+        })
+    }
+
+    /// Builds machine Bearer verification over a dynamically reloaded public-key provider.
+    ///
+    /// # Errors
+    /// Rejects invalid policy or an unavailable/empty provider key set.
+    pub fn with_verification_provider(
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        max_ttl_seconds: u32,
+        provider: Arc<dyn MachineTokenVerificationKeyProvider>,
+    ) -> Result<Self, String> {
+        let issuer = issuer.into();
+        let audience = audience.into();
+        validate_public_https_url(&issuer, "machine token issuer")?;
+        if audience.is_empty() || audience.chars().any(char::is_whitespace) {
+            return Err(
+                "machine token audience must be a non-empty token without whitespace".to_owned(),
+            );
+        }
+        if max_ttl_seconds == 0 || max_ttl_seconds > MAX_MACHINE_TOKEN_TTL_SECONDS {
+            return Err(format!(
+                "machine token max TTL must be between 1 and {MAX_MACHINE_TOKEN_TTL_SECONDS} seconds"
+            ));
+        }
+        let keys = provider
+            .current_verification_keys()
+            .map_err(|error| format!("resolve machine token verification keys: {error:?}"))?;
+        if keys.keys().is_empty() {
+            return Err("machine token verification key set must not be empty".to_owned());
+        }
+        Ok(Self {
+            policy: MachineTokenPolicy {
+                issuer,
+                audience,
+                max_ttl_seconds,
+            },
+            verification: MachineBearerVerificationConfig::Provider(provider),
         })
     }
 }
@@ -1207,8 +1268,14 @@ impl ProductionRuntime {
             Arc::clone(&conference_state),
         );
         if let Some(config) = machine_bearer {
-            universal_service =
-                universal_service.with_machine_bearer_auth(config.verification_keys, config.policy);
+            universal_service = match config.verification {
+                MachineBearerVerificationConfig::Static(keys) => {
+                    universal_service.with_machine_bearer_auth(keys, config.policy)
+                }
+                MachineBearerVerificationConfig::Provider(provider) => {
+                    universal_service.with_machine_bearer_auth_provider(provider, config.policy)
+                }
+            };
         }
 
         Server::builder()
@@ -1476,10 +1543,22 @@ async fn serve_realtime_services(
         runtime_capabilities.recording,
     );
     if let Some(config) = machine_bearer {
-        universal_service = universal_service
-            .with_machine_bearer_auth(Arc::clone(&config.verification_keys), config.policy.clone());
-        recording_service =
-            recording_service.with_machine_bearer_auth(config.verification_keys, config.policy);
+        match config.verification {
+            MachineBearerVerificationConfig::Static(keys) => {
+                universal_service = universal_service
+                    .with_machine_bearer_auth(Arc::clone(&keys), config.policy.clone());
+                recording_service =
+                    recording_service.with_machine_bearer_auth(keys, config.policy);
+            }
+            MachineBearerVerificationConfig::Provider(provider) => {
+                universal_service = universal_service.with_machine_bearer_auth_provider(
+                    Arc::clone(&provider),
+                    config.policy.clone(),
+                );
+                recording_service =
+                    recording_service.with_machine_bearer_auth_provider(provider, config.policy);
+            }
+        }
     }
 
     Server::builder()
