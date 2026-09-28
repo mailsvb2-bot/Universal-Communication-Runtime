@@ -165,9 +165,8 @@ impl ReloadingMachineTokenSecretProvider {
             }
         }
 
-        let encoded = Zeroizing::new(
-            fs::read_to_string(path).map_err(|_| SecretProviderError::Unavailable)?,
-        );
+        let encoded =
+            Zeroizing::new(fs::read_to_string(path).map_err(|_| SecretProviderError::Unavailable)?);
         let mut current_key_id = None;
         let mut current_seed_hex = None;
         let mut previous_key_id = None;
@@ -185,7 +184,9 @@ impl ReloadingMachineTokenSecretProvider {
                 "current_key_id" if current_key_id.is_none() => current_key_id = Some(value),
                 "current_seed_hex" if current_seed_hex.is_none() => current_seed_hex = Some(value),
                 "previous_key_id" if previous_key_id.is_none() => previous_key_id = Some(value),
-                "previous_seed_hex" if previous_seed_hex.is_none() => previous_seed_hex = Some(value),
+                "previous_seed_hex" if previous_seed_hex.is_none() => {
+                    previous_seed_hex = Some(value)
+                }
                 _ => return Err(SecretProviderError::InvalidMaterial),
             }
         }
@@ -213,10 +214,7 @@ impl ReloadingMachineTokenSecretProvider {
         })
     }
 
-    fn decode_version(
-        key_id: &str,
-        seed_hex: &str,
-    ) -> Result<SecretVersion, SecretProviderError> {
+    fn decode_version(key_id: &str, seed_hex: &str) -> Result<SecretVersion, SecretProviderError> {
         let seed = Zeroizing::new(
             decode_key_hex_named(seed_hex, "machine token provider seed")
                 .map_err(|_| SecretProviderError::InvalidMaterial)?,
@@ -283,8 +281,7 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
         .as_deref()
         == Some("file-reload")
     {
-        let manifest_file =
-            PathBuf::from(required_env("UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE")?);
+        let manifest_file = PathBuf::from(required_env("UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE")?);
         let secret_id = std::env::var("UCR_MACHINE_TOKEN_SIGNING_SECRET_ID")
             .unwrap_or_else(|_| "machine-token-signing".to_owned());
         let handle = SecretHandle {
@@ -348,9 +345,8 @@ struct ReloadingMachineTokenJwksProvider {
 
 impl ReloadingMachineTokenJwksProvider {
     fn read_keys(&self) -> Result<MachineTokenPublicKeySet, CanonicalError> {
-        let metadata = fs::symlink_metadata(&self.jwks_file).map_err(|_| {
-            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
-        })?;
+        let metadata = fs::symlink_metadata(&self.jwks_file)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
         if metadata.file_type().is_symlink()
             || !metadata.is_file()
             || metadata.len() > MAX_MACHINE_TOKEN_JWKS_BYTES as u64
@@ -359,17 +355,15 @@ impl ReloadingMachineTokenJwksProvider {
                 CanonicalErrorCode::TemporarilyUnavailable,
             ));
         }
-        let encoded = fs::read_to_string(&self.jwks_file).map_err(|_| {
-            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
-        })?;
+        let encoded = fs::read_to_string(&self.jwks_file)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
         if encoded.len() > MAX_MACHINE_TOKEN_JWKS_BYTES {
             return Err(CanonicalError::new(
                 CanonicalErrorCode::TemporarilyUnavailable,
             ));
         }
-        MachineTokenPublicKeySet::from_jwks_json(&encoded).map_err(|_| {
-            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
-        })
+        MachineTokenPublicKeySet::from_jwks_json(&encoded)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))
     }
 }
 
