@@ -4136,10 +4136,10 @@ mod universal_runtime_tests {
     use super::{
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
         IssueJoinGrantInput, PrepareConferenceRuntimeInput, SetConferenceMetadataInput,
-        UpdateParticipantInput, ensure_participant, ensure_participant_device, issue_join_grant,
-        lifecycle_event, prepare_conference_runtime, resolve_join_call, resolve_join_device,
-        resolve_person_principal, set_conference_metadata, update_participant,
-        accept_integration_mutation_id,
+        UpdateParticipantInput, ensure_participant, ensure_participant_device,
+        accept_integration_mutation_id, conference_for_integration, issue_join_grant,
+        lifecycle_event, participant_attendance, prepare_conference_runtime, resolve_join_call,
+        resolve_join_device, resolve_person_principal, set_conference_metadata, update_participant,
     };
 
     #[test]
@@ -4596,6 +4596,62 @@ mod universal_runtime_tests {
         )
         .expect_err("generic update must not promote owner");
         assert_eq!(promote_attendee.code, CanonicalErrorCode::PolicyDenied);
+    }
+
+    #[test]
+    fn foreign_integration_cannot_read_issue_join_or_read_attendance() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        let owned = conference();
+        store
+            .persist_universal_conference_profile(&owned)
+            .expect("conference");
+        let foreign = IntegrationId::from_opaque(oid("integration-foreign"));
+
+        let read = conference_for_integration(
+            &store,
+            &scope(),
+            &owned.conference_id,
+            &foreign,
+        )
+        .expect_err("foreign integration cannot read conference");
+        assert_eq!(read.code, CanonicalErrorCode::NotFound);
+
+        let issuer = JoinTokenIssuer::new(
+            JoinTokenKey::from_bytes([23_u8; 32]),
+            "https://join.example.test/join",
+        )
+        .expect("join issuer");
+        let join = issue_join_grant(
+            &store,
+            &issuer,
+            IssueJoinGrantInput {
+                scope: scope(),
+                conference_id: owned.conference_id.clone(),
+                integration_id: foreign.clone(),
+                external_user_id: b"foreign-user".to_vec(),
+                ttl_seconds: 300,
+                use_policy: JoinGrantUsePolicy::SingleUse,
+                not_before_unix_ms: None,
+                not_after_unix_ms: None,
+                idempotency_key: "foreign-join".to_owned(),
+            },
+            b"foreign-join-payload".to_vec(),
+            1_000_000,
+        )
+        .expect_err("foreign integration cannot issue join");
+        assert_eq!(join.code, CanonicalErrorCode::PolicyDenied);
+
+        let attendance = participant_attendance(
+            &store,
+            &scope(),
+            &owned.conference_id,
+            &foreign,
+            b"foreign-user",
+            1_000_000,
+        )
+        .expect_err("foreign integration cannot read attendance");
+        assert_eq!(attendance.code, CanonicalErrorCode::NotFound);
     }
 
     #[test]
