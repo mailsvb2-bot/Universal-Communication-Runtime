@@ -147,10 +147,7 @@ pub fn validate_broadcast_request(
     }
     let mut destinations = HashSet::with_capacity(request.destinations.len());
     if request.destinations.iter().any(|destination| {
-        !destinations.insert((
-            destination.destination_id.as_str(),
-            destination.protocol,
-        ))
+        !destinations.insert((destination.destination_id.as_str(), destination.protocol))
     }) {
         return Err(BroadcastProviderError::InvalidRequest);
     }
@@ -230,8 +227,10 @@ mod tests {
             item.id == MEDIA_COMPOSITION_CAPABILITY
                 && item.maturity == ucr_model::CapabilityMaturity::Prepared
         }));
-        assert!(capabilities.iter().all(|item| {
-            item.maturity == ucr_model::CapabilityMaturity::Prepared
-        }));
+        assert!(
+            capabilities
+                .iter()
+                .all(|item| { item.maturity == ucr_model::CapabilityMaturity::Prepared })
+        );
     }
 }
