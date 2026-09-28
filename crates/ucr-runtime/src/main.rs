@@ -221,7 +221,7 @@ impl SecretProvider for ReloadingMachineTokenSecretProvider {
         let previous = self
             .previous_file
             .as_ref()
-            .map(Self::read_version)
+            .map(|path| Self::read_version(path.as_path()))
             .transpose()?;
         if previous
             .as_ref()
