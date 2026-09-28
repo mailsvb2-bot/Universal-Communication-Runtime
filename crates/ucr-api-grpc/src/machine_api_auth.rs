@@ -190,7 +190,7 @@ where
 mod tests {
     use std::sync::{Arc, RwLock};
 
-    use ucr_crypto::{MachineTokenSigningKey, MachineTokenPublicKeySet};
+    use ucr_crypto::{MachineTokenPublicKeySet, MachineTokenSigningKey};
     use ucr_model::{KeyId, OpaqueId};
 
     use super::*;
@@ -201,9 +201,7 @@ mod tests {
     }
 
     impl MachineTokenVerificationKeyProvider for MutableVerificationProvider {
-        fn current_verification_keys(
-            &self,
-        ) -> Result<MachineTokenPublicKeySet, CanonicalError> {
+        fn current_verification_keys(&self) -> Result<MachineTokenPublicKeySet, CanonicalError> {
             self.keys
                 .read()
                 .map(|keys| keys.clone())
@@ -223,8 +221,7 @@ mod tests {
     fn dynamic_machine_bearer_config_observes_rotated_verification_keys() {
         let provider = Arc::new(MutableVerificationProvider {
             keys: RwLock::new(
-                MachineTokenPublicKeySet::new(vec![key("machine-v1", 7)])
-                    .expect("initial keys"),
+                MachineTokenPublicKeySet::new(vec![key("machine-v1", 7)]).expect("initial keys"),
             ),
         });
         let config = MachineBearerConfig::provider(
@@ -240,11 +237,8 @@ mod tests {
         assert_eq!(before.keys()[0].key_id.as_opaque().as_str(), "machine-v1");
 
         *provider.keys.write().expect("write keys") =
-            MachineTokenPublicKeySet::new(vec![
-                key("machine-v2", 8),
-                key("machine-v1", 7),
-            ])
-            .expect("rotated keys");
+            MachineTokenPublicKeySet::new(vec![key("machine-v2", 8), key("machine-v1", 7)])
+                .expect("rotated keys");
 
         let after = config.current_verification_keys().expect("rotated keys");
         assert_eq!(after.keys().len(), 2);
