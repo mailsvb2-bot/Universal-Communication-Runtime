@@ -185,3 +185,70 @@ where
     }
     Ok(actor)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, RwLock};
+
+    use ucr_crypto::{MachineTokenSigningKey, MachineTokenPublicKeySet};
+    use ucr_model::{KeyId, OpaqueId};
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct MutableVerificationProvider {
+        keys: RwLock<MachineTokenPublicKeySet>,
+    }
+
+    impl MachineTokenVerificationKeyProvider for MutableVerificationProvider {
+        fn current_verification_keys(
+            &self,
+        ) -> Result<MachineTokenPublicKeySet, CanonicalError> {
+            self.keys
+                .read()
+                .map(|keys| keys.clone())
+                .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))
+        }
+    }
+
+    fn key(id: &str, seed: u8) -> ucr_crypto::MachineTokenPublicKey {
+        MachineTokenSigningKey::from_seed(
+            KeyId::from_opaque(OpaqueId::new(id).expect("key id")),
+            [seed; 32],
+        )
+        .public_key()
+    }
+
+    #[test]
+    fn dynamic_machine_bearer_config_observes_rotated_verification_keys() {
+        let provider = Arc::new(MutableVerificationProvider {
+            keys: RwLock::new(
+                MachineTokenPublicKeySet::new(vec![key("machine-v1", 7)])
+                    .expect("initial keys"),
+            ),
+        });
+        let config = MachineBearerConfig::provider(
+            provider.clone(),
+            MachineTokenPolicy {
+                issuer: "https://auth.example.test".to_owned(),
+                audience: "ucr-api".to_owned(),
+                max_ttl_seconds: 900,
+            },
+        );
+
+        let before = config.current_verification_keys().expect("initial keys");
+        assert_eq!(before.keys()[0].key_id.as_opaque().as_str(), "machine-v1");
+
+        *provider.keys.write().expect("write keys") =
+            MachineTokenPublicKeySet::new(vec![
+                key("machine-v2", 8),
+                key("machine-v1", 7),
+            ])
+            .expect("rotated keys");
+
+        let after = config.current_verification_keys().expect("rotated keys");
+        assert_eq!(after.keys().len(), 2);
+        assert_eq!(after.keys()[0].key_id.as_opaque().as_str(), "machine-v2");
+        assert_eq!(after.keys()[1].key_id.as_opaque().as_str(), "machine-v1");
+    }
+}
