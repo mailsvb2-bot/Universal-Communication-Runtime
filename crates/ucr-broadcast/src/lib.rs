@@ -6,8 +6,7 @@ use std::collections::HashSet;
 use ucr_model::{CallId, CapabilityDescriptor, OpaqueId, TenantScope};
 use ucr_protocol::{
     DASH_BROADCAST_CAPABILITY, HLS_BROADCAST_CAPABILITY, MAX_BROADCAST_OUTPUTS,
-    MAX_BROADCAST_VIDEO_SOURCES, RTMP_BROADCAST_CAPABILITY,
-    broadcast_capabilities,
+    MAX_BROADCAST_VIDEO_SOURCES, RTMP_BROADCAST_CAPABILITY, broadcast_capabilities,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
