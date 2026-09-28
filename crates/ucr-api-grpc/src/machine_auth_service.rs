@@ -8,6 +8,8 @@ use ucr_core::{
     ServiceQuotaStore,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet, MachineTokenSigningKey};
+use ucr_model::KeyId;
+use ucr_secrets::{ActiveSecretSet, SecretHandle, SecretProvider, SecretPurpose, SecretVersion};
 use ucr_machine_auth::{MachineAuthExchangeRequest, MachineAuthRuntime, SUPPORTED_MACHINE_SCOPES};
 use ucr_protocol::CanonicalError;
 
@@ -22,12 +24,85 @@ pub struct MachineAuthDiscovery {
     pub jwks_uri: String,
 }
 
+#[derive(Clone)]
+enum MachineAuthSigningSource {
+    Static {
+        signing_key: Arc<MachineTokenSigningKey>,
+        verification_keys: Arc<MachineTokenPublicKeySet>,
+    },
+    Provider {
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+    },
+}
+
+impl fmt::Debug for MachineAuthSigningSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Static { .. } => formatter
+                .debug_struct("MachineAuthSigningSource")
+                .field("mode", &"static")
+                .field("material", &"<secret>")
+                .finish_non_exhaustive(),
+            Self::Provider { handle, .. } => formatter
+                .debug_struct("MachineAuthSigningSource")
+                .field("mode", &"provider")
+                .field("handle", handle)
+                .field("material", &"<secret>")
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+fn machine_token_key_from_version(
+    version: &SecretVersion,
+) -> Result<MachineTokenSigningKey, CanonicalError> {
+    let seed: [u8; 32] = version
+        .material
+        .as_bytes()
+        .try_into()
+        .map_err(|_| CanonicalError::new(ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable))?;
+    Ok(MachineTokenSigningKey::from_seed(
+        KeyId::from_opaque(version.version_id.clone()),
+        seed,
+    ))
+}
+
+fn provider_key_material(
+    provider: &dyn SecretProvider,
+    handle: &SecretHandle,
+) -> Result<(MachineTokenSigningKey, MachineTokenPublicKeySet), CanonicalError> {
+    if handle.purpose != SecretPurpose::MachineTokenSigning {
+        return Err(CanonicalError::new(
+            ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable,
+        ));
+    }
+    let active = provider
+        .active_secret_set(handle)
+        .map_err(|_| CanonicalError::new(ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable))?;
+    machine_token_material_from_active(&active)
+}
+
+fn machine_token_material_from_active(
+    active: &ActiveSecretSet,
+) -> Result<(MachineTokenSigningKey, MachineTokenPublicKeySet), CanonicalError> {
+    let current = machine_token_key_from_version(&active.current)?;
+    let mut verification = MachineTokenPublicKeySet::new(vec![current.public_key()])
+        .map_err(|_| CanonicalError::new(ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable))?;
+    if let Some(previous) = &active.previous {
+        let previous = machine_token_key_from_version(previous)?;
+        verification
+            .insert(previous.public_key())
+            .map_err(|_| CanonicalError::new(ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable))?;
+    }
+    Ok((current, verification))
+}
+
 pub struct GrpcMachineAuthService<C, A, S> {
     clock: Arc<C>,
     authorization: Arc<A>,
     store: Arc<S>,
-    signing_key: Arc<MachineTokenSigningKey>,
-    verification_keys: Arc<MachineTokenPublicKeySet>,
+    signing_source: MachineAuthSigningSource,
     policy: MachineTokenPolicy,
     discovery: MachineAuthDiscovery,
 }
@@ -47,11 +122,42 @@ impl<C, A, S> GrpcMachineAuthService<C, A, S> {
             clock,
             authorization,
             store,
-            signing_key,
-            verification_keys,
+            signing_source: MachineAuthSigningSource::Static {
+                signing_key,
+                verification_keys,
+            },
             policy,
             discovery,
         }
+    }
+
+    /// Builds machine-auth over the shared provider-backed signing-key boundary.
+    ///
+    /// # Errors
+    /// Rejects a wrong-purpose handle, unavailable provider, malformed key material, or duplicate
+    /// overlap key identifiers.
+    pub fn with_secret_provider(
+        clock: Arc<C>,
+        authorization: Arc<A>,
+        store: Arc<S>,
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+        policy: MachineTokenPolicy,
+        discovery: MachineAuthDiscovery,
+    ) -> Result<Self, String> {
+        if handle.purpose != SecretPurpose::MachineTokenSigning {
+            return Err("machine auth signing handle must use MachineTokenSigning purpose".to_owned());
+        }
+        provider_key_material(provider.as_ref(), &handle)
+            .map_err(|_| "machine auth signing provider is unavailable or malformed".to_owned())?;
+        Ok(Self {
+            clock,
+            authorization,
+            store,
+            signing_source: MachineAuthSigningSource::Provider { provider, handle },
+            policy,
+            discovery,
+        })
     }
 }
 
@@ -61,8 +167,7 @@ impl<C, A, S> Clone for GrpcMachineAuthService<C, A, S> {
             clock: Arc::clone(&self.clock),
             authorization: Arc::clone(&self.authorization),
             store: Arc::clone(&self.store),
-            signing_key: Arc::clone(&self.signing_key),
-            verification_keys: Arc::clone(&self.verification_keys),
+            signing_source: self.signing_source.clone(),
             policy: self.policy.clone(),
             discovery: self.discovery.clone(),
         }
@@ -75,8 +180,7 @@ impl<C, A, S> fmt::Debug for GrpcMachineAuthService<C, A, S> {
             .debug_struct("GrpcMachineAuthService")
             .field("policy", &self.policy)
             .field("discovery", &self.discovery)
-            .field("signing_key", &"<secret>")
-            .field("verification_keys", &self.verification_keys)
+            .field("signing_source", &self.signing_source)
             .finish_non_exhaustive()
     }
 }
@@ -101,10 +205,24 @@ where
     A: AuthorizationEvaluator,
     S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore,
 {
-    fn public_jwks(&self) -> pb::MachineAuthJwks {
-        pb::MachineAuthJwks {
-            keys: self
-                .verification_keys
+    fn current_signing_material(
+        &self,
+    ) -> Result<(MachineTokenSigningKey, MachineTokenPublicKeySet), CanonicalError> {
+        match &self.signing_source {
+            MachineAuthSigningSource::Static {
+                signing_key,
+                verification_keys,
+            } => Ok(((**signing_key).clone(), (**verification_keys).clone())),
+            MachineAuthSigningSource::Provider { provider, handle } => {
+                provider_key_material(provider.as_ref(), handle)
+            }
+        }
+    }
+
+    fn public_jwks(&self) -> Result<pb::MachineAuthJwks, CanonicalError> {
+        let (_, verification_keys) = self.current_signing_material()?;
+        Ok(pb::MachineAuthJwks {
+            keys: verification_keys
                 .keys()
                 .iter()
                 .map(|public_key| pb::MachineAuthJwk {
@@ -116,7 +234,7 @@ where
                     x: URL_SAFE_NO_PAD.encode(public_key.verifying_key.0),
                 })
                 .collect(),
-        }
+        })
     }
 
     fn exchange(
@@ -129,11 +247,12 @@ where
         let client_id = decode_opaque(request.client_id)?;
         let requested_ttl_seconds =
             (request.requested_ttl_seconds != 0).then_some(request.requested_ttl_seconds);
+        let (signing_key, _) = self.current_signing_material()?;
         let runtime = MachineAuthRuntime::new(
             &*self.clock,
             &*self.authorization,
             &*self.store,
-            &self.signing_key,
+            &signing_key,
             &self.policy,
         );
         let grant = runtime.exchange(MachineAuthExchangeRequest {
@@ -210,10 +329,12 @@ where
         &self,
         _request: Request<pb::MachineAuthJwksRequest>,
     ) -> Result<Response<pb::MachineAuthJwksResponse>, Status> {
+        let result = match self.public_jwks() {
+            Ok(jwks) => pb::machine_auth_jwks_response::Result::Jwks(jwks),
+            Err(error) => pb::machine_auth_jwks_response::Result::Error(pb_error(error)),
+        };
         Ok(Response::new(pb::MachineAuthJwksResponse {
-            result: Some(pb::machine_auth_jwks_response::Result::Jwks(
-                self.public_jwks(),
-            )),
+            result: Some(result),
         }))
     }
 }
@@ -271,7 +392,7 @@ mod tests {
             },
         );
 
-        let jwks = service.public_jwks();
+        let jwks = service.public_jwks().expect("jwks");
         assert_eq!(jwks.keys.len(), 2);
         let active = jwks
             .keys
