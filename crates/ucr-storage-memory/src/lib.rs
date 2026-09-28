@@ -9250,9 +9250,7 @@ impl UniversalConferenceStore for MemoryLocalStore {
             .get(&key)
             .cloned()
             .ok_or(DurableStoreError::Conflict)?;
-        if current.revision == expected_revision.saturating_add(1)
-            && current.metadata == metadata
-        {
+        if current.revision == expected_revision.saturating_add(1) && current.metadata == metadata {
             return Ok(current);
         }
         if current.revision != expected_revision {
