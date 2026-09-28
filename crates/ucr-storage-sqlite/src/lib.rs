@@ -252,6 +252,35 @@ impl StorageProvider for SqliteLocalStore {
 }
 
 impl CommandAcceptanceStore for SqliteLocalStore {
+    fn has_accepted_idempotency_key(
+        &self,
+        scope: &TenantScope,
+        idempotency_key: &str,
+    ) -> Result<bool, DurableStoreError> {
+        if idempotency_key.is_empty() || idempotency_key.len() > ucr_protocol::MAX_IDEMPOTENCY_KEY_LEN
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let namespace = namespace_storage_key(scope);
+        let connection = self.lock_connection()?;
+        connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM accepted_commands
+                    WHERE tenant_id = ?1 AND namespace_present = ?2
+                      AND namespace_id = ?3 AND idempotency_key = ?4
+                 )",
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    idempotency_key,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))
+    }
+
     fn accept_command(
         &self,
         command: &CommandEnvelope,
