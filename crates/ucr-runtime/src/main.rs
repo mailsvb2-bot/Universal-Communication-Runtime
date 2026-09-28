@@ -491,12 +491,21 @@ async fn serve_realtime_command(
         .map_err(|error| format!("invalid --bind address: {error}"))?;
     let join_base_url =
         join_base_url.ok_or_else(|| "--join-base-url is required for serve-realtime".to_owned())?;
-    let key_hex = std::env::var("UCR_REALTIME_JOIN_KEY_HEX")
-        .map_err(|_| "UCR_REALTIME_JOIN_KEY_HEX is required for serve-realtime".to_owned())?;
-    let turn_rest_secret = std::env::var("UCR_WEBRTC_TURN_SECRET_HEX")
-        .ok()
-        .map(|value| decode_key_hex_named(&value, "UCR_WEBRTC_TURN_SECRET_HEX"))
-        .transpose()?;
+    let mut config = if let Some((provider, handle)) = secret_provider_from_env(
+        "UCR_REALTIME_JOIN_SECRET_PROVIDER",
+        "UCR_REALTIME_JOIN_SECRET_FILE",
+        "UCR_REALTIME_JOIN_SECRET_ID",
+        "realtime-join-signing",
+        SecretPurpose::JoinSigning,
+    )? {
+        RealtimeRuntimeConfig::with_join_secret_provider(join_base_url, provider, handle)?
+    } else {
+        let key_hex = Zeroizing::new(
+            std::env::var("UCR_REALTIME_JOIN_KEY_HEX")
+                .map_err(|_| "UCR_REALTIME_JOIN_KEY_HEX is required for serve-realtime".to_owned())?,
+        );
+        RealtimeRuntimeConfig::new(join_base_url, decode_key_hex(&key_hex)?)?
+    };
     let turn_ttl_seconds = std::env::var("UCR_WEBRTC_TURN_TTL_SECONDS")
         .ok()
         .map(|value| {
@@ -506,17 +515,40 @@ async fn serve_realtime_command(
         })
         .transpose()?
         .unwrap_or(300);
-    let config = RealtimeRuntimeConfig::new(join_base_url, decode_key_hex(&key_hex)?)?
-        .with_webrtc_ice(
-            csv_env("UCR_WEBRTC_STUN_URLS"),
-            csv_env("UCR_WEBRTC_TURN_URLS"),
+    let stun_urls = csv_env("UCR_WEBRTC_STUN_URLS");
+    let turn_urls = csv_env("UCR_WEBRTC_TURN_URLS");
+    let relay_only = bool_env("UCR_WEBRTC_RELAY_ONLY")?.unwrap_or(false);
+    config = if let Some((provider, handle)) = secret_provider_from_env(
+        "UCR_WEBRTC_TURN_SECRET_PROVIDER",
+        "UCR_WEBRTC_TURN_SECRET_FILE",
+        "UCR_WEBRTC_TURN_SECRET_ID",
+        "webrtc-turn-root",
+        SecretPurpose::TurnCredentials,
+    )? {
+        config.with_webrtc_ice_secret_provider(
+            stun_urls,
+            turn_urls,
+            provider,
+            handle,
+            turn_ttl_seconds,
+            relay_only,
+        )?
+    } else {
+        let turn_rest_secret = std::env::var("UCR_WEBRTC_TURN_SECRET_HEX")
+            .ok()
+            .map(|value| decode_key_hex_named(&value, "UCR_WEBRTC_TURN_SECRET_HEX"))
+            .transpose()?;
+        config.with_webrtc_ice(
+            stun_urls,
+            turn_urls,
             turn_rest_secret,
             turn_ttl_seconds,
-            bool_env("UCR_WEBRTC_RELAY_ONLY")?.unwrap_or(false),
+            relay_only,
         )?
-        .with_browser_realtime_gateway(
-            bool_env("UCR_BROWSER_REALTIME_GATEWAY_ENABLED")?.unwrap_or(false),
-        );
+    };
+    config = config.with_browser_realtime_gateway(
+        bool_env("UCR_BROWSER_REALTIME_GATEWAY_ENABLED")?.unwrap_or(false),
+    );
     let runtime = Arc::new(ProductionRuntime::open_existing(database)?);
     match machine_bearer_config_from_env()? {
         Some(machine_bearer) => {
@@ -538,16 +570,32 @@ fn dispatch_webhook_once(
         tenant_id.ok_or_else(|| "--tenant-id is required for dispatch-webhook-once".to_owned())?;
     let subscription_id = subscription_id
         .ok_or_else(|| "--subscription-id is required for dispatch-webhook-once".to_owned())?;
-    let key_hex = std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
-        "UCR_WEBHOOK_SIGNING_KEY_HEX is required for dispatch-webhook-once".to_owned()
-    })?;
     let runtime = ProductionRuntime::open_existing(database)?;
-    let outcome = runtime.dispatch_webhook_once(
-        &tenant_id,
-        namespace_id,
-        &subscription_id,
-        decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
-    )?;
+    let outcome = if let Some((provider, handle)) = secret_provider_from_env(
+        "UCR_WEBHOOK_SECRET_PROVIDER",
+        "UCR_WEBHOOK_SIGNING_SECRET_FILE",
+        "UCR_WEBHOOK_SIGNING_SECRET_ID",
+        "webhook-signing",
+        SecretPurpose::WebhookSigning,
+    )? {
+        runtime.dispatch_webhook_once_with_secret_provider(
+            &tenant_id,
+            namespace_id,
+            &subscription_id,
+            provider,
+            handle,
+        )?
+    } else {
+        let key_hex = Zeroizing::new(std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
+            "UCR_WEBHOOK_SIGNING_KEY_HEX is required for dispatch-webhook-once".to_owned()
+        })?);
+        runtime.dispatch_webhook_once(
+            &tenant_id,
+            namespace_id,
+            &subscription_id,
+            decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
+        )?
+    };
     match outcome {
         WebhookDispatchOutcome::Idle => println!("UCR_WEBHOOK_DISPATCH outcome=idle"),
         WebhookDispatchOutcome::RetryAfter { retry_after_ms } => {
@@ -567,8 +615,6 @@ fn dispatch_webhook_once(
 }
 
 async fn run_webhook_worker(database: &PathBuf) -> Result<(), String> {
-    let key_hex = std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX")
-        .map_err(|_| "UCR_WEBHOOK_SIGNING_KEY_HEX is required for run-webhook-worker".to_owned())?;
     let poll_interval = std::env::var("UCR_WEBHOOK_POLL_INTERVAL_MS")
         .ok()
         .map(|value| {
@@ -579,12 +625,30 @@ async fn run_webhook_worker(database: &PathBuf) -> Result<(), String> {
         })
         .transpose()?
         .unwrap_or(DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL);
-    Arc::new(ProductionRuntime::open_existing(database)?)
-        .run_webhook_worker(
-            decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
-            poll_interval,
-        )
-        .await
+    let runtime = Arc::new(ProductionRuntime::open_existing(database)?);
+    if let Some((provider, handle)) = secret_provider_from_env(
+        "UCR_WEBHOOK_SECRET_PROVIDER",
+        "UCR_WEBHOOK_SIGNING_SECRET_FILE",
+        "UCR_WEBHOOK_SIGNING_SECRET_ID",
+        "webhook-signing",
+        SecretPurpose::WebhookSigning,
+    )? {
+        runtime
+            .run_webhook_worker_with_secret_provider(provider, handle, poll_interval)
+            .await
+    } else {
+        let key_hex = Zeroizing::new(
+            std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
+                "UCR_WEBHOOK_SIGNING_KEY_HEX is required for run-webhook-worker".to_owned()
+            })?,
+        );
+        runtime
+            .run_webhook_worker(
+                decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
+                poll_interval,
+            )
+            .await
+    }
 }
 
 async fn run_recording_retention_worker(database: &PathBuf) -> Result<(), String> {
