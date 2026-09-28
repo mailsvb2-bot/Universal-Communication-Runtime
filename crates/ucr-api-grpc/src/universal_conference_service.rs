@@ -9,7 +9,8 @@ use super::{
         decode_machine_api_authentication,
     },
     mutation_idempotency::{
-        accept_mutation, accept_mutation_id, validate_mutation_idempotency_key,
+        accept_mutation, accept_mutation_id, accept_mutation_receipt,
+        validate_mutation_idempotency_key,
     },
     pb, pb_acknowledgement, pb_error, pb_opaque, pb_scope,
 };
@@ -589,32 +590,7 @@ where
                     &input.integration_id,
                     CONFERENCE_MANAGE_PERMISSION,
                 )
-                .and_then(|_| {
-                    accept_mutation(
-                        &*self.store,
-                        &input.scope,
-                        "ucr.conference.metadata.v1",
-                        &input.idempotency_key,
-                        payload,
-                    )?;
-                    let current = conference_for_integration(
-                        &*self.store,
-                        &input.scope,
-                        &input.conference_id,
-                        &input.integration_id,
-                    )?;
-                    if current.metadata == input.metadata {
-                        return Ok(current);
-                    }
-                    self.store
-                        .replace_universal_conference_metadata(
-                            &input.scope,
-                            &input.conference_id,
-                            current.revision,
-                            &input.metadata,
-                        )
-                        .map_err(map_store_error)
-                }),
+                .and_then(|_| set_conference_metadata(&*self.store, &input, payload)),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::UniversalSetConferenceMetadataResponse {
@@ -3606,6 +3582,41 @@ fn pb_participant(
     }
 }
 
+fn set_conference_metadata<S: UniversalConferenceStore + CommandAcceptanceStore>(
+    store: &S,
+    input: &SetConferenceMetadataInput,
+    command_payload: Vec<u8>,
+) -> Result<UniversalConferenceProfile, CanonicalError> {
+    let accepted = accept_mutation_receipt(
+        store,
+        &input.scope,
+        "ucr.conference.metadata.v1",
+        &input.idempotency_key,
+        command_payload,
+    )?;
+    let current = conference_for_integration(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+    )?;
+
+    // A duplicate command has already won the durable idempotency identity. Never replay its
+    // side effect against a newer Conference revision: later mutations must remain authoritative.
+    if accepted.duplicate || current.metadata == input.metadata {
+        return Ok(current);
+    }
+
+    store
+        .replace_universal_conference_metadata(
+            &input.scope,
+            &input.conference_id,
+            current.revision,
+            &input.metadata,
+        )
+        .map_err(map_store_error)
+}
+
 fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
     store: &S,
     input: CreateInput,
@@ -4272,6 +4283,55 @@ mod universal_runtime_tests {
                 },
             )
             .expect("terminate call");
+    }
+
+    #[test]
+    fn metadata_retry_never_overwrites_a_newer_successful_update() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        let initial = conference();
+        store
+            .persist_universal_conference_profile(&initial)
+            .expect("conference");
+
+        let update = |key: &str, value: &[u8], idempotency_key: &str| {
+            SetConferenceMetadataInput {
+                scope: scope(),
+                conference_id: initial.conference_id.clone(),
+                integration_id: initial.integration_id.clone(),
+                metadata: vec![UniversalConferenceMetadataEntry {
+                    key: key.to_owned(),
+                    value: value.to_vec(),
+                }],
+                idempotency_key: idempotency_key.to_owned(),
+            }
+        };
+
+        let first = update("com.example.crm.customer_id", b"x", "metadata-a");
+        let first_result =
+            set_conference_metadata(&store, &first, b"metadata-a-payload".to_vec())
+                .expect("first metadata update");
+        assert_eq!(first_result.revision, 2);
+
+        let second = update("com.example.crm.customer_id", b"y", "metadata-b");
+        let second_result =
+            set_conference_metadata(&store, &second, b"metadata-b-payload".to_vec())
+                .expect("second metadata update");
+        assert_eq!(second_result.revision, 3);
+        assert_eq!(second_result.metadata[0].value, b"y");
+
+        let retry =
+            set_conference_metadata(&store, &first, b"metadata-a-payload".to_vec())
+                .expect("exact retry");
+        assert_eq!(retry.revision, 3);
+        assert_eq!(retry.metadata[0].value, b"y");
+
+        let loaded = store
+            .universal_conference_profile(&scope(), &initial.conference_id)
+            .expect("load")
+            .expect("conference");
+        assert_eq!(loaded.revision, 3);
+        assert_eq!(loaded.metadata[0].value, b"y");
     }
 
     #[test]
