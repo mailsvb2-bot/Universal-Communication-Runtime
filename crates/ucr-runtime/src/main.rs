@@ -185,7 +185,7 @@ impl ReloadingMachineTokenSecretProvider {
                 "current_seed_hex" if current_seed_hex.is_none() => current_seed_hex = Some(value),
                 "previous_key_id" if previous_key_id.is_none() => previous_key_id = Some(value),
                 "previous_seed_hex" if previous_seed_hex.is_none() => {
-                    previous_seed_hex = Some(value)
+                    previous_seed_hex = Some(value);
                 }
                 _ => return Err(SecretProviderError::InvalidMaterial),
             }
