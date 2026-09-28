@@ -71,7 +71,11 @@ pub use service_request::{
     SystemServiceQuotaClock,
 };
 pub use store_forward::StoreForwardStore;
-pub use universal_conference::{ConferenceJoinGrantStore, UniversalConferenceStore};
+pub use universal_conference::{
+    ConferenceJoinGrantStore, ConferenceMetadataError, MAX_CONFERENCE_METADATA_ENTRIES,
+    MAX_CONFERENCE_METADATA_KEY_BYTES, MAX_CONFERENCE_METADATA_TOTAL_BYTES,
+    MAX_CONFERENCE_METADATA_VALUE_BYTES, UniversalConferenceStore, canonical_conference_metadata,
+};
 
 /// A route candidate is transient runtime state, never canonical identity.
 #[derive(Debug, Clone, PartialEq, Eq)]

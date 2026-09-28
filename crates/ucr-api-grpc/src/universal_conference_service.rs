@@ -9,7 +9,8 @@ use super::{
         decode_machine_api_authentication,
     },
     mutation_idempotency::{
-        accept_mutation, accept_mutation_id, validate_mutation_idempotency_key,
+        accept_mutation, accept_mutation_id, accept_mutation_receipt,
+        validate_mutation_idempotency_key,
     },
     pb, pb_acknowledgement, pb_error, pb_opaque, pb_scope,
 };
@@ -38,7 +39,8 @@ use ucr_model::{
     GroupOwnership, GroupRecord, GroupRole, IdentityEvidence, IdentityId, IdentityOwnership,
     IdentityRecord, IntegrationId, MediaKind, OpaqueId, PermissionGrant, PermissionScope,
     PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion,
-    ScopedPrincipal, SessionId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMode,
+    ScopedPrincipal, SessionId, TenantScope, UniversalConferenceLifecycle,
+    UniversalConferenceMetadataEntry, UniversalConferenceMode,
     UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
@@ -572,6 +574,39 @@ where
         }))
     }
 
+    async fn set_conference_metadata(
+        &self,
+        request: Request<pb::UniversalSetConferenceMetadataRequest>,
+    ) -> Result<Response<pb::UniversalSetConferenceMetadataResponse>, Status> {
+        let authentication = decode_universal_conference_authentication(request.metadata());
+        let body = request.into_inner();
+        let payload = body.encode_to_vec();
+        let decoded = decode_set_conference_metadata(body);
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok(input)) => self
+                .admit_integration(
+                    &input.scope,
+                    authentication,
+                    &input.integration_id,
+                    CONFERENCE_MANAGE_PERMISSION,
+                )
+                .and_then(|_| set_conference_metadata(&*self.store, &input, payload)),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::UniversalSetConferenceMetadataResponse {
+            result: Some(match result {
+                Ok(conference) => {
+                    pb::universal_set_conference_metadata_response::Result::Conference(
+                        pb_conference(&conference),
+                    )
+                }
+                Err(error) => {
+                    pb::universal_set_conference_metadata_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
     async fn ensure_participant(
         &self,
         request: Request<pb::UniversalEnsureParticipantRequest>,
@@ -1040,6 +1075,14 @@ struct UpdateParticipantInput {
     idempotency_key: String,
 }
 
+struct SetConferenceMetadataInput {
+    scope: TenantScope,
+    conference_id: GroupId,
+    integration_id: IntegrationId,
+    metadata: Vec<UniversalConferenceMetadataEntry>,
+    idempotency_key: String,
+}
+
 struct RemoveParticipantInput {
     scope: TenantScope,
     conference_id: GroupId,
@@ -1074,6 +1117,7 @@ struct CreateInput {
     idempotency_key: String,
     mode: UniversalConferenceMode,
     schedule: ConferenceScheduleMetadata,
+    metadata: Vec<UniversalConferenceMetadataEntry>,
 }
 
 fn decode_create(
@@ -1085,6 +1129,7 @@ fn decode_create(
     validate_mutation_idempotency_key(&value.idempotency_key)?;
     let mode = decode_mode(value.mode)?;
     let schedule = decode_schedule(value.schedule.ok_or_else(invalid_argument)?)?;
+    let metadata = decode_conference_metadata(value.metadata)?;
     Ok(CreateInput {
         scope,
         integration_id,
@@ -1092,6 +1137,50 @@ fn decode_create(
         idempotency_key: value.idempotency_key,
         mode,
         schedule,
+        metadata,
+    })
+}
+
+fn decode_conference_metadata(
+    values: Vec<pb::UniversalConferenceMetadataEntry>,
+) -> Result<Vec<UniversalConferenceMetadataEntry>, CanonicalError> {
+    let metadata = values
+        .into_iter()
+        .map(|value| UniversalConferenceMetadataEntry {
+            key: value.key,
+            value: value.value,
+        })
+        .collect::<Vec<_>>();
+    ucr_core::canonical_conference_metadata(&metadata).map_err(|error| {
+        let code = match error {
+            ucr_core::ConferenceMetadataError::InvalidKey
+            | ucr_core::ConferenceMetadataError::DuplicateKey => {
+                CanonicalErrorCode::InvalidArgument
+            }
+            ucr_core::ConferenceMetadataError::TooManyEntries
+            | ucr_core::ConferenceMetadataError::ValueTooLarge
+            | ucr_core::ConferenceMetadataError::TotalTooLarge => {
+                CanonicalErrorCode::ResourceExhausted
+            }
+        };
+        CanonicalError::new(code)
+    })
+}
+
+fn decode_set_conference_metadata(
+    value: pb::UniversalSetConferenceMetadataRequest,
+) -> Result<SetConferenceMetadataInput, CanonicalError> {
+    let scope = decode_scope(value.scope.ok_or_else(invalid_argument)?)?;
+    let conference_id = GroupId::from_opaque(decode_opaque(value.conference_id)?);
+    let integration_id = IntegrationId::from_opaque(decode_opaque(value.integration_id)?);
+    validate_mutation_idempotency_key(&value.idempotency_key)?;
+    let metadata = decode_conference_metadata(value.metadata)?;
+    Ok(SetConferenceMetadataInput {
+        scope,
+        conference_id,
+        integration_id,
+        metadata,
+        idempotency_key: value.idempotency_key,
     })
 }
 
@@ -3495,6 +3584,41 @@ fn pb_participant(
     }
 }
 
+fn set_conference_metadata<S: UniversalConferenceStore + CommandAcceptanceStore>(
+    store: &S,
+    input: &SetConferenceMetadataInput,
+    command_payload: Vec<u8>,
+) -> Result<UniversalConferenceProfile, CanonicalError> {
+    let accepted = accept_mutation_receipt(
+        store,
+        &input.scope,
+        "ucr.conference.metadata.v1",
+        &input.idempotency_key,
+        command_payload,
+    )?;
+    let current = conference_for_integration(
+        store,
+        &input.scope,
+        &input.conference_id,
+        &input.integration_id,
+    )?;
+
+    // A duplicate command has already won the durable idempotency identity. Never replay its
+    // side effect against a newer Conference revision: later mutations must remain authoritative.
+    if accepted.duplicate || current.metadata == input.metadata {
+        return Ok(current);
+    }
+
+    store
+        .replace_universal_conference_metadata(
+            &input.scope,
+            &input.conference_id,
+            current.revision,
+            &input.metadata,
+        )
+        .map_err(map_store_error)
+}
+
 fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
     store: &S,
     input: CreateInput,
@@ -3513,6 +3637,7 @@ fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
             && existing.create_idempotency_key == input.idempotency_key
             && existing.mode == input.mode
             && existing.schedule == input.schedule
+            && existing.metadata == input.metadata
         {
             return Ok(existing);
         }
@@ -3552,6 +3677,7 @@ fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
         mode: input.mode,
         lifecycle: UniversalConferenceLifecycle::Scheduled,
         schedule: input.schedule,
+        metadata: input.metadata,
         entry_open: false,
         revision: 1,
     };
@@ -3666,6 +3792,14 @@ fn pb_conference(value: &UniversalConferenceProfile) -> pb::UniversalConferenceD
         }),
         entry_open: value.entry_open,
         revision: value.revision,
+        metadata: value
+            .metadata
+            .iter()
+            .map(|entry| pb::UniversalConferenceMetadataEntry {
+                key: entry.key.clone(),
+                value: entry.value.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -3900,7 +4034,8 @@ mod universal_runtime_tests {
         GroupMemberState, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord,
         IntegrationId, OpaqueId, PrincipalId, PrincipalIdentityBinding, PrincipalKind,
         PrincipalRef, ScopedPrincipal, TenantId, TenantScope, UniversalConferenceLifecycle,
-        UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+        UniversalConferenceMetadataEntry, UniversalConferenceMode,
+        UniversalConferenceParticipantProfile, UniversalConferenceProfile,
     };
     use ucr_protocol::CanonicalErrorCode;
     use ucr_realtime::{JoinGrantUsePolicy, JoinTokenIssuer, JoinTokenKey};
@@ -3908,10 +4043,10 @@ mod universal_runtime_tests {
 
     use super::{
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
-        IssueJoinGrantInput, PrepareConferenceRuntimeInput, UpdateParticipantInput,
-        ensure_participant, ensure_participant_device, issue_join_grant, lifecycle_event,
-        prepare_conference_runtime, resolve_join_call, resolve_join_device,
-        resolve_person_principal, update_participant,
+        IssueJoinGrantInput, PrepareConferenceRuntimeInput, SetConferenceMetadataInput,
+        UpdateParticipantInput, ensure_participant, ensure_participant_device, issue_join_grant,
+        lifecycle_event, prepare_conference_runtime, resolve_join_call, resolve_join_device,
+        resolve_person_principal, set_conference_metadata, update_participant,
     };
 
     #[test]
@@ -4001,6 +4136,7 @@ mod universal_runtime_tests {
                 join_after_seconds: 300,
                 timezone: Some("UTC".to_owned()),
             },
+            metadata: Vec::new(),
             entry_open: true,
             revision: 1,
         }
@@ -4150,6 +4286,51 @@ mod universal_runtime_tests {
                 },
             )
             .expect("terminate call");
+    }
+
+    #[test]
+    fn metadata_retry_never_overwrites_a_newer_successful_update() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        let initial = conference();
+        store
+            .persist_universal_conference_profile(&initial)
+            .expect("conference");
+
+        let update = |key: &str, value: &[u8], idempotency_key: &str| SetConferenceMetadataInput {
+            scope: scope(),
+            conference_id: initial.conference_id.clone(),
+            integration_id: initial.integration_id.clone(),
+            metadata: vec![UniversalConferenceMetadataEntry {
+                key: key.to_owned(),
+                value: value.to_vec(),
+            }],
+            idempotency_key: idempotency_key.to_owned(),
+        };
+
+        let first = update("com.example.crm.customer_id", b"x", "metadata-a");
+        let first_result = set_conference_metadata(&store, &first, b"metadata-a-payload".to_vec())
+            .expect("first metadata update");
+        assert_eq!(first_result.revision, 2);
+
+        let second = update("com.example.crm.customer_id", b"y", "metadata-b");
+        let second_result =
+            set_conference_metadata(&store, &second, b"metadata-b-payload".to_vec())
+                .expect("second metadata update");
+        assert_eq!(second_result.revision, 3);
+        assert_eq!(second_result.metadata[0].value, b"y");
+
+        let retry = set_conference_metadata(&store, &first, b"metadata-a-payload".to_vec())
+            .expect("exact retry");
+        assert_eq!(retry.revision, 3);
+        assert_eq!(retry.metadata[0].value, b"y");
+
+        let loaded = store
+            .universal_conference_profile(&scope(), &initial.conference_id)
+            .expect("load")
+            .expect("conference");
+        assert_eq!(loaded.revision, 3);
+        assert_eq!(loaded.metadata[0].value, b"y");
     }
 
     #[test]

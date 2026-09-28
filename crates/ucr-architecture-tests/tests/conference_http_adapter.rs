@@ -19,6 +19,8 @@ fn conference_http_adapter_is_a_loopback_transport_over_universal_conference_grp
     assert!(source.contains("validate_loopback_bind(bind)?"));
     assert!(source.contains("tls_edge=required"));
     assert!(source.contains(r#""/v1/conferences""#));
+    assert!(source.contains(r#""/v1/conferences/metadata""#));
+    assert!(source.contains("set_conference_metadata(request)"));
     assert!(source.contains(r#""/v1/participants""#));
     assert!(source.contains(r#""/v1/join-grants""#));
     assert!(source.contains(r#""/v1/capabilities""#));
@@ -32,6 +34,8 @@ fn conference_http_adapter_is_a_loopback_transport_over_universal_conference_grp
     assert!(source.contains("while let Some(frame) = body.frame().await"));
     assert!(!source.contains("body.collect().await"));
     assert!(openapi.contains("/v1/conferences:"));
+    assert!(openapi.contains("/v1/conferences/metadata:"));
+    assert!(openapi.contains("operationId: setConferenceMetadata"));
     assert!(spec.contains("ucr-conference-web"));
     assert!(spec.contains("No REST-only business rules are allowed."));
 

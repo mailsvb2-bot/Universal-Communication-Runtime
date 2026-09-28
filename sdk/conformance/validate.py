@@ -288,7 +288,8 @@ def main() -> None:
         and "SQLITE_SCHEMA_V42: u32 = 42" in sqlite_store
         and "SQLITE_SCHEMA_V43: u32 = 43" in sqlite_store
         and "SQLITE_SCHEMA_V44: u32 = 44" in sqlite_store
-        and "SQLITE_SCHEMA_VERSION: u32 = 45" in sqlite_store
+        and "SQLITE_SCHEMA_V45: u32 = 45" in sqlite_store
+        and "SQLITE_SCHEMA_VERSION: u32 = 46" in sqlite_store
         and "migrate_v38_to_v39" in sqlite_store
         and "migrate_v39_to_v40" in sqlite_store
         and "migrate_v40_to_v41" in sqlite_store
@@ -296,9 +297,12 @@ def main() -> None:
         and "migrate_v42_to_v43" in sqlite_store
         and "migrate_v43_to_v44" in sqlite_store
         and "migrate_v44_to_v45" in sqlite_store
+        and "migrate_v45_to_v46" in sqlite_store
+        and "create_v46_objects" in sqlite_universal_conferences
+        and "verify_v46_objects" in sqlite_universal_conferences
         and "service_audit_authentication" in sqlite_service_control
         and "verify_v44_objects" in sqlite_service_control,
-        "resource quota v42, runtime worker lease v43, typed audit v44, and attachment v45 migration chain missing",
+        "resource quota v42, runtime worker lease v43, typed audit v44, attachment v45, and conference metadata v46 migration chain missing",
     )
     for marker in (
         "ServiceResourceQuotaPolicy",

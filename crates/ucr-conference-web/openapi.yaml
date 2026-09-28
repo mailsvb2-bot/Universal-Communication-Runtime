@@ -21,6 +21,9 @@ paths:
   /v1/conferences/entry:
     post:
       operationId: setEntryOpen
+  /v1/conferences/metadata:
+    post:
+      operationId: setConferenceMetadata
   /v1/participants:
     post:
       operationId: ensureParticipant

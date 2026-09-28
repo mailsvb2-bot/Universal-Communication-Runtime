@@ -165,7 +165,8 @@ fn v30_migration_adds_empty_organization_state_without_inference() {
         let connection = rusqlite::Connection::open(&path).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE IF EXISTS attachment_chunks;
+                "DROP TABLE IF EXISTS universal_conference_metadata;
+                 DROP TABLE IF EXISTS attachment_chunks;
                  DROP TABLE IF EXISTS attachments;
                  DROP TRIGGER IF EXISTS service_audit_authentication_no_update;
                  DROP TRIGGER IF EXISTS service_audit_authentication_no_delete;

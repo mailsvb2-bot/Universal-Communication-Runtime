@@ -13,7 +13,8 @@ use ucr_model::{
     CallId, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceParticipantRole,
     ConferenceScheduleMetadata, DeviceId, GroupId, IntegrationId, OpaqueId, PrincipalId,
     PrincipalKind, PrincipalRef, SessionId, TenantId, TenantScope, UniversalConferenceLifecycle,
-    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    UniversalConferenceMetadataEntry, UniversalConferenceMode,
+    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_storage_sqlite::{SQLITE_SCHEMA_VERSION, SqliteLocalStore};
 
@@ -44,6 +45,7 @@ fn conference() -> UniversalConferenceProfile {
             join_after_seconds: 300,
             timezone: Some("Europe/Amsterdam".to_owned()),
         },
+        metadata: Vec::new(),
         entry_open: false,
         revision: 1,
     }
@@ -362,6 +364,108 @@ fn external_participant_reference_is_unique_within_integration_conference() {
     assert_eq!(
         store.persist_universal_conference_participant(&duplicate_external),
         Err(ucr_core::DurableStoreError::Conflict)
+    );
+
+    cleanup(&path);
+}
+
+#[test]
+fn conference_metadata_replace_is_durable_idempotent_and_restart_safe() {
+    let path = db_path("universal-conference-metadata-restart");
+    let metadata = vec![
+        UniversalConferenceMetadataEntry {
+            key: "org.example.webinar.source".to_owned(),
+            value: b"landing".to_vec(),
+        },
+        UniversalConferenceMetadataEntry {
+            key: "com.example.crm.customer_id".to_owned(),
+            value: b"customer-42".to_vec(),
+        },
+    ];
+    {
+        let store = SqliteLocalStore::open(&path).expect("open");
+        let initial = conference();
+        store
+            .persist_universal_conference_profile(&initial)
+            .expect("conference");
+        let updated = store
+            .replace_universal_conference_metadata(
+                &scope(),
+                &initial.conference_id,
+                initial.revision,
+                &metadata,
+            )
+            .expect("replace metadata");
+        assert_eq!(updated.revision, initial.revision + 1);
+        assert_eq!(updated.metadata[0].key, "com.example.crm.customer_id");
+
+        let retry = store
+            .replace_universal_conference_metadata(
+                &scope(),
+                &initial.conference_id,
+                initial.revision,
+                &metadata,
+            )
+            .expect("exact retry");
+        assert_eq!(retry, updated);
+
+        let changed = vec![UniversalConferenceMetadataEntry {
+            key: "com.example.crm.customer_id".to_owned(),
+            value: b"changed".to_vec(),
+        }];
+        assert_eq!(
+            store.replace_universal_conference_metadata(
+                &scope(),
+                &initial.conference_id,
+                initial.revision,
+                &changed,
+            ),
+            Err(ucr_core::DurableStoreError::Conflict)
+        );
+    }
+    {
+        let store = SqliteLocalStore::open(&path).expect("reopen");
+        let loaded = store
+            .universal_conference_profile(&scope(), &conference().conference_id)
+            .expect("load")
+            .expect("conference");
+        assert_eq!(loaded.revision, 2);
+        assert_eq!(loaded.metadata.len(), 2);
+        assert_eq!(loaded.metadata[0].key, "com.example.crm.customer_id");
+        assert_eq!(loaded.metadata[0].value, b"customer-42");
+    }
+
+    cleanup(&path);
+}
+
+#[test]
+fn corrupt_persisted_metadata_namespace_fails_closed_on_reopen() {
+    let path = db_path("universal-conference-metadata-corrupt");
+    {
+        let store = SqliteLocalStore::open(&path).expect("open");
+        store
+            .persist_universal_conference_profile(&conference())
+            .expect("conference");
+    }
+    {
+        let connection = rusqlite::Connection::open(&path).expect("raw sqlite");
+        connection
+            .execute(
+                "INSERT INTO universal_conference_metadata (
+                    tenant_id, namespace_present, namespace_id, conference_id,
+                    metadata_key, metadata_value
+                 ) VALUES (?1, 0, '', ?2, 'customer_id', ?3)",
+                rusqlite::params![
+                    scope().tenant_id.as_opaque().as_str(),
+                    conference().conference_id.as_opaque().as_str(),
+                    b"bad".as_slice(),
+                ],
+            )
+            .expect("insert malformed namespace");
+    }
+    assert_eq!(
+        SqliteLocalStore::open(&path).err(),
+        Some(ucr_core::DurableStoreError::Corrupt)
     );
 
     cleanup(&path);

@@ -94,7 +94,8 @@ const SQLITE_SCHEMA_V41: u32 = 41;
 const SQLITE_SCHEMA_V42: u32 = 42;
 const SQLITE_SCHEMA_V43: u32 = 43;
 const SQLITE_SCHEMA_V44: u32 = 44;
-pub const SQLITE_SCHEMA_VERSION: u32 = 45;
+const SQLITE_SCHEMA_V45: u32 = 45;
+pub const SQLITE_SCHEMA_VERSION: u32 = 46;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -476,7 +477,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v45(connection);
+        return verify_schema_v46(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -531,11 +532,17 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V42 => migrate_v42_to_v43(connection)?,
             SQLITE_SCHEMA_V43 => migrate_v43_to_v44(connection)?,
             SQLITE_SCHEMA_V44 => migrate_v44_to_v45(connection)?,
+            SQLITE_SCHEMA_V45 => migrate_v45_to_v46(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v45(connection)
+    verify_schema_v46(connection)
+}
+
+fn verify_schema_v46(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v45(connection)?;
+    universal_conference_store::verify_v46_objects(connection)
 }
 
 fn verify_schema_v45(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -666,6 +673,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     runtime_worker_store::create_v43_objects(&transaction)?;
     service_control_store::create_v44_objects(&transaction)?;
     attachment_store::create_v45_objects(&transaction)?;
+    universal_conference_store::create_v46_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1482,12 +1490,27 @@ fn migrate_v44_to_v45(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     attachment_store::create_v45_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V45)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v45(connection)
+}
+
+fn migrate_v45_to_v46(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v45(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    universal_conference_store::create_v46_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v46(connection)
 }
 
 fn verify_table_columns(
@@ -1638,7 +1661,13 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v46_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch("DROP TABLE IF EXISTS universal_conference_metadata;")
+}
+
+#[cfg(test)]
 fn test_remove_v45_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v46_objects(connection)?;
     connection.execute_batch(
         "DROP TABLE IF EXISTS attachment_chunks;
          DROP TABLE IF EXISTS attachments;",
@@ -1865,7 +1894,9 @@ mod tests {
         SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND, canonical_communication_intent,
     };
 
-    use super::{SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID};
+    use super::{
+        SQLITE_SCHEMA_V45, SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID,
+    };
 
     static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -2552,6 +2583,44 @@ mod tests {
                 .status,
             CommandReceiptStatus::Accepted
         );
+    }
+
+    #[test]
+    fn v45_store_migrates_metadata_table_to_v46_and_reopens_cleanly() {
+        let db = TestDbPath::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create current store");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open raw v46 store");
+            crate::test_remove_v46_objects(&connection).expect("remove v46 objects");
+            connection
+                .pragma_update(None, "user_version", SQLITE_SCHEMA_V45)
+                .expect("mark exact v45");
+        }
+
+        {
+            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v45 to v46");
+            assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("inspect migrated store");
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_schema
+                        WHERE type='table' AND name='universal_conference_metadata'
+                    )",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("metadata table existence");
+            assert!(exists);
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen migrated v46 store");
+        assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
     }
 
     #[test]

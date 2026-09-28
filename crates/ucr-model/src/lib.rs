@@ -87,8 +87,8 @@ pub use transport_orchestrator::{
 };
 pub use universal_conference::{
     ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceParticipantRole,
-    ConferenceScheduleMetadata, UniversalConferenceLifecycle, UniversalConferenceMode,
-    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    ConferenceScheduleMetadata, UniversalConferenceLifecycle, UniversalConferenceMetadataEntry,
+    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 pub use video::{EncodedVideoFrame, VideoCodecConfig, VideoSourceKind, VideoStreamDescriptor};
 pub use webrtc::{

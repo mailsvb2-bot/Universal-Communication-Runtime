@@ -198,6 +198,9 @@ async fn dispatch_post(path: &str, request: Request<Incoming>, state: &AppState)
         "/v1/conferences/entry" => {
             forward_entry(&mut client, &body, authorization.as_deref()).await
         }
+        "/v1/conferences/metadata" => {
+            forward_metadata(&mut client, &body, authorization.as_deref()).await
+        }
         "/v1/participants" => {
             forward_ensure_participant(&mut client, &body, authorization.as_deref()).await
         }
@@ -444,6 +447,20 @@ fn scope_of(scope: &ScopeJson) -> Result<pb::TenantScope, TransportError> {
     })
 }
 
+fn metadata_of(
+    values: &[MetadataJson],
+) -> Result<Vec<pb::UniversalConferenceMetadataEntry>, TransportError> {
+    values
+        .iter()
+        .map(|value| {
+            Ok(pb::UniversalConferenceMetadataEntry {
+                key: value.key.clone(),
+                value: external_bytes(&value.value_b64)?,
+            })
+        })
+        .collect()
+}
+
 fn external_bytes(encoded: &str) -> Result<Vec<u8>, TransportError> {
     STANDARD.decode(encoded).map_err(|_| {
         TransportError::new(
@@ -565,6 +582,13 @@ struct ScheduleJson {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct MetadataJson {
+    key: String,
+    value_b64: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateJson {
     scope: ScopeJson,
     integration_id: String,
@@ -572,6 +596,8 @@ struct CreateJson {
     idempotency_key: String,
     mode: String,
     schedule: ScheduleJson,
+    #[serde(default)]
+    metadata: Vec<MetadataJson>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -607,6 +633,16 @@ struct EntryJson {
     conference_id: String,
     integration_id: String,
     entry_open: bool,
+    idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConferenceMetadataJson {
+    scope: ScopeJson,
+    conference_id: String,
+    integration_id: String,
+    metadata: Vec<MetadataJson>,
     idempotency_key: String,
 }
 
@@ -1146,6 +1182,7 @@ fn create_request(
         idempotency_key: parsed.idempotency_key.clone(),
         mode: mode_code(&parsed.mode)?,
         schedule: Some(schedule_of(&parsed.schedule)?),
+        metadata: metadata_of(&parsed.metadata)?,
     })
 }
 
@@ -1338,6 +1375,49 @@ async fn forward_entry(
             None => empty_upstream(),
         }
     })
+    .await
+}
+
+async fn forward_metadata(
+    client: &mut ConferenceClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<ConferenceMetadataJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let request = match (|| -> Result<_, TransportError> {
+        Ok(pb::UniversalSetConferenceMetadataRequest {
+            scope: Some(scope_of(&parsed.scope)?),
+            conference_id: Some(opaque(&parsed.conference_id)?),
+            integration_id: Some(opaque(&parsed.integration_id)?),
+            metadata: metadata_of(&parsed.metadata)?,
+            idempotency_key: parsed.idempotency_key.clone(),
+        })
+    })() {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(request, authorization) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(
+        client.set_conference_metadata(request),
+        |response| match response.result {
+            Some(pb::universal_set_conference_metadata_response::Result::Conference(
+                conference,
+            )) => json_response(
+                StatusCode::OK,
+                &json!({ "conference": conference_json(&conference) }),
+            ),
+            Some(pb::universal_set_conference_metadata_response::Result::Error(error)) => {
+                error_response(&error)
+            }
+            None => empty_upstream(),
+        },
+    )
     .await
 }
 
@@ -1976,6 +2056,10 @@ fn conference_json(conference: &pb::UniversalConferenceDescriptor) -> Value {
             "join_after_seconds": item.join_after_seconds,
             "timezone": item.timezone,
         })),
+        "metadata": conference.metadata.iter().map(|entry| json!({
+            "key": entry.key,
+            "value_b64": STANDARD.encode(&entry.value),
+        })).collect::<Vec<_>>(),
         "entry_open": conference.entry_open,
         "revision": conference.revision,
     })

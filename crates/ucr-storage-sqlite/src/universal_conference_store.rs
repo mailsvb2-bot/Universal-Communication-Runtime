@@ -90,6 +90,105 @@ pub(super) fn create_v35_objects(transaction: &Transaction<'_>) -> Result<(), Du
         .map_err(|error| map_schema_change_error(&error))
 }
 
+pub(super) fn create_v46_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(
+            "CREATE TABLE universal_conference_metadata (
+                tenant_id TEXT NOT NULL,
+                namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+                namespace_id TEXT NOT NULL,
+                conference_id TEXT NOT NULL,
+                metadata_key TEXT NOT NULL CHECK(length(metadata_key) BETWEEN 1 AND 255),
+                metadata_value BLOB NOT NULL CHECK(length(metadata_value) <= 4096),
+                PRIMARY KEY(
+                    tenant_id, namespace_present, namespace_id, conference_id, metadata_key
+                ),
+                FOREIGN KEY(tenant_id, namespace_present, namespace_id, conference_id)
+                    REFERENCES universal_conferences(
+                        tenant_id, namespace_present, namespace_id, conference_id
+                    ) ON DELETE CASCADE,
+                CHECK((namespace_present = 0 AND namespace_id = '') OR
+                      (namespace_present = 1 AND namespace_id <> ''))
+             ) WITHOUT ROWID;",
+        )
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn verify_v46_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_table_columns(
+        connection,
+        "universal_conference_metadata",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("conference_id", "TEXT", 1, 4),
+            ("metadata_key", "TEXT", 1, 5),
+            ("metadata_value", "BLOB", 1, 0),
+        ],
+    )?;
+
+    let mut statement = connection
+        .prepare(
+            "SELECT tenant_id, namespace_present, namespace_id, conference_id,
+                    metadata_key, metadata_value
+             FROM universal_conference_metadata
+             ORDER BY tenant_id, namespace_present, namespace_id, conference_id, metadata_key",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Vec<u8>>(5)?,
+            ))
+        })
+        .map_err(|error| map_sqlite_error(&error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| map_sqlite_error(&error))?;
+
+    let mut current_owner: Option<(String, i64, String, String)> = None;
+    let mut current_entries = Vec::new();
+    for (tenant_id, namespace_present, namespace_id, conference_id, key, value) in rows {
+        let owner = (tenant_id, namespace_present, namespace_id, conference_id);
+        if current_owner
+            .as_ref()
+            .is_some_and(|current| current != &owner)
+        {
+            ucr_core::canonical_conference_metadata(&current_entries)
+                .map_err(|_| DurableStoreError::Corrupt)?;
+            current_entries.clear();
+        }
+        current_owner = Some(owner);
+        current_entries.push(ucr_model::UniversalConferenceMetadataEntry { key, value });
+        if current_entries.len() > ucr_core::MAX_CONFERENCE_METADATA_ENTRIES {
+            return Err(DurableStoreError::Corrupt);
+        }
+    }
+    if !current_entries.is_empty() {
+        ucr_core::canonical_conference_metadata(&current_entries)
+            .map_err(|_| DurableStoreError::Corrupt)?;
+    }
+
+    let mut foreign_key_check = connection
+        .prepare("PRAGMA foreign_key_check(universal_conference_metadata)")
+        .map_err(|error| map_sqlite_error(&error))?;
+    if foreign_key_check
+        .query([])
+        .map_err(|error| map_sqlite_error(&error))?
+        .next()
+        .map_err(|error| map_sqlite_error(&error))?
+        .is_some()
+    {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
+}
+
 pub(super) fn verify_schema_v32(connection: &Connection) -> Result<(), DurableStoreError> {
     super::organization_store::verify_schema_v31(connection)?;
     verify_table_columns(
@@ -304,7 +403,11 @@ impl UniversalConferenceStore for SqliteLocalStore {
         &self,
         profile: &UniversalConferenceProfile,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
-        validate_profile(profile)?;
+        let mut profile = profile.clone();
+        profile.metadata = ucr_core::canonical_conference_metadata(&profile.metadata)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        validate_profile(&profile)?;
+        let profile = &profile;
         let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -363,6 +466,59 @@ impl UniversalConferenceStore for SqliteLocalStore {
         validate_external_reference(external_conference_id)?;
         let connection = self.lock_connection()?;
         load_profile_for_external(&connection, scope, integration_id, external_conference_id)
+    }
+
+    fn replace_universal_conference_metadata(
+        &self,
+        scope: &TenantScope,
+        conference_id: &GroupId,
+        expected_revision: u64,
+        metadata: &[ucr_model::UniversalConferenceMetadataEntry],
+    ) -> Result<UniversalConferenceProfile, DurableStoreError> {
+        let metadata = ucr_core::canonical_conference_metadata(metadata)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let current =
+            load_profile(&transaction, scope, conference_id)?.ok_or(DurableStoreError::Conflict)?;
+        if current.revision == expected_revision.saturating_add(1) && current.metadata == metadata {
+            return Ok(current);
+        }
+        if current.revision != expected_revision {
+            return Err(DurableStoreError::Conflict);
+        }
+        let next_revision = expected_revision
+            .checked_add(1)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        let namespace = namespace_storage_key(scope);
+        let changed = transaction
+            .execute(
+                "UPDATE universal_conferences
+                 SET revision = ?1
+                 WHERE tenant_id = ?2 AND namespace_present = ?3 AND namespace_id = ?4
+                   AND conference_id = ?5 AND revision = ?6",
+                params![
+                    encode_u64(next_revision).as_slice(),
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    conference_id.as_opaque().as_str(),
+                    encode_u64(expected_revision).as_slice(),
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        if changed != 1 {
+            return Err(DurableStoreError::Conflict);
+        }
+        replace_metadata_rows(&transaction, scope, conference_id, &metadata)?;
+        let updated =
+            load_profile(&transaction, scope, conference_id)?.ok_or(DurableStoreError::Corrupt)?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(updated)
     }
 
     fn transition_universal_conference(
@@ -761,7 +917,64 @@ fn insert_profile(
             ],
         )
         .map_err(|error| map_sqlite_error(&error))?;
+    insert_metadata_rows(
+        transaction,
+        &profile.scope,
+        &profile.conference_id,
+        &profile.metadata,
+    )?;
     Ok(())
+}
+
+fn insert_metadata_rows(
+    connection: &Connection,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    metadata: &[ucr_model::UniversalConferenceMetadataEntry],
+) -> Result<(), DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    for entry in metadata {
+        connection
+            .execute(
+                "INSERT INTO universal_conference_metadata (
+                    tenant_id, namespace_present, namespace_id, conference_id,
+                    metadata_key, metadata_value
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    conference_id.as_opaque().as_str(),
+                    entry.key.as_str(),
+                    entry.value.as_slice(),
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+    }
+    Ok(())
+}
+
+fn replace_metadata_rows(
+    transaction: &Transaction<'_>,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+    metadata: &[ucr_model::UniversalConferenceMetadataEntry],
+) -> Result<(), DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    transaction
+        .execute(
+            "DELETE FROM universal_conference_metadata
+             WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
+               AND conference_id = ?4",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                conference_id.as_opaque().as_str(),
+            ],
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    insert_metadata_rows(transaction, scope, conference_id, metadata)
 }
 
 fn ensure_integration_participant_quota(
@@ -994,9 +1207,56 @@ fn load_profile(
         )
         .optional()
         .map_err(|error| map_sqlite_error(&error))?;
-    stored
-        .map(|row| decode_profile(scope, conference_id, row))
-        .transpose()
+    match stored {
+        Some(row) => {
+            let metadata = load_metadata(connection, scope, conference_id)?;
+            decode_profile(scope, conference_id, row, metadata).map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+fn load_metadata(
+    connection: &Connection,
+    scope: &TenantScope,
+    conference_id: &GroupId,
+) -> Result<Vec<ucr_model::UniversalConferenceMetadataEntry>, DurableStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let limit = i64::try_from(ucr_core::MAX_CONFERENCE_METADATA_ENTRIES + 1)
+        .map_err(|_| DurableStoreError::Internal)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT metadata_key, metadata_value
+             FROM universal_conference_metadata
+             WHERE tenant_id = ?1 AND namespace_present = ?2 AND namespace_id = ?3
+               AND conference_id = ?4
+             ORDER BY metadata_key
+             LIMIT ?5",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let metadata = statement
+        .query_map(
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                conference_id.as_opaque().as_str(),
+                limit,
+            ],
+            |row| {
+                Ok(ucr_model::UniversalConferenceMetadataEntry {
+                    key: row.get(0)?,
+                    value: row.get(1)?,
+                })
+            },
+        )
+        .map_err(|error| map_sqlite_error(&error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| map_sqlite_error(&error))?;
+    if metadata.len() > ucr_core::MAX_CONFERENCE_METADATA_ENTRIES {
+        return Err(DurableStoreError::Corrupt);
+    }
+    ucr_core::canonical_conference_metadata(&metadata).map_err(|_| DurableStoreError::Corrupt)
 }
 
 fn load_profile_for_external(
@@ -1036,6 +1296,7 @@ fn decode_profile(
     scope: &TenantScope,
     conference_id: &GroupId,
     row: StoredConference,
+    metadata: Vec<ucr_model::UniversalConferenceMetadataEntry>,
 ) -> Result<UniversalConferenceProfile, DurableStoreError> {
     let profile = UniversalConferenceProfile {
         scope: scope.clone(),
@@ -1056,6 +1317,7 @@ fn decode_profile(
                 .map_err(|_| DurableStoreError::Corrupt)?,
             timezone: row.timezone,
         },
+        metadata,
         entry_open: parse_bool(row.entry_open)?,
         revision: decode_u64(&row.revision)?,
     };
@@ -1264,6 +1526,11 @@ fn decode_participant(
 
 fn validate_profile(profile: &UniversalConferenceProfile) -> Result<(), DurableStoreError> {
     validate_external_reference(&profile.external_conference_id)?;
+    let canonical_metadata = ucr_core::canonical_conference_metadata(&profile.metadata)
+        .map_err(|_| DurableStoreError::InvalidRecord)?;
+    if canonical_metadata != profile.metadata {
+        return Err(DurableStoreError::InvalidRecord);
+    }
     if profile.revision == 0
         || profile.create_idempotency_key.is_empty()
         || profile.create_idempotency_key.len() > 256
@@ -1554,6 +1821,7 @@ mod resource_quota_tests {
                 join_after_seconds: 0,
                 timezone: None,
             },
+            metadata: Vec::new(),
             entry_open: true,
             revision: 1,
         }

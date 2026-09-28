@@ -53,6 +53,23 @@ pub struct ConferenceJoinGrantRecord {
     pub redeemed: bool,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct UniversalConferenceMetadataEntry {
+    pub key: String,
+    pub value: Vec<u8>,
+}
+
+impl core::fmt::Debug for UniversalConferenceMetadataEntry {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("UniversalConferenceMetadataEntry")
+            .field("key", &self.key)
+            .field("value", &"<opaque>")
+            .field("value_len", &self.value.len())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConferenceScheduleMetadata {
     pub starts_at_unix_ms: i64,
@@ -77,6 +94,8 @@ pub struct UniversalConferenceProfile {
     pub mode: UniversalConferenceMode,
     pub lifecycle: UniversalConferenceLifecycle,
     pub schedule: ConferenceScheduleMetadata,
+    /// Bounded integration-owned metadata. Values are opaque and must never become UCR authority.
+    pub metadata: Vec<UniversalConferenceMetadataEntry>,
     pub entry_open: bool,
     pub revision: u64,
 }
@@ -97,6 +116,7 @@ impl core::fmt::Debug for UniversalConferenceProfile {
             .field("mode", &self.mode)
             .field("lifecycle", &self.lifecycle)
             .field("schedule", &self.schedule)
+            .field("metadata_count", &self.metadata.len())
             .field("entry_open", &self.entry_open)
             .field("revision", &self.revision)
             .finish()

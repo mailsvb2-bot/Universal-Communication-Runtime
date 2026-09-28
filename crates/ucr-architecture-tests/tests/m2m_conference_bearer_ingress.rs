@@ -35,7 +35,7 @@ fn universal_conference_ingress_accepts_one_canonical_authentication_scheme() {
         production
             .matches("decode_universal_conference_authentication(request.metadata())")
             .count(),
-        17,
+        18,
         "every Universal Conference RPC must pass through the typed auth selector",
     );
     assert_eq!(
