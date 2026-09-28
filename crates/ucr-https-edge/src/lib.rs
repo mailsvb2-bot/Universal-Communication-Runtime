@@ -302,7 +302,12 @@ mod tests {
         net::{TcpListener, TcpStream},
     };
 
-    use super::{tls_acceptor, validate_loopback_upstream};
+    use super::{ProviderBackedTlsAcceptor, tls_acceptor, validate_loopback_upstream};
+    use ucr_model::OpaqueId;
+    use ucr_secrets::{
+        InMemorySecretProvider, SecretHandle, SecretMaterial, SecretProvider, SecretPurpose,
+        SecretVersion,
+    };
 
     #[test]
     fn https_edge_refuses_a_non_loopback_upstream() {
@@ -514,4 +519,140 @@ mod tests {
         assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
         let _ = std::fs::remove_dir_all(directory);
     }
+    #[test]
+    fn provider_backed_tls_rotation_keeps_a_valid_pair_during_staggered_updates() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ucr-https-edge-provider-{stamp}"));
+        let pair_one = root.join("pair-one");
+        let pair_two = root.join("pair-two");
+        std::fs::create_dir_all(&pair_one).expect("pair one directory");
+        std::fs::create_dir_all(&pair_two).expect("pair two directory");
+        let (certificate_one, private_key_one) = mint_certificate(&pair_one);
+        let (certificate_two, private_key_two) = mint_certificate(&pair_two);
+
+        let provider = Arc::new(InMemorySecretProvider::default());
+        let certificate_handle = SecretHandle {
+            secret_id: OpaqueId::new("https-edge-certificate").expect("certificate id"),
+            purpose: SecretPurpose::TlsCertificate,
+        };
+        let private_key_handle = SecretHandle {
+            secret_id: OpaqueId::new("https-edge-private-key").expect("private key id"),
+            purpose: SecretPurpose::TlsPrivateKey,
+        };
+        provider
+            .provision(
+                certificate_handle.clone(),
+                SecretVersion {
+                    version_id: OpaqueId::new("cert-v1").expect("version"),
+                    material: SecretMaterial::new(
+                        std::fs::read(&certificate_one).expect("certificate one"),
+                    )
+                    .expect("certificate material"),
+                },
+            )
+            .expect("provision certificate");
+        provider
+            .provision(
+                private_key_handle.clone(),
+                SecretVersion {
+                    version_id: OpaqueId::new("key-v1").expect("version"),
+                    material: SecretMaterial::new(
+                        std::fs::read(&private_key_one).expect("private key one"),
+                    )
+                    .expect("private key material"),
+                },
+            )
+            .expect("provision private key");
+
+        let factory = ProviderBackedTlsAcceptor::new(
+            provider.clone(),
+            certificate_handle.clone(),
+            private_key_handle.clone(),
+        )
+        .expect("provider-backed acceptor");
+        factory.current_acceptor().expect("initial pair");
+
+        provider
+            .rotate(
+                &certificate_handle,
+                SecretVersion {
+                    version_id: OpaqueId::new("cert-v2").expect("version"),
+                    material: SecretMaterial::new(
+                        std::fs::read(&certificate_two).expect("certificate two"),
+                    )
+                    .expect("certificate material"),
+                },
+            )
+            .expect("rotate certificate");
+        factory
+            .current_acceptor()
+            .expect("previous certificate remains paired with current key");
+
+        provider
+            .rotate(
+                &private_key_handle,
+                SecretVersion {
+                    version_id: OpaqueId::new("key-v2").expect("version"),
+                    material: SecretMaterial::new(
+                        std::fs::read(&private_key_two).expect("private key two"),
+                    )
+                    .expect("private key material"),
+                },
+            )
+            .expect("rotate private key");
+        factory.current_acceptor().expect("new current pair");
+
+        let rendered = format!("{factory:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("BEGIN PRIVATE KEY"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_backed_tls_rejects_wrong_purpose_and_unmatched_material() {
+        let provider = Arc::new(InMemorySecretProvider::default());
+        let wrong_certificate = SecretHandle {
+            secret_id: OpaqueId::new("https-edge-wrong-cert").expect("id"),
+            purpose: SecretPurpose::WebhookSigning,
+        };
+        let private_key = SecretHandle {
+            secret_id: OpaqueId::new("https-edge-key").expect("id"),
+            purpose: SecretPurpose::TlsPrivateKey,
+        };
+        assert!(ProviderBackedTlsAcceptor::new(
+            provider.clone(),
+            wrong_certificate,
+            private_key.clone(),
+        )
+        .is_err());
+
+        let certificate = SecretHandle {
+            secret_id: OpaqueId::new("https-edge-cert").expect("id"),
+            purpose: SecretPurpose::TlsCertificate,
+        };
+        provider
+            .provision(
+                certificate.clone(),
+                SecretVersion {
+                    version_id: OpaqueId::new("cert-v1").expect("version"),
+                    material: SecretMaterial::new(b"not-a-certificate".to_vec()).expect("material"),
+                },
+            )
+            .expect("provision certificate");
+        provider
+            .provision(
+                private_key.clone(),
+                SecretVersion {
+                    version_id: OpaqueId::new("key-v1").expect("version"),
+                    material: SecretMaterial::new(b"not-a-private-key".to_vec()).expect("material"),
+                },
+            )
+            .expect("provision key");
+        assert!(ProviderBackedTlsAcceptor::new(provider, certificate, private_key).is_err());
+    }
+
+
 }
