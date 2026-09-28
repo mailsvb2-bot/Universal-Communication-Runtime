@@ -293,10 +293,23 @@ impl<C, A, S> GrpcUniversalConferenceService<C, A, S> {
         verification_keys: Arc<MachineTokenPublicKeySet>,
         policy: MachineTokenPolicy,
     ) -> Self {
-        self.machine_bearer = Some(Arc::new(UniversalConferenceMachineBearer {
+        self.machine_bearer = Some(Arc::new(UniversalConferenceMachineBearer::static_keys(
             verification_keys,
             policy,
-        }));
+        )));
+        self
+    }
+
+    /// Enables dynamically reloaded machine Bearer verification for Universal Conference ingress.
+    #[must_use]
+    pub fn with_machine_bearer_auth_provider(
+        mut self,
+        provider: Arc<dyn super::MachineTokenVerificationKeyProvider>,
+        policy: MachineTokenPolicy,
+    ) -> Self {
+        self.machine_bearer = Some(Arc::new(UniversalConferenceMachineBearer::provider(
+            provider, policy,
+        )));
         self
     }
 }
