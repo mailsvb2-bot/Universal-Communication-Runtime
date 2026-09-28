@@ -439,6 +439,39 @@ fn conference_metadata_replace_is_durable_idempotent_and_restart_safe() {
 }
 
 #[test]
+fn corrupt_persisted_metadata_namespace_fails_closed_on_reopen() {
+    let path = db_path("universal-conference-metadata-corrupt");
+    {
+        let store = SqliteLocalStore::open(&path).expect("open");
+        store
+            .persist_universal_conference_profile(&conference())
+            .expect("conference");
+    }
+    {
+        let connection = rusqlite::Connection::open(&path).expect("raw sqlite");
+        connection
+            .execute(
+                "INSERT INTO universal_conference_metadata (
+                    tenant_id, namespace_present, namespace_id, conference_id,
+                    metadata_key, metadata_value
+                 ) VALUES (?1, 0, '', ?2, 'customer_id', ?3)",
+                rusqlite::params![
+                    scope().tenant_id.as_opaque().as_str(),
+                    conference().conference_id.as_opaque().as_str(),
+                    b"bad".as_slice(),
+                ],
+            )
+            .expect("insert malformed namespace");
+    }
+    assert_eq!(
+        SqliteLocalStore::open(&path).err(),
+        Some(ucr_core::DurableStoreError::Corrupt)
+    );
+
+    cleanup(&path);
+}
+
+#[test]
 fn durable_join_grant_redeem_and_revocation_survive_restart() {
     let path = db_path("universal-conference-join-grant-restart");
     {
