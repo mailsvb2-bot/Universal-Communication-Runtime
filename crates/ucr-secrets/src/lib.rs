@@ -38,6 +38,7 @@ impl fmt::Debug for SecretHandle {
     }
 }
 
+#[derive(PartialEq, Eq)]
 pub struct SecretMaterial(Vec<u8>);
 
 impl SecretMaterial {
