@@ -14,7 +14,7 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     let secrets = read("crates/ucr-secrets/src/lib.rs");
     let spec = read("spec/secret-management.md");
 
-    assert!(root.contains(""crates/ucr-secrets""));
+    assert!(root.contains("\"crates/ucr-secrets\""));
     assert!(secrets.contains("pub trait SecretProvider"));
     assert!(secrets.contains("pub enum SecretPurpose"));
     assert!(secrets.contains("JoinSigning"));
