@@ -9145,6 +9145,10 @@ impl UniversalConferenceStore for MemoryLocalStore {
         &self,
         profile: &UniversalConferenceProfile,
     ) -> Result<DurableRecordStatus, DurableStoreError> {
+        let mut profile = profile.clone();
+        profile.metadata = ucr_core::canonical_conference_metadata(&profile.metadata)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let profile = &profile;
         if profile.external_conference_id.is_empty()
             || profile.external_conference_id.len() > 512
             || profile.create_idempotency_key.is_empty()
@@ -9228,6 +9232,42 @@ impl UniversalConferenceStore for MemoryLocalStore {
             .get(&external_key)
             .and_then(|key| state.universal_conferences.get(key))
             .cloned())
+    }
+
+    fn replace_universal_conference_metadata(
+        &self,
+        scope: &TenantScope,
+        conference_id: &ucr_model::GroupId,
+        expected_revision: u64,
+        metadata: &[ucr_model::UniversalConferenceMetadataEntry],
+    ) -> Result<UniversalConferenceProfile, DurableStoreError> {
+        let metadata = ucr_core::canonical_conference_metadata(metadata)
+            .map_err(|_| DurableStoreError::InvalidRecord)?;
+        let key = universal_conference_key(scope, conference_id);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let current = state
+            .universal_conferences
+            .get(&key)
+            .cloned()
+            .ok_or(DurableStoreError::Conflict)?;
+        if current.revision == expected_revision.saturating_add(1)
+            && current.metadata == metadata
+        {
+            return Ok(current);
+        }
+        if current.revision != expected_revision {
+            return Err(DurableStoreError::Conflict);
+        }
+        let profile = state
+            .universal_conferences
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Corrupt)?;
+        profile.metadata = metadata;
+        profile.revision = profile
+            .revision
+            .checked_add(1)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        Ok(profile.clone())
     }
 
     fn transition_universal_conference(
