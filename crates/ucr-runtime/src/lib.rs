@@ -15,13 +15,12 @@ use ucr_api_grpc::{
     GrpcIntegrationService, GrpcMachineAuthService, GrpcOperatorRuntimeService,
     GrpcRealtimeService, GrpcRecordingService, GrpcStoreForwardService, GrpcSyncService,
     GrpcUniversalConferenceService, MachineAuthDiscovery, MachineTokenVerificationKeyProvider,
-    OperatorRuntimeHealthSource,
-    RealtimeWebRtcDependencies, UniversalConferenceRuntimeCapabilities, call_service_server,
-    conference_service_server, device_service_server, event_service_server,
-    expire_due_recordings_once, group_service_server, integration_service_server,
-    machine_auth_service_server, operator_runtime_service_server, pb, realtime_service_server,
-    recording_service_server, store_forward_service_server, sync_service_server,
-    universal_conference_service_server,
+    OperatorRuntimeHealthSource, RealtimeWebRtcDependencies,
+    UniversalConferenceRuntimeCapabilities, call_service_server, conference_service_server,
+    device_service_server, event_service_server, expire_due_recordings_once, group_service_server,
+    integration_service_server, machine_auth_service_server, operator_runtime_service_server, pb,
+    realtime_service_server, recording_service_server, store_forward_service_server,
+    sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
@@ -1547,8 +1546,7 @@ async fn serve_realtime_services(
             MachineBearerVerificationConfig::Static(keys) => {
                 universal_service = universal_service
                     .with_machine_bearer_auth(Arc::clone(&keys), config.policy.clone());
-                recording_service =
-                    recording_service.with_machine_bearer_auth(keys, config.policy);
+                recording_service = recording_service.with_machine_bearer_auth(keys, config.policy);
             }
             MachineBearerVerificationConfig::Provider(provider) => {
                 universal_service = universal_service.with_machine_bearer_auth_provider(
@@ -1871,7 +1869,10 @@ mod tests {
         .expect("machine auth config")
         .with_previous_signing_key("key-2026-08", [6_u8; 32])
         .expect("previous signing key");
-        assert_eq!(static_machine_auth_verification_keys(&config).keys().len(), 2);
+        assert_eq!(
+            static_machine_auth_verification_keys(&config).keys().len(),
+            2
+        );
         assert_eq!(
             static_machine_auth_verification_keys(&config).keys()[0]
                 .key_id
@@ -1926,7 +1927,12 @@ mod tests {
             static_machine_auth_verification_keys(&before_restart),
             static_machine_auth_verification_keys(&after_restart)
         );
-        assert_eq!(static_machine_auth_verification_keys(&after_restart).keys().len(), 2);
+        assert_eq!(
+            static_machine_auth_verification_keys(&after_restart)
+                .keys()
+                .len(),
+            2
+        );
 
         let retired = MachineAuthRuntimeConfig::new(
             "https://auth.example.test",
@@ -1938,7 +1944,10 @@ mod tests {
             900,
         )
         .expect("retired previous key config");
-        assert_eq!(static_machine_auth_verification_keys(&retired).keys().len(), 1);
+        assert_eq!(
+            static_machine_auth_verification_keys(&retired).keys().len(),
+            1
+        );
         assert_eq!(
             static_machine_auth_verification_keys(&retired).keys()[0]
                 .key_id
