@@ -37,6 +37,7 @@ use ucr_model::{
     TenantId, TenantScope,
 };
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
+use ucr_secrets::{SecretHandle, SecretProvider};
 use ucr_sfu::{SfuForwardSink, SfuForwardSinkError};
 use ucr_storage_sqlite::{
     RECORDING_RETENTION_WORKER_KIND, SqliteLocalStore, WEBHOOK_DELIVERY_WORKER_KIND,
@@ -636,6 +637,43 @@ impl ProductionRuntime {
             .map_err(|error| format!("dispatch durable webhook: {error:?}"))
     }
 
+    /// Executes one durable webhook-delivery attempt with the shared secret provider.
+    ///
+    /// The provider-backed sink resolves the current WebhookSigning version for each attempt,
+    /// so rotations take effect without recreating the runtime or persisting key material.
+    ///
+    /// # Errors
+    /// Fails closed when the provider handle is unavailable, wrong-purpose, malformed, or when
+    /// normal webhook delivery validation fails.
+    pub fn dispatch_webhook_once_with_secret_provider(
+        &self,
+        tenant_id: &str,
+        namespace_id: Option<&str>,
+        subscription_id: &str,
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+    ) -> Result<WebhookDispatchOutcome, String> {
+        let scope = TenantScope {
+            tenant_id: TenantId::from_opaque(runtime_opaque(tenant_id, "tenant id")?),
+            namespace_id: namespace_id
+                .map(|value| runtime_opaque(value, "namespace id").map(NamespaceId::from_opaque))
+                .transpose()?,
+        };
+        let subscription_id =
+            EventSubscriptionId::from_opaque(runtime_opaque(subscription_id, "subscription id")?);
+        let clock = SystemEventDeliveryClock;
+        let sink = HardenedWebhookSink::with_secret_provider(
+            SystemWebhookDnsResolver,
+            NativeTlsWebhookExecutor::default(),
+            provider,
+            handle,
+        )
+        .map_err(|error| format!("configure webhook signing provider: {error:?}"))?;
+        EventWebhookDispatcher::new(&clock, self.store.as_ref(), &sink)
+            .dispatch_once(&scope, &subscription_id)
+            .map_err(|error| format!("dispatch durable webhook: {error:?}"))
+    }
+
     /// Runs the production webhook worker over all canonical Service Account-owned webhook
     /// subscriptions in the durable `SQLite` store.
     ///
@@ -681,6 +719,96 @@ impl ProductionRuntime {
             NativeTlsWebhookExecutor::default(),
             WebhookSigningSecret::from_bytes(signing_key),
         );
+        println!(
+            "UCR_WEBHOOK_WORKER_READY poll_interval_ms={}",
+            poll_interval.as_millis()
+        );
+
+        loop {
+            let sweep = match self.dispatch_webhook_sweep(clock, &sink, &holder_id) {
+                Ok(sweep) => sweep,
+                Err(error) => {
+                    let _ = self
+                        .store
+                        .release_runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND, &holder_id);
+                    return Err(error);
+                }
+            };
+            if sweep.delivered > 0
+                || sweep.retry_scheduled > 0
+                || sweep.dead_lettered > 0
+                || sweep.rejected > 0
+            {
+                println!(
+                    "UCR_WEBHOOK_WORKER_SWEEP targets={} delivered={} retry_scheduled={} dead_lettered={} rejected={}",
+                    sweep.targets,
+                    sweep.delivered,
+                    sweep.retry_scheduled,
+                    sweep.dead_lettered,
+                    sweep.rejected,
+                );
+            }
+
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => {
+                    result.map_err(|error| format!("webhook worker shutdown signal: {error}"))?;
+                    self.store
+                        .release_runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND, &holder_id)
+                        .map_err(|error| format!("release webhook worker durable lease: {error:?}"))?;
+                    println!("UCR_WEBHOOK_WORKER_STOPPED");
+                    return Ok(());
+                }
+                () = tokio::time::sleep(poll_interval) => {}
+            }
+        }
+    }
+
+    /// Runs the production webhook worker using the shared rotation-safe signing provider.
+    ///
+    /// The current webhook signing version is resolved for every delivery attempt. Provider
+    /// outages fail closed through the canonical retry path rather than falling back to a stale key.
+    ///
+    /// # Errors
+    /// Rejects unsafe polling intervals, provider configuration failures, lease loss, and durable
+    /// worker failures.
+    pub async fn run_webhook_worker_with_secret_provider(
+        self: Arc<Self>,
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+        poll_interval: Duration,
+    ) -> Result<(), String> {
+        if !(MIN_WEBHOOK_WORKER_POLL_INTERVAL..=MAX_WEBHOOK_WORKER_POLL_INTERVAL)
+            .contains(&poll_interval)
+        {
+            return Err("webhook worker poll interval must be between 100 ms and 60 s".to_owned());
+        }
+
+        let holder_id = generate_opaque_id()
+            .map_err(|_| "generate webhook worker lease holder id".to_owned())?
+            .as_str()
+            .to_owned();
+        let now_unix_ms = runtime_now_unix_ms()?;
+        let acquired = self
+            .store
+            .try_acquire_runtime_worker_lease(
+                WEBHOOK_DELIVERY_WORKER_KIND,
+                &holder_id,
+                now_unix_ms,
+                WEBHOOK_WORKER_LEASE_DURATION_MS,
+            )
+            .map_err(|error| format!("acquire webhook worker durable lease: {error:?}"))?;
+        if !acquired {
+            return Err("another webhook worker holds the durable delivery lease".to_owned());
+        }
+
+        let clock = SystemEventDeliveryClock;
+        let sink = HardenedWebhookSink::with_secret_provider(
+            SystemWebhookDnsResolver,
+            NativeTlsWebhookExecutor::default(),
+            provider,
+            handle,
+        )
+        .map_err(|error| format!("configure webhook signing provider: {error:?}"))?;
         println!(
             "UCR_WEBHOOK_WORKER_READY poll_interval_ms={}",
             poll_interval.as_millis()
