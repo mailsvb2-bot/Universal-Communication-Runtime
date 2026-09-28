@@ -923,5 +923,4 @@ mod tests {
             Err(EventWebhookDeliveryError::Retryable)
         ));
     }
-
 }
