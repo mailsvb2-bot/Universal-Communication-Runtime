@@ -3624,7 +3624,9 @@ const fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
         | JoinTokenError::Revoked
         | JoinTokenError::AlreadyUsed => CanonicalErrorCode::Unauthenticated,
         JoinTokenError::CapacityExceeded => CanonicalErrorCode::ResourceExhausted,
-        JoinTokenError::StateUnavailable => CanonicalErrorCode::TemporarilyUnavailable,
+        JoinTokenError::StateUnavailable | JoinTokenError::KeyUnavailable => {
+            CanonicalErrorCode::TemporarilyUnavailable
+        }
         JoinTokenError::ClockOverflow
         | JoinTokenError::RandomUnavailable
         | JoinTokenError::Internal => CanonicalErrorCode::Internal,
