@@ -490,4 +490,56 @@ mod tests {
         assert!(!rendered.contains("[7"));
         assert!(!rendered.contains("[8"));
     }
+    #[test]
+    fn provider_rotation_moves_machine_signing_to_current_and_keeps_previous_verify_only() {
+        let provider = Arc::new(InMemorySecretProvider::default());
+        let handle = SecretHandle {
+            secret_id: ucr_model::OpaqueId::new("machine-token-signing-material")
+                .expect("secret id"),
+            purpose: SecretPurpose::MachineTokenSigning,
+        };
+        provider
+            .provision(
+                handle.clone(),
+                SecretVersion {
+                    version_id: ucr_model::OpaqueId::new("machine-sign-v1").expect("version"),
+                    material: SecretMaterial::new(vec![17_u8; 32]).expect("material"),
+                },
+            )
+            .expect("provision");
+
+        let (before_signing, before_verify) =
+            provider_key_material(provider.as_ref(), &handle).expect("initial material");
+        assert_eq!(before_signing.key_id().as_opaque().as_str(), "machine-sign-v1");
+        assert_eq!(before_verify.keys().len(), 1);
+
+        provider
+            .rotate(
+                &handle,
+                SecretVersion {
+                    version_id: ucr_model::OpaqueId::new("machine-sign-v2").expect("version"),
+                    material: SecretMaterial::new(vec![18_u8; 32]).expect("material"),
+                },
+            )
+            .expect("rotate");
+
+        let (after_signing, after_verify) =
+            provider_key_material(provider.as_ref(), &handle).expect("rotated material");
+        assert_eq!(after_signing.key_id().as_opaque().as_str(), "machine-sign-v2");
+        assert_eq!(after_verify.keys().len(), 2);
+        assert!(
+            after_verify
+                .keys()
+                .iter()
+                .any(|key| key.key_id.as_opaque().as_str() == "machine-sign-v1")
+        );
+        assert!(
+            after_verify
+                .keys()
+                .iter()
+                .any(|key| key.key_id.as_opaque().as_str() == "machine-sign-v2")
+        );
+    }
+
+
 }
