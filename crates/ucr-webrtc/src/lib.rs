@@ -1291,14 +1291,14 @@ mod tests {
                 },
             )
             .expect("provision");
-        let issuer = TurnRestCredentialIssuer::with_secret_provider(
-            provider.clone(),
-            handle.clone(),
-        )
-        .expect("provider issuer");
+        let issuer =
+            TurnRestCredentialIssuer::with_secret_provider(provider.clone(), handle.clone())
+                .expect("provider issuer");
         let session_id =
             SessionId::from_opaque(OpaqueId::new("provider-session").expect("session"));
-        let first = issuer.issue(&session_id, 300, 1_000).expect("v1 credential");
+        let first = issuer
+            .issue(&session_id, 300, 1_000)
+            .expect("v1 credential");
 
         provider
             .rotate(
@@ -1309,7 +1309,9 @@ mod tests {
                 },
             )
             .expect("rotate");
-        let second = issuer.issue(&session_id, 300, 1_000).expect("v2 credential");
+        let second = issuer
+            .issue(&session_id, 300, 1_000)
+            .expect("v2 credential");
 
         assert_eq!(first.username, second.username);
         assert_ne!(first.credential, second.credential);
