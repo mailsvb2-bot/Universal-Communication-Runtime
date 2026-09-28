@@ -167,7 +167,8 @@ fn universal_conference_idempotency_and_foreign_integration_paths_are_isolated()
         .0;
     assert!(subscriptions.contains("conference_for_integration("));
     assert!(spec.contains("isolated by exact integration identity and operation class"));
-    assert!(spec.contains("raw legacy key was already accepted"));
+    assert!(spec.contains("atomically handles"));
+    assert!(spec.contains("rolling-upgrade concurrency regression"));
 }
 
 #[test]
