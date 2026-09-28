@@ -4111,6 +4111,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-secrets"
+version = "0.0.1"
+dependencies = [
+ "ucr-model",
+ "zeroize",
+]
+
+[[package]]
 name = "ucr-security-tests"
 version = "0.0.1"
 dependencies = [
