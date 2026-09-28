@@ -199,42 +199,41 @@ where
         .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE)
 }
 
+fn jwks_from_verification_keys(
+    verification_keys: &MachineTokenPublicKeySet,
+) -> pb::MachineAuthJwks {
+    pb::MachineAuthJwks {
+        keys: verification_keys
+            .keys()
+            .iter()
+            .map(|public_key| pb::MachineAuthJwk {
+                kty: "OKP".to_owned(),
+                crv: "Ed25519".to_owned(),
+                r#use: "sig".to_owned(),
+                alg: "EdDSA".to_owned(),
+                kid: public_key.key_id.as_opaque().as_str().to_owned(),
+                x: URL_SAFE_NO_PAD.encode(public_key.verifying_key.0),
+            })
+            .collect(),
+    }
+}
+
 impl<C, A, S> GrpcMachineAuthService<C, A, S>
 where
     C: ServiceQuotaClock,
     A: AuthorizationEvaluator,
     S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore,
 {
-    fn current_signing_material(
-        &self,
-    ) -> Result<(MachineTokenSigningKey, MachineTokenPublicKeySet), CanonicalError> {
+    fn public_jwks(&self) -> Result<pb::MachineAuthJwks, CanonicalError> {
         match &self.signing_source {
             MachineAuthSigningSource::Static {
-                signing_key,
-                verification_keys,
-            } => Ok(((**signing_key).clone(), (**verification_keys).clone())),
+                verification_keys, ..
+            } => Ok(jwks_from_verification_keys(verification_keys)),
             MachineAuthSigningSource::Provider { provider, handle } => {
-                provider_key_material(provider.as_ref(), handle)
+                let (_, verification_keys) = provider_key_material(provider.as_ref(), handle)?;
+                Ok(jwks_from_verification_keys(&verification_keys))
             }
         }
-    }
-
-    fn public_jwks(&self) -> Result<pb::MachineAuthJwks, CanonicalError> {
-        let (_, verification_keys) = self.current_signing_material()?;
-        Ok(pb::MachineAuthJwks {
-            keys: verification_keys
-                .keys()
-                .iter()
-                .map(|public_key| pb::MachineAuthJwk {
-                    kty: "OKP".to_owned(),
-                    crv: "Ed25519".to_owned(),
-                    r#use: "sig".to_owned(),
-                    alg: "EdDSA".to_owned(),
-                    kid: public_key.key_id.as_opaque().as_str().to_owned(),
-                    x: URL_SAFE_NO_PAD.encode(public_key.verifying_key.0),
-                })
-                .collect(),
-        })
     }
 
     fn exchange(
@@ -243,16 +242,33 @@ where
         secret: &ucr_core::ServiceCredentialSecret,
         request: pb::MachineTokenRequest,
     ) -> Result<pb::MachineAccessToken, CanonicalError> {
+        match &self.signing_source {
+            MachineAuthSigningSource::Static { signing_key, .. } => {
+                self.exchange_with_signing_key(credential_id, secret, signing_key, request)
+            }
+            MachineAuthSigningSource::Provider { provider, handle } => {
+                let (signing_key, _) = provider_key_material(provider.as_ref(), handle)?;
+                self.exchange_with_signing_key(credential_id, secret, &signing_key, request)
+            }
+        }
+    }
+
+    fn exchange_with_signing_key(
+        &self,
+        credential_id: &ucr_model::ServiceCredentialId,
+        secret: &ucr_core::ServiceCredentialSecret,
+        signing_key: &MachineTokenSigningKey,
+        request: pb::MachineTokenRequest,
+    ) -> Result<pb::MachineAccessToken, CanonicalError> {
         let scope = decode_scope(request.scope.ok_or_else(invalid_argument)?)?;
         let client_id = decode_opaque(request.client_id)?;
         let requested_ttl_seconds =
             (request.requested_ttl_seconds != 0).then_some(request.requested_ttl_seconds);
-        let (signing_key, _) = self.current_signing_material()?;
         let runtime = MachineAuthRuntime::new(
             &*self.clock,
             &*self.authorization,
             &*self.store,
-            &signing_key,
+            signing_key,
             &self.policy,
         );
         let grant = runtime.exchange(MachineAuthExchangeRequest {
@@ -342,6 +358,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ucr_secrets::{InMemorySecretProvider, SecretMaterial, SecretVersion};
 
     #[test]
     fn machine_auth_discovery_exposes_only_bounded_public_scopes() {
@@ -413,4 +430,64 @@ mod tests {
                 .any(|key| key.kid == "machine-jwks-key-previous")
         );
     }
+    #[test]
+    fn provider_rotation_updates_machine_auth_jwks_with_bounded_overlap() {
+        let provider = Arc::new(InMemorySecretProvider::default());
+        let handle = SecretHandle {
+            secret_id: ucr_model::OpaqueId::new("machine-token-signing").expect("secret id"),
+            purpose: SecretPurpose::MachineTokenSigning,
+        };
+        provider
+            .provision(
+                handle.clone(),
+                SecretVersion {
+                    version_id: ucr_model::OpaqueId::new("machine-key-v1").expect("version"),
+                    material: SecretMaterial::new(vec![7_u8; 32]).expect("material"),
+                },
+            )
+            .expect("provision");
+
+        let service = GrpcMachineAuthService::with_secret_provider(
+            Arc::new(ucr_core::SystemServiceQuotaClock),
+            Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
+            Arc::new(ucr_storage_memory::MemoryLocalStore::default()),
+            provider.clone(),
+            handle.clone(),
+            MachineTokenPolicy {
+                issuer: "https://auth.example.test".to_owned(),
+                audience: "ucr-api".to_owned(),
+                max_ttl_seconds: 900,
+            },
+            MachineAuthDiscovery {
+                token_endpoint: "https://auth.example.test/oauth2/token".to_owned(),
+                jwks_uri: "https://auth.example.test/oauth2/jwks".to_owned(),
+            },
+        )
+        .expect("provider-backed service");
+
+        let before = service.public_jwks().expect("initial jwks");
+        assert_eq!(before.keys.len(), 1);
+        assert_eq!(before.keys[0].kid, "machine-key-v1");
+
+        provider
+            .rotate(
+                &handle,
+                SecretVersion {
+                    version_id: ucr_model::OpaqueId::new("machine-key-v2").expect("version"),
+                    material: SecretMaterial::new(vec![8_u8; 32]).expect("material"),
+                },
+            )
+            .expect("rotate");
+
+        let after = service.public_jwks().expect("rotated jwks");
+        assert_eq!(after.keys.len(), 2);
+        assert!(after.keys.iter().any(|key| key.kid == "machine-key-v2"));
+        assert!(after.keys.iter().any(|key| key.kid == "machine-key-v1"));
+        let rendered = format!("{:?}", service.signing_source);
+        assert!(rendered.contains("<secret>"));
+        assert!(!rendered.contains("[7"));
+        assert!(!rendered.contains("[8"));
+    }
+
+
 }
