@@ -1758,6 +1758,7 @@ mod resource_quota_tests {
                 join_after_seconds: 0,
                 timezone: None,
             },
+            metadata: Vec::new(),
             entry_open: true,
             revision: 1,
         }
