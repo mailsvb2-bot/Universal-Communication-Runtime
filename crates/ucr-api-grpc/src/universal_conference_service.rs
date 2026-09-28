@@ -8,10 +8,7 @@ use super::{
         MachineApiAuthentication, MachineBearerConfig, admit_machine_api,
         decode_machine_api_authentication,
     },
-    mutation_idempotency::{
-        accept_mutation, accept_mutation_id, accept_mutation_receipt,
-        validate_mutation_idempotency_key,
-    },
+    mutation_idempotency::{accept_mutation_receipt, validate_mutation_idempotency_key},
     pb, pb_acknowledgement, pb_error, pb_opaque, pb_scope,
 };
 use prost::Message;
@@ -24,14 +21,14 @@ use ucr_core::{
     GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore, IdentityStore,
     PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
     ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
-    UniversalConferenceStore, generate_opaque_id,
+    UniversalConferenceStore,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet, TrustedSigningKeyResolver};
 use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipant, CallParticipantState,
     CallParticipantUpdateKind, CallSession, CallSignal, CallSignalKind, CallSignallingState,
-    CommandEnvelope, CommandId, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy,
+    CommandId, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy,
     ConferenceMediaSubscription, ConferenceParticipantRole, ConferenceScheduleMetadata,
     ConferenceSubscriptionSet, ConversationId, ConversationKind, ConversationRecord,
     ConversationRef, CorrelationContext, DeliveryPolicy, DeviceDescriptor, DeviceId,
@@ -50,7 +47,7 @@ use ucr_protocol::{
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
     CONFERENCE_READ_PERMISSION, CONFERENCE_SUBSCRIBE_PERMISSION, CanonicalError,
-    CanonicalErrorCode, CapabilityMaturity, CommandReceiptStatus, DEVICE_REGISTER_PERMISSION,
+    CanonicalErrorCode, CapabilityMaturity, DEVICE_REGISTER_PERMISSION,
     GROUP_MLS_CAPABILITY, H264_VIDEO_CODEC_CAPABILITY, MAX_CALL_PARTICIPANTS,
     MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT, OPUS_AUDIO_CODEC_CAPABILITY,
     SCREEN_SHARE_SEND_PERMISSION, SCREEN_SHARE_VIDEO_CAPABILITY, VIDEO_MEDIA_CAPABILITY,
