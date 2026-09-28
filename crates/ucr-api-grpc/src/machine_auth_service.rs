@@ -8,10 +8,10 @@ use ucr_core::{
     ServiceQuotaStore,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet, MachineTokenSigningKey};
-use ucr_model::KeyId;
-use ucr_secrets::{ActiveSecretSet, SecretHandle, SecretProvider, SecretPurpose, SecretVersion};
 use ucr_machine_auth::{MachineAuthExchangeRequest, MachineAuthRuntime, SUPPORTED_MACHINE_SCOPES};
+use ucr_model::KeyId;
 use ucr_protocol::CanonicalError;
+use ucr_secrets::{ActiveSecretSet, SecretHandle, SecretProvider, SecretPurpose, SecretVersion};
 
 use crate::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_credentials,
@@ -57,11 +57,9 @@ impl fmt::Debug for MachineAuthSigningSource {
 fn machine_token_key_from_version(
     version: &SecretVersion,
 ) -> Result<MachineTokenSigningKey, CanonicalError> {
-    let seed: [u8; 32] = version
-        .material
-        .as_bytes()
-        .try_into()
-        .map_err(|_| CanonicalError::new(ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable))?;
+    let seed: [u8; 32] = version.material.as_bytes().try_into().map_err(|_| {
+        CanonicalError::new(ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable)
+    })?;
     Ok(MachineTokenSigningKey::from_seed(
         KeyId::from_opaque(version.version_id.clone()),
         seed,
@@ -77,9 +75,9 @@ fn provider_key_material(
             ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable,
         ));
     }
-    let active = provider
-        .active_secret_set(handle)
-        .map_err(|_| CanonicalError::new(ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable))?;
+    let active = provider.active_secret_set(handle).map_err(|_| {
+        CanonicalError::new(ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable)
+    })?;
     machine_token_material_from_active(&active)
 }
 
@@ -87,13 +85,15 @@ fn machine_token_material_from_active(
     active: &ActiveSecretSet,
 ) -> Result<(MachineTokenSigningKey, MachineTokenPublicKeySet), CanonicalError> {
     let current = machine_token_key_from_version(&active.current)?;
-    let mut verification = MachineTokenPublicKeySet::new(vec![current.public_key()])
-        .map_err(|_| CanonicalError::new(ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable))?;
+    let mut verification =
+        MachineTokenPublicKeySet::new(vec![current.public_key()]).map_err(|_| {
+            CanonicalError::new(ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable)
+        })?;
     if let Some(previous) = &active.previous {
         let previous = machine_token_key_from_version(previous)?;
-        verification
-            .insert(previous.public_key())
-            .map_err(|_| CanonicalError::new(ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable))?;
+        verification.insert(previous.public_key()).map_err(|_| {
+            CanonicalError::new(ucr_protocol::CanonicalErrorCode::TemporarilyUnavailable)
+        })?;
     }
     Ok((current, verification))
 }
@@ -146,7 +146,9 @@ impl<C, A, S> GrpcMachineAuthService<C, A, S> {
         discovery: MachineAuthDiscovery,
     ) -> Result<Self, String> {
         if handle.purpose != SecretPurpose::MachineTokenSigning {
-            return Err("machine auth signing handle must use MachineTokenSigning purpose".to_owned());
+            return Err(
+                "machine auth signing handle must use MachineTokenSigning purpose".to_owned(),
+            );
         }
         provider_key_material(provider.as_ref(), &handle)
             .map_err(|_| "machine auth signing provider is unavailable or malformed".to_owned())?;
@@ -488,6 +490,4 @@ mod tests {
         assert!(!rendered.contains("[7"));
         assert!(!rendered.contains("[8"));
     }
-
-
 }
