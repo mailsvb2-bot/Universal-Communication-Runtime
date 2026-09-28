@@ -27,7 +27,28 @@ fn universal_conference_contract_hides_internal_ucr_identity_mechanics() {
         !line.starts_with("//") && line.contains("DeviceId ")
     }));
     assert!(!proto.contains("clientplatform"));
-    assert!(!proto.contains("crm"));
+    assert!(!proto.lines().any(|line| {
+        let line = line.trim_start();
+        !line.starts_with("//") && line.contains("customer_id")
+    }));
+}
+
+#[test]
+fn universal_conference_metadata_is_bounded_namespaced_and_not_a_second_database() {
+    let proto = read("proto/ucr/v1/universal_conference.proto");
+    let core = read("crates/ucr-core/src/universal_conference.rs");
+    let sqlite = read("crates/ucr-storage-sqlite/src/universal_conference_store.rs");
+    let spec = read("spec/universal-conference-api.md");
+
+    assert!(proto.contains("message UniversalConferenceMetadataEntry"));
+    assert!(proto.contains("rpc SetConferenceMetadata"));
+    assert!(proto.contains("repeated UniversalConferenceMetadataEntry metadata"));
+    assert!(core.contains("MAX_CONFERENCE_METADATA_ENTRIES: usize = 32"));
+    assert!(core.contains("MAX_CONFERENCE_METADATA_VALUE_BYTES: usize = 4096"));
+    assert!(core.contains("segments >= 3"));
+    assert!(sqlite.contains("CREATE TABLE universal_conference_metadata"));
+    assert!(spec.contains("com.example.crm.customer_id"));
+    assert!(spec.contains("must not become an arbitrary integration database"));
 }
 
 #[test]
