@@ -510,7 +510,10 @@ mod tests {
 
         let (before_signing, before_verify) =
             provider_key_material(provider.as_ref(), &handle).expect("initial material");
-        assert_eq!(before_signing.key_id().as_opaque().as_str(), "machine-sign-v1");
+        assert_eq!(
+            before_signing.key_id().as_opaque().as_str(),
+            "machine-sign-v1"
+        );
         assert_eq!(before_verify.keys().len(), 1);
 
         provider
@@ -525,7 +528,10 @@ mod tests {
 
         let (after_signing, after_verify) =
             provider_key_material(provider.as_ref(), &handle).expect("rotated material");
-        assert_eq!(after_signing.key_id().as_opaque().as_str(), "machine-sign-v2");
+        assert_eq!(
+            after_signing.key_id().as_opaque().as_str(),
+            "machine-sign-v2"
+        );
         assert_eq!(after_verify.keys().len(), 2);
         assert!(
             after_verify
@@ -540,6 +546,4 @@ mod tests {
                 .any(|key| key.key_id.as_opaque().as_str() == "machine-sign-v2")
         );
     }
-
-
 }
