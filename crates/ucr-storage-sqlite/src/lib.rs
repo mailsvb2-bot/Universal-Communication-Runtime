@@ -274,11 +274,9 @@ impl CommandAcceptanceStore for SqliteLocalStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
 
-        if let Some(receipt) = protect_legacy_idempotency_key(
-            &transaction,
-            &legacy_incoming,
-            legacy_idempotency_key,
-        )? {
+        if let Some(receipt) =
+            protect_legacy_idempotency_key(&transaction, &legacy_incoming, legacy_idempotency_key)?
+        {
             transaction
                 .commit()
                 .map_err(|error| map_sqlite_error(&error))?;
@@ -432,9 +430,8 @@ fn protect_legacy_idempotency_key(
         .map(Some);
     }
 
-    let reservation_id = CommandId::from_opaque(
-        generate_opaque_id().map_err(|_| DurableStoreError::Internal)?,
-    );
+    let reservation_id =
+        CommandId::from_opaque(generate_opaque_id().map_err(|_| DurableStoreError::Internal)?);
     let mut reservation = legacy_incoming.clone();
     reservation.command_id = reservation_id.clone();
     LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE.clone_into(&mut reservation.command_type);
