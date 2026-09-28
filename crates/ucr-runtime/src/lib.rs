@@ -639,7 +639,7 @@ impl ProductionRuntime {
 
     /// Executes one durable webhook-delivery attempt with the shared secret provider.
     ///
-    /// The provider-backed sink resolves the current WebhookSigning version for each attempt,
+    /// The provider-backed sink resolves the current `WebhookSigning` version for each attempt,
     /// so rotations take effect without recreating the runtime or persisting key material.
     ///
     /// # Errors
