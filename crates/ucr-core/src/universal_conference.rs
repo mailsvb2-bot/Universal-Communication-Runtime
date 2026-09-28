@@ -1,10 +1,82 @@
 use ucr_model::{
     ConferenceJoinGrantRecord, ConferenceParticipantRole, EventEnvelope, GroupId, IntegrationId,
     PrincipalRef, SessionId, TenantScope, UniversalConferenceLifecycle,
-    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    UniversalConferenceMetadataEntry, UniversalConferenceParticipantProfile,
+    UniversalConferenceProfile,
 };
 
 use crate::{DurableRecordStatus, DurableStoreError, StorageProvider};
+
+pub const MAX_CONFERENCE_METADATA_ENTRIES: usize = 32;
+pub const MAX_CONFERENCE_METADATA_KEY_BYTES: usize = 255;
+pub const MAX_CONFERENCE_METADATA_VALUE_BYTES: usize = 4096;
+pub const MAX_CONFERENCE_METADATA_TOTAL_BYTES: usize = 32 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConferenceMetadataError {
+    TooManyEntries,
+    InvalidKey,
+    DuplicateKey,
+    ValueTooLarge,
+    TotalTooLarge,
+}
+
+/// Validates and canonically orders integration-owned Conference metadata.
+///
+/// Keys use a reverse-DNS-like namespace with at least three dot-separated ASCII identifier
+/// segments (for example `com.example.crm.customer_id`). Values are opaque bounded bytes.
+/// Metadata never grants UCR authority and is intentionally budgeted so this surface cannot become
+/// an arbitrary integration database.
+///
+/// # Errors
+/// Rejects malformed/duplicate keys or count/per-entry/aggregate budget violations.
+pub fn canonical_conference_metadata(
+    metadata: &[UniversalConferenceMetadataEntry],
+) -> Result<Vec<UniversalConferenceMetadataEntry>, ConferenceMetadataError> {
+    if metadata.len() > MAX_CONFERENCE_METADATA_ENTRIES {
+        return Err(ConferenceMetadataError::TooManyEntries);
+    }
+    let mut total = 0usize;
+    let mut canonical = metadata.to_vec();
+    for entry in &canonical {
+        if !valid_metadata_key(&entry.key) {
+            return Err(ConferenceMetadataError::InvalidKey);
+        }
+        if entry.value.len() > MAX_CONFERENCE_METADATA_VALUE_BYTES {
+            return Err(ConferenceMetadataError::ValueTooLarge);
+        }
+        total = total
+            .checked_add(entry.key.len())
+            .and_then(|value| value.checked_add(entry.value.len()))
+            .ok_or(ConferenceMetadataError::TotalTooLarge)?;
+        if total > MAX_CONFERENCE_METADATA_TOTAL_BYTES {
+            return Err(ConferenceMetadataError::TotalTooLarge);
+        }
+    }
+    canonical.sort_by(|left, right| left.key.cmp(&right.key));
+    if canonical.windows(2).any(|pair| pair[0].key == pair[1].key) {
+        return Err(ConferenceMetadataError::DuplicateKey);
+    }
+    Ok(canonical)
+}
+
+fn valid_metadata_key(key: &str) -> bool {
+    if key.is_empty() || key.len() > MAX_CONFERENCE_METADATA_KEY_BYTES {
+        return false;
+    }
+    let mut segments = 0usize;
+    for segment in key.split('.') {
+        if segment.is_empty()
+            || !segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        {
+            return false;
+        }
+        segments += 1;
+    }
+    segments >= 3
+}
 
 /// Durable coordinator metadata for the high-level Conference integration boundary.
 ///
@@ -43,6 +115,22 @@ pub trait UniversalConferenceStore: StorageProvider {
         integration_id: &IntegrationId,
         external_conference_id: &[u8],
     ) -> Result<Option<UniversalConferenceProfile>, DurableStoreError>;
+
+    /// Atomically replaces the bounded integration-owned metadata set and advances Conference
+    /// revision exactly once.
+    ///
+    /// Exact retries may return the already-applied next revision when metadata matches. Changed
+    /// content under a stale revision conflicts.
+    ///
+    /// # Errors
+    /// Rejects invalid metadata, stale revisions, unknown conferences and durable-store failures.
+    fn replace_universal_conference_metadata(
+        &self,
+        scope: &TenantScope,
+        conference_id: &GroupId,
+        expected_revision: u64,
+        metadata: &[UniversalConferenceMetadataEntry],
+    ) -> Result<UniversalConferenceProfile, DurableStoreError>;
 
     /// Applies one optimistic lifecycle transition and increments revision exactly once.
     ///
@@ -224,4 +312,54 @@ pub trait ConferenceJoinGrantStore: StorageProvider {
         scope: &TenantScope,
         session_id: &SessionId,
     ) -> Result<ConferenceJoinGrantRecord, DurableStoreError>;
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use ucr_model::UniversalConferenceMetadataEntry;
+
+    use super::{ConferenceMetadataError, canonical_conference_metadata};
+
+    #[test]
+    fn conference_metadata_is_namespaced_bounded_and_canonical() {
+        let metadata = vec![
+            UniversalConferenceMetadataEntry {
+                key: "org.example.webinar.source".to_owned(),
+                value: b"landing".to_vec(),
+            },
+            UniversalConferenceMetadataEntry {
+                key: "com.example.crm.customer_id".to_owned(),
+                value: b"customer-42".to_vec(),
+            },
+        ];
+        let canonical = canonical_conference_metadata(&metadata).expect("metadata");
+        assert_eq!(canonical[0].key, "com.example.crm.customer_id");
+        assert_eq!(canonical[1].key, "org.example.webinar.source");
+    }
+
+    #[test]
+    fn conference_metadata_rejects_unscoped_duplicate_and_oversized_values() {
+        assert_eq!(
+            canonical_conference_metadata(&[UniversalConferenceMetadataEntry {
+                key: "customer_id".to_owned(),
+                value: Vec::new(),
+            }]),
+            Err(ConferenceMetadataError::InvalidKey)
+        );
+        let duplicate = UniversalConferenceMetadataEntry {
+            key: "com.example.crm.customer_id".to_owned(),
+            value: b"a".to_vec(),
+        };
+        assert_eq!(
+            canonical_conference_metadata(&[duplicate.clone(), duplicate]),
+            Err(ConferenceMetadataError::DuplicateKey)
+        );
+        assert_eq!(
+            canonical_conference_metadata(&[UniversalConferenceMetadataEntry {
+                key: "com.example.crm.payload".to_owned(),
+                value: vec![0; 4097],
+            }]),
+            Err(ConferenceMetadataError::ValueTooLarge)
+        );
+    }
 }
