@@ -44,9 +44,13 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     assert!(machine_auth.contains("GrpcMachineAuthService::with_secret_provider"));
     assert!(machine_auth.contains("SecretPurpose::MachineTokenSigning"));
     assert!(machine_auth.contains("provider_key_material"));
+    assert!(runtime.contains("MachineTokenVerificationKeyProvider"));
+    assert!(runtime.contains("with_verification_provider"));
     assert!(runtime.contains("MachineAuthRuntimeConfig::with_secret_provider"));
     assert!(runtime_main.contains("UCR_MACHINE_TOKEN_SECRET_PROVIDER"));
     assert!(runtime_main.contains("ReloadingMachineTokenSecretProvider"));
+    assert!(runtime_main.contains("ReloadingMachineTokenJwksProvider"));
+    assert!(runtime_main.contains("UCR_MACHINE_TOKEN_VERIFICATION_PROVIDER"));
     assert!(secrets.contains("pub trait SecretProvider"));
     assert!(secrets.contains("pub enum SecretPurpose"));
     assert!(secrets.contains("MachineTokenSigning"));
