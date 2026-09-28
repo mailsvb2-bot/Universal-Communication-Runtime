@@ -98,3 +98,36 @@ Provider lookup and PEM parsing do not run in the serial accept loop. Each accep
 resolves its TLS material inside that connection task, so one slow provider operation cannot stop
 the listener from accepting unrelated connections. A production KMS/Vault/HSM adapter should keep
 the same non-blocking listener property and may add its own bounded cache/refresh strategy.
+
+## Machine token signing integration
+
+The OAuth2/M2M machine-auth service uses a distinct `MachineTokenSigning` secret purpose. In
+provider-backed mode, every client-credentials exchange resolves the provider's current 32-byte
+Ed25519 seed immediately before token issuance. The provider version identifier becomes the JWT
+`kid`, so rotating material cannot silently reuse an old public-key identity.
+
+The JWKS endpoint resolves the same active set on every request and publishes public keys for the
+current version plus at most one previous version. New tokens are signed only by current while
+tokens minted before rotation remain verifiable during the bounded overlap window. Missing,
+wrong-purpose, unavailable, malformed, or duplicate-version provider state fails closed; the
+machine-auth service does not fall back to a stale static seed.
+
+`ucr-runtime serve-auth` exposes this path with
+`UCR_MACHINE_TOKEN_SECRET_PROVIDER=file-reload`. The current manifest is configured through
+`UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE`; an optional previous manifest is configured through
+`UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_SECRET_FILE`. Each manifest is a bounded, non-symlink,
+owner-protected text file with exactly:
+
+```text
+key_id=<opaque-key-id>
+seed_hex=<64 lowercase-or-uppercase hex characters>
+```
+
+The manifests are re-read for issuance/JWKS resolution, so operators can rotate with atomic file
+replacement without restarting the machine-auth listener. The legacy
+`UCR_MACHINE_TOKEN_SIGNING_KEY_ID` + `UCR_MACHINE_TOKEN_SIGNING_KEY_FILE` startup path remains
+available for compatibility.
+
+This still does not claim a durable external KMS/Vault/HSM adapter. It closes the canonical UCR
+consumer/runtime path and provides an executable reloadable deployment adapter; production
+external-provider availability, authorization, and recovery evidence remains a separate gate.
