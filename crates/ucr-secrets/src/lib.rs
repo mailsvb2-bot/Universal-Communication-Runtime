@@ -153,7 +153,10 @@ impl InMemorySecretProvider {
         handle: SecretHandle,
         version: SecretVersion,
     ) -> Result<ActiveSecretSet, SecretProviderError> {
-        let mut state = self.state.write().map_err(|_| SecretProviderError::Internal)?;
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| SecretProviderError::Internal)?;
         if let Some(existing) = state.get(&handle) {
             if existing.current == version && existing.previous.is_none() {
                 return Ok(existing.clone());
@@ -196,8 +199,14 @@ impl SecretProvider for InMemorySecretProvider {
         handle: &SecretHandle,
         new_version: SecretVersion,
     ) -> Result<ActiveSecretSet, SecretProviderError> {
-        let mut state = self.state.write().map_err(|_| SecretProviderError::Internal)?;
-        let existing = state.get(handle).cloned().ok_or(SecretProviderError::NotFound)?;
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| SecretProviderError::Internal)?;
+        let existing = state
+            .get(handle)
+            .cloned()
+            .ok_or(SecretProviderError::NotFound)?;
 
         if existing.current == new_version {
             return Ok(existing);
