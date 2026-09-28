@@ -553,8 +553,7 @@ impl JoinTokenIssuer {
     fn sign(&self, claims: &RealtimeSessionClaims) -> Result<String, JoinTokenError> {
         let payload = encode_claims(claims)?;
         let key = self.current_signing_key()?;
-        let mut mac =
-            HmacSha256::new_from_slice(&key.0).map_err(|_| JoinTokenError::Internal)?;
+        let mut mac = HmacSha256::new_from_slice(&key.0).map_err(|_| JoinTokenError::Internal)?;
         mac.update(&payload);
         let signature = mac.finalize().into_bytes();
         Ok(format!(
@@ -584,7 +583,9 @@ impl JoinTokenIssuer {
                     .active_secret_set(handle)
                     .map_err(|_| JoinTokenError::KeyUnavailable)?;
                 let mut keys = Vec::with_capacity(2);
-                keys.push(join_token_key_from_material(set.current.material.as_bytes())?);
+                keys.push(join_token_key_from_material(
+                    set.current.material.as_bytes(),
+                )?);
                 if let Some(previous) = set.previous {
                     keys.push(join_token_key_from_material(previous.material.as_bytes())?);
                 }
