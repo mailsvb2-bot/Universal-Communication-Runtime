@@ -22,6 +22,7 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     let webrtc = read("crates/ucr-webrtc/src/lib.rs");
     let webhook = read("crates/ucr-webhook/src/lib.rs");
     let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let https_edge = read("crates/ucr-https-edge/src/lib.rs");
     assert!(webrtc.contains("TurnRestCredentialIssuer::with_secret_provider"));
     assert!(webrtc.contains("SecretPurpose::TurnCredentials"));
     assert!(webrtc.contains("self.current_secret()?"));
@@ -30,6 +31,10 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     assert!(webhook.contains("self.current_signing_secret()?"));
     assert!(runtime.contains("dispatch_webhook_once_with_secret_provider"));
     assert!(runtime.contains("run_webhook_worker_with_secret_provider"));
+    assert!(https_edge.contains("ProviderBackedTlsAcceptor"));
+    assert!(https_edge.contains("SecretPurpose::TlsCertificate"));
+    assert!(https_edge.contains("SecretPurpose::TlsPrivateKey"));
+    assert!(https_edge.contains("current_acceptor"));
     assert!(secrets.contains("pub trait SecretProvider"));
     assert!(secrets.contains("pub enum SecretPurpose"));
     assert!(secrets.contains("JoinSigning"));
