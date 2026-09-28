@@ -21,8 +21,10 @@ fn broadcast_processing_is_separate_from_sfu_authority() {
     assert!(broadcast.contains("pub trait CompositionProvider"));
     assert!(broadcast.contains("pub trait BroadcastProvider"));
     assert!(broadcast.contains("CompositionLayout::ScreenWithSpeaker"));
+    assert!(broadcast.contains("composition_id: OpaqueId"));
     assert!(broadcast.contains("audio_stream_ids: Vec<AudioStreamId>"));
     assert!(broadcast.contains("video_stream_ids: Vec<VideoStreamId>"));
+    assert!(broadcast.contains("Exact retries of the same `operation_id` must be idempotent"));
     assert!(!broadcast_manifest.contains("ucr-sfu"));
     assert!(!sfu_manifest.contains("ucr-broadcast"));
     assert!(universal_api.contains("capabilities.extend(broadcast_capabilities())"));
