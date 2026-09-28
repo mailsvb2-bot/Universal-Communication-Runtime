@@ -3,6 +3,11 @@
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use ucr_core::WebhookDispatchOutcome;
+use ucr_model::OpaqueId;
+use ucr_secrets::{
+    ActiveSecretSet, SecretHandle, SecretMaterial, SecretProvider, SecretProviderError,
+    SecretProviderHealth, SecretPurpose, SecretVersion,
+};
 use ucr_crypto::{MAX_MACHINE_TOKEN_JWKS_BYTES, MachineTokenPublicKeySet};
 use ucr_runtime::{
     DEFAULT_RECORDING_RETENTION_POLL_INTERVAL, DEFAULT_RUNTIME_BIND,
@@ -113,16 +118,125 @@ async fn run() -> Result<(), String> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ReloadingMachineTokenSecretProvider {
+    handle: SecretHandle,
+    current_file: PathBuf,
+    previous_file: Option<PathBuf>,
+}
+
+impl ReloadingMachineTokenSecretProvider {
+    fn new(
+        handle: SecretHandle,
+        current_file: PathBuf,
+        previous_file: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        if handle.purpose != SecretPurpose::MachineTokenSigning {
+            return Err("machine token provider handle must use MachineTokenSigning purpose".to_owned());
+        }
+        let provider = Self {
+            handle,
+            current_file,
+            previous_file,
+        };
+        provider
+            .active_secret_set(&provider.handle)
+            .map_err(|error| format!("load machine token provider manifest: {error:?}"))?;
+        Ok(provider)
+    }
+
+    fn read_version(path: &PathBuf) -> Result<SecretVersion, SecretProviderError> {
+        let metadata = fs::symlink_metadata(path).map_err(|_| SecretProviderError::Unavailable)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 512 {
+            return Err(SecretProviderError::InvalidMaterial);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(SecretProviderError::InvalidMaterial);
+            }
+        }
+        let encoded = fs::read_to_string(path).map_err(|_| SecretProviderError::Unavailable)?;
+        let mut key_id = None;
+        let mut seed_hex = None;
+        for line in encoded.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let Some((name, value)) = line.split_once('=') else {
+                return Err(SecretProviderError::InvalidMaterial);
+            };
+            match name.trim() {
+                "key_id" if key_id.is_none() => key_id = Some(value.trim()),
+                "seed_hex" if seed_hex.is_none() => seed_hex = Some(value.trim()),
+                _ => return Err(SecretProviderError::InvalidMaterial),
+            }
+        }
+        let key_id = key_id.ok_or(SecretProviderError::InvalidMaterial)?;
+        let seed_hex = seed_hex.ok_or(SecretProviderError::InvalidMaterial)?;
+        let seed = decode_key_hex_named(seed_hex, "machine token provider seed")
+            .map_err(|_| SecretProviderError::InvalidMaterial)?;
+        Ok(SecretVersion {
+            version_id: OpaqueId::new(key_id).map_err(|_| SecretProviderError::InvalidMaterial)?,
+            material: SecretMaterial::new(seed.to_vec())?,
+        })
+    }
+}
+
+impl SecretProvider for ReloadingMachineTokenSecretProvider {
+    fn provider_id(&self) -> &'static str {
+        "machine-token-file-reload"
+    }
+
+    fn health(&self) -> SecretProviderHealth {
+        if self.active_secret_set(&self.handle).is_ok() {
+            SecretProviderHealth::Healthy
+        } else {
+            SecretProviderHealth::Unavailable
+        }
+    }
+
+    fn active_secret_set(
+        &self,
+        handle: &SecretHandle,
+    ) -> Result<ActiveSecretSet, SecretProviderError> {
+        if handle != &self.handle {
+            return Err(SecretProviderError::NotFound);
+        }
+        let current = Self::read_version(&self.current_file)?;
+        let previous = self
+            .previous_file
+            .as_ref()
+            .map(Self::read_version)
+            .transpose()?;
+        if previous
+            .as_ref()
+            .is_some_and(|version| version.version_id == current.version_id)
+        {
+            return Err(SecretProviderError::Conflict);
+        }
+        Ok(ActiveSecretSet {
+            handle: handle.clone(),
+            current,
+            previous,
+        })
+    }
+
+    fn rotate(
+        &self,
+        _handle: &SecretHandle,
+        _new_version: SecretVersion,
+    ) -> Result<ActiveSecretSet, SecretProviderError> {
+        Err(SecretProviderError::Unavailable)
+    }
+}
+
 async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String> {
     let bind: SocketAddr = bind
         .parse()
         .map_err(|error| format!("invalid --bind address: {error}"))?;
     let issuer = required_env("UCR_MACHINE_TOKEN_ISSUER")?;
     let audience = required_env("UCR_MACHINE_TOKEN_AUDIENCE")?;
-    let signing_key_id = required_env("UCR_MACHINE_TOKEN_SIGNING_KEY_ID")?;
     let token_endpoint = required_env("UCR_MACHINE_TOKEN_ENDPOINT")?;
     let jwks_uri = required_env("UCR_MACHINE_TOKEN_JWKS_URI")?;
-    let signing_key_file = required_env("UCR_MACHINE_TOKEN_SIGNING_KEY_FILE")?;
     let max_ttl_seconds = std::env::var("UCR_MACHINE_TOKEN_MAX_TTL_SECONDS")
         .ok()
         .map(|value| {
@@ -132,31 +246,71 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
         })
         .transpose()?
         .unwrap_or(900);
-    let signing_seed = read_machine_token_signing_key(&signing_key_file)?;
-    let mut config = MachineAuthRuntimeConfig::new(
-        issuer,
-        audience,
-        signing_key_id,
-        signing_seed,
-        token_endpoint,
-        jwks_uri,
-        max_ttl_seconds,
-    )?;
-    let previous_key_id = std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_ID").ok();
-    let previous_key_file = std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_FILE").ok();
-    match (previous_key_id, previous_key_file) {
-        (Some(key_id), Some(key_file)) => {
-            let previous_seed = read_machine_token_signing_key(&key_file)?;
-            config = config.with_previous_signing_key(key_id, previous_seed)?;
+
+    let config = if std::env::var("UCR_MACHINE_TOKEN_SECRET_PROVIDER")
+        .ok()
+        .as_deref()
+        == Some("file-reload")
+    {
+        let current_file =
+            PathBuf::from(required_env("UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE")?);
+        let previous_file = std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_SECRET_FILE")
+            .ok()
+            .map(PathBuf::from);
+        let secret_id = std::env::var("UCR_MACHINE_TOKEN_SIGNING_SECRET_ID")
+            .unwrap_or_else(|_| "machine-token-signing".to_owned());
+        let handle = SecretHandle {
+            secret_id: OpaqueId::new(&secret_id)
+                .map_err(|_| "UCR_MACHINE_TOKEN_SIGNING_SECRET_ID is invalid".to_owned())?,
+            purpose: SecretPurpose::MachineTokenSigning,
+        };
+        let provider = Arc::new(ReloadingMachineTokenSecretProvider::new(
+            handle.clone(),
+            current_file,
+            previous_file,
+        )?);
+        MachineAuthRuntimeConfig::with_secret_provider(
+            issuer,
+            audience,
+            provider,
+            handle,
+            token_endpoint,
+            jwks_uri,
+            max_ttl_seconds,
+        )?
+    } else {
+        let signing_key_id = required_env("UCR_MACHINE_TOKEN_SIGNING_KEY_ID")?;
+        let signing_key_file = required_env("UCR_MACHINE_TOKEN_SIGNING_KEY_FILE")?;
+        let signing_seed = read_machine_token_signing_key(&signing_key_file)?;
+        let mut config = MachineAuthRuntimeConfig::new(
+            issuer,
+            audience,
+            signing_key_id,
+            signing_seed,
+            token_endpoint,
+            jwks_uri,
+            max_ttl_seconds,
+        )?;
+        let previous_key_id =
+            std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_ID").ok();
+        let previous_key_file =
+            std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_FILE").ok();
+        match (previous_key_id, previous_key_file) {
+            (Some(key_id), Some(key_file)) => {
+                let previous_seed = read_machine_token_signing_key(&key_file)?;
+                config = config.with_previous_signing_key(key_id, previous_seed)?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(
+                    "UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_ID and UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_FILE must be configured together"
+                        .to_owned(),
+                );
+            }
         }
-        (None, None) => {}
-        _ => {
-            return Err(
-                "UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_ID and UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_FILE must be configured together"
-                    .to_owned(),
-            );
-        }
-    }
+        config
+    };
+
     Arc::new(ProductionRuntime::open_existing(database)?)
         .serve_machine_auth(bind, config)
         .await
