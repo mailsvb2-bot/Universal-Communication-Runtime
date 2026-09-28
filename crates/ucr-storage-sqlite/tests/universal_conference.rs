@@ -13,7 +13,8 @@ use ucr_model::{
     CallId, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceParticipantRole,
     ConferenceScheduleMetadata, DeviceId, GroupId, IntegrationId, OpaqueId, PrincipalId,
     PrincipalKind, PrincipalRef, SessionId, TenantId, TenantScope, UniversalConferenceLifecycle,
-    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    UniversalConferenceMetadataEntry, UniversalConferenceMode,
+    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_storage_sqlite::{SQLITE_SCHEMA_VERSION, SqliteLocalStore};
 
@@ -364,6 +365,75 @@ fn external_participant_reference_is_unique_within_integration_conference() {
         store.persist_universal_conference_participant(&duplicate_external),
         Err(ucr_core::DurableStoreError::Conflict)
     );
+
+    cleanup(&path);
+}
+
+#[test]
+fn conference_metadata_replace_is_durable_idempotent_and_restart_safe() {
+    let path = db_path("universal-conference-metadata-restart");
+    let metadata = vec![
+        UniversalConferenceMetadataEntry {
+            key: "org.example.webinar.source".to_owned(),
+            value: b"landing".to_vec(),
+        },
+        UniversalConferenceMetadataEntry {
+            key: "com.example.crm.customer_id".to_owned(),
+            value: b"customer-42".to_vec(),
+        },
+    ];
+    {
+        let store = SqliteLocalStore::open(&path).expect("open");
+        let initial = conference();
+        store
+            .persist_universal_conference_profile(&initial)
+            .expect("conference");
+        let updated = store
+            .replace_universal_conference_metadata(
+                &scope(),
+                &initial.conference_id,
+                initial.revision,
+                &metadata,
+            )
+            .expect("replace metadata");
+        assert_eq!(updated.revision, initial.revision + 1);
+        assert_eq!(updated.metadata[0].key, "com.example.crm.customer_id");
+
+        let retry = store
+            .replace_universal_conference_metadata(
+                &scope(),
+                &initial.conference_id,
+                initial.revision,
+                &metadata,
+            )
+            .expect("exact retry");
+        assert_eq!(retry, updated);
+
+        let changed = vec![UniversalConferenceMetadataEntry {
+            key: "com.example.crm.customer_id".to_owned(),
+            value: b"changed".to_vec(),
+        }];
+        assert_eq!(
+            store.replace_universal_conference_metadata(
+                &scope(),
+                &initial.conference_id,
+                initial.revision,
+                &changed,
+            ),
+            Err(ucr_core::DurableStoreError::Conflict)
+        );
+    }
+    {
+        let store = SqliteLocalStore::open(&path).expect("reopen");
+        let loaded = store
+            .universal_conference_profile(&scope(), &conference().conference_id)
+            .expect("load")
+            .expect("conference");
+        assert_eq!(loaded.revision, 2);
+        assert_eq!(loaded.metadata.len(), 2);
+        assert_eq!(loaded.metadata[0].key, "com.example.crm.customer_id");
+        assert_eq!(loaded.metadata[0].value, b"customer-42");
+    }
 
     cleanup(&path);
 }
