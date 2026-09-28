@@ -185,7 +185,9 @@ impl MachineAuthRuntimeConfig {
         max_ttl_seconds: u32,
     ) -> Result<Self, String> {
         if handle.purpose != SecretPurpose::MachineTokenSigning {
-            return Err("machine token signing handle must use MachineTokenSigning purpose".to_owned());
+            return Err(
+                "machine token signing handle must use MachineTokenSigning purpose".to_owned(),
+            );
         }
         let active = provider
             .active_secret_set(&handle)
