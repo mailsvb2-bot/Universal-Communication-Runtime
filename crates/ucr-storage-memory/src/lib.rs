@@ -18,12 +18,14 @@ use ucr_core::{
     ConferenceJoinGrantStore, ConversationStore, DeliveryStore, DeviceLifecycleStore,
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, FederationPeerStore,
-    IdentityDeviceLookupStore, IdentityStore, MAX_RECORDING_RETENTION_BATCH, MessageStore,
+    IdentityDeviceLookupStore, IdentityStore, LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE,
+    LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_RECORDING_RETENTION_BATCH, MessageStore,
     PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
     RecordingStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
     ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
     ServiceQuotaConsumeError, ServiceQuotaStore, ServiceResourceQuotaConsumeError, StorageHealth,
     StorageProvider, SyncStore, TrustedSigningKeyStore, UniversalConferenceStore,
+    generate_opaque_id,
 };
 use ucr_crypto::{
     ReplayError, ReplayProtector, TranscriptBinding, TrustedKeyResolutionError,
@@ -2244,6 +2246,57 @@ impl SyncStore for MemoryLocalStore {
 }
 
 impl CommandAcceptanceStore for MemoryLocalStore {
+    fn accept_command_with_legacy_reservation(
+        &self,
+        command: &CommandEnvelope,
+        legacy_idempotency_key: &str,
+    ) -> Result<CommandReceipt, DurableStoreError> {
+        let command = canonical_command(command).map_err(map_command_error)?;
+        let mut legacy_incoming = command.clone();
+        legacy_incoming.correlation.idempotency_key = Some(legacy_idempotency_key.to_owned());
+        let legacy_incoming = canonical_command(&legacy_incoming).map_err(map_command_error)?;
+        let raw_key = command_key(&legacy_incoming)?;
+        let command_key = command_key(&command)?;
+        let command_ref = command_ref_key(&command.scope, &command.command_id);
+
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+
+        if let Some(original) = state.accepted.get(&raw_key) {
+            if original.command_type != LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE
+                || original.payload.as_slice() != LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD
+            {
+                return receipt_for_existing(original, &legacy_incoming);
+            }
+        } else {
+            let reservation_id = CommandId::from_opaque(
+                generate_opaque_id().map_err(|_| DurableStoreError::Internal)?,
+            );
+            let mut reservation = legacy_incoming.clone();
+            reservation.command_id = reservation_id.clone();
+            LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE.clone_into(&mut reservation.command_type);
+            reservation.payload = LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD.to_vec();
+            reservation.correlation.correlation_id = reservation_id.as_opaque().clone();
+            reservation.correlation.causation_id = None;
+            let reservation = canonical_command(&reservation).map_err(map_command_error)?;
+            let reservation_ref = command_ref_key(&reservation.scope, &reservation.command_id);
+            if state.accepted_by_id.contains_key(&reservation_ref) {
+                return Err(DurableStoreError::Conflict);
+            }
+            state.accepted.insert(raw_key, reservation.clone());
+            state.accepted_by_id.insert(reservation_ref, reservation);
+        }
+
+        if let Some(original) = state.accepted.get(&command_key) {
+            return receipt_for_existing(original, &command);
+        }
+        if state.accepted_by_id.contains_key(&command_ref) {
+            return Err(DurableStoreError::Conflict);
+        }
+        state.accepted.insert(command_key, command.clone());
+        state.accepted_by_id.insert(command_ref, command.clone());
+        Ok(accepted_command_receipt(command.command_id))
+    }
+
     fn accept_command(
         &self,
         command: &CommandEnvelope,

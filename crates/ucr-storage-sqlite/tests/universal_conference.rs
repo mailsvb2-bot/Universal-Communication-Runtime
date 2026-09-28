@@ -7,15 +7,17 @@ use std::{
 };
 
 use ucr_core::{
-    ConferenceJoinGrantStore, DurableRecordStatus, StorageProvider, UniversalConferenceStore,
+    CommandAcceptanceStore, ConferenceJoinGrantStore, DurableRecordStatus, DurableStoreError,
+    StorageProvider, UniversalConferenceStore,
 };
 use ucr_model::{
-    CallId, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceParticipantRole,
-    ConferenceScheduleMetadata, DeviceId, GroupId, IntegrationId, OpaqueId, PrincipalId,
-    PrincipalKind, PrincipalRef, SessionId, TenantId, TenantScope, UniversalConferenceLifecycle,
-    UniversalConferenceMetadataEntry, UniversalConferenceMode,
-    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+    CallId, CommandEnvelope, CommandId, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy,
+    ConferenceParticipantRole, ConferenceScheduleMetadata, CorrelationContext, DeviceId, GroupId,
+    IntegrationId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, SessionId, TenantId,
+    TenantScope, UniversalConferenceLifecycle, UniversalConferenceMetadataEntry,
+    UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
+use ucr_protocol::{CommandReceiptStatus, RUNTIME_ENVELOPE_SCHEMA_V1};
 use ucr_storage_sqlite::{SQLITE_SCHEMA_VERSION, SqliteLocalStore};
 
 fn oid(value: &str) -> OpaqueId {
@@ -104,6 +106,74 @@ fn cleanup(path: &PathBuf) {
         let mut sidecar = path.as_os_str().to_os_string();
         sidecar.push(suffix);
         let _ = fs::remove_file(PathBuf::from(sidecar));
+    }
+}
+
+fn idempotency_command(id: &str, key: &str) -> CommandEnvelope {
+    let command_id = CommandId::from_opaque(oid(id));
+    CommandEnvelope {
+        command_id: command_id.clone(),
+        scope: scope(),
+        command_type: "ucr.conference.entry.v1".to_owned(),
+        payload: b"rolling-upgrade-payload".to_vec(),
+        correlation: CorrelationContext {
+            correlation_id: command_id.as_opaque().clone(),
+            causation_id: None,
+            idempotency_key: Some(key.to_owned()),
+        },
+        schema_version: RUNTIME_ENVELOPE_SCHEMA_V1,
+        extensions: Vec::new(),
+    }
+}
+
+#[test]
+fn rolling_upgrade_raw_and_namespaced_acceptance_never_both_win() {
+    for iteration in 0..8_u32 {
+        let path = db_path(&format!("idempotency-rolling-race-{iteration}"));
+        let old_store = SqliteLocalStore::open(&path).expect("open old-compatible connection");
+        let new_store = SqliteLocalStore::open(&path).expect("open new connection");
+        let barrier = Arc::new(Barrier::new(3));
+
+        let old_barrier = Arc::clone(&barrier);
+        let old = thread::spawn(move || {
+            old_barrier.wait();
+            old_store.accept_command(&idempotency_command("old-command", "shared-raw-key"))
+        });
+
+        let new_barrier = Arc::clone(&barrier);
+        let new = thread::spawn(move || {
+            new_barrier.wait();
+            new_store.accept_command_with_legacy_reservation(
+                &idempotency_command("new-command", "ucri-v1-derived-key"),
+                "shared-raw-key",
+            )
+        });
+
+        barrier.wait();
+        let old_result = old.join().expect("old thread");
+        let new_result = new.join().expect("new thread");
+
+        let accepted = [&old_result, &new_result]
+            .into_iter()
+            .filter(|result| {
+                matches!(
+                    result,
+                    Ok(receipt) if receipt.status == CommandReceiptStatus::Accepted
+                )
+            })
+            .count();
+        assert_eq!(accepted, 1, "exactly one path may accept a new command");
+
+        for result in [&old_result, &new_result] {
+            match result {
+                Ok(receipt) => assert!(matches!(
+                    receipt.status,
+                    CommandReceiptStatus::Accepted | CommandReceiptStatus::Duplicate
+                )),
+                Err(error) => assert_eq!(*error, DurableStoreError::Conflict),
+            }
+        }
+        cleanup(&path);
     }
 }
 

@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{fmt, fmt::Write as _, sync::Arc};
 
 use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE,
@@ -9,12 +9,12 @@ use super::{
         decode_machine_api_authentication,
     },
     mutation_idempotency::{
-        accept_mutation, accept_mutation_id, accept_mutation_receipt,
-        validate_mutation_idempotency_key,
+        accept_mutation_receipt_with_legacy_reservation, validate_mutation_idempotency_key,
     },
     pb, pb_acknowledgement, pb_error, pb_opaque, pb_scope,
 };
 use prost::Message;
+use sha2::{Digest as _, Sha256};
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
@@ -23,14 +23,14 @@ use ucr_core::{
     GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore, IdentityStore,
     PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
     ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
-    UniversalConferenceStore, generate_opaque_id,
+    UniversalConferenceStore,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet, TrustedSigningKeyResolver};
 use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipant, CallParticipantState,
     CallParticipantUpdateKind, CallSession, CallSignal, CallSignalKind, CallSignallingState,
-    CommandEnvelope, CommandId, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy,
+    CommandId, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy,
     ConferenceMediaSubscription, ConferenceParticipantRole, ConferenceScheduleMetadata,
     ConferenceSubscriptionSet, ConversationId, ConversationKind, ConversationRecord,
     ConversationRef, CorrelationContext, DeliveryPolicy, DeviceDescriptor, DeviceId,
@@ -49,13 +49,13 @@ use ucr_protocol::{
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
     CONFERENCE_READ_PERMISSION, CONFERENCE_SUBSCRIBE_PERMISSION, CanonicalError,
-    CanonicalErrorCode, CapabilityMaturity, CommandReceiptStatus, DEVICE_REGISTER_PERMISSION,
-    GROUP_MLS_CAPABILITY, H264_VIDEO_CODEC_CAPABILITY, MAX_CALL_PARTICIPANTS,
-    MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT, OPUS_AUDIO_CODEC_CAPABILITY,
-    SCREEN_SHARE_SEND_PERMISSION, SCREEN_SHARE_VIDEO_CAPABILITY, VIDEO_MEDIA_CAPABILITY,
-    VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, acknowledgement_for, broadcast_capabilities,
-    canonical_capabilities, phase20_audio_capabilities, phase21_video_capabilities,
-    phase22_media_e2ee_capabilities, phase29_sfu_capabilities, phase30_conference_capabilities,
+    CanonicalErrorCode, CapabilityMaturity, DEVICE_REGISTER_PERMISSION, GROUP_MLS_CAPABILITY,
+    H264_VIDEO_CODEC_CAPABILITY, MAX_CALL_PARTICIPANTS, MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT,
+    OPUS_AUDIO_CODEC_CAPABILITY, SCREEN_SHARE_SEND_PERMISSION, SCREEN_SHARE_VIDEO_CAPABILITY,
+    VIDEO_MEDIA_CAPABILITY, VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, acknowledgement_for,
+    broadcast_capabilities, canonical_capabilities, phase20_audio_capabilities,
+    phase21_video_capabilities, phase22_media_e2ee_capabilities, phase29_sfu_capabilities,
+    phase30_conference_capabilities,
 };
 use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
@@ -74,6 +74,95 @@ const MAX_EXTERNAL_CONFERENCE_ID_BYTES: usize = 512;
 const MAX_TIMEZONE_BYTES: usize = 128;
 const MAX_JOIN_WINDOW_SECONDS: u32 = 31_536_000;
 const MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS: usize = MAX_CALL_PARTICIPANTS + 1;
+const UNIVERSAL_IDEMPOTENCY_DOMAIN: &[u8] = b"UCR-UNIVERSAL-INTEGRATION-IDEMPOTENCY-V1\0";
+
+fn integration_scoped_idempotency_key(
+    integration_id: &IntegrationId,
+    command_type: &str,
+    idempotency_key: &str,
+) -> Result<String, CanonicalError> {
+    validate_mutation_idempotency_key(idempotency_key)?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(UNIVERSAL_IDEMPOTENCY_DOMAIN);
+    update_idempotency_hash_field(&mut hasher, integration_id.as_opaque().as_wire_bytes())?;
+    update_idempotency_hash_field(&mut hasher, command_type.as_bytes())?;
+    update_idempotency_hash_field(&mut hasher, idempotency_key.as_bytes())?;
+
+    let digest = hasher.finalize();
+    let mut derived = String::with_capacity(7 + digest.len() * 2);
+    derived.push_str("ucri-v1-");
+    for byte in digest {
+        write!(&mut derived, "{byte:02x}")
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    }
+    Ok(derived)
+}
+
+fn update_idempotency_hash_field(hasher: &mut Sha256, value: &[u8]) -> Result<(), CanonicalError> {
+    let length = u64::try_from(value.len())
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    hasher.update(length.to_be_bytes());
+    hasher.update(value);
+    Ok(())
+}
+
+fn accept_integration_mutation_receipt<S: CommandAcceptanceStore>(
+    store: &S,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    command_type: &str,
+    idempotency_key: &str,
+    payload: Vec<u8>,
+) -> Result<super::mutation_idempotency::AcceptedMutation, CanonicalError> {
+    let key = integration_scoped_idempotency_key(integration_id, command_type, idempotency_key)?;
+    accept_mutation_receipt_with_legacy_reservation(
+        store,
+        scope,
+        command_type,
+        &key,
+        idempotency_key,
+        payload,
+    )
+}
+
+fn accept_integration_mutation_id<S: CommandAcceptanceStore>(
+    store: &S,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    command_type: &str,
+    idempotency_key: &str,
+    payload: Vec<u8>,
+) -> Result<CommandId, CanonicalError> {
+    accept_integration_mutation_receipt(
+        store,
+        scope,
+        integration_id,
+        command_type,
+        idempotency_key,
+        payload,
+    )
+    .map(|accepted| accepted.command_id)
+}
+
+fn accept_integration_mutation<S: CommandAcceptanceStore>(
+    store: &S,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    command_type: &str,
+    idempotency_key: &str,
+    payload: Vec<u8>,
+) -> Result<(), CanonicalError> {
+    accept_integration_mutation_id(
+        store,
+        scope,
+        integration_id,
+        command_type,
+        idempotency_key,
+        payload,
+    )
+    .map(|_| ())
+}
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -461,9 +550,10 @@ where
                     CONFERENCE_MANAGE_PERMISSION,
                 )
                 .and_then(|_| {
-                    let stable_command_id = accept_mutation_id(
+                    let stable_command_id = accept_integration_mutation_id(
                         &*self.store,
                         &scope,
+                        &integration_id,
                         "ucr.conference.lifecycle.v1",
                         &idempotency_key,
                         payload,
@@ -536,9 +626,10 @@ where
                     CONFERENCE_MANAGE_PERMISSION,
                 )
                 .and_then(|_| {
-                    accept_mutation(
+                    accept_integration_mutation(
                         &*self.store,
                         &scope,
+                        &integration_id,
                         "ucr.conference.entry.v1",
                         &idempotency_key,
                         payload,
@@ -1736,9 +1827,10 @@ where
     }
     enforce_ensure_owner_role_transition(store, &input)?;
 
-    let stable_command_id = accept_mutation_id(
+    let stable_command_id = accept_integration_mutation_id(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.participant.ensure.v1",
         &input.idempotency_key,
         payload,
@@ -1860,9 +1952,10 @@ where
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
 
-    let stable_command_id = accept_mutation_id(
+    let stable_command_id = accept_integration_mutation_id(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.participant.device.ensure.v1",
         &input.idempotency_key,
         payload,
@@ -1939,9 +2032,10 @@ where
         role,
     )?;
 
-    accept_mutation(
+    accept_integration_mutation(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.participant.update.v1",
         &input.idempotency_key,
         payload,
@@ -2051,9 +2145,10 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
 
-    let command_id = accept_mutation_id(
+    let command_id = accept_integration_mutation_id(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.participant.remove.v1",
         &input.idempotency_key,
         payload,
@@ -2495,9 +2590,10 @@ where
         scope: input.scope.clone(),
         principal: owner_ready.profile.participant.clone(),
     };
-    let stable_command_id = accept_mutation_id(
+    let stable_command_id = accept_integration_mutation_id(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.runtime.prepare.v1",
         &input.idempotency_key,
         payload,
@@ -2979,9 +3075,10 @@ where
         + IdentityDeviceLookupStore
         + GroupCallLookupStore,
 {
-    let stable_command_id = accept_mutation_id(
+    let stable_command_id = accept_integration_mutation_id(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.join.issue.v1",
         &input.idempotency_key,
         payload,
@@ -3142,9 +3239,10 @@ where
         + CommandAcceptanceStore
         + GroupCallLookupStore,
 {
-    accept_mutation(
+    accept_integration_mutation(
         store,
         scope,
+        integration_id,
         "ucr.conference.join.revoke.v1",
         idempotency_key,
         payload,
@@ -3589,9 +3687,10 @@ fn set_conference_metadata<S: UniversalConferenceStore + CommandAcceptanceStore>
     input: &SetConferenceMetadataInput,
     command_payload: Vec<u8>,
 ) -> Result<UniversalConferenceProfile, CanonicalError> {
-    let accepted = accept_mutation_receipt(
+    let accepted = accept_integration_mutation_receipt(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.metadata.v1",
         &input.idempotency_key,
         command_payload,
@@ -3644,29 +3743,14 @@ fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
     }
 
-    let incoming_command_id = CommandId::from_opaque(
-        generate_opaque_id().map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
-    );
-    let command = CommandEnvelope {
-        command_id: incoming_command_id.clone(),
-        scope: input.scope.clone(),
-        command_type: "ucr.conference.create.v1".to_owned(),
-        payload: command_payload,
-        correlation: CorrelationContext {
-            correlation_id: incoming_command_id.as_opaque().clone(),
-            causation_id: None,
-            idempotency_key: Some(input.idempotency_key.clone()),
-        },
-        schema_version: ProtocolVersion::new(1, 0),
-        extensions: Vec::new(),
-    };
-    let receipt = store.accept_command(&command).map_err(map_store_error)?;
-    let stable_command_id = match receipt.status {
-        CommandReceiptStatus::Accepted => receipt.command_id,
-        CommandReceiptStatus::Duplicate => receipt
-            .original_command_id
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?,
-    };
+    let stable_command_id = accept_integration_mutation_id(
+        store,
+        &input.scope,
+        &input.integration_id,
+        "ucr.conference.create.v1",
+        &input.idempotency_key,
+        command_payload,
+    )?;
     let conference_id = GroupId::from_opaque(stable_command_id.as_opaque().clone());
     let profile = UniversalConferenceProfile {
         scope: input.scope,
@@ -4023,29 +4107,30 @@ mod universal_runtime_tests {
     };
 
     use ucr_core::{
-        CallStore, DeviceLifecycleStore, EventJournalStore, GroupCallLookupStore, GroupStore,
-        IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
-        UniversalConferenceStore,
+        CallStore, CommandAcceptanceStore, DeviceLifecycleStore, EventJournalStore,
+        GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore, IdentityStore,
+        PrincipalIdentityBindingStore, UniversalConferenceStore,
     };
     use ucr_model::{
         CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
-        CallSignallingState, CallTerminationReason, CommandId, ConferenceParticipantRole,
-        ConferenceScheduleMetadata, DeviceDescriptor, DeviceLifecycleState, EventId,
-        GroupMemberState, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord,
-        IntegrationId, OpaqueId, PrincipalId, PrincipalIdentityBinding, PrincipalKind,
-        PrincipalRef, ScopedPrincipal, TenantId, TenantScope, UniversalConferenceLifecycle,
-        UniversalConferenceMetadataEntry, UniversalConferenceMode,
-        UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+        CallSignallingState, CallTerminationReason, CommandEnvelope, CommandId,
+        ConferenceParticipantRole, ConferenceScheduleMetadata, CorrelationContext,
+        DeviceDescriptor, DeviceLifecycleState, EventId, GroupMemberState, IdentityEvidence,
+        IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, OpaqueId, PrincipalId,
+        PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal,
+        TenantId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMetadataEntry,
+        UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
     };
-    use ucr_protocol::CanonicalErrorCode;
+    use ucr_protocol::{CanonicalErrorCode, CommandReceiptStatus};
     use ucr_realtime::{JoinGrantUsePolicy, JoinTokenIssuer, JoinTokenKey};
     use ucr_storage_sqlite::SqliteLocalStore;
 
     use super::{
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
         IssueJoinGrantInput, PrepareConferenceRuntimeInput, SetConferenceMetadataInput,
-        UpdateParticipantInput, ensure_participant, ensure_participant_device, issue_join_grant,
-        lifecycle_event, prepare_conference_runtime, resolve_join_call, resolve_join_device,
+        UpdateParticipantInput, accept_integration_mutation_id, conference_for_integration,
+        ensure_participant, ensure_participant_device, issue_join_grant, lifecycle_event,
+        participant_attendance, prepare_conference_runtime, resolve_join_call, resolve_join_device,
         resolve_person_principal, set_conference_metadata, update_participant,
     };
 
@@ -4334,6 +4419,102 @@ mod universal_runtime_tests {
     }
 
     #[test]
+    fn integration_scoped_idempotency_allows_same_user_key_for_two_integrations() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        let integration_a = IntegrationId::from_opaque(oid("integration-a"));
+        let integration_b = IntegrationId::from_opaque(oid("integration-b"));
+
+        let first = accept_integration_mutation_id(
+            &store,
+            &scope(),
+            &integration_a,
+            "ucr.conference.entry.v1",
+            "shared-user-key",
+            b"integration-a-payload".to_vec(),
+        )
+        .expect("integration A accepted");
+        let second = accept_integration_mutation_id(
+            &store,
+            &scope(),
+            &integration_b,
+            "ucr.conference.entry.v1",
+            "shared-user-key",
+            b"integration-b-payload".to_vec(),
+        )
+        .expect("integration B accepted");
+        assert_ne!(first, second);
+
+        let retry = accept_integration_mutation_id(
+            &store,
+            &scope(),
+            &integration_a,
+            "ucr.conference.entry.v1",
+            "shared-user-key",
+            b"integration-a-payload".to_vec(),
+        )
+        .expect("integration A retry");
+        assert_eq!(retry, first);
+    }
+
+    #[test]
+    fn integration_scoped_idempotency_preserves_legacy_receipts_after_upgrade() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        let integration = IntegrationId::from_opaque(oid("integration-legacy"));
+        let legacy_command_id = CommandId::from_opaque(oid("legacy-command"));
+        let legacy = CommandEnvelope {
+            command_id: legacy_command_id.clone(),
+            scope: scope(),
+            command_type: "ucr.conference.entry.v1".to_owned(),
+            payload: b"legacy-payload".to_vec(),
+            correlation: CorrelationContext {
+                correlation_id: oid("legacy-correlation"),
+                causation_id: None,
+                idempotency_key: Some("legacy-user-key".to_owned()),
+            },
+            schema_version: ProtocolVersion::new(1, 0),
+            extensions: Vec::new(),
+        };
+        let receipt = store.accept_command(&legacy).expect("seed legacy receipt");
+        assert_eq!(receipt.status, CommandReceiptStatus::Accepted);
+
+        let retry = accept_integration_mutation_id(
+            &store,
+            &scope(),
+            &integration,
+            "ucr.conference.entry.v1",
+            "legacy-user-key",
+            b"legacy-payload".to_vec(),
+        )
+        .expect("legacy exact retry");
+        assert_eq!(retry, legacy_command_id);
+
+        let changed = accept_integration_mutation_id(
+            &store,
+            &scope(),
+            &integration,
+            "ucr.conference.entry.v1",
+            "legacy-user-key",
+            b"changed-payload".to_vec(),
+        )
+        .expect_err("legacy changed retry conflicts");
+        assert_eq!(changed.code, CanonicalErrorCode::Conflict);
+
+        let foreign = IntegrationId::from_opaque(oid("integration-legacy-foreign"));
+        let cross_integration = accept_integration_mutation_id(
+            &store,
+            &scope(),
+            &foreign,
+            "ucr.conference.entry.v1",
+            "legacy-user-key",
+            b"foreign-payload".to_vec(),
+        )
+        .expect_err("legacy key must not become a foreign side effect");
+        assert_eq!(cross_integration.code, CanonicalErrorCode::Conflict);
+    }
+
+    #[test]
     fn participant_owner_transitions_fail_closed_in_real_sqlite_store() {
         let db = TestDb::new();
         let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
@@ -4419,6 +4600,57 @@ mod universal_runtime_tests {
         )
         .expect_err("generic update must not promote owner");
         assert_eq!(promote_attendee.code, CanonicalErrorCode::PolicyDenied);
+    }
+
+    #[test]
+    fn foreign_integration_cannot_read_issue_join_or_read_attendance() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        let owned = conference();
+        store
+            .persist_universal_conference_profile(&owned)
+            .expect("conference");
+        let foreign = IntegrationId::from_opaque(oid("integration-foreign"));
+
+        let read = conference_for_integration(&store, &scope(), &owned.conference_id, &foreign)
+            .expect_err("foreign integration cannot read conference");
+        assert_eq!(read.code, CanonicalErrorCode::NotFound);
+
+        let issuer = JoinTokenIssuer::new(
+            JoinTokenKey::from_bytes([23_u8; 32]),
+            "https://join.example.test/join",
+        )
+        .expect("join issuer");
+        let join = issue_join_grant(
+            &store,
+            &issuer,
+            IssueJoinGrantInput {
+                scope: scope(),
+                conference_id: owned.conference_id.clone(),
+                integration_id: foreign.clone(),
+                external_user_id: b"foreign-user".to_vec(),
+                ttl_seconds: 300,
+                use_policy: JoinGrantUsePolicy::SingleUse,
+                not_before_unix_ms: None,
+                not_after_unix_ms: None,
+                idempotency_key: "foreign-join".to_owned(),
+            },
+            b"foreign-join-payload".to_vec(),
+            1_000_000,
+        )
+        .expect_err("foreign integration cannot issue join");
+        assert_eq!(join.code, CanonicalErrorCode::PolicyDenied);
+
+        let attendance = participant_attendance(
+            &store,
+            &scope(),
+            &owned.conference_id,
+            &foreign,
+            b"foreign-user",
+            1_000_000,
+        )
+        .expect_err("foreign integration cannot read attendance");
+        assert_eq!(attendance.code, CanonicalErrorCode::NotFound);
     }
 
     #[test]

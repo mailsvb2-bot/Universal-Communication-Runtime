@@ -146,6 +146,20 @@ Attendance is a read-only projection over the canonical Event journal. The proje
 
 All create/mutate operations carry an explicit idempotency key where appropriate. Exact retries must deduplicate durably; changed requests under the same idempotency identity must conflict.
 
+Universal Conference mutation idempotency is isolated by exact integration identity and operation class
+inside one TenantScope. Two integrations may therefore use the same caller-provided idempotency key
+without creating cross-integration conflicts. The durable command store remains the single canonical
+acceptance owner; the Universal ingress derives a bounded domain-separated SHA-256 storage key from
+`integration_id + operation + caller key`.
+
+Upgrade compatibility is fail-closed and race-safe. The canonical command store atomically handles
+the raw legacy key and the new derived key under one lock/transaction. If a real pre-upgrade raw-key
+command already exists, retries keep its exact duplicate/conflict semantics and original command
+identity. Otherwise the store durably reserves the raw key before accepting the derived command in
+the same transaction. An older process racing after that reservation sees the raw key occupied and
+fails closed instead of accepting a second command. A rolling-upgrade concurrency regression proves
+that the old raw path and the new namespaced path can never both return a fresh Accepted receipt.
+
 ## Transport adapters
 
 gRPC is the typed source contract. REST/JSON, OpenAPI, JavaScript/TypeScript, Python, Kotlin, Swift and Rust SDKs must remain thin adapters over the same contract. No REST-only business rules are allowed.
