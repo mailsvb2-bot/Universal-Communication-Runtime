@@ -18,9 +18,70 @@ use super::{
 pub(crate) const AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const MAX_BEARER_AUTHORIZATION_METADATA_BYTES: usize = MAX_MACHINE_TOKEN_BYTES + 32;
 
+pub trait MachineTokenVerificationKeyProvider: std::fmt::Debug + Send + Sync {
+    /// Resolves the currently accepted machine-token verification keys.
+    ///
+    /// # Errors
+    /// Returns a canonical fail-closed error when verification material cannot be resolved.
+    fn current_verification_keys(&self) -> Result<MachineTokenPublicKeySet, CanonicalError>;
+}
+
+#[derive(Clone)]
+enum MachineBearerVerificationSource {
+    Static(Arc<MachineTokenPublicKeySet>),
+    Provider(Arc<dyn MachineTokenVerificationKeyProvider>),
+}
+
+impl std::fmt::Debug for MachineBearerVerificationSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static(keys) => formatter
+                .debug_tuple("Static")
+                .field(&keys.keys().len())
+                .finish(),
+            Self::Provider(_) => formatter
+                .debug_tuple("Provider")
+                .field(&"<dynamic>")
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct MachineBearerConfig {
-    pub(crate) verification_keys: Arc<MachineTokenPublicKeySet>,
+    verification: MachineBearerVerificationSource,
     pub(crate) policy: MachineTokenPolicy,
+}
+
+impl MachineBearerConfig {
+    pub(crate) fn static_keys(
+        verification_keys: Arc<MachineTokenPublicKeySet>,
+        policy: MachineTokenPolicy,
+    ) -> Self {
+        Self {
+            verification: MachineBearerVerificationSource::Static(verification_keys),
+            policy,
+        }
+    }
+
+    pub(crate) fn provider(
+        provider: Arc<dyn MachineTokenVerificationKeyProvider>,
+        policy: MachineTokenPolicy,
+    ) -> Self {
+        Self {
+            verification: MachineBearerVerificationSource::Provider(provider),
+            policy,
+        }
+    }
+
+    fn current_verification_keys(&self) -> Result<MachineTokenPublicKeySet, CanonicalError> {
+        match &self.verification {
+            MachineBearerVerificationSource::Static(keys) => Ok((**keys).clone()),
+            MachineBearerVerificationSource::Provider(provider) => {
+                provider.current_verification_keys()
+            }
+        }
+    }
 }
 
 pub(crate) enum MachineApiAuthentication {
@@ -102,11 +163,12 @@ where
         }
         MachineApiAuthentication::MachineBearer(encoded) => {
             let config = machine_bearer.ok_or_else(unauthenticated)?;
+            let verification_keys = config.current_verification_keys()?;
             let gate = MachineBearerRequestGate::new(
                 clock,
                 authorization,
                 store,
-                &*config.verification_keys,
+                &verification_keys,
                 &config.policy,
             );
             gate.authenticate_permission_request(&encoded, permission, scope)?
