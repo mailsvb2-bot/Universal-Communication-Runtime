@@ -1314,7 +1314,7 @@ mod tests {
         assert_eq!(first.username, second.username);
         assert_ne!(first.credential, second.credential);
         assert!(!format!("{issuer:?}").contains("07070707"));
-        assert_eq!(
+        assert!(matches!(
             TurnRestCredentialIssuer::with_secret_provider(
                 provider,
                 SecretHandle {
@@ -1323,7 +1323,7 @@ mod tests {
                 },
             ),
             Err(TurnCredentialError::KeyUnavailable)
-        );
+        ));
     }
 
     #[test]
