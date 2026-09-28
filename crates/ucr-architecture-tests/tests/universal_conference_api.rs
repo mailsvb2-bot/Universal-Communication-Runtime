@@ -150,11 +150,12 @@ fn universal_conference_idempotency_and_foreign_integration_paths_are_isolated()
 
     assert!(service.contains("UCR-UNIVERSAL-INTEGRATION-IDEMPOTENCY-V1"));
     assert!(service.contains("integration_scoped_idempotency_key"));
-    assert!(service.contains("has_accepted_idempotency_key"));
+    assert!(service.contains("accept_mutation_receipt_with_legacy_reservation"));
     assert!(service.contains("Sha256"));
-    assert!(core.contains("fn has_accepted_idempotency_key"));
-    assert!(memory.contains("fn has_accepted_idempotency_key"));
-    assert!(sqlite.contains("fn has_accepted_idempotency_key"));
+    assert!(core.contains("fn accept_command_with_legacy_reservation"));
+    assert!(memory.contains("fn accept_command_with_legacy_reservation"));
+    assert!(sqlite.contains("fn accept_command_with_legacy_reservation"));
+    assert!(sqlite.contains("TransactionBehavior::Immediate"));
     assert!(service.contains("foreign_integration_cannot_read_issue_join_or_read_attendance"));
 
     let subscriptions = service
