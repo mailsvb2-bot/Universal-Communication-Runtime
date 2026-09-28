@@ -214,6 +214,14 @@ impl SecretProvider for InMemorySecretProvider {
         if existing.current.version_id == new_version.version_id {
             return Err(SecretProviderError::Conflict);
         }
+        if let Some(previous) = &existing.previous {
+            if *previous == new_version {
+                return Ok(existing);
+            }
+            if previous.version_id == new_version.version_id {
+                return Err(SecretProviderError::Conflict);
+            }
+        }
 
         let rotated = ActiveSecretSet {
             handle: handle.clone(),
@@ -317,6 +325,73 @@ mod tests {
                 },
             ),
             Err(SecretProviderError::Conflict)
+        );
+    }
+
+    #[test]
+    fn delayed_retry_of_previous_rotation_never_rolls_current_back() {
+        let provider = InMemorySecretProvider::default();
+        let handle = SecretHandle {
+            secret_id: oid("join-delayed-retry"),
+            purpose: SecretPurpose::JoinSigning,
+        };
+        provider
+            .provision(
+                handle.clone(),
+                SecretVersion {
+                    version_id: oid("v1"),
+                    material: material(b"first-secret"),
+                },
+            )
+            .expect("provision");
+        provider
+            .rotate(
+                &handle,
+                SecretVersion {
+                    version_id: oid("v2"),
+                    material: material(b"second-secret"),
+                },
+            )
+            .expect("v2");
+        let current = provider
+            .rotate(
+                &handle,
+                SecretVersion {
+                    version_id: oid("v3"),
+                    material: material(b"third-secret"),
+                },
+            )
+            .expect("v3");
+
+        let delayed = provider
+            .rotate(
+                &handle,
+                SecretVersion {
+                    version_id: oid("v2"),
+                    material: material(b"second-secret"),
+                },
+            )
+            .expect("delayed exact retry");
+        assert_eq!(delayed, current);
+        assert_eq!(delayed.current.version_id, oid("v3"));
+
+        assert_eq!(
+            provider.rotate(
+                &handle,
+                SecretVersion {
+                    version_id: oid("v2"),
+                    material: material(b"changed-second-secret"),
+                },
+            ),
+            Err(SecretProviderError::Conflict)
+        );
+        assert_eq!(
+            provider
+                .active_secret_set(&handle)
+                .expect("state")
+                .current
+                .version_id,
+            oid("v3")
         );
     }
 
