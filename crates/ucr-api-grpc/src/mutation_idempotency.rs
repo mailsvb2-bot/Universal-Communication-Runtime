@@ -103,27 +103,6 @@ pub(crate) fn accept_mutation_receipt_with_legacy_reservation<S: CommandAcceptan
     }
 }
 
-pub(crate) fn accept_mutation_id<S: CommandAcceptanceStore>(
-    store: &S,
-    scope: &TenantScope,
-    command_type: &str,
-    idempotency_key: &str,
-    payload: Vec<u8>,
-) -> Result<CommandId, CanonicalError> {
-    accept_mutation_receipt(store, scope, command_type, idempotency_key, payload)
-        .map(|accepted| accepted.command_id)
-}
-
-pub(crate) fn accept_mutation<S: CommandAcceptanceStore>(
-    store: &S,
-    scope: &TenantScope,
-    command_type: &str,
-    idempotency_key: &str,
-    payload: Vec<u8>,
-) -> Result<(), CanonicalError> {
-    accept_mutation_id(store, scope, command_type, idempotency_key, payload).map(|_| ())
-}
-
 const fn map_store_error(error: DurableStoreError) -> CanonicalError {
     let code = match error {
         DurableStoreError::InvalidRecord => CanonicalErrorCode::InvalidArgument,
