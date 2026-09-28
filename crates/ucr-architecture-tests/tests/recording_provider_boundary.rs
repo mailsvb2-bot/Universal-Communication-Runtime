@@ -1,0 +1,47 @@
+use std::{fs, path::PathBuf};
+
+fn workspace() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn read(path: &str) -> String {
+    fs::read_to_string(workspace().join(path)).unwrap_or_else(|error| panic!("{path}: {error}"))
+}
+
+#[test]
+fn recording_provider_is_a_side_effect_boundary_not_a_second_lifecycle_owner() {
+    let core = read("crates/ucr-core/src/recording.rs");
+    let exports = read("crates/ucr-core/src/lib.rs");
+    let spec = read("spec/recording.md");
+
+    assert!(core.contains("pub trait RecordingMediaProvider"));
+    assert!(core.contains("pub struct RecordingProviderRequest"));
+    assert!(core.contains("pub enum RecordingProviderOperation"));
+    assert!(core.contains("pub enum RecordingProviderHealth"));
+    assert!(core.contains("pub enum RecordingProviderError"));
+    assert!(exports.contains("RecordingMediaProvider"));
+    assert!(spec.contains("one pluggable `RecordingMediaProvider` boundary"));
+    assert!(spec.contains("must not become a second Recording lifecycle owner"));
+}
+
+#[test]
+fn recording_provider_request_does_not_carry_media_or_crypto_secrets() {
+    let core = read("crates/ucr-core/src/recording.rs");
+    let start = core
+        .find("pub struct RecordingProviderRequest")
+        .expect("provider request");
+    let end = core[start..]
+        .find("\n}\n")
+        .map(|offset| start + offset)
+        .expect("provider request end");
+    let request = &core[start..end];
+
+    assert!(request.contains("scope: TenantScope"));
+    assert!(request.contains("recording_id: RecordingId"));
+    assert!(request.contains("call_id: CallId"));
+    assert!(request.contains("lifecycle_revision: u64"));
+    assert!(!request.contains("payload"));
+    assert!(!request.contains("ciphertext"));
+    assert!(!request.contains("key"));
+    assert!(!request.contains("token"));
+}

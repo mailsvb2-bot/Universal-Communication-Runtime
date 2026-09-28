@@ -17,7 +17,9 @@ Externally observable recording lifecycle facts use the one canonical Event jour
 - transition to `STOPPED` emits `ucr.recording.stopped`, including an ACTIVE recording stopped by participant denial/revocation;
 - transition to `DELETED` emits `ucr.recording.deleted`.
 
-The store contract also provides an atomic `expire_recording_with_event` path for a future retention worker, but no public/runtime expiry scheduler is claimed yet. `ucr.recording.expired` therefore remains Prepared until that scheduler/provider path has executable evidence.
+The store contract provides an atomic `expire_recording_with_event` path and the runtime now has a bounded, lease-coordinated retention worker. It enumerates only non-final recordings whose durable `expires_at_unix_ms` has elapsed, then re-checks each exact revision inside the atomic expiry+Event transition. Concurrent lifecycle changes become stale work and are skipped rather than force-expired. Successful expiry emits `ucr.recording.expired` through the canonical Event journal.
+
+The retention worker owns no media bytes and does not make recording Production-ready. It is finite-retention lifecycle enforcement only; controlled encrypted-media deletion still requires a concrete `RecordingMediaProvider` implementation and provider conformance evidence.
 
 The Event payload is `RecordingLifecycleEvent` and contains only the scoped recording/call identifiers, previous/current state, resulting revision and occurrence timestamp. Recording snapshot mutation and Event append are one durable atomic store action. Memory performs both under one mutex with rollback on Event conflict; SQLite performs compare-and-swap plus Event append in one immediate transaction. A store that cannot prove this atomicity fails closed rather than performing two independent writes. This lifecycle evidence still does not make a concrete media recorder Production-ready.
 
@@ -42,6 +44,16 @@ recording consent subject.
 
 The binding is fail-closed when recording runtime capability is unavailable. Merely compiling or
 serving this lifecycle contract is not permission to advertise Production recording.
+
+## Pluggable provider boundary
+
+Concrete recording side effects use one pluggable `RecordingMediaProvider` boundary. The provider receives only bounded canonical context: scope, Recording ID, Call ID, lifecycle revision, operation and retention expiry. It does not receive a second Conference/Call/Recording model, join credentials, media crypto keys or arbitrary integration metadata through this control contract.
+
+The provider operation identity is the exact `(scope, recording_id, lifecycle_revision, operation)` tuple. Exact retries must be idempotent. A changed request that collides with an already-applied provider operation must fail closed rather than duplicating capture/finalization/deletion effects.
+
+A provider may represent an in-process recorder, S3-compatible encrypted object pipeline, or an external media pipeline, but it must not become a second Recording lifecycle owner. Canonical lifecycle, participant consent, authorization, retention timestamps and Event evidence remain owned by the existing UCR Recording/Event boundaries.
+
+This contract establishes the replaceable provider seam only. It does not enable `ucr.conference.recording` by itself and is not evidence of encryption-at-rest, retention deletion, export authorization, provider recovery, media composition or recording-ready delivery. Those require a concrete provider plus conformance evidence.
 
 ## Output/provider boundary
 

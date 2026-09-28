@@ -655,6 +655,63 @@ where
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RecordingRetentionSweep {
+    pub examined: usize,
+    pub expired: usize,
+    pub stale: usize,
+}
+
+/// Applies one bounded retention sweep using the canonical Recording store and Event journal.
+///
+/// Discovery is only a hint. Every candidate is re-checked by optimistic revision inside the
+/// atomic `expire_recording_with_event` transition, so a concurrent lifecycle mutation becomes
+/// stale work rather than an incorrect expiry.
+///
+/// # Errors
+/// Returns explicit durable-store/event construction failures. Revision conflicts are counted as
+/// stale work and do not abort the sweep.
+pub fn expire_due_recordings_once<S: RecordingStore>(
+    store: &S,
+    now_unix_ms: i64,
+    limit: usize,
+) -> Result<RecordingRetentionSweep, CanonicalError> {
+    let due = store
+        .recordings_due_for_expiry(now_unix_ms, limit)
+        .map_err(map_store_error)?;
+    let mut sweep = RecordingRetentionSweep::default();
+
+    for current in due {
+        sweep.examined = sweep.examined.saturating_add(1);
+        let event = recording_lifecycle_event(
+            &current,
+            RecordingState::Expired,
+            fresh_event_id()?,
+            None,
+            None,
+            now_unix_ms,
+        )?;
+        match store.expire_recording_with_event(
+            &current.scope,
+            &current.recording_id,
+            current.revision,
+            now_unix_ms,
+            &event,
+        ) {
+            Ok(expired) if expired.state == RecordingState::Expired => {
+                sweep.expired = sweep.expired.saturating_add(1);
+            }
+            Ok(_) => return Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+            Err(DurableStoreError::Conflict) => {
+                sweep.stale = sweep.stale.saturating_add(1);
+            }
+            Err(error) => return Err(map_store_error(error)),
+        }
+    }
+
+    Ok(sweep)
+}
+
 fn recording_request_matches(
     existing: &RecordingSession,
     call_id: &ucr_model::CallId,
@@ -945,4 +1002,86 @@ const fn map_store_error(error: DurableStoreError) -> CanonicalError {
         | DurableStoreError::Internal => CanonicalErrorCode::Internal,
     };
     CanonicalError::new(code)
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use ucr_core::RecordingStore as _;
+    use ucr_model::{
+        CallId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingId, RecordingPolicy,
+        RecordingSession, RecordingState, TenantId, TenantScope,
+    };
+    use ucr_storage_memory::MemoryLocalStore;
+
+    use super::expire_due_recordings_once;
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid test id")
+    }
+
+    fn recording(id: &str, requested_at_unix_ms: i64) -> RecordingSession {
+        RecordingSession {
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(oid("retention-tenant")),
+                namespace_id: None,
+            },
+            recording_id: RecordingId::from_opaque(oid(id)),
+            call_id: CallId::from_opaque(oid("retention-call")),
+            requested_by: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("retention-service")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+            policy: RecordingPolicy {
+                require_all_participant_consent: false,
+                notify_all_participants: true,
+                retention_seconds: 60,
+                policy_reference: None,
+            },
+            state: RecordingState::Ready,
+            consents: Vec::new(),
+            requested_at_unix_ms,
+            started_at_unix_ms: None,
+            stopped_at_unix_ms: None,
+            expires_at_unix_ms: requested_at_unix_ms + 60_000,
+            revision: 1,
+        }
+    }
+
+    #[test]
+    fn retention_sweep_expires_only_due_recordings_with_atomic_event_path() {
+        let store = MemoryLocalStore::default();
+        let due = recording("due-recording", 1_000);
+        let future = recording("future-recording", 20_000);
+        store.persist_recording(&due).expect("persist due");
+        store.persist_recording(&future).expect("persist future");
+
+        let sweep = expire_due_recordings_once(&store, 61_000, 16).expect("retention sweep");
+        assert_eq!(sweep.examined, 1);
+        assert_eq!(sweep.expired, 1);
+        assert_eq!(sweep.stale, 0);
+
+        let expired = store
+            .recording(&due.scope, &due.recording_id)
+            .expect("load due")
+            .expect("due recording");
+        assert_eq!(expired.state, RecordingState::Expired);
+        assert_eq!(expired.revision, 2);
+
+        let untouched = store
+            .recording(&future.scope, &future.recording_id)
+            .expect("load future")
+            .expect("future recording");
+        assert_eq!(untouched.state, RecordingState::Ready);
+        assert_eq!(untouched.revision, 1);
+    }
+
+    #[test]
+    fn retention_sweep_rejects_unbounded_batches() {
+        let store = MemoryLocalStore::default();
+        let error = expire_due_recordings_once(&store, 61_000, 0).expect_err("zero batch rejected");
+        assert_eq!(
+            error.code,
+            ucr_protocol::CanonicalErrorCode::InvalidArgument
+        );
+    }
 }

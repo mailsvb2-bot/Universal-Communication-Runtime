@@ -1,9 +1,11 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use ucr_core::{DurableRecordStatus, DurableStoreError, RecordingStore};
+use ucr_core::{
+    DurableRecordStatus, DurableStoreError, MAX_RECORDING_RETENTION_BATCH, RecordingStore,
+};
 use ucr_model::{
-    CallId, EventEnvelope, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingConsent,
-    RecordingConsentState, RecordingId, RecordingPolicy, RecordingSession, RecordingState,
-    TenantScope,
+    CallId, EventEnvelope, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
+    RecordingConsent, RecordingConsentState, RecordingId, RecordingPolicy, RecordingSession,
+    RecordingState, TenantId, TenantScope,
 };
 use ucr_protocol::{
     RecordingProtocolError, apply_recording_consent, delete_recording, expire_recording,
@@ -159,6 +161,71 @@ impl RecordingStore for SqliteLocalStore {
     ) -> Result<Option<RecordingSession>, DurableStoreError> {
         let connection = self.lock_connection()?;
         load_recording(&connection, scope, recording_id)
+    }
+
+    fn recordings_due_for_expiry(
+        &self,
+        now_unix_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<RecordingSession>, DurableStoreError> {
+        if limit == 0 || limit > MAX_RECORDING_RETENTION_BATCH {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT tenant_id, namespace_present, namespace_id, recording_id
+                 FROM recordings
+                 WHERE expires_at_unix_ms <= ?1
+                   AND state NOT IN ('expired','deleted')
+                 ORDER BY expires_at_unix_ms, tenant_id, namespace_present, namespace_id, recording_id
+                 LIMIT ?2",
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    now_unix_ms,
+                    i64::try_from(limit).map_err(|_| DurableStoreError::InvalidRecord)?
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let mut keys = Vec::with_capacity(limit);
+        for row in rows {
+            let (tenant_id, namespace_present, namespace_id, recording_id) =
+                row.map_err(|error| map_sqlite_error(&error))?;
+            let namespace_id = match namespace_present {
+                0 if namespace_id.is_empty() => None,
+                1 if !namespace_id.is_empty() => {
+                    Some(NamespaceId::from_opaque(parse_id(&namespace_id)?))
+                }
+                _ => return Err(DurableStoreError::Corrupt),
+            };
+            keys.push((
+                TenantScope {
+                    tenant_id: TenantId::from_opaque(parse_id(&tenant_id)?),
+                    namespace_id,
+                },
+                RecordingId::from_opaque(parse_id(&recording_id)?),
+            ));
+        }
+        drop(statement);
+
+        let mut due = Vec::with_capacity(keys.len());
+        for (scope, recording_id) in keys {
+            let recording = load_recording(&connection, &scope, &recording_id)?
+                .ok_or(DurableStoreError::Corrupt)?;
+            due.push(recording);
+        }
+        Ok(due)
     }
 
     fn set_recording_consent(

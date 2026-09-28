@@ -5,8 +5,9 @@ use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use ucr_core::WebhookDispatchOutcome;
 use ucr_crypto::{MAX_MACHINE_TOKEN_JWKS_BYTES, MachineTokenPublicKeySet};
 use ucr_runtime::{
-    DEFAULT_RUNTIME_BIND, DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MachineAuthRuntimeConfig,
-    MachineBearerRuntimeConfig, ProductionRuntime, RealtimeRuntimeConfig,
+    DEFAULT_RECORDING_RETENTION_POLL_INTERVAL, DEFAULT_RUNTIME_BIND,
+    DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MachineAuthRuntimeConfig, MachineBearerRuntimeConfig,
+    ProductionRuntime, RealtimeRuntimeConfig,
 };
 use zeroize::Zeroizing;
 
@@ -107,6 +108,7 @@ async fn run() -> Result<(), String> {
             subscription_id,
         ),
         "run-webhook-worker" => run_webhook_worker(&database).await,
+        "run-recording-retention-worker" => run_recording_retention_worker(&database).await,
         _ => Err(usage()),
     }
 }
@@ -337,6 +339,25 @@ async fn run_webhook_worker(database: &PathBuf) -> Result<(), String> {
         .await
 }
 
+async fn run_recording_retention_worker(database: &PathBuf) -> Result<(), String> {
+    let poll_interval = std::env::var("UCR_RECORDING_RETENTION_POLL_INTERVAL_MS")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map(Duration::from_millis)
+                .map_err(|_| {
+                    "UCR_RECORDING_RETENTION_POLL_INTERVAL_MS must be an unsigned integer"
+                        .to_owned()
+                })
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_RECORDING_RETENTION_POLL_INTERVAL);
+    Arc::new(ProductionRuntime::open_existing(database)?)
+        .run_recording_retention_worker(poll_interval)
+        .await
+}
+
 fn csv_env(variable: &str) -> Vec<String> {
     std::env::var(variable)
         .ok()
@@ -393,6 +414,6 @@ fn hex_nibble(byte: u8) -> Result<u8, String> {
 }
 
 fn usage() -> String {
-    "usage: ucr-runtime <init|check|metrics|serve|serve-auth|serve-realtime|dispatch-webhook-once|run-webhook-worker> --database PATH [--bind 127.0.0.1:50051] [--join-base-url https://host/conference] [--tenant-id ID] [--namespace-id ID] [--subscription-id ID]"
+    "usage: ucr-runtime <init|check|metrics|serve|serve-auth|serve-realtime|dispatch-webhook-once|run-webhook-worker|run-recording-retention-worker> --database PATH [--bind 127.0.0.1:50051] [--join-base-url https://host/conference] [--tenant-id ID] [--namespace-id ID] [--subscription-id ID]"
         .to_owned()
 }
