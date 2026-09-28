@@ -14,6 +14,7 @@ fn broadcast_processing_is_separate_from_sfu_authority() {
     let broadcast = read("crates/ucr-broadcast/src/lib.rs");
     let broadcast_manifest = read("crates/ucr-broadcast/Cargo.toml");
     let sfu_manifest = read("crates/ucr-sfu/Cargo.toml");
+    let universal_api = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
     let spec = read("spec/broadcast.md");
 
     assert!(workspace_manifest.contains("\"crates/ucr-broadcast\""));
