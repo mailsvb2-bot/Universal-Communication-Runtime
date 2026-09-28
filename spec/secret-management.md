@@ -24,3 +24,14 @@ This boundary is a prerequisite for zero-downtime rotation of join signing keys,
 keys, TLS private keys/certificates, media crypto roots, and TURN credential roots. Each consumer
 must still prove its own overlap/reload semantics before the corresponding Production claim is
 enabled.
+
+## Join signing integration
+
+`JoinTokenIssuer` retains its static-key constructor for compatibility, and also supports the shared
+provider boundary. Provider-backed issuance always signs with the current JoinSigning secret version.
+Verification accepts current and previous versions, so already-issued short-lived grants continue to
+verify during one bounded rotation overlap without changing the token wire format. A second rotation
+drops the oldest version, after which tokens signed by that oldest key fail signature verification.
+
+Provider unavailability or malformed key length fails closed as `KeyUnavailable`; the issuer never
+falls back to an unrelated key or silently re-enables a retired version.
