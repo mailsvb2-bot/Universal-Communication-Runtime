@@ -4112,21 +4112,24 @@ mod universal_runtime_tests {
     };
 
     use ucr_core::{
-        CallStore, DeviceLifecycleStore, EventJournalStore, GroupCallLookupStore, GroupStore,
-        IdentityDeviceLookupStore, IdentityStore, PrincipalIdentityBindingStore,
-        UniversalConferenceStore,
+        CallStore, CommandAcceptanceStore, DeviceLifecycleStore, EventJournalStore,
+        GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore, IdentityStore,
+        PrincipalIdentityBindingStore, UniversalConferenceStore,
     };
     use ucr_model::{
         CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
-        CallSignallingState, CallTerminationReason, CommandId, ConferenceParticipantRole,
+        CallSignallingState, CallTerminationReason, CommandEnvelope, CommandId,
+        ConferenceParticipantRole,
         ConferenceScheduleMetadata, DeviceDescriptor, DeviceLifecycleState, EventId,
         GroupMemberState, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord,
-        IntegrationId, OpaqueId, PrincipalId, PrincipalIdentityBinding, PrincipalKind,
-        PrincipalRef, ScopedPrincipal, TenantId, TenantScope, UniversalConferenceLifecycle,
+        CorrelationContext, IntegrationId, OpaqueId, PrincipalId, PrincipalIdentityBinding,
+        PrincipalKind,
+        PrincipalRef, ProtocolVersion, ScopedPrincipal, TenantId, TenantScope,
+        UniversalConferenceLifecycle,
         UniversalConferenceMetadataEntry, UniversalConferenceMode,
         UniversalConferenceParticipantProfile, UniversalConferenceProfile,
     };
-    use ucr_protocol::CanonicalErrorCode;
+    use ucr_protocol::{CanonicalErrorCode, CommandReceiptStatus};
     use ucr_realtime::{JoinGrantUsePolicy, JoinTokenIssuer, JoinTokenKey};
     use ucr_storage_sqlite::SqliteLocalStore;
 
@@ -4136,6 +4139,7 @@ mod universal_runtime_tests {
         UpdateParticipantInput, ensure_participant, ensure_participant_device, issue_join_grant,
         lifecycle_event, prepare_conference_runtime, resolve_join_call, resolve_join_device,
         resolve_person_principal, set_conference_metadata, update_participant,
+        accept_integration_mutation_id,
     };
 
     #[test]
@@ -4420,6 +4424,90 @@ mod universal_runtime_tests {
             .expect("conference");
         assert_eq!(loaded.revision, 3);
         assert_eq!(loaded.metadata[0].value, b"y");
+    }
+
+    #[test]
+    fn integration_scoped_idempotency_allows_same_user_key_for_two_integrations() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        let integration_a = IntegrationId::from_opaque(oid("integration-a"));
+        let integration_b = IntegrationId::from_opaque(oid("integration-b"));
+
+        let first = accept_integration_mutation_id(
+            &store,
+            &scope(),
+            &integration_a,
+            "ucr.conference.entry.v1",
+            "shared-user-key",
+            b"integration-a-payload".to_vec(),
+        )
+        .expect("integration A accepted");
+        let second = accept_integration_mutation_id(
+            &store,
+            &scope(),
+            &integration_b,
+            "ucr.conference.entry.v1",
+            "shared-user-key",
+            b"integration-b-payload".to_vec(),
+        )
+        .expect("integration B accepted");
+        assert_ne!(first, second);
+
+        let retry = accept_integration_mutation_id(
+            &store,
+            &scope(),
+            &integration_a,
+            "ucr.conference.entry.v1",
+            "shared-user-key",
+            b"integration-a-payload".to_vec(),
+        )
+        .expect("integration A retry");
+        assert_eq!(retry, first);
+    }
+
+    #[test]
+    fn integration_scoped_idempotency_preserves_legacy_receipts_after_upgrade() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
+        let integration = IntegrationId::from_opaque(oid("integration-legacy"));
+        let legacy_command_id = CommandId::from_opaque(oid("legacy-command"));
+        let legacy = CommandEnvelope {
+            command_id: legacy_command_id.clone(),
+            scope: scope(),
+            command_type: "ucr.conference.entry.v1".to_owned(),
+            payload: b"legacy-payload".to_vec(),
+            correlation: CorrelationContext {
+                correlation_id: oid("legacy-correlation"),
+                causation_id: None,
+                idempotency_key: Some("legacy-user-key".to_owned()),
+            },
+            schema_version: ProtocolVersion::new(1, 0),
+            extensions: Vec::new(),
+        };
+        let receipt = store.accept_command(&legacy).expect("seed legacy receipt");
+        assert_eq!(receipt.status, CommandReceiptStatus::Accepted);
+
+        let retry = accept_integration_mutation_id(
+            &store,
+            &scope(),
+            &integration,
+            "ucr.conference.entry.v1",
+            "legacy-user-key",
+            b"legacy-payload".to_vec(),
+        )
+        .expect("legacy exact retry");
+        assert_eq!(retry, legacy_command_id);
+
+        let changed = accept_integration_mutation_id(
+            &store,
+            &scope(),
+            &integration,
+            "ucr.conference.entry.v1",
+            "legacy-user-key",
+            b"changed-payload".to_vec(),
+        )
+        .expect_err("legacy changed retry conflicts");
+        assert_eq!(changed.code, CanonicalErrorCode::Conflict);
     }
 
     #[test]
