@@ -22,6 +22,7 @@ ucr-conference = { path = "../ucr-conference" }
 ucr-media-e2ee = { path = "../ucr-media-e2ee" }
 ucr-model = { path = "../ucr-model" }
 ucr-realtime = { path = "../ucr-realtime" }
+ucr-secrets = { path = "../ucr-secrets" }
 ucr-sfu = { path = "../ucr-sfu" }
 ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
 ucr-webhook = { path = "../ucr-webhook" }

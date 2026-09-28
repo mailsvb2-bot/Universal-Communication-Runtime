@@ -49,3 +49,20 @@ This wiring does not by itself claim zero-downtime TURN rotation. The deployed T
 also prove that its shared-secret reload/overlap behavior accepts the intended rotation window.
 Short-lived TURN credentials remain scoped to the authenticated realtime `SessionId` and bounded
 by the session lifetime.
+
+## Webhook signing integration
+
+`HardenedWebhookSink` supports the shared provider boundary with a `WebhookSigning` handle.
+Provider-backed delivery resolves the current version for every request immediately before HMAC
+construction, so a provider rotation affects new webhook signatures without reconstructing the
+runtime worker. Missing, unavailable, wrong-purpose, or malformed provider material fails closed
+through the retryable webhook-delivery path; the sink never falls back to a stale static key.
+
+`ProductionRuntime` exposes provider-backed execution for both one-shot dispatch and the durable
+webhook worker. The previous static-key entry points remain compatibility surfaces and therefore do
+not constitute a silent public-contract break.
+
+This slice does not yet claim complete Production secret management. The command-line deployment
+path still accepts the compatibility environment key, and a durable external KMS/Vault/HSM adapter
+with independently proven live reload/rotation remains required before the zero-downtime webhook
+key-management Production claim is enabled.
