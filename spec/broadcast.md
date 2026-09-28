@@ -13,7 +13,12 @@ The separate `CompositionProvider` accepts one already-authorized, bounded opera
 - exact Tenant scope and Call ID;
 - an opaque idempotent operation ID;
 - one of the required layouts: gallery, active speaker, or screen-with-speaker;
-- a bounded unique list of video source IDs.
+- bounded unique typed audio-stream IDs and video-stream IDs from the existing Call media model.
+
+The request may be audio-only or audio+video; it may not be media-empty. Typed stream IDs prevent the
+composition boundary from inventing a parallel source identifier namespace. The provider may process
+the selected media, but the existing Call/media descriptors remain the source-of-truth for stream
+identity and authorization.
 
 The provider owns only media-processing side effects. It creates no canonical Conference roster,
 Call state, participant authority, SFU routing state, or Recording lifecycle.
