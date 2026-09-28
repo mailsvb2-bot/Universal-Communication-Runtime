@@ -30,6 +30,7 @@ use ucr_protocol::{
     CapabilityDescriptor, WebRtcProtocolError, canonical_ice_server, canonical_webrtc_candidate,
     canonical_webrtc_description, phase46_webrtc_capabilities,
 };
+use ucr_secrets::{SecretHandle, SecretProvider, SecretPurpose};
 use webrtc::{
     api::{
         APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
@@ -139,6 +140,7 @@ pub const MAX_TURN_CREDENTIAL_TTL_SECONDS: u32 = 3_600;
 pub enum TurnCredentialError {
     InvalidTtl,
     ClockOverflow,
+    KeyUnavailable,
     CryptoUnavailable,
 }
 
@@ -180,22 +182,82 @@ impl fmt::Debug for IssuedTurnCredential {
 }
 
 #[derive(Clone)]
+enum TurnRestSecretSource {
+    Static(TurnRestSecret),
+    Provider {
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+    },
+}
+
+impl fmt::Debug for TurnRestSecretSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Static(_) => formatter.write_str("Static(<redacted>)"),
+            Self::Provider { handle, .. } => formatter
+                .debug_struct("Provider")
+                .field("handle", handle)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct TurnRestCredentialIssuer {
-    secret: TurnRestSecret,
+    secret_source: TurnRestSecretSource,
 }
 
 impl fmt::Debug for TurnRestCredentialIssuer {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TurnRestCredentialIssuer")
-            .finish_non_exhaustive()
+            .field("secret_source", &self.secret_source)
+            .finish()
     }
 }
 
 impl TurnRestCredentialIssuer {
     #[must_use]
     pub const fn new(secret: TurnRestSecret) -> Self {
-        Self { secret }
+        Self {
+            secret_source: TurnRestSecretSource::Static(secret),
+        }
+    }
+
+    /// Creates a TURN REST issuer backed by the shared secret-provider boundary.
+    ///
+    /// Issuance always reads the provider's current `TurnCredentials` version so rotations become
+    /// effective without rebuilding the WebRTC session-config factory. TURN infrastructure must
+    /// separately prove overlap/reload semantics before zero-downtime rotation is claimed.
+    ///
+    /// # Errors
+    /// Rejects a non-TURN handle, unavailable/missing provider state, or malformed key material.
+    pub fn with_secret_provider(
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+    ) -> Result<Self, TurnCredentialError> {
+        if handle.purpose != SecretPurpose::TurnCredentials {
+            return Err(TurnCredentialError::KeyUnavailable);
+        }
+        let set = provider
+            .active_secret_set(&handle)
+            .map_err(|_| TurnCredentialError::KeyUnavailable)?;
+        turn_rest_secret_from_material(set.current.material.as_bytes())?;
+        Ok(Self {
+            secret_source: TurnRestSecretSource::Provider { provider, handle },
+        })
+    }
+
+    fn current_secret(&self) -> Result<TurnRestSecret, TurnCredentialError> {
+        match &self.secret_source {
+            TurnRestSecretSource::Static(secret) => Ok(secret.clone()),
+            TurnRestSecretSource::Provider { provider, handle } => {
+                let set = provider
+                    .active_secret_set(handle)
+                    .map_err(|_| TurnCredentialError::KeyUnavailable)?;
+                turn_rest_secret_from_material(set.current.material.as_bytes())
+            }
+        }
     }
 
     /// Issues coturn TURN REST API compatible time-limited credentials for one realtime session.
@@ -225,7 +287,8 @@ impl TurnRestCredentialIssuer {
             "{expires_at_unix_seconds}:{}",
             session_id.as_opaque().as_str()
         );
-        let key = PKey::hmac(&self.secret.0).map_err(|_| TurnCredentialError::CryptoUnavailable)?;
+        let secret = self.current_secret()?;
+        let key = PKey::hmac(&secret.0).map_err(|_| TurnCredentialError::CryptoUnavailable)?;
         let mut signer = Signer::new(MessageDigest::sha1(), &key)
             .map_err(|_| TurnCredentialError::CryptoUnavailable)?;
         signer
@@ -240,6 +303,13 @@ impl TurnRestCredentialIssuer {
             expires_at_unix_seconds,
         })
     }
+}
+
+fn turn_rest_secret_from_material(material: &[u8]) -> Result<TurnRestSecret, TurnCredentialError> {
+    let bytes: [u8; 32] = material
+        .try_into()
+        .map_err(|_| TurnCredentialError::KeyUnavailable)?;
+    Ok(TurnRestSecret::from_bytes(bytes))
 }
 
 pub const LIVE_WEBRTC_COMMAND_QUEUE_CAPACITY: usize = 256;
@@ -1111,6 +1181,7 @@ const fn map_turn_credential_error(error: TurnCredentialError) -> WebRtcProvider
         TurnCredentialError::InvalidTtl => {
             WebRtcProviderError::InvalidProtocol(WebRtcProtocolError::InvalidIceCredential)
         }
+        TurnCredentialError::KeyUnavailable => WebRtcProviderError::TemporarilyUnavailable,
         TurnCredentialError::ClockOverflow | TurnCredentialError::CryptoUnavailable => {
             WebRtcProviderError::Internal
         }
@@ -1174,6 +1245,10 @@ mod tests {
     use super::*;
     use ucr_model::{IceCredentialType, OpaqueId};
     use ucr_protocol::{CapabilityMaturity, WEBRTC_BROWSER_CAPABILITY};
+    use ucr_secrets::{
+        InMemorySecretProvider, SecretHandle, SecretMaterial, SecretProvider, SecretPurpose,
+        SecretVersion,
+    };
 
     #[test]
     fn turn_rest_credentials_are_short_lived_session_bound_and_redacted() {
@@ -1197,6 +1272,57 @@ mod tests {
         assert_eq!(
             issuer.issue(&session_id, MAX_TURN_CREDENTIAL_TTL_SECONDS + 1, 1_000),
             Err(TurnCredentialError::InvalidTtl)
+        );
+    }
+
+    #[test]
+    fn turn_provider_rotation_changes_new_credentials_without_static_secret_fallback() {
+        let provider = Arc::new(InMemorySecretProvider::default());
+        let handle = SecretHandle {
+            secret_id: OpaqueId::new("turn-root").expect("id"),
+            purpose: SecretPurpose::TurnCredentials,
+        };
+        provider
+            .provision(
+                handle.clone(),
+                SecretVersion {
+                    version_id: OpaqueId::new("v1").expect("version"),
+                    material: SecretMaterial::new(vec![7_u8; 32]).expect("secret"),
+                },
+            )
+            .expect("provision");
+        let issuer = TurnRestCredentialIssuer::with_secret_provider(
+            provider.clone(),
+            handle.clone(),
+        )
+        .expect("provider issuer");
+        let session_id =
+            SessionId::from_opaque(OpaqueId::new("provider-session").expect("session"));
+        let first = issuer.issue(&session_id, 300, 1_000).expect("v1 credential");
+
+        provider
+            .rotate(
+                &handle,
+                SecretVersion {
+                    version_id: OpaqueId::new("v2").expect("version"),
+                    material: SecretMaterial::new(vec![8_u8; 32]).expect("secret"),
+                },
+            )
+            .expect("rotate");
+        let second = issuer.issue(&session_id, 300, 1_000).expect("v2 credential");
+
+        assert_eq!(first.username, second.username);
+        assert_ne!(first.credential, second.credential);
+        assert!(!format!("{issuer:?}").contains("07070707"));
+        assert_eq!(
+            TurnRestCredentialIssuer::with_secret_provider(
+                provider,
+                SecretHandle {
+                    secret_id: OpaqueId::new("turn-root").expect("id"),
+                    purpose: SecretPurpose::JoinSigning,
+                },
+            ),
+            Err(TurnCredentialError::KeyUnavailable)
         );
     }
 
