@@ -127,16 +127,11 @@ async fn run() -> Result<(), String> {
 #[derive(Debug, Clone)]
 struct ReloadingMachineTokenSecretProvider {
     handle: SecretHandle,
-    current_file: PathBuf,
-    previous_file: Option<PathBuf>,
+    manifest_file: PathBuf,
 }
 
 impl ReloadingMachineTokenSecretProvider {
-    fn new(
-        handle: SecretHandle,
-        current_file: PathBuf,
-        previous_file: Option<PathBuf>,
-    ) -> Result<Self, String> {
+    fn new(handle: SecretHandle, manifest_file: PathBuf) -> Result<Self, String> {
         if handle.purpose != SecretPurpose::MachineTokenSigning {
             return Err(
                 "machine token provider handle must use MachineTokenSigning purpose".to_owned(),
@@ -144,8 +139,7 @@ impl ReloadingMachineTokenSecretProvider {
         }
         let provider = Self {
             handle,
-            current_file,
-            previous_file,
+            manifest_file,
         };
         provider
             .active_secret_set(&provider.handle)
@@ -153,9 +147,12 @@ impl ReloadingMachineTokenSecretProvider {
         Ok(provider)
     }
 
-    fn read_version(path: &Path) -> Result<SecretVersion, SecretProviderError> {
+    fn read_manifest(
+        path: &Path,
+        handle: &SecretHandle,
+    ) -> Result<ActiveSecretSet, SecretProviderError> {
         let metadata = fs::symlink_metadata(path).map_err(|_| SecretProviderError::Unavailable)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 512 {
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 1024 {
             return Err(SecretProviderError::InvalidMaterial);
         }
         #[cfg(unix)]
@@ -165,11 +162,14 @@ impl ReloadingMachineTokenSecretProvider {
                 return Err(SecretProviderError::InvalidMaterial);
             }
         }
+
         let encoded = Zeroizing::new(
             fs::read_to_string(path).map_err(|_| SecretProviderError::Unavailable)?,
         );
-        let mut key_id = None;
-        let mut seed_hex = None;
+        let mut current_key_id = None;
+        let mut current_seed_hex = None;
+        let mut previous_key_id = None;
+        let mut previous_seed_hex = None;
         for line in encoded
             .lines()
             .map(str::trim)
@@ -178,14 +178,43 @@ impl ReloadingMachineTokenSecretProvider {
             let Some((name, value)) = line.split_once('=') else {
                 return Err(SecretProviderError::InvalidMaterial);
             };
+            let value = value.trim();
             match name.trim() {
-                "key_id" if key_id.is_none() => key_id = Some(value.trim()),
-                "seed_hex" if seed_hex.is_none() => seed_hex = Some(value.trim()),
+                "current_key_id" if current_key_id.is_none() => current_key_id = Some(value),
+                "current_seed_hex" if current_seed_hex.is_none() => current_seed_hex = Some(value),
+                "previous_key_id" if previous_key_id.is_none() => previous_key_id = Some(value),
+                "previous_seed_hex" if previous_seed_hex.is_none() => previous_seed_hex = Some(value),
                 _ => return Err(SecretProviderError::InvalidMaterial),
             }
         }
-        let key_id = key_id.ok_or(SecretProviderError::InvalidMaterial)?;
-        let seed_hex = seed_hex.ok_or(SecretProviderError::InvalidMaterial)?;
+
+        let current = Self::decode_version(
+            current_key_id.ok_or(SecretProviderError::InvalidMaterial)?,
+            current_seed_hex.ok_or(SecretProviderError::InvalidMaterial)?,
+        )?;
+        let previous = match (previous_key_id, previous_seed_hex) {
+            (Some(key_id), Some(seed_hex)) => Some(Self::decode_version(key_id, seed_hex)?),
+            (None, None) => None,
+            _ => return Err(SecretProviderError::InvalidMaterial),
+        };
+        if previous
+            .as_ref()
+            .is_some_and(|version| version.version_id == current.version_id)
+        {
+            return Err(SecretProviderError::Conflict);
+        }
+
+        Ok(ActiveSecretSet {
+            handle: handle.clone(),
+            current,
+            previous,
+        })
+    }
+
+    fn decode_version(
+        key_id: &str,
+        seed_hex: &str,
+    ) -> Result<SecretVersion, SecretProviderError> {
         let seed = Zeroizing::new(
             decode_key_hex_named(seed_hex, "machine token provider seed")
                 .map_err(|_| SecretProviderError::InvalidMaterial)?,
@@ -217,23 +246,7 @@ impl SecretProvider for ReloadingMachineTokenSecretProvider {
         if handle != &self.handle {
             return Err(SecretProviderError::NotFound);
         }
-        let current = Self::read_version(&self.current_file)?;
-        let previous = self
-            .previous_file
-            .as_ref()
-            .map(|path| Self::read_version(path.as_path()))
-            .transpose()?;
-        if previous
-            .as_ref()
-            .is_some_and(|version| version.version_id == current.version_id)
-        {
-            return Err(SecretProviderError::Conflict);
-        }
-        Ok(ActiveSecretSet {
-            handle: handle.clone(),
-            current,
-            previous,
-        })
+        Self::read_manifest(self.manifest_file.as_path(), handle)
     }
 
     fn rotate(
@@ -268,10 +281,8 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
         .as_deref()
         == Some("file-reload")
     {
-        let current_file = PathBuf::from(required_env("UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE")?);
-        let previous_file = std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_SECRET_FILE")
-            .ok()
-            .map(PathBuf::from);
+        let manifest_file =
+            PathBuf::from(required_env("UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE")?);
         let secret_id = std::env::var("UCR_MACHINE_TOKEN_SIGNING_SECRET_ID")
             .unwrap_or_else(|_| "machine-token-signing".to_owned());
         let handle = SecretHandle {
@@ -281,8 +292,7 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
         };
         let provider = Arc::new(ReloadingMachineTokenSecretProvider::new(
             handle.clone(),
-            current_file,
-            previous_file,
+            manifest_file,
         )?);
         MachineAuthRuntimeConfig::with_secret_provider(
             issuer,
