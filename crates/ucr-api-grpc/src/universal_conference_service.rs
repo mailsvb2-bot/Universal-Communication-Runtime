@@ -4043,10 +4043,10 @@ mod universal_runtime_tests {
 
     use super::{
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
-        IssueJoinGrantInput, PrepareConferenceRuntimeInput, UpdateParticipantInput,
-        ensure_participant, ensure_participant_device, issue_join_grant, lifecycle_event,
-        prepare_conference_runtime, resolve_join_call, resolve_join_device,
-        resolve_person_principal, update_participant,
+        IssueJoinGrantInput, PrepareConferenceRuntimeInput, SetConferenceMetadataInput,
+        UpdateParticipantInput, ensure_participant, ensure_participant_device, issue_join_grant,
+        lifecycle_event, prepare_conference_runtime, resolve_join_call, resolve_join_device,
+        resolve_person_principal, set_conference_metadata, update_participant,
     };
 
     #[test]
