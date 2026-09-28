@@ -35,3 +35,17 @@ drops the oldest version, after which tokens signed by that oldest key fail sign
 
 Provider unavailability or malformed key length fails closed as `KeyUnavailable`; the issuer never
 falls back to an unrelated key or silently re-enables a retired version.
+
+
+## TURN credential root integration
+
+`TurnRestCredentialIssuer` supports the same shared provider boundary with a
+`TurnCredentials` handle. Every short-lived credential issuance resolves the current provider
+version, so a root rotation takes effect without reconstructing the WebRTC configuration factory.
+Missing, unavailable, wrong-purpose, or malformed provider material fails closed; there is no
+fallback to a stale static root.
+
+This wiring does not by itself claim zero-downtime TURN rotation. The deployed TURN service must
+also prove that its shared-secret reload/overlap behavior accepts the intended rotation window.
+Short-lived TURN credentials remain scoped to the authenticated realtime `SessionId` and bounded
+by the session lifetime.
