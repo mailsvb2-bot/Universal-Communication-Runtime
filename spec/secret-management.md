@@ -146,3 +146,43 @@ A zero-downtime rotation follows this order:
 The legacy startup-only signing-key and static JWKS paths remain compatibility surfaces. A durable
 external KMS/Vault/HSM adapter and deployment authorization/availability/recovery evidence remain
 separate Production gates.
+
+
+## Shipped runtime file-reload wiring
+
+The production CLI now exposes the same shared provider boundary for the realtime and webhook
+consumers instead of forcing deployment secrets to remain static process configuration.
+
+- Join signing: `UCR_REALTIME_JOIN_SECRET_PROVIDER=file-reload` with
+  `UCR_REALTIME_JOIN_SECRET_FILE` and optional `UCR_REALTIME_JOIN_SECRET_ID`.
+- TURN REST root: `UCR_WEBRTC_TURN_SECRET_PROVIDER=file-reload` with
+  `UCR_WEBRTC_TURN_SECRET_FILE` and optional `UCR_WEBRTC_TURN_SECRET_ID`.
+- Webhook signing: `UCR_WEBHOOK_SECRET_PROVIDER=file-reload` with
+  `UCR_WEBHOOK_SIGNING_SECRET_FILE` and optional `UCR_WEBHOOK_SIGNING_SECRET_ID`.
+
+The manifest is a single bounded, non-symlink file so current/previous rotation is observed as one
+snapshot. Generic field names are `current_version_id`, `current_secret_hex`,
+`previous_version_id`, and `previous_secret_hex`; the machine-token
+`current_key_id/current_seed_hex` aliases remain accepted for compatibility. On Unix, group/other
+file permissions fail closed. File contents and decoded secret bytes are zeroized after parsing.
+Static `*_HEX` paths remain compatibility inputs, not the recommended rotation path.
+
+Provider-backed Join signing resolves current/previous material through `JoinTokenIssuer`;
+provider-backed TURN resolves the current root for each short-lived credential issuance; provider-backed
+Webhook signing resolves the current root immediately before each delivery attempt. Provider
+unavailability never falls back to the stale static compatibility secret.
+
+## MediaCrypto scope
+
+`MediaCrypto` must not be wired into direct-call or group endpoint E2EE merely to satisfy a
+configuration checklist. Direct-call traffic keys are derived from authenticated UCR Crypto sessions
+with fresh X25519 ephemerals; group-media keys are owned by the RFC-9420/OpenMLS epoch state. Injecting
+one deployment-wide root into either path would create a second media-crypto authority and weaken the
+existing trust model.
+
+The `MediaCrypto` purpose is therefore reserved for concrete deployment/provider-owned media roots
+that actually require secret management (for example a future server-side recording, composition, or
+broadcast encryption provider). No such provider may advertise Production capability until it wires
+this purpose through the shared provider boundary and proves rotation/recovery semantics. The absence
+of such a concrete consumer is an explicit non-claim, not permission to alter endpoint E2EE key
+derivation.
