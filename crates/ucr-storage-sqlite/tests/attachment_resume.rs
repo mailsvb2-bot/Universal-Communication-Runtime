@@ -128,11 +128,12 @@ fn sqlite_v44_migrates_to_v45_without_inventing_attachment_state() {
         connection
             .execute_batch(
                 "PRAGMA foreign_keys=OFF;
+                 DROP TABLE IF EXISTS universal_conference_metadata;
                  DROP TABLE IF EXISTS attachment_chunks;
                  DROP TABLE IF EXISTS attachments;
                  PRAGMA foreign_keys=ON;",
             )
-            .expect("remove v45 attachment objects");
+            .expect("remove post-v44 objects");
         connection
             .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
             .expect("preserve UCR store ownership");
@@ -141,7 +142,7 @@ fn sqlite_v44_migrates_to_v45_without_inventing_attachment_state() {
             .expect("simulate exact v44 store");
     }
 
-    let migrated = SqliteLocalStore::open(&db.0).expect("migrate v44 to v45");
+    let migrated = SqliteLocalStore::open(&db.0).expect("migrate v44 through current");
     assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
     let descriptor = descriptor(b"abcdefgh");
     assert_eq!(
