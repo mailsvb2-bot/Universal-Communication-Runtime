@@ -153,13 +153,21 @@ where
     A: AuthorizationEvaluator,
     S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore,
 {
-    let admission = match authentication {
+    let actor = match authentication {
         MachineApiAuthentication::ServiceCredential {
             credential_id,
             secret,
         } => {
             let gate = ServicePrincipalRequestGate::new(clock, authorization, store);
-            gate.authenticate_request(scope, &credential_id, &secret, permission, scope)?
+            let admission =
+                gate.authenticate_request(scope, &credential_id, &secret, permission, scope)?;
+            let actor = admission.subject().clone();
+            admission.authorize(&AuthorizationRequest {
+                subject: actor.clone(),
+                permission: permission.to_owned(),
+                resource_scope: scope.clone(),
+            })?;
+            actor
         }
         MachineApiAuthentication::MachineBearer(encoded) => {
             let config = machine_bearer.ok_or_else(unauthenticated)?;
@@ -171,15 +179,16 @@ where
                 &verification_keys,
                 &config.policy,
             );
-            gate.authenticate_permission_request(&encoded, permission, scope)?
+            let admission = gate.authenticate_permission_request(&encoded, permission, scope)?;
+            let actor = admission.subject().clone();
+            admission.authorize(&AuthorizationRequest {
+                subject: actor.clone(),
+                permission: permission.to_owned(),
+                resource_scope: scope.clone(),
+            })?;
+            actor
         }
     };
-    let actor = admission.subject().clone();
-    admission.authorize(&AuthorizationRequest {
-        subject: actor.clone(),
-        permission: permission.to_owned(),
-        resource_scope: scope.clone(),
-    })?;
     if actor.principal.kind != ucr_model::PrincipalKind::ServiceAccount {
         return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
     }
