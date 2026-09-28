@@ -51,6 +51,17 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     assert!(runtime_main.contains("ReloadingMachineTokenSecretProvider"));
     assert!(runtime_main.contains("ReloadingMachineTokenJwksProvider"));
     assert!(runtime_main.contains("UCR_MACHINE_TOKEN_VERIFICATION_PROVIDER"));
+    assert!(runtime_main.contains("UCR_REALTIME_JOIN_SECRET_PROVIDER"));
+    assert!(runtime_main.contains("UCR_REALTIME_JOIN_SECRET_FILE"));
+    assert!(runtime_main.contains("UCR_WEBRTC_TURN_SECRET_PROVIDER"));
+    assert!(runtime_main.contains("UCR_WEBRTC_TURN_SECRET_FILE"));
+    assert!(runtime_main.contains("UCR_WEBHOOK_SECRET_PROVIDER"));
+    assert!(runtime_main.contains("UCR_WEBHOOK_SIGNING_SECRET_FILE"));
+    assert!(runtime.contains("RealtimeRuntimeConfig"));
+    assert!(runtime.contains("with_join_secret_provider"));
+    assert!(runtime.contains("with_webrtc_ice_secret_provider"));
+    assert!(runtime_main.contains("run_webhook_worker_with_secret_provider"));
+    assert!(runtime_main.contains("dispatch_webhook_once_with_secret_provider"));
     assert!(secrets.contains("pub trait SecretProvider"));
     assert!(secrets.contains("pub enum SecretPurpose"));
     assert!(secrets.contains("MachineTokenSigning"));
