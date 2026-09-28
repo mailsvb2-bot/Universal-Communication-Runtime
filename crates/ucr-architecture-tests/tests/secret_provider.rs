@@ -19,6 +19,10 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     assert!(realtime.contains("JoinTokenIssuer::with_secret_provider"));
     assert!(realtime.contains("current_signing_key"));
     assert!(realtime.contains("verification_keys"));
+    let webrtc = read("crates/ucr-webrtc/src/lib.rs");
+    assert!(webrtc.contains("TurnRestCredentialIssuer::with_secret_provider"));
+    assert!(webrtc.contains("SecretPurpose::TurnCredentials"));
+    assert!(webrtc.contains("self.current_secret()?"));
     assert!(secrets.contains("pub trait SecretProvider"));
     assert!(secrets.contains("pub enum SecretPurpose"));
     assert!(secrets.contains("JoinSigning"));
