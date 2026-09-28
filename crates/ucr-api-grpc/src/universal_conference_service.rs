@@ -8,7 +8,9 @@ use super::{
         MachineApiAuthentication, MachineBearerConfig, admit_machine_api,
         decode_machine_api_authentication,
     },
-    mutation_idempotency::{accept_mutation_receipt, validate_mutation_idempotency_key},
+    mutation_idempotency::{
+        accept_mutation_receipt_with_legacy_reservation, validate_mutation_idempotency_key,
+    },
     pb, pb_acknowledgement, pb_error, pb_opaque, pb_scope,
 };
 use prost::Message;
@@ -74,23 +76,12 @@ const MAX_JOIN_WINDOW_SECONDS: u32 = 31_536_000;
 const MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS: usize = MAX_CALL_PARTICIPANTS + 1;
 const UNIVERSAL_IDEMPOTENCY_DOMAIN: &[u8] = b"UCR-UNIVERSAL-INTEGRATION-IDEMPOTENCY-V1\0";
 
-fn integration_scoped_idempotency_key<S: CommandAcceptanceStore>(
-    store: &S,
-    scope: &TenantScope,
+fn integration_scoped_idempotency_key(
     integration_id: &IntegrationId,
     command_type: &str,
     idempotency_key: &str,
 ) -> Result<String, CanonicalError> {
     validate_mutation_idempotency_key(idempotency_key)?;
-
-    // Preserve exact legacy retry/conflict behavior for commands accepted before integration
-    // namespacing was introduced. A store that cannot prove absence fails closed.
-    if store
-        .has_accepted_idempotency_key(scope, idempotency_key)
-        .map_err(map_store_error)?
-    {
-        return Ok(idempotency_key.to_owned());
-    }
 
     let mut hasher = Sha256::new();
     hasher.update(UNIVERSAL_IDEMPOTENCY_DOMAIN);
@@ -124,14 +115,15 @@ fn accept_integration_mutation_receipt<S: CommandAcceptanceStore>(
     idempotency_key: &str,
     payload: Vec<u8>,
 ) -> Result<super::mutation_idempotency::AcceptedMutation, CanonicalError> {
-    let key = integration_scoped_idempotency_key(
+    let key = integration_scoped_idempotency_key(integration_id, command_type, idempotency_key)?;
+    accept_mutation_receipt_with_legacy_reservation(
         store,
         scope,
-        integration_id,
         command_type,
+        &key,
         idempotency_key,
-    )?;
-    accept_mutation_receipt(store, scope, command_type, &key, payload)
+        payload,
+    )
 }
 
 fn accept_integration_mutation_id<S: CommandAcceptanceStore>(
