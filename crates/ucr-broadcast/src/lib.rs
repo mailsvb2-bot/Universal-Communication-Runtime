@@ -51,6 +51,11 @@ pub struct BroadcastDestination {
 pub struct CompositionRequest {
     pub scope: TenantScope,
     pub call_id: CallId,
+    /// Caller-selected stable identifier for the composed output.
+    ///
+    /// Providers must bind this handle to the exact operation semantics and must not replace it
+    /// with a provider-specific identifier in the canonical boundary.
+    pub composition_id: OpaqueId,
     pub operation_id: OpaqueId,
     pub layout: CompositionLayout,
     pub audio_stream_ids: Vec<AudioStreamId>,
@@ -90,8 +95,10 @@ pub trait CompositionProvider: fmt::Debug + Send + Sync {
 
     /// Accepts one bounded composition operation.
     ///
-    /// Exact retries of the same `operation_id` must be idempotent. Reusing an operation ID for
-    /// changed composition semantics must fail with `Conflict`.
+    /// The caller-selected `composition_id` is the provider-independent output handle passed to
+    /// later broadcast operations. Exact retries of the same `operation_id` must be idempotent.
+    /// Reusing an operation ID for changed composition semantics, including a different
+    /// `composition_id`, must fail with `Conflict`.
     ///
     /// # Errors
     /// Returns a bounded provider failure without mutating canonical Call/Conference state.
@@ -106,7 +113,10 @@ pub trait BroadcastProvider: fmt::Debug + Send + Sync {
     /// Publishes one already-composed media output to configured destinations.
     ///
     /// The destination IDs resolve to provider/operator configuration outside canonical UCR state;
-    /// implementations must not log or persist stream keys through this request.
+    /// implementations must not log or persist stream keys through this request. Exact retries of
+    /// the same `operation_id` must be idempotent. Reusing an operation ID with a different
+    /// composition or destination set must fail with `Conflict` rather than starting duplicate
+    /// publishing/packaging side effects.
     ///
     /// # Errors
     /// Returns a bounded provider failure without creating Conference or SFU authority.
@@ -201,6 +211,7 @@ mod tests {
         let request = CompositionRequest {
             scope: scope(),
             call_id: CallId::from_opaque(oid("broadcast-call")),
+            composition_id: oid("composition-output"),
             operation_id: oid("composition-op"),
             layout: CompositionLayout::ScreenWithSpeaker,
             audio_stream_ids: vec![AudioStreamId::from_opaque(oid("speaker-audio"))],
@@ -229,6 +240,7 @@ mod tests {
         let audio_only = CompositionRequest {
             scope: scope(),
             call_id: CallId::from_opaque(oid("broadcast-call")),
+            composition_id: oid("audio-composition-output"),
             operation_id: oid("audio-composition-op"),
             layout: CompositionLayout::ActiveSpeaker,
             audio_stream_ids: vec![AudioStreamId::from_opaque(oid("speaker-audio"))],
@@ -250,12 +262,27 @@ mod tests {
     }
 
     #[test]
+    fn composition_output_handle_is_explicit_and_distinct_from_retry_identity() {
+        let request = CompositionRequest {
+            scope: scope(),
+            call_id: CallId::from_opaque(oid("broadcast-call")),
+            composition_id: oid("stable-composition-output"),
+            operation_id: oid("compose-retry-identity"),
+            layout: CompositionLayout::Gallery,
+            audio_stream_ids: vec![AudioStreamId::from_opaque(oid("speaker-audio"))],
+            video_stream_ids: vec![VideoStreamId::from_opaque(oid("speaker-video"))],
+        };
+        assert_ne!(request.composition_id, request.operation_id);
+        assert_eq!(validate_composition_request(&request), Ok(()));
+    }
+
+    #[test]
     fn broadcast_uses_opaque_destination_refs_for_rtmp_hls_and_dash() {
         let request = BroadcastRequest {
             scope: scope(),
             call_id: CallId::from_opaque(oid("broadcast-call")),
             operation_id: oid("broadcast-op"),
-            composition_id: oid("composition-op"),
+            composition_id: oid("composition-output"),
             destinations: vec![
                 BroadcastDestination {
                     destination_id: oid("rtmp-target"),
@@ -284,7 +311,7 @@ mod tests {
             scope: scope(),
             call_id: CallId::from_opaque(oid("broadcast-call")),
             operation_id: oid("broadcast-op-duplicate"),
-            composition_id: oid("composition-op"),
+            composition_id: oid("composition-output"),
             destinations: vec![
                 BroadcastDestination {
                     destination_id: oid("same-target"),
