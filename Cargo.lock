@@ -3952,6 +3952,8 @@ dependencies = [
  "rustls",
  "tokio",
  "tokio-rustls",
+ "ucr-model",
+ "ucr-secrets",
 ]
 
 [[package]]
