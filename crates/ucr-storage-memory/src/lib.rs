@@ -2273,8 +2273,7 @@ impl CommandAcceptanceStore for MemoryLocalStore {
             );
             let mut reservation = legacy_incoming.clone();
             reservation.command_id = reservation_id.clone();
-            LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE
-                .clone_into(&mut reservation.command_type);
+            LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE.clone_into(&mut reservation.command_type);
             reservation.payload = LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD.to_vec();
             reservation.correlation.correlation_id = reservation_id.as_opaque().clone();
             reservation.correlation.causation_id = None;
