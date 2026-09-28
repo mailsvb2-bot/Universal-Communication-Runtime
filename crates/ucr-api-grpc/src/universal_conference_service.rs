@@ -94,9 +94,9 @@ fn integration_scoped_idempotency_key<S: CommandAcceptanceStore>(
 
     let mut hasher = Sha256::new();
     hasher.update(UNIVERSAL_IDEMPOTENCY_DOMAIN);
-    update_idempotency_hash_field(&mut hasher, integration_id.as_opaque().as_wire_bytes());
-    update_idempotency_hash_field(&mut hasher, command_type.as_bytes());
-    update_idempotency_hash_field(&mut hasher, idempotency_key.as_bytes());
+    update_idempotency_hash_field(&mut hasher, integration_id.as_opaque().as_wire_bytes())?;
+    update_idempotency_hash_field(&mut hasher, command_type.as_bytes())?;
+    update_idempotency_hash_field(&mut hasher, idempotency_key.as_bytes())?;
 
     let digest = hasher.finalize();
     let mut derived = String::with_capacity(7 + digest.len() * 2);
@@ -108,9 +108,15 @@ fn integration_scoped_idempotency_key<S: CommandAcceptanceStore>(
     Ok(derived)
 }
 
-fn update_idempotency_hash_field(hasher: &mut Sha256, value: &[u8]) {
-    hasher.update((value.len() as u64).to_be_bytes());
+fn update_idempotency_hash_field(
+    hasher: &mut Sha256,
+    value: &[u8],
+) -> Result<(), CanonicalError> {
+    let length = u64::try_from(value.len())
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    hasher.update(length.to_be_bytes());
     hasher.update(value);
+    Ok(())
 }
 
 fn accept_integration_mutation_receipt<S: CommandAcceptanceStore>(
