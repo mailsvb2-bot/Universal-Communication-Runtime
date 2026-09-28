@@ -1,6 +1,12 @@
 #![forbid(unsafe_code)]
 
-use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use ucr_core::WebhookDispatchOutcome;
 use ucr_crypto::{MAX_MACHINE_TOKEN_JWKS_BYTES, MachineTokenPublicKeySet};
@@ -147,7 +153,7 @@ impl ReloadingMachineTokenSecretProvider {
         Ok(provider)
     }
 
-    fn read_version(path: &PathBuf) -> Result<SecretVersion, SecretProviderError> {
+    fn read_version(path: &Path) -> Result<SecretVersion, SecretProviderError> {
         let metadata = fs::symlink_metadata(path).map_err(|_| SecretProviderError::Unavailable)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 512 {
             return Err(SecretProviderError::InvalidMaterial);
@@ -159,7 +165,9 @@ impl ReloadingMachineTokenSecretProvider {
                 return Err(SecretProviderError::InvalidMaterial);
             }
         }
-        let encoded = fs::read_to_string(path).map_err(|_| SecretProviderError::Unavailable)?;
+        let encoded = Zeroizing::new(
+            fs::read_to_string(path).map_err(|_| SecretProviderError::Unavailable)?,
+        );
         let mut key_id = None;
         let mut seed_hex = None;
         for line in encoded
@@ -178,11 +186,13 @@ impl ReloadingMachineTokenSecretProvider {
         }
         let key_id = key_id.ok_or(SecretProviderError::InvalidMaterial)?;
         let seed_hex = seed_hex.ok_or(SecretProviderError::InvalidMaterial)?;
-        let seed = decode_key_hex_named(seed_hex, "machine token provider seed")
-            .map_err(|_| SecretProviderError::InvalidMaterial)?;
+        let seed = Zeroizing::new(
+            decode_key_hex_named(seed_hex, "machine token provider seed")
+                .map_err(|_| SecretProviderError::InvalidMaterial)?,
+        );
         Ok(SecretVersion {
             version_id: OpaqueId::new(key_id).map_err(|_| SecretProviderError::InvalidMaterial)?,
-            material: SecretMaterial::new(seed.to_vec())?,
+            material: SecretMaterial::new(seed.as_ref().to_vec())?,
         })
     }
 }
