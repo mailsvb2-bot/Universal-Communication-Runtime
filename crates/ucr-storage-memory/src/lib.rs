@@ -2249,7 +2249,8 @@ impl CommandAcceptanceStore for MemoryLocalStore {
         scope: &TenantScope,
         idempotency_key: &str,
     ) -> Result<bool, DurableStoreError> {
-        if idempotency_key.is_empty() || idempotency_key.len() > ucr_protocol::MAX_IDEMPOTENCY_KEY_LEN
+        if idempotency_key.is_empty()
+            || idempotency_key.len() > ucr_protocol::MAX_IDEMPOTENCY_KEY_LEN
         {
             return Err(DurableStoreError::InvalidRecord);
         }
