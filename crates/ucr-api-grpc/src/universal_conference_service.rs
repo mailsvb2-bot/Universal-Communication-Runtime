@@ -3939,7 +3939,7 @@ mod universal_runtime_tests {
                 .expect("prepared broadcast capability");
             assert_eq!(
                 capability.maturity,
-                pb::CapabilityMaturity::Prepared as i32
+                super::pb::CapabilityMaturity::Prepared as i32
             );
         }
         assert_eq!(
