@@ -9708,6 +9708,7 @@ mod conference_lifecycle_event_atomicity_tests {
                 join_after_seconds: 60,
                 timezone: Some("UTC".to_owned()),
             },
+            metadata: Vec::new(),
             entry_open: true,
             revision: 1,
         }
@@ -10425,6 +10426,7 @@ mod service_resource_participant_quota_tests {
                 join_after_seconds: 0,
                 timezone: None,
             },
+            metadata: Vec::new(),
             entry_open: true,
             revision: 1,
         }
