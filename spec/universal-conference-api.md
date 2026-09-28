@@ -39,6 +39,26 @@ transition therefore cannot become externally visible without its paired `ucr.co
 `ucr.conference.ended` Event, and an Event cannot commit without the corresponding lifecycle revision.
 
 
+## Bounded integration metadata
+
+Universal Conference exposes a deliberately small namespaced metadata extension mechanism for
+integration-owned correlation data such as `com.example.crm.customer_id`. Keys use at least three
+dot-separated ASCII identifier segments and are canonicalized lexicographically. One Conference may
+carry at most 32 entries; a key is at most 255 bytes, one opaque value at most 4 KiB, and the complete
+key/value set at most 32 KiB.
+
+Metadata is context only. It must not become an arbitrary integration database, UCR authorization
+input, identity authority, routing authority, secret store, or substitute for canonical fields.
+Values are treated as opaque bytes and are redacted from Debug output. Duplicate or unscoped keys
+fail closed.
+
+CreateConference persists the canonical metadata set as part of the exact idempotent create
+semantics. SetConferenceMetadata atomically replaces the complete set, uses the normal durable
+mutation-idempotency boundary, and advances the Conference revision exactly once. Exact retries
+return the already-applied state; changed reuse of an idempotency key conflicts. SQLite stores
+metadata in a child table owned by the existing Universal Conference store so there is no second
+metadata owner or independent lifecycle.
+
 ## Integration isolation
 
 Every conference read or mutation is scoped by both `TenantScope` and `IntegrationId`. Universal Conference credentials are canonical Service Account credentials whose authenticated principal ID must exactly match the presented `IntegrationId`; a tenant permission by itself is not sufficient to impersonate another integration. A caller that presents another integration's `conference_id` receives `NOT_FOUND` after integration admission; the public API must not expose cross-integration existence or permit management by handle alone. External references remain integration-scoped and no integration credential is a tenant-wide conference superuser by default.
