@@ -16,7 +16,7 @@ fn broadcast_processing_is_separate_from_sfu_authority() {
     let sfu_manifest = read("crates/ucr-sfu/Cargo.toml");
     let spec = read("spec/broadcast.md");
 
-    assert!(workspace_manifest.contains(""crates/ucr-broadcast""));
+    assert!(workspace_manifest.contains("\"crates/ucr-broadcast\""));
     assert!(broadcast.contains("pub trait CompositionProvider"));
     assert!(broadcast.contains("pub trait BroadcastProvider"));
     assert!(broadcast.contains("CompositionLayout::ScreenWithSpeaker"));
@@ -47,8 +47,8 @@ fn broadcast_control_contract_keeps_destination_secrets_out_of_canonical_values(
 #[test]
 fn rtmp_hls_dash_capabilities_remain_prepared() {
     let protocol = read("crates/ucr-protocol/src/broadcast.rs");
-    assert!(protocol.contains(""ucr.broadcast.rtmp""));
-    assert!(protocol.contains(""ucr.broadcast.hls""));
-    assert!(protocol.contains(""ucr.broadcast.dash""));
+    assert!(protocol.contains("\"ucr.broadcast.rtmp\""));
+    assert!(protocol.contains("\"ucr.broadcast.hls\""));
+    assert!(protocol.contains("\"ucr.broadcast.dash\""));
     assert!(protocol.contains("CapabilityMaturity::Prepared"));
 }
