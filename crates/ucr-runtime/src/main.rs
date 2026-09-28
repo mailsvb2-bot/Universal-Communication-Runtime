@@ -127,25 +127,20 @@ async fn run() -> Result<(), String> {
 }
 
 #[derive(Debug, Clone)]
-struct ReloadingMachineTokenSecretProvider {
+struct ReloadingFileSecretProvider {
     handle: SecretHandle,
     manifest_file: PathBuf,
 }
 
-impl ReloadingMachineTokenSecretProvider {
+impl ReloadingFileSecretProvider {
     fn new(handle: SecretHandle, manifest_file: PathBuf) -> Result<Self, String> {
-        if handle.purpose != SecretPurpose::MachineTokenSigning {
-            return Err(
-                "machine token provider handle must use MachineTokenSigning purpose".to_owned(),
-            );
-        }
         let provider = Self {
             handle,
             manifest_file,
         };
         provider
             .active_secret_set(&provider.handle)
-            .map_err(|error| format!("load machine token provider manifest: {error:?}"))?;
+            .map_err(|error| format!("load secret provider manifest: {error:?}"))?;
         Ok(provider)
     }
 
@@ -181,10 +176,16 @@ impl ReloadingMachineTokenSecretProvider {
             };
             let value = value.trim();
             match name.trim() {
-                "current_key_id" if current_key_id.is_none() => current_key_id = Some(value),
-                "current_seed_hex" if current_seed_hex.is_none() => current_seed_hex = Some(value),
-                "previous_key_id" if previous_key_id.is_none() => previous_key_id = Some(value),
-                "previous_seed_hex" if previous_seed_hex.is_none() => {
+                "current_key_id" | "current_version_id" if current_key_id.is_none() => {
+                    current_key_id = Some(value);
+                }
+                "current_seed_hex" | "current_secret_hex" if current_seed_hex.is_none() => {
+                    current_seed_hex = Some(value);
+                }
+                "previous_key_id" | "previous_version_id" if previous_key_id.is_none() => {
+                    previous_key_id = Some(value);
+                }
+                "previous_seed_hex" | "previous_secret_hex" if previous_seed_hex.is_none() => {
                     previous_seed_hex = Some(value);
                 }
                 _ => return Err(SecretProviderError::InvalidMaterial),
@@ -216,7 +217,7 @@ impl ReloadingMachineTokenSecretProvider {
 
     fn decode_version(key_id: &str, seed_hex: &str) -> Result<SecretVersion, SecretProviderError> {
         let seed = Zeroizing::new(
-            decode_key_hex_named(seed_hex, "machine token provider seed")
+            decode_key_hex_named(seed_hex, "secret provider material")
                 .map_err(|_| SecretProviderError::InvalidMaterial)?,
         );
         Ok(SecretVersion {
@@ -226,9 +227,9 @@ impl ReloadingMachineTokenSecretProvider {
     }
 }
 
-impl SecretProvider for ReloadingMachineTokenSecretProvider {
+impl SecretProvider for ReloadingFileSecretProvider {
     fn provider_id(&self) -> &'static str {
-        "machine-token-file-reload"
+        "file-reload"
     }
 
     fn health(&self) -> SecretProviderHealth {
@@ -258,6 +259,34 @@ impl SecretProvider for ReloadingMachineTokenSecretProvider {
     }
 }
 
+fn secret_provider_from_env(
+    provider_variable: &str,
+    manifest_variable: &str,
+    secret_id_variable: &str,
+    default_secret_id: &str,
+    purpose: SecretPurpose,
+) -> Result<Option<(Arc<dyn SecretProvider>, SecretHandle)>, String> {
+    let Some(provider_kind) = std::env::var(provider_variable).ok() else {
+        return Ok(None);
+    };
+    if provider_kind != "file-reload" {
+        return Err(format!("{provider_variable} must be file-reload when configured"));
+    }
+    let manifest_file = PathBuf::from(required_env(manifest_variable)?);
+    let secret_id =
+        std::env::var(secret_id_variable).unwrap_or_else(|_| default_secret_id.to_owned());
+    let handle = SecretHandle {
+        secret_id: OpaqueId::new(&secret_id)
+            .map_err(|_| format!("{secret_id_variable} is invalid"))?,
+        purpose,
+    };
+    let provider: Arc<dyn SecretProvider> = Arc::new(ReloadingFileSecretProvider::new(
+        handle.clone(),
+        manifest_file,
+    )?);
+    Ok(Some((provider, handle)))
+}
+
 async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String> {
     let bind: SocketAddr = bind
         .parse()
@@ -276,23 +305,13 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
         .transpose()?
         .unwrap_or(900);
 
-    let config = if std::env::var("UCR_MACHINE_TOKEN_SECRET_PROVIDER")
-        .ok()
-        .as_deref()
-        == Some("file-reload")
-    {
-        let manifest_file = PathBuf::from(required_env("UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE")?);
-        let secret_id = std::env::var("UCR_MACHINE_TOKEN_SIGNING_SECRET_ID")
-            .unwrap_or_else(|_| "machine-token-signing".to_owned());
-        let handle = SecretHandle {
-            secret_id: OpaqueId::new(&secret_id)
-                .map_err(|_| "UCR_MACHINE_TOKEN_SIGNING_SECRET_ID is invalid".to_owned())?,
-            purpose: SecretPurpose::MachineTokenSigning,
-        };
-        let provider = Arc::new(ReloadingMachineTokenSecretProvider::new(
-            handle.clone(),
-            manifest_file,
-        )?);
+    let config = if let Some((provider, handle)) = secret_provider_from_env(
+        "UCR_MACHINE_TOKEN_SECRET_PROVIDER",
+        "UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE",
+        "UCR_MACHINE_TOKEN_SIGNING_SECRET_ID",
+        "machine-token-signing",
+        SecretPurpose::MachineTokenSigning,
+    )? {
         MachineAuthRuntimeConfig::with_secret_provider(
             issuer,
             audience,
