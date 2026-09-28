@@ -7,8 +7,8 @@ use ucr_model::{
     AudioStreamId, CallId, CapabilityDescriptor, OpaqueId, TenantScope, VideoStreamId,
 };
 use ucr_protocol::{
-    DASH_BROADCAST_CAPABILITY, HLS_BROADCAST_CAPABILITY, MAX_BROADCAST_OUTPUTS,
-    MAX_BROADCAST_AUDIO_SOURCES, MAX_BROADCAST_VIDEO_SOURCES, RTMP_BROADCAST_CAPABILITY,
+    DASH_BROADCAST_CAPABILITY, HLS_BROADCAST_CAPABILITY, MAX_BROADCAST_AUDIO_SOURCES,
+    MAX_BROADCAST_OUTPUTS, MAX_BROADCAST_VIDEO_SOURCES, RTMP_BROADCAST_CAPABILITY,
     broadcast_capabilities,
 };
 
@@ -170,9 +170,11 @@ pub fn validate_broadcast_request(
         return Err(BroadcastProviderError::InvalidRequest);
     }
     let mut destinations = HashSet::with_capacity(request.destinations.len());
-    if request.destinations.iter().any(|destination| {
-        !destinations.insert(destination.destination_id.as_str())
-    }) {
+    if request
+        .destinations
+        .iter()
+        .any(|destination| !destinations.insert(destination.destination_id.as_str()))
+    {
         return Err(BroadcastProviderError::InvalidRequest);
     }
     Ok(())
