@@ -66,3 +66,21 @@ This slice does not yet claim complete Production secret management. The command
 path still accepts the compatibility environment key, and a durable external KMS/Vault/HSM adapter
 with independently proven live reload/rotation remains required before the zero-downtime webhook
 key-management Production claim is enabled.
+
+## TLS edge integration
+
+`ProviderBackedTlsAcceptor` binds the HTTPS edge to the shared `SecretProvider` with distinct
+`TlsCertificate` and `TlsPrivateKey` handles. New inbound connections resolve active provider
+material before handshake, so rotations can take effect without restarting the listener. Existing
+TLS sessions retain the acceptor snapshot with which they already negotiated.
+
+Certificate and private-key rotation may be staged independently. The edge prefers the
+current/current pair, then tries the bounded previous versions exposed by the provider. This keeps
+one valid pair available during the overlap window while preventing unbounded historical-key
+fallback. If no active pair parses and matches, or the provider is unavailable, that new connection
+fails closed rather than silently reusing material outside the provider's active set.
+
+The existing file-based `run` and `tls_acceptor` surfaces remain compatibility paths, so this is
+not a silent deployment-contract break. Complete Production secret management still requires a
+durable external provider adapter and operator evidence for its availability, authorization,
+rotation, and recovery behavior.
