@@ -42,8 +42,10 @@ The current capability IDs are:
 - `ucr.broadcast.hls`;
 - `ucr.broadcast.dash`.
 
-All are **Prepared**. Merely compiling the provider boundary does not authorize a deployment to
-advertise Production broadcast.
+All are **Prepared**. The universal capability-discovery response includes these descriptors so
+integrators can discover the contract and its maturity, while the runtime availability flag
+`rtmp` remains false until a concrete Production provider is configured and evidenced. Merely
+compiling the provider boundary does not authorize a deployment to advertise Production broadcast.
 
 ## Production evidence still required
 
