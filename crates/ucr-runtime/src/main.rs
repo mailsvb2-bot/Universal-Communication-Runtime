@@ -3,16 +3,16 @@
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use ucr_core::WebhookDispatchOutcome;
-use ucr_model::OpaqueId;
-use ucr_secrets::{
-    ActiveSecretSet, SecretHandle, SecretMaterial, SecretProvider, SecretProviderError,
-    SecretProviderHealth, SecretPurpose, SecretVersion,
-};
 use ucr_crypto::{MAX_MACHINE_TOKEN_JWKS_BYTES, MachineTokenPublicKeySet};
+use ucr_model::OpaqueId;
 use ucr_runtime::{
     DEFAULT_RECORDING_RETENTION_POLL_INTERVAL, DEFAULT_RUNTIME_BIND,
     DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MachineAuthRuntimeConfig, MachineBearerRuntimeConfig,
     ProductionRuntime, RealtimeRuntimeConfig,
+};
+use ucr_secrets::{
+    ActiveSecretSet, SecretHandle, SecretMaterial, SecretProvider, SecretProviderError,
+    SecretProviderHealth, SecretPurpose, SecretVersion,
 };
 use zeroize::Zeroizing;
 
@@ -132,7 +132,9 @@ impl ReloadingMachineTokenSecretProvider {
         previous_file: Option<PathBuf>,
     ) -> Result<Self, String> {
         if handle.purpose != SecretPurpose::MachineTokenSigning {
-            return Err("machine token provider handle must use MachineTokenSigning purpose".to_owned());
+            return Err(
+                "machine token provider handle must use MachineTokenSigning purpose".to_owned(),
+            );
         }
         let provider = Self {
             handle,
@@ -160,7 +162,11 @@ impl ReloadingMachineTokenSecretProvider {
         let encoded = fs::read_to_string(path).map_err(|_| SecretProviderError::Unavailable)?;
         let mut key_id = None;
         let mut seed_hex = None;
-        for line in encoded.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for line in encoded
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
             let Some((name, value)) = line.split_once('=') else {
                 return Err(SecretProviderError::InvalidMaterial);
             };
@@ -252,8 +258,7 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
         .as_deref()
         == Some("file-reload")
     {
-        let current_file =
-            PathBuf::from(required_env("UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE")?);
+        let current_file = PathBuf::from(required_env("UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE")?);
         let previous_file = std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_SECRET_FILE")
             .ok()
             .map(PathBuf::from);
@@ -291,10 +296,8 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
             jwks_uri,
             max_ttl_seconds,
         )?;
-        let previous_key_id =
-            std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_ID").ok();
-        let previous_key_file =
-            std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_FILE").ok();
+        let previous_key_id = std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_ID").ok();
+        let previous_key_file = std::env::var("UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_KEY_FILE").ok();
         match (previous_key_id, previous_key_file) {
             (Some(key_id), Some(key_file)) => {
                 let previous_seed = read_machine_token_signing_key(&key_file)?;
