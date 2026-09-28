@@ -1894,7 +1894,9 @@ mod tests {
         SERVICE_AUDIT_MESSAGE_SEND_OPERATION_KIND, canonical_communication_intent,
     };
 
-    use super::{SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID};
+    use super::{
+        SQLITE_SCHEMA_V45, SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID,
+    };
 
     static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
