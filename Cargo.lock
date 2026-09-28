@@ -4068,6 +4068,7 @@ dependencies = [
  "ucr-core",
  "ucr-model",
  "ucr-protocol",
+ "ucr-secrets",
  "ucr-sfu",
 ]
 
@@ -4107,6 +4108,14 @@ dependencies = [
  "ucr-storage-sqlite",
  "ucr-webhook",
  "ucr-webrtc",
+ "zeroize",
+]
+
+[[package]]
+name = "ucr-secrets"
+version = "0.0.1"
+dependencies = [
+ "ucr-model",
  "zeroize",
 ]
 

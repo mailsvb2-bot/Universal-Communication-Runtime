@@ -14,6 +14,7 @@ tokio = { version = "=1.53.1", features = ["sync"] }
 ucr-core = { path = "../ucr-core" }
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
+ucr-secrets = { path = "../ucr-secrets" }
 ucr-sfu = { path = "../ucr-sfu" }
 
 [lints]

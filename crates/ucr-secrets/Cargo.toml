@@ -1,0 +1,15 @@
+[package]
+name = "ucr-secrets"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ucr-model = { path = "../ucr-model" }
+zeroize = "=1.9.0"
+
+[lints]
+workspace = true

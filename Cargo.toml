@@ -32,6 +32,7 @@ members = [
     "crates/ucr-realtime-web",
     "crates/ucr-webrtc",
     "crates/ucr-webhook",
+    "crates/ucr-secrets",
     "crates/ucr-broadcast",
     "crates/ucr-conference",
     "crates/ucr-bridge",

@@ -16,6 +16,7 @@ use ucr_model::{
     PrincipalRef, ScopedPrincipal, SessionId, SfuForwardEnvelope, TenantId, TenantScope,
 };
 use ucr_protocol::adaptive_stage_allows_media;
+use ucr_secrets::{SecretHandle, SecretProvider, SecretPurpose};
 use ucr_sfu::{SfuForwardSink, SfuForwardSinkError};
 
 pub const MIN_JOIN_TTL_SECONDS: u32 = 30;
@@ -88,12 +89,34 @@ pub enum JoinTokenError {
     AlreadyUsed,
     CapacityExceeded,
     StateUnavailable,
+    KeyUnavailable,
     Internal,
+}
+
+#[derive(Clone)]
+enum JoinTokenKeySource {
+    Static(JoinTokenKey),
+    Provider {
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+    },
+}
+
+impl fmt::Debug for JoinTokenKeySource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Static(_) => formatter.write_str("Static(<redacted>)"),
+            Self::Provider { handle, .. } => formatter
+                .debug_struct("Provider")
+                .field("handle", handle)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct JoinTokenIssuer {
-    key: JoinTokenKey,
+    key_source: JoinTokenKeySource,
     join_base_url: String,
     grants: Arc<Mutex<Vec<JoinGrantState>>>,
 }
@@ -122,7 +145,43 @@ impl JoinTokenIssuer {
             return Err(JoinTokenError::InvalidBaseUrl);
         }
         Ok(Self {
-            key,
+            key_source: JoinTokenKeySource::Static(key),
+            join_base_url,
+            grants: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    /// Creates an issuer backed by the shared secret-provider boundary.
+    ///
+    /// New tokens use the current secret version; verification accepts current and previous during
+    /// the provider's bounded rotation overlap. The join-token wire format is unchanged.
+    ///
+    /// # Errors
+    /// Rejects non-join handles, unavailable providers, malformed key material, or invalid URLs.
+    pub fn with_secret_provider(
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+        join_base_url: impl Into<String>,
+    ) -> Result<Self, JoinTokenError> {
+        if handle.purpose != SecretPurpose::JoinSigning {
+            return Err(JoinTokenError::KeyUnavailable);
+        }
+        let join_base_url = join_base_url.into();
+        if !join_base_url.starts_with("https://")
+            || join_base_url.contains('#')
+            || join_base_url.chars().any(char::is_whitespace)
+        {
+            return Err(JoinTokenError::InvalidBaseUrl);
+        }
+        let set = provider
+            .active_secret_set(&handle)
+            .map_err(|_| JoinTokenError::KeyUnavailable)?;
+        join_token_key_from_material(set.current.material.as_bytes())?;
+        if let Some(previous) = set.previous {
+            join_token_key_from_material(previous.material.as_bytes())?;
+        }
+        Ok(Self {
+            key_source: JoinTokenKeySource::Provider { provider, handle },
             join_base_url,
             grants: Arc::new(Mutex::new(Vec::new())),
         })
@@ -436,11 +495,20 @@ impl JoinTokenIssuer {
         let signature = URL_SAFE_NO_PAD
             .decode(signature_text)
             .map_err(|_| JoinTokenError::Malformed)?;
-        let mut mac =
-            HmacSha256::new_from_slice(&self.key.0).map_err(|_| JoinTokenError::Internal)?;
-        mac.update(&payload);
-        mac.verify_slice(&signature)
-            .map_err(|_| JoinTokenError::InvalidSignature)?;
+        let keys = self.verification_keys()?;
+        let mut verified = false;
+        for key in keys {
+            let mut mac =
+                HmacSha256::new_from_slice(&key.0).map_err(|_| JoinTokenError::Internal)?;
+            mac.update(&payload);
+            if mac.verify_slice(&signature).is_ok() {
+                verified = true;
+                break;
+            }
+        }
+        if !verified {
+            return Err(JoinTokenError::InvalidSignature);
+        }
         let claims = decode_claims(&payload)?;
         if claims.not_before_unix_ms < claims.issued_at_unix_ms
             || claims.not_before_unix_ms >= claims.expires_at_unix_ms
@@ -484,8 +552,8 @@ impl JoinTokenIssuer {
 
     fn sign(&self, claims: &RealtimeSessionClaims) -> Result<String, JoinTokenError> {
         let payload = encode_claims(claims)?;
-        let mut mac =
-            HmacSha256::new_from_slice(&self.key.0).map_err(|_| JoinTokenError::Internal)?;
+        let key = self.current_signing_key()?;
+        let mut mac = HmacSha256::new_from_slice(&key.0).map_err(|_| JoinTokenError::Internal)?;
         mac.update(&payload);
         let signature = mac.finalize().into_bytes();
         Ok(format!(
@@ -494,6 +562,44 @@ impl JoinTokenIssuer {
             URL_SAFE_NO_PAD.encode(signature)
         ))
     }
+
+    fn current_signing_key(&self) -> Result<JoinTokenKey, JoinTokenError> {
+        match &self.key_source {
+            JoinTokenKeySource::Static(key) => Ok(key.clone()),
+            JoinTokenKeySource::Provider { provider, handle } => {
+                let set = provider
+                    .active_secret_set(handle)
+                    .map_err(|_| JoinTokenError::KeyUnavailable)?;
+                join_token_key_from_material(set.current.material.as_bytes())
+            }
+        }
+    }
+
+    fn verification_keys(&self) -> Result<Vec<JoinTokenKey>, JoinTokenError> {
+        match &self.key_source {
+            JoinTokenKeySource::Static(key) => Ok(vec![key.clone()]),
+            JoinTokenKeySource::Provider { provider, handle } => {
+                let set = provider
+                    .active_secret_set(handle)
+                    .map_err(|_| JoinTokenError::KeyUnavailable)?;
+                let mut keys = Vec::with_capacity(2);
+                keys.push(join_token_key_from_material(
+                    set.current.material.as_bytes(),
+                )?);
+                if let Some(previous) = set.previous {
+                    keys.push(join_token_key_from_material(previous.material.as_bytes())?);
+                }
+                Ok(keys)
+            }
+        }
+    }
+}
+
+fn join_token_key_from_material(material: &[u8]) -> Result<JoinTokenKey, JoinTokenError> {
+    let bytes: [u8; 32] = material
+        .try_into()
+        .map_err(|_| JoinTokenError::KeyUnavailable)?;
+    Ok(JoinTokenKey::from_bytes(bytes))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1331,6 +1437,10 @@ mod tests {
         CryptoSuite, GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature, KeyId, MediaKind,
         SfuForwardTarget,
     };
+    use ucr_secrets::{
+        InMemorySecretProvider, SecretHandle, SecretMaterial, SecretProvider, SecretPurpose,
+        SecretVersion,
+    };
 
     fn id(value: &str) -> OpaqueId {
         OpaqueId::new(value).expect("valid id")
@@ -1404,6 +1514,85 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn join_tokens_survive_one_secret_rotation_without_wire_format_change() {
+        let provider = Arc::new(InMemorySecretProvider::default());
+        let handle = SecretHandle {
+            secret_id: id("join-signing-secret"),
+            purpose: SecretPurpose::JoinSigning,
+        };
+        provider
+            .provision(
+                handle.clone(),
+                SecretVersion {
+                    version_id: id("v1"),
+                    material: SecretMaterial::new(vec![7_u8; 32]).expect("v1"),
+                },
+            )
+            .expect("provision");
+        let issuer = JoinTokenIssuer::with_secret_provider(
+            provider.clone(),
+            handle.clone(),
+            "https://join.example.test/conference",
+        )
+        .expect("provider issuer");
+
+        let first = issuer
+            .issue(
+                scope(),
+                CallId::from_opaque(id("rotation-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("rotation-device"))),
+                300,
+                20_000,
+            )
+            .expect("issue v1");
+        let first_token = token_from_url(&first.join_url).to_owned();
+
+        provider
+            .rotate(
+                &handle,
+                SecretVersion {
+                    version_id: id("v2"),
+                    material: SecretMaterial::new(vec![8_u8; 32]).expect("v2"),
+                },
+            )
+            .expect("rotate");
+
+        assert_eq!(
+            issuer
+                .verify_signed_claims(&first_token, 20_001)
+                .expect("old token remains valid"),
+            first.claims
+        );
+
+        let second = issuer
+            .issue(
+                scope(),
+                CallId::from_opaque(id("rotation-call")),
+                participant(),
+                Some(DeviceId::from_opaque(id("rotation-device-2"))),
+                300,
+                20_002,
+            )
+            .expect("issue v2");
+        assert_ne!(first.join_url, second.join_url);
+
+        provider
+            .rotate(
+                &handle,
+                SecretVersion {
+                    version_id: id("v3"),
+                    material: SecretMaterial::new(vec![9_u8; 32]).expect("v3"),
+                },
+            )
+            .expect("rotate again");
+        assert_eq!(
+            issuer.verify_signed_claims(&first_token, 20_003),
+            Err(JoinTokenError::InvalidSignature)
+        );
     }
 
     #[test]

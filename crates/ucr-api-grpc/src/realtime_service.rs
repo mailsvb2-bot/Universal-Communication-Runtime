@@ -2501,7 +2501,7 @@ fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
         JoinTokenError::CapacityExceeded => {
             CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
         }
-        JoinTokenError::StateUnavailable => {
+        JoinTokenError::StateUnavailable | JoinTokenError::KeyUnavailable => {
             CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
         }
         JoinTokenError::ClockOverflow
