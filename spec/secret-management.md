@@ -106,28 +106,43 @@ provider-backed mode, every client-credentials exchange resolves the provider's 
 Ed25519 seed immediately before token issuance. The provider version identifier becomes the JWT
 `kid`, so rotating material cannot silently reuse an old public-key identity.
 
-The JWKS endpoint resolves the same active set on every request and publishes public keys for the
-current version plus at most one previous version. New tokens are signed only by current while
+The JWKS endpoint resolves the same active snapshot on every request and publishes public keys for
+the current version plus at most one previous version. New tokens are signed only by current while
 tokens minted before rotation remain verifiable during the bounded overlap window. Missing,
 wrong-purpose, unavailable, malformed, or duplicate-version provider state fails closed; the
 machine-auth service does not fall back to a stale static seed.
 
 `ucr-runtime serve-auth` exposes this path with
-`UCR_MACHINE_TOKEN_SECRET_PROVIDER=file-reload`. The current manifest is configured through
-`UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE`; an optional previous manifest is configured through
-`UCR_MACHINE_TOKEN_PREVIOUS_SIGNING_SECRET_FILE`. Each manifest is a bounded, non-symlink,
-owner-protected text file with exactly:
+`UCR_MACHINE_TOKEN_SECRET_PROVIDER=file-reload`. The signing snapshot is configured through
+`UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE` and is a bounded, non-symlink, owner-protected file.
+Current and previous versions live in one atomically replaceable snapshot:
 
 ```text
-key_id=<opaque-key-id>
-seed_hex=<64 lowercase-or-uppercase hex characters>
+current_key_id=<opaque-key-id>
+current_seed_hex=<64 hex characters>
+previous_key_id=<opaque-key-id>        # optional, paired with previous_seed_hex
+previous_seed_hex=<64 hex characters> # optional, paired with previous_key_id
 ```
 
-The manifests are re-read for issuance/JWKS resolution, so operators can rotate with atomic file
-replacement without restarting the machine-auth listener. The legacy
-`UCR_MACHINE_TOKEN_SIGNING_KEY_ID` + `UCR_MACHINE_TOKEN_SIGNING_KEY_FILE` startup path remains
-available for compatibility.
+This single-file shape is required: current and previous must never be read from independently
+rotated files because that creates an interval where the old token key disappears or the snapshot
+conflicts.
 
-This still does not claim a durable external KMS/Vault/HSM adapter. It closes the canonical UCR
-consumer/runtime path and provides an executable reloadable deployment adapter; production
-external-provider availability, authorization, and recovery evidence remains a separate gate.
+The public API verifier has an independent public-only reload boundary. Setting
+`UCR_MACHINE_TOKEN_VERIFICATION_PROVIDER=file-reload` makes `serve` and `serve-realtime`
+re-read `UCR_MACHINE_TOKEN_VERIFICATION_JWKS_FILE` for each machine Bearer admission. The
+Universal Conference and Recording ingress paths therefore observe the same refreshed public key
+set without process restart.
+
+A zero-downtime rotation follows this order:
+
+1. Atomically publish verifier JWKS containing both `v2` and `v1` to API processes.
+2. Atomically replace the signing snapshot with `current=v2, previous=v1`.
+3. Keep both verification keys for at least the maximum access-token lifetime plus deployment
+   skew.
+4. Retire `v1` by atomically publishing verifier JWKS with only `v2`, then replace the signing
+   snapshot with only `current=v2`.
+
+The legacy startup-only signing-key and static JWKS paths remain compatibility surfaces. A durable
+external KMS/Vault/HSM adapter and deployment authorization/availability/recovery evidence remain
+separate Production gates.
