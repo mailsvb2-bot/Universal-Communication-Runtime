@@ -783,6 +783,15 @@ impl ProductionRuntime {
             return Err("webhook worker poll interval must be between 100 ms and 60 s".to_owned());
         }
 
+        let clock = SystemEventDeliveryClock;
+        let sink = HardenedWebhookSink::with_secret_provider(
+            SystemWebhookDnsResolver,
+            NativeTlsWebhookExecutor::default(),
+            provider,
+            handle,
+        )
+        .map_err(|error| format!("configure webhook signing provider: {error:?}"))?;
+
         let holder_id = generate_opaque_id()
             .map_err(|_| "generate webhook worker lease holder id".to_owned())?
             .as_str()
@@ -800,15 +809,6 @@ impl ProductionRuntime {
         if !acquired {
             return Err("another webhook worker holds the durable delivery lease".to_owned());
         }
-
-        let clock = SystemEventDeliveryClock;
-        let sink = HardenedWebhookSink::with_secret_provider(
-            SystemWebhookDnsResolver,
-            NativeTlsWebhookExecutor::default(),
-            provider,
-            handle,
-        )
-        .map_err(|error| format!("configure webhook signing provider: {error:?}"))?;
         println!(
             "UCR_WEBHOOK_WORKER_READY poll_interval_ms={}",
             poll_interval.as_millis()
