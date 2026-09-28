@@ -44,6 +44,7 @@ fn conference() -> UniversalConferenceProfile {
             join_after_seconds: 300,
             timezone: Some("Europe/Amsterdam".to_owned()),
         },
+        metadata: Vec::new(),
         entry_open: false,
         revision: 1,
     }
