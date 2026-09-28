@@ -4106,6 +4106,7 @@ dependencies = [
  "ucr-crypto",
  "ucr-media-e2ee",
  "ucr-model",
+ "ucr-protocol",
  "ucr-realtime",
  "ucr-secrets",
  "ucr-sfu",
