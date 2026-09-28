@@ -856,21 +856,32 @@ pub trait RecoveryPlanStore: StorageProvider {
 ///
 /// The implementation must atomically persist acceptance before returning an
 /// Accepted receipt and must preserve deduplication across restart.
+pub const LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE: &str =
+    "ucr.command.idempotency.reservation.v1";
+pub const LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD: &[u8] =
+    b"UCR-LEGACY-IDEMPOTENCY-RESERVATION-V1";
+
 pub trait CommandAcceptanceStore: StorageProvider {
-    /// Returns whether one exact scoped idempotency key has already been durably accepted.
+    /// Atomically protects one pre-upgrade raw idempotency key and accepts/deduplicates the
+    /// supplied namespaced command.
     ///
-    /// This read-only compatibility probe exists so newer ingress layers can preserve legacy
-    /// idempotency identities across an upgrade before choosing a stronger namespaced identity.
-    /// Implementations that cannot prove the answer must fail closed.
+    /// If a real legacy command already owns `legacy_idempotency_key`, implementations must
+    /// preserve its exact duplicate/conflict semantics. Otherwise they durably reserve that raw
+    /// key before accepting `command`, in the same lock/transaction, so an older process cannot
+    /// concurrently accept the raw key and create a second side effect.
+    ///
+    /// The default fails closed so third-party stores cannot silently weaken rolling-upgrade
+    /// idempotency safety.
     ///
     /// # Errors
-    /// Returns explicit storage failures; an error must never be treated as absence.
-    fn has_accepted_idempotency_key(
+    /// Returns explicit invalid/conflict/storage failures; failures never mean a new command was
+    /// accepted.
+    fn accept_command_with_legacy_reservation(
         &self,
-        scope: &TenantScope,
-        idempotency_key: &str,
-    ) -> Result<bool, DurableStoreError> {
-        let _ = (scope, idempotency_key);
+        command: &CommandEnvelope,
+        legacy_idempotency_key: &str,
+    ) -> Result<CommandReceipt, DurableStoreError> {
+        let _ = (command, legacy_idempotency_key);
         Err(DurableStoreError::Unavailable)
     }
 
