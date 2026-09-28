@@ -7,11 +7,11 @@ use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
 };
+use tokio_rustls::TlsAcceptor;
 use ucr_secrets::{ActiveSecretSet, SecretHandle, SecretProvider, SecretPurpose};
 
 const MAX_CERTIFICATE_BYTES: u64 = 64 * 1024;
 const MAX_PRIVATE_KEY_BYTES: u64 = 64 * 1024;
-
 
 #[derive(Clone)]
 pub struct ProviderBackedTlsAcceptor {
