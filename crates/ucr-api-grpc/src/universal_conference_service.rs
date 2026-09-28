@@ -40,8 +40,8 @@ use ucr_model::{
     IdentityRecord, IntegrationId, MediaKind, OpaqueId, PermissionGrant, PermissionScope,
     PrincipalId, PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion,
     ScopedPrincipal, SessionId, TenantScope, UniversalConferenceLifecycle,
-    UniversalConferenceMetadataEntry, UniversalConferenceMode, UniversalConferenceParticipantProfile,
-    UniversalConferenceProfile,
+    UniversalConferenceMetadataEntry, UniversalConferenceMode,
+    UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
 use ucr_protocol::{
     AUDIO_MEDIA_CAPABILITY, AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION,
@@ -1154,7 +1154,9 @@ fn decode_conference_metadata(
     ucr_core::canonical_conference_metadata(&metadata).map_err(|error| {
         let code = match error {
             ucr_core::ConferenceMetadataError::InvalidKey
-            | ucr_core::ConferenceMetadataError::DuplicateKey => CanonicalErrorCode::InvalidArgument,
+            | ucr_core::ConferenceMetadataError::DuplicateKey => {
+                CanonicalErrorCode::InvalidArgument
+            }
             ucr_core::ConferenceMetadataError::TooManyEntries
             | ucr_core::ConferenceMetadataError::ValueTooLarge
             | ucr_core::ConferenceMetadataError::TotalTooLarge => {
@@ -4295,23 +4297,20 @@ mod universal_runtime_tests {
             .persist_universal_conference_profile(&initial)
             .expect("conference");
 
-        let update = |key: &str, value: &[u8], idempotency_key: &str| {
-            SetConferenceMetadataInput {
-                scope: scope(),
-                conference_id: initial.conference_id.clone(),
-                integration_id: initial.integration_id.clone(),
-                metadata: vec![UniversalConferenceMetadataEntry {
-                    key: key.to_owned(),
-                    value: value.to_vec(),
-                }],
-                idempotency_key: idempotency_key.to_owned(),
-            }
+        let update = |key: &str, value: &[u8], idempotency_key: &str| SetConferenceMetadataInput {
+            scope: scope(),
+            conference_id: initial.conference_id.clone(),
+            integration_id: initial.integration_id.clone(),
+            metadata: vec![UniversalConferenceMetadataEntry {
+                key: key.to_owned(),
+                value: value.to_vec(),
+            }],
+            idempotency_key: idempotency_key.to_owned(),
         };
 
         let first = update("com.example.crm.customer_id", b"x", "metadata-a");
-        let first_result =
-            set_conference_metadata(&store, &first, b"metadata-a-payload".to_vec())
-                .expect("first metadata update");
+        let first_result = set_conference_metadata(&store, &first, b"metadata-a-payload".to_vec())
+            .expect("first metadata update");
         assert_eq!(first_result.revision, 2);
 
         let second = update("com.example.crm.customer_id", b"y", "metadata-b");
@@ -4321,9 +4320,8 @@ mod universal_runtime_tests {
         assert_eq!(second_result.revision, 3);
         assert_eq!(second_result.metadata[0].value, b"y");
 
-        let retry =
-            set_conference_metadata(&store, &first, b"metadata-a-payload".to_vec())
-                .expect("exact retry");
+        let retry = set_conference_metadata(&store, &first, b"metadata-a-payload".to_vec())
+            .expect("exact retry");
         assert_eq!(retry.revision, 3);
         assert_eq!(retry.metadata[0].value, b"y");
 
