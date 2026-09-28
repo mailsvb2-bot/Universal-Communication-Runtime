@@ -18,6 +18,7 @@ path = "src/main.rs"
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread"] }
 tokio-rustls = "=0.26.4"
+ucr-model = { path = "../ucr-model" }
 ucr-secrets = { path = "../ucr-secrets" }
 
 [lints]
