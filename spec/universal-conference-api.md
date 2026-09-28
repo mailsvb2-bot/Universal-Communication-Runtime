@@ -54,10 +54,12 @@ fail closed.
 
 CreateConference persists the canonical metadata set as part of the exact idempotent create
 semantics. SetConferenceMetadata atomically replaces the complete set, uses the normal durable
-mutation-idempotency boundary, and advances the Conference revision exactly once. Exact retries
-return the already-applied state; changed reuse of an idempotency key conflicts. SQLite stores
-metadata in a child table owned by the existing Universal Conference store so there is no second
-metadata owner or independent lifecycle.
+mutation-idempotency boundary, and advances the Conference revision exactly once. An exact retry
+that hits an already accepted idempotency identity is side-effect free and returns the current
+canonical Conference descriptor; it must never replay an older metadata write over a newer
+successful mutation. Changed reuse of an idempotency key conflicts. SQLite stores metadata in a
+child table owned by the existing Universal Conference store so there is no second metadata owner
+or independent lifecycle.
 
 ## Integration isolation
 
