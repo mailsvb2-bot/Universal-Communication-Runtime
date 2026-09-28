@@ -4104,6 +4104,7 @@ dependencies = [
  "ucr-media-e2ee",
  "ucr-model",
  "ucr-realtime",
+ "ucr-secrets",
  "ucr-sfu",
  "ucr-storage-sqlite",
  "ucr-webhook",
@@ -4233,6 +4234,7 @@ dependencies = [
  "sha2 0.11.0",
  "ucr-core",
  "ucr-model",
+ "ucr-secrets",
  "url",
  "zeroize",
 ]
