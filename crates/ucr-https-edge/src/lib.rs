@@ -8,10 +8,162 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 use tokio_rustls::TlsAcceptor;
-use ucr_secrets::{ActiveSecretSet, SecretHandle, SecretProvider, SecretPurpose};
+use ucr_model::OpaqueId;
+use ucr_secrets::{ActiveSecretSet, SecretHandle, SecretMaterial, SecretProvider, SecretProviderError, SecretProviderHealth, SecretPurpose, SecretVersion};
 
 const MAX_CERTIFICATE_BYTES: u64 = 64 * 1024;
 const MAX_PRIVATE_KEY_BYTES: u64 = 64 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct ReloadingFileTlsSecretProvider {
+    certificate_path: Arc<str>,
+    private_key_path: Arc<str>,
+    previous_certificate_path: Option<Arc<str>>,
+    previous_private_key_path: Option<Arc<str>>,
+    certificate_handle: SecretHandle,
+    private_key_handle: SecretHandle,
+}
+
+impl ReloadingFileTlsSecretProvider {
+    /// Creates a file-backed compatibility adapter for the shared secret-provider boundary.
+    ///
+    /// Files are re-read on every resolution so atomic file replacement is visible to new
+    /// connections without restarting the HTTPS edge. The adapter owns no TLS policy.
+    ///
+    /// # Errors
+    /// Rejects empty paths or malformed handle identifiers.
+    pub fn new(
+        certificate_path: impl Into<String>,
+        private_key_path: impl Into<String>,
+        previous_certificate_path: Option<String>,
+        previous_private_key_path: Option<String>,
+        certificate_secret_id: &str,
+        private_key_secret_id: &str,
+    ) -> Result<Self, String> {
+        let certificate_path = certificate_path.into();
+        let private_key_path = private_key_path.into();
+        if certificate_path.is_empty() || private_key_path.is_empty() {
+            return Err("TLS secret provider paths must not be empty".to_owned());
+        }
+        if previous_certificate_path.is_some() != previous_private_key_path.is_some() {
+            return Err(
+                "previous TLS certificate and private-key paths must be configured together"
+                    .to_owned(),
+            );
+        }
+        Ok(Self {
+            certificate_path: Arc::from(certificate_path),
+            private_key_path: Arc::from(private_key_path),
+            previous_certificate_path: previous_certificate_path.map(Arc::from),
+            previous_private_key_path: previous_private_key_path.map(Arc::from),
+            certificate_handle: SecretHandle {
+                secret_id: OpaqueId::new(certificate_secret_id)
+                    .map_err(|_| "invalid TLS certificate secret id".to_owned())?,
+                purpose: SecretPurpose::TlsCertificate,
+            },
+            private_key_handle: SecretHandle {
+                secret_id: OpaqueId::new(private_key_secret_id)
+                    .map_err(|_| "invalid TLS private-key secret id".to_owned())?,
+                purpose: SecretPurpose::TlsPrivateKey,
+            },
+        })
+    }
+
+    #[must_use]
+    pub fn certificate_handle(&self) -> SecretHandle {
+        self.certificate_handle.clone()
+    }
+
+    #[must_use]
+    pub fn private_key_handle(&self) -> SecretHandle {
+        self.private_key_handle.clone()
+    }
+
+    fn read_material(path: &str, limit: u64) -> Result<SecretMaterial, SecretProviderError> {
+        let metadata = fs::symlink_metadata(path).map_err(|_| SecretProviderError::Unavailable)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > limit {
+            return Err(SecretProviderError::InvalidMaterial);
+        }
+        let bytes = fs::read(path).map_err(|_| SecretProviderError::Unavailable)?;
+        SecretMaterial::new(bytes)
+    }
+
+    fn set_for(
+        &self,
+        handle: &SecretHandle,
+        current_path: &str,
+        previous_path: Option<&str>,
+        limit: u64,
+    ) -> Result<ActiveSecretSet, SecretProviderError> {
+        let current = SecretVersion {
+            version_id: OpaqueId::new("file-current").map_err(|_| SecretProviderError::Internal)?,
+            material: Self::read_material(current_path, limit)?,
+        };
+        let previous = previous_path
+            .map(|path| {
+                Ok(SecretVersion {
+                    version_id: OpaqueId::new("file-previous")
+                        .map_err(|_| SecretProviderError::Internal)?,
+                    material: Self::read_material(path, limit)?,
+                })
+            })
+            .transpose()?;
+        Ok(ActiveSecretSet {
+            handle: handle.clone(),
+            current,
+            previous,
+        })
+    }
+}
+
+impl SecretProvider for ReloadingFileTlsSecretProvider {
+    fn provider_id(&self) -> &'static str {
+        "tls-file-reload"
+    }
+
+    fn health(&self) -> SecretProviderHealth {
+        if self
+            .active_secret_set(&self.certificate_handle)
+            .and_then(|_| self.active_secret_set(&self.private_key_handle))
+            .is_ok()
+        {
+            SecretProviderHealth::Healthy
+        } else {
+            SecretProviderHealth::Unavailable
+        }
+    }
+
+    fn active_secret_set(
+        &self,
+        handle: &SecretHandle,
+    ) -> Result<ActiveSecretSet, SecretProviderError> {
+        if handle == &self.certificate_handle {
+            self.set_for(
+                handle,
+                &self.certificate_path,
+                self.previous_certificate_path.as_deref(),
+                MAX_CERTIFICATE_BYTES,
+            )
+        } else if handle == &self.private_key_handle {
+            self.set_for(
+                handle,
+                &self.private_key_path,
+                self.previous_private_key_path.as_deref(),
+                MAX_PRIVATE_KEY_BYTES,
+            )
+        } else {
+            Err(SecretProviderError::NotFound)
+        }
+    }
+
+    fn rotate(
+        &self,
+        _handle: &SecretHandle,
+        _new_version: SecretVersion,
+    ) -> Result<ActiveSecretSet, SecretProviderError> {
+        Err(SecretProviderError::Unavailable)
+    }
+}
 
 #[derive(Clone)]
 pub struct ProviderBackedTlsAcceptor {
@@ -132,14 +284,15 @@ pub async fn run_with_secret_provider(
             .accept()
             .await
             .map_err(|error| format!("accept HTTPS edge connection: {error}"))?;
-        let acceptor = match acceptor_factory.current_acceptor() {
-            Ok(acceptor) => acceptor,
-            Err(error) => {
-                eprintln!("ucr-https-edge: TLS secret provider unavailable: {error}");
-                continue;
-            }
-        };
+        let acceptor_factory = acceptor_factory.clone();
         tokio::spawn(async move {
+            let acceptor = match acceptor_factory.current_acceptor() {
+                Ok(acceptor) => acceptor,
+                Err(error) => {
+                    eprintln!("ucr-https-edge: TLS secret provider unavailable: {error}");
+                    return;
+                }
+            };
             if let Err(error) = proxy_connection(acceptor, stream, upstream).await {
                 eprintln!("ucr-https-edge: connection closed: {error}");
             }
@@ -152,6 +305,53 @@ pub async fn run_with_secret_provider(
 /// # Errors
 /// Returns bind, certificate, or upstream configuration errors. Connection
 /// failures are logged and do not stop the listener.
+/// Starts the HTTPS edge using the configured TLS material source.
+///
+/// `UCR_HTTPS_EDGE_SECRET_PROVIDER=file-reload` enables the shared provider-backed path.
+/// Without that variable the legacy static file path remains available for compatibility.
+///
+/// # Errors
+/// Returns explicit environment, provider, TLS, bind, or upstream configuration errors.
+pub async fn run_configured() -> Result<(), String> {
+    if std::env::var("UCR_HTTPS_EDGE_SECRET_PROVIDER").ok().as_deref() != Some("file-reload") {
+        return run().await;
+    }
+
+    let bind = required_env("UCR_HTTPS_EDGE_BIND")?
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("invalid UCR_HTTPS_EDGE_BIND: {error}"))?;
+    let upstream = required_env("UCR_HTTPS_EDGE_UPSTREAM")?
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("invalid UCR_HTTPS_EDGE_UPSTREAM: {error}"))?;
+    let certificate_path = required_env("UCR_HTTPS_EDGE_CERT_FILE")?;
+    let private_key_path = required_env("UCR_HTTPS_EDGE_KEY_FILE")?;
+    let previous_certificate_path = std::env::var("UCR_HTTPS_EDGE_PREVIOUS_CERT_FILE").ok();
+    let previous_private_key_path = std::env::var("UCR_HTTPS_EDGE_PREVIOUS_KEY_FILE").ok();
+    let certificate_secret_id = std::env::var("UCR_HTTPS_EDGE_CERT_SECRET_ID")
+        .unwrap_or_else(|_| "https-edge-certificate".to_owned());
+    let private_key_secret_id = std::env::var("UCR_HTTPS_EDGE_KEY_SECRET_ID")
+        .unwrap_or_else(|_| "https-edge-private-key".to_owned());
+
+    let provider = Arc::new(ReloadingFileTlsSecretProvider::new(
+        certificate_path,
+        private_key_path,
+        previous_certificate_path,
+        previous_private_key_path,
+        &certificate_secret_id,
+        &private_key_secret_id,
+    )?);
+    let certificate_handle = provider.certificate_handle();
+    let private_key_handle = provider.private_key_handle();
+    run_with_secret_provider(
+        bind,
+        upstream,
+        provider,
+        certificate_handle,
+        private_key_handle,
+    )
+    .await
+}
+
 pub async fn run() -> Result<(), String> {
     let bind = std::env::var("UCR_HTTPS_EDGE_BIND")
         .map_err(|_| "UCR_HTTPS_EDGE_BIND is required".to_owned())?
