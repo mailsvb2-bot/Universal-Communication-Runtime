@@ -729,7 +729,7 @@ impl ProductionRuntime {
     ///
     /// The worker owns no recording/media state. It only discovers bounded due snapshots and
     /// delegates each candidate to the canonical atomic expiry+Event transition. A durable worker
-    /// lease prevents concurrent active workers against the same SQLite store.
+    /// lease prevents concurrent active workers against the same `SQLite` store.
     ///
     /// # Errors
     /// Rejects unsafe polling intervals, lease loss, clock failures, and durable-store errors.
