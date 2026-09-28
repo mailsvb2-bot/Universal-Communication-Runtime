@@ -858,8 +858,7 @@ pub trait RecoveryPlanStore: StorageProvider {
 /// Accepted receipt and must preserve deduplication across restart.
 pub const LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE: &str =
     "ucr.command.idempotency.reservation.v1";
-pub const LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD: &[u8] =
-    b"UCR-LEGACY-IDEMPOTENCY-RESERVATION-V1";
+pub const LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD: &[u8] = b"UCR-LEGACY-IDEMPOTENCY-RESERVATION-V1";
 
 pub trait CommandAcceptanceStore: StorageProvider {
     /// Atomically protects one pre-upgrade raw idempotency key and accepts/deduplicates the
