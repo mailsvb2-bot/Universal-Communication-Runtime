@@ -14,8 +14,7 @@ use ucr_model::{
     CallId, CommandEnvelope, CommandId, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy,
     ConferenceParticipantRole, CorrelationContext,
     ConferenceScheduleMetadata, DeviceId, GroupId, IntegrationId, OpaqueId, PrincipalId,
-    PrincipalKind, PrincipalRef, ProtocolVersion, SessionId, TenantId, TenantScope,
-    UniversalConferenceLifecycle,
+    PrincipalKind, PrincipalRef, SessionId, TenantId, TenantScope, UniversalConferenceLifecycle,
     UniversalConferenceMetadataEntry, UniversalConferenceMode,
     UniversalConferenceParticipantProfile, UniversalConferenceProfile,
 };
