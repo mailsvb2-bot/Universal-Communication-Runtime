@@ -4068,6 +4068,7 @@ dependencies = [
  "ucr-core",
  "ucr-model",
  "ucr-protocol",
+ "ucr-secrets",
  "ucr-sfu",
 ]
 
