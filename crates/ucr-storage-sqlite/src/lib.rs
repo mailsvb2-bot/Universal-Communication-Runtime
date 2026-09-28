@@ -43,7 +43,10 @@ use std::{fmt, path::Path, sync::Mutex, time::Duration};
 use rusqlite::{
     Connection, Error as SqliteError, ErrorCode, OptionalExtension, TransactionBehavior, params,
 };
-use ucr_core::{CommandAcceptanceStore, DurableStoreError, StorageHealth, StorageProvider};
+use ucr_core::{
+    CommandAcceptanceStore, DurableStoreError, LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE,
+    LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, StorageHealth, StorageProvider, generate_opaque_id,
+};
 use ucr_model::{CommandEnvelope, CommandId, OpaqueId, TenantScope};
 use ucr_protocol::{
     CommandError, CommandReceipt, accepted_command_receipt, canonical_command,
@@ -252,34 +255,186 @@ impl StorageProvider for SqliteLocalStore {
 }
 
 impl CommandAcceptanceStore for SqliteLocalStore {
-    fn has_accepted_idempotency_key(
+    fn accept_command_with_legacy_reservation(
         &self,
-        scope: &TenantScope,
-        idempotency_key: &str,
-    ) -> Result<bool, DurableStoreError> {
-        if idempotency_key.is_empty()
-            || idempotency_key.len() > ucr_protocol::MAX_IDEMPOTENCY_KEY_LEN
-        {
-            return Err(DurableStoreError::InvalidRecord);
-        }
-        let namespace = namespace_storage_key(scope);
-        let connection = self.lock_connection()?;
-        connection
+        command: &CommandEnvelope,
+        legacy_idempotency_key: &str,
+    ) -> Result<CommandReceipt, DurableStoreError> {
+        let command = canonical_command(command).map_err(map_command_error)?;
+        let mut legacy_incoming = command.clone();
+        legacy_incoming.correlation.idempotency_key = Some(legacy_idempotency_key.to_owned());
+        let legacy_incoming = canonical_command(&legacy_incoming).map_err(map_command_error)?;
+
+        let derived_key = command
+            .correlation
+            .idempotency_key
+            .as_deref()
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        let namespace = namespace_storage_key(&command.scope);
+        let tenant = command.scope.tenant_id.as_opaque().as_str();
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+
+        let legacy_existing = transaction
             .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM accepted_commands
-                    WHERE tenant_id = ?1 AND namespace_present = ?2
-                      AND namespace_id = ?3 AND idempotency_key = ?4
-                 )",
+                "SELECT command_id, command_type, payload FROM accepted_commands
+                 WHERE tenant_id = ?1 AND namespace_present = ?2
+                   AND namespace_id = ?3 AND idempotency_key = ?4",
                 params![
-                    scope.tenant_id.as_opaque().as_str(),
+                    tenant,
                     namespace.present,
                     namespace.value,
-                    idempotency_key,
+                    legacy_idempotency_key,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(&error))?;
+
+        if let Some((original_id, command_type, payload)) = legacy_existing {
+            if command_type != LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE
+                || payload.as_slice() != LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD
+            {
+                let original_command_id = CommandId::from_opaque(
+                    OpaqueId::new(original_id).map_err(|_| DurableStoreError::Corrupt)?,
+                );
+                let protocol = command_store::load_protocol_metadata(
+                    &transaction,
+                    &command.scope,
+                    &original_command_id,
+                )?
+                .ok_or(DurableStoreError::Corrupt)?;
+                let receipt = duplicate_receipt(
+                    &legacy_incoming,
+                    original_command_id,
+                    &command_type,
+                    &payload,
+                    &protocol,
+                )?;
+                transaction
+                    .commit()
+                    .map_err(|error| map_sqlite_error(&error))?;
+                return Ok(receipt);
+            }
+        } else {
+            let reservation_id = CommandId::from_opaque(
+                generate_opaque_id().map_err(|_| DurableStoreError::Internal)?,
+            );
+            let mut reservation = legacy_incoming.clone();
+            reservation.command_id = reservation_id.clone();
+            reservation.command_type = LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE.to_owned();
+            reservation.payload = LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD.to_vec();
+            reservation.correlation.correlation_id = reservation_id.as_opaque().clone();
+            reservation.correlation.causation_id = None;
+            let reservation = canonical_command(&reservation).map_err(map_command_error)?;
+
+            transaction
+                .execute(
+                    "INSERT INTO accepted_commands (
+                        tenant_id, namespace_present, namespace_id, idempotency_key,
+                        command_id, command_type, payload
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        tenant,
+                        namespace.present,
+                        namespace.value,
+                        legacy_idempotency_key,
+                        reservation.command_id.as_opaque().as_str(),
+                        reservation.command_type.as_str(),
+                        reservation.payload.as_slice(),
+                    ],
+                )
+                .map_err(|error| map_sqlite_error(&error))?;
+            command_store::insert_protocol_metadata(&transaction, &reservation)?;
+        }
+
+        let existing = transaction
+            .query_row(
+                "SELECT command_id, command_type, payload FROM accepted_commands
+                 WHERE tenant_id = ?1 AND namespace_present = ?2
+                   AND namespace_id = ?3 AND idempotency_key = ?4",
+                params![tenant, namespace.present, namespace.value, derived_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(&error))?;
+        if let Some((original_id, command_type, payload)) = existing {
+            let original_command_id = CommandId::from_opaque(
+                OpaqueId::new(original_id).map_err(|_| DurableStoreError::Corrupt)?,
+            );
+            let protocol = command_store::load_protocol_metadata(
+                &transaction,
+                &command.scope,
+                &original_command_id,
+            )?
+            .ok_or(DurableStoreError::Corrupt)?;
+            let receipt = duplicate_receipt(
+                &command,
+                original_command_id,
+                &command_type,
+                &payload,
+                &protocol,
+            )?;
+            transaction
+                .commit()
+                .map_err(|error| map_sqlite_error(&error))?;
+            return Ok(receipt);
+        }
+
+        let command_id_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM accepted_commands
+                 WHERE tenant_id = ?1 AND namespace_present = ?2
+                   AND namespace_id = ?3 AND command_id = ?4)",
+                params![
+                    tenant,
+                    namespace.present,
+                    namespace.value,
+                    command.command_id.as_opaque().as_str()
                 ],
                 |row| row.get(0),
             )
-            .map_err(|error| map_sqlite_error(&error))
+            .map_err(|error| map_sqlite_error(&error))?;
+        if command_id_exists {
+            return Err(DurableStoreError::Conflict);
+        }
+
+        transaction
+            .execute(
+                "INSERT INTO accepted_commands (
+                    tenant_id, namespace_present, namespace_id, idempotency_key,
+                    command_id, command_type, payload
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    tenant,
+                    namespace.present,
+                    namespace.value,
+                    derived_key,
+                    command.command_id.as_opaque().as_str(),
+                    command.command_type.as_str(),
+                    command.payload.as_slice(),
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        command_store::insert_protocol_metadata(&transaction, &command)?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(accepted_command_receipt(command.command_id))
     }
 
     fn accept_command(
