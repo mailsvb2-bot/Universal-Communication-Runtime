@@ -28,9 +28,11 @@ Call state, participant authority, SFU routing state, or Recording lifecycle.
 The separate `BroadcastProvider` publishes one already-composed output to a bounded set of
 destinations. The current provider contract supports RTMP, HLS, and DASH destination classes.
 
-Canonical requests contain only opaque destination IDs and protocol kinds. RTMP stream keys,
-signed CDN URLs, storage credentials and other provider secrets are resolved behind the provider
-boundary and must not be persisted or logged through canonical UCR request values.
+Canonical requests contain only opaque destination IDs and protocol kinds. A destination reference
+may appear at most once in one publish operation, even if a caller tries to pair the same reference
+with multiple protocol kinds. RTMP stream keys, signed CDN URLs, storage credentials and other
+provider secrets are resolved behind the provider boundary and must not be persisted or logged
+through canonical UCR request values.
 
 ## Capability contract
 
