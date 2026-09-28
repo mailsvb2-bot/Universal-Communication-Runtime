@@ -4032,7 +4032,8 @@ mod universal_runtime_tests {
         GroupMemberState, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord,
         IntegrationId, OpaqueId, PrincipalId, PrincipalIdentityBinding, PrincipalKind,
         PrincipalRef, ScopedPrincipal, TenantId, TenantScope, UniversalConferenceLifecycle,
-        UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+        UniversalConferenceMetadataEntry, UniversalConferenceMode,
+        UniversalConferenceParticipantProfile, UniversalConferenceProfile,
     };
     use ucr_protocol::CanonicalErrorCode;
     use ucr_realtime::{JoinGrantUsePolicy, JoinTokenIssuer, JoinTokenKey};
