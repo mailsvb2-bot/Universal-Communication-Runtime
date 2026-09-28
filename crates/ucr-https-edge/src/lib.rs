@@ -9,7 +9,10 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 use ucr_model::OpaqueId;
-use ucr_secrets::{ActiveSecretSet, SecretHandle, SecretMaterial, SecretProvider, SecretProviderError, SecretProviderHealth, SecretPurpose, SecretVersion};
+use ucr_secrets::{
+    ActiveSecretSet, SecretHandle, SecretMaterial, SecretProvider, SecretProviderError,
+    SecretProviderHealth, SecretPurpose, SecretVersion,
+};
 
 const MAX_CERTIFICATE_BYTES: u64 = 64 * 1024;
 const MAX_PRIVATE_KEY_BYTES: u64 = 64 * 1024;
@@ -313,7 +316,11 @@ pub async fn run_with_secret_provider(
 /// # Errors
 /// Returns explicit environment, provider, TLS, bind, or upstream configuration errors.
 pub async fn run_configured() -> Result<(), String> {
-    if std::env::var("UCR_HTTPS_EDGE_SECRET_PROVIDER").ok().as_deref() != Some("file-reload") {
+    if std::env::var("UCR_HTTPS_EDGE_SECRET_PROVIDER")
+        .ok()
+        .as_deref()
+        != Some("file-reload")
+    {
         return run().await;
     }
 
