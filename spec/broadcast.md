@@ -27,7 +27,10 @@ Call state, participant authority, SFU routing state, or Recording lifecycle.
 ## Broadcast provider
 
 The separate `BroadcastProvider` publishes one already-composed output to a bounded set of
-destinations. The current provider contract supports RTMP, HLS, and DASH destination classes.
+destinations. It references the stable composition ID produced by the composition request. Exact
+retries of one publish operation ID are idempotent; reusing that operation ID with a different
+composition or destination set conflicts. The current provider contract supports RTMP, HLS, and
+DASH destination classes.
 
 Canonical requests contain only opaque destination IDs and protocol kinds. A destination reference
 may appear at most once in one publish operation, even if a caller tries to pair the same reference
