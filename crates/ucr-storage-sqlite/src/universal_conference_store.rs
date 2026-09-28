@@ -126,7 +126,64 @@ pub(super) fn verify_v46_objects(connection: &Connection) -> Result<(), DurableS
             ("metadata_key", "TEXT", 1, 5),
             ("metadata_value", "BLOB", 1, 0),
         ],
-    )
+    )?;
+
+    let mut statement = connection
+        .prepare(
+            "SELECT tenant_id, namespace_present, namespace_id, conference_id,
+                    metadata_key, metadata_value
+             FROM universal_conference_metadata
+             ORDER BY tenant_id, namespace_present, namespace_id, conference_id, metadata_key",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Vec<u8>>(5)?,
+            ))
+        })
+        .map_err(|error| map_sqlite_error(&error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| map_sqlite_error(&error))?;
+
+    let mut current_owner: Option<(String, i64, String, String)> = None;
+    let mut current_entries = Vec::new();
+    for (tenant_id, namespace_present, namespace_id, conference_id, key, value) in rows {
+        let owner = (tenant_id, namespace_present, namespace_id, conference_id);
+        if current_owner.as_ref().is_some_and(|current| current != &owner) {
+            ucr_core::canonical_conference_metadata(&current_entries)
+                .map_err(|_| DurableStoreError::Corrupt)?;
+            current_entries.clear();
+        }
+        current_owner = Some(owner);
+        current_entries.push(ucr_model::UniversalConferenceMetadataEntry { key, value });
+        if current_entries.len() > ucr_core::MAX_CONFERENCE_METADATA_ENTRIES {
+            return Err(DurableStoreError::Corrupt);
+        }
+    }
+    if !current_entries.is_empty() {
+        ucr_core::canonical_conference_metadata(&current_entries)
+            .map_err(|_| DurableStoreError::Corrupt)?;
+    }
+
+    let mut foreign_key_check = connection
+        .prepare("PRAGMA foreign_key_check(universal_conference_metadata)")
+        .map_err(|error| map_sqlite_error(&error))?;
+    if foreign_key_check
+        .query([])
+        .map_err(|error| map_sqlite_error(&error))?
+        .next()
+        .map_err(|error| map_sqlite_error(&error))?
+        .is_some()
+    {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
 }
 
 pub(super) fn verify_schema_v32(connection: &Connection) -> Result<(), DurableStoreError> {
