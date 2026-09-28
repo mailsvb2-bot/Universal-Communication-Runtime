@@ -141,6 +141,35 @@ fn universal_conference_credentials_are_bound_to_integration_identity() {
 }
 
 #[test]
+fn universal_conference_idempotency_and_foreign_integration_paths_are_isolated() {
+    let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+    let core = read("crates/ucr-core/src/lib.rs");
+    let memory = read("crates/ucr-storage-memory/src/lib.rs");
+    let sqlite = read("crates/ucr-storage-sqlite/src/lib.rs");
+    let spec = read("spec/universal-conference-api.md");
+
+    assert!(service.contains("UCR-UNIVERSAL-INTEGRATION-IDEMPOTENCY-V1"));
+    assert!(service.contains("integration_scoped_idempotency_key"));
+    assert!(service.contains("has_accepted_idempotency_key"));
+    assert!(service.contains("Sha256"));
+    assert!(core.contains("fn has_accepted_idempotency_key"));
+    assert!(memory.contains("fn has_accepted_idempotency_key"));
+    assert!(sqlite.contains("fn has_accepted_idempotency_key"));
+    assert!(service.contains("foreign_integration_cannot_read_issue_join_or_read_attendance"));
+
+    let subscriptions = service
+        .split_once("fn set_universal_subscriptions")
+        .expect("subscription helper")
+        .1
+        .split_once("fn prepare_conference_runtime")
+        .expect("subscription helper close")
+        .0;
+    assert!(subscriptions.contains("conference_for_integration("));
+    assert!(spec.contains("isolated by exact integration identity and operation class"));
+    assert!(spec.contains("raw legacy key was already accepted"));
+}
+
+#[test]
 fn universal_conference_capability_discovery_is_explicit_and_deployment_aware() {
     let proto = read("proto/ucr/v1/universal_conference.proto");
     let service = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
