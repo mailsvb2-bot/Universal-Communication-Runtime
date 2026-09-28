@@ -623,12 +623,14 @@ mod tests {
             secret_id: OpaqueId::new("https-edge-key").expect("id"),
             purpose: SecretPurpose::TlsPrivateKey,
         };
-        assert!(ProviderBackedTlsAcceptor::new(
-            provider.clone(),
-            wrong_certificate,
-            private_key.clone(),
-        )
-        .is_err());
+        assert!(
+            ProviderBackedTlsAcceptor::new(
+                provider.clone(),
+                wrong_certificate,
+                private_key.clone(),
+            )
+            .is_err()
+        );
 
         let certificate = SecretHandle {
             secret_id: OpaqueId::new("https-edge-cert").expect("id"),
