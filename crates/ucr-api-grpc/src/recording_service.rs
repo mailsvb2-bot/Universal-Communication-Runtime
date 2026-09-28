@@ -68,10 +68,20 @@ impl<C, A, S> GrpcRecordingService<C, A, S> {
         verification_keys: Arc<MachineTokenPublicKeySet>,
         policy: MachineTokenPolicy,
     ) -> Self {
-        self.machine_bearer = Some(Arc::new(MachineBearerConfig {
+        self.machine_bearer = Some(Arc::new(MachineBearerConfig::static_keys(
             verification_keys,
             policy,
-        }));
+        )));
+        self
+    }
+
+    #[must_use]
+    pub fn with_machine_bearer_auth_provider(
+        mut self,
+        provider: Arc<dyn super::MachineTokenVerificationKeyProvider>,
+        policy: MachineTokenPolicy,
+    ) -> Self {
+        self.machine_bearer = Some(Arc::new(MachineBearerConfig::provider(provider, policy)));
         self
     }
 }
