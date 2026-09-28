@@ -6,6 +6,7 @@ pub const HLS_BROADCAST_CAPABILITY: &str = "ucr.broadcast.hls";
 pub const DASH_BROADCAST_CAPABILITY: &str = "ucr.broadcast.dash";
 
 pub const MAX_BROADCAST_OUTPUTS: usize = 8;
+pub const MAX_BROADCAST_AUDIO_SOURCES: usize = 64;
 pub const MAX_BROADCAST_VIDEO_SOURCES: usize = 64;
 
 #[must_use]
