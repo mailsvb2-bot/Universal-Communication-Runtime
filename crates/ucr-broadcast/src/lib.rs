@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use ucr_model::{CallId, CapabilityDescriptor, OpaqueId, TenantScope};
 use ucr_protocol::{
     DASH_BROADCAST_CAPABILITY, HLS_BROADCAST_CAPABILITY, MAX_BROADCAST_OUTPUTS,
-    MAX_BROADCAST_VIDEO_SOURCES, MEDIA_COMPOSITION_CAPABILITY, RTMP_BROADCAST_CAPABILITY,
+    MAX_BROADCAST_VIDEO_SOURCES, RTMP_BROADCAST_CAPABILITY,
     broadcast_capabilities,
 };
 
@@ -120,6 +120,10 @@ impl PreparedBroadcastCapabilities {
     }
 }
 
+/// Validates bounded composition inputs before any provider side effect.
+///
+/// # Errors
+/// Returns `InvalidRequest` for an empty, duplicate, or oversized source set.
 pub fn validate_composition_request(
     request: &CompositionRequest,
 ) -> Result<(), BroadcastProviderError> {
@@ -139,6 +143,10 @@ pub fn validate_composition_request(
     Ok(())
 }
 
+/// Validates bounded unique broadcast destinations before any provider side effect.
+///
+/// # Errors
+/// Returns `InvalidRequest` for an empty, duplicate, or oversized destination set.
 pub fn validate_broadcast_request(
     request: &BroadcastRequest,
 ) -> Result<(), BroadcastProviderError> {
@@ -224,7 +232,7 @@ mod tests {
     fn prepared_capabilities_do_not_claim_production() {
         let capabilities = PreparedBroadcastCapabilities.current_capabilities();
         assert!(capabilities.iter().any(|item| {
-            item.id == MEDIA_COMPOSITION_CAPABILITY
+            item.id == ucr_protocol::MEDIA_COMPOSITION_CAPABILITY
                 && item.maturity == ucr_model::CapabilityMaturity::Prepared
         }));
         assert!(
