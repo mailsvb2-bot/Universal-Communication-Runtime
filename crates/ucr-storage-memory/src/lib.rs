@@ -2244,6 +2244,21 @@ impl SyncStore for MemoryLocalStore {
 }
 
 impl CommandAcceptanceStore for MemoryLocalStore {
+    fn has_accepted_idempotency_key(
+        &self,
+        scope: &TenantScope,
+        idempotency_key: &str,
+    ) -> Result<bool, DurableStoreError> {
+        if idempotency_key.is_empty() || idempotency_key.len() > ucr_protocol::MAX_IDEMPOTENCY_KEY_LEN
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .accepted
+            .contains_key(&(scope_key(scope), idempotency_key.to_owned())))
+    }
+
     fn accept_command(
         &self,
         command: &CommandEnvelope,
