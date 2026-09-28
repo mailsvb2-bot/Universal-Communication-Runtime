@@ -857,6 +857,23 @@ pub trait RecoveryPlanStore: StorageProvider {
 /// The implementation must atomically persist acceptance before returning an
 /// Accepted receipt and must preserve deduplication across restart.
 pub trait CommandAcceptanceStore: StorageProvider {
+    /// Returns whether one exact scoped idempotency key has already been durably accepted.
+    ///
+    /// This read-only compatibility probe exists so newer ingress layers can preserve legacy
+    /// idempotency identities across an upgrade before choosing a stronger namespaced identity.
+    /// Implementations that cannot prove the answer must fail closed.
+    ///
+    /// # Errors
+    /// Returns explicit storage failures; an error must never be treated as absence.
+    fn has_accepted_idempotency_key(
+        &self,
+        scope: &TenantScope,
+        idempotency_key: &str,
+    ) -> Result<bool, DurableStoreError> {
+        let _ = (scope, idempotency_key);
+        Err(DurableStoreError::Unavailable)
+    }
+
     /// Atomically accepts or deduplicates one command.
     ///
     /// # Errors
