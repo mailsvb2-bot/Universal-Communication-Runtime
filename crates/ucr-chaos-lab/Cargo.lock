@@ -2311,6 +2311,7 @@ dependencies = [
  "tokio",
  "ucr-model",
  "ucr-protocol",
+ "ucr-secrets",
  "webrtc",
  "zeroize",
 ]
