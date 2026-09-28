@@ -4,6 +4,7 @@ use std::{
     fmt,
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs},
+    sync::Arc,
     time::Duration,
 };
 
@@ -14,6 +15,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use ucr_core::{EventWebhookDeliveryError, EventWebhookSink};
 use ucr_model::{EventEnvelope, EventSubscription, EventSubscriptionMode};
+use ucr_secrets::{SecretHandle, SecretProvider, SecretPurpose};
 use url::{Host, Url};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -258,21 +260,93 @@ fn header_value(value: &str) -> bool {
     !value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
 }
 
+enum WebhookSigningSecretSource {
+    Static(WebhookSigningSecret),
+    Provider {
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+    },
+}
+
+impl fmt::Debug for WebhookSigningSecretSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Static(_) => formatter.write_str("Static(<redacted>)"),
+            Self::Provider { handle, .. } => formatter
+                .debug_struct("Provider")
+                .field("handle", handle)
+                .field("material", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
 pub struct HardenedWebhookSink<R, X> {
     resolver: R,
     executor: X,
-    signing_secret: WebhookSigningSecret,
+    signing_secret: WebhookSigningSecretSource,
 }
 
 impl<R, X> HardenedWebhookSink<R, X> {
     #[must_use]
-    pub const fn new(resolver: R, executor: X, signing_secret: WebhookSigningSecret) -> Self {
+    pub fn new(resolver: R, executor: X, signing_secret: WebhookSigningSecret) -> Self {
         Self {
             resolver,
             executor,
-            signing_secret,
+            signing_secret: WebhookSigningSecretSource::Static(signing_secret),
         }
     }
+
+    /// Creates a webhook sink whose signing key is resolved from the shared secret provider.
+    ///
+    /// # Errors
+    /// Fails closed when the handle purpose is not webhook signing, when the provider cannot
+    /// resolve the handle, or when current material is not exactly 32 bytes.
+    pub fn with_secret_provider(
+        resolver: R,
+        executor: X,
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+    ) -> Result<Self, EventWebhookDeliveryError> {
+        if handle.purpose != SecretPurpose::WebhookSigning {
+            return Err(EventWebhookDeliveryError::Retryable);
+        }
+        let active = provider
+            .active_secret_set(&handle)
+            .map_err(|_| EventWebhookDeliveryError::Retryable)?;
+        webhook_signing_secret_from_material(active.current.material.as_bytes())
+            .map_err(|_| EventWebhookDeliveryError::Retryable)?;
+        Ok(Self {
+            resolver,
+            executor,
+            signing_secret: WebhookSigningSecretSource::Provider { provider, handle },
+        })
+    }
+
+    fn current_signing_secret(&self) -> Result<WebhookSigningSecret, WebhookPolicyError> {
+        match &self.signing_secret {
+            WebhookSigningSecretSource::Static(secret) => Ok(secret.clone()),
+            WebhookSigningSecretSource::Provider { provider, handle } => {
+                if handle.purpose != SecretPurpose::WebhookSigning {
+                    return Err(WebhookPolicyError::SigningKeyUnavailable);
+                }
+                let active = provider
+                    .active_secret_set(handle)
+                    .map_err(|_| WebhookPolicyError::SigningKeyUnavailable)?;
+                webhook_signing_secret_from_material(active.current.material.as_bytes())
+                    .map_err(|_| WebhookPolicyError::SigningKeyUnavailable)
+            }
+        }
+    }
+}
+
+fn webhook_signing_secret_from_material(
+    material: &[u8],
+) -> Result<WebhookSigningSecret, WebhookPolicyError> {
+    let bytes: [u8; 32] = material
+        .try_into()
+        .map_err(|_| WebhookPolicyError::SigningKeyUnavailable)?;
+    Ok(WebhookSigningSecret::from_bytes(bytes))
 }
 
 impl<R: fmt::Debug, X: fmt::Debug> fmt::Debug for HardenedWebhookSink<R, X> {
@@ -281,7 +355,7 @@ impl<R: fmt::Debug, X: fmt::Debug> fmt::Debug for HardenedWebhookSink<R, X> {
             .debug_struct("HardenedWebhookSink")
             .field("resolver", &self.resolver)
             .field("executor", &self.executor)
-            .field("signing_secret", &"<redacted>")
+            .field("signing_secret", &self.signing_secret)
             .finish()
     }
 }
@@ -310,12 +384,15 @@ enum WebhookPolicyError {
     InvalidEndpoint,
     PrivateEndpoint,
     ResolutionUnavailable,
+    SigningKeyUnavailable,
 }
 
 impl WebhookPolicyError {
     const fn delivery_error(self) -> EventWebhookDeliveryError {
         match self {
-            Self::ResolutionUnavailable => EventWebhookDeliveryError::Retryable,
+            Self::ResolutionUnavailable | Self::SigningKeyUnavailable => {
+                EventWebhookDeliveryError::Retryable
+            }
             Self::InvalidSubscription | Self::InvalidEndpoint | Self::PrivateEndpoint => {
                 EventWebhookDeliveryError::Permanent
             }
@@ -386,8 +463,9 @@ where
         let timestamp = event.wall_time_unix_ms.to_string();
         let event_id = event.event_id.as_opaque().as_str();
         let subscription_id = subscription.subscription_id.as_opaque().as_str();
-        let mut mac = HmacSha256::new_from_slice(&self.signing_secret.0)
-            .map_err(|_| WebhookPolicyError::InvalidSubscription)?;
+        let signing_secret = self.current_signing_secret()?;
+        let mut mac = HmacSha256::new_from_slice(&signing_secret.0)
+            .map_err(|_| WebhookPolicyError::SigningKeyUnavailable)?;
         mac.update(timestamp.as_bytes());
         mac.update(b"\n");
         mac.update(subscription_id.as_bytes());
@@ -516,6 +594,7 @@ mod tests {
         EventSubscriptionId, EventSubscriptionStart, IdentityId, OpaqueId, ProtocolVersion,
         TenantId, TenantScope,
     };
+    use ucr_secrets::{InMemorySecretProvider, SecretMaterial, SecretVersion};
 
     #[derive(Debug)]
     struct StaticResolver {
@@ -719,4 +798,130 @@ mod tests {
             Err(EventWebhookDeliveryError::Retryable)
         );
     }
+    #[test]
+    fn provider_rotation_changes_new_webhook_signatures_without_static_fallback() {
+        let provider = Arc::new(InMemorySecretProvider::default());
+        let handle = SecretHandle {
+            secret_id: oid("webhook-provider"),
+            purpose: SecretPurpose::WebhookSigning,
+        };
+        provider
+            .provision(
+                handle.clone(),
+                SecretVersion {
+                    version_id: oid("v1"),
+                    material: SecretMaterial::new(vec![7_u8; 32]).expect("material"),
+                },
+            )
+            .expect("provision");
+        let sink = HardenedWebhookSink::with_secret_provider(
+            StaticResolver {
+                addresses: vec![IpAddr::from_str("93.184.216.34").expect("public ip")],
+            },
+            RecordingExecutor {
+                status: 204,
+                request: Mutex::new(None),
+            },
+            provider.clone(),
+            handle.clone(),
+        )
+        .expect("provider sink");
+
+        let first = sink
+            .prepare_request(&subscription("https://example.com/events"), &event())
+            .expect("first request");
+        let first_signature = first
+            .headers
+            .iter()
+            .find(|(name, _)| name == SIGNATURE_HEADER)
+            .map(|(_, value)| value.clone())
+            .expect("first signature");
+
+        provider
+            .rotate(
+                &handle,
+                SecretVersion {
+                    version_id: oid("v2"),
+                    material: SecretMaterial::new(vec![8_u8; 32]).expect("material"),
+                },
+            )
+            .expect("rotate");
+
+        let second = sink
+            .prepare_request(&subscription("https://example.com/events"), &event())
+            .expect("second request");
+        let second_signature = second
+            .headers
+            .iter()
+            .find(|(name, _)| name == SIGNATURE_HEADER)
+            .map(|(_, value)| value.clone())
+            .expect("second signature");
+
+        assert_ne!(first_signature, second_signature);
+        let rendered = format!("{sink:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("07070707"));
+        assert!(!rendered.contains("08080808"));
+    }
+
+    #[test]
+    fn provider_backed_webhook_signing_fails_closed_on_wrong_purpose_or_malformed_key() {
+        let provider = Arc::new(InMemorySecretProvider::default());
+        let wrong = SecretHandle {
+            secret_id: oid("webhook-wrong-purpose"),
+            purpose: SecretPurpose::JoinSigning,
+        };
+        provider
+            .provision(
+                wrong.clone(),
+                SecretVersion {
+                    version_id: oid("v1"),
+                    material: SecretMaterial::new(vec![7_u8; 32]).expect("material"),
+                },
+            )
+            .expect("provision wrong");
+        assert!(matches!(
+            HardenedWebhookSink::with_secret_provider(
+                StaticResolver {
+                    addresses: vec![IpAddr::from_str("93.184.216.34").expect("public ip")],
+                },
+                RecordingExecutor {
+                    status: 204,
+                    request: Mutex::new(None),
+                },
+                provider.clone(),
+                wrong,
+            ),
+            Err(EventWebhookDeliveryError::Retryable)
+        ));
+
+        let malformed = SecretHandle {
+            secret_id: oid("webhook-malformed"),
+            purpose: SecretPurpose::WebhookSigning,
+        };
+        provider
+            .provision(
+                malformed.clone(),
+                SecretVersion {
+                    version_id: oid("v1"),
+                    material: SecretMaterial::new(vec![9_u8; 31]).expect("material"),
+                },
+            )
+            .expect("provision malformed");
+        assert!(matches!(
+            HardenedWebhookSink::with_secret_provider(
+                StaticResolver {
+                    addresses: vec![IpAddr::from_str("93.184.216.34").expect("public ip")],
+                },
+                RecordingExecutor {
+                    status: 204,
+                    request: Mutex::new(None),
+                },
+                provider,
+                malformed,
+            ),
+            Err(EventWebhookDeliveryError::Retryable)
+        ));
+    }
+
 }
