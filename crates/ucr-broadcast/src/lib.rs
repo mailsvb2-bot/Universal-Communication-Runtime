@@ -3,10 +3,13 @@
 use core::fmt;
 use std::collections::HashSet;
 
-use ucr_model::{CallId, CapabilityDescriptor, OpaqueId, TenantScope};
+use ucr_model::{
+    AudioStreamId, CallId, CapabilityDescriptor, OpaqueId, TenantScope, VideoStreamId,
+};
 use ucr_protocol::{
     DASH_BROADCAST_CAPABILITY, HLS_BROADCAST_CAPABILITY, MAX_BROADCAST_OUTPUTS,
-    MAX_BROADCAST_VIDEO_SOURCES, RTMP_BROADCAST_CAPABILITY, broadcast_capabilities,
+    MAX_BROADCAST_AUDIO_SOURCES, MAX_BROADCAST_VIDEO_SOURCES, RTMP_BROADCAST_CAPABILITY,
+    broadcast_capabilities,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +53,8 @@ pub struct CompositionRequest {
     pub call_id: CallId,
     pub operation_id: OpaqueId,
     pub layout: CompositionLayout,
-    pub video_source_ids: Vec<OpaqueId>,
+    pub audio_stream_ids: Vec<AudioStreamId>,
+    pub video_stream_ids: Vec<VideoStreamId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,23 +126,36 @@ impl PreparedBroadcastCapabilities {
 /// Validates bounded composition inputs before any provider side effect.
 ///
 /// # Errors
-/// Returns `InvalidRequest` for an empty, duplicate, or oversized source set.
+/// Returns `InvalidRequest` when both media source sets are empty, or when either set is
+/// duplicate or oversized.
 pub fn validate_composition_request(
     request: &CompositionRequest,
 ) -> Result<(), BroadcastProviderError> {
-    if request.video_source_ids.is_empty()
-        || request.video_source_ids.len() > MAX_BROADCAST_VIDEO_SOURCES
+    if (request.audio_stream_ids.is_empty() && request.video_stream_ids.is_empty())
+        || request.audio_stream_ids.len() > MAX_BROADCAST_AUDIO_SOURCES
+        || request.video_stream_ids.len() > MAX_BROADCAST_VIDEO_SOURCES
     {
         return Err(BroadcastProviderError::InvalidRequest);
     }
-    let mut sources = HashSet::with_capacity(request.video_source_ids.len());
+
+    let mut audio_sources = HashSet::with_capacity(request.audio_stream_ids.len());
     if request
-        .video_source_ids
+        .audio_stream_ids
         .iter()
-        .any(|source| !sources.insert(source.as_str()))
+        .any(|stream_id| !audio_sources.insert(stream_id.as_opaque().as_str()))
     {
         return Err(BroadcastProviderError::InvalidRequest);
     }
+
+    let mut video_sources = HashSet::with_capacity(request.video_stream_ids.len());
+    if request
+        .video_stream_ids
+        .iter()
+        .any(|stream_id| !video_sources.insert(stream_id.as_opaque().as_str()))
+    {
+        return Err(BroadcastProviderError::InvalidRequest);
+    }
+
     Ok(())
 }
 
@@ -154,7 +171,7 @@ pub fn validate_broadcast_request(
     }
     let mut destinations = HashSet::with_capacity(request.destinations.len());
     if request.destinations.iter().any(|destination| {
-        !destinations.insert((destination.destination_id.as_str(), destination.protocol))
+        !destinations.insert(destination.destination_id.as_str())
     }) {
         return Err(BroadcastProviderError::InvalidRequest);
     }
@@ -164,7 +181,7 @@ pub fn validate_broadcast_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ucr_model::{TenantId, TenantScope};
+    use ucr_model::{AudioStreamId, TenantId, TenantScope, VideoStreamId};
 
     fn oid(value: &str) -> OpaqueId {
         OpaqueId::new(value).expect("valid test id")
@@ -184,16 +201,48 @@ mod tests {
             call_id: CallId::from_opaque(oid("broadcast-call")),
             operation_id: oid("composition-op"),
             layout: CompositionLayout::ScreenWithSpeaker,
-            video_source_ids: vec![oid("screen"), oid("speaker")],
+            audio_stream_ids: vec![AudioStreamId::from_opaque(oid("speaker-audio"))],
+            video_stream_ids: vec![
+                VideoStreamId::from_opaque(oid("screen")),
+                VideoStreamId::from_opaque(oid("speaker")),
+            ],
         };
         assert_eq!(validate_composition_request(&request), Ok(()));
 
         let duplicate = CompositionRequest {
-            video_source_ids: vec![oid("screen"), oid("screen")],
+            video_stream_ids: vec![
+                VideoStreamId::from_opaque(oid("screen")),
+                VideoStreamId::from_opaque(oid("screen")),
+            ],
             ..request
         };
         assert_eq!(
             validate_composition_request(&duplicate),
+            Err(BroadcastProviderError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn composition_accepts_audio_only_and_rejects_duplicate_audio_streams() {
+        let audio_only = CompositionRequest {
+            scope: scope(),
+            call_id: CallId::from_opaque(oid("broadcast-call")),
+            operation_id: oid("audio-composition-op"),
+            layout: CompositionLayout::ActiveSpeaker,
+            audio_stream_ids: vec![AudioStreamId::from_opaque(oid("speaker-audio"))],
+            video_stream_ids: Vec::new(),
+        };
+        assert_eq!(validate_composition_request(&audio_only), Ok(()));
+
+        let duplicate_audio = CompositionRequest {
+            audio_stream_ids: vec![
+                AudioStreamId::from_opaque(oid("speaker-audio")),
+                AudioStreamId::from_opaque(oid("speaker-audio")),
+            ],
+            ..audio_only
+        };
+        assert_eq!(
+            validate_composition_request(&duplicate_audio),
             Err(BroadcastProviderError::InvalidRequest)
         );
     }
@@ -224,6 +273,30 @@ mod tests {
         assert_eq!(
             request.destinations[0].protocol.capability(),
             RTMP_BROADCAST_CAPABILITY
+        );
+    }
+
+    #[test]
+    fn broadcast_rejects_reusing_one_destination_reference_under_multiple_protocols() {
+        let request = BroadcastRequest {
+            scope: scope(),
+            call_id: CallId::from_opaque(oid("broadcast-call")),
+            operation_id: oid("broadcast-op-duplicate"),
+            composition_id: oid("composition-op"),
+            destinations: vec![
+                BroadcastDestination {
+                    destination_id: oid("same-target"),
+                    protocol: BroadcastProtocol::Rtmp,
+                },
+                BroadcastDestination {
+                    destination_id: oid("same-target"),
+                    protocol: BroadcastProtocol::Hls,
+                },
+            ],
+        };
+        assert_eq!(
+            validate_broadcast_request(&request),
+            Err(BroadcastProviderError::InvalidRequest)
         );
     }
 
