@@ -519,6 +519,7 @@ mod tests {
         assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
         let _ = std::fs::remove_dir_all(directory);
     }
+
     #[test]
     fn provider_backed_tls_rotation_keeps_a_valid_pair_during_staggered_updates() {
         let stamp = SystemTime::now()
@@ -653,6 +654,4 @@ mod tests {
             .expect("provision key");
         assert!(ProviderBackedTlsAcceptor::new(provider, certificate, private_key).is_err());
     }
-
-
 }
