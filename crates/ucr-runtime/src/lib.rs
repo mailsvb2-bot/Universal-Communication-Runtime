@@ -1844,6 +1844,19 @@ const fn health_label(health: StorageHealth) -> &'static str {
 mod tests {
     use super::*;
 
+    fn static_machine_auth_verification_keys(
+        config: &MachineAuthRuntimeConfig,
+    ) -> &MachineTokenPublicKeySet {
+        match &config.signing {
+            MachineAuthSigningConfig::Static {
+                verification_keys, ..
+            } => verification_keys,
+            MachineAuthSigningConfig::Provider { .. } => {
+                panic!("expected static machine auth config")
+            }
+        }
+    }
+
     #[test]
     fn machine_auth_config_requires_https_and_redacts_signing_key() {
         let config = MachineAuthRuntimeConfig::new(
@@ -1858,23 +1871,23 @@ mod tests {
         .expect("machine auth config")
         .with_previous_signing_key("key-2026-08", [6_u8; 32])
         .expect("previous signing key");
-        assert_eq!(config.verification_keys.keys().len(), 2);
+        assert_eq!(static_machine_auth_verification_keys(&config).keys().len(), 2);
         assert_eq!(
-            config.verification_keys.keys()[0]
+            static_machine_auth_verification_keys(&config).keys()[0]
                 .key_id
                 .as_opaque()
                 .as_str(),
             "key-2026-09"
         );
         assert_eq!(
-            config.verification_keys.keys()[1]
+            static_machine_auth_verification_keys(&config).keys()[1]
                 .key_id
                 .as_opaque()
                 .as_str(),
             "key-2026-08"
         );
         let debug = format!("{config:?}");
-        assert!(debug.contains("<secret>"));
+        assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("[7, 7, 7"));
         assert!(
             MachineAuthRuntimeConfig::new(
@@ -1910,10 +1923,10 @@ mod tests {
         let before_restart = build();
         let after_restart = build();
         assert_eq!(
-            before_restart.verification_keys.as_ref(),
-            after_restart.verification_keys.as_ref()
+            static_machine_auth_verification_keys(&before_restart),
+            static_machine_auth_verification_keys(&after_restart)
         );
-        assert_eq!(after_restart.verification_keys.keys().len(), 2);
+        assert_eq!(static_machine_auth_verification_keys(&after_restart).keys().len(), 2);
 
         let retired = MachineAuthRuntimeConfig::new(
             "https://auth.example.test",
@@ -1925,9 +1938,9 @@ mod tests {
             900,
         )
         .expect("retired previous key config");
-        assert_eq!(retired.verification_keys.keys().len(), 1);
+        assert_eq!(static_machine_auth_verification_keys(&retired).keys().len(), 1);
         assert_eq!(
-            retired.verification_keys.keys()[0]
+            static_machine_auth_verification_keys(&retired).keys()[0]
                 .key_id
                 .as_opaque()
                 .as_str(),
