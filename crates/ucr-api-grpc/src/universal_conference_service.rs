@@ -47,13 +47,13 @@ use ucr_protocol::{
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION,
     CONFERENCE_PARTICIPANT_ENSURE_PERMISSION, CONFERENCE_PARTICIPANT_MANAGE_PERMISSION,
     CONFERENCE_READ_PERMISSION, CONFERENCE_SUBSCRIBE_PERMISSION, CanonicalError,
-    CanonicalErrorCode, CapabilityMaturity, DEVICE_REGISTER_PERMISSION,
-    GROUP_MLS_CAPABILITY, H264_VIDEO_CODEC_CAPABILITY, MAX_CALL_PARTICIPANTS,
-    MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT, OPUS_AUDIO_CODEC_CAPABILITY,
-    SCREEN_SHARE_SEND_PERMISSION, SCREEN_SHARE_VIDEO_CAPABILITY, VIDEO_MEDIA_CAPABILITY,
-    VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, acknowledgement_for, broadcast_capabilities,
-    canonical_capabilities, phase20_audio_capabilities, phase21_video_capabilities,
-    phase22_media_e2ee_capabilities, phase29_sfu_capabilities, phase30_conference_capabilities,
+    CanonicalErrorCode, CapabilityMaturity, DEVICE_REGISTER_PERMISSION, GROUP_MLS_CAPABILITY,
+    H264_VIDEO_CODEC_CAPABILITY, MAX_CALL_PARTICIPANTS, MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT,
+    OPUS_AUDIO_CODEC_CAPABILITY, SCREEN_SHARE_SEND_PERMISSION, SCREEN_SHARE_VIDEO_CAPABILITY,
+    VIDEO_MEDIA_CAPABILITY, VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, acknowledgement_for,
+    broadcast_capabilities, canonical_capabilities, phase20_audio_capabilities,
+    phase21_video_capabilities, phase22_media_e2ee_capabilities, phase29_sfu_capabilities,
+    phase30_conference_capabilities,
 };
 use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
@@ -108,10 +108,7 @@ fn integration_scoped_idempotency_key<S: CommandAcceptanceStore>(
     Ok(derived)
 }
 
-fn update_idempotency_hash_field(
-    hasher: &mut Sha256,
-    value: &[u8],
-) -> Result<(), CanonicalError> {
+fn update_idempotency_hash_field(hasher: &mut Sha256, value: &[u8]) -> Result<(), CanonicalError> {
     let length = u64::try_from(value.len())
         .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
     hasher.update(length.to_be_bytes());
@@ -4125,15 +4122,12 @@ mod universal_runtime_tests {
     use ucr_model::{
         CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
         CallSignallingState, CallTerminationReason, CommandEnvelope, CommandId,
-        ConferenceParticipantRole,
-        ConferenceScheduleMetadata, DeviceDescriptor, DeviceLifecycleState, EventId,
-        GroupMemberState, IdentityEvidence, IdentityId, IdentityOwnership, IdentityRecord,
-        CorrelationContext, IntegrationId, OpaqueId, PrincipalId, PrincipalIdentityBinding,
-        PrincipalKind,
-        PrincipalRef, ProtocolVersion, ScopedPrincipal, TenantId, TenantScope,
-        UniversalConferenceLifecycle,
-        UniversalConferenceMetadataEntry, UniversalConferenceMode,
-        UniversalConferenceParticipantProfile, UniversalConferenceProfile,
+        ConferenceParticipantRole, ConferenceScheduleMetadata, CorrelationContext,
+        DeviceDescriptor, DeviceLifecycleState, EventId, GroupMemberState, IdentityEvidence,
+        IdentityId, IdentityOwnership, IdentityRecord, IntegrationId, OpaqueId, PrincipalId,
+        PrincipalIdentityBinding, PrincipalKind, PrincipalRef, ProtocolVersion, ScopedPrincipal,
+        TenantId, TenantScope, UniversalConferenceLifecycle, UniversalConferenceMetadataEntry,
+        UniversalConferenceMode, UniversalConferenceParticipantProfile, UniversalConferenceProfile,
     };
     use ucr_protocol::{CanonicalErrorCode, CommandReceiptStatus};
     use ucr_realtime::{JoinGrantUsePolicy, JoinTokenIssuer, JoinTokenKey};
@@ -4142,10 +4136,10 @@ mod universal_runtime_tests {
     use super::{
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
         IssueJoinGrantInput, PrepareConferenceRuntimeInput, SetConferenceMetadataInput,
-        UpdateParticipantInput, ensure_participant, ensure_participant_device,
-        accept_integration_mutation_id, conference_for_integration, issue_join_grant,
-        lifecycle_event, participant_attendance, prepare_conference_runtime, resolve_join_call,
-        resolve_join_device, resolve_person_principal, set_conference_metadata, update_participant,
+        UpdateParticipantInput, accept_integration_mutation_id, conference_for_integration,
+        ensure_participant, ensure_participant_device, issue_join_grant, lifecycle_event,
+        participant_attendance, prepare_conference_runtime, resolve_join_call, resolve_join_device,
+        resolve_person_principal, set_conference_metadata, update_participant,
     };
 
     #[test]
@@ -4614,13 +4608,8 @@ mod universal_runtime_tests {
             .expect("conference");
         let foreign = IntegrationId::from_opaque(oid("integration-foreign"));
 
-        let read = conference_for_integration(
-            &store,
-            &scope(),
-            &owned.conference_id,
-            &foreign,
-        )
-        .expect_err("foreign integration cannot read conference");
+        let read = conference_for_integration(&store, &scope(), &owned.conference_id, &foreign)
+            .expect_err("foreign integration cannot read conference");
         assert_eq!(read.code, CanonicalErrorCode::NotFound);
 
         let issuer = JoinTokenIssuer::new(
