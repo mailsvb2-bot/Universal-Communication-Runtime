@@ -1541,23 +1541,11 @@ async fn serve_realtime_services(
         Arc::clone(&join_issuer),
         runtime_capabilities.recording,
     );
-    if let Some(config) = machine_bearer {
-        match config.verification {
-            MachineBearerVerificationConfig::Static(keys) => {
-                universal_service = universal_service
-                    .with_machine_bearer_auth(Arc::clone(&keys), config.policy.clone());
-                recording_service = recording_service.with_machine_bearer_auth(keys, config.policy);
-            }
-            MachineBearerVerificationConfig::Provider(provider) => {
-                universal_service = universal_service.with_machine_bearer_auth_provider(
-                    Arc::clone(&provider),
-                    config.policy.clone(),
-                );
-                recording_service =
-                    recording_service.with_machine_bearer_auth_provider(provider, config.policy);
-            }
-        }
-    }
+    (universal_service, recording_service) = apply_realtime_machine_bearer(
+        universal_service,
+        recording_service,
+        machine_bearer,
+    );
 
     Server::builder()
         .add_service(operator_runtime_service_server(
@@ -1613,6 +1601,42 @@ async fn serve_realtime_services(
         )))
         .serve_with_incoming(incoming)
         .await
+}
+
+fn apply_realtime_machine_bearer(
+    mut universal_service: GrpcUniversalConferenceService<
+        SystemServiceQuotaClock,
+        SqliteLocalStore,
+        SqliteLocalStore,
+    >,
+    mut recording_service: GrpcRecordingService<
+        SystemServiceQuotaClock,
+        SqliteLocalStore,
+        SqliteLocalStore,
+    >,
+    machine_bearer: Option<MachineBearerRuntimeConfig>,
+) -> (
+    GrpcUniversalConferenceService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+    GrpcRecordingService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+) {
+    if let Some(config) = machine_bearer {
+        match config.verification {
+            MachineBearerVerificationConfig::Static(keys) => {
+                universal_service = universal_service
+                    .with_machine_bearer_auth(Arc::clone(&keys), config.policy.clone());
+                recording_service = recording_service.with_machine_bearer_auth(keys, config.policy);
+            }
+            MachineBearerVerificationConfig::Provider(provider) => {
+                universal_service = universal_service.with_machine_bearer_auth_provider(
+                    Arc::clone(&provider),
+                    config.policy.clone(),
+                );
+                recording_service =
+                    recording_service.with_machine_bearer_auth_provider(provider, config.policy);
+            }
+        }
+    }
+    (universal_service, recording_service)
 }
 
 struct RealtimeRuntimeDependencies {
