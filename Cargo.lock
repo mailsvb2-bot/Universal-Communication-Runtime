@@ -3811,6 +3811,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-broadcast"
+version = "0.0.1"
+dependencies = [
+ "ucr-model",
+ "ucr-protocol",
+]
+
+[[package]]
 name = "ucr-chat"
 version = "0.0.1"
 dependencies = [
