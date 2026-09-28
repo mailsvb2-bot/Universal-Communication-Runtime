@@ -20,6 +20,8 @@ fn broadcast_processing_is_separate_from_sfu_authority() {
     assert!(broadcast.contains("pub trait CompositionProvider"));
     assert!(broadcast.contains("pub trait BroadcastProvider"));
     assert!(broadcast.contains("CompositionLayout::ScreenWithSpeaker"));
+    assert!(broadcast.contains("audio_stream_ids: Vec<AudioStreamId>"));
+    assert!(broadcast.contains("video_stream_ids: Vec<VideoStreamId>"));
     assert!(!broadcast_manifest.contains("ucr-sfu"));
     assert!(!sfu_manifest.contains("ucr-broadcast"));
     assert!(spec.contains("explicitly outside SFU authority"));
