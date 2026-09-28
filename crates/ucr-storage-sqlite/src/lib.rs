@@ -2584,6 +2584,44 @@ mod tests {
     }
 
     #[test]
+    fn v45_store_migrates_metadata_table_to_v46_and_reopens_cleanly() {
+        let db = TestDbPath::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create current store");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open raw v46 store");
+            crate::test_remove_v46_objects(&connection).expect("remove v46 objects");
+            connection
+                .pragma_update(None, "user_version", SQLITE_SCHEMA_V45)
+                .expect("mark exact v45");
+        }
+
+        {
+            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v45 to v46");
+            assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("inspect migrated store");
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_schema
+                        WHERE type='table' AND name='universal_conference_metadata'
+                    )",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("metadata table existence");
+            assert!(exists);
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen migrated v46 store");
+        assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+    }
+
+    #[test]
     fn v1_store_migrates_and_preserves_command_deduplication() {
         let db = TestDbPath::new();
         let connection = create_v1_store(db.path());
