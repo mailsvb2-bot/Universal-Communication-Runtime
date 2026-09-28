@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{fmt, fmt::Write as _, sync::Arc};
 
 use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE,
@@ -15,6 +15,7 @@ use super::{
     pb, pb_acknowledgement, pb_error, pb_opaque, pb_scope,
 };
 use prost::Message;
+use sha2::{Digest as _, Sha256};
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
@@ -74,6 +75,102 @@ const MAX_EXTERNAL_CONFERENCE_ID_BYTES: usize = 512;
 const MAX_TIMEZONE_BYTES: usize = 128;
 const MAX_JOIN_WINDOW_SECONDS: u32 = 31_536_000;
 const MAX_ACTIVE_PARTICIPANT_SCAN_ITEMS: usize = MAX_CALL_PARTICIPANTS + 1;
+const UNIVERSAL_IDEMPOTENCY_DOMAIN: &[u8] = b"UCR-UNIVERSAL-INTEGRATION-IDEMPOTENCY-V1\0";
+
+fn integration_scoped_idempotency_key<S: CommandAcceptanceStore>(
+    store: &S,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    command_type: &str,
+    idempotency_key: &str,
+) -> Result<String, CanonicalError> {
+    validate_mutation_idempotency_key(idempotency_key)?;
+
+    // Preserve exact legacy retry/conflict behavior for commands accepted before integration
+    // namespacing was introduced. A store that cannot prove absence fails closed.
+    if store
+        .has_accepted_idempotency_key(scope, idempotency_key)
+        .map_err(map_store_error)?
+    {
+        return Ok(idempotency_key.to_owned());
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(UNIVERSAL_IDEMPOTENCY_DOMAIN);
+    update_idempotency_hash_field(&mut hasher, integration_id.as_opaque().as_wire_bytes());
+    update_idempotency_hash_field(&mut hasher, command_type.as_bytes());
+    update_idempotency_hash_field(&mut hasher, idempotency_key.as_bytes());
+
+    let digest = hasher.finalize();
+    let mut derived = String::with_capacity(7 + digest.len() * 2);
+    derived.push_str("ucri-v1-");
+    for byte in digest {
+        write!(&mut derived, "{byte:02x}")
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
+    }
+    Ok(derived)
+}
+
+fn update_idempotency_hash_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn accept_integration_mutation_receipt<S: CommandAcceptanceStore>(
+    store: &S,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    command_type: &str,
+    idempotency_key: &str,
+    payload: Vec<u8>,
+) -> Result<super::mutation_idempotency::AcceptedMutation, CanonicalError> {
+    let key = integration_scoped_idempotency_key(
+        store,
+        scope,
+        integration_id,
+        command_type,
+        idempotency_key,
+    )?;
+    accept_mutation_receipt(store, scope, command_type, &key, payload)
+}
+
+fn accept_integration_mutation_id<S: CommandAcceptanceStore>(
+    store: &S,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    command_type: &str,
+    idempotency_key: &str,
+    payload: Vec<u8>,
+) -> Result<CommandId, CanonicalError> {
+    accept_integration_mutation_receipt(
+        store,
+        scope,
+        integration_id,
+        command_type,
+        idempotency_key,
+        payload,
+    )
+    .map(|accepted| accepted.command_id)
+}
+
+fn accept_integration_mutation<S: CommandAcceptanceStore>(
+    store: &S,
+    scope: &TenantScope,
+    integration_id: &IntegrationId,
+    command_type: &str,
+    idempotency_key: &str,
+    payload: Vec<u8>,
+) -> Result<(), CanonicalError> {
+    accept_integration_mutation_id(
+        store,
+        scope,
+        integration_id,
+        command_type,
+        idempotency_key,
+        payload,
+    )
+    .map(|_| ())
+}
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -461,9 +558,10 @@ where
                     CONFERENCE_MANAGE_PERMISSION,
                 )
                 .and_then(|_| {
-                    let stable_command_id = accept_mutation_id(
+                    let stable_command_id = accept_integration_mutation_id(
                         &*self.store,
                         &scope,
+                        &integration_id,
                         "ucr.conference.lifecycle.v1",
                         &idempotency_key,
                         payload,
@@ -536,9 +634,10 @@ where
                     CONFERENCE_MANAGE_PERMISSION,
                 )
                 .and_then(|_| {
-                    accept_mutation(
+                    accept_integration_mutation(
                         &*self.store,
                         &scope,
+                        &integration_id,
                         "ucr.conference.entry.v1",
                         &idempotency_key,
                         payload,
@@ -1736,9 +1835,10 @@ where
     }
     enforce_ensure_owner_role_transition(store, &input)?;
 
-    let stable_command_id = accept_mutation_id(
+    let stable_command_id = accept_integration_mutation_id(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.participant.ensure.v1",
         &input.idempotency_key,
         payload,
@@ -1860,9 +1960,10 @@ where
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
 
-    let stable_command_id = accept_mutation_id(
+    let stable_command_id = accept_integration_mutation_id(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.participant.device.ensure.v1",
         &input.idempotency_key,
         payload,
@@ -1939,9 +2040,10 @@ where
         role,
     )?;
 
-    accept_mutation(
+    accept_integration_mutation(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.participant.update.v1",
         &input.idempotency_key,
         payload,
@@ -2051,9 +2153,10 @@ where
         return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
     }
 
-    let command_id = accept_mutation_id(
+    let command_id = accept_integration_mutation_id(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.participant.remove.v1",
         &input.idempotency_key,
         payload,
@@ -2495,9 +2598,10 @@ where
         scope: input.scope.clone(),
         principal: owner_ready.profile.participant.clone(),
     };
-    let stable_command_id = accept_mutation_id(
+    let stable_command_id = accept_integration_mutation_id(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.runtime.prepare.v1",
         &input.idempotency_key,
         payload,
@@ -2979,9 +3083,10 @@ where
         + IdentityDeviceLookupStore
         + GroupCallLookupStore,
 {
-    let stable_command_id = accept_mutation_id(
+    let stable_command_id = accept_integration_mutation_id(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.join.issue.v1",
         &input.idempotency_key,
         payload,
@@ -3142,9 +3247,10 @@ where
         + CommandAcceptanceStore
         + GroupCallLookupStore,
 {
-    accept_mutation(
+    accept_integration_mutation(
         store,
         scope,
+        integration_id,
         "ucr.conference.join.revoke.v1",
         idempotency_key,
         payload,
@@ -3589,9 +3695,10 @@ fn set_conference_metadata<S: UniversalConferenceStore + CommandAcceptanceStore>
     input: &SetConferenceMetadataInput,
     command_payload: Vec<u8>,
 ) -> Result<UniversalConferenceProfile, CanonicalError> {
-    let accepted = accept_mutation_receipt(
+    let accepted = accept_integration_mutation_receipt(
         store,
         &input.scope,
+        &input.integration_id,
         "ucr.conference.metadata.v1",
         &input.idempotency_key,
         command_payload,
@@ -3644,29 +3751,14 @@ fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
     }
 
-    let incoming_command_id = CommandId::from_opaque(
-        generate_opaque_id().map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
-    );
-    let command = CommandEnvelope {
-        command_id: incoming_command_id.clone(),
-        scope: input.scope.clone(),
-        command_type: "ucr.conference.create.v1".to_owned(),
-        payload: command_payload,
-        correlation: CorrelationContext {
-            correlation_id: incoming_command_id.as_opaque().clone(),
-            causation_id: None,
-            idempotency_key: Some(input.idempotency_key.clone()),
-        },
-        schema_version: ProtocolVersion::new(1, 0),
-        extensions: Vec::new(),
-    };
-    let receipt = store.accept_command(&command).map_err(map_store_error)?;
-    let stable_command_id = match receipt.status {
-        CommandReceiptStatus::Accepted => receipt.command_id,
-        CommandReceiptStatus::Duplicate => receipt
-            .original_command_id
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?,
-    };
+    let stable_command_id = accept_integration_mutation_id(
+        store,
+        &input.scope,
+        &input.integration_id,
+        "ucr.conference.create.v1",
+        &input.idempotency_key,
+        command_payload,
+    )?;
     let conference_id = GroupId::from_opaque(stable_command_id.as_opaque().clone());
     let profile = UniversalConferenceProfile {
         scope: input.scope,
