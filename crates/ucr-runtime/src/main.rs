@@ -8,9 +8,11 @@ use std::{
     time::Duration,
 };
 
+use ucr_api_grpc::MachineTokenVerificationKeyProvider;
 use ucr_core::WebhookDispatchOutcome;
 use ucr_crypto::{MAX_MACHINE_TOKEN_JWKS_BYTES, MachineTokenPublicKeySet};
 use ucr_model::OpaqueId;
+use ucr_protocol::{CanonicalError, CanonicalErrorCode};
 use ucr_runtime::{
     DEFAULT_RECORDING_RETENTION_POLL_INTERVAL, DEFAULT_RUNTIME_BIND,
     DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MachineAuthRuntimeConfig, MachineBearerRuntimeConfig,
@@ -339,6 +341,44 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
         .await
 }
 
+#[derive(Debug, Clone)]
+struct ReloadingMachineTokenJwksProvider {
+    jwks_file: PathBuf,
+}
+
+impl ReloadingMachineTokenJwksProvider {
+    fn read_keys(&self) -> Result<MachineTokenPublicKeySet, CanonicalError> {
+        let metadata = fs::symlink_metadata(&self.jwks_file).map_err(|_| {
+            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+        })?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > MAX_MACHINE_TOKEN_JWKS_BYTES as u64
+        {
+            return Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable,
+            ));
+        }
+        let encoded = fs::read_to_string(&self.jwks_file).map_err(|_| {
+            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+        })?;
+        if encoded.len() > MAX_MACHINE_TOKEN_JWKS_BYTES {
+            return Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable,
+            ));
+        }
+        MachineTokenPublicKeySet::from_jwks_json(&encoded).map_err(|_| {
+            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+        })
+    }
+}
+
+impl MachineTokenVerificationKeyProvider for ReloadingMachineTokenJwksProvider {
+    fn current_verification_keys(&self) -> Result<MachineTokenPublicKeySet, CanonicalError> {
+        self.read_keys()
+    }
+}
+
 fn machine_bearer_config_from_env() -> Result<Option<MachineBearerRuntimeConfig>, String> {
     let Some(jwks_file) = std::env::var("UCR_MACHINE_TOKEN_VERIFICATION_JWKS_FILE").ok() else {
         return Ok(None);
@@ -360,6 +400,24 @@ fn machine_bearer_config_from_env() -> Result<Option<MachineBearerRuntimeConfig>
         })
         .transpose()?
         .unwrap_or(900);
+
+    if std::env::var("UCR_MACHINE_TOKEN_VERIFICATION_PROVIDER")
+        .ok()
+        .as_deref()
+        == Some("file-reload")
+    {
+        let provider = Arc::new(ReloadingMachineTokenJwksProvider {
+            jwks_file: PathBuf::from(jwks_file),
+        });
+        return MachineBearerRuntimeConfig::with_verification_provider(
+            issuer,
+            audience,
+            max_ttl_seconds,
+            provider,
+        )
+        .map(Some);
+    }
+
     let metadata = fs::metadata(&jwks_file)
         .map_err(|error| format!("inspect machine token verification JWKS file: {error}"))?;
     if !metadata.is_file() || metadata.len() > MAX_MACHINE_TOKEN_JWKS_BYTES as u64 {
