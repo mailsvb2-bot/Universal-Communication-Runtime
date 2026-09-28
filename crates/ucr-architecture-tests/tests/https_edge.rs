@@ -11,7 +11,7 @@ fn https_edge_terminates_tls_and_proxies_only_to_loopback() {
         .expect("HTTPS edge source");
     let binary = fs::read_to_string(workspace.join("crates/ucr-https-edge/src/main.rs"))
         .expect("HTTPS edge binary");
-    assert!(binary.contains("ucr_https_edge::run()"));
+    assert!(binary.contains("ucr_https_edge::run_configured()"));
     let spec = fs::read_to_string(workspace.join("spec/m2m-authentication.md"))
         .expect("machine auth spec");
 
