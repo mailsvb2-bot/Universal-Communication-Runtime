@@ -4122,6 +4122,7 @@ mod universal_runtime_tests {
                 join_after_seconds: 300,
                 timezone: Some("UTC".to_owned()),
             },
+            metadata: Vec::new(),
             entry_open: true,
             revision: 1,
         }
