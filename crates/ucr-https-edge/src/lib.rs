@@ -1,15 +1,151 @@
 #![forbid(unsafe_code)]
 
-use std::{fs, net::SocketAddr, path::Path, sync::Arc};
+use std::{fs, io::Cursor, net::SocketAddr, path::Path, sync::Arc};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
 };
+use ucr_secrets::{ActiveSecretSet, SecretHandle, SecretProvider, SecretPurpose};
 
 const MAX_CERTIFICATE_BYTES: u64 = 64 * 1024;
 const MAX_PRIVATE_KEY_BYTES: u64 = 64 * 1024;
+
+
+#[derive(Clone)]
+pub struct ProviderBackedTlsAcceptor {
+    provider: Arc<dyn SecretProvider>,
+    certificate_handle: SecretHandle,
+    private_key_handle: SecretHandle,
+}
+
+impl std::fmt::Debug for ProviderBackedTlsAcceptor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderBackedTlsAcceptor")
+            .field("certificate_handle", &self.certificate_handle)
+            .field("private_key_handle", &self.private_key_handle)
+            .field("material", &"<redacted>")
+            .finish()
+    }
+}
+
+impl ProviderBackedTlsAcceptor {
+    /// Creates a provider-backed TLS acceptor factory.
+    ///
+    /// # Errors
+    /// Rejects wrong-purpose handles or currently unavailable/malformed provider material.
+    pub fn new(
+        provider: Arc<dyn SecretProvider>,
+        certificate_handle: SecretHandle,
+        private_key_handle: SecretHandle,
+    ) -> Result<Self, String> {
+        if certificate_handle.purpose != SecretPurpose::TlsCertificate {
+            return Err("TLS certificate handle must use TlsCertificate purpose".to_owned());
+        }
+        if private_key_handle.purpose != SecretPurpose::TlsPrivateKey {
+            return Err("TLS private key handle must use TlsPrivateKey purpose".to_owned());
+        }
+        let factory = Self {
+            provider,
+            certificate_handle,
+            private_key_handle,
+        };
+        factory.current_acceptor()?;
+        Ok(factory)
+    }
+
+    /// Resolves current/previous overlap and builds an acceptor for one new connection.
+    ///
+    /// New connections prefer the current/current pair. During independently sequenced
+    /// certificate and key rotations, bounded previous versions are tried so an already-valid
+    /// pair remains usable until both handles converge.
+    ///
+    /// # Errors
+    /// Fails closed when the provider is unavailable or no active certificate/key pair matches.
+    pub fn current_acceptor(&self) -> Result<TlsAcceptor, String> {
+        let certificates = self
+            .provider
+            .active_secret_set(&self.certificate_handle)
+            .map_err(|error| format!("resolve TLS certificate secret: {error:?}"))?;
+        let private_keys = self
+            .provider
+            .active_secret_set(&self.private_key_handle)
+            .map_err(|error| format!("resolve TLS private key secret: {error:?}"))?;
+        acceptor_from_active_secret_sets(&certificates, &private_keys)
+    }
+}
+
+fn acceptor_from_active_secret_sets(
+    certificates: &ActiveSecretSet,
+    private_keys: &ActiveSecretSet,
+) -> Result<TlsAcceptor, String> {
+    let certificate_versions = std::iter::once(&certificates.current)
+        .chain(certificates.previous.iter())
+        .collect::<Vec<_>>();
+    let private_key_versions = std::iter::once(&private_keys.current)
+        .chain(private_keys.previous.iter())
+        .collect::<Vec<_>>();
+
+    for certificate in &certificate_versions {
+        for private_key in &private_key_versions {
+            if let Ok(acceptor) = tls_acceptor_from_pem_bytes(
+                certificate.material.as_bytes(),
+                private_key.material.as_bytes(),
+            ) {
+                return Ok(acceptor);
+            }
+        }
+    }
+    Err("no active TLS certificate/private-key pair is valid".to_owned())
+}
+
+/// Starts the HTTPS edge with provider-backed TLS material.
+///
+/// The provider is resolved for every accepted connection, so new connections observe the newest
+/// valid keypair without restarting the listener. Existing TLS sessions keep the acceptor snapshot
+/// they already negotiated with.
+///
+/// # Errors
+/// Returns bind, provider, certificate, key, or upstream configuration errors.
+pub async fn run_with_secret_provider(
+    bind: SocketAddr,
+    upstream: SocketAddr,
+    provider: Arc<dyn SecretProvider>,
+    certificate_handle: SecretHandle,
+    private_key_handle: SecretHandle,
+) -> Result<(), String> {
+    validate_loopback_upstream(upstream)?;
+    let acceptor_factory =
+        ProviderBackedTlsAcceptor::new(provider, certificate_handle, private_key_handle)?;
+    let listener = TcpListener::bind(bind)
+        .await
+        .map_err(|error| format!("bind HTTPS edge: {error}"))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("resolve HTTPS edge: {error}"))?;
+    println!("UCR_HTTPS_EDGE_READY endpoint=https://{address} upstream=http://{upstream}");
+
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .map_err(|error| format!("accept HTTPS edge connection: {error}"))?;
+        let acceptor = match acceptor_factory.current_acceptor() {
+            Ok(acceptor) => acceptor,
+            Err(error) => {
+                eprintln!("ucr-https-edge: TLS secret provider unavailable: {error}");
+                continue;
+            }
+        };
+        tokio::spawn(async move {
+            if let Err(error) = proxy_connection(acceptor, stream, upstream).await {
+                eprintln!("ucr-https-edge: connection closed: {error}");
+            }
+        });
+    }
+}
 
 /// Starts the TLS edge from process environment variables.
 ///
@@ -72,36 +208,50 @@ pub fn tls_acceptor(
     certificate_path: &str,
     private_key_path: &str,
 ) -> Result<tokio_rustls::TlsAcceptor, String> {
+    bounded_file(certificate_path, MAX_CERTIFICATE_BYTES, "certificate")?;
+    bounded_file(private_key_path, MAX_PRIVATE_KEY_BYTES, "private key")?;
+    let certificate_pem =
+        fs::read(certificate_path).map_err(|error| format!("open TLS certificate: {error}"))?;
+    let private_key_pem =
+        fs::read(private_key_path).map_err(|error| format!("open TLS private key: {error}"))?;
+    tls_acceptor_from_pem_bytes(&certificate_pem, &private_key_pem)
+}
+
+fn tls_acceptor_from_pem_bytes(
+    certificate_pem: &[u8],
+    private_key_pem: &[u8],
+) -> Result<TlsAcceptor, String> {
+    if certificate_pem.is_empty()
+        || certificate_pem.len() > MAX_CERTIFICATE_BYTES as usize
+        || private_key_pem.is_empty()
+        || private_key_pem.len() > MAX_PRIVATE_KEY_BYTES as usize
+    {
+        return Err("TLS secret material must be non-empty and bounded".to_owned());
+    }
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let certificates = load_certificates(certificate_path)?;
-    let private_key = load_private_key(private_key_path)?;
+    let certificates = parse_certificates(certificate_pem)?;
+    let private_key = parse_private_key(private_key_pem)?;
     let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certificates, private_key)
         .map_err(|error| format!("build TLS server config: {error}"))?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+    Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
-fn load_certificates(path: &str) -> Result<Vec<CertificateDer<'static>>, String> {
-    bounded_file(path, MAX_CERTIFICATE_BYTES, "certificate")?;
-    let mut reader = std::io::BufReader::new(
-        fs::File::open(path).map_err(|error| format!("open TLS certificate: {error}"))?,
-    );
+fn parse_certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, String> {
+    let mut reader = Cursor::new(pem);
     let certificates = CertificateDer::pem_reader_iter(&mut reader)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("parse TLS certificate: {error}"))?;
     if certificates.is_empty() {
-        return Err("TLS certificate file contained no certificates".to_owned());
+        return Err("TLS certificate material contained no certificates".to_owned());
     }
     Ok(certificates)
 }
 
-fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>, String> {
-    bounded_file(path, MAX_PRIVATE_KEY_BYTES, "private key")?;
-    let mut reader = std::io::BufReader::new(
-        fs::File::open(path).map_err(|error| format!("open TLS private key: {error}"))?,
-    );
+fn parse_private_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>, String> {
+    let mut reader = Cursor::new(pem);
     PrivateKeyDer::from_pem_reader(&mut reader)
         .map_err(|error| format!("parse TLS private key: {error}"))
 }
