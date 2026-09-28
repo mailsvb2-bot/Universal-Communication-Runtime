@@ -11,6 +11,7 @@ or broadcast lifecycle owner.
 
 The separate `CompositionProvider` accepts one already-authorized, bounded operation containing:
 - exact Tenant scope and Call ID;
+- a caller-selected stable composition ID used as the provider-independent output handle;
 - an opaque idempotent operation ID;
 - one of the required layouts: gallery, active speaker, or screen-with-speaker;
 - bounded unique typed audio-stream IDs and video-stream IDs from the existing Call media model.
