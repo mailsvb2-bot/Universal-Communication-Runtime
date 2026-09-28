@@ -16,6 +16,7 @@ webrtc = "=0.17.2"
 zeroize = { version = "=1.9.0", features = ["derive"] }
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
+ucr-secrets = { path = "../ucr-secrets" }
 
 [lints]
 workspace = true
