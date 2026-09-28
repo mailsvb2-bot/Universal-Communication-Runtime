@@ -16,6 +16,8 @@ use ucr_secrets::{
 
 const MAX_CERTIFICATE_BYTES: u64 = 64 * 1024;
 const MAX_PRIVATE_KEY_BYTES: u64 = 64 * 1024;
+const MAX_CERTIFICATE_BYTES_USIZE: usize = 64 * 1024;
+const MAX_PRIVATE_KEY_BYTES_USIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ReloadingFileTlsSecretProvider {
@@ -92,7 +94,6 @@ impl ReloadingFileTlsSecretProvider {
     }
 
     fn set_for(
-        &self,
         handle: &SecretHandle,
         current_path: &str,
         previous_path: Option<&str>,
@@ -141,14 +142,14 @@ impl SecretProvider for ReloadingFileTlsSecretProvider {
         handle: &SecretHandle,
     ) -> Result<ActiveSecretSet, SecretProviderError> {
         if handle == &self.certificate_handle {
-            self.set_for(
+            Self::set_for(
                 handle,
                 &self.certificate_path,
                 self.previous_certificate_path.as_deref(),
                 MAX_CERTIFICATE_BYTES,
             )
         } else if handle == &self.private_key_handle {
-            self.set_for(
+            Self::set_for(
                 handle,
                 &self.private_key_path,
                 self.previous_private_key_path.as_deref(),
@@ -182,7 +183,7 @@ impl std::fmt::Debug for ProviderBackedTlsAcceptor {
             .field("certificate_handle", &self.certificate_handle)
             .field("private_key_handle", &self.private_key_handle)
             .field("material", &"<redacted>")
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -303,11 +304,6 @@ pub async fn run_with_secret_provider(
     }
 }
 
-/// Starts the TLS edge from process environment variables.
-///
-/// # Errors
-/// Returns bind, certificate, or upstream configuration errors. Connection
-/// failures are logged and do not stop the listener.
 /// Starts the HTTPS edge using the configured TLS material source.
 ///
 /// `UCR_HTTPS_EDGE_SECRET_PROVIDER=file-reload` enables the shared provider-backed path.
@@ -359,6 +355,11 @@ pub async fn run_configured() -> Result<(), String> {
     .await
 }
 
+/// Starts the TLS edge from process environment variables using the legacy static file path.
+///
+/// # Errors
+/// Returns bind, certificate, private-key, or upstream configuration errors. Connection failures
+/// are logged and do not stop the listener.
 pub async fn run() -> Result<(), String> {
     let bind = std::env::var("UCR_HTTPS_EDGE_BIND")
         .map_err(|_| "UCR_HTTPS_EDGE_BIND is required".to_owned())?
@@ -429,9 +430,9 @@ fn tls_acceptor_from_pem_bytes(
     private_key_pem: &[u8],
 ) -> Result<TlsAcceptor, String> {
     if certificate_pem.is_empty()
-        || certificate_pem.len() > MAX_CERTIFICATE_BYTES as usize
+        || certificate_pem.len() > MAX_CERTIFICATE_BYTES_USIZE
         || private_key_pem.is_empty()
-        || private_key_pem.len() > MAX_PRIVATE_KEY_BYTES as usize
+        || private_key_pem.len() > MAX_PRIVATE_KEY_BYTES_USIZE
     {
         return Err("TLS secret material must be non-empty and bounded".to_owned());
     }
