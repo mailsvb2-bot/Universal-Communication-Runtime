@@ -155,7 +155,10 @@ pub(super) fn verify_v46_objects(connection: &Connection) -> Result<(), DurableS
     let mut current_entries = Vec::new();
     for (tenant_id, namespace_present, namespace_id, conference_id, key, value) in rows {
         let owner = (tenant_id, namespace_present, namespace_id, conference_id);
-        if current_owner.as_ref().is_some_and(|current| current != &owner) {
+        if current_owner
+            .as_ref()
+            .is_some_and(|current| current != &owner)
+        {
             ucr_core::canonical_conference_metadata(&current_entries)
                 .map_err(|_| DurableStoreError::Corrupt)?;
             current_entries.clear();
@@ -480,9 +483,7 @@ impl UniversalConferenceStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         let current =
             load_profile(&transaction, scope, conference_id)?.ok_or(DurableStoreError::Conflict)?;
-        if current.revision == expected_revision.saturating_add(1)
-            && current.metadata == metadata
-        {
+        if current.revision == expected_revision.saturating_add(1) && current.metadata == metadata {
             return Ok(current);
         }
         if current.revision != expected_revision {
@@ -916,7 +917,12 @@ fn insert_profile(
             ],
         )
         .map_err(|error| map_sqlite_error(&error))?;
-    insert_metadata_rows(transaction, &profile.scope, &profile.conference_id, &profile.metadata)?;
+    insert_metadata_rows(
+        transaction,
+        &profile.scope,
+        &profile.conference_id,
+        &profile.metadata,
+    )?;
     Ok(())
 }
 
