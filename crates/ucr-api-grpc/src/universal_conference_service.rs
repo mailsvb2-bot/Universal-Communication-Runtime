@@ -51,9 +51,9 @@ use ucr_protocol::{
     GROUP_MLS_CAPABILITY, H264_VIDEO_CODEC_CAPABILITY, MAX_CALL_PARTICIPANTS,
     MAX_CONFERENCE_SUBSCRIPTIONS_PER_RECIPIENT, OPUS_AUDIO_CODEC_CAPABILITY,
     SCREEN_SHARE_SEND_PERMISSION, SCREEN_SHARE_VIDEO_CAPABILITY, VIDEO_MEDIA_CAPABILITY,
-    VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, acknowledgement_for, canonical_capabilities,
-    phase20_audio_capabilities, phase21_video_capabilities, phase22_media_e2ee_capabilities,
-    phase29_sfu_capabilities, phase30_conference_capabilities,
+    VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, acknowledgement_for, broadcast_capabilities,
+    canonical_capabilities, phase20_audio_capabilities, phase21_video_capabilities,
+    phase22_media_e2ee_capabilities, phase29_sfu_capabilities, phase30_conference_capabilities,
 };
 use ucr_realtime::{
     JoinGrantUsePolicy as RealtimeJoinGrantUsePolicy, JoinTokenError, JoinTokenIssuer,
@@ -3086,6 +3086,7 @@ fn universal_capabilities(
     capabilities.extend(phase22_media_e2ee_capabilities());
     capabilities.extend(phase29_sfu_capabilities());
     capabilities.extend(phase30_conference_capabilities());
+    capabilities.extend(broadcast_capabilities());
     let capabilities = canonical_capabilities(&capabilities)
         .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?;
     let has_capability = |id: &str| capabilities.iter().any(|value| value.id == id);
@@ -3925,6 +3926,22 @@ mod universal_runtime_tests {
         assert!(capabilities.webinar);
         assert!(!capabilities.rtmp);
         assert!(!capabilities.recording);
+        for id in [
+            ucr_protocol::MEDIA_COMPOSITION_CAPABILITY,
+            ucr_protocol::RTMP_BROADCAST_CAPABILITY,
+            ucr_protocol::HLS_BROADCAST_CAPABILITY,
+            ucr_protocol::DASH_BROADCAST_CAPABILITY,
+        ] {
+            let capability = capabilities
+                .capabilities
+                .iter()
+                .find(|capability| capability.id == id)
+                .expect("prepared broadcast capability");
+            assert_eq!(
+                capability.maturity,
+                super::pb::CapabilityMaturity::Prepared as i32
+            );
+        }
         assert_eq!(
             capabilities.codecs,
             vec![

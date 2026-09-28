@@ -8,6 +8,7 @@ mod attachment;
 mod audio;
 mod authorization;
 mod bridge;
+mod broadcast;
 mod call;
 mod capability;
 mod commands;
@@ -135,6 +136,12 @@ pub use bridge::{
     validate_bridge_action_transition, validate_bridge_event_cursor, validate_bridge_event_page,
     validate_bridge_inbound_event, validate_bridge_provider_acceptance,
     validate_bridge_registration_transition,
+};
+
+pub use broadcast::{
+    DASH_BROADCAST_CAPABILITY, HLS_BROADCAST_CAPABILITY, MAX_BROADCAST_AUDIO_SOURCES,
+    MAX_BROADCAST_OUTPUTS, MAX_BROADCAST_VIDEO_SOURCES, MEDIA_COMPOSITION_CAPABILITY,
+    RTMP_BROADCAST_CAPABILITY, broadcast_capabilities,
 };
 pub use call::{
     CALL_CREATION_FINGERPRINT_V1_DOMAIN, CALL_SIGNAL_FINGERPRINT_V1_DOMAIN, CallSignallingError,
