@@ -10241,9 +10241,8 @@ mod phase14_event_subscription_tests {
     use ucr_core::{
         DurableRecordStatus, DurableStoreError, EventApiIngress, EventAppendStatus,
         EventDeliveryClock, EventDeliveryClockError, EventJournalStore, EventSubscriptionStore,
-        PermissionGrantStore,
-        ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore,
-        issue_service_credential,
+        PermissionGrantStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaClockError,
+        ServiceQuotaStore, issue_service_credential,
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CorrelationContext, DeviceId, DeviceRef,
