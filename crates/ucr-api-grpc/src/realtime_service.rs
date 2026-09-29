@@ -12,8 +12,9 @@ use ucr_conference::{
 };
 use ucr_core::{
     AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
-    DurableStoreError, EventJournalStore, GroupMessageStore, PrincipalIdentityBindingStore,
-    ServiceQuotaStore, UniversalConferenceStore,
+    DurableStoreError, EventJournalStore, GroupMessageStore, MAX_ACTIVE_RECORDINGS_PER_CALL,
+    PrincipalIdentityBindingStore, RecordingStore, ServiceQuotaStore, UniversalConferenceStore,
+    recording_allows_realtime_participant,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
@@ -226,6 +227,7 @@ where
         + UniversalConferenceStore
         + ConferenceJoinGrantStore
         + ServiceQuotaStore
+        + RecordingStore
         + 'static,
 {
     pb::realtime_service_server::RealtimeServiceServer::new(service)
@@ -247,6 +249,7 @@ where
         + UniversalConferenceStore
         + ConferenceJoinGrantStore
         + ServiceQuotaStore
+        + RecordingStore
         + 'static,
 {
     type SubscribeMediaStream =
@@ -275,6 +278,7 @@ where
                         self.require_entry_open_for_join(&claims)?;
                     }
                     self.ensure_accepted_conference_participant_for_join(&claims)?;
+                    require_recording_participant_admission(&*self.store, &claims)?;
                     let media_policy = self.effective_universal_media_policy(&claims)?;
                     let redeemed = self.redeemed_claims(&token, &scope, &call_id, &session_id)?;
                     if redeemed != claims {
@@ -2510,7 +2514,31 @@ fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
     }
 }
 
-const fn map_registry_error(error: RealtimeRegistryError) -> CanonicalError {
+const fn require_recording_participant_admission<S>(
+    store: &S,
+    claims: &RealtimeSessionClaims,
+) -> Result<(), CanonicalError>
+where
+    S: RecordingStore,
+{
+    let recordings = store
+        .active_recordings_for_call(
+            &claims.scope,
+            &claims.call_id,
+            MAX_ACTIVE_RECORDINGS_PER_CALL,
+        )
+        .map_err(map_store_error)?;
+    if recordings
+        .iter()
+        .all(|recording| recording_allows_realtime_participant(recording, &claims.participant))
+    {
+        Ok(())
+    } else {
+        Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
+    }
+}
+
+fn map_registry_error(error: RealtimeRegistryError) -> CanonicalError {
     match error {
         RealtimeRegistryError::Expired | RealtimeRegistryError::ClaimMismatch => {
             CanonicalError::new(CanonicalErrorCode::Unauthenticated)
