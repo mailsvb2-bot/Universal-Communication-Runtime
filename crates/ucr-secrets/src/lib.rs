@@ -422,6 +422,99 @@ mod tests {
         SecretMaterial::new(value.to_vec()).expect("material")
     }
 
+    fn manifest_path(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "ucr-secret-manifest-{name}-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        path
+    }
+
+    fn write_manifest(path: &Path, body: &str) {
+        fs::write(path, body).expect("write manifest");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("chmod manifest");
+        }
+    }
+
+    #[test]
+    fn reloadable_file_provider_observes_atomic_overlap_replacement() {
+        let path = manifest_path("rotation");
+        write_manifest(
+            &path,
+            "current_version_id=v1\ncurrent_secret_hex=4141414141414141414141414141414141414141414141414141414141414141\n",
+        );
+        let handle = SecretHandle {
+            secret_id: oid("file-provider"),
+            purpose: SecretPurpose::JoinSigning,
+        };
+        let provider =
+            ReloadingFileSecretProvider::new(handle.clone(), path.clone()).expect("provider");
+        let first = provider.active_secret_set(&handle).expect("first");
+        assert_eq!(first.current.version_id, oid("v1"));
+        assert!(first.previous.is_none());
+
+        let replacement = path.with_extension("next");
+        write_manifest(
+            &replacement,
+            "current_version_id=v2\ncurrent_secret_hex=4242424242424242424242424242424242424242424242424242424242424242\nprevious_version_id=v1\nprevious_secret_hex=4141414141414141414141414141414141414141414141414141414141414141\n",
+        );
+        fs::rename(&replacement, &path).expect("atomic replace");
+
+        let rotated = provider.active_secret_set(&handle).expect("rotated");
+        assert_eq!(rotated.current.version_id, oid("v2"));
+        assert_eq!(
+            rotated.previous.as_ref().map(|value| &value.version_id),
+            Some(&oid("v1"))
+        );
+        fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn reloadable_file_provider_rejects_duplicate_version_ids() {
+        let path = manifest_path("duplicate");
+        write_manifest(
+            &path,
+            "current_version_id=v1\ncurrent_secret_hex=4141414141414141414141414141414141414141414141414141414141414141\nprevious_version_id=v1\nprevious_secret_hex=4242424242424242424242424242424242424242424242424242424242424242\n",
+        );
+        let handle = SecretHandle {
+            secret_id: oid("file-provider-duplicate"),
+            purpose: SecretPurpose::WebhookSigning,
+        };
+        assert_eq!(
+            ReloadingFileSecretProvider::new(handle, path.clone()).map(|_| ()),
+            Err(SecretProviderError::Conflict)
+        );
+        fs::remove_file(path).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reloadable_file_provider_rejects_group_readable_manifest() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let path = manifest_path("permissions");
+        fs::write(
+            &path,
+            "current_version_id=v1\ncurrent_secret_hex=4141414141414141414141414141414141414141414141414141414141414141\n",
+        )
+        .expect("write manifest");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("chmod manifest");
+        let handle = SecretHandle {
+            secret_id: oid("file-provider-permissions"),
+            purpose: SecretPurpose::MachineTokenSigning,
+        };
+        assert_eq!(
+            ReloadingFileSecretProvider::new(handle, path.clone()).map(|_| ()),
+            Err(SecretProviderError::InvalidMaterial)
+        );
+        fs::remove_file(path).expect("cleanup");
+    }
+
     #[test]
     fn rotation_keeps_exactly_current_and_previous_for_zero_downtime_overlap() {
         let provider = InMemorySecretProvider::default();
