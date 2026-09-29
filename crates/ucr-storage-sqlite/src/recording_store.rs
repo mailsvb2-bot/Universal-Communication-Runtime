@@ -1042,7 +1042,8 @@ fn decode_u64(value: &[u8]) -> Result<u64, DurableStoreError> {
 mod tests {
     use rusqlite::Connection;
     use ucr_core::{
-        CallStore, ConversationStore, EventJournalStore, RecordingStore, StorageProvider,
+        CallStore, ConversationStore, EventJournalStore, MAX_ACTIVE_RECORDINGS_PER_CALL,
+        RecordingStore, StorageProvider,
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CallParticipant, CallParticipantState, CallSession,
@@ -1260,6 +1261,78 @@ mod tests {
             .expect("revoke");
         assert_eq!(stopped.state, RecordingState::Stopped);
         assert_eq!(stopped.stopped_at_unix_ms, Some(1_040_000));
+    }
+
+    #[test]
+    fn active_recording_lookup_is_call_scoped_and_excludes_stopped_rows() {
+        let db = TestDb::new();
+        let (call, host, guest) = call();
+        let initial = recording(&call, &host, &guest);
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        store
+            .persist_conversation(&conversation())
+            .expect("conversation");
+        store.create_call(&host, &call).expect("call");
+        store.persist_recording(&initial).expect("recording");
+
+        let host_granted = store
+            .set_recording_consent(
+                &initial.scope,
+                &initial.recording_id,
+                initial.revision,
+                &host.principal,
+                RecordingConsentState::Granted,
+                1_010_000,
+            )
+            .expect("host consent");
+        let ready = store
+            .set_recording_consent(
+                &initial.scope,
+                &initial.recording_id,
+                host_granted.revision,
+                &guest.principal,
+                RecordingConsentState::Granted,
+                1_020_000,
+            )
+            .expect("guest consent");
+        let active = store
+            .start_recording(
+                &initial.scope,
+                &initial.recording_id,
+                ready.revision,
+                1_030_000,
+            )
+            .expect("start");
+
+        assert_eq!(
+            store
+                .active_recordings_for_call(
+                    &initial.scope,
+                    &initial.call_id,
+                    MAX_ACTIVE_RECORDINGS_PER_CALL,
+                )
+                .expect("active lookup"),
+            vec![active.clone()]
+        );
+
+        store
+            .stop_recording(
+                &active.scope,
+                &active.recording_id,
+                active.revision,
+                1_040_000,
+            )
+            .expect("stop");
+        assert!(
+            store
+                .active_recordings_for_call(
+                    &initial.scope,
+                    &initial.call_id,
+                    MAX_ACTIVE_RECORDINGS_PER_CALL,
+                )
+                .expect("after stop")
+                .is_empty()
+        );
     }
 
     #[test]
