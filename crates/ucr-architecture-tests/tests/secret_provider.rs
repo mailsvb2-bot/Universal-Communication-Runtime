@@ -30,7 +30,8 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     assert!(webrtc.contains("SecretPurpose::TurnCredentials"));
     assert!(webrtc.contains("self.current_secret()?"));
     assert!(webrtc.contains("turn_rest_secret_from_active_set"));
-    assert!(webrtc.contains("u8::is_ascii_graphic"));
+    assert!(webrtc.contains("validate_coturn_rest_secret_material"));
+    assert!(webrtc.contains("is_ascii_alphanumeric"));
     assert!(webhook.contains("HardenedWebhookSink::with_secret_provider"));
     assert!(webhook.contains("SecretPurpose::WebhookSigning"));
     assert!(webhook.contains("self.current_signing_secret()?"));
@@ -57,6 +58,16 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     assert!(runtime_main.contains("UCR_REALTIME_JOIN_SECRET_FILE"));
     assert!(runtime_main.contains("UCR_WEBRTC_TURN_SECRET_PROVIDER"));
     assert!(runtime_main.contains("UCR_WEBRTC_TURN_SECRET_FILE"));
+    assert!(runtime_main.contains("reconcile-turn-secrets"));
+    assert!(runtime_main.contains("--exclusive-turn-realm"));
+    assert!(runtime_main.contains("reconcile_coturn_sqlite_secret_set"));
+    let turn_reconcile = read("crates/ucr-runtime/src/turn_secret_reconcile.rs");
+    assert!(turn_reconcile.contains("TransactionBehavior::Immediate"));
+    assert!(turn_reconcile.contains("SQLITE_OPEN_READ_WRITE"));
+    assert!(turn_reconcile.contains("symlink_metadata"));
+    assert!(turn_reconcile.contains("ExclusiveOwnershipRequired"));
+    assert!(turn_reconcile.contains("VerificationFailed"));
+    assert!(!turn_reconcile.contains("Command::new"));
     assert!(runtime_main.contains("UCR_WEBHOOK_SECRET_PROVIDER"));
     assert!(runtime_main.contains("UCR_WEBHOOK_SIGNING_SECRET_FILE"));
     assert!(runtime.contains("RealtimeRuntimeConfig"));

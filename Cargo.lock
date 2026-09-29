@@ -4097,6 +4097,7 @@ dependencies = [
 name = "ucr-runtime"
 version = "0.0.1"
 dependencies = [
+ "rusqlite",
  "tokio",
  "tokio-stream",
  "tonic",

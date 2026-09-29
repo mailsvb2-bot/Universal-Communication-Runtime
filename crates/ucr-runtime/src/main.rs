@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod turn_secret_reconcile;
+
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use ucr_api_grpc::MachineTokenVerificationKeyProvider;
@@ -24,54 +26,20 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
-    let mut args = std::env::args().skip(1);
-    let command = args.next().ok_or_else(usage)?;
-    let mut database = None;
-    let mut bind = DEFAULT_RUNTIME_BIND.to_owned();
-    let mut join_base_url = None;
-    let mut tenant_id = None;
-    let mut namespace_id = None;
-    let mut subscription_id = None;
+    let parsed = parse_args()?;
+    let command = parsed.command;
+    let database = parsed.database;
+    let bind = parsed.bind;
+    let join_base_url = parsed.join_base_url;
+    let tenant_id = parsed.tenant_id;
+    let namespace_id = parsed.namespace_id;
+    let subscription_id = parsed.subscription_id;
+    let turn_database = parsed.turn_database;
+    let turn_realm = parsed.turn_realm;
+    let exclusive_turn_realm = parsed.exclusive_turn_realm;
 
-    while let Some(argument) = args.next() {
-        match argument.as_str() {
-            "--database" => {
-                database = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| "--database requires a path".to_owned())?,
-                ));
-            }
-            "--bind" => {
-                bind = args
-                    .next()
-                    .ok_or_else(|| "--bind requires an address".to_owned())?;
-            }
-            "--join-base-url" => {
-                join_base_url = Some(
-                    args.next()
-                        .ok_or_else(|| "--join-base-url requires an HTTPS URL".to_owned())?,
-                );
-            }
-            "--tenant-id" => {
-                tenant_id = Some(
-                    args.next()
-                        .ok_or_else(|| "--tenant-id requires an opaque identifier".to_owned())?,
-                );
-            }
-            "--namespace-id" => {
-                namespace_id =
-                    Some(args.next().ok_or_else(|| {
-                        "--namespace-id requires an opaque identifier".to_owned()
-                    })?);
-            }
-            "--subscription-id" => {
-                subscription_id =
-                    Some(args.next().ok_or_else(|| {
-                        "--subscription-id requires an opaque identifier".to_owned()
-                    })?);
-            }
-            _ => return Err(format!("unknown option: {argument}; {}", usage())),
-        }
+    if command == "reconcile-turn-secrets" {
+        return reconcile_turn_secrets_command(turn_database, turn_realm, exclusive_turn_realm);
     }
 
     let database = database.ok_or_else(|| format!("--database is required; {}", usage()))?;
@@ -117,6 +85,92 @@ async fn run() -> Result<(), String> {
     }
 }
 
+#[derive(Debug)]
+struct ParsedArgs {
+    command: String,
+    database: Option<PathBuf>,
+    bind: String,
+    join_base_url: Option<String>,
+    tenant_id: Option<String>,
+    namespace_id: Option<String>,
+    subscription_id: Option<String>,
+    turn_database: Option<PathBuf>,
+    turn_realm: Option<String>,
+    exclusive_turn_realm: bool,
+}
+
+fn parse_args() -> Result<ParsedArgs, String> {
+    let mut args = std::env::args().skip(1);
+    let command = args.next().ok_or_else(usage)?;
+    let mut parsed = ParsedArgs {
+        command,
+        database: None,
+        bind: DEFAULT_RUNTIME_BIND.to_owned(),
+        join_base_url: None,
+        tenant_id: None,
+        namespace_id: None,
+        subscription_id: None,
+        turn_database: None,
+        turn_realm: None,
+        exclusive_turn_realm: false,
+    };
+
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--database" => {
+                parsed.database = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| "--database requires a path".to_owned())?,
+                ));
+            }
+            "--bind" => {
+                parsed.bind = args
+                    .next()
+                    .ok_or_else(|| "--bind requires an address".to_owned())?;
+            }
+            "--join-base-url" => {
+                parsed.join_base_url = Some(
+                    args.next()
+                        .ok_or_else(|| "--join-base-url requires an HTTPS URL".to_owned())?,
+                );
+            }
+            "--tenant-id" => {
+                parsed.tenant_id = Some(
+                    args.next()
+                        .ok_or_else(|| "--tenant-id requires an opaque identifier".to_owned())?,
+                );
+            }
+            "--namespace-id" => {
+                parsed.namespace_id =
+                    Some(args.next().ok_or_else(|| {
+                        "--namespace-id requires an opaque identifier".to_owned()
+                    })?);
+            }
+            "--subscription-id" => {
+                parsed.subscription_id =
+                    Some(args.next().ok_or_else(|| {
+                        "--subscription-id requires an opaque identifier".to_owned()
+                    })?);
+            }
+            "--turn-database" => {
+                parsed.turn_database =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--turn-database requires a path".to_owned()
+                    })?));
+            }
+            "--turn-realm" => {
+                parsed.turn_realm = Some(
+                    args.next()
+                        .ok_or_else(|| "--turn-realm requires a realm".to_owned())?,
+                );
+            }
+            "--exclusive-turn-realm" => parsed.exclusive_turn_realm = true,
+            _ => return Err(format!("unknown option: {argument}; {}", usage())),
+        }
+    }
+    Ok(parsed)
+}
+
 type ConfiguredSecretProvider = (Arc<dyn SecretProvider>, SecretHandle);
 
 fn secret_provider_from_env(
@@ -147,6 +201,42 @@ fn secret_provider_from_env(
             .map_err(|error| format!("load secret provider manifest: {error:?}"))?,
     );
     Ok(Some((provider, handle)))
+}
+
+fn reconcile_turn_secrets_command(
+    turn_database: Option<PathBuf>,
+    turn_realm: Option<String>,
+    exclusive_turn_realm: bool,
+) -> Result<(), String> {
+    let turn_database = turn_database
+        .ok_or_else(|| "--turn-database is required for reconcile-turn-secrets".to_owned())?;
+    let turn_realm = turn_realm
+        .ok_or_else(|| "--turn-realm is required for reconcile-turn-secrets".to_owned())?;
+    let (provider, handle) = secret_provider_from_env(
+        "UCR_WEBRTC_TURN_SECRET_PROVIDER",
+        "UCR_WEBRTC_TURN_SECRET_FILE",
+        "UCR_WEBRTC_TURN_SECRET_ID",
+        "webrtc-turn-root",
+        SecretPurpose::TurnCredentials,
+    )?
+    .ok_or_else(|| {
+        "UCR_WEBRTC_TURN_SECRET_PROVIDER=file-reload is required for reconcile-turn-secrets"
+            .to_owned()
+    })?;
+    let outcome = turn_secret_reconcile::reconcile_coturn_sqlite_secret_set(
+        provider.as_ref(),
+        &handle,
+        &turn_database,
+        &turn_realm,
+        exclusive_turn_realm,
+    )
+    .map_err(|error| format!("reconcile coturn dynamic secrets: {error:?}"))?;
+    println!("UCR_TURN_SECRET_RECONCILE_OK");
+    println!("desired={}", outcome.desired);
+    println!("inserted={}", outcome.inserted);
+    println!("removed={}", outcome.removed);
+    println!("retained={}", outcome.retained);
+    Ok(())
 }
 
 async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String> {
@@ -588,6 +678,6 @@ fn hex_nibble(byte: u8) -> Result<u8, String> {
 }
 
 fn usage() -> String {
-    "usage: ucr-runtime <init|check|metrics|serve|serve-auth|serve-realtime|dispatch-webhook-once|run-webhook-worker|run-recording-retention-worker> --database PATH [--bind 127.0.0.1:50051] [--join-base-url https://host/conference] [--tenant-id ID] [--namespace-id ID] [--subscription-id ID]"
+    "usage: ucr-runtime <init|check|metrics|serve|serve-auth|serve-realtime|dispatch-webhook-once|run-webhook-worker|run-recording-retention-worker> --database PATH [...] | ucr-runtime reconcile-turn-secrets --turn-database PATH --turn-realm REALM --exclusive-turn-realm"
         .to_owned()
 }

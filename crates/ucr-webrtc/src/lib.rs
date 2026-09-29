@@ -315,13 +315,30 @@ fn turn_rest_secret_from_active_set(
     Ok(current)
 }
 
+/// Validates deployment TURN REST root material against the canonical coturn-safe alphabet.
+///
+/// UCR intentionally uses a base64url-safe subset so the same bytes can be represented without
+/// quoting or control-character ambiguity in coturn configuration and SQL-backed dynamic secrets.
+///
+/// # Errors
+/// Returns `KeyUnavailable` unless the material is exactly 32 bytes of ASCII alphanumeric,
+/// '-' or '_'.
+pub fn validate_coturn_rest_secret_material(material: &[u8]) -> Result<(), TurnCredentialError> {
+    if material.len() != 32
+        || !material
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_'))
+    {
+        return Err(TurnCredentialError::KeyUnavailable);
+    }
+    Ok(())
+}
+
 fn turn_rest_secret_from_material(material: &[u8]) -> Result<TurnRestSecret, TurnCredentialError> {
+    validate_coturn_rest_secret_material(material)?;
     let bytes: [u8; 32] = material
         .try_into()
         .map_err(|_| TurnCredentialError::KeyUnavailable)?;
-    if !bytes.iter().all(u8::is_ascii_graphic) {
-        return Err(TurnCredentialError::KeyUnavailable);
-    }
     Ok(TurnRestSecret::from_bytes(bytes))
 }
 
@@ -1339,6 +1356,22 @@ mod tests {
             ),
             Err(TurnCredentialError::KeyUnavailable)
         ));
+    }
+
+    #[test]
+    fn coturn_provider_material_uses_unambiguous_base64url_safe_alphabet() {
+        assert_eq!(
+            validate_coturn_rest_secret_material(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_coturn_rest_secret_material(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA!"),
+            Err(TurnCredentialError::KeyUnavailable)
+        );
+        assert_eq!(
+            validate_coturn_rest_secret_material(b"short"),
+            Err(TurnCredentialError::KeyUnavailable)
+        );
     }
 
     #[test]
