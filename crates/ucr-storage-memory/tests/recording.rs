@@ -1,4 +1,6 @@
-use ucr_core::{DurableRecordStatus, DurableStoreError, RecordingStore};
+use ucr_core::{
+    DurableRecordStatus, DurableStoreError, MAX_ACTIVE_RECORDINGS_PER_CALL, RecordingStore,
+};
 use ucr_model::{
     CallId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingConsent,
     RecordingConsentState, RecordingId, RecordingPolicy, RecordingSession, RecordingState,
@@ -200,4 +202,34 @@ fn retention_expiry_is_finite_and_delete_is_idempotent() {
         )
         .expect("repeat delete");
     assert_eq!(repeated, deleted);
+}
+
+
+#[test]
+fn active_recording_lookup_is_call_scoped_bounded_and_state_exact() {
+    let store = MemoryLocalStore::default();
+    let mut first = recording();
+    first.policy.require_all_participant_consent = false;
+    first.state = RecordingState::Active;
+    first.started_at_unix_ms = Some(1_010_000);
+    store.persist_recording(&first).expect("first");
+
+    let mut stopped = first.clone();
+    stopped.recording_id = RecordingId::from_opaque(oid("recording-stopped"));
+    stopped.state = RecordingState::Stopped;
+    stopped.stopped_at_unix_ms = Some(1_020_000);
+    store.persist_recording(&stopped).expect("stopped");
+
+    let active = store
+        .active_recordings_for_call(
+            &first.scope,
+            &first.call_id,
+            MAX_ACTIVE_RECORDINGS_PER_CALL,
+        )
+        .expect("active by call");
+    assert_eq!(active, vec![first.clone()]);
+    assert_eq!(
+        store.active_recordings_for_call(&first.scope, &first.call_id, 0),
+        Err(DurableStoreError::InvalidRecord)
+    );
 }
