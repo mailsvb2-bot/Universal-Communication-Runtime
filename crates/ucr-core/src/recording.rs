@@ -2,7 +2,7 @@ use core::fmt;
 
 use ucr_model::{
     CallId, EventEnvelope, PrincipalRef, RecordingConsentState, RecordingId, RecordingSession,
-    TenantScope,
+    RecordingState, TenantScope,
 };
 
 use crate::{DurableRecordStatus, DurableStoreError, StorageProvider};
