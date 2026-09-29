@@ -397,6 +397,22 @@ message UniversalGetParticipantAttendanceResponse {
   }
 }
 
+// Integration-facing projection of one canonical realtime attendance transition.
+// Internal PrincipalRef, DeviceId and CallId remain deliberately absent. The canonical participant
+// attendance Event remains authoritative; this payload exists so the owning integration can consume
+// the same fact through its Service Account-scoped Event/webhook subscription.
+message UniversalConferenceAttendanceEvent {
+  TenantScope scope = 1;
+  OpaqueId conference_id = 2;
+  OpaqueId integration_id = 3;
+  bytes external_conference_id = 4;
+  bytes external_user_id = 5;
+  OpaqueId session_id = 6;
+  ConferenceAttendanceKind kind = 7;
+  int64 occurred_at_unix_ms = 8;
+  uint64 session_sequence = 9;
+}
+
 message UniversalGetCapabilitiesRequest {
   TenantScope scope = 1;
   OpaqueId integration_id = 2;
