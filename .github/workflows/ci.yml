@@ -341,3 +341,7 @@ jobs:
         run: python3 crates/ucr-reference-messenger/validate.py
       - name: Validate concrete accessibility evidence
         run: python3 crates/ucr-reference-messenger/web/validate_accessibility.py
+      - name: Validate local development package
+        run: >-
+          docker compose -f compose.yaml config -q &&
+          python3 -m py_compile docker/dev/webhook_receiver.py docker/dev/turn_credentials.py
