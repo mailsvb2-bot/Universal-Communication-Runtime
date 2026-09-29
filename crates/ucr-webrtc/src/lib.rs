@@ -30,7 +30,7 @@ use ucr_protocol::{
     CapabilityDescriptor, WebRtcProtocolError, canonical_ice_server, canonical_webrtc_candidate,
     canonical_webrtc_description, phase46_webrtc_capabilities,
 };
-use ucr_secrets::{SecretHandle, SecretProvider, SecretPurpose};
+use ucr_secrets::{ActiveSecretSet, SecretHandle, SecretProvider, SecretPurpose};
 use webrtc::{
     api::{
         APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
@@ -242,7 +242,7 @@ impl TurnRestCredentialIssuer {
         let set = provider
             .active_secret_set(&handle)
             .map_err(|_| TurnCredentialError::KeyUnavailable)?;
-        turn_rest_secret_from_material(set.current.material.as_bytes())?;
+        turn_rest_secret_from_active_set(&set)?;
         Ok(Self {
             secret_source: TurnRestSecretSource::Provider { provider, handle },
         })
@@ -255,7 +255,7 @@ impl TurnRestCredentialIssuer {
                 let set = provider
                     .active_secret_set(handle)
                     .map_err(|_| TurnCredentialError::KeyUnavailable)?;
-                turn_rest_secret_from_material(set.current.material.as_bytes())
+                turn_rest_secret_from_active_set(&set)
             }
         }
     }
@@ -305,10 +305,23 @@ impl TurnRestCredentialIssuer {
     }
 }
 
+fn turn_rest_secret_from_active_set(
+    set: &ActiveSecretSet,
+) -> Result<TurnRestSecret, TurnCredentialError> {
+    let current = turn_rest_secret_from_material(set.current.material.as_bytes())?;
+    if let Some(previous) = &set.previous {
+        turn_rest_secret_from_material(previous.material.as_bytes())?;
+    }
+    Ok(current)
+}
+
 fn turn_rest_secret_from_material(material: &[u8]) -> Result<TurnRestSecret, TurnCredentialError> {
     let bytes: [u8; 32] = material
         .try_into()
         .map_err(|_| TurnCredentialError::KeyUnavailable)?;
+    if !bytes.iter().all(u8::is_ascii_graphic) {
+        return Err(TurnCredentialError::KeyUnavailable);
+    }
     Ok(TurnRestSecret::from_bytes(bytes))
 }
 
