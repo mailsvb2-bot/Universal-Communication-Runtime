@@ -227,6 +227,36 @@ pub trait RecordingStore: StorageProvider {
         )
     }
 
+
+    /// Applies consent and atomically prepares a provider stop when the consent mutation stops an
+    /// active recording.
+    ///
+    /// # Errors
+    /// Fails closed when Recording state, Event and provider operation cannot be committed as one
+    /// durable action.
+    #[allow(clippy::too_many_arguments)]
+    fn set_recording_consent_with_event_and_provider_stop(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        participant: &PrincipalRef,
+        state: RecordingConsentState,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (
+            scope,
+            recording_id,
+            expected_revision,
+            participant,
+            state,
+            now_unix_ms,
+            event,
+        );
+        Err(DurableStoreError::Unavailable)
+    }
+
     /// Starts recording lifecycle after consent and retention gates pass.
     ///
     /// # Errors
