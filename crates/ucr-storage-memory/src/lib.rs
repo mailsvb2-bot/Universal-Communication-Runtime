@@ -21,7 +21,8 @@ use ucr_core::{
     IdentityDeviceLookupStore, IdentityStore, LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE,
     LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_RECORDING_PROVIDER_OPERATION_BATCH,
     MAX_RECORDING_RETENTION_BATCH, MessageStore, PermissionGrantStore,
-    PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, RecordingProviderOperation,
+    PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
+    RecordingConsentProviderStopRequest, RecordingProviderOperation,
     RecordingProviderOperationRecord, RecordingProviderOperationState,
     RecordingProviderOperationStore, RecordingProviderRequest, RecordingStore,
     RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
@@ -9093,23 +9094,24 @@ impl RecordingStore for MemoryLocalStore {
 
     fn set_recording_consent_with_event_and_provider_stop(
         &self,
-        scope: &TenantScope,
-        recording_id: &RecordingId,
-        expected_revision: u64,
-        participant: &PrincipalRef,
-        consent_state: RecordingConsentState,
-        now_unix_ms: i64,
-        event: &EventEnvelope,
+        request: RecordingConsentProviderStopRequest<'_>,
     ) -> Result<RecordingSession, DurableStoreError> {
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         transition_recording_with_event_and_provider_operation(
             &mut state,
-            &recording_key(scope, recording_id),
-            expected_revision,
-            |current| apply_recording_consent(current, participant, consent_state, now_unix_ms),
-            event,
+            &recording_key(request.scope, request.recording_id),
+            request.expected_revision,
+            |current| {
+                apply_recording_consent(
+                    current,
+                    request.participant,
+                    request.state,
+                    request.now_unix_ms,
+                )
+            },
+            request.event,
             RecordingProviderOperation::Stop,
-            now_unix_ms,
+            request.now_unix_ms,
         )
     }
 
