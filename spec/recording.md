@@ -62,3 +62,29 @@ When an integration has `max_recording_minutes` configured, a concrete recording
 Concrete encoded-media capture, compositor/mixer behavior and object storage are provider boundaries behind the Recording lifecycle. They must not receive MLS keys or unrelated Conference state beyond what is required for the explicitly authorized recording path. A Production recording provider needs storage encryption, access authorization, integrity evidence, retention enforcement, failure recovery and export/delete conformance tests.
 
 The durable lifecycle/store can be implemented and tested while `ucr.conference.recording` remains unadvertised. Capability discovery must continue to report recording unavailable until a concrete encrypted media provider is wired, participant-churn policy is enforced at the realtime boundary, and provider deletion/retention conformance is proven.
+
+### Durable provider-operation outbox
+
+Recording lifecycle transitions that require provider side effects now prepare a durable
+`RecordingProviderOperationRecord` in the same atomic storage action as the Recording snapshot and
+lifecycle Event. Start prepares `Start`; explicit stop and consent-triggered stop prepare `Stop`;
+delete and retention expiry prepare `Delete`. This prevents the two unsafe split-brain cases:
+committing ACTIVE without a durable recorder-start obligation, or invoking a recorder before the
+canonical lifecycle commit is durable.
+
+The provider-operation identity is exactly
+`(scope, recording_id, lifecycle_revision, operation)`. Exact prepare retries deduplicate; changed
+reuse conflicts. Pending operations survive restart in SQLite schema v47. A bounded dispatcher
+applies only due pending operations, marks successful requests Applied, schedules bounded
+exponential retry for transient provider failures, and marks permanent or retry-exhausted requests
+Failed. The dispatcher never changes canonical Recording lifecycle state.
+
+SQLite commits Recording snapshot + Event + provider operation in one IMMEDIATE transaction. The
+memory store mirrors the same semantics under one mutex for conformance tests. Stores that cannot
+prove this combined atomicity inherit fail-closed default methods rather than silently performing a
+second non-atomic write.
+
+This outbox is infrastructure for a concrete recorder, not the recorder itself. The shipped runtime
+still reports recorder NotConfigured and `ucr.conference.recording` remains unavailable until a
+real encrypted media provider, provider health wiring, capture/finalization behavior, access/export
+authorization, deletion proof and recovery/conformance evidence are present.
