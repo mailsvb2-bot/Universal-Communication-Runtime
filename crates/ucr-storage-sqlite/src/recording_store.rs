@@ -321,7 +321,6 @@ impl RecordingStore for SqliteLocalStore {
             },
             request.event,
             RecordingProviderOperation::Stop,
-            request.now_unix_ms,
         )
     }
 
@@ -359,7 +358,6 @@ impl RecordingStore for SqliteLocalStore {
             |current| start_recording(current, now_unix_ms),
             event,
             RecordingProviderOperation::Start,
-            now_unix_ms,
         )
     }
 
@@ -397,7 +395,6 @@ impl RecordingStore for SqliteLocalStore {
             |current| stop_recording(current, now_unix_ms),
             event,
             RecordingProviderOperation::Stop,
-            now_unix_ms,
         )
     }
 
@@ -435,7 +432,6 @@ impl RecordingStore for SqliteLocalStore {
             |current| expire_recording(current, now_unix_ms),
             event,
             RecordingProviderOperation::Delete,
-            now_unix_ms,
         )
     }
 
@@ -484,7 +480,6 @@ impl RecordingStore for SqliteLocalStore {
             |current| delete_recording(current, now_unix_ms),
             event,
             RecordingProviderOperation::Delete,
-            now_unix_ms,
         )
     }
 }
@@ -595,7 +590,6 @@ fn transition_recording_with_event_and_provider_operation<F>(
     transition: F,
     event: &EventEnvelope,
     operation: RecordingProviderOperation,
-    available_at_unix_ms: i64,
 ) -> Result<RecordingSession, DurableStoreError>
 where
     F: FnOnce(&RecordingSession) -> Result<RecordingSession, RecordingProtocolError>,
@@ -621,7 +615,7 @@ where
         request: RecordingProviderRequest::for_session(&next, operation),
         state: RecordingProviderOperationState::Pending,
         attempts: 0,
-        available_at_unix_ms,
+        available_at_unix_ms: event.wall_time_unix_ms,
     };
     let _ = recording_provider_store::insert_provider_operation_in_transaction(
         &transaction,
