@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 
 import {
   mountConference,
+  normalizeConferenceBranding,
   normalizeConferenceJoinUrl,
+  withConferenceBranding,
 } from "./src/conference_embed.ts";
 
 const joinUrl =
@@ -18,9 +20,63 @@ assert.throws(
   /#ucr_join/,
 );
 
-const headless = mountConference({ joinUrl, mode: "headless" });
+const branding = normalizeConferenceBranding(
+  {
+    name: "Example Live",
+    logoUrl: "/assets/logo.png",
+    accentColor: "#ABCDEF",
+    backgroundColor: "#010203",
+    language: "ru",
+    waitingText: "Эфир скоро начнётся",
+  },
+  joinUrl,
+);
+assert.deepEqual(branding, {
+  name: "Example Live",
+  logoUrl: "https://conference.example.test/assets/logo.png",
+  accentColor: "#abcdef",
+  backgroundColor: "#010203",
+  language: "ru",
+  waitingText: "Эфир скоро начнётся",
+});
+
+const brandedJoinUrl = withConferenceBranding(joinUrl, branding);
+const brandedUrl = new URL(brandedJoinUrl);
+const brandedFragment = new URLSearchParams(brandedUrl.hash.slice(1));
+assert.equal(brandedFragment.get("ucr_join"), "signed-test-grant");
+assert.deepEqual(JSON.parse(brandedFragment.get("ucr_brand") ?? "{}"), branding);
+
+assert.throws(
+  () => withConferenceBranding(joinUrl, { accentColor: "red" }),
+  /#RRGGBB/,
+);
+assert.throws(
+  () => withConferenceBranding(joinUrl, { logoUrl: "javascript:alert(1)" }),
+  /logoUrl must use https/,
+);
+assert.throws(
+  () =>
+    withConferenceBranding(joinUrl, {
+      logoUrl: "https://user:secret@conference.example.test/logo.png",
+    }),
+  /must not contain credentials/,
+);
+assert.throws(
+  () =>
+    withConferenceBranding(joinUrl, {
+      language: "de" as never,
+    }),
+  /language must be en or ru/,
+);
+
+const headless = mountConference({
+  joinUrl,
+  mode: "headless",
+  branding: { name: "Example Live", language: "ru" },
+});
 assert.equal(headless.mode, "headless");
 assert.equal(headless.element, null);
+assert.match(headless.joinUrl, /ucr_brand=/);
 headless.unmount();
 
 class FakeFrame {
@@ -72,15 +128,19 @@ try {
   const mounted = mountConference({
     joinUrl,
     container: container as unknown as HTMLElement,
-    title: "Demo conference",
+    branding: {
+      name: "Example Live",
+      accentColor: "#336699",
+      language: "en",
+    },
     className: "ucr-frame",
   });
 
   assert.equal(mounted.mode, "iframe");
   assert.equal(container.children.length, 1);
   const frame = container.children[0];
-  assert.equal(frame.src, joinUrl);
-  assert.equal(frame.title, "Demo conference");
+  assert.match(frame.src, /ucr_brand=/);
+  assert.equal(frame.title, "Example Live");
   assert.equal(frame.className, "ucr-frame");
   assert.equal(frame.referrerPolicy, "no-referrer");
   assert.match(frame.allow, /camera/);
