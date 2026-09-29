@@ -166,6 +166,24 @@ gRPC is the typed source contract. REST/JSON, OpenAPI, JavaScript/TypeScript, Py
 
 `ucr-conference-web` is that HTTP adapter. It binds loopback only and forwards each `/v1/...` route to exactly one canonical gRPC RPC. Universal Conference routes target `UniversalConferenceService`; the recording lifecycle routes `/v1/recordings`, `/v1/recordings/get`, `/v1/recordings/consent`, `/v1/recordings/start`, `/v1/recordings/stop`, and `/v1/recordings/delete` target the matching `RecordingService` RPC. The JSON body is the RPC request: opaque identifiers stay UTF-8 tokens, and external reference bytes are standard Base64. `Authorization` is copied into gRPC metadata and is not interpreted by the adapter. Recording participant consent therefore keeps the same device-bound realtime Bearer authority owned by `RecordingService`; the HTTP layer never creates a second consent/auth owner. Canonical permission, quota, audit, idempotency, participant-token validation and integration isolation remain in the gRPC ingress. `GET /v1/openapi.yaml` publishes the route map. Recording routes require an explicit `UCR_RECORDING_GRPC_UPSTREAM` that targets the canonical `ucr-runtime serve-realtime` listener, because that daemon owns the shared `JoinTokenIssuer` required to authenticate participant consent. If the recording upstream is not configured, the HTTP adapter fails closed with `503 Service Unavailable` rather than falling through to an API daemon that does not serve `RecordingService`. A loopback test posts `/v1/capabilities` without credentials and requires the canonical unauthenticated error from `UniversalConferenceService`, both directly and through `ucr-https-edge`, so the adapter is not only a JSON parser. A second loopback test creates a conference with a real machine Bearer and repeats the same JSON: both responses are successful and return the same `conference_id`. A third test ensures a host participant for that conference and repeats the same ensure request; both responses succeed for the same external user. A fourth loopback test creates a meeting, ensures an owner and an attendee, enrolls one device for each, prepares the canonical runtime, moves the conference to `waiting`, then posts `/v1/join-grants` for the attendee twice with the same idempotency key and Bearer scope `conference:join:issue`. Both responses succeed and return the same `session_id` and `join_url`. A trusted HTTPS edge is still required before this listener is reachable outside the host.
 
+## White-label presentation boundary
+
+White-label configuration is presentation metadata, not Conference state. The TypeScript embed helper
+may carry a bounded display name, HTTPS logo URL, accent/background colors, language and waiting-room
+text in the browser-only `ucr_brand` URL-fragment parameter. The reference browser validates these
+fields independently and applies them only to DOM text, safe image attributes and CSS custom
+properties. The fragment is never forwarded to gRPC/REST, persisted by the Universal Conference
+coordinator, interpreted as authorization, or used to derive role/media/lifecycle policy.
+
+The personal `ucr_join` grant remains independently signed and authoritative. Changing or deleting
+`ucr_brand` cannot widen a join grant, open entry, unmute a participant, enable camera/screen
+publication or alter any canonical permission. Invalid presentation metadata is ignored/falls back to
+the default UCR presentation rather than weakening authentication.
+
+A custom conference domain is an HTTPS edge, DNS and TLS deployment concern. Integrations issue a
+join URL on the deployment's configured origin; the embed helper must not rewrite a join URL to an
+arbitrary host. Existing exact-origin/CORS policy remains authoritative.
+
 ## Product boundary
 
 No CRM, funnel, payment, advertising, warm-up campaign or ClientPlatform-specific business concept belongs here. External products consume communication facts and apply their own business logic.
