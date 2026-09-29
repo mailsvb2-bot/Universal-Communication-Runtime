@@ -30,7 +30,7 @@ use ucr_protocol::{
     CapabilityDescriptor, WebRtcProtocolError, canonical_ice_server, canonical_webrtc_candidate,
     canonical_webrtc_description, phase46_webrtc_capabilities,
 };
-use ucr_secrets::{SecretHandle, SecretProvider, SecretPurpose};
+use ucr_secrets::{ActiveSecretSet, SecretHandle, SecretProvider, SecretPurpose};
 use webrtc::{
     api::{
         APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
@@ -242,7 +242,7 @@ impl TurnRestCredentialIssuer {
         let set = provider
             .active_secret_set(&handle)
             .map_err(|_| TurnCredentialError::KeyUnavailable)?;
-        turn_rest_secret_from_material(set.current.material.as_bytes())?;
+        turn_rest_secret_from_active_set(&set)?;
         Ok(Self {
             secret_source: TurnRestSecretSource::Provider { provider, handle },
         })
@@ -255,7 +255,7 @@ impl TurnRestCredentialIssuer {
                 let set = provider
                     .active_secret_set(handle)
                     .map_err(|_| TurnCredentialError::KeyUnavailable)?;
-                turn_rest_secret_from_material(set.current.material.as_bytes())
+                turn_rest_secret_from_active_set(&set)
             }
         }
     }
@@ -305,10 +305,23 @@ impl TurnRestCredentialIssuer {
     }
 }
 
+fn turn_rest_secret_from_active_set(
+    set: &ActiveSecretSet,
+) -> Result<TurnRestSecret, TurnCredentialError> {
+    let current = turn_rest_secret_from_material(set.current.material.as_bytes())?;
+    if let Some(previous) = &set.previous {
+        turn_rest_secret_from_material(previous.material.as_bytes())?;
+    }
+    Ok(current)
+}
+
 fn turn_rest_secret_from_material(material: &[u8]) -> Result<TurnRestSecret, TurnCredentialError> {
     let bytes: [u8; 32] = material
         .try_into()
         .map_err(|_| TurnCredentialError::KeyUnavailable)?;
+    if !bytes.iter().all(u8::is_ascii_graphic) {
+        return Err(TurnCredentialError::KeyUnavailable);
+    }
     Ok(TurnRestSecret::from_bytes(bytes))
 }
 
@@ -1264,7 +1277,7 @@ mod tests {
         assert!(!debug.contains(&first.username));
         assert!(!debug.contains("session"));
         assert!(!debug.contains(&first.credential));
-        assert!(!format!("{issuer:?}").contains("07070707"));
+        assert!(!format!("{issuer:?}").contains("AAAAAAAA"));
         assert_eq!(
             issuer.issue(&session_id, MIN_TURN_CREDENTIAL_TTL_SECONDS - 1, 1_000),
             Err(TurnCredentialError::InvalidTtl)
@@ -1287,7 +1300,7 @@ mod tests {
                 handle.clone(),
                 SecretVersion {
                     version_id: OpaqueId::new("v1").expect("version"),
-                    material: SecretMaterial::new(vec![7_u8; 32]).expect("secret"),
+                    material: SecretMaterial::new(vec![b'A'; 32]).expect("secret"),
                 },
             )
             .expect("provision");
@@ -1305,7 +1318,7 @@ mod tests {
                 &handle,
                 SecretVersion {
                     version_id: OpaqueId::new("v2").expect("version"),
-                    material: SecretMaterial::new(vec![8_u8; 32]).expect("secret"),
+                    material: SecretMaterial::new(vec![b'B'; 32]).expect("secret"),
                 },
             )
             .expect("rotate");
@@ -1324,6 +1337,42 @@ mod tests {
                     purpose: SecretPurpose::JoinSigning,
                 },
             ),
+            Err(TurnCredentialError::KeyUnavailable)
+        ));
+    }
+
+    #[test]
+    fn turn_provider_rejects_non_textual_or_mixed_overlap_roots() {
+        let provider = Arc::new(InMemorySecretProvider::default());
+        let handle = SecretHandle {
+            secret_id: OpaqueId::new("turn-portability").expect("id"),
+            purpose: SecretPurpose::TurnCredentials,
+        };
+        provider
+            .provision(
+                handle.clone(),
+                SecretVersion {
+                    version_id: OpaqueId::new("binary").expect("version"),
+                    material: SecretMaterial::new(vec![7_u8; 32]).expect("secret"),
+                },
+            )
+            .expect("provision");
+        assert!(matches!(
+            TurnRestCredentialIssuer::with_secret_provider(provider.clone(), handle.clone()),
+            Err(TurnCredentialError::KeyUnavailable)
+        ));
+
+        provider
+            .rotate(
+                &handle,
+                SecretVersion {
+                    version_id: OpaqueId::new("portable").expect("version"),
+                    material: SecretMaterial::new(vec![b'C'; 32]).expect("secret"),
+                },
+            )
+            .expect("rotate");
+        assert!(matches!(
+            TurnRestCredentialIssuer::with_secret_provider(provider, handle),
             Err(TurnCredentialError::KeyUnavailable)
         ));
     }

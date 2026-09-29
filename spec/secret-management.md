@@ -50,6 +50,18 @@ also prove that its shared-secret reload/overlap behavior accepts the intended r
 Short-lived TURN credentials remain scoped to the authenticated realtime `SessionId` and bounded
 by the session lifetime.
 
+Provider-backed TURN material is additionally constrained to exactly 32 visible ASCII bytes. This is
+an interoperability invariant, not a cryptographic downgrade: coturn's REST shared secret is a
+string value, so arbitrary binary roots cannot be represented as the exact same HMAC key. The
+provider validates both current and previous versions before issuance; a mixed rotation snapshot
+with an unrepresentable previous root fails closed instead of claiming an overlap that coturn cannot
+mirror. Operators should generate high-entropy visible-ASCII roots and encode those bytes as hex in
+the shared provider manifest.
+
+The legacy in-process `TurnRestSecret::from_bytes` constructor remains available for API
+compatibility and tests, but it is not evidence that arbitrary binary deployment roots are coturn
+portable.
+
 ## Webhook signing integration
 
 `HardenedWebhookSink` supports the shared provider boundary with a `WebhookSigning` handle.
