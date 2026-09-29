@@ -3,11 +3,13 @@
 use core::fmt;
 use std::{
     collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 
 use ucr_model::OpaqueId;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const MAX_SECRET_BYTES: usize = 64 * 1024;
 pub const MAX_SECRET_VERSIONS_PER_HANDLE: usize = 2;
@@ -137,6 +139,180 @@ pub trait SecretProvider: fmt::Debug + Send + Sync {
         handle: &SecretHandle,
         new_version: SecretVersion,
     ) -> Result<ActiveSecretSet, SecretProviderError>;
+}
+
+
+pub const MAX_RELOADABLE_SECRET_MANIFEST_BYTES: u64 = 1024;
+
+#[derive(Debug, Clone)]
+pub struct ReloadingFileSecretProvider {
+    handle: SecretHandle,
+    manifest_file: PathBuf,
+}
+
+impl ReloadingFileSecretProvider {
+    /// Opens one read-only file-backed provider snapshot source.
+    ///
+    /// The manifest is re-read on every lookup so an atomic file replacement becomes visible
+    /// without rebuilding consumers. This adapter owns no durable secret history and therefore
+    /// does not implement mutation through the provider rotate method.
+    ///
+    /// # Errors
+    /// Rejects unavailable, unsafe, malformed, or duplicate-version manifests.
+    pub fn new(
+        handle: SecretHandle,
+        manifest_file: impl Into<PathBuf>,
+    ) -> Result<Self, SecretProviderError> {
+        let provider = Self {
+            handle,
+            manifest_file: manifest_file.into(),
+        };
+        provider.active_secret_set(&provider.handle)?;
+        Ok(provider)
+    }
+
+    fn read_manifest(
+        path: &Path,
+        handle: &SecretHandle,
+    ) -> Result<ActiveSecretSet, SecretProviderError> {
+        let metadata = fs::symlink_metadata(path).map_err(|_| SecretProviderError::Unavailable)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > MAX_RELOADABLE_SECRET_MANIFEST_BYTES
+        {
+            return Err(SecretProviderError::InvalidMaterial);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(SecretProviderError::InvalidMaterial);
+            }
+        }
+
+        let encoded =
+            Zeroizing::new(fs::read_to_string(path).map_err(|_| SecretProviderError::Unavailable)?);
+        let mut current_version_id = None;
+        let mut current_secret_hex = None;
+        let mut previous_version_id = None;
+        let mut previous_secret_hex = None;
+        for line in encoded
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let Some((name, value)) = line.split_once('=') else {
+                return Err(SecretProviderError::InvalidMaterial);
+            };
+            let value = value.trim();
+            match name.trim() {
+                "current_key_id" | "current_version_id" if current_version_id.is_none() => {
+                    current_version_id = Some(value);
+                }
+                "current_seed_hex" | "current_secret_hex" if current_secret_hex.is_none() => {
+                    current_secret_hex = Some(value);
+                }
+                "previous_key_id" | "previous_version_id" if previous_version_id.is_none() => {
+                    previous_version_id = Some(value);
+                }
+                "previous_seed_hex" | "previous_secret_hex" if previous_secret_hex.is_none() => {
+                    previous_secret_hex = Some(value);
+                }
+                _ => return Err(SecretProviderError::InvalidMaterial),
+            }
+        }
+
+        let current = Self::decode_version(
+            current_version_id.ok_or(SecretProviderError::InvalidMaterial)?,
+            current_secret_hex.ok_or(SecretProviderError::InvalidMaterial)?,
+        )?;
+        let previous = match (previous_version_id, previous_secret_hex) {
+            (Some(version_id), Some(secret_hex)) => {
+                Some(Self::decode_version(version_id, secret_hex)?)
+            }
+            (None, None) => None,
+            _ => return Err(SecretProviderError::InvalidMaterial),
+        };
+        if previous
+            .as_ref()
+            .is_some_and(|version| version.version_id == current.version_id)
+        {
+            return Err(SecretProviderError::Conflict);
+        }
+
+        Ok(ActiveSecretSet {
+            handle: handle.clone(),
+            current,
+            previous,
+        })
+    }
+
+    fn decode_version(
+        version_id: &str,
+        secret_hex: &str,
+    ) -> Result<SecretVersion, SecretProviderError> {
+        let bytes = Zeroizing::new(decode_hex_32(secret_hex)?);
+        Ok(SecretVersion {
+            version_id: OpaqueId::new(version_id)
+                .map_err(|_| SecretProviderError::InvalidMaterial)?,
+            material: SecretMaterial::new(bytes.as_ref().to_vec())?,
+        })
+    }
+}
+
+impl SecretProvider for ReloadingFileSecretProvider {
+    fn provider_id(&self) -> &'static str {
+        "file-reload"
+    }
+
+    fn health(&self) -> SecretProviderHealth {
+        if self.active_secret_set(&self.handle).is_ok() {
+            SecretProviderHealth::Healthy
+        } else {
+            SecretProviderHealth::Unavailable
+        }
+    }
+
+    fn active_secret_set(
+        &self,
+        handle: &SecretHandle,
+    ) -> Result<ActiveSecretSet, SecretProviderError> {
+        if handle != &self.handle {
+            return Err(SecretProviderError::NotFound);
+        }
+        Self::read_manifest(self.manifest_file.as_path(), handle)
+    }
+
+    fn rotate(
+        &self,
+        _handle: &SecretHandle,
+        _new_version: SecretVersion,
+    ) -> Result<ActiveSecretSet, SecretProviderError> {
+        Err(SecretProviderError::Unavailable)
+    }
+}
+
+fn decode_hex_32(value: &str) -> Result<[u8; 32], SecretProviderError> {
+    if value.len() != 64 {
+        return Err(SecretProviderError::InvalidMaterial);
+    }
+    let mut output = [0_u8; 32];
+    let bytes = value.as_bytes();
+    for index in 0..32 {
+        let high = hex_nibble(bytes[index * 2])?;
+        let low = hex_nibble(bytes[index * 2 + 1])?;
+        output[index] = (high << 4) | low;
+    }
+    Ok(output)
+}
+
+const fn hex_nibble(byte: u8) -> Result<u8, SecretProviderError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(SecretProviderError::InvalidMaterial),
+    }
 }
 
 #[derive(Debug, Default, Clone)]
