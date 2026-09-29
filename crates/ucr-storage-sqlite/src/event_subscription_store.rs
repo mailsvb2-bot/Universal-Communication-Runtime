@@ -1497,8 +1497,8 @@ mod tests {
     };
 
     use ucr_core::{
-        DurableRecordStatus, DurableStoreError, EventJournalStore, EventSubscriptionStore,
-        StorageProvider,
+        DurableRecordStatus, DurableStoreError, EventAppendStatus, EventJournalStore,
+        EventSubscriptionStore, StorageProvider,
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CorrelationContext, DeviceId, DeviceRef, EventConsumerCursor,
@@ -1599,6 +1599,45 @@ mod tests {
             integrity_metadata: vec![1, 2, 3],
             extensions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn atomic_event_batch_commits_all_or_rolls_back_all() {
+        let path = TestDbPath::new();
+        let store = SqliteLocalStore::open(path.path()).expect("open SQLite store");
+        let first = event("atomic-sqlite-first", b"first");
+        let second = event("atomic-sqlite-second", b"second");
+        assert_eq!(
+            store
+                .append_events_atomically(&[first.clone(), second.clone()])
+                .expect("append atomic batch"),
+            vec![EventAppendStatus::Appended, EventAppendStatus::Appended]
+        );
+        assert_eq!(
+            store
+                .append_events_atomically(&[first.clone(), second.clone()])
+                .expect("deduplicate atomic batch"),
+            vec![EventAppendStatus::Duplicate, EventAppendStatus::Duplicate]
+        );
+
+        let rollback_path = TestDbPath::new();
+        let rollback_store =
+            SqliteLocalStore::open(rollback_path.path()).expect("open rollback SQLite store");
+        rollback_store
+            .append_event(&event("atomic-sqlite-conflict", b"persisted"))
+            .expect("seed conflict");
+        let would_be_first = event("atomic-sqlite-rollback", b"new");
+        let conflicting = event("atomic-sqlite-conflict", b"changed");
+        assert_eq!(
+            rollback_store.append_events_atomically(&[would_be_first.clone(), conflicting]),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            rollback_store
+                .event(&scope(), &would_be_first.event_id)
+                .expect("read rolled-back Event"),
+            None
+        );
     }
 
     fn subscription() -> EventSubscription {
