@@ -1,8 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{
     DurableRecordStatus, DurableStoreError, MAX_RECORDING_PROVIDER_OPERATION_BATCH,
-    RecordingProviderOperationRecord, RecordingProviderOperationState, RecordingProviderOperationStore,
-    RecordingProviderRequest, RecordingProviderOperation,
+    RecordingProviderOperation, RecordingProviderOperationRecord, RecordingProviderOperationState,
+    RecordingProviderOperationStore, RecordingProviderRequest,
 };
 use ucr_model::{CallId, NamespaceId, OpaqueId, RecordingId, TenantId, TenantScope};
 
@@ -190,18 +190,20 @@ impl RecordingProviderOperationStore for SqliteLocalStore {
         drop(statement);
 
         keys.into_iter()
-            .map(|(tenant, present, namespace, recording, revision, operation)| {
-                let scope = parse_scope(&tenant, present, &namespace)?;
-                let revision = decode_u64(&revision)?;
-                load_operation(
-                    &connection,
-                    &scope,
-                    &RecordingId::from_opaque(parse_id(&recording)?),
-                    revision,
-                    parse_operation(&operation)?,
-                )?
-                .ok_or(DurableStoreError::Corrupt)
-            })
+            .map(
+                |(tenant, present, namespace, recording, revision, operation)| {
+                    let scope = parse_scope(&tenant, present, &namespace)?;
+                    let revision = decode_u64(&revision)?;
+                    load_operation(
+                        &connection,
+                        &scope,
+                        &RecordingId::from_opaque(parse_id(&recording)?),
+                        revision,
+                        parse_operation(&operation)?,
+                    )?
+                    .ok_or(DurableStoreError::Corrupt)
+                },
+            )
             .collect()
     }
 
@@ -335,7 +337,6 @@ impl RecordingProviderOperationStore for SqliteLocalStore {
             }
         }
     }
-
 }
 
 fn load_operation(
@@ -373,23 +374,25 @@ fn load_operation(
         )
         .optional()
         .map_err(|error| map_sqlite_error(&error))?
-        .map(|(call_id, expires_at_unix_ms, state, attempts, available_at_unix_ms)| {
-            let record = RecordingProviderOperationRecord {
-                request: RecordingProviderRequest {
-                    scope: scope.clone(),
-                    recording_id: recording_id.clone(),
-                    call_id: CallId::from_opaque(parse_id(&call_id)?),
-                    lifecycle_revision,
-                    operation,
-                    expires_at_unix_ms,
-                },
-                state: parse_state(&state)?,
-                attempts: u32::try_from(attempts).map_err(|_| DurableStoreError::Corrupt)?,
-                available_at_unix_ms,
-            };
-            validate_record(&record)?;
-            Ok(record)
-        })
+        .map(
+            |(call_id, expires_at_unix_ms, state, attempts, available_at_unix_ms)| {
+                let record = RecordingProviderOperationRecord {
+                    request: RecordingProviderRequest {
+                        scope: scope.clone(),
+                        recording_id: recording_id.clone(),
+                        call_id: CallId::from_opaque(parse_id(&call_id)?),
+                        lifecycle_revision,
+                        operation,
+                        expires_at_unix_ms,
+                    },
+                    state: parse_state(&state)?,
+                    attempts: u32::try_from(attempts).map_err(|_| DurableStoreError::Corrupt)?,
+                    available_at_unix_ms,
+                };
+                validate_record(&record)?;
+                Ok(record)
+            },
+        )
         .transpose()
 }
 
@@ -465,7 +468,6 @@ fn decode_u64(value: &[u8]) -> Result<u64, DurableStoreError> {
     let bytes: [u8; 8] = value.try_into().map_err(|_| DurableStoreError::Corrupt)?;
     Ok(u64::from_be_bytes(bytes))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -564,10 +566,12 @@ mod tests {
             .prepare_recording_provider_operation(&record)
             .expect("prepare");
 
-        assert!(store
-            .pending_recording_provider_operations(99, 10)
-            .expect("before due")
-            .is_empty());
+        assert!(
+            store
+                .pending_recording_provider_operations(99, 10)
+                .expect("before due")
+                .is_empty()
+        );
         let due = store
             .pending_recording_provider_operations(100, 10)
             .expect("due");
@@ -586,10 +590,12 @@ mod tests {
         store
             .mark_recording_provider_operation_applied(&record.request)
             .expect("applied");
-        assert!(store
-            .pending_recording_provider_operations(1_000, 10)
-            .expect("after applied")
-            .is_empty());
+        assert!(
+            store
+                .pending_recording_provider_operations(1_000, 10)
+                .expect("after applied")
+                .is_empty()
+        );
         store
             .mark_recording_provider_operation_applied(&record.request)
             .expect("applied retry is idempotent");
