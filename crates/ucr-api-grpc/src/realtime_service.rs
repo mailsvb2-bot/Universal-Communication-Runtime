@@ -2695,7 +2695,7 @@ mod recording_admission_tests {
             requested_at_unix_ms: 900,
             started_at_unix_ms: Some(950),
             stopped_at_unix_ms: None,
-            expires_at_unix_ms: 60_950,
+            expires_at_unix_ms: 60_900,
             revision: 2,
         };
         store
