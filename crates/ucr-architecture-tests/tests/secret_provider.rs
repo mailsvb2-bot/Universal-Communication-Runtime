@@ -63,6 +63,7 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     let turn_reconcile = read("crates/ucr-runtime/src/turn_secret_reconcile.rs");
     assert!(turn_reconcile.contains("TransactionBehavior::Immediate"));
     assert!(turn_reconcile.contains("SQLITE_OPEN_READ_WRITE"));
+    assert!(turn_reconcile.contains("symlink_metadata"));
     assert!(turn_reconcile.contains("ExclusiveOwnershipRequired"));
     assert!(turn_reconcile.contains("VerificationFailed"));
     assert!(!turn_reconcile.contains("Command::new"));
