@@ -316,14 +316,7 @@ impl RecordingStore for SqliteLocalStore {
             scope,
             recording_id,
             expected_revision,
-            |current| {
-                apply_recording_consent(
-                    current,
-                    participant,
-                    consent_state,
-                    now_unix_ms,
-                )
-            },
+            |current| apply_recording_consent(current, participant, consent_state, now_unix_ms),
             event,
             RecordingProviderOperation::Stop,
             now_unix_ms,
