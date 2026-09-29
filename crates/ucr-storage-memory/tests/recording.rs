@@ -221,11 +221,7 @@ fn active_recording_lookup_is_call_scoped_bounded_and_state_exact() {
     store.persist_recording(&stopped).expect("stopped");
 
     let active = store
-        .active_recordings_for_call(
-            &first.scope,
-            &first.call_id,
-            MAX_ACTIVE_RECORDINGS_PER_CALL,
-        )
+        .active_recordings_for_call(&first.scope, &first.call_id, MAX_ACTIVE_RECORDINGS_PER_CALL)
         .expect("active by call");
     assert_eq!(active, vec![first.clone()]);
     assert_eq!(
