@@ -1,6 +1,6 @@
 # Attachment Integrity and Content Addressing
 
-Status: **Prepared integrity + durable resume foundation**. Canonical Attachment metadata/chunks now have Memory and SQLite storage owners with restart-safe chunk recovery. Transfer scheduling, transport execution, public upload/download APIs and full file-transfer UX remain separate work.
+Status: **Prepared integrity + durable resumable API foundation**. Canonical Attachment metadata/chunks have Memory and SQLite storage owners with restart-safe chunk recovery, plus an authenticated public gRPC descriptor/chunk API wired into dev and durable runtime paths. Transfer scheduling, transport execution, SDK/REST helpers and full file-transfer UX remain separate work.
 
 ## Canonical ownership
 
@@ -73,12 +73,19 @@ This slice does **not** claim that Canon file transfer is complete.
 
 Still required before the main Canon file-transfer/DoD path is closed:
 
-- upload/download public API/SDK surface;
+- SDK/REST upload/download helpers above the authenticated gRPC chunk API;
 - transport execution and cancellation;
 - retry/backpressure/resource policy;
 - local/direct and Internet transfer composition;
 - Message-to-Attachment existence/authorization binding;
 - attachment retention/deletion/export behavior;
 - end-to-end file delivery tests through the Reference consumer.
+
+The public gRPC slice provides `RegisterAttachment`, `GetAttachment`, `PutChunk`, `GetChunk`
+and `VerifyAttachment`. It reuses the canonical `AttachmentStore`, exact-scope Service Account
+authorization, quota/audit admission and the same verifier-only machine Bearer boundary used by
+other external UCR services. Exact retries therefore reuse canonical descriptor/chunk identities;
+conflicting redefinitions remain fail-closed. Complete verification streams stored chunks in
+canonical index order and does not assemble a whole file in memory.
 
 The purpose of this slice is to establish one canonical integrity/content-addressing contract that all later storage, APIs and transports must reuse.
