@@ -1075,7 +1075,7 @@ impl ProductionRuntime {
     /// Executes one bounded durable Recording provider-operation sweep.
     ///
     /// This method does not enable Recording capability by itself. A deployment must provide a
-    /// concrete RecordingMediaProvider; the durable outbox remains the retry/idempotency owner.
+    /// concrete `RecordingMediaProvider`; the durable outbox remains the retry/idempotency owner.
     ///
     /// # Errors
     /// Returns durable-store failures without dropping pending provider operations.
