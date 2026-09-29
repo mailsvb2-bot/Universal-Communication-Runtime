@@ -99,6 +99,9 @@ pub struct RecordingProviderOperationRecord {
 }
 
 pub const MAX_RECORDING_PROVIDER_OPERATION_BATCH: usize = 128;
+pub const MAX_RECORDING_PROVIDER_ATTEMPTS: u32 = 8;
+pub const RECORDING_PROVIDER_RETRY_BASE_MS: i64 = 1_000;
+pub const RECORDING_PROVIDER_RETRY_MAX_MS: i64 = 60_000;
 
 /// Durable restart-safe ledger for provider side effects authorized by canonical Recording state.
 ///
@@ -154,6 +157,78 @@ pub trait RecordingProviderOperationStore: StorageProvider {
         request: &RecordingProviderRequest,
     ) -> Result<(), DurableStoreError>;
 }
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RecordingProviderDispatchSweep {
+    pub examined: usize,
+    pub applied: usize,
+    pub retried: usize,
+    pub failed: usize,
+}
+
+/// Applies one bounded batch of durable Recording provider operations.
+///
+/// The durable outbox remains authoritative for retry state. Exact provider retries use the
+/// canonical provider-operation identity already embedded in each request.
+///
+/// # Errors
+/// Returns explicit durable-store failures. Provider failures are converted into retry or terminal
+/// outbox state and do not abort unrelated operations in the same batch.
+pub fn dispatch_recording_provider_operations_once<S, P>(
+    store: &S,
+    provider: &P,
+    now_unix_ms: i64,
+    limit: usize,
+) -> Result<RecordingProviderDispatchSweep, DurableStoreError>
+where
+    S: RecordingProviderOperationStore,
+    P: RecordingMediaProvider + ?Sized,
+{
+    let pending = store.pending_recording_provider_operations(now_unix_ms, limit)?;
+    let mut sweep = RecordingProviderDispatchSweep::default();
+
+    for record in pending {
+        sweep.examined = sweep.examined.saturating_add(1);
+        match provider.apply(&record.request) {
+            Ok(()) => {
+                store.mark_recording_provider_operation_applied(&record.request)?;
+                sweep.applied = sweep.applied.saturating_add(1);
+            }
+            Err(RecordingProviderError::Conflict | RecordingProviderError::PolicyDenied) => {
+                store.mark_recording_provider_operation_failed(&record.request)?;
+                sweep.failed = sweep.failed.saturating_add(1);
+            }
+            Err(
+                RecordingProviderError::CapacityExceeded
+                | RecordingProviderError::TemporarilyUnavailable
+                | RecordingProviderError::Internal,
+            ) => {
+                if record.attempts.saturating_add(1) >= MAX_RECORDING_PROVIDER_ATTEMPTS {
+                    store.mark_recording_provider_operation_failed(&record.request)?;
+                    sweep.failed = sweep.failed.saturating_add(1);
+                } else {
+                    let next_attempt = now_unix_ms
+                        .checked_add(recording_provider_retry_delay_ms(record.attempts))
+                        .ok_or(DurableStoreError::InvalidRecord)?;
+                    store.retry_recording_provider_operation(&record.request, next_attempt)?;
+                    sweep.retried = sweep.retried.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    Ok(sweep)
+}
+
+#[must_use]
+pub fn recording_provider_retry_delay_ms(previous_attempts: u32) -> i64 {
+    let exponent = previous_attempts.min(6);
+    let multiplier = 1_i64 << exponent;
+    RECORDING_PROVIDER_RETRY_BASE_MS
+        .saturating_mul(multiplier)
+        .min(RECORDING_PROVIDER_RETRY_MAX_MS)
+}
+
 
 /// Durable owner of recording policy, consent evidence and lifecycle only.
 ///
