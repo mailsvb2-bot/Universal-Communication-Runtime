@@ -54,3 +54,19 @@ fn recording_provider_request_does_not_carry_media_or_crypto_secrets() {
     assert!(!request.contains("key"));
     assert!(!request.contains("token"));
 }
+
+
+#[test]
+fn realtime_join_enforces_recording_participant_churn_policy() {
+    let core = read("crates/ucr-core/src/recording.rs");
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let sqlite = read("crates/ucr-storage-sqlite/src/recording_store.rs");
+    let memory = read("crates/ucr-storage-memory/src/lib.rs");
+
+    assert!(core.contains("recording_allows_realtime_participant"));
+    assert!(core.contains("active_recordings_for_call"));
+    assert!(realtime.contains("require_recording_participant_admission"));
+    assert!(realtime.contains("recording_allows_realtime_participant"));
+    assert!(sqlite.contains("state='active'"));
+    assert!(memory.contains("recording.state == RecordingState::Active"));
+}
