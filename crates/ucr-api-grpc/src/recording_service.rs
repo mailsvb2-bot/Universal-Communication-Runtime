@@ -296,17 +296,31 @@ where
                     } else {
                         None
                     };
-                    self.store
-                        .set_recording_consent_with_event(
-                            &scope,
-                            &recording_id,
-                            expected_revision,
-                            &participant,
-                            state,
-                            now_unix_ms,
-                            event.as_ref(),
-                        )
-                        .map_err(map_store_error)
+                    if let Some(event) = event.as_ref() {
+                        self.store
+                            .set_recording_consent_with_event_and_provider_stop(
+                                &scope,
+                                &recording_id,
+                                expected_revision,
+                                &participant,
+                                state,
+                                now_unix_ms,
+                                event,
+                            )
+                            .map_err(map_store_error)
+                    } else {
+                        self.store
+                            .set_recording_consent_with_event(
+                                &scope,
+                                &recording_id,
+                                expected_revision,
+                                &participant,
+                                state,
+                                now_unix_ms,
+                                None,
+                            )
+                            .map_err(map_store_error)
+                    }
                 })
             }
             (Err(error), _) | (_, Err(error)) => Err(error),
@@ -639,27 +653,33 @@ where
         )?;
 
         match mutation {
-            RecordingLifecycleMutation::Start => self.store.start_recording_with_event(
-                &scope,
-                &recording_id,
-                expected_revision,
-                now_unix_ms,
-                &event,
-            ),
-            RecordingLifecycleMutation::Stop => self.store.stop_recording_with_event(
-                &scope,
-                &recording_id,
-                expected_revision,
-                now_unix_ms,
-                &event,
-            ),
-            RecordingLifecycleMutation::Delete => self.store.delete_recording_with_event(
-                &scope,
-                &recording_id,
-                expected_revision,
-                now_unix_ms,
-                &event,
-            ),
+            RecordingLifecycleMutation::Start => self
+                .store
+                .start_recording_with_event_and_provider_operation(
+                    &scope,
+                    &recording_id,
+                    expected_revision,
+                    now_unix_ms,
+                    &event,
+                ),
+            RecordingLifecycleMutation::Stop => self
+                .store
+                .stop_recording_with_event_and_provider_operation(
+                    &scope,
+                    &recording_id,
+                    expected_revision,
+                    now_unix_ms,
+                    &event,
+                ),
+            RecordingLifecycleMutation::Delete => self
+                .store
+                .delete_recording_with_event_and_provider_operation(
+                    &scope,
+                    &recording_id,
+                    expected_revision,
+                    now_unix_ms,
+                    &event,
+                ),
         }
         .map_err(map_store_error)
     }
@@ -701,7 +721,7 @@ pub fn expire_due_recordings_once<S: RecordingStore>(
             None,
             now_unix_ms,
         )?;
-        match store.expire_recording_with_event(
+        match store.expire_recording_with_event_and_provider_operation(
             &current.scope,
             &current.recording_id,
             current.revision,
