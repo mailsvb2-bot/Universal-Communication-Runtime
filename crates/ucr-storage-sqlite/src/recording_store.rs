@@ -1,6 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{
-    DurableRecordStatus, DurableStoreError, MAX_RECORDING_RETENTION_BATCH, RecordingStore,
+    DurableRecordStatus, DurableStoreError, MAX_RECORDING_RETENTION_BATCH,
+    RecordingProviderOperation, RecordingProviderOperationRecord, RecordingProviderOperationState,
+    RecordingProviderRequest, RecordingStore,
 };
 use ucr_model::{
     CallId, EventEnvelope, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
@@ -14,7 +16,8 @@ use ucr_protocol::{
 
 use super::{
     SqliteLocalStore, event_journal, map_schema_change_error, map_sqlite_error,
-    namespace_storage_key, universal_conference_store, verify_table_columns,
+    namespace_storage_key, recording_provider_store, universal_conference_store,
+    verify_table_columns,
 };
 
 const V33_OBJECTS_SQL: &str = r"
@@ -316,6 +319,26 @@ impl RecordingStore for SqliteLocalStore {
         )
     }
 
+    fn start_recording_with_event_and_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        transition_recording_with_event_and_provider_operation(
+            self,
+            scope,
+            recording_id,
+            expected_revision,
+            |current| start_recording(current, now_unix_ms),
+            event,
+            RecordingProviderOperation::Start,
+            now_unix_ms,
+        )
+    }
+
     fn stop_recording_with_event(
         &self,
         scope: &TenantScope,
@@ -334,6 +357,26 @@ impl RecordingStore for SqliteLocalStore {
         )
     }
 
+    fn stop_recording_with_event_and_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        transition_recording_with_event_and_provider_operation(
+            self,
+            scope,
+            recording_id,
+            expected_revision,
+            |current| stop_recording(current, now_unix_ms),
+            event,
+            RecordingProviderOperation::Stop,
+            now_unix_ms,
+        )
+    }
+
     fn expire_recording_with_event(
         &self,
         scope: &TenantScope,
@@ -349,6 +392,26 @@ impl RecordingStore for SqliteLocalStore {
             expected_revision,
             |current| expire_recording(current, now_unix_ms),
             Some(event),
+        )
+    }
+
+    fn expire_recording_with_event_and_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        transition_recording_with_event_and_provider_operation(
+            self,
+            scope,
+            recording_id,
+            expected_revision,
+            |current| expire_recording(current, now_unix_ms),
+            event,
+            RecordingProviderOperation::Delete,
+            now_unix_ms,
         )
     }
 
@@ -379,6 +442,25 @@ impl RecordingStore for SqliteLocalStore {
             expected_revision,
             |current| delete_recording(current, now_unix_ms),
             Some(event),
+        )
+    }
+    fn delete_recording_with_event_and_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        transition_recording_with_event_and_provider_operation(
+            self,
+            scope,
+            recording_id,
+            expected_revision,
+            |current| delete_recording(current, now_unix_ms),
+            event,
+            RecordingProviderOperation::Delete,
+            now_unix_ms,
         )
     }
 }
@@ -475,6 +557,52 @@ where
     if let Some(event) = event {
         let _ = event_journal::append_event_in_transaction(&transaction, event)?;
     }
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    Ok(next)
+}
+
+fn transition_recording_with_event_and_provider_operation<F>(
+    store: &SqliteLocalStore,
+    scope: &TenantScope,
+    recording_id: &RecordingId,
+    expected_revision: u64,
+    transition: F,
+    event: &EventEnvelope,
+    operation: RecordingProviderOperation,
+    available_at_unix_ms: i64,
+) -> Result<RecordingSession, DurableStoreError>
+where
+    F: FnOnce(&RecordingSession) -> Result<RecordingSession, RecordingProtocolError>,
+{
+    let mut connection = store.lock_connection()?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    let current =
+        load_recording(&transaction, scope, recording_id)?.ok_or(DurableStoreError::Conflict)?;
+    if current.revision != expected_revision {
+        return Err(DurableStoreError::Conflict);
+    }
+    let next = transition(&current).map_err(map_recording_protocol_error)?;
+    validate_recording_lifecycle_event(&current, &next, Some(event))?;
+    if next == current {
+        return Ok(current);
+    }
+
+    replace_recording_snapshot(&transaction, &next, expected_revision)?;
+    let _ = event_journal::append_event_in_transaction(&transaction, event)?;
+    let provider_record = RecordingProviderOperationRecord {
+        request: RecordingProviderRequest::for_session(&next, operation),
+        state: RecordingProviderOperationState::Pending,
+        attempts: 0,
+        available_at_unix_ms,
+    };
+    let _ = recording_provider_store::insert_provider_operation_in_transaction(
+        &transaction,
+        &provider_record,
+    )?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
