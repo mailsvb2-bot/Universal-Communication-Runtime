@@ -507,8 +507,11 @@ mod tests {
                 ) WITHOUT ROWID;",
             )
             .expect("recordings table");
-        create_v47_objects(&connection.unchecked_transaction().expect("transaction"))
-            .expect("v47 objects");
+        {
+            let transaction = connection.unchecked_transaction().expect("transaction");
+            create_v47_objects(&transaction).expect("v47 objects");
+            transaction.commit().expect("commit schema");
+        }
         connection
             .execute(
                 "INSERT INTO recordings
