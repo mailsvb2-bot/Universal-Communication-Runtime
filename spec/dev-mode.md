@@ -33,7 +33,7 @@ existing canonical dev host:
 
 - the authenticated gRPC API is still owned by `ucr dev` and still binds only
   `127.0.0.1:50051` inside the container;
-- a byte-only TCP forwarder publishes that loopback API through a container port that Compose maps
+- a byte-only TCP forwarder publishes that loopback API through a container port 50052 that Compose maps
   only to host `127.0.0.1:50051`; it adds no protocol, auth, retry or domain semantics;
 - the reference Conference browser HTML is served on host loopback for integration/UI work;
 - a coturn process provides an explicitly insecure **test-only** TURN deployment with a fixed
