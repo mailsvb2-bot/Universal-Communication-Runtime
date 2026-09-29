@@ -2631,6 +2631,83 @@ fn status_from_canonical(error: CanonicalError) -> Status {
 }
 
 #[cfg(test)]
+mod recording_admission_tests {
+    use super::*;
+    use ucr_model::{
+        NamespaceId, RecordingPolicy, RecordingSession, RecordingState, TenantId,
+    };
+    use ucr_realtime::JoinGrantUsePolicy;
+    use ucr_storage_memory::MemoryLocalStore;
+
+    fn id(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn claims() -> RealtimeSessionClaims {
+        RealtimeSessionClaims {
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(id("recording-gate-tenant")),
+                namespace_id: Some(NamespaceId::from_opaque(id("recording-gate-namespace"))),
+            },
+            call_id: CallId::from_opaque(id("recording-gate-call")),
+            participant: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("recording-gate-participant")),
+                kind: PrincipalKind::Person,
+            },
+            device_id: None,
+            session_id: SessionId::from_opaque(id("recording-gate-session")),
+            issued_at_unix_ms: 1_000,
+            not_before_unix_ms: 1_000,
+            expires_at_unix_ms: 2_000,
+            use_policy: JoinGrantUsePolicy::Reusable,
+        }
+    }
+
+    #[test]
+    fn realtime_recording_gate_allows_calls_without_active_recording() {
+        let store = MemoryLocalStore::default();
+        assert_eq!(
+            require_recording_participant_admission(&store, &claims()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn realtime_recording_gate_denies_active_recording_without_consent_evidence() {
+        let store = MemoryLocalStore::default();
+        let claims = claims();
+        let recording = RecordingSession {
+            scope: claims.scope.clone(),
+            recording_id: ucr_model::RecordingId::from_opaque(id("recording-gate-recording")),
+            call_id: claims.call_id.clone(),
+            requested_by: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("recording-gate-host")),
+                kind: PrincipalKind::Person,
+            },
+            policy: RecordingPolicy {
+                require_all_participant_consent: false,
+                notify_all_participants: true,
+                retention_seconds: 60,
+                policy_reference: None,
+            },
+            state: RecordingState::Active,
+            consents: Vec::new(),
+            requested_at_unix_ms: 900,
+            started_at_unix_ms: Some(950),
+            stopped_at_unix_ms: None,
+            expires_at_unix_ms: 60_950,
+            revision: 2,
+        };
+        store.persist_recording(&recording).expect("persist recording");
+
+        assert_eq!(
+            require_recording_participant_admission(&store, &claims),
+            Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
+        );
+    }
+}
+
+#[cfg(test)]
 mod bandwidth_quota_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
