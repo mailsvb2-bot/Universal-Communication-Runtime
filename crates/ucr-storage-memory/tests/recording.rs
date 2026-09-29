@@ -204,7 +204,6 @@ fn retention_expiry_is_finite_and_delete_is_idempotent() {
     assert_eq!(repeated, deleted);
 }
 
-
 #[test]
 fn active_recording_lookup_is_call_scoped_bounded_and_state_exact() {
     let store = MemoryLocalStore::default();
