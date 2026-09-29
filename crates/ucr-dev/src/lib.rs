@@ -10,10 +10,11 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, transport::Server};
 use ucr_api_grpc::{
-    GrpcCallService, GrpcDeviceService, GrpcEventService, GrpcGroupService, GrpcIntegrationService,
-    GrpcStoreForwardService, GrpcSyncService, attach_service_credential, call_service_server,
-    device_service_server, event_service_server, group_service_server, integration_service_server,
-    pb, store_forward_service_server, sync_service_server,
+    GrpcAttachmentService, GrpcCallService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
+    GrpcIntegrationService, GrpcStoreForwardService, GrpcSyncService, attach_service_credential,
+    attachment_service_server, call_service_server, device_service_server, event_service_server,
+    group_service_server, integration_service_server, pb, store_forward_service_server,
+    sync_service_server,
 };
 use ucr_core::{
     CanonicalTransportError, ClassifiedTransportFailure, DeviceLifecycleStore, IdentityStore,
@@ -27,7 +28,7 @@ use ucr_model::{
     PermissionGrant, PermissionScope, PrincipalId, PrincipalKind, PrincipalRef, ScopedPrincipal,
     ServiceCredentialId, ServiceQuotaPolicy, TenantId, TenantScope,
 };
-use ucr_protocol::RUNTIME_PERMISSION_IDS;
+use ucr_protocol::{RUNTIME_PERMISSION_IDS, attachment_content_id};
 use ucr_storage_memory::MemoryLocalStore;
 
 pub const DEFAULT_DEV_BIND: &str = "127.0.0.1:50051";
@@ -473,6 +474,11 @@ impl DevEnvironment {
                 Arc::clone(&authorization),
                 Arc::clone(&store),
             )))
+            .add_service(attachment_service_server(GrpcAttachmentService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
             .add_service(group_service_server(GrpcGroupService::new(
                 Arc::clone(&clock),
                 Arc::clone(&authorization),
@@ -633,6 +639,11 @@ async fn verify_public_api(env: &Arc<DevEnvironment>) -> Result<(), String> {
                 Arc::clone(&authorization),
                 Arc::clone(&store),
             )))
+            .add_service(attachment_service_server(GrpcAttachmentService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
             .add_service(group_service_server(GrpcGroupService::new(
                 Arc::clone(&clock),
                 Arc::clone(&authorization),
@@ -648,6 +659,7 @@ async fn verify_public_api(env: &Arc<DevEnvironment>) -> Result<(), String> {
     });
     let endpoint = format!("http://{address}");
     verify_integration_round_trip(&endpoint, env).await?;
+    verify_attachment_round_trip(&endpoint, env).await?;
     verify_group_round_trip(&endpoint, env).await?;
     verify_call_round_trip(&endpoint, env).await?;
     server.abort();
@@ -720,6 +732,106 @@ async fn verify_integration_round_trip(endpoint: &str, env: &DevEnvironment) -> 
             Some(pb::integration_send_message_response::Result::Acknowledgement(_))
         ),
         "SendMessage",
+    )
+}
+
+async fn verify_attachment_round_trip(
+    endpoint: &str,
+    env: &DevEnvironment,
+) -> Result<(), String> {
+    let mut client =
+        pb::attachment_service_client::AttachmentServiceClient::connect(endpoint.to_owned())
+            .await
+            .map_err(|error| format!("self-check AttachmentService connect: {error}"))?;
+    let payload = b"hello from ucr dev attachment".to_vec();
+    let content_id = attachment_content_id(&payload);
+    let attachment_id = "dev-attachment";
+
+    let mut register = Request::new(pb::AttachmentRegisterRequest {
+        attachment: Some(pb::AttachmentDescriptor {
+            attachment_id: Some(pb_id(attachment_id)),
+            scope: Some(pb_scope(&env.scope)),
+            content_id: Some(pb::AttachmentContentId {
+                sha256: content_id.sha256.to_vec(),
+            }),
+            size_bytes: payload.len() as u64,
+            chunk_size_bytes: payload.len() as u32,
+            chunk_count: 1,
+            media_type: Some("text/plain".to_owned()),
+            file_name: Some("dev.txt".to_owned()),
+        }),
+    });
+    attach_dev_credential(&mut register, env);
+    let registered = client
+        .register_attachment(register)
+        .await
+        .map_err(|error| format!("self-check RegisterAttachment: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            registered.result,
+            Some(pb::attachment_register_response::Result::Attachment(_))
+        ),
+        "RegisterAttachment",
+    )?;
+
+    let mut put = Request::new(pb::AttachmentPutChunkRequest {
+        scope: Some(pb_scope(&env.scope)),
+        chunk: Some(pb::AttachmentChunk {
+            attachment_id: Some(pb_id(attachment_id)),
+            index: 0,
+            offset_bytes: 0,
+            payload: payload.clone(),
+            sha256: content_id.sha256.to_vec(),
+        }),
+    });
+    attach_dev_credential(&mut put, env);
+    let put = client
+        .put_chunk(put)
+        .await
+        .map_err(|error| format!("self-check PutChunk: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            put.result,
+            Some(pb::attachment_put_chunk_response::Result::Acknowledgement(_))
+        ),
+        "PutChunk",
+    )?;
+
+    let mut get = Request::new(pb::AttachmentGetChunkRequest {
+        scope: Some(pb_scope(&env.scope)),
+        attachment_id: Some(pb_id(attachment_id)),
+        index: 0,
+    });
+    attach_dev_credential(&mut get, env);
+    let downloaded = client
+        .get_chunk(get)
+        .await
+        .map_err(|error| format!("self-check GetChunk: {error}"))?
+        .into_inner();
+    let exact_payload = match downloaded.result {
+        Some(pb::attachment_get_chunk_response::Result::Chunk(chunk)) => chunk.payload == payload,
+        _ => false,
+    };
+    require_result(exact_payload, "GetChunk")?;
+
+    let mut verify = Request::new(pb::AttachmentVerifyRequest {
+        scope: Some(pb_scope(&env.scope)),
+        attachment_id: Some(pb_id(attachment_id)),
+    });
+    attach_dev_credential(&mut verify, env);
+    let verified = client
+        .verify_attachment(verify)
+        .await
+        .map_err(|error| format!("self-check VerifyAttachment: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            verified.result,
+            Some(pb::attachment_verify_response::Result::Acknowledgement(_))
+        ),
+        "VerifyAttachment",
     )
 }
 

@@ -11,12 +11,14 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use ucr_api_grpc::{
-    GrpcCallService, GrpcConferenceService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
-    GrpcIntegrationService, GrpcMachineAuthService, GrpcOperatorRuntimeService,
+    GrpcAttachmentService, GrpcCallService, GrpcConferenceService, GrpcDeviceService,
+    GrpcEventService, GrpcGroupService, GrpcIntegrationService, GrpcMachineAuthService,
+    GrpcOperatorRuntimeService,
     GrpcRealtimeService, GrpcRecordingService, GrpcStoreForwardService, GrpcSyncService,
     GrpcUniversalConferenceService, MachineAuthDiscovery, MachineTokenVerificationKeyProvider,
     OperatorRuntimeHealthSource, RealtimeWebRtcDependencies,
-    UniversalConferenceRuntimeCapabilities, call_service_server, conference_service_server,
+    UniversalConferenceRuntimeCapabilities, attachment_service_server, call_service_server,
+    conference_service_server,
     device_service_server, event_service_server, expire_due_recordings_once, group_service_server,
     integration_service_server, machine_auth_service_server, operator_runtime_service_server, pb,
     realtime_service_server, recording_service_server, store_forward_service_server,
@@ -1343,15 +1345,30 @@ impl ProductionRuntime {
             Arc::clone(&store),
             Arc::clone(&conference_state),
         );
+        let mut attachment_service = GrpcAttachmentService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        );
         if let Some(config) = machine_bearer {
-            universal_service = match config.verification {
+            match config.verification {
                 MachineBearerVerificationConfig::Static(keys) => {
-                    universal_service.with_machine_bearer_auth(keys, config.policy)
+                    universal_service = universal_service.with_machine_bearer_auth(
+                        Arc::clone(&keys),
+                        config.policy.clone(),
+                    );
+                    attachment_service =
+                        attachment_service.with_machine_bearer_auth(keys, config.policy);
                 }
                 MachineBearerVerificationConfig::Provider(provider) => {
-                    universal_service.with_machine_bearer_auth_provider(provider, config.policy)
+                    universal_service = universal_service.with_machine_bearer_auth_provider(
+                        Arc::clone(&provider),
+                        config.policy.clone(),
+                    );
+                    attachment_service = attachment_service
+                        .with_machine_bearer_auth_provider(provider, config.policy);
                 }
-            };
+            }
         }
 
         Server::builder()
@@ -1363,6 +1380,7 @@ impl ProductionRuntime {
                 Arc::clone(&authorization),
                 Arc::clone(&store),
             )))
+            .add_service(attachment_service_server(attachment_service))
             .add_service(group_service_server(GrpcGroupService::new(
                 Arc::clone(&clock),
                 Arc::clone(&authorization),
@@ -1618,6 +1636,27 @@ async fn serve_realtime_services(
         Arc::clone(&join_issuer),
         runtime_capabilities.recording,
     );
+    let mut attachment_service = GrpcAttachmentService::new(
+        Arc::clone(&clock),
+        Arc::clone(&authorization),
+        Arc::clone(&store),
+    );
+    if let Some(config) = machine_bearer.as_ref() {
+        match &config.verification {
+            MachineBearerVerificationConfig::Static(keys) => {
+                attachment_service = attachment_service.with_machine_bearer_auth(
+                    Arc::clone(keys),
+                    config.policy.clone(),
+                );
+            }
+            MachineBearerVerificationConfig::Provider(provider) => {
+                attachment_service = attachment_service.with_machine_bearer_auth_provider(
+                    Arc::clone(provider),
+                    config.policy.clone(),
+                );
+            }
+        }
+    }
     (universal_service, recording_service) =
         apply_realtime_machine_bearer(universal_service, recording_service, machine_bearer);
 
@@ -1630,6 +1669,7 @@ async fn serve_realtime_services(
             Arc::clone(&authorization),
             Arc::clone(&store),
         )))
+        .add_service(attachment_service_server(attachment_service))
         .add_service(group_service_server(GrpcGroupService::new(
             Arc::clone(&clock),
             Arc::clone(&authorization),
