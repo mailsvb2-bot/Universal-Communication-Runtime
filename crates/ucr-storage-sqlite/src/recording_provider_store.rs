@@ -215,7 +215,7 @@ impl RecordingProviderOperationStore for SqliteLocalStore {
         let changed = connection
             .execute(
                 "UPDATE recording_provider_operations
-                 SET state='applied'
+                 SET state='applied', attempts=attempts+1
                  WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
                    AND recording_id=?4 AND lifecycle_revision=?5 AND operation=?6
                    AND state='pending' AND call_id=?7 AND expires_at_unix_ms=?8",
