@@ -41,7 +41,7 @@ fi
 
 cat "$RUNTIME_LOG"
 
-socat TCP-LISTEN:150051,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:50051 &
+socat TCP-LISTEN:50052,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:50051 &
 PIDS="$PIDS $!"
 
 python3 -m http.server 8080 --bind 0.0.0.0 --directory /opt/ucr/browser &
