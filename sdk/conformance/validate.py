@@ -145,6 +145,9 @@ def main() -> None:
     memory_store = read("crates/ucr-storage-memory/src/lib.rs")
     sqlite_service_control = read("crates/ucr-storage-sqlite/src/service_control_store.rs")
     sqlite_store = read("crates/ucr-storage-sqlite/src/lib.rs")
+    sqlite_recording_provider = read(
+        "crates/ucr-storage-sqlite/src/recording_provider_store.rs"
+    )
     realtime_registry = read("crates/ucr-realtime/src/lib.rs")
     realtime_service = read("crates/ucr-api-grpc/src/realtime_service.rs")
     rate_limit_spec = read("spec/service-principal-rate-limits.md")
@@ -289,7 +292,8 @@ def main() -> None:
         and "SQLITE_SCHEMA_V43: u32 = 43" in sqlite_store
         and "SQLITE_SCHEMA_V44: u32 = 44" in sqlite_store
         and "SQLITE_SCHEMA_V45: u32 = 45" in sqlite_store
-        and "SQLITE_SCHEMA_VERSION: u32 = 46" in sqlite_store
+        and "SQLITE_SCHEMA_V46: u32 = 46" in sqlite_store
+        and "SQLITE_SCHEMA_VERSION: u32 = 47" in sqlite_store
         and "migrate_v38_to_v39" in sqlite_store
         and "migrate_v39_to_v40" in sqlite_store
         and "migrate_v40_to_v41" in sqlite_store
@@ -298,11 +302,14 @@ def main() -> None:
         and "migrate_v43_to_v44" in sqlite_store
         and "migrate_v44_to_v45" in sqlite_store
         and "migrate_v45_to_v46" in sqlite_store
+        and "migrate_v46_to_v47" in sqlite_store
         and "create_v46_objects" in sqlite_universal_conferences
         and "verify_v46_objects" in sqlite_universal_conferences
+        and "create_v47_objects" in sqlite_recording_provider
+        and "verify_v47_objects" in sqlite_recording_provider
         and "service_audit_authentication" in sqlite_service_control
         and "verify_v44_objects" in sqlite_service_control,
-        "resource quota v42, runtime worker lease v43, typed audit v44, attachment v45, and conference metadata v46 migration chain missing",
+        "resource quota v42, runtime worker lease v43, typed audit v44, attachment v45, conference metadata v46, and recording provider outbox v47 migration chain missing",
     )
     for marker in (
         "ServiceResourceQuotaPolicy",
