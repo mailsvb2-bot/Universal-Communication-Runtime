@@ -1,8 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{
     DurableRecordStatus, DurableStoreError, MAX_ACTIVE_RECORDINGS_PER_CALL,
-    MAX_RECORDING_RETENTION_BATCH, RecordingConsentProviderStopRequest,
-    RecordingProviderOperation,
+    MAX_RECORDING_RETENTION_BATCH, RecordingConsentProviderStopRequest, RecordingProviderOperation,
     RecordingProviderOperationRecord, RecordingProviderOperationState, RecordingProviderRequest,
     RecordingStore,
 };
