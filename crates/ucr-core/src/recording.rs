@@ -633,7 +633,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn realtime_participant_gate_fails_closed_for_churn_without_consent_evidence() {
         let recording = session();
         let participant = PrincipalRef {
@@ -668,6 +667,7 @@ mod tests {
         assert!(!recording_allows_realtime_participant(&recording, &participant));
     }
 
+    #[test]
     fn provider_request_copies_only_bounded_canonical_recording_context() {
         let session = session();
         let request =
