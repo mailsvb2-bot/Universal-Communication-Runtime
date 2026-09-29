@@ -65,6 +65,8 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     assert!(runtime_main.contains("run_webhook_worker_with_secret_provider"));
     assert!(runtime_main.contains("dispatch_webhook_once_with_secret_provider"));
     assert!(secrets.contains("pub trait SecretProvider"));
+    assert!(secrets.contains("pub struct ReloadingFileSecretProvider"));
+    assert!(secrets.contains("MAX_RELOADABLE_SECRET_MANIFEST_BYTES"));
     assert!(secrets.contains("pub enum SecretPurpose"));
     assert!(secrets.contains("MachineTokenSigning"));
     assert!(secrets.contains("JoinSigning"));
