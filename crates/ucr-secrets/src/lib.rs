@@ -141,7 +141,6 @@ pub trait SecretProvider: fmt::Debug + Send + Sync {
     ) -> Result<ActiveSecretSet, SecretProviderError>;
 }
 
-
 pub const MAX_RELOADABLE_SECRET_MANIFEST_BYTES: u64 = 1024;
 
 #[derive(Debug, Clone)]
