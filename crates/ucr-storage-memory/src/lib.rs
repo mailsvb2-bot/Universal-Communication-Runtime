@@ -8892,7 +8892,10 @@ where
         available_at_unix_ms,
     };
     let provider_key = recording_provider_operation_key(&record.request);
-    if state.recording_provider_operations.contains_key(&provider_key) {
+    if state
+        .recording_provider_operations
+        .contains_key(&provider_key)
+    {
         return Err(DurableStoreError::Conflict);
     }
 
@@ -9298,7 +9301,9 @@ impl RecordingProviderOperationStore for MemoryLocalStore {
                 Err(DurableStoreError::Conflict)
             };
         }
-        state.recording_provider_operations.insert(key, record.clone());
+        state
+            .recording_provider_operations
+            .insert(key, record.clone());
         Ok(DurableRecordStatus::Persisted)
     }
 
