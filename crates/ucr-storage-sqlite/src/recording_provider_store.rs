@@ -8,7 +8,7 @@ use ucr_model::{CallId, NamespaceId, OpaqueId, RecordingId, TenantId, TenantScop
 
 use super::{
     SqliteLocalStore, map_schema_change_error, map_sqlite_error, namespace_storage_key,
-    recording_store, verify_table_columns,
+    verify_table_columns,
 };
 
 pub(super) const V47_OBJECTS_SQL: &str = r"
@@ -43,11 +43,6 @@ pub(super) fn create_v47_objects(transaction: &Transaction<'_>) -> Result<(), Du
     transaction
         .execute_batch(V47_OBJECTS_SQL)
         .map_err(|error| map_schema_change_error(&error))
-}
-
-pub(super) fn verify_schema_v47(connection: &Connection) -> Result<(), DurableStoreError> {
-    recording_store::verify_v33_objects(connection)?;
-    verify_v47_objects(connection)
 }
 
 pub(super) fn verify_v47_objects(connection: &Connection) -> Result<(), DurableStoreError> {
