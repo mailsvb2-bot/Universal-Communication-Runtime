@@ -76,10 +76,10 @@ async fn run() -> Result<(), String> {
                     })?);
             }
             "--turn-database" => {
-                turn_database = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| "--turn-database requires a path".to_owned())?,
-                ));
+                turn_database =
+                    Some(PathBuf::from(args.next().ok_or_else(|| {
+                        "--turn-database requires a path".to_owned()
+                    })?));
             }
             "--turn-realm" => {
                 turn_realm = Some(
@@ -95,11 +95,7 @@ async fn run() -> Result<(), String> {
     }
 
     if command == "reconcile-turn-secrets" {
-        return reconcile_turn_secrets_command(
-            turn_database,
-            turn_realm,
-            exclusive_turn_realm,
-        );
+        return reconcile_turn_secrets_command(turn_database, turn_realm, exclusive_turn_realm);
     }
 
     let database = database.ok_or_else(|| format!("--database is required; {}", usage()))?;
@@ -182,10 +178,10 @@ fn reconcile_turn_secrets_command(
     turn_realm: Option<String>,
     exclusive_turn_realm: bool,
 ) -> Result<(), String> {
-    let turn_database =
-        turn_database.ok_or_else(|| "--turn-database is required for reconcile-turn-secrets".to_owned())?;
-    let turn_realm =
-        turn_realm.ok_or_else(|| "--turn-realm is required for reconcile-turn-secrets".to_owned())?;
+    let turn_database = turn_database
+        .ok_or_else(|| "--turn-database is required for reconcile-turn-secrets".to_owned())?;
+    let turn_realm = turn_realm
+        .ok_or_else(|| "--turn-realm is required for reconcile-turn-secrets".to_owned())?;
     let (provider, handle) = secret_provider_from_env(
         "UCR_WEBRTC_TURN_SECRET_PROVIDER",
         "UCR_WEBRTC_TURN_SECRET_FILE",
