@@ -303,14 +303,8 @@ mod tests {
         drop(connection);
 
         let (provider, handle) = provider_with(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", None);
-        reconcile_coturn_sqlite_secret_set(
-            &provider,
-            &handle,
-            &path,
-            "turn.example",
-            true,
-        )
-        .expect("reconcile");
+        reconcile_coturn_sqlite_secret_set(&provider, &handle, &path, "turn.example", true)
+            .expect("reconcile");
 
         let connection = Connection::open(&path).expect("db");
         let count: i64 = connection
