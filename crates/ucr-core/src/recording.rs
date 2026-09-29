@@ -285,7 +285,6 @@ pub trait RecordingStore: StorageProvider {
         recording_id: &RecordingId,
     ) -> Result<Option<RecordingSession>, DurableStoreError>;
 
-
     /// Returns a bounded deterministic set of ACTIVE recordings for one canonical Call.
     ///
     /// This lookup is used only for fail-closed realtime admission. It does not infer participant
@@ -572,8 +571,8 @@ mod tests {
     };
 
     use super::{
-        RecordingMediaProvider, RecordingProviderError, RecordingProviderHealth,
-        RecordingProviderOperation, RecordingProviderRequest, recording_allows_realtime_participant,
+        recording_allows_realtime_participant, RecordingMediaProvider, RecordingProviderError,
+        RecordingProviderHealth, RecordingProviderOperation, RecordingProviderRequest,
     };
 
     fn opaque(value: &str) -> OpaqueId {
@@ -639,7 +638,10 @@ mod tests {
             principal_id: PrincipalId::from_opaque(opaque("late-participant")),
             kind: PrincipalKind::Person,
         };
-        assert!(!recording_allows_realtime_participant(&recording, &participant));
+        assert!(!recording_allows_realtime_participant(
+            &recording,
+            &participant
+        ));
     }
 
     #[test]
@@ -654,17 +656,29 @@ mod tests {
             state: RecordingConsentState::Pending,
             decided_at_unix_ms: 0,
         });
-        assert!(!recording_allows_realtime_participant(&recording, &participant));
+        assert!(!recording_allows_realtime_participant(
+            &recording,
+            &participant
+        ));
 
         recording.policy.require_all_participant_consent = false;
-        assert!(recording_allows_realtime_participant(&recording, &participant));
+        assert!(recording_allows_realtime_participant(
+            &recording,
+            &participant
+        ));
 
         recording.consents[0].state = RecordingConsentState::Granted;
         recording.policy.require_all_participant_consent = true;
-        assert!(recording_allows_realtime_participant(&recording, &participant));
+        assert!(recording_allows_realtime_participant(
+            &recording,
+            &participant
+        ));
 
         recording.consents[0].state = RecordingConsentState::Revoked;
-        assert!(!recording_allows_realtime_participant(&recording, &participant));
+        assert!(!recording_allows_realtime_participant(
+            &recording,
+            &participant
+        ));
     }
 
     #[test]
