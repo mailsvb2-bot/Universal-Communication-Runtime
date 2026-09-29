@@ -55,7 +55,6 @@ fn recording_provider_request_does_not_carry_media_or_crypto_secrets() {
     assert!(!request.contains("token"));
 }
 
-
 #[test]
 fn realtime_join_enforces_recording_participant_churn_policy() {
     let core = read("crates/ucr-core/src/recording.rs");
