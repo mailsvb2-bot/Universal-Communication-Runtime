@@ -20,6 +20,15 @@ fn recording_provider_is_a_side_effect_boundary_not_a_second_lifecycle_owner() {
     assert!(core.contains("pub enum RecordingProviderHealth"));
     assert!(core.contains("pub enum RecordingProviderError"));
     assert!(exports.contains("RecordingMediaProvider"));
+    assert!(core.contains("pub trait RecordingProviderOperationStore"));
+    assert!(core.contains("dispatch_recording_provider_operations_once"));
+    assert!(exports.contains("RecordingProviderOperationStore"));
+    let sqlite = read("crates/ucr-storage-sqlite/src/recording_provider_store.rs");
+    assert!(sqlite.contains("recording_provider_operations"));
+    assert!(sqlite.contains("TransactionBehavior::Immediate"));
+    let grpc = read("crates/ucr-api-grpc/src/recording_service.rs");
+    assert!(grpc.contains("start_recording_with_event_and_provider_operation"));
+    assert!(grpc.contains("set_recording_consent_with_event_and_provider_stop"));
     assert!(spec.contains("one pluggable `RecordingMediaProvider` boundary"));
     assert!(spec.contains("must not become a second Recording lifecycle owner"));
 }

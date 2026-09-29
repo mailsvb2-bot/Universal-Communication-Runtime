@@ -82,6 +82,162 @@ pub trait RecordingMediaProvider: fmt::Debug + Send + Sync {
     fn apply(&self, request: &RecordingProviderRequest) -> Result<(), RecordingProviderError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingProviderOperationState {
+    Pending,
+    Applied,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingProviderOperationRecord {
+    pub request: RecordingProviderRequest,
+    pub state: RecordingProviderOperationState,
+    pub attempts: u32,
+    pub available_at_unix_ms: i64,
+}
+
+pub const MAX_RECORDING_PROVIDER_OPERATION_BATCH: usize = 128;
+pub const MAX_RECORDING_PROVIDER_ATTEMPTS: u32 = 8;
+pub const RECORDING_PROVIDER_RETRY_BASE_MS: i64 = 1_000;
+pub const RECORDING_PROVIDER_RETRY_MAX_MS: i64 = 60_000;
+
+/// Durable restart-safe ledger for provider side effects authorized by canonical Recording state.
+///
+/// Implementations must keep the operation identity
+/// `(scope, recording_id, lifecycle_revision, operation)` unique. Preparing the exact same
+/// operation is idempotent; changed reuse conflicts.
+pub trait RecordingProviderOperationStore: StorageProvider {
+    /// Persists or deduplicates one pending provider operation.
+    ///
+    /// # Errors
+    /// Rejects malformed/conflicting records and explicit durable-store failures.
+    fn prepare_recording_provider_operation(
+        &self,
+        record: &RecordingProviderOperationRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Returns a bounded deterministic batch of due pending operations.
+    ///
+    /// # Errors
+    /// Rejects zero/oversized limits and explicit durable-store failures.
+    fn pending_recording_provider_operations(
+        &self,
+        now_unix_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<RecordingProviderOperationRecord>, DurableStoreError>;
+
+    /// Marks one exact pending operation applied.
+    ///
+    /// # Errors
+    /// Rejects stale/mismatched state and explicit durable-store failures.
+    fn mark_recording_provider_operation_applied(
+        &self,
+        request: &RecordingProviderRequest,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Records a retry for one exact pending operation and moves its next-attempt deadline.
+    ///
+    /// # Errors
+    /// Rejects stale/mismatched state, non-increasing deadlines and explicit store failures.
+    fn retry_recording_provider_operation(
+        &self,
+        request: &RecordingProviderRequest,
+        next_attempt_unix_ms: i64,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Marks one exact pending operation terminally failed.
+    ///
+    /// # Errors
+    /// Rejects stale/mismatched state and explicit durable-store failures.
+    fn mark_recording_provider_operation_failed(
+        &self,
+        request: &RecordingProviderRequest,
+    ) -> Result<(), DurableStoreError>;
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RecordingProviderDispatchSweep {
+    pub examined: usize,
+    pub applied: usize,
+    pub retried: usize,
+    pub failed: usize,
+}
+
+/// Applies one bounded batch of durable Recording provider operations.
+///
+/// The durable outbox remains authoritative for retry state. Exact provider retries use the
+/// canonical provider-operation identity already embedded in each request.
+///
+/// # Errors
+/// Returns explicit durable-store failures. Provider failures are converted into retry or terminal
+/// outbox state and do not abort unrelated operations in the same batch.
+pub fn dispatch_recording_provider_operations_once<S, P>(
+    store: &S,
+    provider: &P,
+    now_unix_ms: i64,
+    limit: usize,
+) -> Result<RecordingProviderDispatchSweep, DurableStoreError>
+where
+    S: RecordingProviderOperationStore,
+    P: RecordingMediaProvider + ?Sized,
+{
+    let pending = store.pending_recording_provider_operations(now_unix_ms, limit)?;
+    let mut sweep = RecordingProviderDispatchSweep::default();
+
+    for record in pending {
+        sweep.examined = sweep.examined.saturating_add(1);
+        match provider.apply(&record.request) {
+            Ok(()) => {
+                store.mark_recording_provider_operation_applied(&record.request)?;
+                sweep.applied = sweep.applied.saturating_add(1);
+            }
+            Err(RecordingProviderError::Conflict | RecordingProviderError::PolicyDenied) => {
+                store.mark_recording_provider_operation_failed(&record.request)?;
+                sweep.failed = sweep.failed.saturating_add(1);
+            }
+            Err(
+                RecordingProviderError::CapacityExceeded
+                | RecordingProviderError::TemporarilyUnavailable
+                | RecordingProviderError::Internal,
+            ) => {
+                if record.attempts.saturating_add(1) >= MAX_RECORDING_PROVIDER_ATTEMPTS {
+                    store.mark_recording_provider_operation_failed(&record.request)?;
+                    sweep.failed = sweep.failed.saturating_add(1);
+                } else {
+                    let next_attempt = now_unix_ms
+                        .checked_add(recording_provider_retry_delay_ms(record.attempts))
+                        .ok_or(DurableStoreError::InvalidRecord)?;
+                    store.retry_recording_provider_operation(&record.request, next_attempt)?;
+                    sweep.retried = sweep.retried.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    Ok(sweep)
+}
+
+#[must_use]
+pub fn recording_provider_retry_delay_ms(previous_attempts: u32) -> i64 {
+    let exponent = previous_attempts.min(6);
+    let multiplier = 1_i64 << exponent;
+    RECORDING_PROVIDER_RETRY_BASE_MS
+        .saturating_mul(multiplier)
+        .min(RECORDING_PROVIDER_RETRY_MAX_MS)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RecordingConsentProviderStopRequest<'a> {
+    pub scope: &'a TenantScope,
+    pub recording_id: &'a RecordingId,
+    pub expected_revision: u64,
+    pub participant: &'a PrincipalRef,
+    pub state: RecordingConsentState,
+    pub now_unix_ms: i64,
+    pub event: &'a EventEnvelope,
+}
+
 /// Durable owner of recording policy, consent evidence and lifecycle only.
 ///
 /// This store does not own Call/Group membership and never owns recorded media bytes or MLS keys.
@@ -165,6 +321,20 @@ pub trait RecordingStore: StorageProvider {
         )
     }
 
+    /// Applies consent and atomically prepares a provider stop when the consent mutation stops an
+    /// active recording.
+    ///
+    /// # Errors
+    /// Fails closed when Recording state, Event and provider operation cannot be committed as one
+    /// durable action.
+    fn set_recording_consent_with_event_and_provider_stop(
+        &self,
+        request: RecordingConsentProviderStopRequest<'_>,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = request;
+        Err(DurableStoreError::Unavailable)
+    }
+
     /// Starts recording lifecycle after consent and retention gates pass.
     ///
     /// # Errors
@@ -183,6 +353,23 @@ pub trait RecordingStore: StorageProvider {
     /// Rejects stale/non-ready recording state, invalid Event evidence, unsupported atomic
     /// persistence, or explicit durable-store failures.
     fn start_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
+        Err(DurableStoreError::Unavailable)
+    }
+
+    /// Starts lifecycle and atomically prepares the matching provider side effect.
+    ///
+    /// # Errors
+    /// Fails closed when the store cannot commit Recording state, Event and provider operation
+    /// as one durable action.
+    fn start_recording_with_event_and_provider_operation(
         &self,
         scope: &TenantScope,
         recording_id: &RecordingId,
@@ -223,6 +410,22 @@ pub trait RecordingStore: StorageProvider {
         Err(DurableStoreError::Unavailable)
     }
 
+    /// Stops lifecycle and atomically prepares the provider stop operation.
+    ///
+    /// # Errors
+    /// Fails closed when the combined durable action is unsupported or invalid.
+    fn stop_recording_with_event_and_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
+        Err(DurableStoreError::Unavailable)
+    }
+
     /// Applies finite-retention expiry.
     ///
     /// # Errors
@@ -241,6 +444,22 @@ pub trait RecordingStore: StorageProvider {
     /// Rejects early/stale recording state, invalid Event evidence, unsupported atomic
     /// persistence, or explicit durable-store failures.
     fn expire_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
+        Err(DurableStoreError::Unavailable)
+    }
+
+    /// Expires lifecycle and atomically prepares controlled provider deletion.
+    ///
+    /// # Errors
+    /// Fails closed when the combined durable action is unsupported or invalid.
+    fn expire_recording_with_event_and_provider_operation(
         &self,
         scope: &TenantScope,
         recording_id: &RecordingId,
@@ -273,6 +492,22 @@ pub trait RecordingStore: StorageProvider {
     /// Rejects stale/malformed recording state, invalid Event evidence, unsupported atomic
     /// persistence, or explicit durable-store failures.
     fn delete_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
+        Err(DurableStoreError::Unavailable)
+    }
+
+    /// Deletes lifecycle and atomically prepares controlled provider deletion.
+    ///
+    /// # Errors
+    /// Fails closed when the combined durable action is unsupported or invalid.
+    fn delete_recording_with_event_and_provider_operation(
         &self,
         scope: &TenantScope,
         recording_id: &RecordingId,

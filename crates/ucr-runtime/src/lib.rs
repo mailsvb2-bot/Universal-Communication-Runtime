@@ -24,9 +24,10 @@ use ucr_api_grpc::{
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
-    DurableStoreError, EventWebhookDispatcher, MAX_RECORDING_RETENTION_BATCH, StorageHealth,
-    StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome,
-    generate_opaque_id,
+    DurableStoreError, EventWebhookDispatcher, MAX_RECORDING_PROVIDER_OPERATION_BATCH,
+    MAX_RECORDING_RETENTION_BATCH, RecordingMediaProvider, RecordingProviderDispatchSweep,
+    StorageHealth, StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock,
+    WebhookDispatchOutcome, dispatch_recording_provider_operations_once, generate_opaque_id,
 };
 use ucr_crypto::{
     MAX_MACHINE_TOKEN_TTL_SECONDS, MachineTokenPolicy, MachineTokenPublicKeySet,
@@ -1069,6 +1070,27 @@ impl ProductionRuntime {
                 () = tokio::time::sleep(poll_interval) => {}
             }
         }
+    }
+
+    /// Executes one bounded durable Recording provider-operation sweep.
+    ///
+    /// This method does not enable Recording capability by itself. A deployment must provide a
+    /// concrete `RecordingMediaProvider`; the durable outbox remains the retry/idempotency owner.
+    ///
+    /// # Errors
+    /// Returns durable-store failures without dropping pending provider operations.
+    pub fn dispatch_recording_provider_once(
+        &self,
+        provider: &dyn RecordingMediaProvider,
+    ) -> Result<RecordingProviderDispatchSweep, String> {
+        let now_unix_ms = runtime_now_unix_ms()?;
+        dispatch_recording_provider_operations_once(
+            self.store.as_ref(),
+            provider,
+            now_unix_ms,
+            MAX_RECORDING_PROVIDER_OPERATION_BATCH,
+        )
+        .map_err(|error| format!("dispatch recording provider operations: {error:?}"))
     }
 
     /// Runs the durable finite-retention executor for Recording lifecycle state.

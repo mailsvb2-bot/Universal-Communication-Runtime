@@ -18,7 +18,7 @@ fn recording_retention_worker_reuses_canonical_recording_and_event_owners() {
 
     assert!(core.contains("fn recordings_due_for_expiry("));
     assert!(api.contains("pub fn expire_due_recordings_once"));
-    assert!(api.contains("expire_recording_with_event("));
+    assert!(api.contains("expire_recording_with_event_and_provider_operation("));
     assert!(api.contains("RecordingState::Expired"));
     assert!(runtime.contains("run_recording_retention_worker"));
     assert!(runtime.contains("RECORDING_RETENTION_WORKER_KIND"));
