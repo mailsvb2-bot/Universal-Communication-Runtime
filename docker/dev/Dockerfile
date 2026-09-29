@@ -21,6 +21,6 @@ RUN chmod 0755 /usr/local/bin/ucr-dev-entrypoint \
     /opt/ucr/dev/webhook_receiver.py \
     /opt/ucr/dev/turn_credentials.py
 
-EXPOSE 8080 8090 150051 3478/tcp 3478/udp 49160-49170/udp
+EXPOSE 8080 8090 50052 3478/tcp 3478/udp 49160-49170/udp
 
 ENTRYPOINT ["/usr/local/bin/ucr-dev-entrypoint"]
