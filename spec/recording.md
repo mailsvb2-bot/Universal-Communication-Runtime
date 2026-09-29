@@ -63,6 +63,21 @@ Concrete encoded-media capture, compositor/mixer behavior and object storage are
 
 The durable lifecycle/store can be implemented and tested while `ucr.conference.recording` remains unadvertised. Capability discovery must continue to report recording unavailable until a concrete encrypted media provider is wired, participant-churn policy is enforced at the realtime boundary, and provider deletion/retention conformance is proven.
 
+### Realtime participant-churn gate
+
+Realtime admission now checks every ACTIVE Recording for the exact canonical Call before registering a
+new/reconnected realtime session. The participant must already exist in that Recording's consent
+set. When `require_all_participant_consent=true`, admission requires `GRANTED`; when the policy
+does not require every affirmative grant, an existing `PENDING` consent may remain admissible, but
+`DENIED`, `REVOKED`, or completely absent consent evidence fails closed with PolicyDenied.
+
+This deliberately does not invent consent for a participant who joined after Recording creation.
+Until dynamic roster-to-consent expansion is designed as an atomic canonical operation, a late
+participant who is absent from an ACTIVE Recording consent set cannot enter its realtime media
+session. The integration may stop/recreate the recording with the new roster rather than silently
+recording a participant with no notification/consent evidence. Lookup is bounded; exceeding the
+active-recording scan ceiling fails closed rather than skipping an active recording.
+
 ### Durable provider-operation outbox
 
 Recording lifecycle transitions that require provider side effects now prepare a durable
