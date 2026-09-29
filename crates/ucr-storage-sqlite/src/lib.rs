@@ -2805,6 +2805,28 @@ mod tests {
     }
 
     #[test]
+    fn v46_partial_v47_outbox_recovers_idempotently() {
+        let db = TestDbPath::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create current store");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open current store");
+            connection
+                .pragma_update(None, "user_version", SQLITE_SCHEMA_V46)
+                .expect("simulate committed objects before version bump");
+        }
+
+        let recovered = SqliteLocalStore::open(db.path()).expect("recover partial v47 migration");
+        assert_eq!(recovered.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        drop(recovered);
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen recovered store");
+        assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+    }
+
+    #[test]
     fn v46_store_migrates_recording_provider_outbox_to_v47_and_reopens_cleanly() {
         let db = TestDbPath::new();
         {
