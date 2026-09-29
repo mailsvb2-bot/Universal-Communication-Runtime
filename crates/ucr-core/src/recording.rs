@@ -82,7 +82,6 @@ pub trait RecordingMediaProvider: fmt::Debug + Send + Sync {
     fn apply(&self, request: &RecordingProviderRequest) -> Result<(), RecordingProviderError>;
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingProviderOperationState {
     Pending,
@@ -146,7 +145,6 @@ pub trait RecordingProviderOperationStore: StorageProvider {
         request: &RecordingProviderRequest,
         next_attempt_unix_ms: i64,
     ) -> Result<(), DurableStoreError>;
-
 
     /// Marks one exact pending operation terminally failed.
     ///
@@ -228,7 +226,6 @@ pub fn recording_provider_retry_delay_ms(previous_attempts: u32) -> i64 {
         .saturating_mul(multiplier)
         .min(RECORDING_PROVIDER_RETRY_MAX_MS)
 }
-
 
 /// Durable owner of recording policy, consent evidence and lifecycle only.
 ///
@@ -312,7 +309,6 @@ pub trait RecordingStore: StorageProvider {
         )
     }
 
-
     /// Applies consent and atomically prepares a provider stop when the consent mutation stops an
     /// active recording.
     ///
@@ -370,7 +366,6 @@ pub trait RecordingStore: StorageProvider {
         Err(DurableStoreError::Unavailable)
     }
 
-
     /// Starts lifecycle and atomically prepares the matching provider side effect.
     ///
     /// # Errors
@@ -417,7 +412,6 @@ pub trait RecordingStore: StorageProvider {
         Err(DurableStoreError::Unavailable)
     }
 
-
     /// Stops lifecycle and atomically prepares the provider stop operation.
     ///
     /// # Errors
@@ -462,7 +456,6 @@ pub trait RecordingStore: StorageProvider {
         let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
         Err(DurableStoreError::Unavailable)
     }
-
 
     /// Expires lifecycle and atomically prepares controlled provider deletion.
     ///
@@ -511,7 +504,6 @@ pub trait RecordingStore: StorageProvider {
         let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
         Err(DurableStoreError::Unavailable)
     }
-
 
     /// Deletes lifecycle and atomically prepares controlled provider deletion.
     ///
