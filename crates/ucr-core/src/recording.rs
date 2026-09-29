@@ -289,7 +289,6 @@ pub trait RecordingStore: StorageProvider {
     /// # Errors
     /// Rejects invalid/stale consent transitions, mismatched Event evidence, unsupported atomic
     /// persistence, or explicit durable-store failures.
-    #[allow(clippy::too_many_arguments)]
     fn set_recording_consent_with_event(
         &self,
         scope: &TenantScope,
