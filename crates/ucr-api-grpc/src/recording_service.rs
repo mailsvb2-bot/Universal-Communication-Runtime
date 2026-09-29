@@ -5,7 +5,8 @@ use tonic::{Request, Response, Status};
 use ucr_core::{
     AuthorizationEvaluator, CallStore, CommandAcceptanceStore, ConferenceJoinGrantStore,
     DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventJournalStore,
-    PrincipalIdentityBindingStore, RecordingStore, ServiceAuditStore, ServiceCredentialStore,
+    PrincipalIdentityBindingStore, RecordingConsentProviderStopRequest, RecordingStore,
+    ServiceAuditStore, ServiceCredentialStore,
     ServiceQuotaClock, ServiceQuotaStore, generate_opaque_id,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet};
@@ -299,13 +300,15 @@ where
                     if let Some(event) = event.as_ref() {
                         self.store
                             .set_recording_consent_with_event_and_provider_stop(
-                                &scope,
-                                &recording_id,
-                                expected_revision,
-                                &participant,
-                                state,
-                                now_unix_ms,
-                                event,
+                                RecordingConsentProviderStopRequest {
+                                    scope: &scope,
+                                    recording_id: &recording_id,
+                                    expected_revision,
+                                    participant: &participant,
+                                    state,
+                                    now_unix_ms,
+                                    event,
+                                },
                             )
                             .map_err(map_store_error)
                     } else {
