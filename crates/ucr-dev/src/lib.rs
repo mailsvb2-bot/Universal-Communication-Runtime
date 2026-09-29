@@ -735,10 +735,7 @@ async fn verify_integration_round_trip(endpoint: &str, env: &DevEnvironment) -> 
     )
 }
 
-async fn verify_attachment_round_trip(
-    endpoint: &str,
-    env: &DevEnvironment,
-) -> Result<(), String> {
+async fn verify_attachment_round_trip(endpoint: &str, env: &DevEnvironment) -> Result<(), String> {
     let mut client =
         pb::attachment_service_client::AttachmentServiceClient::connect(endpoint.to_owned())
             .await
@@ -794,7 +791,9 @@ async fn verify_attachment_round_trip(
     require_result(
         matches!(
             put.result,
-            Some(pb::attachment_put_chunk_response::Result::Acknowledgement(_))
+            Some(pb::attachment_put_chunk_response::Result::Acknowledgement(
+                _
+            ))
         ),
         "PutChunk",
     )?;
