@@ -198,3 +198,47 @@ broadcast encryption provider). No such provider may advertise Production capabi
 this purpose through the shared provider boundary and proves rotation/recovery semantics. The absence
 of such a concrete consumer is an explicit non-claim, not permission to alter endpoint E2EE key
 derivation.
+
+
+## coturn dynamic secret reconciliation
+
+For coturn deployments that use the SQLite user database, UCR ships an explicit operator command:
+
+```text
+ucr-runtime reconcile-turn-secrets \
+  --turn-database /path/to/turndb \
+  --turn-realm turn.example \
+  --exclusive-turn-realm
+```
+
+The command requires the same provider-backed TURN configuration used by `serve-realtime`
+(`UCR_WEBRTC_TURN_SECRET_PROVIDER=file-reload`,
+`UCR_WEBRTC_TURN_SECRET_FILE`, and optional `UCR_WEBRTC_TURN_SECRET_ID`). It reconciles
+coturn's `turn_secret` rows for exactly one realm to the provider snapshot
+`{current, previous?}`.
+
+Safety invariants:
+
+- the coturn database is opened read-write without CREATE; a wrong or missing database fails closed;
+- the canonical `turn_secret(realm,value)` schema is verified before mutation;
+- an IMMEDIATE SQLite transaction serializes concurrent reconciliation writers;
+- UCR inserts desired roots, removes stale roots in the same realm, verifies the exact resulting
+  set, and only then commits;
+- rows for other realms are never touched;
+- the command refuses to mutate unless `--exclusive-turn-realm` is explicit, because coturn does
+  not store secret version/owner metadata and UCR otherwise cannot distinguish stale UCR roots from
+  roots owned by another operator;
+- secret values are not returned in command output or debug evidence;
+- provider material must pass the same coturn-safe 32-byte base64url-compatible validation used by
+  the TURN REST credential issuer.
+
+The zero-downtime sequence for this SQLite mode is therefore: atomically publish provider
+`{v2,v1}` -> reconcile coturn realm to `{v2,v1}` -> allow at least the maximum issued TURN
+credential lifetime plus deployment skew -> atomically publish provider `{v2}` -> reconcile coturn
+realm to `{v2}`. coturn documents that database-backed TURN REST shared secrets are read
+dynamically and that multiple shared secrets may coexist.
+
+This is **not** a claim that PostgreSQL, MySQL, Redis, or MongoDB coturn secret stores are already
+reconciled by UCR. Those backends require dedicated adapters with equivalent transaction,
+ownership, verification, retry, and secret-handling guarantees before they can claim the same
+operational evidence.
