@@ -323,13 +323,11 @@ fn turn_rest_secret_from_active_set(
 /// # Errors
 /// Returns `KeyUnavailable` unless the material is exactly 32 bytes of ASCII alphanumeric,
 /// '-' or '_'.
-pub fn validate_coturn_rest_secret_material(
-    material: &[u8],
-) -> Result<(), TurnCredentialError> {
+pub fn validate_coturn_rest_secret_material(material: &[u8]) -> Result<(), TurnCredentialError> {
     if material.len() != 32
-        || !material.iter().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_')
-        })
+        || !material
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_'))
     {
         return Err(TurnCredentialError::KeyUnavailable);
     }
