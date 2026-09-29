@@ -5,7 +5,7 @@ services:
       dockerfile: docker/dev/Dockerfile
     init: true
     ports:
-      - "127.0.0.1:50051:150051/tcp"
+      - "127.0.0.1:50051:50052/tcp"
       - "127.0.0.1:8080:8080/tcp"
       - "127.0.0.1:8090:8090/tcp"
       - "127.0.0.1:3478:3478/tcp"
