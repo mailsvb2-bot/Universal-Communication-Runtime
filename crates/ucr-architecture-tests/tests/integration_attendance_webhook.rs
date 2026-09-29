@@ -49,5 +49,9 @@ fn integration_attendance_webhook_is_an_atomic_projection_not_an_owner_bypass() 
 
     let event_spec =
         fs::read_to_string(workspace.join("spec/event-api.md")).expect("read Event API spec");
-    assert!(event_spec.contains("does not weaken the Service Account owner filter"));
+    assert!(event_spec.contains("ucr.conference.attendance.integration.v1"));
+    assert!(event_spec.contains("Service Account owner filter"));
+    assert!(event_spec.contains("participant-owned canonical attendance Event"));
+    assert!(event_spec.contains("on_behalf_of"));
+    assert!(event_spec.contains("granting a Service Account read access"));
 }
