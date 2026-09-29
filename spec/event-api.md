@@ -36,7 +36,7 @@ atomically appends an integration-facing System Event whose `on_behalf_of` is th
 `integration_id`. This makes attendance webhook delivery compatible with the existing isolation
 rule instead of granting a Service Account read access to arbitrary participant-authored Events.
 
-Webhook subscriptions use the same durable subscription/retry/cursor/DLQ owner as polling. The canonical subscription persists only a bounded HTTPS destination; credentials, bearer tokens, signing secrets, DNS results, and provider-specific state are not persisted in it. Userinfo, query strings, and fragments are rejected from the canonical URI.
+The canonical subscription persists only a bounded HTTPS destination; credentials, bearer tokens, signing secrets, DNS results, and provider-specific state are not persisted in it. Userinfo, query strings, and fragments are rejected from the canonical URI.
 
 `EventWebhookDispatcher` remains the single durable delivery owner over an injected `EventWebhookSink`. Before polling or performing any network side effect it requires the subscription to have a durable owner in the exact scope and that owner to be a canonical `ServiceAccount`; legacy pre-v36 unowned subscriptions and non-ServiceAccount raw-store subscriptions fail closed. It performs one bounded Event attempt and commits ACK/retry/DLQ only after the sink result.
 
