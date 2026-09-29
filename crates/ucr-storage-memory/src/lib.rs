@@ -19,9 +19,8 @@ use ucr_core::{
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, FederationPeerStore,
     IdentityDeviceLookupStore, IdentityStore, LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE,
-    LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_ACTIVE_RECORDINGS_PER_CALL,
-    MAX_ATOMIC_EVENT_BATCH, MAX_RECORDING_PROVIDER_OPERATION_BATCH,
-    MAX_RECORDING_RETENTION_BATCH, MessageStore,
+    LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_ACTIVE_RECORDINGS_PER_CALL, MAX_ATOMIC_EVENT_BATCH,
+    MAX_RECORDING_PROVIDER_OPERATION_BATCH, MAX_RECORDING_RETENTION_BATCH, MessageStore,
     PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
     RecordingConsentProviderStopRequest, RecordingProviderOperation,
     RecordingProviderOperationRecord, RecordingProviderOperationState,
@@ -6564,50 +6563,6 @@ mod service_principal_quota_audit_tests {
 
     use super::MemoryLocalStore;
 
-    #[test]
-    fn atomic_event_batch_commits_all_or_rolls_back_all() {
-        let store = MemoryLocalStore::default();
-        let first = event("atomic-memory-first", "ucr.test.atomic", b"first");
-        let second = event("atomic-memory-second", "ucr.test.atomic", b"second");
-        assert_eq!(
-            store
-                .append_events_atomically(&[first.clone(), second.clone()])
-                .expect("append atomic batch"),
-            vec![EventAppendStatus::Appended, EventAppendStatus::Appended]
-        );
-        assert_eq!(
-            store
-                .append_events_atomically(&[first.clone(), second.clone()])
-                .expect("deduplicate atomic batch"),
-            vec![EventAppendStatus::Duplicate, EventAppendStatus::Duplicate]
-        );
-
-        let rollback_store = MemoryLocalStore::default();
-        rollback_store
-            .append_event(&event(
-                "atomic-memory-conflict",
-                "ucr.test.atomic",
-                b"persisted",
-            ))
-            .expect("seed conflict");
-        let would_be_first = event("atomic-memory-rollback", "ucr.test.atomic", b"new");
-        let conflicting = event(
-            "atomic-memory-conflict",
-            "ucr.test.atomic",
-            b"changed",
-        );
-        assert_eq!(
-            rollback_store.append_events_atomically(&[would_be_first.clone(), conflicting]),
-            Err(DurableStoreError::Conflict)
-        );
-        assert_eq!(
-            rollback_store
-                .event(&scope(), &would_be_first.event_id)
-                .expect("read rolled-back Event"),
-            None
-        );
-    }
-
     #[derive(Debug)]
     struct TestClock(AtomicI64);
 
@@ -10284,8 +10239,9 @@ mod phase14_event_subscription_tests {
     use std::sync::atomic::{AtomicI64, Ordering};
 
     use ucr_core::{
-        DurableRecordStatus, EventApiIngress, EventAppendStatus, EventDeliveryClock,
-        EventDeliveryClockError, EventJournalStore, EventSubscriptionStore, PermissionGrantStore,
+        DurableRecordStatus, DurableStoreError, EventApiIngress, EventAppendStatus,
+        EventDeliveryClock, EventDeliveryClockError, EventJournalStore, EventSubscriptionStore,
+        PermissionGrantStore,
         ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore,
         issue_service_credential,
     };
@@ -10350,6 +10306,46 @@ mod phase14_event_subscription_tests {
             integrity_metadata: vec![1, 2, 3],
             extensions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn atomic_event_batch_commits_all_or_rolls_back_all() {
+        let store = MemoryLocalStore::default();
+        let first = event("atomic-memory-first", "ucr.test.atomic", b"first");
+        let second = event("atomic-memory-second", "ucr.test.atomic", b"second");
+        assert_eq!(
+            store
+                .append_events_atomically(&[first.clone(), second.clone()])
+                .expect("append atomic batch"),
+            vec![EventAppendStatus::Appended, EventAppendStatus::Appended]
+        );
+        assert_eq!(
+            store
+                .append_events_atomically(&[first.clone(), second.clone()])
+                .expect("deduplicate atomic batch"),
+            vec![EventAppendStatus::Duplicate, EventAppendStatus::Duplicate]
+        );
+
+        let rollback_store = MemoryLocalStore::default();
+        rollback_store
+            .append_event(&event(
+                "atomic-memory-conflict",
+                "ucr.test.atomic",
+                b"persisted",
+            ))
+            .expect("seed conflict");
+        let would_be_first = event("atomic-memory-rollback", "ucr.test.atomic", b"new");
+        let conflicting = event("atomic-memory-conflict", "ucr.test.atomic", b"changed");
+        assert_eq!(
+            rollback_store.append_events_atomically(&[would_be_first.clone(), conflicting]),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            rollback_store
+                .event(&scope(), &would_be_first.event_id)
+                .expect("read rolled-back Event"),
+            None
+        );
     }
 
     #[derive(Debug)]
