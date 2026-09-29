@@ -741,6 +741,10 @@ async fn verify_attachment_round_trip(endpoint: &str, env: &DevEnvironment) -> R
             .await
             .map_err(|error| format!("self-check AttachmentService connect: {error}"))?;
     let payload = b"hello from ucr dev attachment".to_vec();
+    let payload_size_bytes = u64::try_from(payload.len())
+        .map_err(|_| "self-check attachment payload size does not fit u64".to_owned())?;
+    let chunk_size_bytes = u32::try_from(payload.len())
+        .map_err(|_| "self-check attachment chunk size does not fit u32".to_owned())?;
     let content_id = attachment_content_id(&payload);
     let attachment_id = "dev-attachment";
 
@@ -751,8 +755,8 @@ async fn verify_attachment_round_trip(endpoint: &str, env: &DevEnvironment) -> R
             content_id: Some(pb::AttachmentContentId {
                 sha256: content_id.sha256.to_vec(),
             }),
-            size_bytes: payload.len() as u64,
-            chunk_size_bytes: payload.len() as u32,
+            size_bytes: payload_size_bytes,
+            chunk_size_bytes,
             chunk_count: 1,
             media_type: Some("text/plain".to_owned()),
             file_name: Some("dev.txt".to_owned()),
