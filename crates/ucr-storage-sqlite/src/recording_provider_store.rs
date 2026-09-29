@@ -21,7 +21,7 @@ CREATE TABLE recording_provider_operations (
     operation TEXT NOT NULL CHECK(operation IN ('start','stop','delete')),
     call_id TEXT NOT NULL,
     expires_at_unix_ms INTEGER NOT NULL,
-    state TEXT NOT NULL CHECK(state IN ('pending','applied')),
+    state TEXT NOT NULL CHECK(state IN ('pending','applied','failed')),
     attempts INTEGER NOT NULL CHECK(attempts BETWEEN 0 AND 4294967295),
     available_at_unix_ms INTEGER NOT NULL,
     PRIMARY KEY(
@@ -287,6 +287,55 @@ impl RecordingProviderOperationStore for SqliteLocalStore {
             Err(DurableStoreError::Conflict)
         }
     }
+
+    fn mark_recording_provider_operation_failed(
+        &self,
+        request: &RecordingProviderRequest,
+    ) -> Result<(), DurableStoreError> {
+        let namespace = namespace_storage_key(&request.scope);
+        let revision = request.lifecycle_revision.to_be_bytes();
+        let connection = self.lock_connection()?;
+        let changed = connection
+            .execute(
+                "UPDATE recording_provider_operations
+                 SET state='failed', attempts=attempts+1
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND recording_id=?4 AND lifecycle_revision=?5 AND operation=?6
+                   AND state='pending' AND call_id=?7 AND expires_at_unix_ms=?8
+                   AND attempts < 4294967295",
+                params![
+                    request.scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    request.recording_id.as_opaque().as_str(),
+                    revision.as_slice(),
+                    operation_text(request.operation),
+                    request.call_id.as_opaque().as_str(),
+                    request.expires_at_unix_ms,
+                ],
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            match load_operation(
+                &connection,
+                &request.scope,
+                &request.recording_id,
+                request.lifecycle_revision,
+                request.operation,
+            )? {
+                Some(record)
+                    if record.request == *request
+                        && record.state == RecordingProviderOperationState::Failed =>
+                {
+                    Ok(())
+                }
+                _ => Err(DurableStoreError::Conflict),
+            }
+        }
+    }
+
 }
 
 fn load_operation(
@@ -348,7 +397,10 @@ fn validate_record(record: &RecordingProviderOperationRecord) -> Result<(), Dura
     if record.request.lifecycle_revision == 0
         || record.request.expires_at_unix_ms < 0
         || record.available_at_unix_ms < 0
-        || (record.state == RecordingProviderOperationState::Applied && record.attempts == 0)
+        || (matches!(
+            record.state,
+            RecordingProviderOperationState::Applied | RecordingProviderOperationState::Failed
+        ) && record.attempts == 0)
     {
         return Err(DurableStoreError::InvalidRecord);
     }
@@ -376,6 +428,7 @@ const fn state_text(state: RecordingProviderOperationState) -> &'static str {
     match state {
         RecordingProviderOperationState::Pending => "pending",
         RecordingProviderOperationState::Applied => "applied",
+        RecordingProviderOperationState::Failed => "failed",
     }
 }
 
@@ -383,6 +436,7 @@ fn parse_state(value: &str) -> Result<RecordingProviderOperationState, DurableSt
     match value {
         "pending" => Ok(RecordingProviderOperationState::Pending),
         "applied" => Ok(RecordingProviderOperationState::Applied),
+        "failed" => Ok(RecordingProviderOperationState::Failed),
         _ => Err(DurableStoreError::Corrupt),
     }
 }
