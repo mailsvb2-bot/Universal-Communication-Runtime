@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::path::Path;
+use std::{fs, path::Path};
 
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use ucr_secrets::{SecretHandle, SecretProvider, SecretPurpose};
@@ -72,6 +72,12 @@ pub fn reconcile_coturn_sqlite_secret_set(
             return Err(TurnSecretReconcileError::InvalidSecret);
         }
         desired.push(previous);
+    }
+
+    let metadata =
+        fs::symlink_metadata(database).map_err(|_| TurnSecretReconcileError::DatabaseUnavailable)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(TurnSecretReconcileError::DatabaseUnavailable);
     }
 
     let mut connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE)
@@ -323,6 +329,32 @@ mod tests {
             .expect("count");
         assert_eq!(count, 1);
         fs::remove_file(path).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconciliation_rejects_symlink_database_path() {
+        use std::os::unix::fs::symlink;
+
+        let target = temp_db("symlink-target");
+        initialize_db(&target);
+        let link = target.with_extension("link");
+        let _ = fs::remove_file(&link);
+        symlink(&target, &link).expect("symlink");
+        let (provider, handle) =
+            provider_with(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", None);
+        assert_eq!(
+            reconcile_coturn_sqlite_secret_set(
+                &provider,
+                &handle,
+                &link,
+                "turn.example",
+                true,
+            ),
+            Err(TurnSecretReconcileError::DatabaseUnavailable)
+        );
+        fs::remove_file(link).expect("remove link");
+        fs::remove_file(target).expect("remove target");
     }
 
     #[test]
