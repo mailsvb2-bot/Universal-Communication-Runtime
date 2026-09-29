@@ -256,6 +256,24 @@ pub trait RecordingStore: StorageProvider {
         Err(DurableStoreError::Unavailable)
     }
 
+
+    /// Starts lifecycle and atomically prepares the matching provider side effect.
+    ///
+    /// # Errors
+    /// Fails closed when the store cannot commit Recording state, Event and provider operation
+    /// as one durable action.
+    fn start_recording_with_event_and_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
+        Err(DurableStoreError::Unavailable)
+    }
+
     /// Stops a waiting, ready or active lifecycle.
     ///
     /// # Errors
@@ -274,6 +292,23 @@ pub trait RecordingStore: StorageProvider {
     /// Rejects stale/final recording state, invalid Event evidence, unsupported atomic
     /// persistence, or explicit durable-store failures.
     fn stop_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
+        Err(DurableStoreError::Unavailable)
+    }
+
+
+    /// Stops lifecycle and atomically prepares the provider stop operation.
+    ///
+    /// # Errors
+    /// Fails closed when the combined durable action is unsupported or invalid.
+    fn stop_recording_with_event_and_provider_operation(
         &self,
         scope: &TenantScope,
         recording_id: &RecordingId,
@@ -314,6 +349,23 @@ pub trait RecordingStore: StorageProvider {
         Err(DurableStoreError::Unavailable)
     }
 
+
+    /// Expires lifecycle and atomically prepares controlled provider deletion.
+    ///
+    /// # Errors
+    /// Fails closed when the combined durable action is unsupported or invalid.
+    fn expire_recording_with_event_and_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
+        Err(DurableStoreError::Unavailable)
+    }
+
     /// Marks controlled recording state deleted.
     ///
     /// This mutation is lifecycle evidence only; a concrete media provider must separately prove
@@ -335,6 +387,23 @@ pub trait RecordingStore: StorageProvider {
     /// Rejects stale/malformed recording state, invalid Event evidence, unsupported atomic
     /// persistence, or explicit durable-store failures.
     fn delete_recording_with_event(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let _ = (scope, recording_id, expected_revision, now_unix_ms, event);
+        Err(DurableStoreError::Unavailable)
+    }
+
+
+    /// Deletes lifecycle and atomically prepares controlled provider deletion.
+    ///
+    /// # Errors
+    /// Fails closed when the combined durable action is unsupported or invalid.
+    fn delete_recording_with_event_and_provider_operation(
         &self,
         scope: &TenantScope,
         recording_id: &RecordingId,
