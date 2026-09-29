@@ -1344,12 +1344,8 @@ impl ProductionRuntime {
             Arc::clone(&store),
             Arc::clone(&conference_state),
         );
-        let attachment_service = configured_attachment_service(
-            &clock,
-            &authorization,
-            &store,
-            machine_bearer.as_ref(),
-        );
+        let attachment_service =
+            configured_attachment_service(&clock, &authorization, &store, machine_bearer.as_ref());
         if let Some(config) = machine_bearer {
             match config.verification {
                 MachineBearerVerificationConfig::Static(keys) => {
@@ -1357,8 +1353,8 @@ impl ProductionRuntime {
                         universal_service.with_machine_bearer_auth(keys, config.policy);
                 }
                 MachineBearerVerificationConfig::Provider(provider) => {
-                    universal_service =
-                        universal_service.with_machine_bearer_auth_provider(provider, config.policy);
+                    universal_service = universal_service
+                        .with_machine_bearer_auth_provider(provider, config.policy);
                 }
             }
         }
@@ -1704,8 +1700,9 @@ fn configured_attachment_service(
     match machine_bearer {
         None => service,
         Some(config) => match &config.verification {
-            MachineBearerVerificationConfig::Static(keys) => service
-                .with_machine_bearer_auth(Arc::clone(keys), config.policy.clone()),
+            MachineBearerVerificationConfig::Static(keys) => {
+                service.with_machine_bearer_auth(Arc::clone(keys), config.policy.clone())
+            }
             MachineBearerVerificationConfig::Provider(provider) => service
                 .with_machine_bearer_auth_provider(Arc::clone(provider), config.policy.clone()),
         },
