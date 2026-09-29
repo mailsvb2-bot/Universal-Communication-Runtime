@@ -411,3 +411,159 @@ fn decode_u64(value: &[u8]) -> Result<u64, DurableStoreError> {
     let bytes: [u8; 8] = value.try_into().map_err(|_| DurableStoreError::Corrupt)?;
     Ok(u64::from_be_bytes(bytes))
 }
+
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    fn scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(OpaqueId::new("tenant").expect("tenant")),
+            namespace_id: None,
+        }
+    }
+
+    fn request(revision: u64, operation: RecordingProviderOperation) -> RecordingProviderRequest {
+        RecordingProviderRequest {
+            scope: scope(),
+            recording_id: RecordingId::from_opaque(OpaqueId::new("recording").expect("recording")),
+            call_id: CallId::from_opaque(OpaqueId::new("call").expect("call")),
+            lifecycle_revision: revision,
+            operation,
+            expires_at_unix_ms: 50_000,
+        }
+    }
+
+    fn store() -> SqliteLocalStore {
+        let connection = Connection::open_in_memory().expect("memory");
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .expect("foreign keys");
+        connection
+            .execute_batch(
+                "CREATE TABLE recordings (
+                    tenant_id TEXT NOT NULL,
+                    namespace_present INTEGER NOT NULL,
+                    namespace_id TEXT NOT NULL,
+                    recording_id TEXT NOT NULL,
+                    PRIMARY KEY(tenant_id, namespace_present, namespace_id, recording_id)
+                ) WITHOUT ROWID;",
+            )
+            .expect("recordings table");
+        create_v47_objects(&connection.unchecked_transaction().expect("transaction"))
+            .expect("v47 objects");
+        connection
+            .execute(
+                "INSERT INTO recordings
+                 (tenant_id, namespace_present, namespace_id, recording_id)
+                 VALUES ('tenant',0,'','recording')",
+                [],
+            )
+            .expect("recording row");
+        SqliteLocalStore {
+            connection: Mutex::new(connection),
+        }
+    }
+
+    #[test]
+    fn exact_prepare_deduplicates_and_changed_reuse_conflicts() {
+        let store = store();
+        let record = RecordingProviderOperationRecord {
+            request: request(2, RecordingProviderOperation::Start),
+            state: RecordingProviderOperationState::Pending,
+            attempts: 0,
+            available_at_unix_ms: 100,
+        };
+        assert_eq!(
+            store.prepare_recording_provider_operation(&record),
+            Ok(DurableRecordStatus::Persisted)
+        );
+        assert_eq!(
+            store.prepare_recording_provider_operation(&record),
+            Ok(DurableRecordStatus::Duplicate)
+        );
+
+        let mut changed = record.clone();
+        changed.available_at_unix_ms = 101;
+        assert_eq!(
+            store.prepare_recording_provider_operation(&changed),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn due_retry_and_applied_state_are_restart_safe_semantics() {
+        let store = store();
+        let record = RecordingProviderOperationRecord {
+            request: request(3, RecordingProviderOperation::Stop),
+            state: RecordingProviderOperationState::Pending,
+            attempts: 0,
+            available_at_unix_ms: 100,
+        };
+        store
+            .prepare_recording_provider_operation(&record)
+            .expect("prepare");
+
+        assert!(store
+            .pending_recording_provider_operations(99, 10)
+            .expect("before due")
+            .is_empty());
+        let due = store
+            .pending_recording_provider_operations(100, 10)
+            .expect("due");
+        assert_eq!(due, vec![record.clone()]);
+
+        store
+            .retry_recording_provider_operation(&record.request, 200)
+            .expect("retry");
+        let retried = store
+            .pending_recording_provider_operations(200, 10)
+            .expect("retried");
+        assert_eq!(retried.len(), 1);
+        assert_eq!(retried[0].attempts, 1);
+        assert_eq!(retried[0].available_at_unix_ms, 200);
+
+        store
+            .mark_recording_provider_operation_applied(&record.request)
+            .expect("applied");
+        assert!(store
+            .pending_recording_provider_operations(1_000, 10)
+            .expect("after applied")
+            .is_empty());
+        store
+            .mark_recording_provider_operation_applied(&record.request)
+            .expect("applied retry is idempotent");
+    }
+
+    #[test]
+    fn pending_batch_is_bounded_and_deterministic() {
+        let store = store();
+        for (revision, operation) in [
+            (4, RecordingProviderOperation::Delete),
+            (2, RecordingProviderOperation::Start),
+            (3, RecordingProviderOperation::Stop),
+        ] {
+            store
+                .prepare_recording_provider_operation(&RecordingProviderOperationRecord {
+                    request: request(revision, operation),
+                    state: RecordingProviderOperationState::Pending,
+                    attempts: 0,
+                    available_at_unix_ms: i64::try_from(revision).expect("revision"),
+                })
+                .expect("prepare");
+        }
+        let due = store
+            .pending_recording_provider_operations(10, 2)
+            .expect("batch");
+        assert_eq!(due.len(), 2);
+        assert_eq!(due[0].request.lifecycle_revision, 2);
+        assert_eq!(due[1].request.lifecycle_revision, 3);
+        assert_eq!(
+            store.pending_recording_provider_operations(10, 0),
+            Err(DurableStoreError::InvalidRecord)
+        );
+    }
+}
