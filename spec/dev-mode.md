@@ -20,6 +20,34 @@ The sandbox exposes the Canon scenario names: `message`, `delivery`, `group`, `c
 
 The scenario layer is fault/situation simulation, not a second communication engine. Full cross-implementation behavior and conformance remain Phase 41.
 
+## Docker local development package
+
+The repository root ships a development-only `compose.yaml` so an external integrator can run:
+
+```bash
+docker compose up ucr
+```
+
+The `ucr` service builds the pinned Rust dev binary and composes only developer tooling around the
+existing canonical dev host:
+
+- the authenticated gRPC API is still owned by `ucr dev` and still binds only
+  `127.0.0.1:50051` inside the container;
+- a byte-only TCP forwarder publishes that loopback API through a container port that Compose maps
+  only to host `127.0.0.1:50051`; it adds no protocol, auth, retry or domain semantics;
+- the reference Conference browser HTML is served on host loopback for integration/UI work;
+- a coturn process provides an explicitly insecure **test-only** TURN deployment with a fixed
+  development shared secret and bounded relay port range;
+- a bounded webhook receiver example accepts local POSTs and logs only request size, SHA-256 and an
+  optional bounded event type instead of dumping headers or payloads;
+- temporary TURN REST credentials and the canonical `ucr dev` Service Credential are printed to
+  container logs for local testing.
+
+The package is intentionally ephemeral: UCR canonical state remains the existing in-memory
+`ucr dev` state, and all published host ports bind to `127.0.0.1`. The package does not weaken
+the dev binary's loopback rule or claim that the static browser page can mint its own join authority.
+A real `#ucr_join` grant is still required by the Conference client.
+
 ## Nonclaims
 
 Dev Mode is memory-backed and loopback-only. It is not a production listener, durable production deployment, browser-native node, Relay, discovery service, production bridge, or insecure mode. It must never be used to justify disabling authentication, tenant scope, cryptography, permissions or other production security controls.
