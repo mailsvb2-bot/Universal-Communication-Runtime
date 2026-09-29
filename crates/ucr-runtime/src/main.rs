@@ -270,7 +270,9 @@ fn secret_provider_from_env(
         return Ok(None);
     };
     if provider_kind != "file-reload" {
-        return Err(format!("{provider_variable} must be file-reload when configured"));
+        return Err(format!(
+            "{provider_variable} must be file-reload when configured"
+        ));
     }
     let manifest_file = PathBuf::from(required_env(manifest_variable)?);
     let secret_id =
@@ -500,10 +502,10 @@ async fn serve_realtime_command(
     )? {
         RealtimeRuntimeConfig::with_join_secret_provider(join_base_url, provider, handle)?
     } else {
-        let key_hex = Zeroizing::new(
-            std::env::var("UCR_REALTIME_JOIN_KEY_HEX")
-                .map_err(|_| "UCR_REALTIME_JOIN_KEY_HEX is required for serve-realtime".to_owned())?,
-        );
+        let key_hex =
+            Zeroizing::new(std::env::var("UCR_REALTIME_JOIN_KEY_HEX").map_err(|_| {
+                "UCR_REALTIME_JOIN_KEY_HEX is required for serve-realtime".to_owned()
+            })?);
         RealtimeRuntimeConfig::new(join_base_url, decode_key_hex(&key_hex)?)?
     };
     let turn_ttl_seconds = std::env::var("UCR_WEBRTC_TURN_TTL_SECONDS")
@@ -586,9 +588,10 @@ fn dispatch_webhook_once(
             handle,
         )?
     } else {
-        let key_hex = Zeroizing::new(std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
-            "UCR_WEBHOOK_SIGNING_KEY_HEX is required for dispatch-webhook-once".to_owned()
-        })?);
+        let key_hex =
+            Zeroizing::new(std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
+                "UCR_WEBHOOK_SIGNING_KEY_HEX is required for dispatch-webhook-once".to_owned()
+            })?);
         runtime.dispatch_webhook_once(
             &tenant_id,
             namespace_id,
@@ -637,11 +640,10 @@ async fn run_webhook_worker(database: &PathBuf) -> Result<(), String> {
             .run_webhook_worker_with_secret_provider(provider, handle, poll_interval)
             .await
     } else {
-        let key_hex = Zeroizing::new(
-            std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
+        let key_hex =
+            Zeroizing::new(std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
                 "UCR_WEBHOOK_SIGNING_KEY_HEX is required for run-webhook-worker".to_owned()
-            })?,
-        );
+            })?);
         runtime
             .run_webhook_worker(
                 decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
