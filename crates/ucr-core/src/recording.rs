@@ -571,8 +571,9 @@ mod tests {
     };
 
     use super::{
-        recording_allows_realtime_participant, RecordingMediaProvider, RecordingProviderError,
-        RecordingProviderHealth, RecordingProviderOperation, RecordingProviderRequest,
+        RecordingMediaProvider, RecordingProviderError, RecordingProviderHealth,
+        RecordingProviderOperation, RecordingProviderRequest,
+        recording_allows_realtime_participant,
     };
 
     fn opaque(value: &str) -> OpaqueId {
