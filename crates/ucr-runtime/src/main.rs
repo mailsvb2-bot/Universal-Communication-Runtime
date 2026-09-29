@@ -3,7 +3,7 @@
 use std::{
     fs,
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -18,9 +18,7 @@ use ucr_runtime::{
     DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MachineAuthRuntimeConfig, MachineBearerRuntimeConfig,
     ProductionRuntime, RealtimeRuntimeConfig,
 };
-use ucr_secrets::{
-    ReloadingFileSecretProvider, SecretHandle, SecretProvider, SecretPurpose,
-};
+use ucr_secrets::{ReloadingFileSecretProvider, SecretHandle, SecretProvider, SecretPurpose};
 use zeroize::Zeroizing;
 
 #[tokio::main]
@@ -150,10 +148,10 @@ fn secret_provider_from_env(
             .map_err(|_| format!("{secret_id_variable} is invalid"))?,
         purpose,
     };
-    let provider: Arc<dyn SecretProvider> = Arc::new(ReloadingFileSecretProvider::new(
-        handle.clone(),
-        manifest_file,
-    )?);
+    let provider: Arc<dyn SecretProvider> = Arc::new(
+        ReloadingFileSecretProvider::new(handle.clone(), manifest_file)
+            .map_err(|error| format!("load secret provider manifest: {error:?}"))?,
+    );
     Ok(Some((provider, handle)))
 }
 
