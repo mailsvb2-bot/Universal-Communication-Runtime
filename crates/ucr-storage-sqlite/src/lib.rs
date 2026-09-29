@@ -24,6 +24,7 @@ mod permission_store;
 mod personal_node_store;
 mod principal_identity_binding_store;
 mod recording_store;
+mod recording_provider_store;
 mod recovery_plan;
 mod replay;
 mod runtime_worker_store;
@@ -99,7 +100,8 @@ const SQLITE_SCHEMA_V42: u32 = 42;
 const SQLITE_SCHEMA_V43: u32 = 43;
 const SQLITE_SCHEMA_V44: u32 = 44;
 const SQLITE_SCHEMA_V45: u32 = 45;
-pub const SQLITE_SCHEMA_VERSION: u32 = 46;
+const SQLITE_SCHEMA_V46: u32 = 46;
+pub const SQLITE_SCHEMA_VERSION: u32 = 47;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -671,7 +673,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v46(connection);
+        return verify_schema_v47(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -727,11 +729,32 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V43 => migrate_v43_to_v44(connection)?,
             SQLITE_SCHEMA_V44 => migrate_v44_to_v45(connection)?,
             SQLITE_SCHEMA_V45 => migrate_v45_to_v46(connection)?,
+            SQLITE_SCHEMA_V46 => migrate_v46_to_v47(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v46(connection)
+    verify_schema_v47(connection)
+}
+
+fn migrate_v46_to_v47(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v46(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    recording_provider_store::create_v47_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v47(connection)
+}
+
+fn verify_schema_v47(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v46(connection)?;
+    recording_provider_store::verify_v47_objects(connection)
 }
 
 fn verify_schema_v46(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -868,6 +891,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     service_control_store::create_v44_objects(&transaction)?;
     attachment_store::create_v45_objects(&transaction)?;
     universal_conference_store::create_v46_objects(&transaction)?;
+    recording_provider_store::create_v47_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1698,6 +1722,7 @@ fn migrate_v45_to_v46(connection: &mut Connection) -> Result<(), DurableStoreErr
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
     universal_conference_store::create_v46_objects(&transaction)?;
+    recording_provider_store::create_v47_objects(&transaction)?;
     transaction
         .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
         .map_err(|error| map_sqlite_error(&error))?;
