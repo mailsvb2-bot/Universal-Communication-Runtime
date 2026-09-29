@@ -12,8 +12,9 @@ use ucr_conference::{
 };
 use ucr_core::{
     AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
-    DurableStoreError, EventJournalStore, GroupMessageStore, PrincipalIdentityBindingStore,
-    ServiceQuotaStore, UniversalConferenceStore,
+    DurableStoreError, EventJournalStore, GroupMessageStore, MAX_ACTIVE_RECORDINGS_PER_CALL,
+    PrincipalIdentityBindingStore, RecordingStore, ServiceQuotaStore, UniversalConferenceStore,
+    recording_allows_realtime_participant,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
@@ -226,6 +227,7 @@ where
         + UniversalConferenceStore
         + ConferenceJoinGrantStore
         + ServiceQuotaStore
+        + RecordingStore
         + 'static,
 {
     pb::realtime_service_server::RealtimeServiceServer::new(service)
@@ -247,6 +249,7 @@ where
         + UniversalConferenceStore
         + ConferenceJoinGrantStore
         + ServiceQuotaStore
+        + RecordingStore
         + 'static,
 {
     type SubscribeMediaStream =
@@ -275,6 +278,7 @@ where
                         self.require_entry_open_for_join(&claims)?;
                     }
                     self.ensure_accepted_conference_participant_for_join(&claims)?;
+                    require_recording_participant_admission(&*self.store, &claims)?;
                     let media_policy = self.effective_universal_media_policy(&claims)?;
                     let redeemed = self.redeemed_claims(&token, &scope, &call_id, &session_id)?;
                     if redeemed != claims {
@@ -2510,7 +2514,31 @@ fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
     }
 }
 
-const fn map_registry_error(error: RealtimeRegistryError) -> CanonicalError {
+fn require_recording_participant_admission<S>(
+    store: &S,
+    claims: &RealtimeSessionClaims,
+) -> Result<(), CanonicalError>
+where
+    S: RecordingStore,
+{
+    let recordings = store
+        .active_recordings_for_call(
+            &claims.scope,
+            &claims.call_id,
+            MAX_ACTIVE_RECORDINGS_PER_CALL,
+        )
+        .map_err(map_store_error)?;
+    if recordings
+        .iter()
+        .all(|recording| recording_allows_realtime_participant(recording, &claims.participant))
+    {
+        Ok(())
+    } else {
+        Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
+    }
+}
+
+fn map_registry_error(error: RealtimeRegistryError) -> CanonicalError {
     match error {
         RealtimeRegistryError::Expired | RealtimeRegistryError::ClaimMismatch => {
             CanonicalError::new(CanonicalErrorCode::Unauthenticated)
@@ -2600,6 +2628,85 @@ fn status_from_canonical(error: CanonicalError) -> Status {
         CanonicalErrorCode::Internal => tonic::Code::Internal,
     };
     Status::new(code, "realtime request rejected")
+}
+
+#[cfg(test)]
+mod recording_admission_tests {
+    use super::*;
+    use ucr_model::{
+        NamespaceId, PrincipalRef, RecordingPolicy, RecordingSession, RecordingState, TenantId,
+    };
+    use ucr_realtime::JoinGrantUsePolicy;
+    use ucr_storage_memory::MemoryLocalStore;
+
+    fn id(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn claims() -> RealtimeSessionClaims {
+        RealtimeSessionClaims {
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(id("recording-gate-tenant")),
+                namespace_id: Some(NamespaceId::from_opaque(id("recording-gate-namespace"))),
+            },
+            call_id: CallId::from_opaque(id("recording-gate-call")),
+            participant: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("recording-gate-participant")),
+                kind: PrincipalKind::Person,
+            },
+            device_id: None,
+            session_id: SessionId::from_opaque(id("recording-gate-session")),
+            issued_at_unix_ms: 1_000,
+            not_before_unix_ms: 1_000,
+            expires_at_unix_ms: 2_000,
+            use_policy: JoinGrantUsePolicy::Reusable,
+        }
+    }
+
+    #[test]
+    fn realtime_recording_gate_allows_calls_without_active_recording() {
+        let store = MemoryLocalStore::default();
+        assert_eq!(
+            require_recording_participant_admission(&store, &claims()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn realtime_recording_gate_denies_active_recording_without_consent_evidence() {
+        let store = MemoryLocalStore::default();
+        let claims = claims();
+        let recording = RecordingSession {
+            scope: claims.scope.clone(),
+            recording_id: ucr_model::RecordingId::from_opaque(id("recording-gate-recording")),
+            call_id: claims.call_id.clone(),
+            requested_by: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("recording-gate-host")),
+                kind: PrincipalKind::Person,
+            },
+            policy: RecordingPolicy {
+                require_all_participant_consent: false,
+                notify_all_participants: true,
+                retention_seconds: 60,
+                policy_reference: None,
+            },
+            state: RecordingState::Active,
+            consents: Vec::new(),
+            requested_at_unix_ms: 900,
+            started_at_unix_ms: Some(950),
+            stopped_at_unix_ms: None,
+            expires_at_unix_ms: 60_900,
+            revision: 2,
+        };
+        store
+            .persist_recording(&recording)
+            .expect("persist recording");
+
+        assert_eq!(
+            require_recording_participant_admission(&store, &claims),
+            Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
+        );
+    }
 }
 
 #[cfg(test)]

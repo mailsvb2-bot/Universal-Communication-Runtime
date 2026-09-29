@@ -2,7 +2,7 @@ use core::fmt;
 
 use ucr_model::{
     CallId, EventEnvelope, PrincipalRef, RecordingConsentState, RecordingId, RecordingSession,
-    TenantScope,
+    RecordingState, TenantScope,
 };
 
 use crate::{DurableRecordStatus, DurableStoreError, StorageProvider};
@@ -98,6 +98,7 @@ pub struct RecordingProviderOperationRecord {
 }
 
 pub const MAX_RECORDING_PROVIDER_OPERATION_BATCH: usize = 128;
+pub const MAX_ACTIVE_RECORDINGS_PER_CALL: usize = 16;
 pub const MAX_RECORDING_PROVIDER_ATTEMPTS: u32 = 8;
 pub const RECORDING_PROVIDER_RETRY_BASE_MS: i64 = 1_000;
 pub const RECORDING_PROVIDER_RETRY_MAX_MS: i64 = 60_000;
@@ -238,6 +239,28 @@ pub struct RecordingConsentProviderStopRequest<'a> {
     pub event: &'a EventEnvelope,
 }
 
+#[must_use]
+pub fn recording_allows_realtime_participant(
+    recording: &RecordingSession,
+    participant: &PrincipalRef,
+) -> bool {
+    if recording.state != RecordingState::Active {
+        return true;
+    }
+    let Some(consent) = recording
+        .consents
+        .iter()
+        .find(|consent| consent.participant == *participant)
+    else {
+        return false;
+    };
+    match consent.state {
+        RecordingConsentState::Granted => true,
+        RecordingConsentState::Pending => !recording.policy.require_all_participant_consent,
+        RecordingConsentState::Denied | RecordingConsentState::Revoked => false,
+    }
+}
+
 /// Durable owner of recording policy, consent evidence and lifecycle only.
 ///
 /// This store does not own Call/Group membership and never owns recorded media bytes or MLS keys.
@@ -261,6 +284,23 @@ pub trait RecordingStore: StorageProvider {
         scope: &TenantScope,
         recording_id: &RecordingId,
     ) -> Result<Option<RecordingSession>, DurableStoreError>;
+
+    /// Returns a bounded deterministic set of ACTIVE recordings for one canonical Call.
+    ///
+    /// This lookup is used only for fail-closed realtime admission. It does not infer participant
+    /// consent from Call membership and returns no non-active lifecycle state.
+    ///
+    /// # Errors
+    /// Rejects zero/oversized limits and explicit durable-store failures.
+    fn active_recordings_for_call(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        limit: usize,
+    ) -> Result<Vec<RecordingSession>, DurableStoreError> {
+        let _ = (scope, call_id, limit);
+        Err(DurableStoreError::Unavailable)
+    }
 
     /// Returns a bounded deterministic batch of non-final recordings whose retention deadline
     /// has elapsed. This is discovery only; callers must still apply expiry through the atomic
@@ -525,13 +565,15 @@ mod tests {
     use std::{collections::HashSet, sync::Mutex};
 
     use ucr_model::{
-        CallId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingId, RecordingPolicy,
-        RecordingSession, RecordingState, TenantId, TenantScope,
+        CallId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingConsent,
+        RecordingConsentState, RecordingId, RecordingPolicy, RecordingSession, RecordingState,
+        TenantId, TenantScope,
     };
 
     use super::{
         RecordingMediaProvider, RecordingProviderError, RecordingProviderHealth,
         RecordingProviderOperation, RecordingProviderRequest,
+        recording_allows_realtime_participant,
     };
 
     fn opaque(value: &str) -> OpaqueId {
@@ -588,6 +630,56 @@ mod tests {
             ));
             Ok(())
         }
+    }
+
+    #[test]
+    fn realtime_participant_gate_fails_closed_for_churn_without_consent_evidence() {
+        let recording = session();
+        let participant = PrincipalRef {
+            principal_id: PrincipalId::from_opaque(opaque("late-participant")),
+            kind: PrincipalKind::Person,
+        };
+        assert!(!recording_allows_realtime_participant(
+            &recording,
+            &participant
+        ));
+    }
+
+    #[test]
+    fn realtime_participant_gate_respects_recording_consent_policy() {
+        let participant = PrincipalRef {
+            principal_id: PrincipalId::from_opaque(opaque("participant")),
+            kind: PrincipalKind::Person,
+        };
+        let mut recording = session();
+        recording.consents.push(RecordingConsent {
+            participant: participant.clone(),
+            state: RecordingConsentState::Pending,
+            decided_at_unix_ms: 0,
+        });
+        assert!(!recording_allows_realtime_participant(
+            &recording,
+            &participant
+        ));
+
+        recording.policy.require_all_participant_consent = false;
+        assert!(recording_allows_realtime_participant(
+            &recording,
+            &participant
+        ));
+
+        recording.consents[0].state = RecordingConsentState::Granted;
+        recording.policy.require_all_participant_consent = true;
+        assert!(recording_allows_realtime_participant(
+            &recording,
+            &participant
+        ));
+
+        recording.consents[0].state = RecordingConsentState::Revoked;
+        assert!(!recording_allows_realtime_participant(
+            &recording,
+            &participant
+        ));
     }
 
     #[test]

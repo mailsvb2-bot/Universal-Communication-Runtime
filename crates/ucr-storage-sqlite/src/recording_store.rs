@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{
-    DurableRecordStatus, DurableStoreError, MAX_RECORDING_RETENTION_BATCH,
-    RecordingConsentProviderStopRequest, RecordingProviderOperation,
+    DurableRecordStatus, DurableStoreError, MAX_ACTIVE_RECORDINGS_PER_CALL,
+    MAX_RECORDING_RETENTION_BATCH, RecordingConsentProviderStopRequest, RecordingProviderOperation,
     RecordingProviderOperationRecord, RecordingProviderOperationState, RecordingProviderRequest,
     RecordingStore,
 };
@@ -165,6 +165,61 @@ impl RecordingStore for SqliteLocalStore {
     ) -> Result<Option<RecordingSession>, DurableStoreError> {
         let connection = self.lock_connection()?;
         load_recording(&connection, scope, recording_id)
+    }
+
+    fn active_recordings_for_call(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        limit: usize,
+    ) -> Result<Vec<RecordingSession>, DurableStoreError> {
+        if limit == 0 || limit > MAX_ACTIVE_RECORDINGS_PER_CALL {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        let namespace = namespace_storage_key(scope);
+        let query_limit = limit
+            .checked_add(1)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT recording_id
+                 FROM recordings
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND call_id=?4 AND state='active'
+                 ORDER BY recording_id
+                 LIMIT ?5",
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    call_id.as_opaque().as_str(),
+                    query_limit,
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let mut recording_ids = Vec::with_capacity(limit.saturating_add(1));
+        for row in rows {
+            recording_ids.push(RecordingId::from_opaque(parse_id(
+                &row.map_err(|error| map_sqlite_error(&error))?,
+            )?));
+        }
+        drop(statement);
+        if recording_ids.len() > limit {
+            return Err(DurableStoreError::Full);
+        }
+        recording_ids
+            .into_iter()
+            .map(|recording_id| {
+                load_recording(&connection, scope, &recording_id)?.ok_or(DurableStoreError::Corrupt)
+            })
+            .collect()
     }
 
     fn recordings_due_for_expiry(
@@ -985,7 +1040,8 @@ fn decode_u64(value: &[u8]) -> Result<u64, DurableStoreError> {
 mod tests {
     use rusqlite::Connection;
     use ucr_core::{
-        CallStore, ConversationStore, EventJournalStore, RecordingStore, StorageProvider,
+        CallStore, ConversationStore, EventJournalStore, MAX_ACTIVE_RECORDINGS_PER_CALL,
+        RecordingStore, StorageProvider,
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CallParticipant, CallParticipantState, CallSession,
@@ -1203,6 +1259,78 @@ mod tests {
             .expect("revoke");
         assert_eq!(stopped.state, RecordingState::Stopped);
         assert_eq!(stopped.stopped_at_unix_ms, Some(1_040_000));
+    }
+
+    #[test]
+    fn active_recording_lookup_is_call_scoped_and_excludes_stopped_rows() {
+        let db = TestDb::new();
+        let (call, host, guest) = call();
+        let initial = recording(&call, &host, &guest);
+        let store = SqliteLocalStore::open(db.path()).expect("open");
+        store
+            .persist_conversation(&conversation())
+            .expect("conversation");
+        store.create_call(&host, &call).expect("call");
+        store.persist_recording(&initial).expect("recording");
+
+        let host_granted = store
+            .set_recording_consent(
+                &initial.scope,
+                &initial.recording_id,
+                initial.revision,
+                &host.principal,
+                RecordingConsentState::Granted,
+                1_010_000,
+            )
+            .expect("host consent");
+        let ready = store
+            .set_recording_consent(
+                &initial.scope,
+                &initial.recording_id,
+                host_granted.revision,
+                &guest.principal,
+                RecordingConsentState::Granted,
+                1_020_000,
+            )
+            .expect("guest consent");
+        let active = store
+            .start_recording(
+                &initial.scope,
+                &initial.recording_id,
+                ready.revision,
+                1_030_000,
+            )
+            .expect("start");
+
+        assert_eq!(
+            store
+                .active_recordings_for_call(
+                    &initial.scope,
+                    &initial.call_id,
+                    MAX_ACTIVE_RECORDINGS_PER_CALL,
+                )
+                .expect("active lookup"),
+            vec![active.clone()]
+        );
+
+        store
+            .stop_recording(
+                &active.scope,
+                &active.recording_id,
+                active.revision,
+                1_040_000,
+            )
+            .expect("stop");
+        assert!(
+            store
+                .active_recordings_for_call(
+                    &initial.scope,
+                    &initial.call_id,
+                    MAX_ACTIVE_RECORDINGS_PER_CALL,
+                )
+                .expect("after stop")
+                .is_empty()
+        );
     }
 
     #[test]
