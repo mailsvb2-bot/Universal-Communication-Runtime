@@ -56,7 +56,8 @@ pub use recording::{
     RECORDING_PROVIDER_RETRY_MAX_MS, RecordingMediaProvider, RecordingProviderDispatchSweep,
     RecordingProviderError, RecordingProviderHealth, RecordingProviderOperation,
     RecordingProviderOperationRecord, RecordingProviderOperationState,
-    RecordingProviderOperationStore, RecordingProviderRequest, RecordingStore,
+    RecordingConsentProviderStopRequest, RecordingProviderOperationStore,
+    RecordingProviderRequest, RecordingStore,
     dispatch_recording_provider_operations_once, recording_provider_retry_delay_ms,
 };
 pub use recovery_workflow::{
