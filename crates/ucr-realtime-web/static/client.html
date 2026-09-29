@@ -6,27 +6,29 @@
 <meta name="theme-color" content="#111827">
 <title>UCR Conference</title>
 <style>
-:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:dark}
-body{margin:0;background:#0b1020;color:#f8fafc;min-height:100vh;display:grid;place-items:center}
+:root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:dark;--ucr-background:#0b1020;--ucr-card:#111827;--ucr-text:#f8fafc;--ucr-muted:#cbd5e1;--ucr-panel:#0f172a;--ucr-panel-deep:#020617;--ucr-border:#334155;--ucr-accent:#f8fafc;--ucr-accent-text:#0f172a}
+body{margin:0;background:var(--ucr-background);color:var(--ucr-text);min-height:100vh;display:grid;place-items:center}
 main{width:min(94vw,980px);padding:24px}
-.card{background:#111827;border:1px solid #334155;border-radius:18px;padding:22px;box-shadow:0 20px 60px #0008}
-h1{margin:0 0 10px;font-size:clamp(1.6rem,5vw,2.4rem)}
-p{color:#cbd5e1;line-height:1.45}
+.card{background:var(--ucr-card);border:1px solid var(--ucr-border);border-radius:18px;padding:22px;box-shadow:0 20px 60px #0008}
+.brand{display:flex;align-items:center;gap:12px;margin:0 0 10px}
+.brand-logo{display:block;max-width:160px;max-height:48px;object-fit:contain}
+h1{margin:0;font-size:clamp(1.6rem,5vw,2.4rem)}
+p{color:var(--ucr-muted);line-height:1.45}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:16px 0}
-.metric{background:#0f172a;border-radius:12px;padding:12px}
+.metric{background:var(--ucr-panel);border-radius:12px;padding:12px}
 .metric b{display:block;font-size:1.2rem}
 .media{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin:16px 0}
-.video-card{background:#020617;border:1px solid #334155;border-radius:14px;overflow:hidden}
-.video-card header{padding:8px 10px;color:#cbd5e1;font-size:.85rem}
+.video-card{background:var(--ucr-panel-deep);border:1px solid var(--ucr-border);border-radius:14px;overflow:hidden}
+.video-card header{padding:8px 10px;color:var(--ucr-muted);font-size:.85rem}
 video{display:block;width:100%;aspect-ratio:16/9;background:#000;object-fit:cover}
 .controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
-select,button{border:0;border-radius:12px;padding:12px 14px;font:inherit}
-select{background:#0f172a;color:#f8fafc;border:1px solid #334155;min-width:0}
-button{font-weight:700;cursor:pointer}
-button.primary{background:#f8fafc;color:#0f172a}
-button.secondary{background:#334155;color:#f8fafc}
-button:disabled,select:disabled{opacity:.45;cursor:not-allowed}
-#status{white-space:pre-wrap;background:#020617;border-radius:12px;padding:12px;min-height:48px}
+select,button,input{border-radius:12px;padding:12px 14px;font:inherit}
+select,input{background:var(--ucr-panel);color:var(--ucr-text);border:1px solid var(--ucr-border);min-width:0}
+button{border:0;font-weight:700;cursor:pointer}
+button.primary{background:var(--ucr-accent);color:var(--ucr-accent-text)}
+button.secondary{background:var(--ucr-border);color:var(--ucr-text)}
+button:disabled,select:disabled,input:disabled{opacity:.45;cursor:not-allowed}
+#status{white-space:pre-wrap;background:var(--ucr-panel-deep);border-radius:12px;padding:12px;min-height:48px}
 .small{font-size:.85rem;color:#94a3b8}
 .hidden{display:none}
 </style>
@@ -34,18 +36,18 @@ button:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 <body>
 <main>
 <section class="card">
-<h1>UCR Conference</h1>
+<div class="brand"><img id="brand-logo" class="brand-logo hidden" alt="" referrerpolicy="no-referrer"><h1 id="brand-name">UCR Conference</h1></div>
 <p id="intro">Secure realtime session. Join credentials remain in this page fragment and are never placed in the request URL.</p>
 <div class="grid">
-<div class="metric"><span>State</span><b id="state">Ready</b></div>
-<div class="metric"><span>WebRTC</span><b id="webrtc-state">Idle</b></div>
-<div class="metric"><span>Encrypted packets</span><b id="packets">0</b></div>
-<div class="metric"><span>Expires</span><b id="expires">—</b></div>
+<div class="metric"><span id="state-label">State</span><b id="state">Ready</b></div>
+<div class="metric"><span id="webrtc-label">WebRTC</span><b id="webrtc-state">Idle</b></div>
+<div class="metric"><span id="packets-label">Encrypted packets</span><b id="packets">0</b></div>
+<div class="metric"><span id="expires-label">Expires</span><b id="expires">—</b></div>
 </div>
 <div class="media">
-<div class="video-card"><header>You</header><video id="local-video" autoplay muted playsinline></video></div>
-<div id="screen-card" class="video-card hidden"><header>Your screen</header><video id="screen-video" autoplay muted playsinline></video></div>
-<div class="video-card"><header>Remote</header><video id="remote-video" autoplay playsinline></video></div>
+<div class="video-card"><header id="local-label">You</header><video id="local-video" autoplay muted playsinline></video></div>
+<div id="screen-card" class="video-card hidden"><header id="screen-label">Your screen</header><video id="screen-video" autoplay muted playsinline></video></div>
+<div class="video-card"><header id="remote-label">Remote</header><video id="remote-video" autoplay playsinline></video></div>
 </div>
 <div class="controls">
 <select id="microphone" aria-label="Microphone"><option value="">Default microphone</option></select>
@@ -65,7 +67,7 @@ button:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 </div>
 <div id="reactions" class="small" aria-live="polite"></div>
 <div id="active-speaker" class="small" aria-live="polite">Active speaker: none</div>
-<div class="card" aria-label="Conference chat">
+<div id="chat-card" class="card" aria-label="Conference chat">
   <div id="chat-messages" class="small" aria-live="polite"></div>
   <div class="controls">
     <input id="chat-input" type="text" maxlength="4096" placeholder="Message" disabled>
@@ -77,7 +79,7 @@ button:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 <button id="leave" class="secondary" disabled>Leave</button>
 </div>
 <div id="status" role="status" aria-live="polite">Reading signed join grant…</div>
-<p class="small">Media permission is requested only after joining. Recording is a separate explicit UCR capability with consent and retention policy.</p>
+<p id="footer-note" class="small">Media permission is requested only after joining. Recording is a separate explicit UCR capability with consent and retention policy.</p>
 </section>
 </main>
 <script>
@@ -86,6 +88,9 @@ const $=id=>document.getElementById(id);
 const ui={
   join:$("join"),leave:$("leave"),state:$("state"),webrtcState:$("webrtc-state"),
   packets:$("packets"),expires:$("expires"),status:$("status"),
+  brandLogo:$("brand-logo"),brandName:$("brand-name"),intro:$("intro"),
+  stateLabel:$("state-label"),webrtcLabel:$("webrtc-label"),packetsLabel:$("packets-label"),expiresLabel:$("expires-label"),
+  localLabel:$("local-label"),screenLabel:$("screen-label"),remoteLabel:$("remote-label"),footerNote:$("footer-note"),chatCard:$("chat-card"),
   localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),
   mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker"),chatMessages:$("chat-messages"),chatInput:$("chat-input"),chatSend:$("chat-send")
 };
@@ -102,6 +107,97 @@ const E2EE_MAX_WIRE_BYTES=2*1024*1024+8192;
 const ENTRY_RETRY_MS=2000;
 const STREAM_RETRY_MS=1500;
 const WEBRTC_RETRY_MS=2000;
+const BRANDING_FRAGMENT_KEY="ucr_brand";
+const BRANDING_MAX_JSON_BYTES=4096;
+const BRAND_NAME_MAX=80;
+const BRAND_WAITING_TEXT_MAX=240;
+const BRAND_LOGO_URL_MAX=2048;
+const BRAND_COLOR=/^#[0-9a-fA-F]{6}$/;
+const COPY={
+  en:{
+    defaultTitle:"UCR Conference",intro:"Secure realtime session. Join credentials remain in this page fragment and are never placed in the request URL.",
+    state:"State",webrtc:"WebRTC",packets:"Encrypted packets",expires:"Expires",ready:"Ready",idle:"Idle",
+    you:"You",yourScreen:"Your screen",remote:"Remote",microphone:"Microphone",camera:"Camera",
+    defaultMicrophone:"Default microphone",defaultCamera:"Default camera",muteMicrophone:"Mute microphone",unmuteMicrophone:"Unmute microphone",startMicrophone:"Start microphone",microphoneUnavailable:"Microphone unavailable",
+    turnCameraOff:"Turn camera off",turnCameraOn:"Turn camera on",startCamera:"Start camera",cameraUnavailable:"Camera unavailable",
+    shareScreen:"Share screen",raiseHand:"Raise hand",lowerHand:"Lower hand",reaction:"Reaction",react:"React",
+    activeSpeakerNone:"Active speaker: none",activeSpeakerPrefix:"Active speaker: ",chat:"Conference chat",message:"Message",send:"Send",
+    join:"Join conference",leave:"Leave",readingGrant:"Reading signed join grant…",
+    footer:"Media permission is requested only after joining. Recording is a separate explicit UCR capability with consent and retention policy.",
+    waitingRoom:"You are in the waiting room. Media will start automatically when the host starts the conference.",
+    waitingEntry:"Waiting for the host to open conference entry…",
+    waitingScheduled:"The conference has not started yet. This page will join automatically when entry opens.",
+    handRaised:"Your hand is raised.",handLowered:"Your hand is lowered."
+  },
+  ru:{
+    defaultTitle:"Конференция UCR",intro:"Защищённая сессия в реальном времени. Данные входа остаются во фрагменте этой страницы и не передаются в URL запросов.",
+    state:"Состояние",webrtc:"WebRTC",packets:"Зашифрованные пакеты",expires:"Доступ до",ready:"Готово",idle:"Ожидание",
+    you:"Вы",yourScreen:"Ваш экран",remote:"Участники",microphone:"Микрофон",camera:"Камера",
+    defaultMicrophone:"Микрофон по умолчанию",defaultCamera:"Камера по умолчанию",muteMicrophone:"Выключить микрофон",unmuteMicrophone:"Включить микрофон",startMicrophone:"Включить микрофон",microphoneUnavailable:"Микрофон недоступен",
+    turnCameraOff:"Выключить камеру",turnCameraOn:"Включить камеру",startCamera:"Включить камеру",cameraUnavailable:"Камера недоступна",
+    shareScreen:"Показать экран",raiseHand:"Поднять руку",lowerHand:"Опустить руку",reaction:"Реакция",react:"Отправить реакцию",
+    activeSpeakerNone:"Активный спикер: нет",activeSpeakerPrefix:"Активный спикер: ",chat:"Чат конференции",message:"Сообщение",send:"Отправить",
+    join:"Войти в конференцию",leave:"Выйти",readingGrant:"Проверка ссылки для входа…",
+    footer:"Доступ к камере и микрофону запрашивается только после входа. Запись — отдельная возможность UCR с согласием участников и политикой хранения.",
+    waitingRoom:"Вы в комнате ожидания. Медиа включится автоматически, когда ведущий начнёт конференцию.",
+    waitingEntry:"Ожидание открытия входа ведущим…",
+    waitingScheduled:"Конференция ещё не началась. Страница подключится автоматически, когда вход откроется.",
+    handRaised:"Ваша рука поднята.",handLowered:"Ваша рука опущена."
+  }
+};
+let locale="en",brandNameOverride="",brandWaitingText="";
+
+function tr(key){return (COPY[locale]&&COPY[locale][key])||COPY.en[key]||key;}
+function boundedBrandText(value,max){return typeof value==="string"&&value.trim().length>0&&value.trim().length<=max?value.trim():null;}
+function normalizeBrandColor(value){return typeof value==="string"&&BRAND_COLOR.test(value)?value.toLowerCase():null;}
+function brandAccentText(hex){
+  const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
+  return (r*299+g*587+b*114)/1000>=150?"#0f172a":"#f8fafc";
+}
+function normalizeBrandLogo(value){
+  if(typeof value!=="string"||value.trim().length===0||value.trim().length>BRAND_LOGO_URL_MAX)return null;
+  try{
+    const url=new URL(value.trim(),location.origin);
+    if(url.username||url.password)return null;
+    if(url.protocol==="https:")return url.toString();
+    const loopback=["localhost","127.0.0.1","[::1]"].includes(location.hostname);
+    return location.protocol==="http:"&&loopback&&url.protocol==="http:"&&url.origin===location.origin?url.toString():null;
+  }catch(_){return null;}
+}
+function applyLocale(language){
+  locale=language==="ru"?"ru":"en";
+  document.documentElement.lang=locale;
+  ui.brandName.textContent=brandNameOverride||tr("defaultTitle");
+  document.title=brandNameOverride||tr("defaultTitle");
+  ui.intro.textContent=tr("intro");ui.stateLabel.textContent=tr("state");ui.webrtcLabel.textContent=tr("webrtc");ui.packetsLabel.textContent=tr("packets");ui.expiresLabel.textContent=tr("expires");
+  ui.localLabel.textContent=tr("you");ui.screenLabel.textContent=tr("yourScreen");ui.remoteLabel.textContent=tr("remote");
+  ui.mic.setAttribute("aria-label",tr("microphone"));ui.camera.setAttribute("aria-label",tr("camera"));ui.reaction.setAttribute("aria-label",tr("reaction"));
+  if(ui.mic.options.length)ui.mic.options[0].textContent=tr("defaultMicrophone");
+  if(ui.camera.options.length)ui.camera.options[0].textContent=tr("defaultCamera");
+  ui.screenToggle.textContent=tr("shareScreen");ui.handToggle.textContent=tr("raiseHand");ui.reactionSend.textContent=tr("react");
+  ui.activeSpeaker.textContent=tr("activeSpeakerNone");ui.chatCard.setAttribute("aria-label",tr("chat"));ui.chatInput.placeholder=tr("message");ui.chatSend.textContent=tr("send");
+  ui.join.textContent=tr("join");ui.leave.textContent=tr("leave");ui.footerNote.textContent=tr("footer");ui.status.textContent=tr("readingGrant");
+  if(ui.state.textContent==="Ready")ui.state.textContent=tr("ready");
+  if(ui.webrtcState.textContent==="Idle")ui.webrtcState.textContent=tr("idle");
+  applyToggleLabels();
+}
+function waitCopy(key){return brandWaitingText||tr(key);}
+function applyBrandingFromFragment(params){
+  const raw=params.get(BRANDING_FRAGMENT_KEY);
+  if(!raw||raw.length>BRANDING_MAX_JSON_BYTES){applyLocale("en");return;}
+  let branding;
+  try{branding=JSON.parse(raw);}catch(_){applyLocale("en");return;}
+  if(!branding||typeof branding!=="object"||Array.isArray(branding)){applyLocale("en");return;}
+  const name=boundedBrandText(branding.name,BRAND_NAME_MAX);if(name)brandNameOverride=name;
+  const waiting=boundedBrandText(branding.waitingText,BRAND_WAITING_TEXT_MAX);if(waiting)brandWaitingText=waiting;
+  const accent=normalizeBrandColor(branding.accentColor);
+  if(accent){document.documentElement.style.setProperty("--ucr-accent",accent);document.documentElement.style.setProperty("--ucr-accent-text",brandAccentText(accent));}
+  const background=normalizeBrandColor(branding.backgroundColor);
+  if(background){document.documentElement.style.setProperty("--ucr-background",background);const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.setAttribute("content",background);}
+  const logo=normalizeBrandLogo(branding.logoUrl);
+  if(logo){ui.brandLogo.src=logo;ui.brandLogo.classList.remove("hidden");}
+  applyLocale(branding.language==="ru"?"ru":"en");
+}
 
 function fail(message){ui.state.textContent="Error";ui.status.textContent=message;ui.join.disabled=true;}
 function b64url(s){s=s.replace(/-/g,"+").replace(/_/g,"/");while(s.length%4)s+="=";return Uint8Array.from(atob(s),c=>c.charCodeAt(0));}
@@ -387,8 +483,8 @@ async function refreshDevices(){
   if(!navigator.mediaDevices||!navigator.mediaDevices.enumerateDevices)return;
   const devices=await navigator.mediaDevices.enumerateDevices();
   const selectedMic=ui.mic.value,selectedCamera=ui.camera.value;
-  fillDevices(ui.mic,devices.filter(d=>d.kind==="audioinput"),"Default microphone",selectedMic);
-  fillDevices(ui.camera,devices.filter(d=>d.kind==="videoinput"),"Default camera",selectedCamera);
+  fillDevices(ui.mic,devices.filter(d=>d.kind==="audioinput"),tr("defaultMicrophone"),selectedMic);
+  fillDevices(ui.camera,devices.filter(d=>d.kind==="videoinput"),tr("defaultCamera"),selectedCamera);
 }
 async function handleMediaDeviceChange(){
   try{
@@ -410,8 +506,8 @@ function fillDevices(select,devices,fallback,selected){
 }
 function applyToggleLabels(){
   const audio=localStream&&localStream.getAudioTracks()[0],video=localStream&&localStream.getVideoTracks()[0];
-  ui.micToggle.textContent=!policyAllows("audio")?"Microphone unavailable":audio?(audio.enabled?"Mute microphone":"Unmute microphone"):"Start microphone";
-  ui.cameraToggle.textContent=!policyAllows("camera")?"Camera unavailable":video?(video.enabled?"Turn camera off":"Turn camera on"):"Start camera";
+  ui.micToggle.textContent=!policyAllows("audio")?tr("microphoneUnavailable"):audio?(audio.enabled?tr("muteMicrophone"):tr("unmuteMicrophone")):tr("startMicrophone");
+  ui.cameraToggle.textContent=!policyAllows("camera")?tr("cameraUnavailable"):video?(video.enabled?tr("turnCameraOff"):tr("turnCameraOn")):tr("startCamera");
 }
 function teardownPeer(){
   closeE2eeTransport();
@@ -529,7 +625,7 @@ async function activateAdmittedMedia(){
 async function applyAdmissionState(state){
   if(state==="waiting_room"){
     mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
-    ui.status.textContent="You are in the waiting room. Media will start automatically when the host starts the conference.";
+    ui.status.textContent=waitCopy("waitingRoom");
     return;
   }
   if(state==="closed"){
@@ -568,7 +664,7 @@ async function join(){
 }
 function scheduleEntryRetry(){
   if(Date.now()>=claims.expires){fail("Join grant has expired");return;}
-  ui.state.textContent="Waiting";ui.join.disabled=true;ui.status.textContent="Waiting for the host to open conference entry…";
+  ui.state.textContent="Waiting";ui.join.disabled=true;ui.status.textContent=waitCopy("waitingEntry");
   if(entryRetryTimer)clearTimeout(entryRetryTimer);
   entryRetryTimer=setTimeout(()=>{entryRetryTimer=null;join();},ENTRY_RETRY_MS);
 }
@@ -587,7 +683,7 @@ async function leave(){
 function scheduleWaitingRoom(){
   const delay=claims.not_before-Date.now();
   if(delay<=0){ui.state.textContent="Ready";ui.status.textContent="Signed grant active. Ready to join.";ui.join.disabled=false;return false;}
-  ui.state.textContent="Waiting";ui.join.disabled=true;ui.status.textContent="The conference has not started yet. This page will join automatically when entry opens.";
+  ui.state.textContent="Waiting";ui.join.disabled=true;ui.status.textContent=waitCopy("waitingScheduled");
   if(waitTimer)clearTimeout(waitTimer);
   waitTimer=setTimeout(()=>{waitTimer=null;ui.join.disabled=false;join();},delay);
   return true;
@@ -640,7 +736,7 @@ function stopActiveSpeakerMonitoring(){
   if(audioLevelSource){try{audioLevelSource.disconnect();}catch(_){}audioLevelSource=null;}
   audioLevelAnalyser=null;audioLevelBuffer=null;
   if(audioLevelContext){audioLevelContext.close().catch(()=>{});audioLevelContext=null;}
-  if(ui.activeSpeaker)ui.activeSpeaker.textContent="Active speaker: none";
+  if(ui.activeSpeaker)ui.activeSpeaker.textContent=tr("activeSpeakerNone");
 }
 async function reportLocalAudioLevel(){
   if(!sessionActive||!mediaActive||audioLevelReportInFlight)return;
@@ -667,7 +763,7 @@ async function pollActiveSpeaker(){
     const r=await api("/v1/realtime/active-speaker",body());
     const data=await r.json();
     const value=data.participant_id_b64;
-    ui.activeSpeaker.textContent=value?"Active speaker: "+value.slice(0,12)+(value.length>12?"…":""):"Active speaker: none";
+    ui.activeSpeaker.textContent=value?tr("activeSpeakerPrefix")+value.slice(0,12)+(value.length>12?"…":""):tr("activeSpeakerNone");
   }finally{
     activeSpeakerPollInFlight=false;
   }
@@ -768,8 +864,8 @@ async function toggleRaisedHand(){
   const next=!handRaised;
   await api("/v1/realtime/raised-hand",{...body(),raised:next});
   handRaised=next;
-  ui.handToggle.textContent=handRaised?"Lower hand":"Raise hand";
-  ui.status.textContent=handRaised?"Your hand is raised.":"Your hand is lowered.";
+  ui.handToggle.textContent=handRaised?tr("lowerHand"):tr("raiseHand");
+  ui.status.textContent=handRaised?tr("handRaised"):tr("handLowered");
 }
 ui.handToggle.addEventListener("click",()=>{toggleRaisedHand().catch(e=>{ui.status.textContent="Raised hand failed: "+e.message;});});
 ui.micToggle.addEventListener("click",async()=>{try{let track=localStream&&localStream.getAudioTracks()[0];if(!track){await ensureLocalTrack("audio");return;}track.enabled=!track.enabled;applyToggleLabels();}catch(e){ui.status.textContent="Microphone failed: "+e.message;}});
@@ -778,7 +874,7 @@ ui.screenToggle.addEventListener("click",async()=>{try{if(screenStream){await st
 ui.mic.addEventListener("change",()=>{if(sessionActive&&mediaActive)replaceLocalTrack("audio").catch(e=>{ui.status.textContent="Microphone switch failed: "+e.message;});});
 ui.camera.addEventListener("change",()=>{if(sessionActive&&mediaActive)replaceLocalTrack("camera").catch(e=>{ui.status.textContent="Camera switch failed: "+e.message;});});
 try{
-  const params=new URLSearchParams(location.hash.slice(1));token=params.get("ucr_join")||"";
+  const params=new URLSearchParams(location.hash.slice(1));applyBrandingFromFragment(params);token=params.get("ucr_join")||"";
   if(!token)throw new Error("Missing #ucr_join grant");
   claims=readGrant(token);if(Date.now()>=claims.expires)throw new Error("Join grant has expired");
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
