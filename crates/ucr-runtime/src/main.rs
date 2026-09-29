@@ -1,12 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::{
-    fs,
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use ucr_api_grpc::MachineTokenVerificationKeyProvider;
 use ucr_core::WebhookDispatchOutcome;
@@ -18,10 +12,7 @@ use ucr_runtime::{
     DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MachineAuthRuntimeConfig, MachineBearerRuntimeConfig,
     ProductionRuntime, RealtimeRuntimeConfig,
 };
-use ucr_secrets::{
-    ActiveSecretSet, SecretHandle, SecretMaterial, SecretProvider, SecretProviderError,
-    SecretProviderHealth, SecretPurpose, SecretVersion,
-};
+use ucr_secrets::{ReloadingFileSecretProvider, SecretHandle, SecretProvider, SecretPurpose};
 use zeroize::Zeroizing;
 
 #[tokio::main]
@@ -126,139 +117,6 @@ async fn run() -> Result<(), String> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct ReloadingFileSecretProvider {
-    handle: SecretHandle,
-    manifest_file: PathBuf,
-}
-
-impl ReloadingFileSecretProvider {
-    fn new(handle: SecretHandle, manifest_file: PathBuf) -> Result<Self, String> {
-        let provider = Self {
-            handle,
-            manifest_file,
-        };
-        provider
-            .active_secret_set(&provider.handle)
-            .map_err(|error| format!("load secret provider manifest: {error:?}"))?;
-        Ok(provider)
-    }
-
-    fn read_manifest(
-        path: &Path,
-        handle: &SecretHandle,
-    ) -> Result<ActiveSecretSet, SecretProviderError> {
-        let metadata = fs::symlink_metadata(path).map_err(|_| SecretProviderError::Unavailable)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 1024 {
-            return Err(SecretProviderError::InvalidMaterial);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            if metadata.permissions().mode() & 0o077 != 0 {
-                return Err(SecretProviderError::InvalidMaterial);
-            }
-        }
-
-        let encoded =
-            Zeroizing::new(fs::read_to_string(path).map_err(|_| SecretProviderError::Unavailable)?);
-        let mut current_key_id = None;
-        let mut current_seed_hex = None;
-        let mut previous_key_id = None;
-        let mut previous_seed_hex = None;
-        for line in encoded
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
-            let Some((name, value)) = line.split_once('=') else {
-                return Err(SecretProviderError::InvalidMaterial);
-            };
-            let value = value.trim();
-            match name.trim() {
-                "current_key_id" | "current_version_id" if current_key_id.is_none() => {
-                    current_key_id = Some(value);
-                }
-                "current_seed_hex" | "current_secret_hex" if current_seed_hex.is_none() => {
-                    current_seed_hex = Some(value);
-                }
-                "previous_key_id" | "previous_version_id" if previous_key_id.is_none() => {
-                    previous_key_id = Some(value);
-                }
-                "previous_seed_hex" | "previous_secret_hex" if previous_seed_hex.is_none() => {
-                    previous_seed_hex = Some(value);
-                }
-                _ => return Err(SecretProviderError::InvalidMaterial),
-            }
-        }
-
-        let current = Self::decode_version(
-            current_key_id.ok_or(SecretProviderError::InvalidMaterial)?,
-            current_seed_hex.ok_or(SecretProviderError::InvalidMaterial)?,
-        )?;
-        let previous = match (previous_key_id, previous_seed_hex) {
-            (Some(key_id), Some(seed_hex)) => Some(Self::decode_version(key_id, seed_hex)?),
-            (None, None) => None,
-            _ => return Err(SecretProviderError::InvalidMaterial),
-        };
-        if previous
-            .as_ref()
-            .is_some_and(|version| version.version_id == current.version_id)
-        {
-            return Err(SecretProviderError::Conflict);
-        }
-
-        Ok(ActiveSecretSet {
-            handle: handle.clone(),
-            current,
-            previous,
-        })
-    }
-
-    fn decode_version(key_id: &str, seed_hex: &str) -> Result<SecretVersion, SecretProviderError> {
-        let seed = Zeroizing::new(
-            decode_key_hex_named(seed_hex, "secret provider material")
-                .map_err(|_| SecretProviderError::InvalidMaterial)?,
-        );
-        Ok(SecretVersion {
-            version_id: OpaqueId::new(key_id).map_err(|_| SecretProviderError::InvalidMaterial)?,
-            material: SecretMaterial::new(seed.as_ref().to_vec())?,
-        })
-    }
-}
-
-impl SecretProvider for ReloadingFileSecretProvider {
-    fn provider_id(&self) -> &'static str {
-        "file-reload"
-    }
-
-    fn health(&self) -> SecretProviderHealth {
-        if self.active_secret_set(&self.handle).is_ok() {
-            SecretProviderHealth::Healthy
-        } else {
-            SecretProviderHealth::Unavailable
-        }
-    }
-
-    fn active_secret_set(
-        &self,
-        handle: &SecretHandle,
-    ) -> Result<ActiveSecretSet, SecretProviderError> {
-        if handle != &self.handle {
-            return Err(SecretProviderError::NotFound);
-        }
-        Self::read_manifest(self.manifest_file.as_path(), handle)
-    }
-
-    fn rotate(
-        &self,
-        _handle: &SecretHandle,
-        _new_version: SecretVersion,
-    ) -> Result<ActiveSecretSet, SecretProviderError> {
-        Err(SecretProviderError::Unavailable)
-    }
-}
-
 type ConfiguredSecretProvider = (Arc<dyn SecretProvider>, SecretHandle);
 
 fn secret_provider_from_env(
@@ -284,10 +142,10 @@ fn secret_provider_from_env(
             .map_err(|_| format!("{secret_id_variable} is invalid"))?,
         purpose,
     };
-    let provider: Arc<dyn SecretProvider> = Arc::new(ReloadingFileSecretProvider::new(
-        handle.clone(),
-        manifest_file,
-    )?);
+    let provider: Arc<dyn SecretProvider> = Arc::new(
+        ReloadingFileSecretProvider::new(handle.clone(), manifest_file)
+            .map_err(|error| format!("load secret provider manifest: {error:?}"))?,
+    );
     Ok(Some((provider, handle)))
 }
 
