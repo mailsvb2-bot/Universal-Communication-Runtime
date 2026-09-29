@@ -7,9 +7,8 @@ fn integration_attendance_webhook_is_an_atomic_projection_not_an_owner_bypass() 
         .and_then(Path::parent)
         .expect("workspace root");
 
-    let proto =
-        fs::read_to_string(workspace.join("proto/ucr/v1/universal_conference.proto"))
-            .expect("read Universal Conference proto");
+    let proto = fs::read_to_string(workspace.join("proto/ucr/v1/universal_conference.proto"))
+        .expect("read Universal Conference proto");
     assert!(proto.contains("message UniversalConferenceAttendanceEvent"));
     assert!(proto.contains("bytes external_conference_id = 4;"));
     assert!(proto.contains("bytes external_user_id = 5;"));
@@ -17,7 +16,9 @@ fn integration_attendance_webhook_is_an_atomic_projection_not_an_owner_bypass() 
         !proto
             .split("message UniversalConferenceAttendanceEvent")
             .nth(1)
-            .and_then(|value| value.split("message UniversalGetCapabilitiesRequest").next())
+            .and_then(|value| value
+                .split("message UniversalGetCapabilitiesRequest")
+                .next())
             .expect("attendance projection message")
             .contains("PrincipalRef"),
         "integration attendance payload must not expose canonical participant principals"
