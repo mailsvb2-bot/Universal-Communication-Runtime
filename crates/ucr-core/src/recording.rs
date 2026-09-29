@@ -227,6 +227,17 @@ pub fn recording_provider_retry_delay_ms(previous_attempts: u32) -> i64 {
         .min(RECORDING_PROVIDER_RETRY_MAX_MS)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RecordingConsentProviderStopRequest<'a> {
+    pub scope: &'a TenantScope,
+    pub recording_id: &'a RecordingId,
+    pub expected_revision: u64,
+    pub participant: &'a PrincipalRef,
+    pub state: RecordingConsentState,
+    pub now_unix_ms: i64,
+    pub event: &'a EventEnvelope,
+}
+
 /// Durable owner of recording policy, consent evidence and lifecycle only.
 ///
 /// This store does not own Call/Group membership and never owns recorded media bytes or MLS keys.
@@ -286,6 +297,7 @@ pub trait RecordingStore: StorageProvider {
     /// # Errors
     /// Rejects invalid/stale consent transitions, mismatched Event evidence, unsupported atomic
     /// persistence, or explicit durable-store failures.
+    #[allow(clippy::too_many_arguments)]
     fn set_recording_consent_with_event(
         &self,
         scope: &TenantScope,
@@ -317,23 +329,9 @@ pub trait RecordingStore: StorageProvider {
     /// durable action.
     fn set_recording_consent_with_event_and_provider_stop(
         &self,
-        scope: &TenantScope,
-        recording_id: &RecordingId,
-        expected_revision: u64,
-        participant: &PrincipalRef,
-        state: RecordingConsentState,
-        now_unix_ms: i64,
-        event: &EventEnvelope,
+        request: RecordingConsentProviderStopRequest<'_>,
     ) -> Result<RecordingSession, DurableStoreError> {
-        let _ = (
-            scope,
-            recording_id,
-            expected_revision,
-            participant,
-            state,
-            now_unix_ms,
-            event,
-        );
+        let _ = request;
         Err(DurableStoreError::Unavailable)
     }
 
