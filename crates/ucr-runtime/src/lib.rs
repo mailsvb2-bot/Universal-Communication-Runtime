@@ -1344,26 +1344,21 @@ impl ProductionRuntime {
             Arc::clone(&store),
             Arc::clone(&conference_state),
         );
-        let mut attachment_service = GrpcAttachmentService::new(
-            Arc::clone(&clock),
-            Arc::clone(&authorization),
-            Arc::clone(&store),
+        let attachment_service = configured_attachment_service(
+            &clock,
+            &authorization,
+            &store,
+            machine_bearer.as_ref(),
         );
         if let Some(config) = machine_bearer {
             match config.verification {
                 MachineBearerVerificationConfig::Static(keys) => {
-                    universal_service = universal_service
-                        .with_machine_bearer_auth(Arc::clone(&keys), config.policy.clone());
-                    attachment_service =
-                        attachment_service.with_machine_bearer_auth(keys, config.policy);
+                    universal_service =
+                        universal_service.with_machine_bearer_auth(keys, config.policy);
                 }
                 MachineBearerVerificationConfig::Provider(provider) => {
-                    universal_service = universal_service.with_machine_bearer_auth_provider(
-                        Arc::clone(&provider),
-                        config.policy.clone(),
-                    );
-                    attachment_service = attachment_service
-                        .with_machine_bearer_auth_provider(provider, config.policy);
+                    universal_service =
+                        universal_service.with_machine_bearer_auth_provider(provider, config.policy);
                 }
             }
         }
@@ -1633,23 +1628,8 @@ async fn serve_realtime_services(
         Arc::clone(&join_issuer),
         runtime_capabilities.recording,
     );
-    let mut attachment_service = GrpcAttachmentService::new(
-        Arc::clone(&clock),
-        Arc::clone(&authorization),
-        Arc::clone(&store),
-    );
-    if let Some(config) = machine_bearer.as_ref() {
-        match &config.verification {
-            MachineBearerVerificationConfig::Static(keys) => {
-                attachment_service = attachment_service
-                    .with_machine_bearer_auth(Arc::clone(keys), config.policy.clone());
-            }
-            MachineBearerVerificationConfig::Provider(provider) => {
-                attachment_service = attachment_service
-                    .with_machine_bearer_auth_provider(Arc::clone(provider), config.policy.clone());
-            }
-        }
-    }
+    let attachment_service =
+        configured_attachment_service(&clock, &authorization, &store, machine_bearer.as_ref());
     (universal_service, recording_service) =
         apply_realtime_machine_bearer(universal_service, recording_service, machine_bearer);
 
@@ -1708,6 +1688,28 @@ async fn serve_realtime_services(
         )))
         .serve_with_incoming(incoming)
         .await
+}
+
+fn configured_attachment_service(
+    clock: &Arc<SystemServiceQuotaClock>,
+    authorization: &Arc<SqliteLocalStore>,
+    store: &Arc<SqliteLocalStore>,
+    machine_bearer: Option<&MachineBearerRuntimeConfig>,
+) -> GrpcAttachmentService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore> {
+    let service = GrpcAttachmentService::new(
+        Arc::clone(clock),
+        Arc::clone(authorization),
+        Arc::clone(store),
+    );
+    match machine_bearer {
+        None => service,
+        Some(config) => match &config.verification {
+            MachineBearerVerificationConfig::Static(keys) => service
+                .with_machine_bearer_auth(Arc::clone(keys), config.policy.clone()),
+            MachineBearerVerificationConfig::Provider(provider) => service
+                .with_machine_bearer_auth_provider(Arc::clone(provider), config.policy.clone()),
+        },
+    }
 }
 
 fn apply_realtime_machine_bearer(
