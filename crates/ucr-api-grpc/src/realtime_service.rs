@@ -2633,7 +2633,9 @@ fn status_from_canonical(error: CanonicalError) -> Status {
 #[cfg(test)]
 mod recording_admission_tests {
     use super::*;
-    use ucr_model::{NamespaceId, RecordingPolicy, RecordingSession, RecordingState, TenantId};
+    use ucr_model::{
+        NamespaceId, PrincipalRef, RecordingPolicy, RecordingSession, RecordingState, TenantId,
+    };
     use ucr_realtime::JoinGrantUsePolicy;
     use ucr_storage_memory::MemoryLocalStore;
 
