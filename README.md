@@ -74,6 +74,18 @@ This repository intentionally does not begin with chat UI, messenger adapters, W
 - `crates/ucr-architecture-tests/` — architectural regression gates.
 - `fuzz/` — isolated bounded libFuzzer/ASan targets for implemented untrusted parser/wrapper boundaries.
 
+## Local integration package
+
+External integrators can start the development-only package with:
+
+```bash
+docker compose up ucr
+```
+
+It provides the authenticated `ucr dev` gRPC API on host loopback, ephemeral test credentials,
+the reference browser client, a local test TURN service and a bounded webhook receiver example.
+See `spec/dev-mode.md` for the trust boundary and nonclaims.
+
 ## Quality gate
 
 ```bash
