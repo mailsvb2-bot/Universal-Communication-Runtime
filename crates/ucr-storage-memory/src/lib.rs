@@ -20,7 +20,8 @@ use ucr_core::{
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, FederationPeerStore,
     IdentityDeviceLookupStore, IdentityStore, LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE,
     LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_ACTIVE_RECORDINGS_PER_CALL,
-    MAX_RECORDING_PROVIDER_OPERATION_BATCH, MAX_RECORDING_RETENTION_BATCH, MessageStore,
+    MAX_ATOMIC_EVENT_BATCH, MAX_RECORDING_PROVIDER_OPERATION_BATCH,
+    MAX_RECORDING_RETENTION_BATCH, MessageStore,
     PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
     RecordingConsentProviderStopRequest, RecordingProviderOperation,
     RecordingProviderOperationRecord, RecordingProviderOperationState,
@@ -2742,6 +2743,54 @@ impl EventJournalStore for MemoryLocalStore {
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError> {
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         append_event_to_memory_state(&mut state, event)
+    }
+
+    fn append_events_atomically(
+        &self,
+        events: &[EventEnvelope],
+    ) -> Result<Vec<EventAppendStatus>, DurableStoreError> {
+        if events.is_empty() || events.len() > MAX_ATOMIC_EVENT_BATCH {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let canonical = events
+            .iter()
+            .map(|event| canonical_event(event).map_err(map_event_error))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut staged = HashMap::<EventKey, EventEnvelope>::new();
+        let mut staged_order = Vec::new();
+        let mut statuses = Vec::with_capacity(canonical.len());
+
+        for event in canonical {
+            let key = event_key(&event);
+            if let Some(existing) = state.events.get(&key) {
+                if existing != &event {
+                    return Err(DurableStoreError::Conflict);
+                }
+                statuses.push(EventAppendStatus::Duplicate);
+                continue;
+            }
+            if state.group_changes.contains_key(&key) || state.call_signals.contains_key(&key) {
+                return Err(DurableStoreError::Conflict);
+            }
+            if let Some(existing) = staged.get(&key) {
+                if existing != &event {
+                    return Err(DurableStoreError::Conflict);
+                }
+                statuses.push(EventAppendStatus::Duplicate);
+                continue;
+            }
+            staged_order.push(key.clone());
+            staged.insert(key, event);
+            statuses.push(EventAppendStatus::Appended);
+        }
+
+        for key in staged_order {
+            let event = staged.remove(&key).ok_or(DurableStoreError::Internal)?;
+            state.events.insert(key.clone(), event);
+            state.event_order.push(key);
+        }
+        Ok(statuses)
     }
 
     fn event(
