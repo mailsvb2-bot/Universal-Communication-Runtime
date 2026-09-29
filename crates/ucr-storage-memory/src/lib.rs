@@ -19,9 +19,12 @@ use ucr_core::{
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, FederationPeerStore,
     IdentityDeviceLookupStore, IdentityStore, LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE,
-    LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_RECORDING_RETENTION_BATCH, MessageStore,
-    PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
-    RecordingStore, RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
+    LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_RECORDING_PROVIDER_OPERATION_BATCH,
+    MAX_RECORDING_RETENTION_BATCH, MessageStore, PermissionGrantStore,
+    PrincipalIdentityBindingStore, PrincipalIdentityLookupStore, RecordingProviderOperation,
+    RecordingProviderOperationRecord, RecordingProviderOperationState,
+    RecordingProviderOperationStore, RecordingProviderRequest, RecordingStore,
+    RecoveryAdmissionProof, RecoveryDeviceStagingStore, RecoveryPlanStore,
     ReverifiedDeviceActivationStore, ServiceAuditStore, ServiceCredentialStore,
     ServiceQuotaConsumeError, ServiceQuotaStore, ServiceResourceQuotaConsumeError, StorageHealth,
     StorageProvider, SyncStore, TrustedSigningKeyStore, UniversalConferenceStore,
@@ -126,6 +129,7 @@ type UniversalConferenceIdempotencyKey = (ScopeKey, String, String);
 type UniversalConferenceParticipantKey = (ScopeKey, String, PrincipalRef);
 type ConferenceJoinGrantKey = (ScopeKey, String);
 type RecordingKey = (ScopeKey, String);
+type RecordingProviderOperationKey = (RecordingKey, u64, RecordingProviderOperation);
 
 #[derive(Debug, Clone, Copy)]
 struct MemoryQuotaUsage {
@@ -228,6 +232,8 @@ struct MemoryState {
         HashMap<UniversalConferenceParticipantKey, UniversalConferenceParticipantProfile>,
     conference_join_grants: HashMap<ConferenceJoinGrantKey, ConferenceJoinGrantRecord>,
     recordings: HashMap<RecordingKey, RecordingSession>,
+    recording_provider_operations:
+        HashMap<RecordingProviderOperationKey, RecordingProviderOperationRecord>,
 }
 
 #[derive(Default)]
@@ -8743,6 +8749,16 @@ fn recording_key(scope: &TenantScope, recording_id: &RecordingId) -> RecordingKe
     )
 }
 
+fn recording_provider_operation_key(
+    request: &RecordingProviderRequest,
+) -> RecordingProviderOperationKey {
+    (
+        recording_key(&request.scope, &request.recording_id),
+        request.lifecycle_revision,
+        request.operation,
+    )
+}
+
 fn map_recording_protocol_error(error: RecordingProtocolError) -> DurableStoreError {
     match error {
         RecordingProtocolError::InvalidPolicy
@@ -8838,6 +8854,55 @@ where
         && let Err(error) = append_event_to_memory_state(state, event)
     {
         state.recordings.insert(key.clone(), current);
+        return Err(error);
+    }
+    Ok(next)
+}
+
+fn transition_recording_with_event_and_provider_operation<F>(
+    state: &mut MemoryState,
+    key: &RecordingKey,
+    expected_revision: u64,
+    transition: F,
+    event: &EventEnvelope,
+    operation: RecordingProviderOperation,
+    available_at_unix_ms: i64,
+) -> Result<RecordingSession, DurableStoreError>
+where
+    F: FnOnce(&RecordingSession) -> Result<RecordingSession, RecordingProtocolError>,
+{
+    let current = state
+        .recordings
+        .get(key)
+        .cloned()
+        .ok_or(DurableStoreError::Conflict)?;
+    if current.revision != expected_revision {
+        return Err(DurableStoreError::Conflict);
+    }
+    let next = transition(&current).map_err(map_recording_protocol_error)?;
+    validate_recording_lifecycle_event(&current, &next, Some(event))?;
+    if next == current {
+        return Ok(current);
+    }
+
+    let record = RecordingProviderOperationRecord {
+        request: RecordingProviderRequest::for_session(&next, operation),
+        state: RecordingProviderOperationState::Pending,
+        attempts: 0,
+        available_at_unix_ms,
+    };
+    let provider_key = recording_provider_operation_key(&record.request);
+    if state.recording_provider_operations.contains_key(&provider_key) {
+        return Err(DurableStoreError::Conflict);
+    }
+
+    state.recordings.insert(key.clone(), next.clone());
+    state
+        .recording_provider_operations
+        .insert(provider_key.clone(), record);
+    if let Err(error) = append_event_to_memory_state(state, event) {
+        state.recordings.insert(key.clone(), current);
+        state.recording_provider_operations.remove(&provider_key);
         return Err(error);
     }
     Ok(next)
@@ -9023,6 +9088,28 @@ impl RecordingStore for MemoryLocalStore {
         )
     }
 
+    fn set_recording_consent_with_event_and_provider_stop(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        participant: &PrincipalRef,
+        consent_state: RecordingConsentState,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording_with_event_and_provider_operation(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| apply_recording_consent(current, participant, consent_state, now_unix_ms),
+            event,
+            RecordingProviderOperation::Stop,
+            now_unix_ms,
+        )
+    }
+
     fn start_recording_with_event(
         &self,
         scope: &TenantScope,
@@ -9038,6 +9125,26 @@ impl RecordingStore for MemoryLocalStore {
             expected_revision,
             |current| start_recording(current, now_unix_ms),
             Some(event),
+        )
+    }
+
+    fn start_recording_with_event_and_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording_with_event_and_provider_operation(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| start_recording(current, now_unix_ms),
+            event,
+            RecordingProviderOperation::Start,
+            now_unix_ms,
         )
     }
 
@@ -9059,6 +9166,26 @@ impl RecordingStore for MemoryLocalStore {
         )
     }
 
+    fn stop_recording_with_event_and_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording_with_event_and_provider_operation(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| stop_recording(current, now_unix_ms),
+            event,
+            RecordingProviderOperation::Stop,
+            now_unix_ms,
+        )
+    }
+
     fn expire_recording_with_event(
         &self,
         scope: &TenantScope,
@@ -9074,6 +9201,26 @@ impl RecordingStore for MemoryLocalStore {
             expected_revision,
             |current| expire_recording(current, now_unix_ms),
             Some(event),
+        )
+    }
+
+    fn expire_recording_with_event_and_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording_with_event_and_provider_operation(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| expire_recording(current, now_unix_ms),
+            event,
+            RecordingProviderOperation::Delete,
+            now_unix_ms,
         )
     }
 
@@ -9109,6 +9256,161 @@ impl RecordingStore for MemoryLocalStore {
             |current| delete_recording(current, now_unix_ms),
             Some(event),
         )
+    }
+    fn delete_recording_with_event_and_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        transition_recording_with_event_and_provider_operation(
+            &mut state,
+            &recording_key(scope, recording_id),
+            expected_revision,
+            |current| delete_recording(current, now_unix_ms),
+            event,
+            RecordingProviderOperation::Delete,
+            now_unix_ms,
+        )
+    }
+}
+
+impl RecordingProviderOperationStore for MemoryLocalStore {
+    fn prepare_recording_provider_operation(
+        &self,
+        record: &RecordingProviderOperationRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError> {
+        if record.request.lifecycle_revision == 0
+            || record.request.expires_at_unix_ms < 0
+            || record.available_at_unix_ms < 0
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let key = recording_provider_operation_key(&record.request);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        if let Some(existing) = state.recording_provider_operations.get(&key) {
+            return if existing == record {
+                Ok(DurableRecordStatus::Duplicate)
+            } else {
+                Err(DurableStoreError::Conflict)
+            };
+        }
+        state.recording_provider_operations.insert(key, record.clone());
+        Ok(DurableRecordStatus::Persisted)
+    }
+
+    fn pending_recording_provider_operations(
+        &self,
+        now_unix_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<RecordingProviderOperationRecord>, DurableStoreError> {
+        if limit == 0 || limit > MAX_RECORDING_PROVIDER_OPERATION_BATCH {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut rows = state
+            .recording_provider_operations
+            .values()
+            .filter(|record| {
+                record.state == RecordingProviderOperationState::Pending
+                    && record.available_at_unix_ms <= now_unix_ms
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.available_at_unix_ms
+                .cmp(&right.available_at_unix_ms)
+                .then_with(|| {
+                    left.request
+                        .recording_id
+                        .as_opaque()
+                        .as_str()
+                        .cmp(right.request.recording_id.as_opaque().as_str())
+                })
+                .then_with(|| {
+                    left.request
+                        .lifecycle_revision
+                        .cmp(&right.request.lifecycle_revision)
+                })
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
+    fn mark_recording_provider_operation_applied(
+        &self,
+        request: &RecordingProviderRequest,
+    ) -> Result<(), DurableStoreError> {
+        let key = recording_provider_operation_key(request);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let record = state
+            .recording_provider_operations
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Conflict)?;
+        if record.request != *request {
+            return Err(DurableStoreError::Conflict);
+        }
+        if record.state == RecordingProviderOperationState::Applied {
+            return Ok(());
+        }
+        if record.state != RecordingProviderOperationState::Pending {
+            return Err(DurableStoreError::Conflict);
+        }
+        record.attempts = record.attempts.saturating_add(1);
+        record.state = RecordingProviderOperationState::Applied;
+        Ok(())
+    }
+
+    fn retry_recording_provider_operation(
+        &self,
+        request: &RecordingProviderRequest,
+        next_attempt_unix_ms: i64,
+    ) -> Result<(), DurableStoreError> {
+        let key = recording_provider_operation_key(request);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let record = state
+            .recording_provider_operations
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Conflict)?;
+        if record.request != *request
+            || record.state != RecordingProviderOperationState::Pending
+            || next_attempt_unix_ms <= record.available_at_unix_ms
+        {
+            return Err(DurableStoreError::Conflict);
+        }
+        record.attempts = record
+            .attempts
+            .checked_add(1)
+            .ok_or(DurableStoreError::InvalidRecord)?;
+        record.available_at_unix_ms = next_attempt_unix_ms;
+        Ok(())
+    }
+
+    fn mark_recording_provider_operation_failed(
+        &self,
+        request: &RecordingProviderRequest,
+    ) -> Result<(), DurableStoreError> {
+        let key = recording_provider_operation_key(request);
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let record = state
+            .recording_provider_operations
+            .get_mut(&key)
+            .ok_or(DurableStoreError::Conflict)?;
+        if record.request != *request {
+            return Err(DurableStoreError::Conflict);
+        }
+        if record.state == RecordingProviderOperationState::Failed {
+            return Ok(());
+        }
+        if record.state != RecordingProviderOperationState::Pending {
+            return Err(DurableStoreError::Conflict);
+        }
+        record.attempts = record.attempts.saturating_add(1);
+        record.state = RecordingProviderOperationState::Failed;
+        Ok(())
     }
 }
 
