@@ -82,6 +82,68 @@ pub trait RecordingMediaProvider: fmt::Debug + Send + Sync {
     fn apply(&self, request: &RecordingProviderRequest) -> Result<(), RecordingProviderError>;
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingProviderOperationState {
+    Pending,
+    Applied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingProviderOperationRecord {
+    pub request: RecordingProviderRequest,
+    pub state: RecordingProviderOperationState,
+    pub attempts: u32,
+    pub available_at_unix_ms: i64,
+}
+
+pub const MAX_RECORDING_PROVIDER_OPERATION_BATCH: usize = 128;
+
+/// Durable restart-safe ledger for provider side effects authorized by canonical Recording state.
+///
+/// Implementations must keep the operation identity
+/// `(scope, recording_id, lifecycle_revision, operation)` unique. Preparing the exact same
+/// operation is idempotent; changed reuse conflicts.
+pub trait RecordingProviderOperationStore: StorageProvider {
+    /// Persists or deduplicates one pending provider operation.
+    ///
+    /// # Errors
+    /// Rejects malformed/conflicting records and explicit durable-store failures.
+    fn prepare_recording_provider_operation(
+        &self,
+        record: &RecordingProviderOperationRecord,
+    ) -> Result<DurableRecordStatus, DurableStoreError>;
+
+    /// Returns a bounded deterministic batch of due pending operations.
+    ///
+    /// # Errors
+    /// Rejects zero/oversized limits and explicit durable-store failures.
+    fn pending_recording_provider_operations(
+        &self,
+        now_unix_ms: i64,
+        limit: usize,
+    ) -> Result<Vec<RecordingProviderOperationRecord>, DurableStoreError>;
+
+    /// Marks one exact pending operation applied.
+    ///
+    /// # Errors
+    /// Rejects stale/mismatched state and explicit durable-store failures.
+    fn mark_recording_provider_operation_applied(
+        &self,
+        request: &RecordingProviderRequest,
+    ) -> Result<(), DurableStoreError>;
+
+    /// Records a retry for one exact pending operation and moves its next-attempt deadline.
+    ///
+    /// # Errors
+    /// Rejects stale/mismatched state, non-increasing deadlines and explicit store failures.
+    fn retry_recording_provider_operation(
+        &self,
+        request: &RecordingProviderRequest,
+        next_attempt_unix_ms: i64,
+    ) -> Result<(), DurableStoreError>;
+}
+
 /// Durable owner of recording policy, consent evidence and lifecycle only.
 ///
 /// This store does not own Call/Group membership and never owns recorded media bytes or MLS keys.
