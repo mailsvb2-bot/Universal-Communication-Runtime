@@ -22,13 +22,13 @@ pub enum TurnSecretReconcileError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnSecretReconcileOutcome {
-    pub desired_count: usize,
-    pub inserted_count: usize,
-    pub removed_count: usize,
-    pub retained_count: usize,
+    pub desired: usize,
+    pub inserted: usize,
+    pub removed: usize,
+    pub retained: usize,
 }
 
-/// Reconciles one coturn SQLite realm to the provider's exact current/previous secret snapshot.
+/// Reconciles one coturn `SQLite` realm to the provider's exact current/previous secret snapshot.
 ///
 /// The caller must explicitly assert exclusive ownership of the realm's `turn_secret` rows.
 /// Without that assertion UCR cannot distinguish stale UCR roots from secrets managed by another
@@ -95,7 +95,7 @@ pub fn reconcile_coturn_sqlite_secret_set(
         .map_err(|_| TurnSecretReconcileError::DatabaseFailure)?;
     let existing = load_realm_secrets(&transaction, realm)?;
 
-    let retained_count = existing
+    let retained = existing
         .iter()
         .filter(|value| {
             desired
@@ -103,7 +103,7 @@ pub fn reconcile_coturn_sqlite_secret_set(
                 .any(|candidate| candidate.as_str() == value.as_str())
         })
         .count();
-    let mut inserted_count = 0;
+    let mut inserted = 0;
     for value in &desired {
         let changed = transaction
             .execute(
@@ -111,16 +111,16 @@ pub fn reconcile_coturn_sqlite_secret_set(
                 params![realm, value.as_str()],
             )
             .map_err(|_| TurnSecretReconcileError::DatabaseFailure)?;
-        inserted_count += changed;
+        inserted += changed;
     }
 
-    let mut removed_count = 0;
+    let mut removed = 0;
     for value in &existing {
         if desired
             .iter()
             .all(|candidate| candidate.as_str() != value.as_str())
         {
-            removed_count += transaction
+            removed += transaction
                 .execute(
                     "DELETE FROM turn_secret WHERE realm = ?1 AND value = ?2",
                     params![realm, value.as_str()],
@@ -138,10 +138,10 @@ pub fn reconcile_coturn_sqlite_secret_set(
         .map_err(|_| TurnSecretReconcileError::DatabaseFailure)?;
 
     Ok(TurnSecretReconcileOutcome {
-        desired_count: desired.len(),
-        inserted_count,
-        removed_count,
-        retained_count,
+        desired: desired.len(),
+        inserted,
+        removed,
+        retained,
     })
 }
 
@@ -275,16 +275,16 @@ mod tests {
         let first =
             reconcile_coturn_sqlite_secret_set(&provider, &handle, &path, "turn.example", true)
                 .expect("reconcile");
-        assert_eq!(first.desired_count, 2);
-        assert_eq!(first.inserted_count, 2);
-        assert_eq!(first.removed_count, 1);
+        assert_eq!(first.desired, 2);
+        assert_eq!(first.inserted, 2);
+        assert_eq!(first.removed, 1);
 
         let second =
             reconcile_coturn_sqlite_secret_set(&provider, &handle, &path, "turn.example", true)
                 .expect("idempotent");
-        assert_eq!(second.inserted_count, 0);
-        assert_eq!(second.removed_count, 0);
-        assert_eq!(second.retained_count, 2);
+        assert_eq!(second.inserted, 0);
+        assert_eq!(second.removed, 0);
+        assert_eq!(second.retained, 2);
 
         fs::remove_file(path).expect("cleanup");
     }
