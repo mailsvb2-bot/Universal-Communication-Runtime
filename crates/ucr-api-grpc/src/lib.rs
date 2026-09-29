@@ -59,6 +59,9 @@ mod machine_api_auth;
 pub use machine_api_auth::MachineTokenVerificationKeyProvider;
 mod mutation_idempotency;
 
+mod attachment_service;
+pub use attachment_service::{GrpcAttachmentService, attachment_service_server};
+
 mod mesh_service;
 pub use mesh_service::{
     AuthenticatedMeshPeerSession, GrpcMeshService, MeshPeerSessionResolver, mesh_service_server,
