@@ -1,8 +1,9 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use ucr_core::{
     DurableRecordStatus, DurableStoreError, MAX_RECORDING_RETENTION_BATCH,
-    RecordingConsentProviderStopRequest, RecordingProviderOperation, RecordingProviderOperationRecord,
-    RecordingProviderOperationState, RecordingProviderRequest, RecordingStore,
+    RecordingConsentProviderStopRequest, RecordingProviderOperation,
+    RecordingProviderOperationRecord, RecordingProviderOperationState, RecordingProviderRequest,
+    RecordingStore,
 };
 use ucr_model::{
     CallId, EventEnvelope, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef,
