@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UCR local development</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:760px;margin:48px auto;padding:0 20px;line-height:1.5}
+code{background:#f2f2f2;padding:.15rem .35rem;border-radius:.3rem}
+a{font-weight:700}
+</style>
+</head>
+<body>
+<h1>UCR local development</h1>
+<p>The local stack is running. Test credentials are printed in the <code>ucr</code> container logs.</p>
+<ul>
+<li>gRPC API: <code>127.0.0.1:50051</code></li>
+<li>Webhook receiver example: <code>http://127.0.0.1:8090/</code></li>
+<li>Test TURN: <code>turn:127.0.0.1:3478?transport=udp</code> (temporary credentials are printed in the logs)</li>
+</ul>
+<p><a href="/client.html">Open the UCR conference browser client</a></p>
+<p>The conference client intentionally requires a real signed <code>#ucr_join</code> grant. This development page does not synthesize or weaken join authority.</p>
+</body>
+</html>
