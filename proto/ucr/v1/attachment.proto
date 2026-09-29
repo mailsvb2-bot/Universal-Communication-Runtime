@@ -4,6 +4,8 @@ package ucr.v1;
 
 import "ucr/v1/common.proto";
 import "ucr/v1/identity.proto";
+import "ucr/v1/errors.proto";
+import "ucr/v1/runtime.proto";
 
 // Immutable content identity for one attachment payload.
 // v1 is exactly SHA-256 over the complete attachment byte sequence.
@@ -32,4 +34,75 @@ message AttachmentChunk {
   uint64 offset_bytes = 3;
   bytes payload = 4;
   bytes sha256 = 5;
+}
+
+
+message AttachmentRegisterRequest {
+  AttachmentDescriptor attachment = 1;
+}
+
+message AttachmentRegisterResponse {
+  oneof result {
+    AttachmentDescriptor attachment = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message AttachmentGetRequest {
+  TenantScope scope = 1;
+  OpaqueId attachment_id = 2;
+}
+
+message AttachmentGetResponse {
+  oneof result {
+    AttachmentDescriptor attachment = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message AttachmentPutChunkRequest {
+  TenantScope scope = 1;
+  AttachmentChunk chunk = 2;
+}
+
+message AttachmentPutChunkResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message AttachmentGetChunkRequest {
+  TenantScope scope = 1;
+  OpaqueId attachment_id = 2;
+  uint32 index = 3;
+}
+
+message AttachmentGetChunkResponse {
+  oneof result {
+    AttachmentChunk chunk = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message AttachmentVerifyRequest {
+  TenantScope scope = 1;
+  OpaqueId attachment_id = 2;
+}
+
+message AttachmentVerifyResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+// Stable resumable attachment ingress. Transport scheduling/cancellation and
+// Message-to-Attachment binding remain separate canonical layers.
+service AttachmentService {
+  rpc RegisterAttachment(AttachmentRegisterRequest) returns (AttachmentRegisterResponse);
+  rpc GetAttachment(AttachmentGetRequest) returns (AttachmentGetResponse);
+  rpc PutChunk(AttachmentPutChunkRequest) returns (AttachmentPutChunkResponse);
+  rpc GetChunk(AttachmentGetChunkRequest) returns (AttachmentGetChunkResponse);
+  rpc VerifyAttachment(AttachmentVerifyRequest) returns (AttachmentVerifyResponse);
 }
