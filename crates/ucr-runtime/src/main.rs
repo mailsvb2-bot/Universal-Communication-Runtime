@@ -259,13 +259,15 @@ impl SecretProvider for ReloadingFileSecretProvider {
     }
 }
 
+type ConfiguredSecretProvider = (Arc<dyn SecretProvider>, SecretHandle);
+
 fn secret_provider_from_env(
     provider_variable: &str,
     manifest_variable: &str,
     secret_id_variable: &str,
     default_secret_id: &str,
     purpose: SecretPurpose,
-) -> Result<Option<(Arc<dyn SecretProvider>, SecretHandle)>, String> {
+) -> Result<Option<ConfiguredSecretProvider>, String> {
     let Some(provider_kind) = std::env::var(provider_variable).ok() else {
         return Ok(None);
     };
