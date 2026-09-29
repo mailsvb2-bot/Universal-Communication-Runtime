@@ -127,25 +127,20 @@ async fn run() -> Result<(), String> {
 }
 
 #[derive(Debug, Clone)]
-struct ReloadingMachineTokenSecretProvider {
+struct ReloadingFileSecretProvider {
     handle: SecretHandle,
     manifest_file: PathBuf,
 }
 
-impl ReloadingMachineTokenSecretProvider {
+impl ReloadingFileSecretProvider {
     fn new(handle: SecretHandle, manifest_file: PathBuf) -> Result<Self, String> {
-        if handle.purpose != SecretPurpose::MachineTokenSigning {
-            return Err(
-                "machine token provider handle must use MachineTokenSigning purpose".to_owned(),
-            );
-        }
         let provider = Self {
             handle,
             manifest_file,
         };
         provider
             .active_secret_set(&provider.handle)
-            .map_err(|error| format!("load machine token provider manifest: {error:?}"))?;
+            .map_err(|error| format!("load secret provider manifest: {error:?}"))?;
         Ok(provider)
     }
 
@@ -181,10 +176,16 @@ impl ReloadingMachineTokenSecretProvider {
             };
             let value = value.trim();
             match name.trim() {
-                "current_key_id" if current_key_id.is_none() => current_key_id = Some(value),
-                "current_seed_hex" if current_seed_hex.is_none() => current_seed_hex = Some(value),
-                "previous_key_id" if previous_key_id.is_none() => previous_key_id = Some(value),
-                "previous_seed_hex" if previous_seed_hex.is_none() => {
+                "current_key_id" | "current_version_id" if current_key_id.is_none() => {
+                    current_key_id = Some(value);
+                }
+                "current_seed_hex" | "current_secret_hex" if current_seed_hex.is_none() => {
+                    current_seed_hex = Some(value);
+                }
+                "previous_key_id" | "previous_version_id" if previous_key_id.is_none() => {
+                    previous_key_id = Some(value);
+                }
+                "previous_seed_hex" | "previous_secret_hex" if previous_seed_hex.is_none() => {
                     previous_seed_hex = Some(value);
                 }
                 _ => return Err(SecretProviderError::InvalidMaterial),
@@ -216,7 +217,7 @@ impl ReloadingMachineTokenSecretProvider {
 
     fn decode_version(key_id: &str, seed_hex: &str) -> Result<SecretVersion, SecretProviderError> {
         let seed = Zeroizing::new(
-            decode_key_hex_named(seed_hex, "machine token provider seed")
+            decode_key_hex_named(seed_hex, "secret provider material")
                 .map_err(|_| SecretProviderError::InvalidMaterial)?,
         );
         Ok(SecretVersion {
@@ -226,9 +227,9 @@ impl ReloadingMachineTokenSecretProvider {
     }
 }
 
-impl SecretProvider for ReloadingMachineTokenSecretProvider {
+impl SecretProvider for ReloadingFileSecretProvider {
     fn provider_id(&self) -> &'static str {
-        "machine-token-file-reload"
+        "file-reload"
     }
 
     fn health(&self) -> SecretProviderHealth {
@@ -258,6 +259,38 @@ impl SecretProvider for ReloadingMachineTokenSecretProvider {
     }
 }
 
+type ConfiguredSecretProvider = (Arc<dyn SecretProvider>, SecretHandle);
+
+fn secret_provider_from_env(
+    provider_variable: &str,
+    manifest_variable: &str,
+    secret_id_variable: &str,
+    default_secret_id: &str,
+    purpose: SecretPurpose,
+) -> Result<Option<ConfiguredSecretProvider>, String> {
+    let Some(provider_kind) = std::env::var(provider_variable).ok() else {
+        return Ok(None);
+    };
+    if provider_kind != "file-reload" {
+        return Err(format!(
+            "{provider_variable} must be file-reload when configured"
+        ));
+    }
+    let manifest_file = PathBuf::from(required_env(manifest_variable)?);
+    let secret_id =
+        std::env::var(secret_id_variable).unwrap_or_else(|_| default_secret_id.to_owned());
+    let handle = SecretHandle {
+        secret_id: OpaqueId::new(&secret_id)
+            .map_err(|_| format!("{secret_id_variable} is invalid"))?,
+        purpose,
+    };
+    let provider: Arc<dyn SecretProvider> = Arc::new(ReloadingFileSecretProvider::new(
+        handle.clone(),
+        manifest_file,
+    )?);
+    Ok(Some((provider, handle)))
+}
+
 async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String> {
     let bind: SocketAddr = bind
         .parse()
@@ -276,23 +309,13 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
         .transpose()?
         .unwrap_or(900);
 
-    let config = if std::env::var("UCR_MACHINE_TOKEN_SECRET_PROVIDER")
-        .ok()
-        .as_deref()
-        == Some("file-reload")
-    {
-        let manifest_file = PathBuf::from(required_env("UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE")?);
-        let secret_id = std::env::var("UCR_MACHINE_TOKEN_SIGNING_SECRET_ID")
-            .unwrap_or_else(|_| "machine-token-signing".to_owned());
-        let handle = SecretHandle {
-            secret_id: OpaqueId::new(&secret_id)
-                .map_err(|_| "UCR_MACHINE_TOKEN_SIGNING_SECRET_ID is invalid".to_owned())?,
-            purpose: SecretPurpose::MachineTokenSigning,
-        };
-        let provider = Arc::new(ReloadingMachineTokenSecretProvider::new(
-            handle.clone(),
-            manifest_file,
-        )?);
+    let config = if let Some((provider, handle)) = secret_provider_from_env(
+        "UCR_MACHINE_TOKEN_SECRET_PROVIDER",
+        "UCR_MACHINE_TOKEN_SIGNING_SECRET_FILE",
+        "UCR_MACHINE_TOKEN_SIGNING_SECRET_ID",
+        "machine-token-signing",
+        SecretPurpose::MachineTokenSigning,
+    )? {
         MachineAuthRuntimeConfig::with_secret_provider(
             issuer,
             audience,
@@ -472,12 +495,21 @@ async fn serve_realtime_command(
         .map_err(|error| format!("invalid --bind address: {error}"))?;
     let join_base_url =
         join_base_url.ok_or_else(|| "--join-base-url is required for serve-realtime".to_owned())?;
-    let key_hex = std::env::var("UCR_REALTIME_JOIN_KEY_HEX")
-        .map_err(|_| "UCR_REALTIME_JOIN_KEY_HEX is required for serve-realtime".to_owned())?;
-    let turn_rest_secret = std::env::var("UCR_WEBRTC_TURN_SECRET_HEX")
-        .ok()
-        .map(|value| decode_key_hex_named(&value, "UCR_WEBRTC_TURN_SECRET_HEX"))
-        .transpose()?;
+    let mut config = if let Some((provider, handle)) = secret_provider_from_env(
+        "UCR_REALTIME_JOIN_SECRET_PROVIDER",
+        "UCR_REALTIME_JOIN_SECRET_FILE",
+        "UCR_REALTIME_JOIN_SECRET_ID",
+        "realtime-join-signing",
+        SecretPurpose::JoinSigning,
+    )? {
+        RealtimeRuntimeConfig::with_join_secret_provider(join_base_url, provider, handle)?
+    } else {
+        let key_hex =
+            Zeroizing::new(std::env::var("UCR_REALTIME_JOIN_KEY_HEX").map_err(|_| {
+                "UCR_REALTIME_JOIN_KEY_HEX is required for serve-realtime".to_owned()
+            })?);
+        RealtimeRuntimeConfig::new(join_base_url, decode_key_hex(&key_hex)?)?
+    };
     let turn_ttl_seconds = std::env::var("UCR_WEBRTC_TURN_TTL_SECONDS")
         .ok()
         .map(|value| {
@@ -487,17 +519,40 @@ async fn serve_realtime_command(
         })
         .transpose()?
         .unwrap_or(300);
-    let config = RealtimeRuntimeConfig::new(join_base_url, decode_key_hex(&key_hex)?)?
-        .with_webrtc_ice(
-            csv_env("UCR_WEBRTC_STUN_URLS"),
-            csv_env("UCR_WEBRTC_TURN_URLS"),
+    let stun_urls = csv_env("UCR_WEBRTC_STUN_URLS");
+    let turn_urls = csv_env("UCR_WEBRTC_TURN_URLS");
+    let relay_only = bool_env("UCR_WEBRTC_RELAY_ONLY")?.unwrap_or(false);
+    config = if let Some((provider, handle)) = secret_provider_from_env(
+        "UCR_WEBRTC_TURN_SECRET_PROVIDER",
+        "UCR_WEBRTC_TURN_SECRET_FILE",
+        "UCR_WEBRTC_TURN_SECRET_ID",
+        "webrtc-turn-root",
+        SecretPurpose::TurnCredentials,
+    )? {
+        config.with_webrtc_ice_secret_provider(
+            stun_urls,
+            turn_urls,
+            provider,
+            handle,
+            turn_ttl_seconds,
+            relay_only,
+        )?
+    } else {
+        let turn_rest_secret = std::env::var("UCR_WEBRTC_TURN_SECRET_HEX")
+            .ok()
+            .map(|value| decode_key_hex_named(&value, "UCR_WEBRTC_TURN_SECRET_HEX"))
+            .transpose()?;
+        config.with_webrtc_ice(
+            stun_urls,
+            turn_urls,
             turn_rest_secret,
             turn_ttl_seconds,
-            bool_env("UCR_WEBRTC_RELAY_ONLY")?.unwrap_or(false),
+            relay_only,
         )?
-        .with_browser_realtime_gateway(
-            bool_env("UCR_BROWSER_REALTIME_GATEWAY_ENABLED")?.unwrap_or(false),
-        );
+    };
+    config = config.with_browser_realtime_gateway(
+        bool_env("UCR_BROWSER_REALTIME_GATEWAY_ENABLED")?.unwrap_or(false),
+    );
     let runtime = Arc::new(ProductionRuntime::open_existing(database)?);
     match machine_bearer_config_from_env()? {
         Some(machine_bearer) => {
@@ -519,16 +574,33 @@ fn dispatch_webhook_once(
         tenant_id.ok_or_else(|| "--tenant-id is required for dispatch-webhook-once".to_owned())?;
     let subscription_id = subscription_id
         .ok_or_else(|| "--subscription-id is required for dispatch-webhook-once".to_owned())?;
-    let key_hex = std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
-        "UCR_WEBHOOK_SIGNING_KEY_HEX is required for dispatch-webhook-once".to_owned()
-    })?;
     let runtime = ProductionRuntime::open_existing(database)?;
-    let outcome = runtime.dispatch_webhook_once(
-        &tenant_id,
-        namespace_id,
-        &subscription_id,
-        decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
-    )?;
+    let outcome = if let Some((provider, handle)) = secret_provider_from_env(
+        "UCR_WEBHOOK_SECRET_PROVIDER",
+        "UCR_WEBHOOK_SIGNING_SECRET_FILE",
+        "UCR_WEBHOOK_SIGNING_SECRET_ID",
+        "webhook-signing",
+        SecretPurpose::WebhookSigning,
+    )? {
+        runtime.dispatch_webhook_once_with_secret_provider(
+            &tenant_id,
+            namespace_id,
+            &subscription_id,
+            provider,
+            handle,
+        )?
+    } else {
+        let key_hex =
+            Zeroizing::new(std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
+                "UCR_WEBHOOK_SIGNING_KEY_HEX is required for dispatch-webhook-once".to_owned()
+            })?);
+        runtime.dispatch_webhook_once(
+            &tenant_id,
+            namespace_id,
+            &subscription_id,
+            decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
+        )?
+    };
     match outcome {
         WebhookDispatchOutcome::Idle => println!("UCR_WEBHOOK_DISPATCH outcome=idle"),
         WebhookDispatchOutcome::RetryAfter { retry_after_ms } => {
@@ -548,8 +620,6 @@ fn dispatch_webhook_once(
 }
 
 async fn run_webhook_worker(database: &PathBuf) -> Result<(), String> {
-    let key_hex = std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX")
-        .map_err(|_| "UCR_WEBHOOK_SIGNING_KEY_HEX is required for run-webhook-worker".to_owned())?;
     let poll_interval = std::env::var("UCR_WEBHOOK_POLL_INTERVAL_MS")
         .ok()
         .map(|value| {
@@ -560,12 +630,29 @@ async fn run_webhook_worker(database: &PathBuf) -> Result<(), String> {
         })
         .transpose()?
         .unwrap_or(DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL);
-    Arc::new(ProductionRuntime::open_existing(database)?)
-        .run_webhook_worker(
-            decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
-            poll_interval,
-        )
-        .await
+    let runtime = Arc::new(ProductionRuntime::open_existing(database)?);
+    if let Some((provider, handle)) = secret_provider_from_env(
+        "UCR_WEBHOOK_SECRET_PROVIDER",
+        "UCR_WEBHOOK_SIGNING_SECRET_FILE",
+        "UCR_WEBHOOK_SIGNING_SECRET_ID",
+        "webhook-signing",
+        SecretPurpose::WebhookSigning,
+    )? {
+        runtime
+            .run_webhook_worker_with_secret_provider(provider, handle, poll_interval)
+            .await
+    } else {
+        let key_hex =
+            Zeroizing::new(std::env::var("UCR_WEBHOOK_SIGNING_KEY_HEX").map_err(|_| {
+                "UCR_WEBHOOK_SIGNING_KEY_HEX is required for run-webhook-worker".to_owned()
+            })?);
+        runtime
+            .run_webhook_worker(
+                decode_key_hex_named(&key_hex, "UCR_WEBHOOK_SIGNING_KEY_HEX")?,
+                poll_interval,
+            )
+            .await
+    }
 }
 
 async fn run_recording_retention_worker(database: &PathBuf) -> Result<(), String> {

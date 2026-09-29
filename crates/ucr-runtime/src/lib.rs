@@ -378,8 +378,7 @@ impl MachineBearerRuntimeConfig {
 
 #[derive(Clone)]
 pub struct RealtimeRuntimeConfig {
-    join_base_url: String,
-    join_token_key: JoinTokenKey,
+    join_issuer: Arc<JoinTokenIssuer>,
     webrtc_config: Arc<WebRtcSessionConfigFactory>,
     browser_realtime_gateway: bool,
 }
@@ -388,8 +387,7 @@ impl core::fmt::Debug for RealtimeRuntimeConfig {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("RealtimeRuntimeConfig")
-            .field("join_base_url", &self.join_base_url)
-            .field("join_token_key", &"<redacted>")
+            .field("join_issuer", &"<redacted-provider-aware>")
             .field("webrtc_config", &self.webrtc_config)
             .field("browser_realtime_gateway", &self.browser_realtime_gateway)
             .finish()
@@ -403,13 +401,29 @@ impl RealtimeRuntimeConfig {
     /// # Errors
     /// Rejects an invalid public join URL.
     pub fn new(join_base_url: impl Into<String>, join_token_key: [u8; 32]) -> Result<Self, String> {
-        let join_base_url = join_base_url.into();
         let join_token_key = JoinTokenKey::from_bytes(join_token_key);
-        JoinTokenIssuer::new(join_token_key.clone(), join_base_url.clone())
+        let join_issuer = JoinTokenIssuer::new(join_token_key, join_base_url)
             .map_err(|error| format!("invalid realtime join configuration: {error:?}"))?;
         Ok(Self {
-            join_base_url,
-            join_token_key,
+            join_issuer: Arc::new(join_issuer),
+            webrtc_config: Arc::new(WebRtcSessionConfigFactory::default()),
+            browser_realtime_gateway: false,
+        })
+    }
+
+    /// Builds realtime configuration using the shared rotation-safe join-signing provider.
+    ///
+    /// # Errors
+    /// Rejects an invalid join URL, wrong-purpose handle, unavailable provider, or malformed key.
+    pub fn with_join_secret_provider(
+        join_base_url: impl Into<String>,
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+    ) -> Result<Self, String> {
+        let join_issuer = JoinTokenIssuer::with_secret_provider(provider, handle, join_base_url)
+            .map_err(|error| format!("invalid realtime join provider configuration: {error:?}"))?;
+        Ok(Self {
+            join_issuer: Arc::new(join_issuer),
             webrtc_config: Arc::new(WebRtcSessionConfigFactory::default()),
             browser_realtime_gateway: false,
         })
@@ -437,7 +451,7 @@ impl RealtimeRuntimeConfig {
     /// # Errors
     /// Rejects invalid ICE URLs, TURN without a secret, invalid TTL, or excessive server counts.
     pub fn with_webrtc_ice(
-        mut self,
+        self,
         stun_urls: Vec<String>,
         turn_urls: Vec<String>,
         turn_rest_secret: Option<[u8; 32]>,
@@ -447,6 +461,47 @@ impl RealtimeRuntimeConfig {
         let turn_issuer = turn_rest_secret
             .map(TurnRestSecret::from_bytes)
             .map(TurnRestCredentialIssuer::new);
+        self.with_webrtc_ice_issuer(
+            stun_urls,
+            turn_urls,
+            turn_issuer,
+            turn_ttl_seconds,
+            relay_only,
+        )
+    }
+
+    /// Adds deployment STUN/TURN configuration using the shared rotation-safe TURN root provider.
+    ///
+    /// # Errors
+    /// Rejects invalid ICE settings, wrong-purpose/unavailable provider state, or malformed material.
+    pub fn with_webrtc_ice_secret_provider(
+        self,
+        stun_urls: Vec<String>,
+        turn_urls: Vec<String>,
+        provider: Arc<dyn SecretProvider>,
+        handle: SecretHandle,
+        turn_ttl_seconds: u32,
+        relay_only: bool,
+    ) -> Result<Self, String> {
+        let turn_issuer = TurnRestCredentialIssuer::with_secret_provider(provider, handle)
+            .map_err(|error| format!("invalid TURN secret provider configuration: {error:?}"))?;
+        self.with_webrtc_ice_issuer(
+            stun_urls,
+            turn_urls,
+            Some(turn_issuer),
+            turn_ttl_seconds,
+            relay_only,
+        )
+    }
+
+    fn with_webrtc_ice_issuer(
+        mut self,
+        stun_urls: Vec<String>,
+        turn_urls: Vec<String>,
+        turn_issuer: Option<TurnRestCredentialIssuer>,
+        turn_ttl_seconds: u32,
+        relay_only: bool,
+    ) -> Result<Self, String> {
         let ice_transport_policy = if relay_only {
             IceTransportPolicy::RelayOnly
         } else {
@@ -1648,15 +1703,10 @@ fn realtime_dependencies(
     config: RealtimeRuntimeConfig,
 ) -> Result<RealtimeRuntimeDependencies, String> {
     let RealtimeRuntimeConfig {
-        join_base_url,
-        join_token_key,
+        join_issuer,
         webrtc_config,
         browser_realtime_gateway: _,
     } = config;
-    let join_issuer = Arc::new(
-        JoinTokenIssuer::new(join_token_key, join_base_url)
-            .map_err(|error| format!("configure realtime join issuer: {error:?}"))?,
-    );
     let (e2ee_ingress_tx, e2ee_ingress) =
         tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
     let live_provider = Arc::new(
