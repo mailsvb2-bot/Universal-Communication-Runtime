@@ -662,15 +662,15 @@ where
                     now_unix_ms,
                     &event,
                 ),
-            RecordingLifecycleMutation::Stop => self
-                .store
-                .stop_recording_with_event_and_provider_operation(
+            RecordingLifecycleMutation::Stop => {
+                self.store.stop_recording_with_event_and_provider_operation(
                     &scope,
                     &recording_id,
                     expected_revision,
                     now_unix_ms,
                     &event,
-                ),
+                )
+            }
             RecordingLifecycleMutation::Delete => self
                 .store
                 .delete_recording_with_event_and_provider_operation(
