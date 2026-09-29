@@ -2633,9 +2633,7 @@ fn status_from_canonical(error: CanonicalError) -> Status {
 #[cfg(test)]
 mod recording_admission_tests {
     use super::*;
-    use ucr_model::{
-        NamespaceId, RecordingPolicy, RecordingSession, RecordingState, TenantId,
-    };
+    use ucr_model::{NamespaceId, RecordingPolicy, RecordingSession, RecordingState, TenantId};
     use ucr_realtime::JoinGrantUsePolicy;
     use ucr_storage_memory::MemoryLocalStore;
 
@@ -2698,7 +2696,9 @@ mod recording_admission_tests {
             expires_at_unix_ms: 60_950,
             revision: 2,
         };
-        store.persist_recording(&recording).expect("persist recording");
+        store
+            .persist_recording(&recording)
+            .expect("persist recording");
 
         assert_eq!(
             require_recording_participant_admission(&store, &claims),
