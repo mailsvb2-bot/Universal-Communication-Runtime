@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -183,10 +184,24 @@ def main() -> int:
             raise RuntimeError(f"WebDriver did not return a session id: {created}")
         reported = value.get("capabilities") or {}
         base = f"http://127.0.0.1:{webdriver_port}/session/{session_id}"
+        branding_fragment = urllib.parse.urlencode(
+            {
+                "ucr_brand": json.dumps(
+                    {
+                        "name": "UCR Browser Probe",
+                        "accentColor": "#336699",
+                        "backgroundColor": "#010203",
+                        "language": "ru",
+                        "waitingText": "Проверка комнаты ожидания",
+                    },
+                    separators=(",", ":"),
+                )
+            }
+        )
         request_json(
             "POST",
             f"{base}/url",
-            {"url": f"http://localhost:{server.server_port}/client.html"},
+            {"url": f"http://localhost:{server.server_port}/client.html#{branding_fragment}"},
         )
         time.sleep(0.5)
         probe = request_json(
@@ -197,6 +212,11 @@ def main() -> int:
 return {
   readyState: document.readyState,
   title: document.title,
+  brandingFunction: typeof applyBrandingFromFragment === "function",
+  brandName: document.getElementById("brand-name")?.textContent,
+  brandLanguage: document.documentElement.lang,
+  brandAccent: getComputedStyle(document.documentElement).getPropertyValue("--ucr-accent").trim(),
+  brandBackground: getComputedStyle(document.documentElement).getPropertyValue("--ucr-background").trim(),
   joinFunction: typeof join === "function",
   restartIceFunction: typeof restartIce === "function",
   applyMediaPolicyFunction: typeof applyMediaPolicy === "function",
@@ -230,7 +250,18 @@ return {
 
         if not isinstance(probe, dict):
             raise RuntimeError(f"browser probe returned invalid payload: {probe!r}")
+        branding_failures = []
+        if probe.get("brandName") != "UCR Browser Probe":
+            branding_failures.append("brandName")
+        if probe.get("brandLanguage") != "ru":
+            branding_failures.append("brandLanguage")
+        if probe.get("brandAccent") != "#336699":
+            branding_failures.append("brandAccent")
+        if probe.get("brandBackground") != "#010203":
+            branding_failures.append("brandBackground")
+
         required = [
+            "brandingFunction",
             "joinFunction",
             "restartIceFunction",
             "applyMediaPolicyFunction",
@@ -254,6 +285,7 @@ return {
             "remoteVideo",
         ]
         failures = [name for name in required if probe.get(name) is not True]
+        failures.extend(branding_failures)
         evidence = {
             "schema": "ucr.browser-compatibility.v1",
             "browser_requested": args.browser,
