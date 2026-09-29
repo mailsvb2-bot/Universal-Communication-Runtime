@@ -1,12 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::{
-    fs,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use ucr_api_grpc::MachineTokenVerificationKeyProvider;
 use ucr_core::WebhookDispatchOutcome;
