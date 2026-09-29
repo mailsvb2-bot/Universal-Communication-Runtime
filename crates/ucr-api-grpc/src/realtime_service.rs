@@ -2514,7 +2514,7 @@ fn map_join_token_error(error: JoinTokenError) -> CanonicalError {
     }
 }
 
-const fn require_recording_participant_admission<S>(
+fn require_recording_participant_admission<S>(
     store: &S,
     claims: &RealtimeSessionClaims,
 ) -> Result<(), CanonicalError>
