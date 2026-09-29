@@ -87,6 +87,7 @@ pub trait RecordingMediaProvider: fmt::Debug + Send + Sync {
 pub enum RecordingProviderOperationState {
     Pending,
     Applied,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +142,16 @@ pub trait RecordingProviderOperationStore: StorageProvider {
         &self,
         request: &RecordingProviderRequest,
         next_attempt_unix_ms: i64,
+    ) -> Result<(), DurableStoreError>;
+
+
+    /// Marks one exact pending operation terminally failed.
+    ///
+    /// # Errors
+    /// Rejects stale/mismatched state and explicit durable-store failures.
+    fn mark_recording_provider_operation_failed(
+        &self,
+        request: &RecordingProviderRequest,
     ) -> Result<(), DurableStoreError>;
 }
 
