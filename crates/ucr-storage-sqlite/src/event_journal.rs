@@ -1,5 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use ucr_core::{CommandOutcomeStore, DurableStoreError, EventAppendStatus, EventJournalStore};
+use ucr_core::{
+    CommandOutcomeStore, DurableStoreError, EventAppendStatus, EventJournalStore,
+    MAX_ATOMIC_EVENT_BATCH,
+};
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CommandId, CorrelationContext, DeviceId, DeviceRef,
     EventEnvelope, EventId, IdentityId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind,
@@ -439,6 +442,27 @@ impl EventJournalStore for SqliteLocalStore {
             .commit()
             .map_err(|error| map_sqlite_error(&error))?;
         Ok(status)
+    }
+
+    fn append_events_atomically(
+        &self,
+        events: &[EventEnvelope],
+    ) -> Result<Vec<EventAppendStatus>, DurableStoreError> {
+        if events.is_empty() || events.len() > MAX_ATOMIC_EVENT_BATCH {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let statuses = events
+            .iter()
+            .map(|event| append_event_in_transaction(&transaction, event))
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(statuses)
     }
 
     fn event(
