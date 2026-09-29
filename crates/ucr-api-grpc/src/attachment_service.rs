@@ -118,11 +118,7 @@ pub fn attachment_service_server<C, A, S>(
 where
     C: ServiceQuotaClock + 'static,
     A: AuthorizationEvaluator + 'static,
-    S: ServiceCredentialStore
-        + ServiceQuotaStore
-        + ServiceAuditStore
-        + AttachmentStore
-        + 'static,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + AttachmentStore + 'static,
 {
     pb::attachment_service_server::AttachmentServiceServer::new(service)
         .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
@@ -134,11 +130,7 @@ impl<C, A, S> pb::attachment_service_server::AttachmentService for GrpcAttachmen
 where
     C: ServiceQuotaClock + 'static,
     A: AuthorizationEvaluator + 'static,
-    S: ServiceCredentialStore
-        + ServiceQuotaStore
-        + ServiceAuditStore
-        + AttachmentStore
-        + 'static,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore + AttachmentStore + 'static,
 {
     async fn register_attachment(
         &self,
@@ -152,7 +144,11 @@ where
             .and_then(decode_attachment_descriptor);
         let result = match (authentication, decoded) {
             (Ok(authentication), Ok(attachment)) => self
-                .admit(&attachment.scope, authentication, ATTACHMENT_WRITE_PERMISSION)
+                .admit(
+                    &attachment.scope,
+                    authentication,
+                    ATTACHMENT_WRITE_PERMISSION,
+                )
                 .and_then(|_| {
                     self.store
                         .persist_attachment_descriptor(&attachment)
@@ -166,11 +162,9 @@ where
         };
         Ok(Response::new(pb::AttachmentRegisterResponse {
             result: Some(match result {
-                Ok(attachment) => {
-                    pb::attachment_register_response::Result::Attachment(pb_attachment_descriptor(
-                        &attachment,
-                    ))
-                }
+                Ok(attachment) => pb::attachment_register_response::Result::Attachment(
+                    pb_attachment_descriptor(&attachment),
+                ),
                 Err(error) => pb::attachment_register_response::Result::Error(pb_error(error)),
             }),
         }))
@@ -196,11 +190,9 @@ where
         };
         Ok(Response::new(pb::AttachmentGetResponse {
             result: Some(match result {
-                Ok(attachment) => {
-                    pb::attachment_get_response::Result::Attachment(pb_attachment_descriptor(
-                        &attachment,
-                    ))
-                }
+                Ok(attachment) => pb::attachment_get_response::Result::Attachment(
+                    pb_attachment_descriptor(&attachment),
+                ),
                 Err(error) => pb::attachment_get_response::Result::Error(pb_error(error)),
             }),
         }))
@@ -216,7 +208,10 @@ where
             .scope
             .ok_or_else(invalid_argument)
             .and_then(decode_scope);
-        let chunk = body.chunk.ok_or_else(invalid_argument).and_then(decode_attachment_chunk);
+        let chunk = body
+            .chunk
+            .ok_or_else(invalid_argument)
+            .and_then(decode_attachment_chunk);
         let result = match (authentication, scope, chunk) {
             (Ok(authentication), Ok(scope), Ok(chunk)) => self
                 .admit(&scope, authentication, ATTACHMENT_WRITE_PERMISSION)
@@ -230,19 +225,15 @@ where
                     self.store
                         .persist_attachment_chunk(&scope, &chunk)
                         .map_err(map_store_error)?;
-                    Ok(acknowledgement_for(
-                        chunk.attachment_id.as_opaque().clone(),
-                    ))
+                    Ok(acknowledgement_for(chunk.attachment_id.as_opaque().clone()))
                 }),
             (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::AttachmentPutChunkResponse {
             result: Some(match result {
-                Ok(acknowledgement) => {
-                    pb::attachment_put_chunk_response::Result::Acknowledgement(
-                        pb_acknowledgement(acknowledgement),
-                    )
-                }
+                Ok(acknowledgement) => pb::attachment_put_chunk_response::Result::Acknowledgement(
+                    pb_acknowledgement(acknowledgement),
+                ),
                 Err(error) => pb::attachment_put_chunk_response::Result::Error(pb_error(error)),
             }),
         }))
@@ -295,9 +286,7 @@ where
         Ok(Response::new(pb::AttachmentVerifyResponse {
             result: Some(match result {
                 Ok(attachment_id) => pb::attachment_verify_response::Result::Acknowledgement(
-                    pb_acknowledgement(acknowledgement_for(
-                        attachment_id.as_opaque().clone(),
-                    )),
+                    pb_acknowledgement(acknowledgement_for(attachment_id.as_opaque().clone())),
                 ),
                 Err(error) => pb::attachment_verify_response::Result::Error(pb_error(error)),
             }),
