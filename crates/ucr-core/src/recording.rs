@@ -319,7 +319,6 @@ pub trait RecordingStore: StorageProvider {
     /// # Errors
     /// Fails closed when Recording state, Event and provider operation cannot be committed as one
     /// durable action.
-    #[allow(clippy::too_many_arguments)]
     fn set_recording_consent_with_event_and_provider_stop(
         &self,
         scope: &TenantScope,
