@@ -48,7 +48,7 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     assert!(runtime.contains("with_verification_provider"));
     assert!(runtime_main.contains("MachineAuthRuntimeConfig::with_secret_provider"));
     assert!(runtime_main.contains("UCR_MACHINE_TOKEN_SECRET_PROVIDER"));
-    assert!(runtime_main.contains("ReloadingMachineTokenSecretProvider"));
+    assert!(runtime_main.contains("ReloadingFileSecretProvider"));
     assert!(runtime_main.contains("ReloadingMachineTokenJwksProvider"));
     assert!(runtime_main.contains("UCR_MACHINE_TOKEN_VERIFICATION_PROVIDER"));
     assert!(runtime_main.contains("UCR_REALTIME_JOIN_SECRET_PROVIDER"));
