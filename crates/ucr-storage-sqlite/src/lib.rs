@@ -1722,9 +1722,8 @@ fn migrate_v45_to_v46(connection: &mut Connection) -> Result<(), DurableStoreErr
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| map_sqlite_error(&error))?;
     universal_conference_store::create_v46_objects(&transaction)?;
-    recording_provider_store::create_v47_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V46)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
@@ -2114,7 +2113,8 @@ mod tests {
     };
 
     use super::{
-        SQLITE_SCHEMA_V45, SQLITE_SCHEMA_VERSION, SqliteLocalStore, UCR_SQLITE_APPLICATION_ID,
+        SQLITE_SCHEMA_V45, SQLITE_SCHEMA_V46, SQLITE_SCHEMA_VERSION, SqliteLocalStore,
+        UCR_SQLITE_APPLICATION_ID,
     };
 
     static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -2802,6 +2802,49 @@ mod tests {
                 .status,
             CommandReceiptStatus::Accepted
         );
+    }
+
+    #[test]
+    fn v46_store_migrates_recording_provider_outbox_to_v47_and_reopens_cleanly() {
+        let db = TestDbPath::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create current store");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open raw v47 store");
+            connection
+                .execute_batch(
+                    "DROP INDEX recording_provider_operations_due;
+                     DROP TABLE recording_provider_operations;",
+                )
+                .expect("remove v47 objects");
+            connection
+                .pragma_update(None, "user_version", SQLITE_SCHEMA_V46)
+                .expect("mark exact v46");
+        }
+
+        {
+            let migrated = SqliteLocalStore::open(db.path()).expect("migrate v46 to v47");
+            assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("inspect migrated store");
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_schema
+                        WHERE type='table' AND name='recording_provider_operations'
+                    )",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("outbox table existence");
+            assert!(exists);
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen migrated v47 store");
+        assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
     }
 
     #[test]
