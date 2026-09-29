@@ -1785,7 +1785,8 @@ where
 
     fn append_attendance(&self, transition: &AttendanceTransition) -> Result<(), CanonicalError> {
         let event = attendance_event(&*self.store, transition)?;
-        let Some(integration_event) = integration_attendance_event(&*self.store, transition, &event)?
+        let Some(integration_event) =
+            integration_attendance_event(&*self.store, transition, &event)?
         else {
             return self
                 .store
@@ -2360,10 +2361,7 @@ where
         .map_err(map_store_error)?
         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
     let Some(group) = store
-        .group_for_conversation(
-            &transition.claims.scope,
-            &call.conversation.conversation_id,
-        )
+        .group_for_conversation(&transition.claims.scope, &call.conversation.conversation_id)
         .map_err(map_store_error)?
     else {
         return Ok(None);
