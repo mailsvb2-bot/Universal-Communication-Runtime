@@ -219,7 +219,7 @@ coturn's `turn_secret` rows for exactly one realm to the provider snapshot
 
 Safety invariants:
 
-- the coturn database is opened read-write without CREATE; a wrong or missing database fails closed;
+- the coturn database path must be a regular non-symlink file and is opened read-write without CREATE; a wrong, redirected, or missing database fails closed;
 - the canonical `turn_secret(realm,value)` schema is verified before mutation;
 - an IMMEDIATE SQLite transaction serializes concurrent reconciliation writers;
 - UCR inserts desired roots, removes stale roots in the same realm, verifies the exact resulting
