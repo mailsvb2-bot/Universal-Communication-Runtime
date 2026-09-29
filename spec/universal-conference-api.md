@@ -142,6 +142,24 @@ calls keep their existing behavior.
 
 Attendance is a read-only projection over the canonical Event journal. The projection does not create a second attendance database or expose private Event journal positions. EventJournal filters by the exact canonical participant principal before applying the bounded projection, so unrelated conference/participant history cannot exhaust an attendance read. If the participant's own bounded projection cannot prove that it has the complete relevant history, it fails closed with resource exhaustion instead of returning partial totals as complete data.
 
+Realtime attendance keeps the participant-owned canonical Events
+`ucr.conference.attendance.{joined|left|reconnected|media_ready}.v1` unchanged. For a Call that
+resolves to a Universal Conference, the realtime boundary additionally emits one
+`ucr.conference.attendance.integration.v1` projection carrying
+`UniversalConferenceAttendanceEvent`. That projection contains only the integration-facing
+Conference ID, Integration ID, external conference/user references, public session ID, transition
+kind/time and session sequence; internal Principal, Device and Call identifiers are omitted.
+
+The integration projection is attributed to `System on_behalf_of=integration_id`. It is therefore
+visible to the owning Service Account's existing durable Event/webhook subscription without
+weakening EventService owner isolation or pretending that the Service Account performed the user's
+join. The participant Event and integration projection are appended atomically to the one Event
+journal. A storage conflict or failure commits neither fresh Event. Exact retries deduplicate both.
+Non-Universal Calls continue to emit only the participant Event.
+
+`GetParticipantAttendance` continues to consume only the participant-owned versioned attendance
+Event types, so the integration webhook projection cannot double-count attendance.
+
 ## Idempotency
 
 All create/mutate operations carry an explicit idempotency key where appropriate. Exact retries must deduplicate durably; changed requests under the same idempotency identity must conflict.
