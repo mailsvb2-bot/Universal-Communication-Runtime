@@ -68,14 +68,17 @@ pub fn reconcile_coturn_sqlite_secret_set(
     let mut desired = Vec::with_capacity(2);
     desired.push(current);
     if let Some(previous) = previous {
-        if desired.iter().any(|value| value.as_str() == previous.as_str()) {
+        if desired
+            .iter()
+            .any(|value| value.as_str() == previous.as_str())
+        {
             return Err(TurnSecretReconcileError::InvalidSecret);
         }
         desired.push(previous);
     }
 
-    let metadata =
-        fs::symlink_metadata(database).map_err(|_| TurnSecretReconcileError::DatabaseUnavailable)?;
+    let metadata = fs::symlink_metadata(database)
+        .map_err(|_| TurnSecretReconcileError::DatabaseUnavailable)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(TurnSecretReconcileError::DatabaseUnavailable);
     }
@@ -94,7 +97,11 @@ pub fn reconcile_coturn_sqlite_secret_set(
 
     let retained_count = existing
         .iter()
-        .filter(|value| desired.iter().any(|candidate| candidate.as_str() == value.as_str()))
+        .filter(|value| {
+            desired
+                .iter()
+                .any(|candidate| candidate.as_str() == value.as_str())
+        })
         .count();
     let mut inserted_count = 0;
     for value in &desired {
@@ -139,10 +146,7 @@ pub fn reconcile_coturn_sqlite_secret_set(
 }
 
 fn validate_realm(realm: &str) -> Result<(), TurnSecretReconcileError> {
-    if realm.is_empty()
-        || realm.len() > 127
-        || realm.chars().any(char::is_control)
-    {
+    if realm.is_empty() || realm.len() > 127 || realm.chars().any(char::is_control) {
         return Err(TurnSecretReconcileError::InvalidRealm);
     }
     Ok(())
@@ -185,9 +189,11 @@ fn load_realm_secrets(
 
 fn same_secret_set(left: &[Zeroizing<String>], right: &[Zeroizing<String>]) -> bool {
     left.len() == right.len()
-        && left
-            .iter()
-            .all(|value| right.iter().any(|candidate| candidate.as_str() == value.as_str()))
+        && left.iter().all(|value| {
+            right
+                .iter()
+                .any(|candidate| candidate.as_str() == value.as_str())
+        })
 }
 
 #[cfg(test)]
@@ -195,9 +201,7 @@ mod tests {
     use super::*;
     use std::{fs, path::PathBuf};
     use ucr_model::OpaqueId;
-    use ucr_secrets::{
-        InMemorySecretProvider, SecretMaterial, SecretProvider, SecretVersion,
-    };
+    use ucr_secrets::{InMemorySecretProvider, SecretMaterial, SecretProvider, SecretVersion};
 
     fn temp_db(name: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -268,26 +272,16 @@ mod tests {
             b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             Some(b"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
         );
-        let first = reconcile_coturn_sqlite_secret_set(
-            &provider,
-            &handle,
-            &path,
-            "turn.example",
-            true,
-        )
-        .expect("reconcile");
+        let first =
+            reconcile_coturn_sqlite_secret_set(&provider, &handle, &path, "turn.example", true)
+                .expect("reconcile");
         assert_eq!(first.desired_count, 2);
         assert_eq!(first.inserted_count, 2);
         assert_eq!(first.removed_count, 1);
 
-        let second = reconcile_coturn_sqlite_secret_set(
-            &provider,
-            &handle,
-            &path,
-            "turn.example",
-            true,
-        )
-        .expect("idempotent");
+        let second =
+            reconcile_coturn_sqlite_secret_set(&provider, &handle, &path, "turn.example", true)
+                .expect("idempotent");
         assert_eq!(second.inserted_count, 0);
         assert_eq!(second.removed_count, 0);
         assert_eq!(second.retained_count, 2);
@@ -308,8 +302,7 @@ mod tests {
             .expect("other");
         drop(connection);
 
-        let (provider, handle) =
-            provider_with(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", None);
+        let (provider, handle) = provider_with(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", None);
         reconcile_coturn_sqlite_secret_set(
             &provider,
             &handle,
@@ -341,16 +334,9 @@ mod tests {
         let link = target.with_extension("link");
         let _ = fs::remove_file(&link);
         symlink(&target, &link).expect("symlink");
-        let (provider, handle) =
-            provider_with(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", None);
+        let (provider, handle) = provider_with(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", None);
         assert_eq!(
-            reconcile_coturn_sqlite_secret_set(
-                &provider,
-                &handle,
-                &link,
-                "turn.example",
-                true,
-            ),
+            reconcile_coturn_sqlite_secret_set(&provider, &handle, &link, "turn.example", true,),
             Err(TurnSecretReconcileError::DatabaseUnavailable)
         );
         fs::remove_file(link).expect("remove link");
@@ -361,16 +347,9 @@ mod tests {
     fn reconciliation_requires_explicit_exclusive_ownership() {
         let path = temp_db("ownership");
         initialize_db(&path);
-        let (provider, handle) =
-            provider_with(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", None);
+        let (provider, handle) = provider_with(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", None);
         assert_eq!(
-            reconcile_coturn_sqlite_secret_set(
-                &provider,
-                &handle,
-                &path,
-                "turn.example",
-                false,
-            ),
+            reconcile_coturn_sqlite_secret_set(&provider, &handle, &path, "turn.example", false,),
             Err(TurnSecretReconcileError::ExclusiveOwnershipRequired)
         );
         fs::remove_file(path).expect("cleanup");
@@ -380,8 +359,7 @@ mod tests {
     fn reconciliation_fails_closed_on_missing_schema_or_unsafe_material() {
         let missing_schema = temp_db("missing-schema");
         Connection::open(&missing_schema).expect("db");
-        let (provider, handle) =
-            provider_with(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", None);
+        let (provider, handle) = provider_with(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", None);
         assert_eq!(
             reconcile_coturn_sqlite_secret_set(
                 &provider,
@@ -396,16 +374,9 @@ mod tests {
 
         let path = temp_db("unsafe");
         initialize_db(&path);
-        let (provider, handle) =
-            provider_with(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA!", None);
+        let (provider, handle) = provider_with(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA!", None);
         assert_eq!(
-            reconcile_coturn_sqlite_secret_set(
-                &provider,
-                &handle,
-                &path,
-                "turn.example",
-                true,
-            ),
+            reconcile_coturn_sqlite_secret_set(&provider, &handle, &path, "turn.example", true,),
             Err(TurnSecretReconcileError::InvalidSecret)
         );
         fs::remove_file(path).expect("cleanup");
