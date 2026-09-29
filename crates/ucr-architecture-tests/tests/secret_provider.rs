@@ -30,7 +30,8 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     assert!(webrtc.contains("SecretPurpose::TurnCredentials"));
     assert!(webrtc.contains("self.current_secret()?"));
     assert!(webrtc.contains("turn_rest_secret_from_active_set"));
-    assert!(webrtc.contains("u8::is_ascii_graphic"));
+    assert!(webrtc.contains("validate_coturn_rest_secret_material"));
+    assert!(webrtc.contains("is_ascii_alphanumeric"));
     assert!(webhook.contains("HardenedWebhookSink::with_secret_provider"));
     assert!(webhook.contains("SecretPurpose::WebhookSigning"));
     assert!(webhook.contains("self.current_signing_secret()?"));
