@@ -19,8 +19,9 @@ use ucr_core::{
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, FederationPeerStore,
     IdentityDeviceLookupStore, IdentityStore, LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE,
-    LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_RECORDING_PROVIDER_OPERATION_BATCH,
-    MAX_RECORDING_RETENTION_BATCH, MessageStore, PermissionGrantStore,
+    LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_ACTIVE_RECORDINGS_PER_CALL,
+    MAX_RECORDING_PROVIDER_OPERATION_BATCH, MAX_RECORDING_RETENTION_BATCH, MessageStore,
+    PermissionGrantStore,
     PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
     RecordingConsentProviderStopRequest, RecordingProviderOperation,
     RecordingProviderOperationRecord, RecordingProviderOperationState,
@@ -38,7 +39,7 @@ use ucr_crypto::{
 use ucr_model::{
     AntiEntropyCursor, AntiEntropyPage, AttachmentChunk, AttachmentDescriptor, AttachmentId,
     AuthorizationRequest, BridgeActionId, BridgeActionRecord, BridgeActionState,
-    BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState, CallSession,
+    BridgeProviderAcceptance, BridgeRegistration, BridgeRegistrationState, CallId, CallSession,
     CommandEnvelope, CommandId, CommunicationIntent, ConferenceJoinGrantRecord,
     ConferenceJoinGrantUsePolicy, ConferenceParticipantRole, ConversationId, ConversationRecord,
     DeliveryAttempt, DeliveryEvidence, DeliveryId, DeliveryState, DeviceDescriptor, DeviceId,
@@ -8940,6 +8941,38 @@ impl RecordingStore for MemoryLocalStore {
             .recordings
             .get(&recording_key(scope, recording_id))
             .cloned())
+    }
+
+    fn active_recordings_for_call(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        limit: usize,
+    ) -> Result<Vec<RecordingSession>, DurableStoreError> {
+        if limit == 0 || limit > MAX_ACTIVE_RECORDINGS_PER_CALL {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut active = state
+            .recordings
+            .values()
+            .filter(|recording| {
+                recording.scope == *scope
+                    && recording.call_id == *call_id
+                    && recording.state == RecordingState::Active
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        active.sort_by(|left, right| {
+            left.recording_id
+                .as_opaque()
+                .as_str()
+                .cmp(right.recording_id.as_opaque().as_str())
+        });
+        if active.len() > limit {
+            return Err(DurableStoreError::Full);
+        }
+        Ok(active)
     }
 
     fn recordings_due_for_expiry(
