@@ -12,7 +12,7 @@ use super::{
 };
 
 pub(super) const V47_OBJECTS_SQL: &str = r"
-CREATE TABLE recording_provider_operations (
+CREATE TABLE IF NOT EXISTS recording_provider_operations (
     tenant_id TEXT NOT NULL,
     namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
     namespace_id TEXT NOT NULL,
@@ -35,7 +35,7 @@ CREATE TABLE recording_provider_operations (
           (namespace_present = 1 AND namespace_id <> ''))
 ) WITHOUT ROWID;
 
-CREATE INDEX recording_provider_operations_due
+CREATE INDEX IF NOT EXISTS recording_provider_operations_due
 ON recording_provider_operations(state, available_at_unix_ms);
 ";
 
