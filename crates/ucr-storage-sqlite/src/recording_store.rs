@@ -301,6 +301,35 @@ impl RecordingStore for SqliteLocalStore {
         )
     }
 
+    fn set_recording_consent_with_event_and_provider_stop(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        expected_revision: u64,
+        participant: &PrincipalRef,
+        consent_state: RecordingConsentState,
+        now_unix_ms: i64,
+        event: &EventEnvelope,
+    ) -> Result<RecordingSession, DurableStoreError> {
+        transition_recording_with_event_and_provider_operation(
+            self,
+            scope,
+            recording_id,
+            expected_revision,
+            |current| {
+                apply_recording_consent(
+                    current,
+                    participant,
+                    consent_state,
+                    now_unix_ms,
+                )
+            },
+            event,
+            RecordingProviderOperation::Stop,
+            now_unix_ms,
+        )
+    }
+
     fn start_recording_with_event(
         &self,
         scope: &TenantScope,
