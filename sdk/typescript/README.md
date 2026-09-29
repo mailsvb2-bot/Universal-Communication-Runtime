@@ -74,5 +74,13 @@ embedding the existing UCR join surface without introducing a second conference 
 Applications may wrap this primitive as a widget, component or full-page experience while keeping
 all conference semantics in the public UCR contract.
 
+The same helper accepts bounded presentation-only `branding` metadata: optional display name,
+HTTPS logo URL, `#RRGGBB` accent/background colors, `en`/`ru` language and waiting-room text.
+The helper serializes that metadata into the existing join URL fragment as `ucr_brand`, alongside
+but separate from `ucr_join`. Browser fragments are not sent in HTTP requests, and the reference
+client validates the presentation fields again before applying them. Branding never becomes
+Conference state, identity evidence, a permission, a role, a media-policy input or an authorization
+signal. A custom domain is supplied by the deployment's trusted HTTPS edge/DNS/TLS configuration;
+the SDK does not rewrite hosts or bypass the origin policy.
 
 The high-level client also covers conference resolution, participant removal/listing, raised-hand listing and capability discovery, so integrations do not need to drop down to internal identifiers or a second transport surface.
