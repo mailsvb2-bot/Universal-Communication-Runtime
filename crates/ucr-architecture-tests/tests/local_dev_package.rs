@@ -10,7 +10,7 @@ fn local_dev_package_reuses_loopback_ucr_dev_and_stays_host_local() {
     let compose = fs::read_to_string(workspace.join("compose.yaml")).expect("read compose.yaml");
     assert!(compose.contains("dockerfile: docker/dev/Dockerfile"));
     for mapping in [
-        "127.0.0.1:50051:150051/tcp",
+        "127.0.0.1:50051:50052/tcp",
         "127.0.0.1:8080:8080/tcp",
         "127.0.0.1:8090:8090/tcp",
         "127.0.0.1:3478:3478/tcp",
@@ -30,9 +30,10 @@ fn local_dev_package_reuses_loopback_ucr_dev_and_stays_host_local() {
     let entrypoint = fs::read_to_string(workspace.join("docker/dev/entrypoint.sh"))
         .expect("read dev entrypoint");
     assert!(entrypoint.contains("ucr dev --bind 127.0.0.1:50051"));
-    assert!(entrypoint.contains(
-        "socat TCP-LISTEN:150051,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:50051"
-    ));
+    assert!(
+        entrypoint
+            .contains("socat TCP-LISTEN:50052,bind=0.0.0.0,reuseaddr,fork TCP:127.0.0.1:50051")
+    );
     assert!(entrypoint.contains("python3 -m http.server 8080"));
     assert!(entrypoint.contains("webhook_receiver.py"));
     assert!(entrypoint.contains("turnserver -n"));
