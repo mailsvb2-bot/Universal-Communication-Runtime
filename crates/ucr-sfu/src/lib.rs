@@ -137,6 +137,27 @@ impl SfuClusterDirectory {
         self.nodes.values().cloned().collect()
     }
 
+    /// Removes workers whose heartbeat lease has expired and clears any sticky placements that
+    /// referenced them. This keeps the bounded ephemeral directory reusable across worker churn.
+    pub fn prune_expired_nodes(&mut self, now_unix_ms: i64) -> usize {
+        let expired = self
+            .nodes
+            .iter()
+            .filter_map(|(node_id, node)| {
+                (node.lease_expires_at_unix_ms <= now_unix_ms).then(|| node_id.clone())
+            })
+            .collect::<Vec<_>>();
+        if expired.is_empty() {
+            return 0;
+        }
+        for node_id in &expired {
+            self.nodes.remove(node_id);
+        }
+        self.placements
+            .retain(|_, assigned_node_id| !expired.iter().any(|node_id| node_id == assigned_node_id));
+        expired.len()
+    }
+
     pub fn remove_node(&mut self, node_id: &ucr_model::OpaqueId) {
         self.nodes.remove(node_id.as_str());
         self.placements
@@ -951,6 +972,39 @@ mod horizontal_placement_tests {
                 "rendezvous distribution collapsed for {node_id}: {count}"
             );
         }
+    }
+
+    #[test]
+    fn expired_worker_pruning_reclaims_capacity_and_stale_stickiness() {
+        let mut directory = SfuClusterDirectory::default();
+        directory
+            .upsert_node(node("expired", "eu", SfuNodeState::Healthy, 0, 100, 100))
+            .expect("expired node");
+        directory
+            .place_session(
+                &scope(),
+                &call("stale-call"),
+                &SfuPlacementPolicy::default(),
+                50,
+            )
+            .expect("initial placement");
+        directory
+            .upsert_node(node("live", "eu", SfuNodeState::Healthy, 0, 100, 10_000))
+            .expect("live node");
+
+        assert_eq!(directory.prune_expired_nodes(100), 1);
+        assert!(directory.node(&opaque("expired")).is_none());
+
+        let replacement = directory
+            .place_session(
+                &scope(),
+                &call("stale-call"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("fresh placement after prune");
+        assert_eq!(replacement.node_id.as_str(), "live");
+        assert!(!replacement.retained_sticky_placement);
     }
 
     #[test]
