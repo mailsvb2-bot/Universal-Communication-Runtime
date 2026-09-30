@@ -690,10 +690,7 @@ fn phase_offline_store_forward(
     let offline = message(s, "e2e-offline-message", 3, b"queued while offline");
     register_bob_device(sender, s);
     assert_eq!(
-        intermediary.device(
-            &s.scope,
-            &DeviceId::from_opaque(oid("e2e-bob-device"))
-        ),
+        intermediary.device(&s.scope, &DeviceId::from_opaque(oid("e2e-bob-device"))),
         Ok(None),
         "intermediary must not require recipient Device lifecycle metadata"
     );
@@ -705,8 +702,7 @@ fn phase_offline_store_forward(
         .persist_communication_intent(&sf_intent)
         .expect("persist sender intent");
     let job = store_forward_job(s, &offline, &sf_intent, "e2e-sender-sf");
-    let runtime =
-        StoreForwardRuntime::new_protected_origin(sender, &AllowAll, &FixedClock(4_000));
+    let runtime = StoreForwardRuntime::new_protected_origin(sender, &AllowAll, &FixedClock(4_000));
     runtime.enqueue(&job).expect("enqueue offline job");
     assert_eq!(
         runtime.process_one(
@@ -1088,7 +1084,11 @@ fn phase_restart_old_client_and_revocation(s: &Scenario, sent: &[MessageEnvelope
         5,
     );
     revoked_route.recipient_endpoint.device_id = Some(device.device_id.clone());
-    let protected_intent = intent(s, "e2e-post-revoke-protected-intent", b"new protected content");
+    let protected_intent = intent(
+        s,
+        "e2e-post-revoke-protected-intent",
+        b"new protected content",
+    );
     assert_eq!(
         TransportOrchestrator::new(&AllowAll)
             .plan_protected(
