@@ -954,18 +954,35 @@ fn phase_restart_old_client_and_revocation(s: &Scenario, sent: &[MessageEnvelope
             .expect("trust device key");
     }
     {
+        let sender = SqliteLocalStore::open(s.sender_db.path()).expect("restart sender");
+        for value in sent {
+            assert!(sender
+                .message(&s.scope, &value.message_id)
+                .expect("sender message after restart")
+                .is_some());
+        }
+        let attachment_id = AttachmentId::from_opaque(oid("e2e-attachment"));
+        assert!(sender
+            .attachment_descriptor(&s.scope, &attachment_id)
+            .expect("attachment after restart")
+            .is_some());
+
         let store = SqliteLocalStore::open(s.recipient_db.path()).expect("restart recipient");
         for value in sent {
             assert!(store
                 .message(&s.scope, &value.message_id)
-                .expect("message after restart")
+                .expect("recipient message after restart")
                 .is_some());
         }
-        let attachment_id = AttachmentId::from_opaque(oid("e2e-attachment"));
-        assert!(store
-            .attachment_descriptor(&s.scope, &attachment_id)
-            .expect("attachment after restart")
-            .is_none());
+        let delivered = DeliveryId::from_opaque(oid("e2e-recipient-delivery"));
+        assert_eq!(
+            store
+                .delivery_attempt(&s.scope, &delivered)
+                .expect("delivery after restart")
+                .expect("delivery exists")
+                .state,
+            DeliveryState::Delivered
+        );
         assert_eq!(
             negotiate_version(
                 VersionRange::new(ProtocolVersion::new(1, 0), ProtocolVersion::new(1, 2))
