@@ -11,11 +11,13 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, transport::Server};
 use ucr_api_grpc::{
     GrpcAttachmentService, GrpcCallService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
-    GrpcIntegrationService, GrpcStoreForwardService, GrpcSyncService, attach_service_credential,
-    attachment_service_server, call_service_server, device_service_server, event_service_server,
-    group_service_server, integration_service_server, pb, store_forward_service_server,
-    sync_service_server,
+    GrpcIntegrationService, GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService,
+    GrpcUniversalConferenceService, attach_service_credential, attachment_service_server,
+    call_service_server, device_service_server, event_service_server, group_service_server,
+    integration_service_server, pb, realtime_service_server, store_forward_service_server,
+    sync_service_server, universal_conference_service_server,
 };
+use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
     CanonicalTransportError, ClassifiedTransportFailure, DeviceLifecycleStore, IdentityStore,
     PermissionGrantStore, RouteCandidate, ServiceCredentialSecret, ServiceCredentialStore,
@@ -29,6 +31,7 @@ use ucr_model::{
     ServiceCredentialId, ServiceQuotaPolicy, TenantId, TenantScope,
 };
 use ucr_protocol::{RUNTIME_PERMISSION_IDS, attachment_content_id};
+use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_storage_memory::MemoryLocalStore;
 
 pub const DEFAULT_DEV_BIND: &str = "127.0.0.1:50051";
@@ -259,6 +262,9 @@ pub struct DevEnvironment {
     mock_peer_device_id: DeviceId,
     credential_id: ServiceCredentialId,
     credential_secret: ServiceCredentialSecret,
+    join_issuer: Arc<JoinTokenIssuer>,
+    conference_state: Arc<ConferenceRuntimeState>,
+    realtime_registry: Arc<RealtimeSessionRegistry>,
     debug_events: Mutex<Vec<String>>,
 }
 
@@ -307,6 +313,16 @@ impl DevEnvironment {
             })
             .map_err(|error| format!("quota seed: {error:?}"))?;
 
+        let join_issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([0x44_u8; 32]),
+                "https://join.ucr-dev.local/join",
+            )
+            .map_err(|error| format!("join issuer: {error:?}"))?,
+        );
+        let conference_state = Arc::new(ConferenceRuntimeState::new());
+        let realtime_registry = Arc::new(RealtimeSessionRegistry::default());
+
         Ok(Self {
             store,
             transport: Arc::new(TestTransport::default()),
@@ -317,6 +333,9 @@ impl DevEnvironment {
             mock_peer_device_id,
             credential_id: record.credential_id,
             credential_secret,
+            join_issuer,
+            conference_state,
+            realtime_registry,
             debug_events: Mutex::new(vec![
                 "dev.identity.ready".to_owned(),
                 "dev.node.ready".to_owned(),
