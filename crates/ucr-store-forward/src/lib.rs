@@ -3,8 +3,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ucr_core::{
-    AuthorizationEvaluator, DeliveryStore, DurableRecordStatus, DurableStoreError,
-    IdGenerationError, PolicyEvaluator, ServiceAuditStore, ServiceCredentialSecret,
+    AuthorizationEvaluator, DeliveryStore, DeviceLifecycleStore, DurableRecordStatus,
+    DurableStoreError, IdGenerationError, PolicyEvaluator, ServiceAuditStore, ServiceCredentialSecret,
     ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
     StoreForwardStore, generate_opaque_id,
 };
@@ -291,7 +291,7 @@ impl<'a, S> StoreForwardRuntime<'a, S> {
 
 impl<S> StoreForwardRuntime<'_, S>
 where
-    S: StoreForwardStore,
+    S: StoreForwardStore + DeviceLifecycleStore,
 {
     /// Persists one sender-side durable Store-and-Forward scheduling job.
     ///
@@ -427,7 +427,8 @@ where
         hints: &[TransportRoutingHint],
         options: Vec<TransportRouteOption<'route>>,
     ) -> Result<ucr_transport_orchestrator::TransportPlan<'route>, TransportOrchestratorError> {
-        self.orchestrator.plan(intent, resources, hints, options)
+        self.orchestrator
+            .plan_protected(intent, resources, hints, options, self.store)
     }
 
     fn prepare_attempt(
