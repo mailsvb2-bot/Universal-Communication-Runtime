@@ -205,3 +205,54 @@ fn map_sfu_control_error(error: OperatorSfuClusterError) -> Status {
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn heartbeat() -> pb::OperatorSfuNodeHeartbeatRequest {
+        pb::OperatorSfuNodeHeartbeatRequest {
+            node_id: "sfu-eu-1".to_owned(),
+            region: "eu-west-1".to_owned(),
+            state: pb::OperatorSfuNodeState::Healthy as i32,
+            active_sessions: 3,
+            max_sessions: 100,
+            lease_ttl_ms: 30_000,
+        }
+    }
+
+    #[test]
+    fn decodes_bounded_sfu_heartbeat() {
+        let decoded = decode_sfu_heartbeat(heartbeat()).expect("valid heartbeat");
+        assert_eq!(decoded.node_id.as_str(), "sfu-eu-1");
+        assert_eq!(decoded.region, "eu-west-1");
+        assert_eq!(decoded.state, SfuNodeState::Healthy);
+        assert_eq!(decoded.active_sessions, 3);
+        assert_eq!(decoded.max_sessions, 100);
+        assert_eq!(decoded.lease_ttl_ms, 30_000);
+    }
+
+    #[test]
+    fn rejects_unbounded_or_ambiguous_sfu_heartbeat() {
+        let mut too_short = heartbeat();
+        too_short.lease_ttl_ms = MIN_OPERATOR_SFU_LEASE_TTL_MS - 1;
+        assert!(decode_sfu_heartbeat(too_short).is_err());
+
+        let mut too_long = heartbeat();
+        too_long.lease_ttl_ms = MAX_OPERATOR_SFU_LEASE_TTL_MS + 1;
+        assert!(decode_sfu_heartbeat(too_long).is_err());
+
+        let mut invalid_state = heartbeat();
+        invalid_state.state = pb::OperatorSfuNodeState::Unspecified as i32;
+        assert!(decode_sfu_heartbeat(invalid_state).is_err());
+
+        let mut control_region = heartbeat();
+        control_region.region = "eu\nwest".to_owned();
+        assert!(decode_sfu_heartbeat(control_region).is_err());
+
+        let mut over_capacity = heartbeat();
+        over_capacity.active_sessions = 101;
+        assert!(decode_sfu_heartbeat(over_capacity).is_err());
+    }
+}
