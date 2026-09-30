@@ -25,7 +25,10 @@ When an origin creates new protected Device content, it uses
 policy/Identity/capability checks with the existing canonical `DeviceLifecycleStore`.
 A Device endpoint is eligible only when the exact scoped Device exists, belongs to the target
 Identity, and is `Active`. Missing, Stale, ReverificationRequired, Expired and Revoked Devices
-fail closed before any `TransportProvider` invocation.
+fail closed. The protected plan retains its Device binding and execution re-reads the canonical
+lifecycle immediately before every provider-bearing primary/failover attempt, so revocation racing
+after planning still stops before any `TransportProvider` invocation. Ordinary transmit/failover
+entry points reject protected plans and cannot bypass that execution-time gate.
 
 The ordinary `StoreForwardRuntime::new` mode remains available for forwarding an already-created
 opaque encrypted envelope where the forwarding node intentionally does not own the recipient Device
