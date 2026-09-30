@@ -1058,6 +1058,14 @@ fn phase_restart_old_client_and_revocation(s: &Scenario, sent: &[MessageEnvelope
             .revoke_device(&s.scope, &device.device_id, &device.identity_id)
             .expect("revoke device");
     }
+    assert_revoked_device_blocks_protected_content(s, &device, &key);
+}
+
+fn assert_revoked_device_blocks_protected_content(
+    s: &Scenario,
+    device: &DeviceDescriptor,
+    key: &PublicKeyDescriptor,
+) {
     let restarted = SqliteLocalStore::open(s.recipient_db.path()).expect("restart after revoke");
     let revoked = restarted
         .device(&s.scope, &device.device_id)
