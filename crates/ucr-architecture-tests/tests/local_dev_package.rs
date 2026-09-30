@@ -45,4 +45,21 @@ fn local_dev_package_reuses_loopback_ucr_dev_and_stays_host_local() {
         dev_main.contains("if !bind.ip().is_loopback()"),
         "container package must not weaken the canonical dev CLI loopback guard"
     );
+
+    let dev_runtime =
+        fs::read_to_string(workspace.join("crates/ucr-dev/src/lib.rs")).expect("read ucr dev runtime");
+    for marker in [
+        "universal_conference_service_server",
+        "realtime_service_server",
+        "GrpcUniversalConferenceService::with_state_and_join_issuer",
+        "GrpcRealtimeService::new",
+        "verify_universal_conference_round_trip",
+        "CreateConference exact idempotent retry",
+        "attendance Event projection",
+    ] {
+        assert!(
+            dev_runtime.contains(marker),
+            "local integration package must retain Universal Conference runtime evidence: {marker}"
+        );
+    }
 }
