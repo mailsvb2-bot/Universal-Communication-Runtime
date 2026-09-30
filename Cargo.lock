@@ -3915,7 +3915,7 @@ dependencies = [
  "ucr-model",
  "ucr-protocol",
  "ucr-realtime",
- "ucr-storage-memory",
+ "ucr-storage-sqlite",
 ]
 
 [[package]]
