@@ -41,6 +41,23 @@ fn placement_service_shares_operator_cluster_and_keeps_public_capability_fail_cl
 }
 
 #[test]
+fn placement_request_cannot_choose_an_sfu_node() {
+    let proto = read("proto/ucr/v1/sfu_placement.proto");
+    let request_start = proto
+        .find("message SfuPlaceCallRequest")
+        .expect("placement request");
+    let request_end = proto[request_start..]
+        .find("\n}")
+        .map(|offset| request_start + offset)
+        .expect("placement request end");
+    let request = &proto[request_start..request_end];
+
+    assert!(!request.contains("node_id"));
+    assert!(request.contains("preferred_region"));
+    assert!(request.contains("allow_cross_region_failover"));
+}
+
+#[test]
 fn placement_contract_does_not_route_participants_or_media_payloads() {
     let proto = read("proto/ucr/v1/sfu_placement.proto");
     for forbidden in [
