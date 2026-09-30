@@ -10,7 +10,7 @@ use ucr_crypto::{MAX_MACHINE_TOKEN_JWKS_BYTES, MachineTokenPublicKeySet};
 use ucr_model::OpaqueId;
 use ucr_protocol::{CanonicalError, CanonicalErrorCode};
 use ucr_runtime::{
-    DEFAULT_RECORDING_RETENTION_POLL_INTERVAL, DEFAULT_RUNTIME_BIND,
+    DEFAULT_OPERATOR_BIND, DEFAULT_RECORDING_RETENTION_POLL_INTERVAL, DEFAULT_RUNTIME_BIND,
     DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MachineAuthRuntimeConfig, MachineBearerRuntimeConfig,
     ProductionRuntime, RealtimeRuntimeConfig,
 };
@@ -30,6 +30,7 @@ async fn run() -> Result<(), String> {
     let command = parsed.command;
     let database = parsed.database;
     let bind = parsed.bind;
+    let operator_bind = parsed.operator_bind;
     let join_base_url = parsed.join_base_url;
     let tenant_id = parsed.tenant_id;
     let namespace_id = parsed.namespace_id;
@@ -66,13 +67,22 @@ async fn run() -> Result<(), String> {
                 .parse()
                 .map_err(|error| format!("invalid --bind address: {error}"))?;
             let runtime = Arc::new(ProductionRuntime::open_existing(&database)?);
+            let operator_bind: SocketAddr = operator_bind
+                .parse()
+                .map_err(|error| format!("invalid --operator-bind address: {error}"))?;
             match machine_bearer_config_from_env()? {
-                Some(config) => runtime.serve_with_machine_bearer(bind, config).await,
-                None => runtime.serve(bind).await,
+                Some(config) => {
+                    runtime
+                        .serve_with_machine_bearer_and_operator(bind, operator_bind, config)
+                        .await
+                }
+                None => runtime.serve_with_operator(bind, operator_bind).await,
             }
         }
-        "serve-realtime" => serve_realtime_command(&database, &bind, join_base_url).await,
-        "serve-auth" => serve_auth_command(&database, &bind).await,
+        "serve-realtime" => {
+            serve_realtime_command(&database, &bind, &operator_bind, join_base_url).await
+        }
+        "serve-auth" => serve_auth_command(&database, &bind, &operator_bind).await,
         "dispatch-webhook-once" => dispatch_webhook_once(
             &database,
             tenant_id,
@@ -90,6 +100,7 @@ struct ParsedArgs {
     command: String,
     database: Option<PathBuf>,
     bind: String,
+    operator_bind: String,
     join_base_url: Option<String>,
     tenant_id: Option<String>,
     namespace_id: Option<String>,
@@ -106,6 +117,7 @@ fn parse_args() -> Result<ParsedArgs, String> {
         command,
         database: None,
         bind: DEFAULT_RUNTIME_BIND.to_owned(),
+        operator_bind: DEFAULT_OPERATOR_BIND.to_owned(),
         join_base_url: None,
         tenant_id: None,
         namespace_id: None,
@@ -127,6 +139,11 @@ fn parse_args() -> Result<ParsedArgs, String> {
                 parsed.bind = args
                     .next()
                     .ok_or_else(|| "--bind requires an address".to_owned())?;
+            }
+            "--operator-bind" => {
+                parsed.operator_bind = args
+                    .next()
+                    .ok_or_else(|| "--operator-bind requires an address".to_owned())?;
             }
             "--join-base-url" => {
                 parsed.join_base_url = Some(
@@ -239,10 +256,17 @@ fn reconcile_turn_secrets_command(
     Ok(())
 }
 
-async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String> {
+async fn serve_auth_command(
+    database: &PathBuf,
+    bind: &str,
+    operator_bind: &str,
+) -> Result<(), String> {
     let bind: SocketAddr = bind
         .parse()
         .map_err(|error| format!("invalid --bind address: {error}"))?;
+    let operator_bind: SocketAddr = operator_bind
+        .parse()
+        .map_err(|error| format!("invalid --operator-bind address: {error}"))?;
     let issuer = required_env("UCR_MACHINE_TOKEN_ISSUER")?;
     let audience = required_env("UCR_MACHINE_TOKEN_AUDIENCE")?;
     let token_endpoint = required_env("UCR_MACHINE_TOKEN_ENDPOINT")?;
@@ -305,7 +329,7 @@ async fn serve_auth_command(database: &PathBuf, bind: &str) -> Result<(), String
     };
 
     Arc::new(ProductionRuntime::open_existing(database)?)
-        .serve_machine_auth(bind, config)
+        .serve_machine_auth_with_operator(bind, operator_bind, config)
         .await
 }
 
@@ -436,11 +460,15 @@ fn read_machine_token_signing_key(path: &str) -> Result<[u8; 32], String> {
 async fn serve_realtime_command(
     database: &PathBuf,
     bind: &str,
+    operator_bind: &str,
     join_base_url: Option<String>,
 ) -> Result<(), String> {
     let bind: SocketAddr = bind
         .parse()
         .map_err(|error| format!("invalid --bind address: {error}"))?;
+    let operator_bind: SocketAddr = operator_bind
+        .parse()
+        .map_err(|error| format!("invalid --operator-bind address: {error}"))?;
     let join_base_url =
         join_base_url.ok_or_else(|| "--join-base-url is required for serve-realtime".to_owned())?;
     let mut config = if let Some((provider, handle)) = secret_provider_from_env(
@@ -505,10 +533,15 @@ async fn serve_realtime_command(
     match machine_bearer_config_from_env()? {
         Some(machine_bearer) => {
             runtime
-                .serve_realtime_with_machine_bearer(bind, config, machine_bearer)
+                .serve_realtime_with_machine_bearer_and_operator(
+                    bind,
+                    operator_bind,
+                    config,
+                    machine_bearer,
+                )
                 .await
         }
-        None => runtime.serve_realtime(bind, config).await,
+        None => runtime.serve_realtime_with_operator(bind, operator_bind, config).await,
     }
 }
 
@@ -678,6 +711,6 @@ fn hex_nibble(byte: u8) -> Result<u8, String> {
 }
 
 fn usage() -> String {
-    "usage: ucr-runtime <init|check|metrics|serve|serve-auth|serve-realtime|dispatch-webhook-once|run-webhook-worker|run-recording-retention-worker> --database PATH [...] | ucr-runtime reconcile-turn-secrets --turn-database PATH --turn-realm REALM --exclusive-turn-realm"
+    "usage: ucr-runtime <init|check|metrics|serve|serve-auth|serve-realtime|dispatch-webhook-once|run-webhook-worker|run-recording-retention-worker> --database PATH [--bind ADDR] [--operator-bind LOOPBACK_ADDR] [...] | ucr-runtime reconcile-turn-secrets --turn-database PATH --turn-realm REALM --exclusive-turn-realm"
         .to_owned()
 }
