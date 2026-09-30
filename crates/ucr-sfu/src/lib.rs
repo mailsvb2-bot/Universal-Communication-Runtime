@@ -746,6 +746,8 @@ const fn permissions(
 
 #[cfg(test)]
 mod horizontal_placement_tests {
+    use std::net::SocketAddr;
+
     use super::{
         MAX_SFU_CLUSTER_NODES, SfuClusterDirectory, SfuNodeDescriptor, SfuNodeEndpoint,
         SfuNodeState, SfuPlacementError, SfuPlacementPolicy,
