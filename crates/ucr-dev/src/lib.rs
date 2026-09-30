@@ -1003,8 +1003,7 @@ async fn verify_universal_conference_round_trip(
     prepare_dev_universal_conference(&mut conference, env, &conference_id, &integration_id).await?;
     open_dev_universal_conference(&mut conference, env, &conference_id, &integration_id).await?;
 
-    let (mut events, subscription_id) =
-        create_dev_attendance_subscription(endpoint, env).await?;
+    let (mut events, subscription_id) = create_dev_attendance_subscription(endpoint, env).await?;
     let (token, claims, session_id) =
         issue_dev_join_grant(&mut conference, env, &conference_id, &integration_id).await?;
     join_and_leave_dev_realtime(endpoint, env, &token, &claims, &session_id).await?;
