@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package ucr.v1;
 
+import "ucr/v1/common.proto";
+
 // Private infrastructure-only horizontal-SFU placement contract.
 // This service MUST remain on the loopback/runtime boundary and MUST NOT be exposed through
 // the Universal Conference integration API or browser gateway.
