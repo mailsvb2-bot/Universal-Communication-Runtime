@@ -13,15 +13,16 @@ use tonic::transport::Server;
 use ucr_api_grpc::{
     GrpcAttachmentService, GrpcCallService, GrpcConferenceService, GrpcDeviceService,
     GrpcEventService, GrpcGroupService, GrpcIntegrationService, GrpcMachineAuthService,
-    GrpcOperatorRuntimeService, GrpcRealtimeService, GrpcRecordingService, GrpcStoreForwardService,
-    GrpcSyncService, GrpcUniversalConferenceService, MachineAuthDiscovery,
+    GrpcOperatorRuntimeService, GrpcRealtimeService, GrpcRecordingService, GrpcSfuPlacementService,
+    GrpcStoreForwardService, GrpcSyncService, GrpcUniversalConferenceService, MachineAuthDiscovery,
     MachineTokenVerificationKeyProvider, OperatorRuntimeHealthSource, OperatorSfuClusterControl,
     OperatorSfuClusterError, OperatorSfuNodeHeartbeat, RealtimeWebRtcDependencies,
     UniversalConferenceRuntimeCapabilities, attachment_service_server, call_service_server,
     conference_service_server, device_service_server, event_service_server,
     expire_due_recordings_once, group_service_server, integration_service_server,
     machine_auth_service_server, operator_runtime_service_server, pb, realtime_service_server,
-    recording_service_server, store_forward_service_server, sync_service_server,
+    recording_service_server, sfu_placement_service_server, store_forward_service_server,
+    sync_service_server,
     universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
@@ -592,6 +593,7 @@ impl ProductionOperatorHealthSource {
         registry: Arc<RealtimeSessionRegistry>,
         live_provider: Arc<LiveWebRtcProvider>,
         turn_configured: bool,
+        sfu_cluster: Arc<Mutex<SfuClusterDirectory>>,
     ) -> Self {
         Self {
             store,
@@ -600,7 +602,7 @@ impl ProductionOperatorHealthSource {
                 live_provider,
                 turn_configured,
             }),
-            sfu_cluster: Some(Arc::new(Mutex::new(SfuClusterDirectory::default()))),
+            sfu_cluster: Some(sfu_cluster),
         }
     }
 }
@@ -1620,12 +1622,16 @@ impl ProductionRuntime {
         let dependencies = realtime_dependencies(config)?;
         let join_issuer = Arc::clone(&dependencies.join_issuer);
         let registry = Arc::clone(&dependencies.registry);
+        let sfu_cluster = Arc::new(Mutex::new(SfuClusterDirectory::default()));
         let operator_health = realtime_operator_health(
             &store,
             &registry,
             &dependencies.live_provider,
             runtime_capabilities.turn,
+            &sfu_cluster,
         );
+        let sfu_placement_service =
+            GrpcSfuPlacementService::new(Arc::clone(&clock), Arc::clone(&sfu_cluster));
         let realtime_service = GrpcRealtimeService::with_webrtc(
             Arc::clone(&clock),
             Arc::clone(&authorization),
@@ -1652,6 +1658,7 @@ impl ProductionRuntime {
             join_issuer,
             machine_bearer,
             operator_health,
+            sfu_placement_service,
             realtime_service,
         };
         let server_result = serve_realtime_services(services, incoming).await;
@@ -1670,6 +1677,7 @@ struct RealtimeServerServices {
     join_issuer: Arc<JoinTokenIssuer>,
     machine_bearer: Option<MachineBearerRuntimeConfig>,
     operator_health: Arc<ProductionOperatorHealthSource>,
+    sfu_placement_service: GrpcSfuPlacementService<SystemServiceQuotaClock>,
     realtime_service:
         GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
 }
@@ -1688,6 +1696,7 @@ async fn serve_realtime_services(
         join_issuer,
         machine_bearer,
         operator_health,
+        sfu_placement_service,
         realtime_service,
     } = services;
     let mut universal_service =
@@ -1715,6 +1724,7 @@ async fn serve_realtime_services(
         .add_service(operator_runtime_service_server(
             GrpcOperatorRuntimeService::new(operator_health),
         ))
+        .add_service(sfu_placement_service_server(sfu_placement_service))
         .add_service(integration_service_server(GrpcIntegrationService::new(
             Arc::clone(&clock),
             Arc::clone(&authorization),
@@ -1909,12 +1919,14 @@ fn realtime_operator_health(
     registry: &Arc<RealtimeSessionRegistry>,
     live_provider: &Arc<LiveWebRtcProvider>,
     turn_configured: bool,
+    sfu_cluster: &Arc<Mutex<SfuClusterDirectory>>,
 ) -> Arc<ProductionOperatorHealthSource> {
     Arc::new(ProductionOperatorHealthSource::realtime(
         Arc::clone(store),
         Arc::clone(registry),
         Arc::clone(live_provider),
         turn_configured,
+        Arc::clone(sfu_cluster),
     ))
 }
 
@@ -2269,6 +2281,7 @@ mod tests {
             Arc::new(RealtimeSessionRegistry::new(8, 2)),
             Arc::new(LiveWebRtcProvider::new().expect("live provider")),
             false,
+            Arc::new(Mutex::new(SfuClusterDirectory::default())),
         );
         let registered = realtime
             .heartbeat_sfu_node(heartbeat)
