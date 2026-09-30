@@ -1,7 +1,5 @@
 use ucr_model::{CallId, NamespaceId, OpaqueId, TenantId, TenantScope};
-use ucr_sfu::{
-    SfuClusterDirectory, SfuNodeDescriptor, SfuNodeState, SfuPlacementPolicy,
-};
+use ucr_sfu::{SfuClusterDirectory, SfuNodeDescriptor, SfuNodeState, SfuPlacementPolicy};
 
 fn id(value: &str) -> OpaqueId {
     OpaqueId::new(value).expect("valid opaque id")
