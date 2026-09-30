@@ -1230,9 +1230,16 @@ async fn verify_universal_conference_round_trip(
         .split_once("#ucr_join=")
         .map(|(_, token)| token.to_owned())
         .ok_or_else(|| "IssueJoinGrant returned malformed join_url".to_owned())?;
+    let verify_now_unix_ms = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("self-check join verification clock: {error}"))?
+            .as_millis(),
+    )
+    .map_err(|_| "self-check join verification clock exceeds i64".to_owned())?;
     let claims = env
         .join_issuer
-        .verify(&token, now_unix_ms)
+        .verify_signed_claims(&token, verify_now_unix_ms)
         .map_err(|error| format!("self-check signed join claims: {error:?}"))?;
 
     let mut realtime =
