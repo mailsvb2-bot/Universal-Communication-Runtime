@@ -827,9 +827,7 @@ mod horizontal_placement_tests {
                 .resolve_live_endpoint(&node_id, 9_999)
                 .expect("live endpoint")
                 .address,
-            "127.0.0.1:7001"
-                .parse::<SocketAddr>()
-                .expect("socket")
+            "127.0.0.1:7001".parse::<SocketAddr>().expect("socket")
         );
         assert_eq!(
             directory.resolve_live_endpoint(&node_id, 10_000),
