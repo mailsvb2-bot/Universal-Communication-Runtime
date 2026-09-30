@@ -28,22 +28,27 @@ Missing, Stale, ReverificationRequired, Expired, and Revoked Devices are filtere
 `TransportProvider` invocation. A durable-store read failure fails closed as
 `DeviceLifecycleUnavailable`. Non-Device endpoints retain the normal transport eligibility rules.
 
-`StoreForwardRuntime` uses this protected planner for every opaque `encrypted_envelope`, so delayed
-or intermediary delivery cannot bypass Device revocation merely because an old Endpoint remains
-discoverable.
+`StoreForwardRuntime::new_protected_origin` uses this protected planner for newly created protected
+Device content at the origin. The ordinary `StoreForwardRuntime::new` path remains the opaque relay
+mode: it forwards an already-created encrypted envelope without requiring the intermediary to own or
+replicate the recipient's Device lifecycle state. This preserves minimum disclosure while ensuring
+content created after revocation cannot be emitted toward the revoked Device by the origin.
 
 ## Security and privacy impact
 
-Revocation now blocks the implemented protected Store-and-Forward transport path before ciphertext
-is handed to a provider. The transport receives no new envelope for a revoked Device. No plaintext
-is introduced into routing and no new Device registry is created.
+Revocation now blocks the implemented origin-side protected Store-and-Forward transport path before
+ciphertext is handed to a provider. The origin transport receives no new envelope for a revoked
+Device. An intermediary receives only the already-created opaque envelope and routing material it
+needs; it does not receive or own the recipient Device lifecycle registry. No plaintext is introduced
+into routing and no second Device registry is created.
 
 ## Compatibility and migration
 
-The durable Device schema is unchanged. Stores used by StoreForwardRuntime must implement the
-existing `DeviceLifecycleStore`; both reference Memory and SQLite stores already do. Deployments
-must have the recipient Device lifecycle record before protected Device routing can succeed.
-Unknown Device state intentionally fails closed.
+The durable Device schema is unchanged. Origin stores used with `new_protected_origin` implement the
+existing `DeviceLifecycleStore`; both reference Memory and SQLite stores already do. The origin must
+have the recipient Device lifecycle record before newly protected Device routing can succeed.
+Unknown Device state intentionally fails closed. Opaque relay mode does not require that lifecycle
+record and therefore does not expand intermediary metadata visibility.
 
 ## Rollback
 
@@ -55,7 +60,8 @@ security evidence.
 ## Testing
 
 - TransportOrchestrator unit evidence proves Active succeeds and Revoked becomes NoEligibleRoute.
-- StoreForward integration evidence proves a revoked Device causes zero provider invocations.
+- StoreForward integration evidence proves a revoked Device causes zero origin provider invocations.
+- Opaque relay evidence proves forwarding succeeds without a recipient Device lifecycle record.
 - Canon §263 system E2E proves post-restart revocation prevents new protected content from reaching
   the transport provider.
 - architecture guards bind StoreForwardRuntime to `plan_protected` and preserve the single
