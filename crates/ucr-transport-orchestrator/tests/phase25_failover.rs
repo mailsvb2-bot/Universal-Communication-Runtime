@@ -8,9 +8,8 @@ use ucr_model::{
     CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, CorrelationContext,
     DeviceDescriptor, DeviceId, DeviceLifecycleState, EndpointAddress, EndpointDescriptor,
     EndpointId, EndpointKind, IdentityId, IntentConstraints, IntentId, MediaThermalState, OpaqueId,
-    TenantId, TenantScope, TransportFailoverAttemptOutcome,
-    TransportFailoverPolicy, TransportFailoverStopReason, TransportResourceSnapshot,
-    TransportRouteTelemetry,
+    TenantId, TenantScope, TransportFailoverAttemptOutcome, TransportFailoverPolicy,
+    TransportFailoverStopReason, TransportResourceSnapshot, TransportRouteTelemetry,
 };
 use ucr_storage_memory::MemoryLocalStore;
 use ucr_transport_orchestrator::{
@@ -590,4 +589,3 @@ fn protected_failover_revalidates_revocation_after_planning() {
         "revocation after planning must stop before provider invocation"
     );
 }
-
