@@ -9,11 +9,11 @@ use core::{cmp::Ordering, fmt};
 use std::collections::BTreeSet;
 
 use ucr_core::{
-    CanonicalTransportError, PolicyDecision, PolicyEvaluator, RouteCandidate, TransportHealth,
-    TransportProvider,
+    CanonicalTransportError, DeviceLifecycleStore, PolicyDecision, PolicyEvaluator, RouteCandidate,
+    TransportHealth, TransportProvider,
 };
 use ucr_model::{
-    CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, EndpointDescriptor,
+    CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, EndpointDescriptor, EndpointKind,
     IntentConstraints, MediaThermalState, TenantScope, TransportOrchestrationDecision,
     TransportResourceSnapshot, TransportRouteDecision, TransportRouteTelemetry,
     TransportRoutingHint,
@@ -21,7 +21,7 @@ use ucr_model::{
 use ucr_protocol::{
     DEFAULT_MAX_PAYLOAD_LEN, IntentError, MAX_TRANSPORT_BANDWIDTH_BPS,
     TransportOrchestratorProtocolError, canonical_communication_intent,
-    canonical_transport_routing_hints, validate_endpoint_descriptor,
+    canonical_transport_routing_hints, device_allows_protected_access, validate_endpoint_descriptor,
     validate_transport_priority_class, validate_transport_resource_snapshot,
     validate_transport_route_candidate_count, validate_transport_route_telemetry,
 };
@@ -35,6 +35,7 @@ pub enum TransportOrchestratorError {
     DuplicateRoute,
     PolicyDenied,
     PolicyPending,
+    DeviceLifecycleUnavailable,
     NoEligibleRoute,
 }
 
@@ -209,6 +210,37 @@ impl<'a> TransportOrchestrator<'a> {
         })
     }
 
+    /// Produces a protected-content route plan that additionally gates Device endpoints through
+    /// the canonical durable Device lifecycle owner.
+    ///
+    /// Non-Device endpoints retain normal route eligibility. Device endpoints are eligible only
+    /// when the exact scoped Device exists, belongs to the target Identity, and is Active.
+    /// Missing, stale, re-verification-required, expired, or revoked Devices fail closed before
+    /// any provider invocation.
+    ///
+    /// # Errors
+    /// Returns the normal planning errors plus DeviceLifecycleUnavailable when the canonical
+    /// lifecycle owner cannot be read safely.
+    pub fn plan_protected<'b, S>(
+        &self,
+        intent: &CommunicationIntent,
+        resources: TransportResourceSnapshot,
+        hints: &[TransportRoutingHint],
+        options: Vec<TransportRouteOption<'b>>,
+        devices: &S,
+    ) -> Result<TransportPlan<'b>, TransportOrchestratorError>
+    where
+        S: DeviceLifecycleStore + ?Sized,
+    {
+        let canonical = canonical_communication_intent(intent)?;
+        let mut protected_options = Vec::with_capacity(options.len());
+        for option in options {
+            if protected_device_option_is_eligible(&canonical, &option, devices)? {
+                protected_options.push(option);
+            }
+        }
+        self.plan(&canonical, resources, hints, protected_options)
+    }
     /// Transmits through the primary planned route exactly once at the orchestrator layer.
     /// Provider-internal bounded reconnect semantics remain provider-owned. A transport error is
     /// returned directly: Phase 24 does not try the next ranked route (Automatic Failover is Phase 25).
@@ -258,6 +290,27 @@ impl<'a> TransportOrchestrator<'a> {
     }
 }
 
+fn protected_device_option_is_eligible<S>(
+    intent: &CommunicationIntent,
+    option: &TransportRouteOption<'_>,
+    devices: &S,
+) -> Result<bool, TransportOrchestratorError>
+where
+    S: DeviceLifecycleStore + ?Sized,
+{
+    if option.recipient_endpoint.kind != EndpointKind::Device {
+        return Ok(true);
+    }
+    let Some(device_id) = option.recipient_endpoint.device_id.as_ref() else {
+        return Ok(false);
+    };
+    let device = devices
+        .device(&intent.scope, device_id)
+        .map_err(|_| TransportOrchestratorError::DeviceLifecycleUnavailable)?;
+    Ok(device.is_some_and(|device| {
+        device.identity_id == intent.target_identity_id && device_allows_protected_access(&device)
+    }))
+}
 fn option_is_eligible(intent: &CommunicationIntent, option: &TransportRouteOption<'_>) -> bool {
     if option.provider.health() == TransportHealth::Unavailable
         || !option.telemetry.recipient_reachable
