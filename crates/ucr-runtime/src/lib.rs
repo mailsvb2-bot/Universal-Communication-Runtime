@@ -2463,10 +2463,8 @@ mod tests {
             active_sessions: 2,
             max_sessions: 100,
             lease_ttl_ms: 30_000,
-            endpoint: ucr_sfu::SfuNodeEndpoint::new(
-                "127.0.0.1:7001".parse().expect("endpoint"),
-            )
-            .expect("valid endpoint"),
+            endpoint: ucr_sfu::SfuNodeEndpoint::new("127.0.0.1:7001".parse().expect("endpoint"))
+                .expect("valid endpoint"),
         };
 
         let basic = ProductionOperatorHealthSource::basic(Arc::clone(&store));
