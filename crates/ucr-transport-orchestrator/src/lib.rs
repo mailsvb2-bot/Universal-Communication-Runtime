@@ -13,7 +13,7 @@ use ucr_core::{
     TransportHealth, TransportProvider,
 };
 use ucr_model::{
-    CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, EndpointDescriptor,
+    CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, DeviceId, EndpointDescriptor,
     EndpointKind, IntentConstraints, MediaThermalState, TenantScope,
     TransportOrchestrationDecision, TransportResourceSnapshot, TransportRouteDecision,
     TransportRouteTelemetry, TransportRoutingHint,
