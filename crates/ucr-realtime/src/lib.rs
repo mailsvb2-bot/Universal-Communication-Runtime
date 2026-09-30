@@ -2122,7 +2122,11 @@ mod tests {
             .claims;
         let expires_at = claims.expires_at_unix_ms;
         let registry = RealtimeSessionRegistry::new(8, 2);
-        registry.join(claims, 29_001).expect("join");
+        registry.join(claims.clone(), 29_001).expect("join");
+        assert_eq!(
+            registry.active_claims_at(29_001).expect("active claims"),
+            vec![claims.clone()]
+        );
         assert_eq!(
             registry
                 .active_session_count_at(29_001)
@@ -2134,6 +2138,12 @@ mod tests {
                 .active_session_count_at(expires_at)
                 .expect("expired count"),
             0
+        );
+        assert!(
+            registry
+                .active_claims_at(expires_at)
+                .expect("expired claims")
+                .is_empty()
         );
     }
 
