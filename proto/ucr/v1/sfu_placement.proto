@@ -33,7 +33,22 @@ message SfuReleaseCallResponse {
   OpaqueId released_call_id = 1;
 }
 
+message SfuResolveNodeRequest {
+  OpaqueId node_id = 1;
+}
+
+message SfuNodeRoute {
+  OpaqueId node_id = 1;
+  string endpoint_ip = 2;
+  uint32 endpoint_port = 3;
+}
+
+message SfuResolveNodeResponse {
+  SfuNodeRoute route = 1;
+}
+
 service SfuPlacementService {
   rpc PlaceCall(SfuPlaceCallRequest) returns (SfuPlaceCallResponse);
   rpc ReleaseCall(SfuReleaseCallRequest) returns (SfuReleaseCallResponse);
+  rpc ResolveNode(SfuResolveNodeRequest) returns (SfuResolveNodeResponse);
 }

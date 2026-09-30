@@ -130,6 +130,33 @@ where
             released_call_id: Some(pb_opaque(call_id.as_opaque())),
         }))
     }
+
+    async fn resolve_node(
+        &self,
+        request: Request<pb::SfuResolveNodeRequest>,
+    ) -> Result<Response<pb::SfuResolveNodeResponse>, Status> {
+        let node_id = decode_opaque(request.into_inner().node_id)
+            .map_err(|_| Status::invalid_argument("invalid SFU node id"))?;
+        let now_unix_ms = self
+            .clock
+            .now_unix_ms()
+            .map_err(|_| Status::unavailable("SFU placement clock unavailable"))?;
+        let mut cluster = self
+            .cluster
+            .lock()
+            .map_err(|_| Status::unavailable("SFU placement directory unavailable"))?;
+        let endpoint = cluster.resolve_live_endpoint(&node_id, now_unix_ms);
+        cluster.prune_expired_nodes(now_unix_ms);
+        let endpoint = endpoint.map_err(map_placement_error)?;
+
+        Ok(Response::new(pb::SfuResolveNodeResponse {
+            route: Some(pb::SfuNodeRoute {
+                node_id: Some(pb_opaque(&node_id)),
+                endpoint_ip: endpoint.address.ip().to_string(),
+                endpoint_port: u32::from(endpoint.address.port()),
+            }),
+        }))
+    }
 }
 
 fn decode_preferred_region(value: &str) -> Result<Option<String>, Status> {
@@ -145,6 +172,8 @@ fn decode_preferred_region(value: &str) -> Result<Option<String>, Status> {
 fn map_placement_error(error: SfuPlacementError) -> Status {
     match error {
         SfuPlacementError::InvalidNode => Status::failed_precondition("SFU placement unavailable"),
+        SfuPlacementError::InvalidEndpoint => Status::invalid_argument("invalid SFU endpoint"),
+        SfuPlacementError::EndpointUnavailable => Status::unavailable("SFU endpoint unavailable"),
         SfuPlacementError::NoHealthyCapacity => {
             Status::resource_exhausted("no healthy SFU capacity")
         }
@@ -156,7 +185,7 @@ mod tests {
     use super::*;
     use ucr_core::ServiceQuotaClockError;
     use ucr_model::OpaqueId;
-    use ucr_sfu::{SfuNodeDescriptor, SfuNodeState};
+    use ucr_sfu::{SfuNodeDescriptor, SfuNodeEndpoint, SfuNodeState};
 
     #[derive(Debug)]
     struct FixedClock(i64);
@@ -245,6 +274,56 @@ mod tests {
         )
         .await
         .expect("release placement");
+    }
+
+    #[tokio::test]
+    async fn resolve_node_returns_only_live_private_endpoint() {
+        let cluster = Arc::new(Mutex::new(SfuClusterDirectory::default()));
+        cluster
+            .lock()
+            .expect("cluster")
+            .upsert_node_with_endpoint(
+                SfuNodeDescriptor {
+                    node_id: OpaqueId::new("sfu-route").expect("node"),
+                    region: "eu".to_owned(),
+                    state: SfuNodeState::Healthy,
+                    active_sessions: 0,
+                    max_sessions: 10,
+                    lease_expires_at_unix_ms: 20_000,
+                },
+                SfuNodeEndpoint::new("127.0.0.1:7001".parse().expect("socket")).expect("endpoint"),
+            )
+            .expect("register node endpoint");
+
+        let service =
+            GrpcSfuPlacementService::new(Arc::new(FixedClock(10_000)), Arc::clone(&cluster));
+        let route = pb::sfu_placement_service_server::SfuPlacementService::resolve_node(
+            &service,
+            Request::new(pb::SfuResolveNodeRequest {
+                node_id: Some(pb_id("sfu-route")),
+            }),
+        )
+        .await
+        .expect("resolve live node")
+        .into_inner()
+        .route
+        .expect("route");
+        assert_eq!(route.node_id.expect("node id").value, b"sfu-route");
+        assert_eq!(route.endpoint_ip, "127.0.0.1");
+        assert_eq!(route.endpoint_port, 7001);
+
+        let expired =
+            GrpcSfuPlacementService::new(Arc::new(FixedClock(20_000)), Arc::clone(&cluster));
+        let error = pb::sfu_placement_service_server::SfuPlacementService::resolve_node(
+            &expired,
+            Request::new(pb::SfuResolveNodeRequest {
+                node_id: Some(pb_id("sfu-route")),
+            }),
+        )
+        .await
+        .expect_err("expired endpoint must fail closed");
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(cluster.lock().expect("cluster").is_empty());
     }
 
     #[tokio::test]

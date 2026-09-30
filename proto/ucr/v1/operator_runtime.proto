@@ -39,6 +39,8 @@ message OperatorSfuNodeHeartbeatRequest {
   uint32 active_sessions = 4;
   uint32 max_sessions = 5;
   uint32 lease_ttl_ms = 6;
+  string endpoint_ip = 7;
+  uint32 endpoint_port = 8;
 }
 
 message OperatorSfuNodeSnapshot {

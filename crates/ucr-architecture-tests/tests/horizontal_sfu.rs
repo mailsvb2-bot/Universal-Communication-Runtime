@@ -46,6 +46,8 @@ fn horizontal_sfu_operator_control_wires_heartbeat_list_and_drain_without_public
     for rpc in ["HeartbeatSfuNode", "DrainSfuNode", "ListSfuNodes"] {
         assert!(operator.contains(rpc), "missing operator SFU RPC {rpc}");
     }
+    assert!(operator.contains("endpoint_ip"));
+    assert!(operator.contains("endpoint_port"));
     assert!(api.contains("OperatorSfuClusterControl"));
     assert!(runtime.contains("sfu_cluster: Some"));
     assert!(runtime.contains("SfuClusterDirectory::default()"));
@@ -53,6 +55,7 @@ fn horizontal_sfu_operator_control_wires_heartbeat_list_and_drain_without_public
     assert!(runtime.contains("prune_expired_nodes"));
     assert!(runtime.contains("mark_draining"));
     assert!(spec.contains("Workers must re-register after process restart"));
+    assert!(spec.contains("`ResolveNode` separately resolves"));
     assert!(spec.contains("concrete inter-node encrypted-media transport"));
 }
 

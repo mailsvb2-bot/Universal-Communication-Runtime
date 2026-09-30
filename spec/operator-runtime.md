@@ -44,7 +44,8 @@ is also not inferred from process configuration: only a currently unexpired dura
 The same private loopback service now owns the prepared horizontal-SFU worker control plane:
 
 - `HeartbeatSfuNode` registers or refreshes one bounded worker record with opaque node ID, deployment
-  region, health/draining state, active/max session counters, and a short lease TTL;
+  region, health/draining state, active/max session counters, a short lease TTL, and one validated
+  private media `IP:port`;
 - `DrainSfuNode` atomically marks a known worker draining so fresh placement stops selecting it while
   existing sticky placements may finish;
 - `ListSfuNodes` returns only bounded infrastructure metadata and the absolute lease expiry.

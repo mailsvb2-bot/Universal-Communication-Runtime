@@ -1,8 +1,12 @@
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 use tonic::{Request, Response, Status};
 use ucr_model::OpaqueId;
-use ucr_sfu::{MAX_SFU_REGION_BYTES, SfuNodeDescriptor, SfuNodeState};
+use ucr_sfu::{MAX_SFU_REGION_BYTES, SfuNodeDescriptor, SfuNodeEndpoint, SfuNodeState};
 
 use super::{GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, pb};
 
@@ -17,6 +21,7 @@ pub struct OperatorSfuNodeHeartbeat {
     pub active_sessions: u32,
     pub max_sessions: u32,
     pub lease_ttl_ms: u32,
+    pub endpoint: SfuNodeEndpoint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +185,16 @@ fn decode_sfu_heartbeat(
         value if value == pb::OperatorSfuNodeState::Unavailable as i32 => SfuNodeState::Unavailable,
         _ => return Err(Status::invalid_argument("invalid SFU node state")),
     };
+    let endpoint_ip = body
+        .endpoint_ip
+        .parse::<IpAddr>()
+        .map_err(|_| Status::invalid_argument("invalid SFU endpoint IP"))?;
+    let endpoint_port = u16::try_from(body.endpoint_port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| Status::invalid_argument("invalid SFU endpoint port"))?;
+    let endpoint = SfuNodeEndpoint::new(SocketAddr::new(endpoint_ip, endpoint_port))
+        .map_err(|_| Status::invalid_argument("invalid SFU endpoint"))?;
     Ok(OperatorSfuNodeHeartbeat {
         node_id,
         region: body.region,
@@ -187,6 +202,7 @@ fn decode_sfu_heartbeat(
         active_sessions: body.active_sessions,
         max_sessions: body.max_sessions,
         lease_ttl_ms: body.lease_ttl_ms,
+        endpoint,
     })
 }
 
@@ -233,6 +249,8 @@ mod tests {
             active_sessions: 3,
             max_sessions: 100,
             lease_ttl_ms: 30_000,
+            endpoint_ip: "127.0.0.1".to_owned(),
+            endpoint_port: 7001,
         }
     }
 
@@ -245,6 +263,10 @@ mod tests {
         assert_eq!(decoded.active_sessions, 3);
         assert_eq!(decoded.max_sessions, 100);
         assert_eq!(decoded.lease_ttl_ms, 30_000);
+        assert_eq!(
+            decoded.endpoint.address,
+            "127.0.0.1:7001".parse::<SocketAddr>().expect("endpoint")
+        );
     }
 
     #[test]
@@ -268,5 +290,13 @@ mod tests {
         let mut over_capacity = heartbeat();
         over_capacity.active_sessions = 101;
         assert!(decode_sfu_heartbeat(over_capacity).is_err());
+
+        let mut missing_port = heartbeat();
+        missing_port.endpoint_port = 0;
+        assert!(decode_sfu_heartbeat(missing_port).is_err());
+
+        let mut unspecified_ip = heartbeat();
+        unspecified_ip.endpoint_ip = "0.0.0.0".to_owned();
+        assert!(decode_sfu_heartbeat(unspecified_ip).is_err());
     }
 }
