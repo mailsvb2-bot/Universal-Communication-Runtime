@@ -37,16 +37,31 @@ pub trait OperatorRuntimeHealthSource: fmt::Debug + Send + Sync {
 /// This boundary accepts only worker metadata. It never carries Conference rosters, participant
 /// identities, join credentials, media keys, plaintext media, or tenant business data.
 pub trait OperatorSfuClusterControl: fmt::Debug + Send + Sync {
+    /// Registers or refreshes one bounded ephemeral SFU worker lease.
+    ///
+    /// # Errors
+    /// Returns `NotConfigured` when this runtime does not own an SFU directory, `InvalidNode`
+    /// for invalid worker metadata, or `Unavailable` when runtime state cannot be accessed.
     fn heartbeat_sfu_node(
         &self,
         heartbeat: OperatorSfuNodeHeartbeat,
     ) -> Result<SfuNodeDescriptor, OperatorSfuClusterError>;
 
+    /// Marks one known live worker as draining.
+    ///
+    /// # Errors
+    /// Returns `NotConfigured` when horizontal SFU control is absent, `InvalidNode` for an
+    /// unknown/expired worker, or `Unavailable` when runtime state cannot be accessed.
     fn drain_sfu_node(
         &self,
         node_id: &OpaqueId,
     ) -> Result<SfuNodeDescriptor, OperatorSfuClusterError>;
 
+    /// Returns the bounded current worker snapshot after pruning expired leases.
+    ///
+    /// # Errors
+    /// Returns `NotConfigured` when horizontal SFU control is absent or `Unavailable` when
+    /// runtime state cannot be accessed.
     fn list_sfu_nodes(&self) -> Result<Vec<SfuNodeDescriptor>, OperatorSfuClusterError>;
 }
 
