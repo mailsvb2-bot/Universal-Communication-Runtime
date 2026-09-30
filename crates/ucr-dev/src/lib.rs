@@ -508,7 +508,9 @@ impl DevEnvironment {
             "UCR_DEV_CREDENTIAL_SECRET_HEX={}",
             self.credential_secret_hex()
         );
-        println!("UCR_DEV_MODE=development-only auth=enabled storage=sqlite-ephemeral loopback=true");
+        println!(
+            "UCR_DEV_MODE=development-only auth=enabled storage=sqlite-ephemeral loopback=true"
+        );
 
         let incoming = TcpListenerStream::new(listener);
         let clock = Arc::new(SystemServiceQuotaClock);
