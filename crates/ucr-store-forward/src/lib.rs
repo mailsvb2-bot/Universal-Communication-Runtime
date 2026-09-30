@@ -513,13 +513,24 @@ where
             expires_at_unix_ms: job.policy.expires_at_unix_ms,
         };
         let clock = StoreForwardFailoverClock(self.clock);
-        match self.orchestrator.transmit_with_failover(
-            intent,
-            plan,
-            &job.encrypted_envelope,
-            failover,
-            &clock,
-        ) {
+        let result = match self.protected_devices {
+            Some(devices) => self.orchestrator.transmit_with_failover_protected(
+                intent,
+                plan,
+                &job.encrypted_envelope,
+                failover,
+                &clock,
+                devices,
+            ),
+            None => self.orchestrator.transmit_with_failover(
+                intent,
+                plan,
+                &job.encrypted_envelope,
+                failover,
+                &clock,
+            ),
+        };
+        match result {
             Ok(_) => self.accept_attempt(lease, &prepared.attempt, now),
             Err(error)
                 if error.decision.stop_reason
