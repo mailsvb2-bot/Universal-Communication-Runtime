@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -26,8 +26,9 @@ use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
     CanonicalTransportError, ClassifiedTransportFailure, DeviceLifecycleStore, IdentityStore,
     PermissionGrantStore, RouteCandidate, ServiceCredentialSecret, ServiceCredentialStore,
-    ServiceQuotaStore, StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock,
-    TransportHealth, TransportProvider, issue_service_credential,
+    ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore, StorageProvider,
+    SystemEventDeliveryClock, SystemServiceQuotaClock, TransportHealth, TransportProvider,
+    issue_service_credential,
 };
 use ucr_model::{
     CapabilityDescriptor, CapabilityMaturity, DeviceDescriptor, DeviceId, DeviceLifecycleState,
@@ -53,6 +54,41 @@ impl Drop for DevStoreCleanup {
         let _ = fs::remove_file(format!("{}-wal", self.0.display()));
         let _ = fs::remove_file(format!("{}-shm", self.0.display()));
     }
+}
+
+#[derive(Debug)]
+struct DevConformanceClock {
+    now_unix_ms: AtomicI64,
+}
+
+impl DevConformanceClock {
+    fn from_system_time() -> Result<Self, String> {
+        Ok(Self {
+            now_unix_ms: AtomicI64::new(system_time_unix_ms("self-check system clock")?),
+        })
+    }
+
+    fn advance_ms(&self, delta_ms: i64) -> Result<(), String> {
+        let current = self.now_unix_ms.load(Ordering::SeqCst);
+        let next = current
+            .checked_add(delta_ms)
+            .ok_or_else(|| "self-check clock overflow".to_owned())?;
+        self.now_unix_ms.store(next, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+impl ServiceQuotaClock for DevConformanceClock {
+    fn now_unix_ms(&self) -> Result<i64, ServiceQuotaClockError> {
+        Ok(self.now_unix_ms.load(Ordering::SeqCst))
+    }
+}
+
+#[derive(Debug)]
+struct DevServiceAccount {
+    integration_id: pb::OpaqueId,
+    credential_id: ServiceCredentialId,
+    credential_secret: ServiceCredentialSecret,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -312,34 +348,8 @@ impl DevEnvironment {
         seed_identity_and_device(&store, &scope, &local_identity_id, &local_device_id)?;
         seed_identity_and_device(&store, &scope, &mock_peer_identity_id, &mock_peer_device_id)?;
 
-        let subject = ScopedPrincipal {
-            scope: scope.clone(),
-            principal: PrincipalRef {
-                principal_id: PrincipalId::from_opaque(opaque("dev-service-principal")),
-                kind: PrincipalKind::ServiceAccount,
-            },
-        };
-        let (record, credential_secret) = issue_service_credential(&subject)
-            .map_err(|error| format!("credential issue: {error:?}"))?;
-        store
-            .provision_service_credential(&record)
-            .map_err(|error| format!("credential persist: {error:?}"))?;
-        for permission in RUNTIME_PERMISSION_IDS {
-            store
-                .grant_permission(&PermissionGrant {
-                    grantee: subject.clone(),
-                    permission: (*permission).to_owned(),
-                    scope: PermissionScope::Exact(scope.clone()),
-                })
-                .map_err(|error| format!("permission grant {permission}: {error:?}"))?;
-        }
-        store
-            .set_service_quota_policy(&ServiceQuotaPolicy {
-                subject,
-                max_requests: 10_000,
-                window_ms: 60_000,
-            })
-            .map_err(|error| format!("quota seed: {error:?}"))?;
+        let service_account =
+            provision_dev_service_account(&store, &scope, "dev-service-principal")?;
 
         let join_issuer = Arc::new(
             JoinTokenIssuer::new(
@@ -360,8 +370,8 @@ impl DevEnvironment {
             local_device_id,
             mock_peer_identity_id,
             mock_peer_device_id,
-            credential_id: record.credential_id,
-            credential_secret,
+            credential_id: service_account.credential_id,
+            credential_secret: service_account.credential_secret,
             join_issuer,
             conference_state,
             realtime_registry,
@@ -606,6 +616,48 @@ pub struct DevDiagnostics {
     pub storage_health: String,
     pub transport_health: String,
     pub debug_event_count: usize,
+}
+
+fn provision_dev_service_account(
+    store: &SqliteLocalStore,
+    scope: &TenantScope,
+    principal_id: &str,
+) -> Result<DevServiceAccount, String> {
+    let subject = ScopedPrincipal {
+        scope: scope.clone(),
+        principal: PrincipalRef {
+            principal_id: PrincipalId::from_opaque(opaque(principal_id)),
+            kind: PrincipalKind::ServiceAccount,
+        },
+    };
+    let (record, credential_secret) = issue_service_credential(&subject)
+        .map_err(|error| format!("credential issue for {principal_id}: {error:?}"))?;
+    store
+        .provision_service_credential(&record)
+        .map_err(|error| format!("credential persist for {principal_id}: {error:?}"))?;
+    for permission in RUNTIME_PERMISSION_IDS {
+        store
+            .grant_permission(&PermissionGrant {
+                grantee: subject.clone(),
+                permission: (*permission).to_owned(),
+                scope: PermissionScope::Exact(scope.clone()),
+            })
+            .map_err(|error| {
+                format!("permission grant {permission} for {principal_id}: {error:?}")
+            })?;
+    }
+    store
+        .set_service_quota_policy(&ServiceQuotaPolicy {
+            subject,
+            max_requests: 10_000,
+            window_ms: 60_000,
+        })
+        .map_err(|error| format!("quota seed for {principal_id}: {error:?}"))?;
+    Ok(DevServiceAccount {
+        integration_id: pb_id(principal_id),
+        credential_id: record.credential_id,
+        credential_secret,
+    })
 }
 
 fn seed_identity_and_device(
