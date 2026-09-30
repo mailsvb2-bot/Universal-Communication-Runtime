@@ -6,13 +6,11 @@ use std::{
 use tonic::{Request, Response, Status};
 use ucr_core::ServiceQuotaClock;
 use ucr_model::CallId;
-use ucr_sfu::{
-    MAX_SFU_REGION_BYTES, SfuClusterDirectory, SfuPlacementError, SfuPlacementPolicy,
-};
+use ucr_sfu::{MAX_SFU_REGION_BYTES, SfuClusterDirectory, SfuPlacementError, SfuPlacementPolicy};
 
 use super::{
-    GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_opaque, decode_scope, pb,
-    pb_opaque,
+    GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_opaque, decode_scope,
+    pb, pb_opaque,
 };
 
 /// Private runtime-only horizontal-SFU placement binding.
@@ -147,7 +145,9 @@ fn decode_preferred_region(value: &str) -> Result<Option<String>, Status> {
 fn map_placement_error(error: SfuPlacementError) -> Status {
     match error {
         SfuPlacementError::InvalidNode => Status::failed_precondition("SFU placement unavailable"),
-        SfuPlacementError::NoHealthyCapacity => Status::resource_exhausted("no healthy SFU capacity"),
+        SfuPlacementError::NoHealthyCapacity => {
+            Status::resource_exhausted("no healthy SFU capacity")
+        }
     }
 }
 
