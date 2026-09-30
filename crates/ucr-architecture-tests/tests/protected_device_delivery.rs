@@ -17,7 +17,8 @@ fn protected_delivery_reuses_canonical_device_lifecycle_owner() {
     let spec = read("spec/store-forward.md");
 
     assert!(orchestrator.contains("pub fn plan_protected"));
-    assert!(orchestrator.contains("S: DeviceLifecycleStore + ?Sized"));
+    assert!(orchestrator.contains("devices: &dyn DeviceLifecycleStore"));
+    assert!(orchestrator.contains("protected_devices: Option<&dyn DeviceLifecycleStore>"));
     assert!(orchestrator.contains("device_allows_protected_access"));
     assert!(orchestrator.contains("protected_device_gate"));
     assert!(orchestrator.contains("revalidate_protected_route"));
