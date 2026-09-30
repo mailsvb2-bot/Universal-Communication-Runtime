@@ -47,7 +47,7 @@ use ucr_store_forward::{
     STORE_FORWARD_INTERNET_CAPABILITY, StoreForwardClock, StoreForwardRuntime,
 };
 use ucr_transport_orchestrator::{
-    TransportFailoverClock, TransportOrchestrator, TransportOrchestratorError, TransportRouteOption,
+    TransportFailoverClock, TransportOrchestrator, TransportRouteOption,
 };
 use ucr_video::{
     PreparedVideoCapabilities, ResolvedVideoNegotiation, VideoNegotiationResolver, VideoRuntime,
@@ -1058,10 +1058,11 @@ fn phase_restart_old_client_and_revocation(s: &Scenario, sent: &[MessageEnvelope
             .revoke_device(&s.scope, &device.device_id, &device.identity_id)
             .expect("revoke device");
     }
-    assert_revoked_device_blocks_protected_content(s, &device, &key);
+    assert_revoked_device_security_persists(s, &device, &key);
+    assert_revoked_origin_blocks_new_protected_store_forward(s);
 }
 
-fn assert_revoked_device_blocks_protected_content(
+fn assert_revoked_device_security_persists(
     s: &Scenario,
     device: &DeviceDescriptor,
     key: &PublicKeyDescriptor,
@@ -1083,31 +1084,61 @@ fn assert_revoked_device_blocks_protected_content(
         Err(TrustedKeyResolutionError::NotTrusted)
     );
 
-    let provider =
-        CapturingProvider::new(STORE_FORWARD_INTERNET_CAPABILITY, ProviderOutcome::Accepted);
-    let mut revoked_route = route_option(
-        &provider,
-        STORE_FORWARD_INTERNET_CAPABILITY,
-        "revoked-device-route",
-        5,
+}
+
+fn assert_revoked_origin_blocks_new_protected_store_forward(s: &Scenario) {
+    let sender = SqliteLocalStore::open(s.sender_db.path()).expect("restart sender for revoke");
+    let device_id = DeviceId::from_opaque(oid("e2e-bob-device"));
+    let identity_id = IdentityId::from_opaque(oid("e2e-bob-identity"));
+    assert_eq!(
+        sender
+            .device(&s.scope, &device_id)
+            .expect("read sender recipient device")
+            .expect("recipient device exists")
+            .state,
+        DeviceLifecycleState::Active
     );
-    revoked_route.recipient_endpoint.device_id = Some(device.device_id.clone());
+    sender
+        .revoke_device(&s.scope, &device_id, &identity_id)
+        .expect("revoke origin recipient device");
+
+    let protected_message = message(s, "e2e-post-revoke-message", 4, b"new protected content");
+    sender
+        .persist_message(&protected_message)
+        .expect("persist post-revoke message");
     let protected_intent = intent(
         s,
         "e2e-post-revoke-protected-intent",
-        b"new protected content",
+        &protected_message.content,
     );
+    sender
+        .persist_communication_intent(&protected_intent)
+        .expect("persist post-revoke intent");
+    let job = store_forward_job(
+        s,
+        &protected_message,
+        &protected_intent,
+        "e2e-post-revoke-store-forward",
+    );
+    let runtime = StoreForwardRuntime::new_protected_origin(&sender, &AllowAll, &FixedClock(6_000));
+    runtime.enqueue(&job).expect("enqueue post-revoke job");
+    let provider =
+        CapturingProvider::new(STORE_FORWARD_INTERNET_CAPABILITY, ProviderOutcome::Accepted);
+
     assert_eq!(
-        TransportOrchestrator::new(&AllowAll)
-            .plan_protected(
-                &protected_intent,
-                resources(),
-                &[],
-                vec![revoked_route],
-                &restarted,
-            )
-            .unwrap_err(),
-        TransportOrchestratorError::NoEligibleRoute
+        runtime.process_one(
+            &s.scope,
+            &job.store_forward_id,
+            resources(),
+            &[],
+            vec![route_option(
+                &provider,
+                STORE_FORWARD_INTERNET_CAPABILITY,
+                "revoked-device-route",
+                5,
+            )],
+        ),
+        Ok(StoreForwardOutcome::RescheduledNoRoute)
     );
     assert!(
         provider.captured().is_empty(),
