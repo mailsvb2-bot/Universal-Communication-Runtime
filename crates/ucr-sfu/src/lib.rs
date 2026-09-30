@@ -791,16 +791,8 @@ mod horizontal_placement_tests {
         let node_id = opaque("sfu-refresh");
         directory
             .upsert_node_with_endpoint(
-                node(
-                    "sfu-refresh",
-                    "eu",
-                    SfuNodeState::Healthy,
-                    0,
-                    100,
-                    20_000,
-                ),
-                SfuNodeEndpoint::new("127.0.0.1:7002".parse().expect("socket"))
-                    .expect("endpoint"),
+                node("sfu-refresh", "eu", SfuNodeState::Healthy, 0, 100, 20_000),
+                SfuNodeEndpoint::new("127.0.0.1:7002".parse().expect("socket")).expect("endpoint"),
             )
             .expect("node endpoint");
         directory
@@ -825,16 +817,8 @@ mod horizontal_placement_tests {
         let node_id = opaque("sfu-route");
         directory
             .upsert_node_with_endpoint(
-                node(
-                    "sfu-route",
-                    "eu",
-                    SfuNodeState::Healthy,
-                    0,
-                    100,
-                    10_000,
-                ),
-                SfuNodeEndpoint::new("127.0.0.1:7001".parse().expect("socket"))
-                    .expect("endpoint"),
+                node("sfu-route", "eu", SfuNodeState::Healthy, 0, 100, 10_000),
+                SfuNodeEndpoint::new("127.0.0.1:7001".parse().expect("socket")).expect("endpoint"),
             )
             .expect("node endpoint");
 
