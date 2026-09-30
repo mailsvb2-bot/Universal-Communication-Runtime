@@ -55,7 +55,8 @@ fn operator_health_is_separate_from_integration_api() {
         );
     }
     assert!(runtime.contains("operator_runtime_service_server"));
-    assert!(spec.contains("MUST NOT forward or expose this service"));
+    assert!(spec.contains("socket separation is the enforcement boundary"));
+    assert!(spec.contains("MUST NOT point at or forward the operator"));
     assert!(spec.contains("valid TURN configuration is not equivalent to TURN network health"));
     assert!(spec.contains("Heartbeat TTL is bounded to 1–120 seconds"));
     assert!(spec.contains("do **not** make the"));
@@ -99,6 +100,11 @@ fn operator_rpc_is_not_registered_on_public_runtime_listeners() {
             &runtime,
             "async fn serve_api(",
             "/// Serves the canonical machine-auth gRPC service",
+        ),
+        section(
+            &runtime,
+            "async fn serve_api_public_services(",
+            "struct RealtimeServerServices",
         ),
         section(
             &runtime,
