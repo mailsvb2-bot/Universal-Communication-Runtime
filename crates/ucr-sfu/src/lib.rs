@@ -1,7 +1,10 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, SocketAddr},
+};
 
 use ucr_core::{
     AuthorizationEvaluator, CallStore, DeviceLifecycleStore, DurableStoreError, GroupStore,
@@ -32,6 +35,32 @@ pub enum SfuNodeState {
     Healthy,
     Draining,
     Unavailable,
+}
+
+/// Private routable media endpoint for one ephemeral SFU worker.
+///
+/// This is infrastructure-only routing metadata. It is never part of the public Conference API and
+/// carries no tenant, participant, media-key, plaintext-media, or provider credential data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SfuNodeEndpoint {
+    pub address: SocketAddr,
+}
+
+impl SfuNodeEndpoint {
+    /// Creates a routable endpoint from an already-parsed socket address.
+    ///
+    /// # Errors
+    /// Rejects zero ports and unspecified/multicast/broadcast IP targets.
+    pub fn new(address: SocketAddr) -> Result<Self, SfuPlacementError> {
+        let ip = address.ip();
+        let invalid_ip = ip.is_unspecified()
+            || ip.is_multicast()
+            || matches!(ip, IpAddr::V4(value) if value.is_broadcast());
+        if address.port() == 0 || invalid_ip {
+            return Err(SfuPlacementError::InvalidEndpoint);
+        }
+        Ok(Self { address })
+    }
 }
 
 /// Ephemeral operator-supplied description of one SFU worker.
@@ -86,6 +115,8 @@ pub struct SfuPlacementDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfuPlacementError {
     InvalidNode,
+    InvalidEndpoint,
+    EndpointUnavailable,
     NoHealthyCapacity,
 }
 
@@ -98,13 +129,14 @@ pub enum SfuPlacementError {
 #[derive(Debug, Default)]
 pub struct SfuClusterDirectory {
     nodes: BTreeMap<String, SfuNodeDescriptor>,
+    endpoints: BTreeMap<String, SfuNodeEndpoint>,
     placements: BTreeMap<Vec<u8>, String>,
 }
 
 impl SfuClusterDirectory {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty() && self.placements.is_empty()
+        self.nodes.is_empty() && self.endpoints.is_empty() && self.placements.is_empty()
     }
 
     /// Registers or refreshes one ephemeral worker heartbeat.
@@ -125,6 +157,53 @@ impl SfuClusterDirectory {
         }
         self.nodes.insert(node.node_id.as_str().to_owned(), node);
         Ok(())
+    }
+
+    /// Registers or refreshes one worker together with its private media-routing endpoint.
+    ///
+    /// Endpoint and worker metadata share this same ephemeral directory so placement and routing
+    /// cannot silently diverge into separate sources of truth.
+    ///
+    /// # Errors
+    /// Returns the same node-validation errors as `upsert_node` and rejects an invalid endpoint
+    /// before mutating either map.
+    pub fn upsert_node_with_endpoint(
+        &mut self,
+        node: SfuNodeDescriptor,
+        endpoint: SfuNodeEndpoint,
+    ) -> Result<(), SfuPlacementError> {
+        SfuNodeEndpoint::new(endpoint.address)?;
+        let node_id = node.node_id.as_str().to_owned();
+        self.upsert_node(node)?;
+        self.endpoints.insert(node_id, endpoint);
+        Ok(())
+    }
+
+    /// Resolves a private endpoint only for a currently live worker.
+    ///
+    /// Draining workers remain resolvable for already-sticky Calls, while unavailable/expired
+    /// workers fail closed. This method does not select a node; selection remains owned by
+    /// `place_session`.
+    ///
+    /// # Errors
+    /// Returns `InvalidNode` for an unknown worker or `EndpointUnavailable` when the worker is
+    /// expired/unavailable or has no registered endpoint.
+    pub fn resolve_live_endpoint(
+        &self,
+        node_id: &ucr_model::OpaqueId,
+        now_unix_ms: i64,
+    ) -> Result<SfuNodeEndpoint, SfuPlacementError> {
+        let node = self
+            .nodes
+            .get(node_id.as_str())
+            .ok_or(SfuPlacementError::InvalidNode)?;
+        if !node.is_live_at(now_unix_ms) {
+            return Err(SfuPlacementError::EndpointUnavailable);
+        }
+        self.endpoints
+            .get(node_id.as_str())
+            .copied()
+            .ok_or(SfuPlacementError::EndpointUnavailable)
     }
 
     #[must_use]
@@ -152,6 +231,7 @@ impl SfuClusterDirectory {
         }
         for node_id in &expired {
             self.nodes.remove(node_id);
+            self.endpoints.remove(node_id);
         }
         self.placements.retain(|_, assigned_node_id| {
             !expired.iter().any(|node_id| node_id == assigned_node_id)
@@ -161,6 +241,7 @@ impl SfuClusterDirectory {
 
     pub fn remove_node(&mut self, node_id: &ucr_model::OpaqueId) {
         self.nodes.remove(node_id.as_str());
+        self.endpoints.remove(node_id.as_str());
         self.placements
             .retain(|_, assigned_node_id| assigned_node_id != node_id.as_str());
     }
