@@ -2192,7 +2192,7 @@ where
         call_id: &CallId,
     ) -> Result<RuntimeCallCleanupDecision, CanonicalError> {
         let Some(call) = self.store.call(scope, call_id).map_err(map_store_error)? else {
-            return Ok(RuntimeCallCleanupDecision::Cleanup);
+            return Ok(RuntimeCallCleanupDecision::Keep);
         };
         if call.signalling_state == CallSignallingState::Terminated {
             return Ok(RuntimeCallCleanupDecision::Cleanup);
