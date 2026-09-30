@@ -40,6 +40,8 @@ fn integration_conformance_profile_covers_universal_connector_requirements() {
         "DevConformanceClock",
         "dev-foreign-service-principal",
         "foreign integration conference read denial",
+        "foreign participant attendance read denial",
+        "foreign owner subscription read denial",
         "foreign owner subscription poll denial",
         "foreign attendance event isolation",
         "not-before realtime join denial",
