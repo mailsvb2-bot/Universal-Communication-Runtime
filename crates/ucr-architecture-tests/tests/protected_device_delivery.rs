@@ -14,6 +14,7 @@ fn protected_delivery_reuses_canonical_device_lifecycle_owner() {
     let store_forward = read("crates/ucr-store-forward/src/lib.rs");
     let device_store = read("crates/ucr-storage-sqlite/src/device_store.rs");
     let adr = read("docs/adr/0112-protected-device-delivery-reuses-canonical-device-lifecycle.md");
+    let spec = read("spec/store-forward.md");
 
     assert!(orchestrator.contains("pub fn plan_protected"));
     assert!(orchestrator.contains("S: DeviceLifecycleStore + ?Sized"));
@@ -28,6 +29,9 @@ fn protected_delivery_reuses_canonical_device_lifecycle_owner() {
     assert!(adr.contains("Status: Accepted"));
     assert!(adr.contains("opaque relay"));
     assert!(adr.contains("minimum disclosure"));
+    assert!(spec.contains("## Protected Device origin gate"));
+    assert!(spec.contains("StoreForwardRuntime::new_protected_origin"));
+    assert!(spec.contains("production worker deployment"));
 }
 
 #[test]
