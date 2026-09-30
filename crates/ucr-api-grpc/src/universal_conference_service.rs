@@ -3993,6 +3993,22 @@ mod bearer_ingress_tests {
         }
     }
 
+    #[test]
+    fn ending_and_ended_force_entry_closed() {
+        assert!(lifecycle_entry_open(
+            UniversalConferenceLifecycle::Live,
+            true
+        ));
+        assert!(!lifecycle_entry_open(
+            UniversalConferenceLifecycle::Ending,
+            true
+        ));
+        assert!(!lifecycle_entry_open(
+            UniversalConferenceLifecycle::Ended,
+            true
+        ));
+    }
+
     fn oid(value: &str) -> OpaqueId {
         OpaqueId::new(value).expect("opaque id")
     }
@@ -4168,8 +4184,8 @@ mod universal_runtime_tests {
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
         IssueJoinGrantInput, PrepareConferenceRuntimeInput, SetConferenceMetadataInput,
         UpdateParticipantInput, accept_integration_mutation_id, conference_for_integration,
-        ensure_participant, ensure_participant_device, issue_join_grant, lifecycle_event,
-        participant_attendance, prepare_conference_runtime, resolve_join_call, resolve_join_device,
+        ensure_participant, ensure_participant_device, issue_join_grant, lifecycle_entry_open,
+        lifecycle_event, participant_attendance, prepare_conference_runtime, resolve_join_call, resolve_join_device,
         resolve_person_principal, set_conference_metadata, update_participant,
     };
 
