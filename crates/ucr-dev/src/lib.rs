@@ -1337,7 +1337,33 @@ async fn verify_dev_integration_isolation(
     subscription_id: &pb::OpaqueId,
 ) -> Result<(), String> {
     let foreign_integration_id = pb_id("dev-foreign-service-principal");
+    verify_dev_conference_read_isolation(
+        conference,
+        env,
+        conference_id,
+        owner_integration_id,
+        &foreign_integration_id,
+    )
+    .await?;
+    verify_dev_conference_join_attendance_isolation(
+        conference,
+        env,
+        conference_id,
+        &foreign_integration_id,
+    )
+    .await?;
+    verify_dev_event_subscription_isolation(events, env, subscription_id).await
+}
 
+async fn verify_dev_conference_read_isolation(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    owner_integration_id: &pb::OpaqueId,
+    foreign_integration_id: &pb::OpaqueId,
+) -> Result<(), String> {
     let mut spoof_owner = Request::new(pb::UniversalGetConferenceRequest {
         scope: Some(pb_scope(&env.scope)),
         conference_id: Some(conference_id.clone()),
@@ -1374,8 +1400,17 @@ async fn verify_dev_integration_isolation(
             Some(pb::universal_get_conference_response::Result::Error(_))
         ),
         "foreign integration cannot read owning conference",
-    )?;
+    )
+}
 
+async fn verify_dev_conference_join_attendance_isolation(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    foreign_integration_id: &pb::OpaqueId,
+) -> Result<(), String> {
     let mut foreign_join = Request::new(pb::UniversalIssueJoinGrantRequest {
         scope: Some(pb_scope(&env.scope)),
         conference_id: Some(conference_id.clone()),
@@ -1404,7 +1439,7 @@ async fn verify_dev_integration_isolation(
     let mut foreign_attendance = Request::new(pb::UniversalGetParticipantAttendanceRequest {
         scope: Some(pb_scope(&env.scope)),
         conference_id: Some(conference_id.clone()),
-        integration_id: Some(foreign_integration_id),
+        integration_id: Some(foreign_integration_id.clone()),
         external_user_id: b"dev-attendee".to_vec(),
     });
     attach_foreign_dev_credential(&mut foreign_attendance, env);
@@ -1419,8 +1454,14 @@ async fn verify_dev_integration_isolation(
             Some(pb::universal_get_participant_attendance_response::Result::Error(_))
         ),
         "foreign integration cannot read owning conference attendance",
-    )?;
+    )
+}
 
+async fn verify_dev_event_subscription_isolation(
+    events: &mut pb::event_service_client::EventServiceClient<tonic::transport::Channel>,
+    env: &DevEnvironment,
+    subscription_id: &pb::OpaqueId,
+) -> Result<(), String> {
     let mut foreign_subscription = Request::new(pb::EventGetSubscriptionRequest {
         scope: Some(pb_scope(&env.scope)),
         subscription_id: Some(subscription_id.clone()),
