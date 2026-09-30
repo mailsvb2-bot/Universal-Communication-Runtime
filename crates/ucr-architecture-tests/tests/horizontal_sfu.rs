@@ -52,7 +52,7 @@ fn horizontal_sfu_operator_control_wires_heartbeat_list_and_drain_without_public
     assert!(runtime.contains("heartbeat_sfu_node"));
     assert!(runtime.contains("prune_expired_nodes"));
     assert!(runtime.contains("mark_draining"));
-    assert!(spec.contains("workers must re-register after process restart"));
+    assert!(spec.contains("Workers must re-register after process restart"));
     assert!(spec.contains("concrete inter-node encrypted-media transport"));
 }
 
