@@ -1447,6 +1447,7 @@ async fn verify_foreign_conference_isolation(
         owner_integration_id,
     )
     .await?;
+    verify_foreign_attendance_read_isolation(conference, env, foreign, conference_id).await?;
     verify_foreign_conference_mutation_isolation(conference, env, foreign, conference_id).await
 }
 
@@ -1495,6 +1496,35 @@ async fn verify_foreign_conference_read_isolation(
             Some(pb::universal_get_conference_response::Result::Error(_))
         ),
         "foreign credential owner integration spoof denial",
+    )
+}
+
+async fn verify_foreign_attendance_read_isolation(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    foreign: &DevServiceAccount,
+    conference_id: &pb::OpaqueId,
+) -> Result<(), String> {
+    let mut attendance = Request::new(pb::UniversalGetParticipantAttendanceRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(foreign.integration_id.clone()),
+        external_user_id: b"dev-attendee".to_vec(),
+    });
+    attach_dev_service_account(&mut attendance, foreign);
+    let attendance = conference
+        .get_participant_attendance(attendance)
+        .await
+        .map_err(|error| format!("self-check foreign GetParticipantAttendance: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            attendance.result,
+            Some(pb::universal_get_participant_attendance_response::Result::Error(_))
+        ),
+        "foreign participant attendance read denial",
     )
 }
 
@@ -1553,6 +1583,31 @@ async fn verify_foreign_conference_mutation_isolation(
     )
 }
 
+async fn verify_foreign_subscription_visibility_isolation(
+    events: &mut pb::event_service_client::EventServiceClient<tonic::transport::Channel>,
+    env: &DevEnvironment,
+    foreign: &DevServiceAccount,
+    owner_subscription_id: &pb::OpaqueId,
+) -> Result<(), String> {
+    let mut request = Request::new(pb::EventGetSubscriptionRequest {
+        scope: Some(pb_scope(&env.scope)),
+        subscription_id: Some(owner_subscription_id.clone()),
+    });
+    attach_dev_service_account(&mut request, foreign);
+    let response = events
+        .get_subscription(request)
+        .await
+        .map_err(|error| format!("self-check foreign GetSubscription: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            response.result,
+            Some(pb::event_get_subscription_response::Result::Error(_))
+        ),
+        "foreign owner subscription read denial",
+    )
+}
+
 async fn verify_foreign_attendance_isolation(
     events: &mut pb::event_service_client::EventServiceClient<tonic::transport::Channel>,
     env: &DevEnvironment,
@@ -1560,6 +1615,14 @@ async fn verify_foreign_attendance_isolation(
     owner_subscription_id: &pb::OpaqueId,
     foreign_subscription_id: pb::OpaqueId,
 ) -> Result<(), String> {
+    verify_foreign_subscription_visibility_isolation(
+        events,
+        env,
+        foreign,
+        owner_subscription_id,
+    )
+    .await?;
+
     let mut owner_lookup = Request::new(pb::EventPollRequest {
         scope: Some(pb_scope(&env.scope)),
         subscription_id: Some(owner_subscription_id.clone()),
