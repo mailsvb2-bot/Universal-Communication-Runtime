@@ -8,9 +8,14 @@ integration capability endpoint.
 
 ## Access boundary
 
-`ucr.v1.OperatorRuntimeService` is served only by the loopback `ucr-runtime` daemon. A public
-HTTPS/WebRTC gateway MUST NOT forward or expose this service. Integration service credentials do not
-grant operator access, and the operator response contains no tenant objects, participant identities,
+`ucr.v1.OperatorRuntimeService` is served only by the loopback `ucr-runtime` daemon on a **separate
+operator listener** from the public/integration upstream. The CLI defaults that private listener to
+`127.0.0.1:50052` via `--operator-bind`; `--bind` remains the public API/realtime upstream that a TLS
+edge may proxy. The runtime rejects an explicit nonzero operator bind equal to the public bind.
+Because `ucr-https-edge` is intentionally a raw TLS-to-loopback byte proxy, this socket separation is
+the enforcement boundary: a public HTTPS/WebRTC gateway MUST NOT point at or forward the operator
+listener. Integration service credentials do not grant operator access, and the operator response
+contains no tenant objects, participant identities,
 join tokens, webhook secrets, TURN credentials, media keys, message plaintext or other business data.
 
 ## Components
