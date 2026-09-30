@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -56,6 +57,20 @@ use super::{
 pub const REALTIME_AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const REALTIME_BEARER_PREFIX: &str = "Bearer ";
 const REALTIME_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RealtimeCleanupSweep {
+    pub inspected_calls: usize,
+    pub closed_calls: usize,
+    pub sessions_reaped: usize,
+    pub ephemeral_entries_removed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeCallCleanupDecision {
+    Keep,
+    Cleanup,
+}
 
 #[derive(Debug)]
 struct BandwidthQuotaSink<'a> {
