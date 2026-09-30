@@ -142,3 +142,47 @@ fn packet_loss_recovery_restarts_ice_for_the_same_live_webrtc_session() {
 
     assert_eq!(provider.close_session(&session_id), Ok(()));
 }
+
+
+#[test]
+fn deterministic_jitter_stays_bounded_on_high_latency_links() {
+    fn observe_latencies() -> Vec<u64> {
+        let mut network = ChaosTransport::with_peers(2);
+        network
+            .apply(Fault::SetLatency(PeerId(0), PeerId(1), 400))
+            .expect("high latency");
+        network
+            .apply(Fault::SetJitter(PeerId(0), PeerId(1), 120))
+            .expect("jitter");
+
+        (10_u64..18)
+            .map(|packet_id| {
+                network
+                    .send(LabPacket::new(
+                        PacketId(packet_id),
+                        PeerId(0),
+                        PeerId(1),
+                        RouteKind::Direct,
+                        b"jitter-probe".to_vec(),
+                    ))
+                    .expect("jittered delivery")
+                    .pop()
+                    .expect("delivered probe")
+                    .latency_ms
+            })
+            .collect()
+    }
+
+    let first = observe_latencies();
+    let replay = observe_latencies();
+
+    assert_eq!(first, replay, "chaos jitter must be deterministic");
+    assert!(
+        first.iter().all(|latency_ms| (400..=520).contains(latency_ms)),
+        "jitter must stay inside the configured latency envelope"
+    );
+    assert!(
+        first.windows(2).any(|pair| pair[0] != pair[1]),
+        "jitter evidence must contain actual latency variation"
+    );
+}
