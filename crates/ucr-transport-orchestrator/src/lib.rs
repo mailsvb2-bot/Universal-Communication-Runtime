@@ -13,17 +13,18 @@ use ucr_core::{
     TransportHealth, TransportProvider,
 };
 use ucr_model::{
-    CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, EndpointDescriptor, EndpointKind,
-    IntentConstraints, MediaThermalState, TenantScope, TransportOrchestrationDecision,
-    TransportResourceSnapshot, TransportRouteDecision, TransportRouteTelemetry,
-    TransportRoutingHint,
+    CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, EndpointDescriptor,
+    EndpointKind, IntentConstraints, MediaThermalState, TenantScope,
+    TransportOrchestrationDecision, TransportResourceSnapshot, TransportRouteDecision,
+    TransportRouteTelemetry, TransportRoutingHint,
 };
 use ucr_protocol::{
     DEFAULT_MAX_PAYLOAD_LEN, IntentError, MAX_TRANSPORT_BANDWIDTH_BPS,
     TransportOrchestratorProtocolError, canonical_communication_intent,
-    canonical_transport_routing_hints, device_allows_protected_access, validate_endpoint_descriptor,
-    validate_transport_priority_class, validate_transport_resource_snapshot,
-    validate_transport_route_candidate_count, validate_transport_route_telemetry,
+    canonical_transport_routing_hints, device_allows_protected_access,
+    validate_endpoint_descriptor, validate_transport_priority_class,
+    validate_transport_resource_snapshot, validate_transport_route_candidate_count,
+    validate_transport_route_telemetry,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -521,8 +522,8 @@ mod tests {
         CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, CorrelationContext,
         DeviceDescriptor, DeviceLifecycleState, EndpointAddress, EndpointDescriptor, EndpointId,
         EndpointKind, IdentityId, IntentConstraints, IntentId, MediaThermalState, OpaqueId,
-        TenantId, TenantScope,
-        TransportResourceSnapshot, TransportRouteTelemetry, TransportRoutingHint,
+        TenantId, TenantScope, TransportResourceSnapshot, TransportRouteTelemetry,
+        TransportRoutingHint,
     };
 
     use ucr_storage_memory::MemoryLocalStore;
@@ -716,7 +717,9 @@ mod tests {
             identity_id: identity(),
             state: DeviceLifecycleState::Active,
         };
-        store.register_device(&scope(), &descriptor).expect("register device");
+        store
+            .register_device(&scope(), &descriptor)
+            .expect("register device");
         let orchestrator = TransportOrchestrator::new(&AllowPolicy);
         let value = intent();
 
@@ -725,7 +728,15 @@ mod tests {
                 &value,
                 resources(),
                 &[],
-                vec![option(&provider, "ucr.transport.test", "route", 10, 10, 9999, 1)],
+                vec![option(
+                    &provider,
+                    "ucr.transport.test",
+                    "route",
+                    10,
+                    10,
+                    9999,
+                    1,
+                )],
                 &store,
             )
             .expect("active device route");
@@ -743,7 +754,15 @@ mod tests {
                     &value,
                     resources(),
                     &[],
-                    vec![option(&provider, "ucr.transport.test", "route", 10, 10, 9999, 1)],
+                    vec![option(
+                        &provider,
+                        "ucr.transport.test",
+                        "route",
+                        10,
+                        10,
+                        9999,
+                        1,
+                    )],
                     &store,
                 )
                 .unwrap_err(),
