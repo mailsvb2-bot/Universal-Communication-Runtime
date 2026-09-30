@@ -642,6 +642,7 @@ impl OperatorSfuClusterControl for ProductionOperatorHealthSource {
         let lease_expires_at_unix_ms = now_unix_ms
             .checked_add(i64::from(heartbeat.lease_ttl_ms))
             .ok_or(OperatorSfuClusterError::InvalidNode)?;
+        let endpoint = heartbeat.endpoint;
         let node = SfuNodeDescriptor {
             node_id: heartbeat.node_id,
             region: heartbeat.region,
@@ -655,7 +656,7 @@ impl OperatorSfuClusterControl for ProductionOperatorHealthSource {
             .map_err(|_| OperatorSfuClusterError::Unavailable)?;
         directory.prune_expired_nodes(now_unix_ms);
         directory
-            .upsert_node(node.clone())
+            .upsert_node_with_endpoint(node.clone(), endpoint)
             .map_err(map_sfu_cluster_error)?;
         Ok(node)
     }
@@ -699,8 +700,12 @@ impl OperatorSfuClusterControl for ProductionOperatorHealthSource {
 
 const fn map_sfu_cluster_error(error: SfuPlacementError) -> OperatorSfuClusterError {
     match error {
-        SfuPlacementError::InvalidNode => OperatorSfuClusterError::InvalidNode,
-        SfuPlacementError::NoHealthyCapacity => OperatorSfuClusterError::Unavailable,
+        SfuPlacementError::InvalidNode | SfuPlacementError::InvalidEndpoint => {
+            OperatorSfuClusterError::InvalidNode
+        }
+        SfuPlacementError::EndpointUnavailable | SfuPlacementError::NoHealthyCapacity => {
+            OperatorSfuClusterError::Unavailable
+        }
     }
 }
 
@@ -2458,6 +2463,10 @@ mod tests {
             active_sessions: 2,
             max_sessions: 100,
             lease_ttl_ms: 30_000,
+            endpoint: ucr_sfu::SfuNodeEndpoint::new(
+                "127.0.0.1:7001".parse().expect("endpoint"),
+            )
+            .expect("valid endpoint"),
         };
 
         let basic = ProductionOperatorHealthSource::basic(Arc::clone(&store));
