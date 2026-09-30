@@ -514,15 +514,18 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use ucr_core::{
-        CanonicalTransportError, PolicyDecision, PolicyEvaluator, RouteCandidate, TransportHealth,
-        TransportProvider,
+        CanonicalTransportError, DeviceLifecycleStore, PolicyDecision, PolicyEvaluator,
+        RouteCandidate, TransportHealth, TransportProvider,
     };
     use ucr_model::{
         CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, CorrelationContext,
-        EndpointAddress, EndpointDescriptor, EndpointId, EndpointKind, IdentityId,
-        IntentConstraints, IntentId, MediaThermalState, OpaqueId, TenantId, TenantScope,
+        DeviceDescriptor, DeviceLifecycleState, EndpointAddress, EndpointDescriptor, EndpointId,
+        EndpointKind, IdentityId, IntentConstraints, IntentId, MediaThermalState, OpaqueId,
+        TenantId, TenantScope,
         TransportResourceSnapshot, TransportRouteTelemetry, TransportRoutingHint,
     };
+
+    use ucr_storage_memory::MemoryLocalStore;
 
     use super::{TransportOrchestrator, TransportOrchestratorError, TransportRouteOption};
 
@@ -697,6 +700,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn protected_plan_filters_revoked_device_before_transport() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let provider = MockProvider {
+            capability: "ucr.transport.test".into(),
+            health: TransportHealth::Healthy,
+            calls: Arc::clone(&calls),
+            result: Ok(()),
+        };
+        let store = MemoryLocalStore::default();
+        let device_id = ucr_model::DeviceId::from_opaque(oid("device-route"));
+        let descriptor = DeviceDescriptor {
+            device_id: device_id.clone(),
+            identity_id: identity(),
+            state: DeviceLifecycleState::Active,
+        };
+        store.register_device(&scope(), &descriptor).expect("register device");
+        let orchestrator = TransportOrchestrator::new(&AllowPolicy);
+        let value = intent();
+
+        let active = orchestrator
+            .plan_protected(
+                &value,
+                resources(),
+                &[],
+                vec![option(&provider, "ucr.transport.test", "route", 10, 10, 9999, 1)],
+                &store,
+            )
+            .expect("active device route");
+        orchestrator
+            .transmit_primary(&value, &active, b"encrypted-protected-content")
+            .expect("active device transport");
+        assert_eq!(calls.lock().expect("calls").len(), 1);
+
+        store
+            .revoke_device(&scope(), &device_id, &identity())
+            .expect("revoke device");
+        assert_eq!(
+            orchestrator
+                .plan_protected(
+                    &value,
+                    resources(),
+                    &[],
+                    vec![option(&provider, "ucr.transport.test", "route", 10, 10, 9999, 1)],
+                    &store,
+                )
+                .unwrap_err(),
+            TransportOrchestratorError::NoEligibleRoute
+        );
+        assert_eq!(
+            calls.lock().expect("calls").len(),
+            1,
+            "revoked device must be filtered before provider invocation"
+        );
+    }
     #[test]
     fn policy_and_hard_intent_constraints_filter_before_ranking() {
         let calls = Arc::new(Mutex::new(Vec::new()));
