@@ -842,6 +842,26 @@ impl RealtimeSessionRegistry {
         Ok(entries.len())
     }
 
+    /// Returns a bounded snapshot of all non-expired authenticated realtime claims.
+    ///
+    /// The snapshot is for internal runtime cleanup only. It preserves exact signed claim binding
+    /// and does not create a second durable session owner. Expiry pruning still flows through the
+    /// registry's canonical cleanup queue so SFU placement release cannot be bypassed.
+    ///
+    /// # Errors
+    /// Fails when the bounded registry state is unavailable.
+    pub fn active_claims_at(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<Vec<RealtimeSessionClaims>, RealtimeRegistryError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        self.prune_expired(&mut entries, now_unix_ms)?;
+        Ok(entries.iter().map(|entry| entry.claims.clone()).collect())
+    }
+
     /// Returns the number of non-expired realtime sessions that belong to one canonical Call.
     ///
     /// This query deliberately reads the existing session registry rather than maintaining a
