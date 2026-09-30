@@ -123,6 +123,7 @@ pub enum Fault {
     Partition(PeerId, PeerId),
     Merge(PeerId, PeerId),
     SetLatency(PeerId, PeerId, u64),
+    SetJitter(PeerId, PeerId, u64),
     SetThrottle(PeerId, PeerId, u64),
     SetClockDrift(PeerId, i64),
     SetSlowConsumer(PeerId, bool),
@@ -196,6 +197,7 @@ pub struct ChaosTransport {
     infrastructure: BTreeMap<InfrastructureComponent, bool>,
     partitions: BTreeSet<(PeerId, PeerId)>,
     latency_ms: BTreeMap<(PeerId, PeerId), u64>,
+    jitter_ms: BTreeMap<(PeerId, PeerId), u64>,
     throttle_bytes_per_second: BTreeMap<(PeerId, PeerId), u64>,
     minimum_send_battery_percent: u8,
     one_shot: BTreeSet<OneShotFault>,
@@ -226,6 +228,7 @@ impl ChaosTransport {
             infrastructure,
             partitions: BTreeSet::new(),
             latency_ms: BTreeMap::new(),
+            jitter_ms: BTreeMap::new(),
             throttle_bytes_per_second: BTreeMap::new(),
             minimum_send_battery_percent: 0,
             one_shot: BTreeSet::new(),
@@ -275,6 +278,15 @@ impl ChaosTransport {
                 self.require_peer(left)?;
                 self.require_peer(right)?;
                 self.latency_ms.insert(peer_pair(left, right), latency_ms);
+            }
+            Fault::SetJitter(left, right, max_jitter_ms) => {
+                self.require_peer(left)?;
+                self.require_peer(right)?;
+                if max_jitter_ms == 0 {
+                    self.jitter_ms.remove(&peer_pair(left, right));
+                } else {
+                    self.jitter_ms.insert(peer_pair(left, right), max_jitter_ms);
+                }
             }
             Fault::SetThrottle(left, right, bytes_per_second) => {
                 self.require_peer(left)?;
@@ -361,6 +373,13 @@ impl ChaosTransport {
             .ok_or(ChaosError::UnknownPeer(packet.destination))?;
         let pair = peer_pair(packet.source, packet.destination);
         let base_latency = self.latency_ms.get(&pair).copied().unwrap_or(0);
+        let jitter_delay_ms = self
+            .jitter_ms
+            .get(&pair)
+            .copied()
+            .map_or(0, |max_jitter_ms| {
+                deterministic_jitter_delay_ms(packet.packet_id, max_jitter_ms)
+            });
         let throttle_bytes_per_second = self.throttle_bytes_per_second.get(&pair).copied();
         let throttle_delay_ms = throttle_bytes_per_second.map_or(0, |rate| {
             let bytes = u64::try_from(packet.payload.len()).expect("payload length must fit u64");
@@ -368,6 +387,7 @@ impl ChaosTransport {
         });
         let slow_consumer_delay_ms = if state.slow_consumer { 5_000 } else { 0 };
         let latency_ms = base_latency
+            .saturating_add(jitter_delay_ms)
             .saturating_add(throttle_delay_ms)
             .saturating_add(slow_consumer_delay_ms);
         Ok(WireDelivery {
@@ -430,6 +450,18 @@ impl ChaosTransport {
             .get_mut(&peer)
             .ok_or(ChaosError::UnknownPeer(peer))
     }
+}
+
+fn deterministic_jitter_delay_ms(packet_id: PacketId, max_jitter_ms: u64) -> u64 {
+    if max_jitter_ms == 0 {
+        return 0;
+    }
+    let mixed = packet_id
+        .0
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .rotate_left(17)
+        ^ packet_id.0.rotate_right(11);
+    mixed % max_jitter_ms.saturating_add(1)
 }
 
 fn route_component(route: RouteKind) -> Option<InfrastructureComponent> {
