@@ -1617,6 +1617,57 @@ mod subscription_state_tests {
     }
 
     #[test]
+    fn tracked_call_cleanup_is_bounded_idempotent_and_scope_exact() {
+        let state = ConferenceRuntimeState::new();
+        let call_id = CallId::from_opaque(oid("call-prune"));
+        state
+            .subscriptions
+            .lock()
+            .expect("subscriptions")
+            .push(entry());
+        state
+            .raised_hands
+            .lock()
+            .expect("raised hands")
+            .push(RaisedHandState {
+                scope: scope(),
+                call_id: call_id.clone(),
+                conference_id: GroupId::from_opaque(oid("group-prune")),
+                participant: principal("bob"),
+            });
+        state
+            .active_speaker_reports
+            .lock()
+            .expect("speaker reports")
+            .push(ActiveSpeakerState {
+                scope: scope(),
+                call_id: call_id.clone(),
+                participant: principal("alice"),
+                level: 90,
+                reported_at_unix_ms: 1_000,
+            });
+
+        let tracked = state.tracked_calls().expect("tracked calls");
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].0, scope());
+        assert_eq!(tracked[0].1, call_id);
+
+        assert_eq!(
+            state
+                .clear_call_ephemeral_state(&scope(), &tracked[0].1)
+                .expect("clear"),
+            3
+        );
+        assert!(state.tracked_calls().expect("tracked after clear").is_empty());
+        assert_eq!(
+            state
+                .clear_call_ephemeral_state(&scope(), &tracked[0].1)
+                .expect("idempotent clear"),
+            0
+        );
+    }
+
+    #[test]
     fn pruning_releases_recipient_source_and_terminated_call_state() {
         let call_id = CallId::from_opaque(oid("call-prune"));
 
