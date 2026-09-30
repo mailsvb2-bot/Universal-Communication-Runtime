@@ -594,13 +594,14 @@ where
                         &idempotency_key,
                         now_unix_ms,
                     )?;
+                    let next_entry_open = lifecycle_entry_open(target, current.entry_open);
                     self.store
                         .transition_universal_conference_with_event(
                             &scope,
                             &conference_id,
                             current.revision,
                             target,
-                            current.entry_open,
+                            next_entry_open,
                             event.as_ref(),
                         )
                         .map_err(map_store_error)
@@ -653,6 +654,15 @@ where
                         &conference_id,
                         &integration_id,
                     )?;
+                    if entry_open
+                        && matches!(
+                            current.lifecycle,
+                            UniversalConferenceLifecycle::Ending
+                                | UniversalConferenceLifecycle::Ended
+                        )
+                    {
+                        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+                    }
                     if current.entry_open == entry_open {
                         return Ok(current);
                     }
@@ -3784,6 +3794,20 @@ fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
         .persist_universal_conference_profile(&profile)
         .map_err(map_store_error)?;
     Ok(profile)
+}
+
+const fn lifecycle_entry_open(
+    target: UniversalConferenceLifecycle,
+    current_entry_open: bool,
+) -> bool {
+    if matches!(
+        target,
+        UniversalConferenceLifecycle::Ending | UniversalConferenceLifecycle::Ended
+    ) {
+        false
+    } else {
+        current_entry_open
+    }
 }
 
 const fn pb_lifecycle(value: UniversalConferenceLifecycle) -> pb::UniversalConferenceLifecycle {
