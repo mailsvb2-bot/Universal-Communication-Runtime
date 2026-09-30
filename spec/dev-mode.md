@@ -6,13 +6,17 @@ Prepared developer harness for the Reference Messenger/public UCR boundary. The 
 
 ## Provided environment
 
-`ucr dev` creates one isolated local environment with a canonical local Identity and Active Device, a canonical mock-peer Identity and Active Device, in-memory test storage, an authenticated Service Principal with exact dev-scope permissions and quota, a test transport, redaction-safe debug events, diagnostics, and a loopback public gRPC API.
+`ucr dev` creates one isolated local environment with a canonical local Identity and Active Device, a canonical mock-peer Identity and Active Device, ephemeral local SQLite test storage, an authenticated Service Principal with exact dev-scope permissions and quota, a test transport, redaction-safe debug events, diagnostics, and a loopback public gRPC API.
 
 Authentication, authorization and quota admission remain enabled. The CLI refuses non-loopback binds. The generated dev credential is ephemeral to the process and is printed only so a local developer can call the authenticated loopback API.
 
 ## Public API proof
 
-`ucr dev --check` starts real loopback public services and proves authenticated Identity creation, Conversation creation, Message persistence, Group creation and Call start through the same `ucr.v1` service bindings used by external consumers. The dev harness may compose canonical owners to host the local node, but it does not add alternate Message, Group, Call, Delivery, routing, retry or Identity owners.
+`ucr dev --check` starts real loopback public services and proves authenticated Identity creation, Conversation creation, Message persistence, Group creation and Call start through the same `ucr.v1` service bindings used by external consumers.
+
+The same dev host also serves the public `UniversalConferenceService`, `RealtimeService` and `EventService` over one shared canonical ephemeral SQLite store, `JoinTokenIssuer`, `ConferenceRuntimeState` and `RealtimeSessionRegistry`. Its self-check executes a business-neutral integration flow through those public RPCs: Conference creation plus exact idempotent retry, owner/attendee provisioning, canonical Device provisioning, runtime preparation, waiting -> live lifecycle, explicit attendee entry-open, signed personal join-grant issuance, realtime join/leave and the integration-owned attendance Event projection. The self-check does not call a private Conference mutation path to simulate success; only the signed-grant claim lookup needed to construct the same Realtime request fields that the reference browser derives from `#ucr_join` is performed locally.
+
+The dev harness may compose canonical owners to host the local node, but it does not add alternate Message, Group, Call, Conference, Event, Delivery, routing, retry or Identity owners.
 
 ## Sandbox and test transport
 
@@ -43,11 +47,11 @@ existing canonical dev host:
 - temporary TURN REST credentials and the canonical `ucr dev` Service Credential are printed to
   container logs for local testing.
 
-The package is intentionally ephemeral: UCR canonical state remains the existing in-memory
-`ucr dev` state, and all published host ports bind to `127.0.0.1`. The package does not weaken
+The package is intentionally ephemeral: UCR canonical state remains one process-local SQLite
+`ucr dev` store created under the operating-system temporary directory and removed on clean shutdown, and all published host ports bind to `127.0.0.1`. The package does not weaken
 the dev binary's loopback rule or claim that the static browser page can mint its own join authority.
 A real `#ucr_join` grant is still required by the Conference client.
 
 ## Nonclaims
 
-Dev Mode is memory-backed and loopback-only. It is not a production listener, durable production deployment, browser-native node, Relay, discovery service, production bridge, or insecure mode. It must never be used to justify disabling authentication, tenant scope, cryptography, permissions or other production security controls.
+Dev Mode is ephemeral SQLite-backed and loopback-only. It is not a production listener, durable production deployment, browser-native node, Relay, discovery service, production bridge, or insecure mode. It must never be used to justify disabling authentication, tenant scope, cryptography, permissions or other production security controls.

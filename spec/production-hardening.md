@@ -19,7 +19,7 @@ The workspace defines four explicit build profiles required by the Canon:
 
 Selecting the `production` Cargo profile is **not** a Production maturity claim. Build profile and maturity state are independent dimensions.
 
-`ucr dev` remains development-only. It uses a memory test store, test transport, loopback API and development bootstrap credentials. Phase 45 MUST NOT package or describe that development environment as the production runtime.
+`ucr dev` remains development-only. It uses an automatically created ephemeral SQLite test store, test transport, loopback API and development bootstrap credentials. The SQLite choice is required so local Universal Conference flows exercise the same canonical MLS-capable storage contract; it does not turn Dev Mode into a durable deployment. Phase 45 MUST NOT package or describe that development environment as the production runtime.
 
 ## Fail-closed readiness evidence
 
@@ -104,7 +104,7 @@ No plaintext messages, decrypted attachments, private keys, recovery secrets or 
 
 The runtime requires an explicitly initialized SQLite database before `serve`. It does not auto-create development credentials, identities or test transports. Plaintext service binding is loopback-only. Remote service mode is not claimed until an explicit authenticated TLS/public-listener boundary exists.
 
-The runtime must not depend on `TestTransport`, `MemoryLocalStore`, sandbox fault injection or dev credential printing.
+The runtime must not depend on `TestTransport`, sandbox fault injection, auto-created temporary state or dev credential printing. Production storage remains explicitly initialized durable SQLite; sharing the canonical SQLite implementation with Dev Mode does not merge their lifecycle or trust boundaries.
 
 ## Platform signing boundary
 

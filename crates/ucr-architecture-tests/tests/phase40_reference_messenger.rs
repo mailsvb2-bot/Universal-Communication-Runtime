@@ -506,7 +506,9 @@ fn phase40_dev_mode_keeps_auth_on_and_exercises_public_api() {
 
     assert!(workspace.contains("\"crates/ucr-dev\""));
     for required in [
-        "MemoryLocalStore::default()",
+        "SqliteLocalStore::open",
+        "std::env::temp_dir()",
+        "DevStoreCleanup",
         "issue_service_credential",
         "RUNTIME_PERMISSION_IDS",
         "SystemServiceQuotaClock",
@@ -516,6 +518,9 @@ fn phase40_dev_mode_keeps_auth_on_and_exercises_public_api() {
         "verify_integration_round_trip",
         "verify_group_round_trip",
         "verify_call_round_trip",
+        "verify_universal_conference_round_trip",
+        "universal_conference_service_server",
+        "realtime_service_server",
         "127.0.0.1:50051",
         "is_loopback()",
     ] {

@@ -1,9 +1,14 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    fs,
     net::SocketAddr,
-    sync::{Arc, Mutex},
-    time::Duration,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::net::TcpListener;
@@ -11,11 +16,13 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, transport::Server};
 use ucr_api_grpc::{
     GrpcAttachmentService, GrpcCallService, GrpcDeviceService, GrpcEventService, GrpcGroupService,
-    GrpcIntegrationService, GrpcStoreForwardService, GrpcSyncService, attach_service_credential,
-    attachment_service_server, call_service_server, device_service_server, event_service_server,
-    group_service_server, integration_service_server, pb, store_forward_service_server,
-    sync_service_server,
+    GrpcIntegrationService, GrpcRealtimeService, GrpcStoreForwardService, GrpcSyncService,
+    GrpcUniversalConferenceService, attach_service_credential, attachment_service_server,
+    call_service_server, device_service_server, event_service_server, group_service_server,
+    integration_service_server, pb, realtime_service_server, store_forward_service_server,
+    sync_service_server, universal_conference_service_server,
 };
+use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
     CanonicalTransportError, ClassifiedTransportFailure, DeviceLifecycleStore, IdentityStore,
     PermissionGrantStore, RouteCandidate, ServiceCredentialSecret, ServiceCredentialStore,
@@ -29,10 +36,24 @@ use ucr_model::{
     ServiceCredentialId, ServiceQuotaPolicy, TenantId, TenantScope,
 };
 use ucr_protocol::{RUNTIME_PERMISSION_IDS, attachment_content_id};
-use ucr_storage_memory::MemoryLocalStore;
+use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
+use ucr_storage_sqlite::SqliteLocalStore;
 
 pub const DEFAULT_DEV_BIND: &str = "127.0.0.1:50051";
 pub const DEV_TRANSPORT_CAPABILITY: &str = "ucr.transport.test.dev";
+
+static DEV_STORE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug)]
+struct DevStoreCleanup(PathBuf);
+
+impl Drop for DevStoreCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+        let _ = fs::remove_file(format!("{}-wal", self.0.display()));
+        let _ = fs::remove_file(format!("{}-shm", self.0.display()));
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestFault {
@@ -250,7 +271,8 @@ impl TransportProvider for TestTransport {
 
 #[derive(Debug)]
 pub struct DevEnvironment {
-    store: Arc<MemoryLocalStore>,
+    store: Arc<SqliteLocalStore>,
+    _store_cleanup: DevStoreCleanup,
     transport: Arc<TestTransport>,
     scope: TenantScope,
     local_identity_id: IdentityId,
@@ -259,16 +281,28 @@ pub struct DevEnvironment {
     mock_peer_device_id: DeviceId,
     credential_id: ServiceCredentialId,
     credential_secret: ServiceCredentialSecret,
+    join_issuer: Arc<JoinTokenIssuer>,
+    conference_state: Arc<ConferenceRuntimeState>,
+    realtime_registry: Arc<RealtimeSessionRegistry>,
     debug_events: Mutex<Vec<String>>,
 }
 
 impl DevEnvironment {
-    /// Creates one isolated, authenticated dev environment using canonical in-memory owners.
+    /// Creates one isolated, authenticated dev environment using the canonical `SQLite` owner.
     ///
     /// # Errors
     /// Returns an error when canonical seed state, credentials, grants or quota cannot be created.
     pub fn new() -> Result<Self, String> {
-        let store = Arc::new(MemoryLocalStore::default());
+        let store_sequence = DEV_STORE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let store_path = std::env::temp_dir().join(format!(
+            "ucr-dev-{}-{store_sequence}.sqlite3",
+            std::process::id()
+        ));
+        let store = Arc::new(
+            SqliteLocalStore::open(&store_path)
+                .map_err(|error| format!("open ephemeral dev store: {error:?}"))?,
+        );
+        let store_cleanup = DevStoreCleanup(store_path);
         let scope = dev_scope();
         let local_identity_id = identity_id("dev-local-identity");
         let local_device_id = device_id("dev-local-device");
@@ -307,8 +341,19 @@ impl DevEnvironment {
             })
             .map_err(|error| format!("quota seed: {error:?}"))?;
 
+        let join_issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([0x44_u8; 32]),
+                "https://join.ucr-dev.local/join",
+            )
+            .map_err(|error| format!("join issuer: {error:?}"))?,
+        );
+        let conference_state = Arc::new(ConferenceRuntimeState::new());
+        let realtime_registry = Arc::new(RealtimeSessionRegistry::default());
+
         Ok(Self {
             store,
+            _store_cleanup: store_cleanup,
             transport: Arc::new(TestTransport::default()),
             scope,
             local_identity_id,
@@ -317,6 +362,9 @@ impl DevEnvironment {
             mock_peer_device_id,
             credential_id: record.credential_id,
             credential_secret,
+            join_issuer,
+            conference_state,
+            realtime_registry,
             debug_events: Mutex::new(vec![
                 "dev.identity.ready".to_owned(),
                 "dev.node.ready".to_owned(),
@@ -460,13 +508,18 @@ impl DevEnvironment {
             "UCR_DEV_CREDENTIAL_SECRET_HEX={}",
             self.credential_secret_hex()
         );
-        println!("UCR_DEV_MODE=development-only auth=enabled storage=memory loopback=true");
+        println!(
+            "UCR_DEV_MODE=development-only auth=enabled storage=sqlite-ephemeral loopback=true"
+        );
 
         let incoming = TcpListenerStream::new(listener);
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
         let store = Arc::clone(&self.store);
         let authorization = Arc::clone(&self.store);
+        let join_issuer = Arc::clone(&self.join_issuer);
+        let conference_state = Arc::clone(&self.conference_state);
+        let realtime_registry = Arc::clone(&self.realtime_registry);
 
         Server::builder()
             .add_service(integration_service_server(GrpcIntegrationService::new(
@@ -505,6 +558,23 @@ impl DevEnvironment {
                 Arc::clone(&authorization),
                 Arc::clone(&store),
             )))
+            .add_service(universal_conference_service_server(
+                GrpcUniversalConferenceService::with_state_and_join_issuer(
+                    Arc::clone(&clock),
+                    Arc::clone(&authorization),
+                    Arc::clone(&store),
+                    Arc::clone(&conference_state),
+                    Arc::clone(&join_issuer),
+                ),
+            ))
+            .add_service(realtime_service_server(GrpcRealtimeService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+                join_issuer,
+                realtime_registry,
+                conference_state,
+            )))
             .add_service(store_forward_service_server(GrpcStoreForwardService::new(
                 clock,
                 authorization,
@@ -539,7 +609,7 @@ pub struct DevDiagnostics {
 }
 
 fn seed_identity_and_device(
-    store: &MemoryLocalStore,
+    store: &SqliteLocalStore,
     scope: &TenantScope,
     identity_id: &IdentityId,
     device_id: &DeviceId,
@@ -632,6 +702,10 @@ async fn verify_public_api(env: &Arc<DevEnvironment>) -> Result<(), String> {
     let clock = Arc::new(SystemServiceQuotaClock);
     let store = Arc::clone(&env.store);
     let authorization = Arc::clone(&env.store);
+    let event_clock = Arc::new(SystemEventDeliveryClock);
+    let join_issuer = Arc::clone(&env.join_issuer);
+    let conference_state = Arc::clone(&env.conference_state);
+    let realtime_registry = Arc::clone(&env.realtime_registry);
     let server = tokio::spawn(async move {
         Server::builder()
             .add_service(integration_service_server(GrpcIntegrationService::new(
@@ -650,9 +724,32 @@ async fn verify_public_api(env: &Arc<DevEnvironment>) -> Result<(), String> {
                 Arc::clone(&store),
             )))
             .add_service(call_service_server(GrpcCallService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
+            .add_service(event_service_server(GrpcEventService::new(
+                Arc::clone(&clock),
+                event_clock,
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
+            .add_service(universal_conference_service_server(
+                GrpcUniversalConferenceService::with_state_and_join_issuer(
+                    Arc::clone(&clock),
+                    Arc::clone(&authorization),
+                    Arc::clone(&store),
+                    Arc::clone(&conference_state),
+                    Arc::clone(&join_issuer),
+                ),
+            ))
+            .add_service(realtime_service_server(GrpcRealtimeService::new(
                 clock,
                 authorization,
                 store,
+                join_issuer,
+                realtime_registry,
+                conference_state,
             )))
             .serve_with_incoming(incoming)
             .await
@@ -662,6 +759,7 @@ async fn verify_public_api(env: &Arc<DevEnvironment>) -> Result<(), String> {
     verify_attachment_round_trip(&endpoint, env).await?;
     verify_group_round_trip(&endpoint, env).await?;
     verify_call_round_trip(&endpoint, env).await?;
+    verify_universal_conference_round_trip(&endpoint, env).await?;
     server.abort();
     Ok(())
 }
@@ -885,6 +983,455 @@ async fn verify_call_round_trip(endpoint: &str, env: &DevEnvironment) -> Result<
         ),
         "StartCall",
     )
+}
+
+async fn verify_universal_conference_round_trip(
+    endpoint: &str,
+    env: &DevEnvironment,
+) -> Result<(), String> {
+    let now_unix_ms = system_time_unix_ms("self-check system clock")?;
+    let integration_id = pb_id("dev-service-principal");
+    let mut conference =
+        pb::universal_conference_service_client::UniversalConferenceServiceClient::connect(
+            endpoint.to_owned(),
+        )
+        .await
+        .map_err(|error| format!("self-check UniversalConferenceService connect: {error}"))?;
+
+    let conference_id =
+        create_dev_universal_conference(&mut conference, env, &integration_id, now_unix_ms).await?;
+    prepare_dev_universal_conference(&mut conference, env, &conference_id, &integration_id).await?;
+    open_dev_universal_conference(&mut conference, env, &conference_id, &integration_id).await?;
+
+    let (mut events, subscription_id) = create_dev_attendance_subscription(endpoint, env).await?;
+    let (token, claims, session_id) =
+        issue_dev_join_grant(&mut conference, env, &conference_id, &integration_id).await?;
+    join_and_leave_dev_realtime(endpoint, env, &token, &claims, &session_id).await?;
+    verify_dev_attendance_projection(&mut events, env, subscription_id).await
+}
+
+fn system_time_unix_ms(context: &str) -> Result<i64, String> {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("{context}: {error}"))?
+            .as_millis(),
+    )
+    .map_err(|_| format!("{context} exceeds i64"))
+}
+
+async fn create_dev_universal_conference(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    integration_id: &pb::OpaqueId,
+    now_unix_ms: i64,
+) -> Result<pb::OpaqueId, String> {
+    let create_body = pb::UniversalCreateConferenceRequest {
+        scope: Some(pb_scope(&env.scope)),
+        integration_id: Some(integration_id.clone()),
+        external_conference_id: b"dev-universal-conference".to_vec(),
+        idempotency_key: "dev-universal-create".to_owned(),
+        mode: pb::UniversalConferenceMode::Webinar as i32,
+        schedule: Some(pb::ConferenceScheduleMetadata {
+            starts_at_unix_ms: now_unix_ms + 300_000,
+            planned_end_unix_ms: Some(now_unix_ms + 3_900_000),
+            join_before_seconds: 900,
+            join_after_seconds: 300,
+            timezone: Some("UTC".to_owned()),
+        }),
+        metadata: Vec::new(),
+    };
+    let mut create = Request::new(create_body.clone());
+    attach_dev_credential(&mut create, env);
+    let created = conference
+        .create_conference(create)
+        .await
+        .map_err(|error| format!("self-check CreateConference: {error}"))?
+        .into_inner();
+    let Some(pb::universal_create_conference_response::Result::Conference(descriptor)) =
+        created.result
+    else {
+        return Err("authenticated public CreateConference self-check failed".to_owned());
+    };
+    let conference_id = descriptor
+        .conference_id
+        .ok_or_else(|| "CreateConference omitted conference_id".to_owned())?;
+
+    let mut retry = Request::new(create_body);
+    attach_dev_credential(&mut retry, env);
+    let retried = conference
+        .create_conference(retry)
+        .await
+        .map_err(|error| format!("self-check CreateConference retry: {error}"))?
+        .into_inner();
+    let retry_id = match retried.result {
+        Some(pb::universal_create_conference_response::Result::Conference(value)) => {
+            value.conference_id
+        }
+        _ => None,
+    };
+    require_result(
+        retry_id.as_ref() == Some(&conference_id),
+        "CreateConference exact idempotent retry",
+    )?;
+    Ok(conference_id)
+}
+
+async fn ensure_dev_universal_participant(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    integration_id: &pb::OpaqueId,
+    external_user_id: &[u8],
+    role: pb::ConferenceParticipantRole,
+    key: &str,
+) -> Result<(), String> {
+    let mut ensure = Request::new(pb::UniversalEnsureParticipantRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(integration_id.clone()),
+        external_user_id: external_user_id.to_vec(),
+        role: role as i32,
+        idempotency_key: format!("{key}-participant"),
+    });
+    attach_dev_credential(&mut ensure, env);
+    let ensured = conference
+        .ensure_participant(ensure)
+        .await
+        .map_err(|error| format!("self-check EnsureParticipant {key}: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            ensured.result,
+            Some(pb::universal_ensure_participant_response::Result::Participant(_))
+        ),
+        "EnsureParticipant",
+    )?;
+
+    let mut device = Request::new(pb::UniversalEnsureParticipantDeviceRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(integration_id.clone()),
+        external_user_id: external_user_id.to_vec(),
+        idempotency_key: format!("{key}-device"),
+    });
+    attach_dev_credential(&mut device, env);
+    let device = conference
+        .ensure_participant_device(device)
+        .await
+        .map_err(|error| format!("self-check EnsureParticipantDevice {key}: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            device.result,
+            Some(
+                pb::universal_ensure_participant_device_response::Result::Device(
+                    pb::UniversalParticipantDeviceStatus { active: true, .. }
+                )
+            )
+        ),
+        "EnsureParticipantDevice",
+    )
+}
+
+async fn prepare_dev_universal_conference(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    integration_id: &pb::OpaqueId,
+) -> Result<(), String> {
+    ensure_dev_universal_participant(
+        conference,
+        env,
+        conference_id,
+        integration_id,
+        b"dev-owner",
+        pb::ConferenceParticipantRole::Owner,
+        "dev-owner",
+    )
+    .await?;
+    ensure_dev_universal_participant(
+        conference,
+        env,
+        conference_id,
+        integration_id,
+        b"dev-attendee",
+        pb::ConferenceParticipantRole::Attendee,
+        "dev-attendee",
+    )
+    .await?;
+
+    let mut prepare = Request::new(pb::UniversalPrepareConferenceRuntimeRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(integration_id.clone()),
+        idempotency_key: "dev-universal-runtime".to_owned(),
+    });
+    attach_dev_credential(&mut prepare, env);
+    let runtime = conference
+        .prepare_conference_runtime(prepare)
+        .await
+        .map_err(|error| format!("self-check PrepareConferenceRuntime: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            runtime.result,
+            Some(
+                pb::universal_prepare_conference_runtime_response::Result::Runtime(
+                    pb::UniversalConferenceRuntimeStatus {
+                        group_ready: true,
+                        call_ready: true,
+                        admitted_participant_count: 2,
+                    }
+                )
+            )
+        ),
+        "PrepareConferenceRuntime",
+    )
+}
+
+async fn open_dev_universal_conference(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    integration_id: &pb::OpaqueId,
+) -> Result<(), String> {
+    for (target, key) in [
+        (pb::UniversalConferenceLifecycle::Waiting, "dev-waiting"),
+        (pb::UniversalConferenceLifecycle::Live, "dev-live"),
+    ] {
+        let mut transition = Request::new(pb::UniversalConferenceLifecycleRequest {
+            scope: Some(pb_scope(&env.scope)),
+            conference_id: Some(conference_id.clone()),
+            target: target as i32,
+            idempotency_key: key.to_owned(),
+            integration_id: Some(integration_id.clone()),
+        });
+        attach_dev_credential(&mut transition, env);
+        let transitioned = conference
+            .transition_conference(transition)
+            .await
+            .map_err(|error| format!("self-check TransitionConference {key}: {error}"))?
+            .into_inner();
+        require_result(
+            matches!(
+                transitioned.result,
+                Some(pb::universal_conference_lifecycle_response::Result::Conference(_))
+            ),
+            "TransitionConference",
+        )?;
+    }
+
+    let mut open = Request::new(pb::UniversalSetEntryOpenRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        entry_open: true,
+        idempotency_key: "dev-entry-open".to_owned(),
+        integration_id: Some(integration_id.clone()),
+    });
+    attach_dev_credential(&mut open, env);
+    let opened = conference
+        .set_entry_open(open)
+        .await
+        .map_err(|error| format!("self-check SetEntryOpen: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            opened.result,
+            Some(pb::universal_set_entry_open_response::Result::Conference(
+                pb::UniversalConferenceDescriptor {
+                    entry_open: true,
+                    ..
+                }
+            ))
+        ),
+        "SetEntryOpen",
+    )
+}
+
+async fn create_dev_attendance_subscription(
+    endpoint: &str,
+    env: &DevEnvironment,
+) -> Result<
+    (
+        pb::event_service_client::EventServiceClient<tonic::transport::Channel>,
+        pb::OpaqueId,
+    ),
+    String,
+> {
+    let subscription_id = pb_id("dev-attendance-subscription");
+    let mut events = pb::event_service_client::EventServiceClient::connect(endpoint.to_owned())
+        .await
+        .map_err(|error| format!("self-check EventService connect: {error}"))?;
+    let mut subscription = Request::new(pb::EventCreateSubscriptionRequest {
+        subscription: Some(pb::EventSubscription {
+            subscription_id: Some(subscription_id.clone()),
+            scope: Some(pb_scope(&env.scope)),
+            mode: pb::EventSubscriptionMode::DurableStream as i32,
+            webhook_uri: None,
+            event_types: vec!["ucr.conference.attendance.integration.v1".to_owned()],
+            max_in_flight: 8,
+            max_attempts: 3,
+            start: pb::EventSubscriptionStart::Latest as i32,
+        }),
+    });
+    attach_dev_credential(&mut subscription, env);
+    let subscribed = events
+        .create_subscription(subscription)
+        .await
+        .map_err(|error| format!("self-check CreateSubscription: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            subscribed.result,
+            Some(pb::event_create_subscription_response::Result::Subscription(_))
+        ),
+        "CreateSubscription",
+    )?;
+    Ok((events, subscription_id))
+}
+
+async fn issue_dev_join_grant(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    integration_id: &pb::OpaqueId,
+) -> Result<(String, ucr_realtime::RealtimeSessionClaims, pb::OpaqueId), String> {
+    let mut issue = Request::new(pb::UniversalIssueJoinGrantRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(integration_id.clone()),
+        external_user_id: b"dev-attendee".to_vec(),
+        ttl_seconds: 300,
+        use_policy: pb::JoinGrantUsePolicy::SingleUse as i32,
+        not_before_unix_ms: None,
+        not_after_unix_ms: None,
+        idempotency_key: "dev-attendee-join".to_owned(),
+    });
+    attach_dev_credential(&mut issue, env);
+    let issued = conference
+        .issue_join_grant(issue)
+        .await
+        .map_err(|error| format!("self-check IssueJoinGrant: {error}"))?
+        .into_inner();
+    let Some(pb::universal_issue_join_grant_response::Result::Grant(grant)) = issued.result else {
+        return Err("authenticated public IssueJoinGrant self-check failed".to_owned());
+    };
+    let session_id = grant
+        .session_id
+        .ok_or_else(|| "IssueJoinGrant omitted session_id".to_owned())?;
+    let token = grant
+        .join_url
+        .split_once("#ucr_join=")
+        .map(|(_, token)| token.to_owned())
+        .ok_or_else(|| "IssueJoinGrant returned malformed join_url".to_owned())?;
+    let claims = env
+        .join_issuer
+        .verify_signed_claims(
+            &token,
+            system_time_unix_ms("self-check join verification clock")?,
+        )
+        .map_err(|error| format!("self-check signed join claims: {error:?}"))?;
+    Ok((token, claims, session_id))
+}
+
+async fn join_and_leave_dev_realtime(
+    endpoint: &str,
+    env: &DevEnvironment,
+    token: &str,
+    claims: &ucr_realtime::RealtimeSessionClaims,
+    session_id: &pb::OpaqueId,
+) -> Result<(), String> {
+    let call_id = pb::OpaqueId {
+        value: claims.call_id.as_opaque().as_wire_bytes().to_vec(),
+    };
+    let mut realtime =
+        pb::realtime_service_client::RealtimeServiceClient::connect(endpoint.to_owned())
+            .await
+            .map_err(|error| format!("self-check RealtimeService connect: {error}"))?;
+
+    let mut join = Request::new(pb::RealtimeJoinRequest {
+        scope: Some(pb_scope(&env.scope)),
+        call_id: Some(call_id.clone()),
+        session_id: Some(session_id.clone()),
+    });
+    attach_realtime_bearer(&mut join, token)?;
+    let joined = realtime
+        .join_realtime(join)
+        .await
+        .map_err(|error| format!("self-check JoinRealtime: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            joined.result,
+            Some(pb::realtime_join_response::Result::Session(_))
+        ),
+        "JoinRealtime",
+    )?;
+
+    let mut leave = Request::new(pb::RealtimeLeaveRequest {
+        scope: Some(pb_scope(&env.scope)),
+        call_id: Some(call_id),
+        session_id: Some(session_id.clone()),
+    });
+    attach_realtime_bearer(&mut leave, token)?;
+    let left = realtime
+        .leave_realtime(leave)
+        .await
+        .map_err(|error| format!("self-check LeaveRealtime: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            left.result,
+            Some(pb::realtime_leave_response::Result::Acknowledgement(_))
+        ),
+        "LeaveRealtime",
+    )
+}
+
+async fn verify_dev_attendance_projection(
+    events: &mut pb::event_service_client::EventServiceClient<tonic::transport::Channel>,
+    env: &DevEnvironment,
+    subscription_id: pb::OpaqueId,
+) -> Result<(), String> {
+    let mut poll = Request::new(pb::EventPollRequest {
+        scope: Some(pb_scope(&env.scope)),
+        subscription_id: Some(subscription_id),
+        max_items: 8,
+    });
+    attach_dev_credential(&mut poll, env);
+    let polled = events
+        .poll_events(poll)
+        .await
+        .map_err(|error| format!("self-check PollEvents: {error}"))?
+        .into_inner();
+    let attendance_events = match polled.result {
+        Some(pb::event_poll_response::Result::Batch(batch)) => batch
+            .events
+            .iter()
+            .filter(|event| event.event_type == "ucr.conference.attendance.integration.v1")
+            .count(),
+        _ => 0,
+    };
+    require_result(attendance_events >= 2, "attendance Event projection")
+}
+
+fn attach_realtime_bearer<T>(request: &mut Request<T>, token: &str) -> Result<(), String> {
+    let value = format!("Bearer {token}")
+        .parse()
+        .map_err(|error| format!("self-check realtime Authorization metadata: {error}"))?;
+    request.metadata_mut().insert("authorization", value);
+    Ok(())
 }
 
 fn attach_dev_credential<T>(request: &mut Request<T>, env: &DevEnvironment) {
