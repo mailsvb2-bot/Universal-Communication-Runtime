@@ -1119,8 +1119,7 @@ fn assert_revoked_origin_blocks_new_protected_store_forward(s: &Scenario) {
         &protected_intent,
         "e2e-post-revoke-store-forward",
     );
-    let runtime =
-        StoreForwardRuntime::new_protected_origin(&sender, &AllowAll, &FixedClock(6_000));
+    let runtime = StoreForwardRuntime::new_protected_origin(&sender, &AllowAll, &FixedClock(6_000));
     runtime.enqueue(&job).expect("enqueue post-revoke job");
     let provider =
         CapturingProvider::new(STORE_FORWARD_INTERNET_CAPABILITY, ProviderOutcome::Accepted);
