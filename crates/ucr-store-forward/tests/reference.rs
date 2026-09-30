@@ -5,15 +5,16 @@ use std::sync::{
 
 use ucr_core::{
     CanonicalTransportError, ClassifiedTransportFailure, CommunicationIntentStore,
-    ConversationStore, DeliveryStore, MessageStore, PolicyDecision, PolicyEvaluator,
-    RouteCandidate, StoreForwardStore, TransportFailureDisposition, TransportHealth,
-    TransportProvider,
+    ConversationStore, DeliveryStore, DeviceLifecycleStore, MessageStore, PolicyDecision,
+    PolicyEvaluator, RouteCandidate, StoreForwardStore, TransportFailureDisposition,
+    TransportHealth, TransportProvider,
 };
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CapabilityDescriptor, CapabilityMaturity, CommunicationIntent,
     ConversationKind, ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy,
-    DeliveryState, DeviceId, DeviceRef, EndpointAddress, EndpointDescriptor, EndpointId,
-    EndpointKind, IdentityId, IntentConstraints, IntentId, MediaThermalState, MessageEnvelope,
+    DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, DeviceRef, EndpointAddress,
+    EndpointDescriptor, EndpointId, EndpointKind, IdentityId, IntentConstraints, IntentId,
+    MediaThermalState, MessageEnvelope,
     MessageId, OpaqueId, OriginRef, PrincipalId, StoreForwardId, StoreForwardJob,
     StoreForwardOutcome, StoreForwardPolicy, TenantId, TenantScope, TransportResourceSnapshot,
     TransportRouteTelemetry,
@@ -243,6 +244,16 @@ fn job() -> StoreForwardJob {
 
 fn seed(store: &MemoryLocalStore) {
     store
+        .register_device(
+            &scope(),
+            &DeviceDescriptor {
+                device_id: DeviceId::from_opaque(oid("sf-recipient-device")),
+                identity_id: target_identity(),
+                state: DeviceLifecycleState::Active,
+            },
+        )
+        .expect("recipient device");
+    store
         .persist_conversation(&conversation())
         .expect("conversation");
     store.persist_message(&message()).expect("message");
@@ -381,6 +392,32 @@ fn proven_failure_gets_new_delivery_id_and_later_success_tombstones_job() {
     assert_eq!(accepted.calls(), 1);
 }
 
+#[test]
+fn revoked_device_never_receives_new_protected_envelope() {
+    let store = MemoryLocalStore::default();
+    seed(&store);
+    let clock = MutableClock::new(1_000);
+    let policy = AllowPolicy;
+    let runtime = StoreForwardRuntime::new(&store, &policy, &clock);
+    let initial = job();
+    runtime.enqueue(&initial).expect("enqueue");
+    store
+        .revoke_device(&scope(), &DeviceId::from_opaque(oid("sf-recipient-device")), &target_identity())
+        .expect("revoke recipient device");
+    let provider = MockProvider::new(ProviderOutcome::Accepted);
+
+    assert_eq!(
+        runtime.process_one(
+            &scope(),
+            &initial.store_forward_id,
+            resources(),
+            &[],
+            vec![option(&provider, "sf-revoked-endpoint")],
+        ),
+        Ok(StoreForwardOutcome::RescheduledNoRoute)
+    );
+    assert_eq!(provider.calls(), 0, "revoked device must be filtered before provider invocation");
+}
 #[test]
 fn ambiguous_acceptance_blocks_automatic_replay_even_after_lease_expiry() {
     let store = MemoryLocalStore::default();
