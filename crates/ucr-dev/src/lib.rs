@@ -1445,6 +1445,26 @@ async fn verify_foreign_conference_isolation(
     conference_id: &pb::OpaqueId,
     owner_integration_id: &pb::OpaqueId,
 ) -> Result<(), String> {
+    verify_foreign_conference_read_isolation(
+        conference,
+        env,
+        foreign,
+        conference_id,
+        owner_integration_id,
+    )
+    .await?;
+    verify_foreign_conference_mutation_isolation(conference, env, foreign, conference_id).await
+}
+
+async fn verify_foreign_conference_read_isolation(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    foreign: &DevServiceAccount,
+    conference_id: &pb::OpaqueId,
+    owner_integration_id: &pb::OpaqueId,
+) -> Result<(), String> {
     let mut foreign_read = Request::new(pb::UniversalGetConferenceRequest {
         scope: Some(pb_scope(&env.scope)),
         conference_id: Some(conference_id.clone()),
@@ -1481,8 +1501,17 @@ async fn verify_foreign_conference_isolation(
             Some(pb::universal_get_conference_response::Result::Error(_))
         ),
         "foreign credential owner integration spoof denial",
-    )?;
+    )
+}
 
+async fn verify_foreign_conference_mutation_isolation(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    foreign: &DevServiceAccount,
+    conference_id: &pb::OpaqueId,
+) -> Result<(), String> {
     let mut mutate = Request::new(pb::UniversalSetEntryOpenRequest {
         scope: Some(pb_scope(&env.scope)),
         conference_id: Some(conference_id.clone()),
