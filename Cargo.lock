@@ -4242,6 +4242,7 @@ dependencies = [
  "ucr-core",
  "ucr-model",
  "ucr-secrets",
+ "ucr-storage-memory",
  "url",
  "zeroize",
 ]
