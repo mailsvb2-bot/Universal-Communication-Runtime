@@ -46,8 +46,8 @@ fn local_dev_package_reuses_loopback_ucr_dev_and_stays_host_local() {
         "container package must not weaken the canonical dev CLI loopback guard"
     );
 
-    let dev_runtime =
-        fs::read_to_string(workspace.join("crates/ucr-dev/src/lib.rs")).expect("read ucr dev runtime");
+    let dev_runtime = fs::read_to_string(workspace.join("crates/ucr-dev/src/lib.rs"))
+        .expect("read ucr dev runtime");
     for marker in [
         "universal_conference_service_server",
         "realtime_service_server",
