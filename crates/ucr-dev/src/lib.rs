@@ -486,6 +486,9 @@ impl DevEnvironment {
         let event_clock = Arc::new(SystemEventDeliveryClock);
         let store = Arc::clone(&self.store);
         let authorization = Arc::clone(&self.store);
+        let join_issuer = Arc::clone(&self.join_issuer);
+        let conference_state = Arc::clone(&self.conference_state);
+        let realtime_registry = Arc::clone(&self.realtime_registry);
 
         Server::builder()
             .add_service(integration_service_server(GrpcIntegrationService::new(
@@ -523,6 +526,23 @@ impl DevEnvironment {
                 event_clock,
                 Arc::clone(&authorization),
                 Arc::clone(&store),
+            )))
+            .add_service(universal_conference_service_server(
+                GrpcUniversalConferenceService::with_state_and_join_issuer(
+                    Arc::clone(&clock),
+                    Arc::clone(&authorization),
+                    Arc::clone(&store),
+                    Arc::clone(&conference_state),
+                    Arc::clone(&join_issuer),
+                ),
+            ))
+            .add_service(realtime_service_server(GrpcRealtimeService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+                join_issuer,
+                realtime_registry,
+                conference_state,
             )))
             .add_service(store_forward_service_server(GrpcStoreForwardService::new(
                 clock,
@@ -651,6 +671,10 @@ async fn verify_public_api(env: &Arc<DevEnvironment>) -> Result<(), String> {
     let clock = Arc::new(SystemServiceQuotaClock);
     let store = Arc::clone(&env.store);
     let authorization = Arc::clone(&env.store);
+    let event_clock = Arc::new(SystemEventDeliveryClock);
+    let join_issuer = Arc::clone(&env.join_issuer);
+    let conference_state = Arc::clone(&env.conference_state);
+    let realtime_registry = Arc::clone(&env.realtime_registry);
     let server = tokio::spawn(async move {
         Server::builder()
             .add_service(integration_service_server(GrpcIntegrationService::new(
@@ -669,9 +693,32 @@ async fn verify_public_api(env: &Arc<DevEnvironment>) -> Result<(), String> {
                 Arc::clone(&store),
             )))
             .add_service(call_service_server(GrpcCallService::new(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
+            .add_service(event_service_server(GrpcEventService::new(
+                Arc::clone(&clock),
+                event_clock,
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+            )))
+            .add_service(universal_conference_service_server(
+                GrpcUniversalConferenceService::with_state_and_join_issuer(
+                    Arc::clone(&clock),
+                    Arc::clone(&authorization),
+                    Arc::clone(&store),
+                    Arc::clone(&conference_state),
+                    Arc::clone(&join_issuer),
+                ),
+            ))
+            .add_service(realtime_service_server(GrpcRealtimeService::new(
                 clock,
                 authorization,
                 store,
+                join_issuer,
+                realtime_registry,
+                conference_state,
             )))
             .serve_with_incoming(incoming)
             .await
@@ -681,6 +728,7 @@ async fn verify_public_api(env: &Arc<DevEnvironment>) -> Result<(), String> {
     verify_attachment_round_trip(&endpoint, env).await?;
     verify_group_round_trip(&endpoint, env).await?;
     verify_call_round_trip(&endpoint, env).await?;
+    verify_universal_conference_round_trip(&endpoint, env).await?;
     server.abort();
     Ok(())
 }
