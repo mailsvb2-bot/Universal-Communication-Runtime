@@ -47,7 +47,7 @@ use ucr_store_forward::{
     STORE_FORWARD_INTERNET_CAPABILITY, StoreForwardClock, StoreForwardRuntime,
 };
 use ucr_transport_orchestrator::{
-    TransportFailoverClock, TransportOrchestrator, TransportRouteOption,
+    TransportFailoverClock, TransportOrchestrator, TransportOrchestratorError, TransportRouteOption,
 };
 use ucr_video::{
     PreparedVideoCapabilities, ResolvedVideoNegotiation, VideoNegotiationResolver, VideoRuntime,
@@ -669,6 +669,18 @@ fn phase_failover_lan_and_file(s: &Scenario, sender: &SqliteLocalStore) {
     assert_eq!(local.captured(), vec![b"encrypted-file-envelope".to_vec()]);
 }
 
+fn register_bob_device(store: &SqliteLocalStore, s: &Scenario) {
+    store
+        .register_device(
+            &s.scope,
+            &DeviceDescriptor {
+                device_id: DeviceId::from_opaque(oid("e2e-bob-device")),
+                identity_id: IdentityId::from_opaque(oid("e2e-bob-identity")),
+                state: DeviceLifecycleState::Active,
+            },
+        )
+        .expect("register Bob device");
+}
 fn phase_offline_store_forward(
     s: &Scenario,
     sender: &SqliteLocalStore,
@@ -676,6 +688,8 @@ fn phase_offline_store_forward(
     recipient: &SqliteLocalStore,
 ) -> MessageEnvelope {
     let offline = message(s, "e2e-offline-message", 3, b"queued while offline");
+    register_bob_device(sender, s);
+    register_bob_device(intermediary, s);
     sender
         .persist_message(&offline)
         .expect("step 10/11: durable message");
@@ -1055,6 +1069,33 @@ fn phase_restart_old_client_and_revocation(s: &Scenario, sent: &[MessageEnvelope
             &key.key_id,
         ),
         Err(TrustedKeyResolutionError::NotTrusted)
+    );
+
+    let provider =
+        CapturingProvider::new(STORE_FORWARD_INTERNET_CAPABILITY, ProviderOutcome::Accepted);
+    let mut revoked_route = route_option(
+        &provider,
+        STORE_FORWARD_INTERNET_CAPABILITY,
+        "revoked-device-route",
+        5,
+    );
+    revoked_route.recipient_endpoint.device_id = Some(device.device_id.clone());
+    let protected_intent = intent(s, "e2e-post-revoke-protected-intent", b"new protected content");
+    assert_eq!(
+        TransportOrchestrator::new(&AllowAll)
+            .plan_protected(
+                &protected_intent,
+                resources(),
+                &[],
+                vec![revoked_route],
+                &restarted,
+            )
+            .unwrap_err(),
+        TransportOrchestratorError::NoEligibleRoute
+    );
+    assert!(
+        provider.captured().is_empty(),
+        "step 22: revoked device must not receive new protected content"
     );
 }
 
