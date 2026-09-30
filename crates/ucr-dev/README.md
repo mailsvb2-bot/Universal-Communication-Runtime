@@ -8,7 +8,7 @@ cargo run -p ucr-dev -- dev --bind 127.0.0.1:50051
 cargo run -p ucr-dev -- dev --simulate offline --check
 ```
 
-The environment provides seeded local/mock-peer Identity+Device state, an automatically created ephemeral SQLite test store, authenticated Service Principal access, a test transport, debug events, diagnostics and a loopback public API. `--check` executes real public Identity, Conversation, Message, Group and Call operations plus the Universal Conference integration path: idempotent conference create, participant/device preparation, runtime materialization, lifecycle transition, signed join grant, Realtime join/leave and attendance Event projection.
+The environment provides seeded local/mock-peer Identity+Device state, an automatically created ephemeral SQLite test store, authenticated Service Principal access, a test transport, debug events, diagnostics and a loopback public API. `--check` executes real public Identity, Conversation, Message, Group and Call operations plus the Universal Conference integration path: idempotent conference create, participant/device preparation, runtime materialization, lifecycle transition, signed join grant, Realtime join/leave and attendance Event projection. It also uses a second canonical development Service Account to prove cross-integration Conference and Event subscription access fails closed through the public API.
 
 The server refuses non-loopback binds. Authentication/permissions/quotas stay enabled. State and printed credentials are ephemeral development material. This crate is not a Production node, persistent deployment, discovery/Relay service or permission bypass.
 
