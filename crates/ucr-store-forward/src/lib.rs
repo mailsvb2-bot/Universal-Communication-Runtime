@@ -272,6 +272,7 @@ pub struct StoreForwardRuntime<'a, S> {
     store: &'a S,
     orchestrator: TransportOrchestrator<'a>,
     clock: &'a dyn StoreForwardClock,
+    protected_devices: Option<&'a dyn DeviceLifecycleStore>,
 }
 
 impl<'a, S> StoreForwardRuntime<'a, S> {
@@ -285,13 +286,38 @@ impl<'a, S> StoreForwardRuntime<'a, S> {
             store,
             orchestrator: TransportOrchestrator::new(policy),
             clock,
+            protected_devices: None,
+        }
+    }
+}
+
+impl<'a, S> StoreForwardRuntime<'a, S>
+where
+    S: DeviceLifecycleStore,
+{
+    /// Creates an origin-side Store-and-Forward runtime for newly protected Device content.
+    ///
+    /// This mode consults the canonical durable Device lifecycle before any Device endpoint may
+    /// receive a newly created encrypted envelope. Relays forwarding an already-created opaque
+    /// envelope should use `new` and therefore do not require recipient Device lifecycle state.
+    #[must_use]
+    pub fn new_protected_origin(
+        store: &'a S,
+        policy: &'a dyn PolicyEvaluator,
+        clock: &'a dyn StoreForwardClock,
+    ) -> Self {
+        Self {
+            store,
+            orchestrator: TransportOrchestrator::new(policy),
+            clock,
+            protected_devices: Some(store),
         }
     }
 }
 
 impl<S> StoreForwardRuntime<'_, S>
 where
-    S: StoreForwardStore + DeviceLifecycleStore,
+    S: StoreForwardStore,
 {
     /// Persists one sender-side durable Store-and-Forward scheduling job.
     ///
@@ -427,8 +453,12 @@ where
         hints: &[TransportRoutingHint],
         options: Vec<TransportRouteOption<'route>>,
     ) -> Result<ucr_transport_orchestrator::TransportPlan<'route>, TransportOrchestratorError> {
-        self.orchestrator
-            .plan_protected(intent, resources, hints, options, self.store)
+        match self.protected_devices {
+            Some(devices) => self
+                .orchestrator
+                .plan_protected(intent, resources, hints, options, devices),
+            None => self.orchestrator.plan(intent, resources, hints, options),
+        }
     }
 
     fn prepare_attempt(
