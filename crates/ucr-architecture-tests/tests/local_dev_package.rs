@@ -54,6 +54,10 @@ fn local_dev_package_reuses_loopback_ucr_dev_and_stays_host_local() {
         "GrpcUniversalConferenceService::with_state_and_join_issuer",
         "GrpcRealtimeService::new",
         "verify_universal_conference_round_trip",
+        "verify_dev_integration_isolation",
+        "dev-foreign-service-principal",
+        "foreign integration cannot read owning conference",
+        "foreign integration cannot poll owning Event subscription",
         "CreateConference exact idempotent retry",
         "attendance Event projection",
     ] {
