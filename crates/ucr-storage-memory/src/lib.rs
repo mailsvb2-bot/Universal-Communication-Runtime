@@ -19,7 +19,7 @@ use ucr_core::{
     DeviceReverificationProof, DurableRecordStatus, DurableStoreError, EventAppendStatus,
     EventJournalStore, EventSubscriptionStore, ExternalIdentityBindingStore, FederationPeerStore,
     IdentityDeviceLookupStore, IdentityStore, LEGACY_IDEMPOTENCY_RESERVATION_COMMAND_TYPE,
-    LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_ACTIVE_RECORDINGS_PER_CALL,
+    LEGACY_IDEMPOTENCY_RESERVATION_PAYLOAD, MAX_ACTIVE_RECORDINGS_PER_CALL, MAX_ATOMIC_EVENT_BATCH,
     MAX_RECORDING_PROVIDER_OPERATION_BATCH, MAX_RECORDING_RETENTION_BATCH, MessageStore,
     PermissionGrantStore, PrincipalIdentityBindingStore, PrincipalIdentityLookupStore,
     RecordingConsentProviderStopRequest, RecordingProviderOperation,
@@ -2742,6 +2742,54 @@ impl EventJournalStore for MemoryLocalStore {
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError> {
         let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
         append_event_to_memory_state(&mut state, event)
+    }
+
+    fn append_events_atomically(
+        &self,
+        events: &[EventEnvelope],
+    ) -> Result<Vec<EventAppendStatus>, DurableStoreError> {
+        if events.is_empty() || events.len() > MAX_ATOMIC_EVENT_BATCH {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let canonical = events
+            .iter()
+            .map(|event| canonical_event(event).map_err(map_event_error))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        let mut staged = HashMap::<EventKey, EventEnvelope>::new();
+        let mut staged_order = Vec::new();
+        let mut statuses = Vec::with_capacity(canonical.len());
+
+        for event in canonical {
+            let key = event_key(&event);
+            if let Some(existing) = state.events.get(&key) {
+                if existing != &event {
+                    return Err(DurableStoreError::Conflict);
+                }
+                statuses.push(EventAppendStatus::Duplicate);
+                continue;
+            }
+            if state.group_changes.contains_key(&key) || state.call_signals.contains_key(&key) {
+                return Err(DurableStoreError::Conflict);
+            }
+            if let Some(existing) = staged.get(&key) {
+                if existing != &event {
+                    return Err(DurableStoreError::Conflict);
+                }
+                statuses.push(EventAppendStatus::Duplicate);
+                continue;
+            }
+            staged_order.push(key.clone());
+            staged.insert(key, event);
+            statuses.push(EventAppendStatus::Appended);
+        }
+
+        for key in staged_order {
+            let event = staged.remove(&key).ok_or(DurableStoreError::Internal)?;
+            state.events.insert(key.clone(), event);
+            state.event_order.push(key);
+        }
+        Ok(statuses)
     }
 
     fn event(
@@ -10191,10 +10239,10 @@ mod phase14_event_subscription_tests {
     use std::sync::atomic::{AtomicI64, Ordering};
 
     use ucr_core::{
-        DurableRecordStatus, EventApiIngress, EventAppendStatus, EventDeliveryClock,
-        EventDeliveryClockError, EventJournalStore, EventSubscriptionStore, PermissionGrantStore,
-        ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaClockError, ServiceQuotaStore,
-        issue_service_credential,
+        DurableRecordStatus, DurableStoreError, EventApiIngress, EventAppendStatus,
+        EventDeliveryClock, EventDeliveryClockError, EventJournalStore, EventSubscriptionStore,
+        PermissionGrantStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaClockError,
+        ServiceQuotaStore, issue_service_credential,
     };
     use ucr_model::{
         ActorId, ActorKind, ActorRef, CorrelationContext, DeviceId, DeviceRef,
@@ -10257,6 +10305,46 @@ mod phase14_event_subscription_tests {
             integrity_metadata: vec![1, 2, 3],
             extensions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn atomic_event_batch_commits_all_or_rolls_back_all() {
+        let store = MemoryLocalStore::default();
+        let first = event("atomic-memory-first", "ucr.test.atomic", b"first");
+        let second = event("atomic-memory-second", "ucr.test.atomic", b"second");
+        assert_eq!(
+            store
+                .append_events_atomically(&[first.clone(), second.clone()])
+                .expect("append atomic batch"),
+            vec![EventAppendStatus::Appended, EventAppendStatus::Appended]
+        );
+        assert_eq!(
+            store
+                .append_events_atomically(&[first.clone(), second.clone()])
+                .expect("deduplicate atomic batch"),
+            vec![EventAppendStatus::Duplicate, EventAppendStatus::Duplicate]
+        );
+
+        let rollback_store = MemoryLocalStore::default();
+        rollback_store
+            .append_event(&event(
+                "atomic-memory-conflict",
+                "ucr.test.atomic",
+                b"persisted",
+            ))
+            .expect("seed conflict");
+        let would_be_first = event("atomic-memory-rollback", "ucr.test.atomic", b"new");
+        let conflicting = event("atomic-memory-conflict", "ucr.test.atomic", b"changed");
+        assert_eq!(
+            rollback_store.append_events_atomically(&[would_be_first.clone(), conflicting]),
+            Err(DurableStoreError::Conflict)
+        );
+        assert_eq!(
+            rollback_store
+                .event(&scope(), &would_be_first.event_id)
+                .expect("read rolled-back Event"),
+            None
+        );
     }
 
     #[derive(Debug)]

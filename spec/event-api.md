@@ -28,7 +28,15 @@ Replay is explicit and idempotent through an opaque replay ID. A new replay gene
 
 ## Webhook semantics
 
-Webhook subscriptions use the same durable subscription/retry/cursor/DLQ owner as polling. The canonical subscription persists only a bounded HTTPS destination; credentials, bearer tokens, signing secrets, DNS results, and provider-specific state are not persisted in it. Userinfo, query strings, and fragments are rejected from the canonical URI.
+Webhook subscriptions use the same durable subscription/retry/cursor/DLQ owner as polling. A
+Universal Conference integration receives participant attendance through the separately attributed
+`ucr.conference.attendance.integration.v1` Event. The realtime boundary does not weaken the
+Service Account owner filter: it preserves the participant-owned canonical attendance Event and
+atomically appends an integration-facing System Event whose `on_behalf_of` is the exact owning
+`integration_id`. This makes attendance webhook delivery compatible with the existing isolation
+rule instead of granting a Service Account read access to arbitrary participant-authored Events.
+
+The canonical subscription persists only a bounded HTTPS destination; credentials, bearer tokens, signing secrets, DNS results, and provider-specific state are not persisted in it. Userinfo, query strings, and fragments are rejected from the canonical URI.
 
 `EventWebhookDispatcher` remains the single durable delivery owner over an injected `EventWebhookSink`. Before polling or performing any network side effect it requires the subscription to have a durable owner in the exact scope and that owner to be a canonical `ServiceAccount`; legacy pre-v36 unowned subscriptions and non-ServiceAccount raw-store subscriptions fail closed. It performs one bounded Event attempt and commits ACK/retry/DLQ only after the sink result.
 

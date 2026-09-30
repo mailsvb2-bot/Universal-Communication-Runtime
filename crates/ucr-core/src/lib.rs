@@ -1195,6 +1195,8 @@ pub enum EventAppendStatus {
 }
 
 /// Durable canonical event journal capability.
+pub const MAX_ATOMIC_EVENT_BATCH: usize = 16;
+
 pub trait EventJournalStore: StorageProvider {
     /// Appends or deduplicates a canonical event.
     ///
@@ -1202,6 +1204,24 @@ pub trait EventJournalStore: StorageProvider {
     /// Returns explicit validation/conflict/storage failures. Reusing one
     /// scoped event ID with different semantics is a conflict.
     fn append_event(&self, event: &EventEnvelope) -> Result<EventAppendStatus, DurableStoreError>;
+
+    /// Atomically appends or deduplicates one bounded set of canonical Events.
+    ///
+    /// This exists for one logical runtime observation that has multiple authorized projections,
+    /// such as participant-owned attendance plus its integration-facing webhook projection. Stores
+    /// must commit all fresh Events or none; a conflict/corruption failure may never leave a prefix
+    /// visible. Exact already-persisted Events retain normal duplicate semantics.
+    ///
+    /// # Errors
+    /// Rejects empty/oversized batches, conflicting Event identities, invalid Events, unsupported
+    /// atomicity, and explicit storage failures.
+    fn append_events_atomically(
+        &self,
+        events: &[EventEnvelope],
+    ) -> Result<Vec<EventAppendStatus>, DurableStoreError> {
+        let _ = events;
+        Err(DurableStoreError::Unavailable)
+    }
 
     /// Loads one exact canonical Event by scoped ID from the same append-only journal.
     ///

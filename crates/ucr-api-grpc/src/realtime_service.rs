@@ -1785,8 +1785,17 @@ where
 
     fn append_attendance(&self, transition: &AttendanceTransition) -> Result<(), CanonicalError> {
         let event = attendance_event(&*self.store, transition)?;
+        let Some(integration_event) =
+            integration_attendance_event(&*self.store, transition, &event)?
+        else {
+            return self
+                .store
+                .append_event(&event)
+                .map(|_| ())
+                .map_err(map_store_error);
+        };
         self.store
-            .append_event(&event)
+            .append_events_atomically(&[event, integration_event])
             .map(|_| ())
             .map_err(map_store_error)
     }
@@ -2337,6 +2346,130 @@ where
         extensions: Vec::new(),
     };
     canonical_event(&event).map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+}
+
+fn integration_attendance_event<S>(
+    store: &S,
+    transition: &AttendanceTransition,
+    participant_event: &EventEnvelope,
+) -> Result<Option<EventEnvelope>, CanonicalError>
+where
+    S: CallStore + GroupMessageStore + UniversalConferenceStore,
+{
+    let call = store
+        .call(&transition.claims.scope, &transition.claims.call_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
+    let Some(group) = store
+        .group_for_conversation(&transition.claims.scope, &call.conversation.conversation_id)
+        .map_err(map_store_error)?
+    else {
+        return Ok(None);
+    };
+    let Some(conference) = store
+        .universal_conference_profile(&transition.claims.scope, &group.group_id)
+        .map_err(map_store_error)?
+    else {
+        return Ok(None);
+    };
+    let participant = store
+        .universal_conference_participant(
+            &transition.claims.scope,
+            &group.group_id,
+            &transition.claims.participant,
+        )
+        .map_err(map_store_error)?
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
+    if participant.integration_id != conference.integration_id
+        || participant.conference_id != conference.conference_id
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
+    }
+
+    let kind = attendance_kind_slug(transition.kind);
+    let event_id = opaque_from_attendance_projection(
+        "integration-attendance",
+        &transition.claims.session_id,
+        kind,
+        transition.session_sequence,
+    )?;
+    let actor_id = opaque_from_attendance_projection(
+        "integration-attendance-actor",
+        &transition.claims.session_id,
+        kind,
+        transition.session_sequence,
+    )?;
+    let device_id = opaque_from_attendance_projection(
+        "integration-attendance-device",
+        &transition.claims.session_id,
+        kind,
+        transition.session_sequence,
+    )?;
+    let identity_id = opaque_from_attendance_projection(
+        "integration-attendance-identity",
+        &transition.claims.session_id,
+        kind,
+        transition.session_sequence,
+    )?;
+    let payload = pb::UniversalConferenceAttendanceEvent {
+        scope: Some(pb_scope(&transition.claims.scope)),
+        conference_id: Some(pb_opaque(conference.conference_id.as_opaque())),
+        integration_id: Some(pb_opaque(conference.integration_id.as_opaque())),
+        external_conference_id: conference.external_conference_id.clone(),
+        external_user_id: participant.external_user_id,
+        session_id: Some(pb_opaque(transition.claims.session_id.as_opaque())),
+        kind: pb_attendance_kind(transition.kind),
+        occurred_at_unix_ms: transition.occurred_at_unix_ms,
+        session_sequence: transition.session_sequence,
+    }
+    .encode_to_vec();
+
+    let event = EventEnvelope {
+        event_id: EventId::from_opaque(event_id),
+        scope: transition.claims.scope.clone(),
+        event_type: "ucr.conference.attendance.integration.v1".to_owned(),
+        payload,
+        actor: ActorRef {
+            actor_id: ActorId::from_opaque(actor_id),
+            kind: ActorKind::System,
+            on_behalf_of: Some(PrincipalId::from_opaque(
+                conference.integration_id.as_opaque().clone(),
+            )),
+        },
+        source_device: DeviceRef {
+            device_id: DeviceId::from_opaque(device_id),
+            identity_id: ucr_model::IdentityId::from_opaque(identity_id),
+        },
+        wall_time_unix_ms: transition.occurred_at_unix_ms,
+        logical_order: transition.session_sequence,
+        correlation: CorrelationContext {
+            correlation_id: transition.claims.session_id.as_opaque().clone(),
+            causation_id: Some(participant_event.event_id.as_opaque().clone()),
+            idempotency_key: Some(format!(
+                "integration-attendance:{kind}:{}",
+                transition.session_sequence
+            )),
+        },
+        schema_version: RUNTIME_ENVELOPE_SCHEMA_V1,
+        integrity_metadata: Vec::new(),
+        extensions: Vec::new(),
+    };
+    canonical_event(&event)
+        .map(Some)
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+}
+
+fn opaque_from_attendance_projection(
+    prefix: &str,
+    session_id: &SessionId,
+    kind: &str,
+    sequence: u64,
+) -> Result<OpaqueId, CanonicalError> {
+    OpaqueId::new(format!(
+        "{prefix}-{}-{kind}-{sequence}",
+        session_id.as_opaque().as_str()
+    ))
+    .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
 }
 
 fn attendance_actor(claims: &RealtimeSessionClaims) -> ActorRef {
