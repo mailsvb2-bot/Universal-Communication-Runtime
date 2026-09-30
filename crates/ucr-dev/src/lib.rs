@@ -1077,7 +1077,7 @@ async fn verify_universal_conference_round_trip(
     let (token, claims, session_id) =
         issue_dev_join_grant(&mut conference, env, &conference_id, &integration_id, clock).await?;
     join_and_leave_dev_realtime(endpoint, env, &token, &claims, &session_id).await?;
-    verify_dev_attendance_projection(&mut events, env, subscription_id).await?;
+    verify_dev_attendance_projection(&mut events, env, &subscription_id).await?;
     verify_foreign_attendance_isolation(
         &mut foreign_events,
         env,
@@ -1595,6 +1595,10 @@ async fn verify_foreign_attendance_isolation(
             .events
             .iter()
             .any(|event| event.event_type == "ucr.conference.attendance.integration.v1"),
+        Some(pb::event_poll_response::Result::Empty(_)) => false,
+        Some(pb::event_poll_response::Result::RetryAfter(_)) => {
+            return Err("foreign Event subscription unexpectedly requested retry".to_owned());
+        }
         Some(pb::event_poll_response::Result::Error(_)) | None => {
             return Err(
                 "authenticated public foreign Event subscription self-check failed".to_owned(),
@@ -1834,11 +1838,11 @@ async fn join_and_leave_dev_realtime(
 async fn verify_dev_attendance_projection(
     events: &mut pb::event_service_client::EventServiceClient<tonic::transport::Channel>,
     env: &DevEnvironment,
-    subscription_id: pb::OpaqueId,
+    subscription_id: &pb::OpaqueId,
 ) -> Result<(), String> {
     let mut poll = Request::new(pb::EventPollRequest {
         scope: Some(pb_scope(&env.scope)),
-        subscription_id: Some(subscription_id),
+        subscription_id: Some(subscription_id.clone()),
         max_items: 8,
     });
     attach_dev_credential(&mut poll, env);
