@@ -144,7 +144,7 @@ impl SfuClusterDirectory {
             .nodes
             .iter()
             .filter_map(|(node_id, node)| {
-                (node.lease_expires_at_unix_ms <= now_unix_ms).then(|| node_id.clone())
+                (node.lease_expires_at_unix_ms <= now_unix_ms).then_some(node_id.clone())
             })
             .collect::<Vec<_>>();
         if expired.is_empty() {
@@ -153,8 +153,9 @@ impl SfuClusterDirectory {
         for node_id in &expired {
             self.nodes.remove(node_id);
         }
-        self.placements
-            .retain(|_, assigned_node_id| !expired.iter().any(|node_id| node_id == assigned_node_id));
+        self.placements.retain(|_, assigned_node_id| {
+            !expired.iter().any(|node_id| node_id == assigned_node_id)
+        });
         expired.len()
     }
 
