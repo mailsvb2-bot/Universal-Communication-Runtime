@@ -15,33 +15,31 @@ use ucr_chat::{
 use ucr_core::{
     AntiEntropyStore, AttachmentStore, AuthorizationEvaluator, CallStore, CanonicalTransportError,
     ClassifiedTransportFailure, CommunicationIntentStore, ConversationStore, DeliveryStore,
-    DeviceLifecycleStore, DurableRecordStatus, EventAppendStatus,
-    EventJournalStore, MessageStore, PolicyDecision, PolicyEvaluator, RouteCandidate, StorageProvider,
-    StoreForwardStore, SyncStore, TransportHealth, TransportProvider,
-    TrustedSigningKeyStore,
+    DeviceLifecycleStore, DurableRecordStatus, EventAppendStatus, EventJournalStore, MessageStore,
+    PolicyDecision, PolicyEvaluator, RouteCandidate, StorageProvider, StoreForwardStore, SyncStore,
+    TransportHealth, TransportProvider, TrustedSigningKeyStore,
 };
-use ucr_crypto::{
-    SigningKeyMaterial, TrustedKeyResolutionError, TrustedSigningKeyResolver,
-};
+use ucr_crypto::{SigningKeyMaterial, TrustedKeyResolutionError, TrustedSigningKeyResolver};
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AttachmentDescriptor, AttachmentId, AuthorizationRequest, CallId,
-    CallParticipant, CallParticipantState, CallSignal, CallSignalKind, CallSignallingState,
-    CallSession, CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, ConversationId,
-    ConversationKind, ConversationRecord, ConversationRef, CorrelationContext, DeliveryAttempt,
-    DeliveryEvidence, DeliveryEvidenceKind, DeliveryId, DeliveryPolicy, DeliveryState,
-    DeviceDescriptor, DeviceId, DeviceLifecycleState, DeviceRef, EndpointAddress, EndpointDescriptor,
-    EndpointId, EndpointKind, EventEnvelope, EventId, EventReplicaState, IdentityId,
-    IntentConstraints, IntentId, KeyId, KeyPurpose, MediaThermalState, MessageEnvelope, MessageId,
-    OpaqueId, OriginRef, PrincipalId, PrincipalKind, PrincipalRef, ProtocolVersion,
+    CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
+    CallSignallingState, CapabilityDescriptor, CapabilityMaturity, CommunicationIntent,
+    ConversationId, ConversationKind, ConversationRecord, ConversationRef, CorrelationContext,
+    DeliveryAttempt, DeliveryEvidence, DeliveryEvidenceKind, DeliveryId, DeliveryPolicy,
+    DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, DeviceRef, EndpointAddress,
+    EndpointDescriptor, EndpointId, EndpointKind, EventEnvelope, EventId, EventReplicaState,
+    IdentityId, IntentConstraints, IntentId, KeyId, KeyPurpose, MediaThermalState, MessageEnvelope,
+    MessageId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, PrincipalRef, ProtocolVersion,
     PublicKeyDescriptor, ScopedPrincipal, SessionId, StoreForwardId, StoreForwardJob,
     StoreForwardOutcome, StoreForwardPolicy, SyncLinkKind, SyncMode, SyncSelection, SyncSession,
     SyncState, TenantId, TenantScope, TransportFailoverPolicy, TransportResourceSnapshot,
-    TransportRouteTelemetry, VideoCodecConfig, VideoSourceKind, VideoStreamDescriptor, VideoStreamId,
+    TransportRouteTelemetry, VideoCodecConfig, VideoSourceKind, VideoStreamDescriptor,
+    VideoStreamId,
 };
 use ucr_protocol::{
     ALGORITHM_VERSION, H264_VIDEO_CODEC_CAPABILITY, KEY_FORMAT_VERSION, MANDATORY_VIDEO_FRAME_RATE,
-    MANDATORY_VIDEO_HEIGHT, MANDATORY_VIDEO_WIDTH, NegotiationResultEnvelope, SIGNATURE_ALGORITHM_ID,
-    VersionPolicy, VersionRange, attachment_content_id,
+    MANDATORY_VIDEO_HEIGHT, MANDATORY_VIDEO_WIDTH, NegotiationResultEnvelope,
+    SIGNATURE_ALGORITHM_ID, VersionPolicy, VersionRange, attachment_content_id,
     canonical_attachment_chunk, negotiate_version, phase21_video_capabilities,
 };
 use ucr_storage_sqlite::SqliteLocalStore;
@@ -85,7 +83,10 @@ impl Drop for TestDb {
 struct AllowAll;
 
 impl AuthorizationEvaluator for AllowAll {
-    fn authorize(&self, _request: &AuthorizationRequest) -> Result<(), ucr_protocol::CanonicalError> {
+    fn authorize(
+        &self,
+        _request: &AuthorizationRequest,
+    ) -> Result<(), ucr_protocol::CanonicalError> {
         Ok(())
     }
 }
@@ -441,7 +442,9 @@ fn phase_internet_chat_and_video(
                 &clock,
             )
             .expect("Internet delivery");
-        recipient.persist_message(&value).expect("recipient message");
+        recipient
+            .persist_message(&value)
+            .expect("recipient message");
         sent.push(value);
     }
     assert_eq!(internet.captured().len(), 2);
@@ -517,7 +520,8 @@ fn start_video_call(s: &Scenario, store: &SqliteLocalStore) {
         .participants
         .iter()
         .filter(|participant| {
-            participant.state == CallParticipantState::Accepted && participant.left_revision.is_none()
+            participant.state == CallParticipantState::Accepted
+                && participant.left_revision.is_none()
         })
         .map(|participant| participant.principal.clone())
         .collect();
@@ -530,14 +534,22 @@ fn start_video_call(s: &Scenario, store: &SqliteLocalStore) {
         source: s.alice.principal.clone(),
         source_kind: VideoSourceKind::Camera,
         codec: camera_codec(),
-        negotiation_ref: active.media_negotiation_ref.clone().expect("negotiation ref"),
+        negotiation_ref: active
+            .media_negotiation_ref
+            .clone()
+            .expect("negotiation ref"),
         negotiation_generation: active.media_negotiation_generation,
     };
-    let mut sender = video.open_sender(&s.alice, &descriptor).expect("video sender");
-    let mut receiver = video.open_receiver(&s.bob, &descriptor).expect("video receiver");
+    let mut sender = video
+        .open_sender(&s.alice, &descriptor)
+        .expect("video sender");
+    let mut receiver = video
+        .open_receiver(&s.bob, &descriptor)
+        .expect("video receiver");
     let rgb = vec![
         7_u8;
-        usize::try_from(MANDATORY_VIDEO_WIDTH * MANDATORY_VIDEO_HEIGHT * 3).expect("frame size")
+        usize::try_from(MANDATORY_VIDEO_WIDTH * MANDATORY_VIDEO_HEIGHT * 3)
+            .expect("frame size")
     ];
     let encoded = sender.encode_rgb8(&rgb).expect("encode video");
     let decoded = receiver.decode_frame(&encoded).expect("decode video");
@@ -664,7 +676,9 @@ fn phase_offline_store_forward(
     recipient: &SqliteLocalStore,
 ) -> MessageEnvelope {
     let offline = message(s, "e2e-offline-message", 3, b"queued while offline");
-    sender.persist_message(&offline).expect("step 10/11: durable message");
+    sender
+        .persist_message(&offline)
+        .expect("step 10/11: durable message");
     let sf_intent = intent(s, "e2e-store-forward-intent", &offline.content);
     sender
         .persist_communication_intent(&sf_intent)
@@ -673,18 +687,28 @@ fn phase_offline_store_forward(
     let runtime = StoreForwardRuntime::new(sender, &AllowAll, &FixedClock(4_000));
     runtime.enqueue(&job).expect("enqueue offline job");
     assert_eq!(
-        runtime.process_one(&s.scope, &job.store_forward_id, resources(), &[], Vec::new()),
+        runtime.process_one(
+            &s.scope,
+            &job.store_forward_id,
+            resources(),
+            &[],
+            Vec::new()
+        ),
         Ok(StoreForwardOutcome::RescheduledNoRoute)
     );
-    assert!(sender
-        .store_forward_job(&s.scope, &job.store_forward_id)
-        .expect("load durable job")
-        .is_some());
+    assert!(
+        sender
+            .store_forward_job(&s.scope, &job.store_forward_id)
+            .expect("load durable job")
+            .is_some()
+    );
 
     intermediary
         .persist_conversation(&s.conversation)
         .expect("intermediary conversation");
-    intermediary.persist_message(&offline).expect("intermediary message");
+    intermediary
+        .persist_message(&offline)
+        .expect("intermediary message");
     intermediary
         .persist_communication_intent(&sf_intent)
         .expect("intermediary intent");
@@ -719,7 +743,9 @@ fn phase_offline_store_forward(
         ..store_forward_job(s, &offline, &sf_intent, "e2e-relay-sf")
     };
     let relay_runtime = StoreForwardRuntime::new(intermediary, &AllowAll, &FixedClock(4_200));
-    relay_runtime.enqueue(&relay_job).expect("enqueue intermediary relay");
+    relay_runtime
+        .enqueue(&relay_job)
+        .expect("enqueue intermediary relay");
     let recipient_provider =
         CapturingProvider::new(STORE_FORWARD_INTERNET_CAPABILITY, ProviderOutcome::Accepted);
     assert_eq!(
@@ -737,7 +763,9 @@ fn phase_offline_store_forward(
         ),
         Ok(StoreForwardOutcome::AcceptedByTransport)
     );
-    recipient.persist_message(&offline).expect("step 14/15 recipient message");
+    recipient
+        .persist_message(&offline)
+        .expect("step 14/15 recipient message");
     mark_presented_to_user(recipient, s, &offline);
     offline
 }
@@ -899,9 +927,12 @@ fn phase_reconciliation(
     let classified = recipient
         .classify_event_summaries(&s.scope, &sync.session_id, &page.summaries)
         .expect("classify recipient state");
-    assert!(classified
-        .iter()
-        .any(|state| state.event_id == event.event_id && state.state == EventReplicaState::Missing));
+    assert!(
+        classified
+            .iter()
+            .any(|state| state.event_id == event.event_id
+                && state.state == EventReplicaState::Missing)
+    );
     assert_eq!(
         recipient.reconcile_event(&s.scope, &sync.session_id, &event),
         Ok(EventAppendStatus::Appended)
@@ -912,14 +943,18 @@ fn phase_reconciliation(
     );
 
     for value in sent {
-        assert!(sender
-            .message(&s.scope, &value.message_id)
-            .expect("sender message")
-            .is_some());
-        assert!(recipient
-            .message(&s.scope, &value.message_id)
-            .expect("recipient message")
-            .is_some());
+        assert!(
+            sender
+                .message(&s.scope, &value.message_id)
+                .expect("sender message")
+                .is_some()
+        );
+        assert!(
+            recipient
+                .message(&s.scope, &value.message_id)
+                .expect("recipient message")
+                .is_some()
+        );
         assert_eq!(
             recipient.persist_message(value),
             Ok(DurableRecordStatus::Duplicate),
@@ -956,23 +991,29 @@ fn phase_restart_old_client_and_revocation(s: &Scenario, sent: &[MessageEnvelope
     {
         let sender = SqliteLocalStore::open(s.sender_db.path()).expect("restart sender");
         for value in sent {
-            assert!(sender
-                .message(&s.scope, &value.message_id)
-                .expect("sender message after restart")
-                .is_some());
+            assert!(
+                sender
+                    .message(&s.scope, &value.message_id)
+                    .expect("sender message after restart")
+                    .is_some()
+            );
         }
         let attachment_id = AttachmentId::from_opaque(oid("e2e-attachment"));
-        assert!(sender
-            .attachment_descriptor(&s.scope, &attachment_id)
-            .expect("attachment after restart")
-            .is_some());
+        assert!(
+            sender
+                .attachment_descriptor(&s.scope, &attachment_id)
+                .expect("attachment after restart")
+                .is_some()
+        );
 
         let store = SqliteLocalStore::open(s.recipient_db.path()).expect("restart recipient");
         for value in sent {
-            assert!(store
-                .message(&s.scope, &value.message_id)
-                .expect("recipient message after restart")
-                .is_some());
+            assert!(
+                store
+                    .message(&s.scope, &value.message_id)
+                    .expect("recipient message after restart")
+                    .is_some()
+            );
         }
         let delivered = DeliveryId::from_opaque(oid("e2e-recipient-delivery"));
         assert_eq!(
@@ -1025,7 +1066,10 @@ fn canon_main_end_to_end() {
     let intermediary =
         SqliteLocalStore::open(s.intermediary_db.path()).expect("intermediary store");
 
-    assert_eq!(sender.health().expect("sender health"), ucr_core::StorageHealth::Healthy);
+    assert_eq!(
+        sender.health().expect("sender health"),
+        ucr_core::StorageHealth::Healthy
+    );
     let mut sent = phase_internet_chat_and_video(&s, &sender, &recipient);
     phase_failover_lan_and_file(&s, &sender);
     let offline = phase_offline_store_forward(&s, &sender, &intermediary, &recipient);
