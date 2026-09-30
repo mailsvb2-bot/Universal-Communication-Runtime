@@ -1,9 +1,13 @@
 use std::{fs, path::Path};
 
 fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
-    let start = source.find(start).unwrap_or_else(|| panic!("missing section start: {start}"));
+    let start = source
+        .find(start)
+        .unwrap_or_else(|| panic!("missing section start: {start}"));
     let tail = &source[start..];
-    let end = tail.find(end).unwrap_or_else(|| panic!("missing section end: {end}"));
+    let end = tail
+        .find(end)
+        .unwrap_or_else(|| panic!("missing section end: {end}"));
     &tail[..end]
 }
 
@@ -84,8 +88,8 @@ fn operator_rpc_is_not_registered_on_public_runtime_listeners() {
         .expect("workspace root");
     let runtime =
         fs::read_to_string(workspace.join("crates/ucr-runtime/src/lib.rs")).expect("runtime");
-    let edge = fs::read_to_string(workspace.join("crates/ucr-https-edge/src/lib.rs"))
-        .expect("HTTPS edge");
+    let edge =
+        fs::read_to_string(workspace.join("crates/ucr-https-edge/src/lib.rs")).expect("HTTPS edge");
     let runtime_main =
         fs::read_to_string(workspace.join("crates/ucr-runtime/src/main.rs")).expect("runtime main");
 
@@ -124,4 +128,3 @@ fn operator_rpc_is_not_registered_on_public_runtime_listeners() {
     assert!(runtime_main.contains("\"--operator-bind\""));
     assert!(runtime_main.contains("serve_realtime_with_machine_bearer_and_operator"));
 }
-
