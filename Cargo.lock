@@ -4149,6 +4149,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ucr-system-tests"
+version = "0.0.1"
+dependencies = [
+ "ucr-chat",
+ "ucr-core",
+ "ucr-crypto",
+ "ucr-model",
+ "ucr-protocol",
+ "ucr-storage-sqlite",
+ "ucr-store-forward",
+ "ucr-transport-orchestrator",
+ "ucr-video",
+]
+
+[[package]]
 name = "ucr-sfu"
 version = "0.0.1"
 dependencies = [
