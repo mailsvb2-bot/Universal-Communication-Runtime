@@ -22,6 +22,8 @@ fn webhook_adapter_preserves_single_event_owner_and_fails_closed() {
     let sqlite = read("crates/ucr-storage-sqlite/src/event_subscription_store.rs");
     let worker_store = read("crates/ucr-storage-sqlite/src/runtime_worker_store.rs");
     let spec = read("spec/event-api.md");
+    let public_network = read("crates/ucr-webhook/tests/public_https_conformance.rs");
+    let conformance = read(".github/workflows/conformance.yml");
 
     assert!(workspace.contains("\"crates/ucr-webhook\""));
     assert!(core.contains("pub trait EventWebhookSink"));
@@ -61,5 +63,13 @@ fn webhook_adapter_preserves_single_event_owner_and_fails_closed() {
     assert!(spec.contains("dispatch-webhook-once"));
     assert!(spec.contains("run-webhook-worker"));
     assert!(spec.contains("durable single-holder lease"));
+    assert!(public_network.contains("EventWebhookDispatcher::new"));
+    assert!(public_network.contains("SystemWebhookDnsResolver"));
+    assert!(public_network.contains("NativeTlsWebhookExecutor"));
+    assert!(public_network.contains("WebhookDispatchOutcome::Delivered"));
+    assert!(public_network.contains("WebhookDispatchOutcome::Idle"));
+    assert!(conformance.contains("UCR_PUBLIC_WEBHOOK_CONFORMANCE_URL"));
+    assert!(conformance.contains("https://postman-echo.com/post"));
+    assert!(spec.contains("explicit public-network proof"));
     assert!(!spec.contains("Event webhook networking remains unimplemented"));
 }
