@@ -38,6 +38,7 @@ Prepared Phase 43 supplies executable fault primitives for network loss/switch, 
 Deterministic fault injection supports the Canon test-transport surface:
 
 - delay through per-link latency;
+- bounded deterministic per-link jitter layered on top of base latency;
 - drop;
 - duplicate;
 - reorder;
@@ -72,7 +73,7 @@ The lab integrity tag is deliberately non-cryptographic. It exists only to make 
 
 ## Network simulation
 
-The canonical simulation fixture instantiates 100 peers and supports per-link latency, packet loss injection, partitions/merge and peer mobility/network-switch state. It enforces an explicit minimum send-battery threshold: a peer below the configured battery limit fails with an explicit `BatteryLimited` result instead of silently transmitting or dropping data. This is a deterministic resource constraint, not a claim of complete mobile battery/thermal fidelity.
+The canonical simulation fixture instantiates 100 peers and supports per-link latency, bounded deterministic jitter, packet loss injection, partitions/merge and peer mobility/network-switch state. It enforces an explicit minimum send-battery threshold: a peer below the configured battery limit fails with an explicit `BatteryLimited` result instead of silently transmitting or dropping data. This is a deterministic resource constraint, not a claim of complete mobile battery/thermal fidelity.
 
 ## Realtime and WebRTC adversity composition
 
@@ -81,9 +82,23 @@ Chaos Lab remains the only deterministic fault substrate; it does not implement 
 - a network switch is observed through the Chaos Transport generation and a dropped realtime downlink is resumed through `RealtimeSessionRegistry::attach_downlink`;
 - a single-use join grant remains single-use during reconnect: a second redemption is rejected while the already authenticated realtime session resumes with a `Reconnected` attendance transition;
 - deterministic packet loss is followed by `LiveWebRtcProvider::restart_session` for the same `SessionId`, proving ICE restart returns a fresh offer without creating another canonical Call/Conference;
-- post-restart link latency remains explicit in Chaos Transport evidence rather than being hidden as success.
+- post-restart link latency remains explicit in Chaos Transport evidence rather than being hidden as success;
+- bounded deterministic jitter varies per-packet latency inside a configured envelope and replays exactly for the same packet IDs;
+- SFU worker disappearance is exercised against the real `SfuClusterDirectory`: the same canonical `CallId` fails over to a surviving healthy node, and re-registering the restarted node does not steal the live sticky placement back.
 
-These are executable integration boundaries, not claims of kernel packet shaping, WAN quality, browser-radio behavior, TURN reachability, or automatic failure detection. Higher-fidelity jitter/loss/RTT and real deployment evidence remain separate production work.
+## Requirement-56 coverage
+
+The product requirement for network adversity is represented explicitly:
+
+- **packet loss** — deterministic `DropNext` plus a real `LiveWebRtcProvider::restart_session` ICE restart on the same realtime session;
+- **jitter** — deterministic bounded per-link jitter with repeatable packet-specific latency variation;
+- **high latency** — explicit base latency remains observable before/after recovery and composes with jitter/throttling;
+- **Wi-Fi -> LTE / network switch** — `SwitchNetwork` advances the destination network generation while the same authenticated realtime session is retained;
+- **temporary network disappearance** — peer offline/online and dropped downlink evidence fail explicitly rather than returning false success;
+- **reconnect** — `RealtimeSessionRegistry::attach_downlink` resumes the existing session and emits `Reconnected` without redeeming a single-use grant again;
+- **SFU node restart** — the horizontal placement directory removes the failed worker, re-places the exact same canonical Call on a survivor, then re-registers the restarted worker while preserving the survivor's sticky placement.
+
+These are executable integration boundaries, not claims of kernel packet shaping, WAN quality, browser-radio behavior, TURN reachability, automatic failure detection, or production inter-node media continuity. The SFU restart test proves control-plane placement/failover semantics only; real worker process orchestration, inter-node encrypted-media transport and live media continuity remain separate production evidence.
 
 ## Non-claims
 
