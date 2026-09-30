@@ -13,6 +13,7 @@ members = [
     "crates/ucr-storage-sqlite",
     "crates/ucr-architecture-tests",
     "crates/ucr-security-tests",
+    "crates/ucr-system-tests",
     "crates/ucr-api-grpc",
     "crates/ucr-dev",
     "crates/ucr-runtime",
