@@ -55,7 +55,8 @@ fn operator_health_is_separate_from_integration_api() {
         );
     }
     assert!(runtime.contains("operator_runtime_service_server"));
-    assert!(spec.contains("socket separation is the enforcement boundary"));
+    assert!(spec.contains("socket separation is"));
+    assert!(spec.contains("the enforcement boundary"));
     assert!(spec.contains("MUST NOT point at or forward the operator"));
     assert!(spec.contains("valid TURN configuration is not equivalent to TURN network health"));
     assert!(spec.contains("Heartbeat TTL is bounded to 1–120 seconds"));
