@@ -1728,7 +1728,7 @@ async fn attempt_realtime_join(
     realtime
         .join_realtime(join)
         .await
-        .map(|response| response.into_inner())
+        .map(tonic::Response::into_inner)
         .map_err(|error| format!("self-check boundary JoinRealtime: {error}"))
 }
 
