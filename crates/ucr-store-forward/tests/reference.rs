@@ -14,10 +14,9 @@ use ucr_model::{
     ConversationKind, ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy,
     DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, DeviceRef, EndpointAddress,
     EndpointDescriptor, EndpointId, EndpointKind, IdentityId, IntentConstraints, IntentId,
-    MediaThermalState, MessageEnvelope,
-    MessageId, OpaqueId, OriginRef, PrincipalId, StoreForwardId, StoreForwardJob,
-    StoreForwardOutcome, StoreForwardPolicy, TenantId, TenantScope, TransportResourceSnapshot,
-    TransportRouteTelemetry,
+    MediaThermalState, MessageEnvelope, MessageId, OpaqueId, OriginRef, PrincipalId,
+    StoreForwardId, StoreForwardJob, StoreForwardOutcome, StoreForwardPolicy, TenantId,
+    TenantScope, TransportResourceSnapshot, TransportRouteTelemetry,
 };
 use ucr_storage_memory::MemoryLocalStore;
 use ucr_store_forward::{
@@ -433,7 +432,11 @@ fn revoked_device_never_receives_new_protected_envelope() {
     let initial = job();
     runtime.enqueue(&initial).expect("enqueue");
     store
-        .revoke_device(&scope(), &DeviceId::from_opaque(oid("sf-recipient-device")), &target_identity())
+        .revoke_device(
+            &scope(),
+            &DeviceId::from_opaque(oid("sf-recipient-device")),
+            &target_identity(),
+        )
         .expect("revoke recipient device");
     let provider = MockProvider::new(ProviderOutcome::Accepted);
 
@@ -447,7 +450,11 @@ fn revoked_device_never_receives_new_protected_envelope() {
         ),
         Ok(StoreForwardOutcome::RescheduledNoRoute)
     );
-    assert_eq!(provider.calls(), 0, "revoked device must be filtered before provider invocation");
+    assert_eq!(
+        provider.calls(),
+        0,
+        "revoked device must be filtered before provider invocation"
+    );
 }
 #[test]
 fn ambiguous_acceptance_blocks_automatic_replay_even_after_lease_expiry() {
