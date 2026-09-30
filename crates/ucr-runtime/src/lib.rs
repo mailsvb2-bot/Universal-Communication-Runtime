@@ -651,6 +651,7 @@ impl OperatorSfuClusterControl for ProductionOperatorHealthSource {
         let mut directory = cluster
             .lock()
             .map_err(|_| OperatorSfuClusterError::Unavailable)?;
+        directory.prune_expired_nodes(now_unix_ms);
         directory
             .upsert_node(node.clone())
             .map_err(map_sfu_cluster_error)?;
@@ -665,9 +666,12 @@ impl OperatorSfuClusterControl for ProductionOperatorHealthSource {
             .sfu_cluster
             .as_ref()
             .ok_or(OperatorSfuClusterError::NotConfigured)?;
+        let now_unix_ms =
+            runtime_now_unix_ms().map_err(|_| OperatorSfuClusterError::Unavailable)?;
         let mut directory = cluster
             .lock()
             .map_err(|_| OperatorSfuClusterError::Unavailable)?;
+        directory.prune_expired_nodes(now_unix_ms);
         directory
             .mark_draining(node_id)
             .map_err(map_sfu_cluster_error)?;
@@ -681,10 +685,13 @@ impl OperatorSfuClusterControl for ProductionOperatorHealthSource {
             .sfu_cluster
             .as_ref()
             .ok_or(OperatorSfuClusterError::NotConfigured)?;
-        cluster
+        let now_unix_ms =
+            runtime_now_unix_ms().map_err(|_| OperatorSfuClusterError::Unavailable)?;
+        let mut directory = cluster
             .lock()
-            .map_err(|_| OperatorSfuClusterError::Unavailable)
-            .map(|directory| directory.nodes())
+            .map_err(|_| OperatorSfuClusterError::Unavailable)?;
+        directory.prune_expired_nodes(now_unix_ms);
+        Ok(directory.nodes())
     }
 }
 
