@@ -1751,8 +1751,7 @@ async fn serve_api_public_services(
     if let Some(config) = machine_bearer {
         match config.verification {
             MachineBearerVerificationConfig::Static(keys) => {
-                universal_service =
-                    universal_service.with_machine_bearer_auth(keys, config.policy);
+                universal_service = universal_service.with_machine_bearer_auth(keys, config.policy);
             }
             MachineBearerVerificationConfig::Provider(provider) => {
                 universal_service =
