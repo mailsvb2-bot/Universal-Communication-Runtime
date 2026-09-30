@@ -1088,6 +1088,7 @@ async fn verify_universal_conference_round_trip(
         &mut foreign_events,
         env,
         foreign,
+        &subscription_id,
         foreign_subscription_id,
     )
     .await?;
@@ -1097,6 +1098,7 @@ async fn verify_universal_conference_round_trip(
         env,
         &conference_id,
         &integration_id,
+        &claims.call_id,
         clock,
     )
     .await
@@ -1391,6 +1393,315 @@ async fn create_dev_attendance_subscription(
     Ok((events, subscription_id))
 }
 
+async fn create_foreign_attendance_subscription(
+    endpoint: &str,
+    env: &DevEnvironment,
+    foreign: &DevServiceAccount,
+) -> Result<
+    (
+        pb::event_service_client::EventServiceClient<tonic::transport::Channel>,
+        pb::OpaqueId,
+    ),
+    String,
+> {
+    let subscription_id = pb_id("dev-foreign-attendance-subscription");
+    let mut events = pb::event_service_client::EventServiceClient::connect(endpoint.to_owned())
+        .await
+        .map_err(|error| format!("self-check foreign EventService connect: {error}"))?;
+    let mut subscription = Request::new(pb::EventCreateSubscriptionRequest {
+        subscription: Some(pb::EventSubscription {
+            subscription_id: Some(subscription_id.clone()),
+            scope: Some(pb_scope(&env.scope)),
+            mode: pb::EventSubscriptionMode::DurableStream as i32,
+            webhook_uri: None,
+            event_types: vec!["ucr.conference.attendance.integration.v1".to_owned()],
+            max_in_flight: 8,
+            max_attempts: 3,
+            start: pb::EventSubscriptionStart::Latest as i32,
+        }),
+    });
+    attach_dev_service_account(&mut subscription, foreign);
+    let subscribed = events
+        .create_subscription(subscription)
+        .await
+        .map_err(|error| format!("self-check foreign CreateSubscription: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            subscribed.result,
+            Some(pb::event_create_subscription_response::Result::Subscription(_))
+        ),
+        "foreign CreateSubscription",
+    )?;
+    Ok((events, subscription_id))
+}
+
+async fn verify_foreign_conference_isolation(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    foreign: &DevServiceAccount,
+    conference_id: &pb::OpaqueId,
+    owner_integration_id: &pb::OpaqueId,
+) -> Result<(), String> {
+    let mut foreign_read = Request::new(pb::UniversalGetConferenceRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(foreign.integration_id.clone()),
+    });
+    attach_dev_service_account(&mut foreign_read, foreign);
+    let foreign_read = conference
+        .get_conference(foreign_read)
+        .await
+        .map_err(|error| format!("self-check foreign GetConference: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            foreign_read.result,
+            Some(pb::universal_get_conference_response::Result::Error(_))
+        ),
+        "foreign integration conference read denial",
+    )?;
+
+    let mut spoofed_read = Request::new(pb::UniversalGetConferenceRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(owner_integration_id.clone()),
+    });
+    attach_dev_service_account(&mut spoofed_read, foreign);
+    let spoofed_read = conference
+        .get_conference(spoofed_read)
+        .await
+        .map_err(|error| format!("self-check spoofed GetConference: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            spoofed_read.result,
+            Some(pb::universal_get_conference_response::Result::Error(_))
+        ),
+        "foreign credential owner integration spoof denial",
+    )?;
+
+    let mut mutate = Request::new(pb::UniversalSetEntryOpenRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        entry_open: false,
+        idempotency_key: "foreign-entry-close".to_owned(),
+        integration_id: Some(foreign.integration_id.clone()),
+    });
+    attach_dev_service_account(&mut mutate, foreign);
+    let mutate = conference
+        .set_entry_open(mutate)
+        .await
+        .map_err(|error| format!("self-check foreign SetEntryOpen: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            mutate.result,
+            Some(pb::universal_set_entry_open_response::Result::Error(_))
+        ),
+        "foreign integration conference mutation denial",
+    )?;
+
+    let mut issue = Request::new(pb::UniversalIssueJoinGrantRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(foreign.integration_id.clone()),
+        external_user_id: b"dev-attendee".to_vec(),
+        ttl_seconds: 30,
+        use_policy: pb::JoinGrantUsePolicy::SingleUse as i32,
+        not_before_unix_ms: None,
+        not_after_unix_ms: None,
+        idempotency_key: "foreign-join".to_owned(),
+    });
+    attach_dev_service_account(&mut issue, foreign);
+    let issued = conference
+        .issue_join_grant(issue)
+        .await
+        .map_err(|error| format!("self-check foreign IssueJoinGrant: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            issued.result,
+            Some(pb::universal_issue_join_grant_response::Result::Error(_))
+        ),
+        "foreign integration join grant denial",
+    )
+}
+
+async fn verify_foreign_attendance_isolation(
+    events: &mut pb::event_service_client::EventServiceClient<tonic::transport::Channel>,
+    env: &DevEnvironment,
+    foreign: &DevServiceAccount,
+    owner_subscription_id: &pb::OpaqueId,
+    foreign_subscription_id: pb::OpaqueId,
+) -> Result<(), String> {
+    let mut owner_lookup = Request::new(pb::EventPollRequest {
+        scope: Some(pb_scope(&env.scope)),
+        subscription_id: Some(owner_subscription_id.clone()),
+        max_items: 8,
+    });
+    attach_dev_service_account(&mut owner_lookup, foreign);
+    let owner_lookup = events
+        .poll_events(owner_lookup)
+        .await
+        .map_err(|error| format!("self-check foreign owner-subscription poll: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            owner_lookup.result,
+            Some(pb::event_poll_response::Result::Error(_))
+        ),
+        "foreign owner subscription poll denial",
+    )?;
+
+    let mut poll = Request::new(pb::EventPollRequest {
+        scope: Some(pb_scope(&env.scope)),
+        subscription_id: Some(foreign_subscription_id),
+        max_items: 8,
+    });
+    attach_dev_service_account(&mut poll, foreign);
+    let polled = events
+        .poll_events(poll)
+        .await
+        .map_err(|error| format!("self-check foreign PollEvents: {error}"))?
+        .into_inner();
+    let leaked = match polled.result {
+        Some(pb::event_poll_response::Result::Batch(batch)) => batch
+            .events
+            .iter()
+            .any(|event| event.event_type == "ucr.conference.attendance.integration.v1"),
+        Some(pb::event_poll_response::Result::Error(_)) | None => {
+            return Err("authenticated public foreign Event subscription self-check failed".to_owned());
+        }
+    };
+    require_result(!leaked, "foreign attendance event isolation")
+}
+
+async fn verify_join_grant_time_boundaries(
+    endpoint: &str,
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    integration_id: &pb::OpaqueId,
+    call_id: &ucr_model::CallId,
+    clock: &DevConformanceClock,
+) -> Result<(), String> {
+    let now = clock
+        .now_unix_ms()
+        .map_err(|_| "self-check conformance clock unavailable".to_owned())?;
+    let (future_token, future_session) = issue_boundary_join_grant(
+        conference,
+        env,
+        conference_id,
+        integration_id,
+        30,
+        Some(now + 5_000),
+        "dev-not-before-join",
+    )
+    .await?;
+    let future = attempt_realtime_join(endpoint, env, &future_token, call_id, &future_session).await?;
+    require_result(
+        matches!(
+            future.result,
+            Some(pb::realtime_join_response::Result::Error(_))
+        ),
+        "not-before realtime join denial",
+    )?;
+
+    let (expiring_token, expiring_session) = issue_boundary_join_grant(
+        conference,
+        env,
+        conference_id,
+        integration_id,
+        30,
+        None,
+        "dev-expiring-join",
+    )
+    .await?;
+    clock.advance_ms(30_001)?;
+    let expired =
+        attempt_realtime_join(endpoint, env, &expiring_token, call_id, &expiring_session).await?;
+    require_result(
+        matches!(
+            expired.result,
+            Some(pb::realtime_join_response::Result::Error(_))
+        ),
+        "expired realtime join denial",
+    )
+}
+
+async fn issue_boundary_join_grant(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    integration_id: &pb::OpaqueId,
+    ttl_seconds: u32,
+    not_before_unix_ms: Option<i64>,
+    idempotency_key: &str,
+) -> Result<(String, pb::OpaqueId), String> {
+    let mut issue = Request::new(pb::UniversalIssueJoinGrantRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(integration_id.clone()),
+        external_user_id: b"dev-attendee".to_vec(),
+        ttl_seconds,
+        use_policy: pb::JoinGrantUsePolicy::SingleUse as i32,
+        not_before_unix_ms,
+        not_after_unix_ms: None,
+        idempotency_key: idempotency_key.to_owned(),
+    });
+    attach_dev_credential(&mut issue, env);
+    let issued = conference
+        .issue_join_grant(issue)
+        .await
+        .map_err(|error| format!("self-check boundary IssueJoinGrant: {error}"))?
+        .into_inner();
+    let Some(pb::universal_issue_join_grant_response::Result::Grant(grant)) = issued.result else {
+        return Err("authenticated public boundary IssueJoinGrant self-check failed".to_owned());
+    };
+    let session_id = grant
+        .session_id
+        .ok_or_else(|| "boundary IssueJoinGrant omitted session_id".to_owned())?;
+    let token = grant
+        .join_url
+        .split_once("#ucr_join=")
+        .map(|(_, token)| token.to_owned())
+        .ok_or_else(|| "boundary IssueJoinGrant returned malformed join_url".to_owned())?;
+    Ok((token, session_id))
+}
+
+async fn attempt_realtime_join(
+    endpoint: &str,
+    env: &DevEnvironment,
+    token: &str,
+    call_id: &ucr_model::CallId,
+    session_id: &pb::OpaqueId,
+) -> Result<pb::RealtimeJoinResponse, String> {
+    let mut realtime =
+        pb::realtime_service_client::RealtimeServiceClient::connect(endpoint.to_owned())
+            .await
+            .map_err(|error| format!("self-check boundary RealtimeService connect: {error}"))?;
+    let mut join = Request::new(pb::RealtimeJoinRequest {
+        scope: Some(pb_scope(&env.scope)),
+        call_id: Some(pb::OpaqueId {
+            value: call_id.as_opaque().as_wire_bytes().to_vec(),
+        }),
+        session_id: Some(session_id.clone()),
+    });
+    attach_realtime_bearer(&mut join, token)?;
+    realtime
+        .join_realtime(join)
+        .await
+        .map(|response| response.into_inner())
+        .map_err(|error| format!("self-check boundary JoinRealtime: {error}"))
+}
+
 async fn issue_dev_join_grant(
     conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
         tonic::transport::Channel,
@@ -1531,6 +1842,14 @@ fn attach_realtime_bearer<T>(request: &mut Request<T>, token: &str) -> Result<()
 
 fn attach_dev_credential<T>(request: &mut Request<T>, env: &DevEnvironment) {
     attach_service_credential(request, &env.credential_id, &env.credential_secret);
+}
+
+fn attach_dev_service_account<T>(request: &mut Request<T>, account: &DevServiceAccount) {
+    attach_service_credential(
+        request,
+        &account.credential_id,
+        &account.credential_secret,
+    );
 }
 
 fn require_result(condition: bool, operation: &str) -> Result<(), String> {
