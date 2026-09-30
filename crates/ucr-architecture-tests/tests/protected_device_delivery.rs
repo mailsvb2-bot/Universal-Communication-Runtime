@@ -18,10 +18,14 @@ fn protected_delivery_reuses_canonical_device_lifecycle_owner() {
     assert!(orchestrator.contains("pub fn plan_protected"));
     assert!(orchestrator.contains("S: DeviceLifecycleStore + ?Sized"));
     assert!(orchestrator.contains("device_allows_protected_access"));
-    assert!(store_forward.contains("S: StoreForwardStore + DeviceLifecycleStore"));
-    assert!(store_forward.contains(".plan_protected(intent, resources, hints, options, self.store)"));
+    assert!(store_forward.contains("pub fn new_protected_origin"));
+    assert!(store_forward.contains("protected_devices: Option<&'a dyn DeviceLifecycleStore>"));
+    assert!(store_forward.contains(".plan_protected(intent, resources, hints, options, devices)"));
+    assert!(store_forward.contains("None => self.orchestrator.plan(intent, resources, hints, options)"));
     assert!(device_store.contains("impl DeviceLifecycleStore for SqliteLocalStore"));
     assert!(adr.contains("Status: Accepted"));
+    assert!(adr.contains("opaque relay"));
+    assert!(adr.contains("minimum disclosure"));
 }
 
 #[test]
