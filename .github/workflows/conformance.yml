@@ -122,6 +122,21 @@ jobs:
       - name: Universal integration runtime-binding conformance
         run: cargo run --locked -p ucr-dev -- dev --check
 
+  public-webhook:
+    name: public-https-webhook
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      UCR_PUBLIC_WEBHOOK_CONFORMANCE_URL: https://postman-echo.com/post
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Real public HTTPS webhook delivery
+        run: >-
+          cargo test --locked -p ucr-webhook --test public_https_conformance
+          dispatcher_delivers_over_real_public_https_and_acks -- --ignored --exact
+
   contract:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
