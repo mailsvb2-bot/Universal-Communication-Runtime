@@ -642,7 +642,8 @@ const fn permissions(
 #[cfg(test)]
 mod horizontal_placement_tests {
     use super::{
-        SfuClusterDirectory, SfuNodeDescriptor, SfuNodeState, SfuPlacementError, SfuPlacementPolicy,
+        MAX_SFU_CLUSTER_NODES, SfuClusterDirectory, SfuNodeDescriptor, SfuNodeState,
+        SfuPlacementError, SfuPlacementPolicy,
     };
     use ucr_model::{CallId, NamespaceId, OpaqueId, TenantId, TenantScope};
 
@@ -950,6 +951,50 @@ mod horizontal_placement_tests {
                 "rendezvous distribution collapsed for {node_id}: {count}"
             );
         }
+    }
+
+    #[test]
+    fn cluster_directory_rejects_unbounded_worker_registration() {
+        let mut directory = SfuClusterDirectory::default();
+        for index in 0..MAX_SFU_CLUSTER_NODES {
+            directory
+                .upsert_node(node(
+                    &format!("sfu-{index}"),
+                    "eu",
+                    SfuNodeState::Healthy,
+                    0,
+                    100,
+                    10_000,
+                ))
+                .expect("bounded node");
+        }
+        assert_eq!(directory.nodes().len(), MAX_SFU_CLUSTER_NODES);
+        assert_eq!(
+            directory.upsert_node(node(
+                "sfu-overflow",
+                "eu",
+                SfuNodeState::Healthy,
+                0,
+                100,
+                10_000,
+            )),
+            Err(SfuPlacementError::InvalidNode)
+        );
+
+        directory
+            .upsert_node(node(
+                "sfu-0",
+                "eu",
+                SfuNodeState::Draining,
+                1,
+                100,
+                20_000,
+            ))
+            .expect("existing node refresh remains allowed");
+        assert_eq!(
+            directory.node(&opaque("sfu-0")).expect("node").state,
+            SfuNodeState::Draining
+        );
     }
 
     #[test]
