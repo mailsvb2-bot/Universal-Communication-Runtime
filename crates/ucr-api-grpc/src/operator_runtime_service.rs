@@ -265,7 +265,9 @@ mod tests {
         assert_eq!(decoded.lease_ttl_ms, 30_000);
         assert_eq!(
             decoded.endpoint.address,
-            "127.0.0.1:7001".parse().expect("endpoint")
+            "127.0.0.1:7001"
+                .parse::<SocketAddr>()
+                .expect("endpoint")
         );
     }
 
