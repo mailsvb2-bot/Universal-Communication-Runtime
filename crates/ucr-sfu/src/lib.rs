@@ -745,8 +745,8 @@ const fn permissions(
 #[cfg(test)]
 mod horizontal_placement_tests {
     use super::{
-        MAX_SFU_CLUSTER_NODES, SfuClusterDirectory, SfuNodeDescriptor, SfuNodeState,
-        SfuPlacementError, SfuPlacementPolicy,
+        MAX_SFU_CLUSTER_NODES, SfuClusterDirectory, SfuNodeDescriptor, SfuNodeEndpoint,
+        SfuNodeState, SfuPlacementError, SfuPlacementPolicy,
     };
     use ucr_model::{CallId, NamespaceId, OpaqueId, TenantId, TenantScope};
 
@@ -781,6 +781,44 @@ mod horizontal_placement_tests {
             max_sessions,
             lease_expires_at_unix_ms,
         }
+    }
+
+    #[test]
+    fn private_endpoint_resolution_follows_node_lease_and_removal() {
+        let mut directory = SfuClusterDirectory::default();
+        let node_id = opaque("sfu-route");
+        directory
+            .upsert_node_with_endpoint(
+                node(
+                    "sfu-route",
+                    "eu",
+                    SfuNodeState::Healthy,
+                    0,
+                    100,
+                    10_000,
+                ),
+                SfuNodeEndpoint::new("127.0.0.1:7001".parse().expect("socket"))
+                    .expect("endpoint"),
+            )
+            .expect("node endpoint");
+
+        assert_eq!(
+            directory
+                .resolve_live_endpoint(&node_id, 9_999)
+                .expect("live endpoint")
+                .address,
+            "127.0.0.1:7001".parse().expect("socket")
+        );
+        assert_eq!(
+            directory.resolve_live_endpoint(&node_id, 10_000),
+            Err(SfuPlacementError::EndpointUnavailable)
+        );
+        assert_eq!(directory.prune_expired_nodes(10_000), 1);
+        assert_eq!(
+            directory.resolve_live_endpoint(&node_id, 10_000),
+            Err(SfuPlacementError::InvalidNode)
+        );
+        assert!(directory.is_empty());
     }
 
     #[test]
