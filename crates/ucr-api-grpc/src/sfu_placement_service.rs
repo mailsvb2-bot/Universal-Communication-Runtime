@@ -1,0 +1,264 @@
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+};
+
+use tonic::{Request, Response, Status};
+use ucr_core::ServiceQuotaClock;
+use ucr_model::CallId;
+use ucr_sfu::{MAX_SFU_REGION_BYTES, SfuClusterDirectory, SfuPlacementError, SfuPlacementPolicy};
+
+use super::{
+    GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_opaque, decode_scope,
+    pb, pb_opaque,
+};
+
+/// Private runtime-only horizontal-SFU placement binding.
+///
+/// This service owns no Conference, participant, authorization or media state. It only projects the
+/// ephemeral `SfuClusterDirectory` through a loopback gRPC boundary for trusted infrastructure.
+pub struct GrpcSfuPlacementService<C> {
+    clock: Arc<C>,
+    cluster: Arc<Mutex<SfuClusterDirectory>>,
+}
+
+impl<C> GrpcSfuPlacementService<C> {
+    #[must_use]
+    pub const fn new(clock: Arc<C>, cluster: Arc<Mutex<SfuClusterDirectory>>) -> Self {
+        Self { clock, cluster }
+    }
+}
+
+impl<C> Clone for GrpcSfuPlacementService<C> {
+    fn clone(&self) -> Self {
+        Self {
+            clock: Arc::clone(&self.clock),
+            cluster: Arc::clone(&self.cluster),
+        }
+    }
+}
+
+impl<C> fmt::Debug for GrpcSfuPlacementService<C> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrpcSfuPlacementService")
+            .finish_non_exhaustive()
+    }
+}
+
+#[must_use]
+pub fn sfu_placement_service_server<C>(
+    service: GrpcSfuPlacementService<C>,
+) -> pb::sfu_placement_service_server::SfuPlacementServiceServer<GrpcSfuPlacementService<C>>
+where
+    C: ServiceQuotaClock + 'static,
+{
+    pb::sfu_placement_service_server::SfuPlacementServiceServer::new(service)
+        .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
+        .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE)
+}
+
+#[tonic::async_trait]
+impl<C> pb::sfu_placement_service_server::SfuPlacementService for GrpcSfuPlacementService<C>
+where
+    C: ServiceQuotaClock + 'static,
+{
+    async fn place_call(
+        &self,
+        request: Request<pb::SfuPlaceCallRequest>,
+    ) -> Result<Response<pb::SfuPlaceCallResponse>, Status> {
+        let body = request.into_inner();
+        let scope = decode_scope(
+            body.scope
+                .ok_or_else(|| Status::invalid_argument("missing tenant scope"))?,
+        )
+        .map_err(|_| Status::invalid_argument("invalid tenant scope"))?;
+        let call_id = CallId::from_opaque(
+            decode_opaque(body.call_id).map_err(|_| Status::invalid_argument("invalid call id"))?,
+        );
+        let preferred_region = decode_preferred_region(&body.preferred_region)?;
+        let policy = SfuPlacementPolicy {
+            preferred_region,
+            allow_cross_region_failover: body.allow_cross_region_failover,
+        };
+        let now_unix_ms = self
+            .clock
+            .now_unix_ms()
+            .map_err(|_| Status::unavailable("SFU placement clock unavailable"))?;
+
+        let mut cluster = self
+            .cluster
+            .lock()
+            .map_err(|_| Status::unavailable("SFU placement directory unavailable"))?;
+        cluster.prune_expired_nodes(now_unix_ms);
+        let placement = cluster
+            .place_session(&scope, &call_id, &policy, now_unix_ms)
+            .map_err(map_placement_error)?;
+
+        Ok(Response::new(pb::SfuPlaceCallResponse {
+            placement: Some(pb::SfuPlacement {
+                node_id: Some(pb_opaque(&placement.node_id)),
+                retained_sticky_placement: placement.retained_sticky_placement,
+                crossed_region: placement.crossed_region,
+            }),
+        }))
+    }
+
+    async fn release_call(
+        &self,
+        request: Request<pb::SfuReleaseCallRequest>,
+    ) -> Result<Response<pb::SfuReleaseCallResponse>, Status> {
+        let body = request.into_inner();
+        let scope = decode_scope(
+            body.scope
+                .ok_or_else(|| Status::invalid_argument("missing tenant scope"))?,
+        )
+        .map_err(|_| Status::invalid_argument("invalid tenant scope"))?;
+        let call_id = CallId::from_opaque(
+            decode_opaque(body.call_id).map_err(|_| Status::invalid_argument("invalid call id"))?,
+        );
+
+        let mut cluster = self
+            .cluster
+            .lock()
+            .map_err(|_| Status::unavailable("SFU placement directory unavailable"))?;
+        cluster
+            .release_session(&scope, &call_id)
+            .map_err(map_placement_error)?;
+
+        Ok(Response::new(pb::SfuReleaseCallResponse {
+            released_call_id: Some(pb_opaque(call_id.as_opaque())),
+        }))
+    }
+}
+
+fn decode_preferred_region(value: &str) -> Result<Option<String>, Status> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > MAX_SFU_REGION_BYTES || value.chars().any(char::is_control) {
+        return Err(Status::invalid_argument("invalid preferred SFU region"));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn map_placement_error(error: SfuPlacementError) -> Status {
+    match error {
+        SfuPlacementError::InvalidNode => Status::failed_precondition("SFU placement unavailable"),
+        SfuPlacementError::NoHealthyCapacity => {
+            Status::resource_exhausted("no healthy SFU capacity")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ucr_core::ServiceQuotaClockError;
+    use ucr_model::OpaqueId;
+    use ucr_sfu::{SfuNodeDescriptor, SfuNodeState};
+
+    #[derive(Debug)]
+    struct FixedClock(i64);
+
+    impl ServiceQuotaClock for FixedClock {
+        fn now_unix_ms(&self) -> Result<i64, ServiceQuotaClockError> {
+            Ok(self.0)
+        }
+    }
+
+    fn pb_id(value: &str) -> pb::OpaqueId {
+        pb::OpaqueId {
+            value: value.as_bytes().to_vec(),
+        }
+    }
+
+    fn place_request() -> pb::SfuPlaceCallRequest {
+        pb::SfuPlaceCallRequest {
+            scope: Some(pb::TenantScope {
+                tenant_id: Some(pb_id("tenant-a")),
+                namespace_id: None,
+            }),
+            call_id: Some(pb_id("call-a")),
+            preferred_region: "eu".to_owned(),
+            allow_cross_region_failover: false,
+        }
+    }
+
+    #[test]
+    fn preferred_region_is_optional_but_bounded() {
+        assert_eq!(decode_preferred_region("").expect("empty"), None);
+        assert_eq!(
+            decode_preferred_region("eu-west-1").expect("region"),
+            Some("eu-west-1".to_owned())
+        );
+        assert!(decode_preferred_region("eu\nwest").is_err());
+        assert!(decode_preferred_region(&"r".repeat(MAX_SFU_REGION_BYTES + 1)).is_err());
+    }
+
+    #[tokio::test]
+    async fn place_call_is_sticky_and_release_returns_capacity() {
+        let cluster = Arc::new(Mutex::new(SfuClusterDirectory::default()));
+        cluster
+            .lock()
+            .expect("cluster")
+            .upsert_node(SfuNodeDescriptor {
+                node_id: OpaqueId::new("sfu-a").expect("node"),
+                region: "eu".to_owned(),
+                state: SfuNodeState::Healthy,
+                active_sessions: 0,
+                max_sessions: 10,
+                lease_expires_at_unix_ms: 20_000,
+            })
+            .expect("register node");
+        let service = GrpcSfuPlacementService::new(Arc::new(FixedClock(10_000)), cluster);
+
+        let first = pb::sfu_placement_service_server::SfuPlacementService::place_call(
+            &service,
+            Request::new(place_request()),
+        )
+        .await
+        .expect("first placement")
+        .into_inner()
+        .placement
+        .expect("placement");
+        assert_eq!(first.node_id.expect("node id").value, b"sfu-a");
+        assert!(!first.retained_sticky_placement);
+
+        let sticky = pb::sfu_placement_service_server::SfuPlacementService::place_call(
+            &service,
+            Request::new(place_request()),
+        )
+        .await
+        .expect("sticky placement")
+        .into_inner()
+        .placement
+        .expect("placement");
+        assert!(sticky.retained_sticky_placement);
+
+        pb::sfu_placement_service_server::SfuPlacementService::release_call(
+            &service,
+            Request::new(pb::SfuReleaseCallRequest {
+                scope: place_request().scope,
+                call_id: Some(pb_id("call-a")),
+            }),
+        )
+        .await
+        .expect("release placement");
+    }
+
+    #[tokio::test]
+    async fn place_call_fails_closed_without_healthy_capacity() {
+        let service = GrpcSfuPlacementService::new(
+            Arc::new(FixedClock(10_000)),
+            Arc::new(Mutex::new(SfuClusterDirectory::default())),
+        );
+        let error = pb::sfu_placement_service_server::SfuPlacementService::place_call(
+            &service,
+            Request::new(place_request()),
+        )
+        .await
+        .expect_err("no capacity");
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+    }
+}

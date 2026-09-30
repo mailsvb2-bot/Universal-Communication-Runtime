@@ -56,6 +56,21 @@ closed because they do not own an SFU directory. Expired leases remain ineligibl
 placement; operator operations prune expired workers plus stale sticky placements so the bounded
 directory remains reusable across node churn. Workers must re-register after process restart.
 
+The realtime daemon also exposes a separate private `SfuPlacementService` on the same **private
+operator listener**, never on the public realtime listener used as the HTTPS-edge upstream. The CLI
+default is `127.0.0.1:50052` via `--operator-bind`; the runtime rejects reusing the public bind for
+this listener. It accepts only canonical tenant scope, Call ID, optional preferred region and the
+cross-region failover policy, then returns the opaque selected SFU node ID plus sticky/cross-region
+placement facts. `ReleaseCall` releases the directory reservation when the infrastructure owner
+knows that Call placement is finished. The same in-process `SfuClusterDirectory` instance is shared
+with the operator heartbeat/drain control, so node health and placement cannot silently diverge into
+two routing brains.
+
+This service is infrastructure-only and is not added to the Universal Conference protobuf or REST
+adapter. It does not accept participant IDs, join tokens, media payloads, endpoint URLs or provider
+credentials. A later gateway/worker-routing layer may consume the opaque selected node ID, but this
+prepared placement service does not yet claim cross-node participant/media transport.
+
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
 true. Production horizontal SFU still requires a concrete inter-node encrypted-media transport,
 binding actual realtime sessions to cluster placement, failure/drain operational evidence, and

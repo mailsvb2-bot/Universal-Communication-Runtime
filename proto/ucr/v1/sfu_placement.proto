@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package ucr.v1;
+
+import "ucr/v1/common.proto";
+
+// Private infrastructure-only horizontal-SFU placement contract.
+// This service MUST remain on the loopback/runtime boundary and MUST NOT be exposed through
+// the Universal Conference integration API or browser gateway.
+message SfuPlaceCallRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  string preferred_region = 3;
+  bool allow_cross_region_failover = 4;
+}
+
+message SfuPlacement {
+  OpaqueId node_id = 1;
+  bool retained_sticky_placement = 2;
+  bool crossed_region = 3;
+}
+
+message SfuPlaceCallResponse {
+  SfuPlacement placement = 1;
+}
+
+message SfuReleaseCallRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+}
+
+message SfuReleaseCallResponse {
+  OpaqueId released_call_id = 1;
+}
+
+service SfuPlacementService {
+  rpc PlaceCall(SfuPlaceCallRequest) returns (SfuPlaceCallResponse);
+  rpc ReleaseCall(SfuReleaseCallRequest) returns (SfuReleaseCallResponse);
+}

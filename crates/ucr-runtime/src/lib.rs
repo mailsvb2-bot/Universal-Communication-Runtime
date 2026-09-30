@@ -13,16 +13,16 @@ use tonic::transport::Server;
 use ucr_api_grpc::{
     GrpcAttachmentService, GrpcCallService, GrpcConferenceService, GrpcDeviceService,
     GrpcEventService, GrpcGroupService, GrpcIntegrationService, GrpcMachineAuthService,
-    GrpcOperatorRuntimeService, GrpcRealtimeService, GrpcRecordingService, GrpcStoreForwardService,
-    GrpcSyncService, GrpcUniversalConferenceService, MachineAuthDiscovery,
+    GrpcOperatorRuntimeService, GrpcRealtimeService, GrpcRecordingService, GrpcSfuPlacementService,
+    GrpcStoreForwardService, GrpcSyncService, GrpcUniversalConferenceService, MachineAuthDiscovery,
     MachineTokenVerificationKeyProvider, OperatorRuntimeHealthSource, OperatorSfuClusterControl,
     OperatorSfuClusterError, OperatorSfuNodeHeartbeat, RealtimeWebRtcDependencies,
     UniversalConferenceRuntimeCapabilities, attachment_service_server, call_service_server,
     conference_service_server, device_service_server, event_service_server,
     expire_due_recordings_once, group_service_server, integration_service_server,
     machine_auth_service_server, operator_runtime_service_server, pb, realtime_service_server,
-    recording_service_server, store_forward_service_server, sync_service_server,
-    universal_conference_service_server,
+    recording_service_server, sfu_placement_service_server, store_forward_service_server,
+    sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
@@ -57,6 +57,7 @@ use ucr_webrtc::{
 };
 
 pub const DEFAULT_RUNTIME_BIND: &str = "127.0.0.1:50051";
+pub const DEFAULT_OPERATOR_BIND: &str = "127.0.0.1:50052";
 pub const RUNTIME_MODE: &str = "local-daemon";
 
 const WEBHOOK_DISPATCH_TARGET_PAGE: usize = 128;
@@ -592,6 +593,7 @@ impl ProductionOperatorHealthSource {
         registry: Arc<RealtimeSessionRegistry>,
         live_provider: Arc<LiveWebRtcProvider>,
         turn_configured: bool,
+        sfu_cluster: Arc<Mutex<SfuClusterDirectory>>,
     ) -> Self {
         Self {
             store,
@@ -600,7 +602,7 @@ impl ProductionOperatorHealthSource {
                 live_provider,
                 turn_configured,
             }),
-            sfu_cluster: Some(Arc::new(Mutex::new(SfuClusterDirectory::default()))),
+            sfu_cluster: Some(sfu_cluster),
         }
     }
 }
@@ -1378,7 +1380,19 @@ impl ProductionRuntime {
     /// # Errors
     /// Returns explicit bind, storage, or gRPC server errors.
     pub async fn serve(self: Arc<Self>, bind: SocketAddr) -> Result<(), String> {
-        self.serve_api(bind, None).await
+        self.serve_api(bind, None, None).await
+    }
+
+    /// Serves the canonical API plus the private operator API on a separate loopback listener.
+    ///
+    /// # Errors
+    /// Returns explicit bind, storage, or gRPC server errors.
+    pub async fn serve_with_operator(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        operator_bind: SocketAddr,
+    ) -> Result<(), String> {
+        self.serve_api(bind, None, Some(operator_bind)).await
     }
 
     /// Serves the canonical API with verifier-only machine Bearer support.
@@ -1390,13 +1404,29 @@ impl ProductionRuntime {
         bind: SocketAddr,
         machine_bearer: MachineBearerRuntimeConfig,
     ) -> Result<(), String> {
-        self.serve_api(bind, Some(machine_bearer)).await
+        self.serve_api(bind, Some(machine_bearer), None).await
+    }
+
+    /// Serves the canonical API with machine Bearer support and a separately bound private
+    /// operator API.
+    ///
+    /// # Errors
+    /// Returns explicit configuration, bind, storage, or gRPC server errors.
+    pub async fn serve_with_machine_bearer_and_operator(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        operator_bind: SocketAddr,
+        machine_bearer: MachineBearerRuntimeConfig,
+    ) -> Result<(), String> {
+        self.serve_api(bind, Some(machine_bearer), Some(operator_bind))
+            .await
     }
 
     async fn serve_api(
         self: Arc<Self>,
         bind: SocketAddr,
         machine_bearer: Option<MachineBearerRuntimeConfig>,
+        operator_bind: Option<SocketAddr>,
     ) -> Result<(), String> {
         validate_local_bind(bind)?;
         let diagnostics = self.diagnostics()?;
@@ -1414,86 +1444,40 @@ impl ProductionRuntime {
         println!("UCR_RUNTIME_MODE={RUNTIME_MODE} storage=sqlite auth=required test_mode=false");
 
         let incoming = TcpListenerStream::new(listener);
+        let operator_incoming = match operator_bind {
+            Some(operator_bind) => {
+                Some(bind_private_operator_listener(bind, operator_bind, "api").await?)
+            }
+            None => None,
+        };
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
         let store = Arc::clone(&self.store);
         let authorization = Arc::clone(&self.store);
         let conference_state = Arc::new(ConferenceRuntimeState::new());
         let operator_health = Arc::new(ProductionOperatorHealthSource::basic(Arc::clone(&store)));
-        let mut universal_service = GrpcUniversalConferenceService::with_state(
-            Arc::clone(&clock),
-            Arc::clone(&authorization),
-            Arc::clone(&store),
-            Arc::clone(&conference_state),
+        let public_server = serve_api_public_services(
+            clock,
+            event_clock,
+            store,
+            authorization,
+            conference_state,
+            machine_bearer,
+            incoming,
         );
-        let attachment_service =
-            configured_attachment_service(&clock, &authorization, &store, machine_bearer.as_ref());
-        if let Some(config) = machine_bearer {
-            match config.verification {
-                MachineBearerVerificationConfig::Static(keys) => {
-                    universal_service =
-                        universal_service.with_machine_bearer_auth(keys, config.policy);
-                }
-                MachineBearerVerificationConfig::Provider(provider) => {
-                    universal_service = universal_service
-                        .with_machine_bearer_auth_provider(provider, config.policy);
-                }
-            }
-        }
 
-        Server::builder()
-            .add_service(operator_runtime_service_server(
-                GrpcOperatorRuntimeService::new(operator_health),
-            ))
-            .add_service(integration_service_server(GrpcIntegrationService::new(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-            )))
-            .add_service(attachment_service_server(attachment_service))
-            .add_service(group_service_server(GrpcGroupService::new(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-            )))
-            .add_service(device_service_server(GrpcDeviceService::new(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-            )))
-            .add_service(sync_service_server(GrpcSyncService::new(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-            )))
-            .add_service(call_service_server(GrpcCallService::new(
-                Arc::clone(&clock),
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-            )))
-            .add_service(conference_service_server(
-                GrpcConferenceService::with_state(
-                    Arc::clone(&clock),
-                    Arc::clone(&authorization),
-                    Arc::clone(&store),
-                    Arc::clone(&conference_state),
-                ),
-            ))
-            .add_service(universal_conference_service_server(universal_service))
-            .add_service(event_service_server(GrpcEventService::new(
-                Arc::clone(&clock),
-                event_clock,
-                Arc::clone(&authorization),
-                Arc::clone(&store),
-            )))
-            .add_service(store_forward_service_server(GrpcStoreForwardService::new(
-                clock,
-                authorization,
-                store,
-            )))
-            .serve_with_incoming(incoming)
-            .await
-            .map_err(|error| format!("local runtime API server: {error}"))
+        match operator_incoming {
+            Some(operator_incoming) => {
+                let operator_server =
+                    serve_basic_operator_services(operator_health, operator_incoming);
+                tokio::try_join!(public_server, operator_server)
+                    .map(|_| ())
+                    .map_err(|error| format!("local runtime/operator API server: {error}"))
+            }
+            None => public_server
+                .await
+                .map_err(|error| format!("local runtime API server: {error}")),
+        }
     }
 
     /// Serves the canonical machine-auth gRPC service on a loopback-only listener.
@@ -1507,6 +1491,29 @@ impl ProductionRuntime {
     pub async fn serve_machine_auth(
         self: Arc<Self>,
         bind: SocketAddr,
+        config: MachineAuthRuntimeConfig,
+    ) -> Result<(), String> {
+        self.serve_machine_auth_inner(bind, None, config).await
+    }
+
+    /// Serves machine-auth plus the private operator API on a separate loopback listener.
+    ///
+    /// # Errors
+    /// Returns explicit configuration, bind, storage, or gRPC server errors.
+    pub async fn serve_machine_auth_with_operator(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        operator_bind: SocketAddr,
+        config: MachineAuthRuntimeConfig,
+    ) -> Result<(), String> {
+        self.serve_machine_auth_inner(bind, Some(operator_bind), config)
+            .await
+    }
+
+    async fn serve_machine_auth_inner(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        operator_bind: Option<SocketAddr>,
         config: MachineAuthRuntimeConfig,
     ) -> Result<(), String> {
         validate_local_bind(bind)?;
@@ -1524,6 +1531,12 @@ impl ProductionRuntime {
         println!("UCR_RUNTIME_MODE={RUNTIME_MODE} machine_auth=true test_mode=false");
 
         let incoming = TcpListenerStream::new(listener);
+        let operator_incoming = match operator_bind {
+            Some(operator_bind) => {
+                Some(bind_private_operator_listener(bind, operator_bind, "machine-auth").await?)
+            }
+            None => None,
+        };
         let clock = Arc::new(SystemServiceQuotaClock);
         let store = Arc::clone(&self.store);
         let operator_health = Arc::new(ProductionOperatorHealthSource::basic(Arc::clone(&store)));
@@ -1553,14 +1566,21 @@ impl ProductionRuntime {
             }
         };
 
-        Server::builder()
-            .add_service(operator_runtime_service_server(
-                GrpcOperatorRuntimeService::new(operator_health),
-            ))
+        let public_server = Server::builder()
             .add_service(machine_auth_service_server(service))
-            .serve_with_incoming(incoming)
-            .await
-            .map_err(|error| format!("local machine-auth API server: {error}"))
+            .serve_with_incoming(incoming);
+        match operator_incoming {
+            Some(operator_incoming) => {
+                let operator_server =
+                    serve_basic_operator_services(operator_health, operator_incoming);
+                tokio::try_join!(public_server, operator_server)
+                    .map(|_| ())
+                    .map_err(|error| format!("local machine-auth/operator API server: {error}"))
+            }
+            None => public_server
+                .await
+                .map_err(|error| format!("local machine-auth API server: {error}")),
+        }
     }
 
     /// Serves the canonical API plus Conference join and Realtime media on a loopback-only
@@ -1574,7 +1594,21 @@ impl ProductionRuntime {
         bind: SocketAddr,
         config: RealtimeRuntimeConfig,
     ) -> Result<(), String> {
-        self.serve_realtime_inner(bind, config, None).await
+        self.serve_realtime_inner(bind, None, config, None).await
+    }
+
+    /// Serves realtime plus a separately bound private operator/SFU placement API.
+    ///
+    /// # Errors
+    /// Returns explicit configuration, bind, storage, or gRPC server errors.
+    pub async fn serve_realtime_with_operator(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        operator_bind: SocketAddr,
+        config: RealtimeRuntimeConfig,
+    ) -> Result<(), String> {
+        self.serve_realtime_inner(bind, Some(operator_bind), config, None)
+            .await
     }
 
     /// Serves realtime plus Universal Conference with verifier-only machine Bearer support.
@@ -1587,13 +1621,30 @@ impl ProductionRuntime {
         config: RealtimeRuntimeConfig,
         machine_bearer: MachineBearerRuntimeConfig,
     ) -> Result<(), String> {
-        self.serve_realtime_inner(bind, config, Some(machine_bearer))
+        self.serve_realtime_inner(bind, None, config, Some(machine_bearer))
+            .await
+    }
+
+    /// Serves realtime with machine Bearer support and a separately bound private operator/SFU
+    /// placement API.
+    ///
+    /// # Errors
+    /// Returns explicit configuration, bind, storage, or gRPC server errors.
+    pub async fn serve_realtime_with_machine_bearer_and_operator(
+        self: Arc<Self>,
+        bind: SocketAddr,
+        operator_bind: SocketAddr,
+        config: RealtimeRuntimeConfig,
+        machine_bearer: MachineBearerRuntimeConfig,
+    ) -> Result<(), String> {
+        self.serve_realtime_inner(bind, Some(operator_bind), config, Some(machine_bearer))
             .await
     }
 
     async fn serve_realtime_inner(
         self: Arc<Self>,
         bind: SocketAddr,
+        operator_bind: Option<SocketAddr>,
         config: RealtimeRuntimeConfig,
         machine_bearer: Option<MachineBearerRuntimeConfig>,
     ) -> Result<(), String> {
@@ -1611,6 +1662,12 @@ impl ProductionRuntime {
         println!("UCR_REALTIME_READY endpoint=http://{address}");
         println!("UCR_RUNTIME_MODE={RUNTIME_MODE} realtime=true tls_edge=required test_mode=false");
         let incoming = TcpListenerStream::new(listener);
+        let operator_incoming = match operator_bind {
+            Some(operator_bind) => {
+                Some(bind_private_operator_listener(bind, operator_bind, "realtime").await?)
+            }
+            None => None,
+        };
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
         let store = Arc::clone(&self.store);
@@ -1620,12 +1677,16 @@ impl ProductionRuntime {
         let dependencies = realtime_dependencies(config)?;
         let join_issuer = Arc::clone(&dependencies.join_issuer);
         let registry = Arc::clone(&dependencies.registry);
+        let sfu_cluster = Arc::new(Mutex::new(SfuClusterDirectory::default()));
         let operator_health = realtime_operator_health(
             &store,
             &registry,
             &dependencies.live_provider,
             runtime_capabilities.turn,
+            &sfu_cluster,
         );
+        let sfu_placement_service =
+            GrpcSfuPlacementService::new(Arc::clone(&clock), Arc::clone(&sfu_cluster));
         let realtime_service = GrpcRealtimeService::with_webrtc(
             Arc::clone(&clock),
             Arc::clone(&authorization),
@@ -1651,13 +1712,103 @@ impl ProductionRuntime {
             runtime_capabilities,
             join_issuer,
             machine_bearer,
-            operator_health,
             realtime_service,
         };
-        let server_result = serve_realtime_services(services, incoming).await;
+        let public_server = serve_realtime_services(services, incoming);
+        let server_result = match operator_incoming {
+            Some(operator_incoming) => {
+                let operator_server = serve_realtime_operator_services(
+                    operator_health,
+                    sfu_placement_service,
+                    operator_incoming,
+                );
+                tokio::try_join!(public_server, operator_server).map(|_| ())
+            }
+            None => public_server.await,
+        };
         bridge_task.abort();
-        server_result.map_err(|error| format!("local realtime API server: {error}"))
+        server_result.map_err(|error| format!("local realtime/operator API server: {error}"))
     }
+}
+
+async fn serve_api_public_services(
+    clock: Arc<SystemServiceQuotaClock>,
+    event_clock: Arc<SystemEventDeliveryClock>,
+    store: Arc<SqliteLocalStore>,
+    authorization: Arc<SqliteLocalStore>,
+    conference_state: Arc<ConferenceRuntimeState>,
+    machine_bearer: Option<MachineBearerRuntimeConfig>,
+    incoming: TcpListenerStream,
+) -> Result<(), tonic::transport::Error> {
+    let mut universal_service = GrpcUniversalConferenceService::with_state(
+        Arc::clone(&clock),
+        Arc::clone(&authorization),
+        Arc::clone(&store),
+        Arc::clone(&conference_state),
+    );
+    let attachment_service =
+        configured_attachment_service(&clock, &authorization, &store, machine_bearer.as_ref());
+    if let Some(config) = machine_bearer {
+        match config.verification {
+            MachineBearerVerificationConfig::Static(keys) => {
+                universal_service = universal_service.with_machine_bearer_auth(keys, config.policy);
+            }
+            MachineBearerVerificationConfig::Provider(provider) => {
+                universal_service =
+                    universal_service.with_machine_bearer_auth_provider(provider, config.policy);
+            }
+        }
+    }
+
+    Server::builder()
+        .add_service(integration_service_server(GrpcIntegrationService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(attachment_service_server(attachment_service))
+        .add_service(group_service_server(GrpcGroupService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(device_service_server(GrpcDeviceService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(sync_service_server(GrpcSyncService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(call_service_server(GrpcCallService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(conference_service_server(
+            GrpcConferenceService::with_state(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+                Arc::clone(&conference_state),
+            ),
+        ))
+        .add_service(universal_conference_service_server(universal_service))
+        .add_service(event_service_server(GrpcEventService::new(
+            Arc::clone(&clock),
+            event_clock,
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(store_forward_service_server(GrpcStoreForwardService::new(
+            clock,
+            authorization,
+            store,
+        )))
+        .serve_with_incoming(incoming)
+        .await
 }
 
 struct RealtimeServerServices {
@@ -1669,7 +1820,6 @@ struct RealtimeServerServices {
     runtime_capabilities: UniversalConferenceRuntimeCapabilities,
     join_issuer: Arc<JoinTokenIssuer>,
     machine_bearer: Option<MachineBearerRuntimeConfig>,
-    operator_health: Arc<ProductionOperatorHealthSource>,
     realtime_service:
         GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
 }
@@ -1687,7 +1837,6 @@ async fn serve_realtime_services(
         runtime_capabilities,
         join_issuer,
         machine_bearer,
-        operator_health,
         realtime_service,
     } = services;
     let mut universal_service =
@@ -1712,9 +1861,6 @@ async fn serve_realtime_services(
         apply_realtime_machine_bearer(universal_service, recording_service, machine_bearer);
 
     Server::builder()
-        .add_service(operator_runtime_service_server(
-            GrpcOperatorRuntimeService::new(operator_health),
-        ))
         .add_service(integration_service_server(GrpcIntegrationService::new(
             Arc::clone(&clock),
             Arc::clone(&authorization),
@@ -1764,6 +1910,51 @@ async fn serve_realtime_services(
             authorization,
             store,
         )))
+        .serve_with_incoming(incoming)
+        .await
+}
+
+async fn bind_private_operator_listener(
+    public_bind: SocketAddr,
+    operator_bind: SocketAddr,
+    mode: &str,
+) -> Result<TcpListenerStream, String> {
+    validate_local_bind(operator_bind)?;
+    if public_bind == operator_bind && public_bind.port() != 0 {
+        return Err("operator bind must be different from the public runtime bind".to_owned());
+    }
+    let listener = TcpListener::bind(operator_bind)
+        .await
+        .map_err(|error| format!("bind private operator API: {error}"))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("resolve private operator API: {error}"))?;
+    println!("UCR_OPERATOR_READY endpoint=http://{address} mode={mode} private=true");
+    Ok(TcpListenerStream::new(listener))
+}
+
+async fn serve_basic_operator_services(
+    operator_health: Arc<ProductionOperatorHealthSource>,
+    incoming: TcpListenerStream,
+) -> Result<(), tonic::transport::Error> {
+    Server::builder()
+        .add_service(operator_runtime_service_server(
+            GrpcOperatorRuntimeService::new(operator_health),
+        ))
+        .serve_with_incoming(incoming)
+        .await
+}
+
+async fn serve_realtime_operator_services(
+    operator_health: Arc<ProductionOperatorHealthSource>,
+    sfu_placement_service: GrpcSfuPlacementService<SystemServiceQuotaClock>,
+    incoming: TcpListenerStream,
+) -> Result<(), tonic::transport::Error> {
+    Server::builder()
+        .add_service(operator_runtime_service_server(
+            GrpcOperatorRuntimeService::new(operator_health),
+        ))
+        .add_service(sfu_placement_service_server(sfu_placement_service))
         .serve_with_incoming(incoming)
         .await
 }
@@ -1909,12 +2100,14 @@ fn realtime_operator_health(
     registry: &Arc<RealtimeSessionRegistry>,
     live_provider: &Arc<LiveWebRtcProvider>,
     turn_configured: bool,
+    sfu_cluster: &Arc<Mutex<SfuClusterDirectory>>,
 ) -> Arc<ProductionOperatorHealthSource> {
     Arc::new(ProductionOperatorHealthSource::realtime(
         Arc::clone(store),
         Arc::clone(registry),
         Arc::clone(live_provider),
         turn_configured,
+        Arc::clone(sfu_cluster),
     ))
 }
 
@@ -2048,6 +2241,15 @@ const fn health_label(health: StorageHealth) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn private_operator_listener_rejects_public_bind_alias() {
+        let bind: SocketAddr = "127.0.0.1:55051".parse().expect("bind");
+        let error = bind_private_operator_listener(bind, bind, "test")
+            .await
+            .expect_err("same public/operator bind must fail closed");
+        assert!(error.contains("operator bind must be different"));
+    }
 
     fn static_machine_auth_verification_keys(
         config: &MachineAuthRuntimeConfig,
@@ -2269,6 +2471,7 @@ mod tests {
             Arc::new(RealtimeSessionRegistry::new(8, 2)),
             Arc::new(LiveWebRtcProvider::new().expect("live provider")),
             false,
+            Arc::new(Mutex::new(SfuClusterDirectory::default())),
         );
         let registered = realtime
             .heartbeat_sfu_node(heartbeat)
