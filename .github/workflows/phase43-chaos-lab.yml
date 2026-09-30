@@ -29,5 +29,7 @@ jobs:
         run: cargo clippy --manifest-path crates/ucr-chaos-lab/Cargo.toml --locked --all-targets -- -D warnings
       - name: Execute chaos evidence
         run: cargo test --manifest-path crates/ucr-chaos-lab/Cargo.toml --locked
+      - name: Execute SFU restart failover adversity evidence
+        run: cargo test --locked -p ucr-sfu --test network_adversity
       - name: Architecture lock
         run: cargo test --locked -p ucr-architecture-tests --test phase43_chaos_lab
