@@ -46,8 +46,9 @@ The system-test crate owns no communication logic. It composes existing canonica
 20. SQLite stores are closed/reopened; Messages, Attachment and Delivered state remain durable.
 21. Canonical version negotiation proves a supported older 1.0 client still negotiates with the
     current 1.x implementation.
-22. A Device is revoked, the store is restarted, protected access remains denied and its signing key
-    is no longer trusted.
+22. A Device is revoked, the store is restarted, protected access remains denied, its signing key
+    is no longer trusted, and a fresh protected Device route is rejected before provider invocation.
+    Revoked Device is rejected by protected route planning and receives no new protected content.
 
 ## Transport test boundary
 
