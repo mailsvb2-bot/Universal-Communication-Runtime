@@ -1897,6 +1897,51 @@ async fn serve_realtime_services(
         .await
 }
 
+async fn bind_private_operator_listener(
+    public_bind: SocketAddr,
+    operator_bind: SocketAddr,
+    mode: &str,
+) -> Result<TcpListenerStream, String> {
+    validate_local_bind(operator_bind)?;
+    if public_bind == operator_bind && public_bind.port() != 0 {
+        return Err("operator bind must be different from the public runtime bind".to_owned());
+    }
+    let listener = TcpListener::bind(operator_bind)
+        .await
+        .map_err(|error| format!("bind private operator API: {error}"))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("resolve private operator API: {error}"))?;
+    println!("UCR_OPERATOR_READY endpoint=http://{address} mode={mode} private=true");
+    Ok(TcpListenerStream::new(listener))
+}
+
+async fn serve_basic_operator_services(
+    operator_health: Arc<ProductionOperatorHealthSource>,
+    incoming: TcpListenerStream,
+) -> Result<(), tonic::transport::Error> {
+    Server::builder()
+        .add_service(operator_runtime_service_server(
+            GrpcOperatorRuntimeService::new(operator_health),
+        ))
+        .serve_with_incoming(incoming)
+        .await
+}
+
+async fn serve_realtime_operator_services(
+    operator_health: Arc<ProductionOperatorHealthSource>,
+    sfu_placement_service: GrpcSfuPlacementService<SystemServiceQuotaClock>,
+    incoming: TcpListenerStream,
+) -> Result<(), tonic::transport::Error> {
+    Server::builder()
+        .add_service(operator_runtime_service_server(
+            GrpcOperatorRuntimeService::new(operator_health),
+        ))
+        .add_service(sfu_placement_service_server(sfu_placement_service))
+        .serve_with_incoming(incoming)
+        .await
+}
+
 fn configured_attachment_service(
     clock: &Arc<SystemServiceQuotaClock>,
     authorization: &Arc<SqliteLocalStore>,
