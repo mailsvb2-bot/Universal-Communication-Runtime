@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::sync::{Arc, Mutex};
+use std::{collections::BTreeMap, sync::{Arc, Mutex}};
 
 use core::fmt;
 
@@ -211,6 +211,172 @@ impl ConferenceRuntimeState {
             adaptive_media: Mutex::new(Vec::new()),
         }
     }
+
+    /// Returns the bounded set of Calls that still have ephemeral Conference runtime state.
+    ///
+    /// This is an operator/runtime cleanup projection only. It creates no durable Call ownership
+    /// and exposes no participant, message, reaction, subscription, or media payload.
+    ///
+    /// # Errors
+    /// Returns temporary-unavailable when any bounded runtime-state lock is poisoned.
+    pub fn tracked_calls(&self) -> Result<Vec<(TenantScope, CallId)>, ConferenceError> {
+        let mut calls = BTreeMap::<Vec<u8>, (TenantScope, CallId)>::new();
+
+        {
+            let state = self
+                .subscriptions
+                .lock()
+                .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+            for entry in state.iter() {
+                insert_tracked_call(&mut calls, &entry.scope, &entry.call_id);
+            }
+        }
+        {
+            let state = self
+                .raised_hands
+                .lock()
+                .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+            for entry in state.iter() {
+                insert_tracked_call(&mut calls, &entry.scope, &entry.call_id);
+            }
+        }
+        {
+            let state = self
+                .reactions
+                .lock()
+                .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+            for entry in &state.events {
+                insert_tracked_call(&mut calls, &entry.scope, &entry.call_id);
+            }
+        }
+        {
+            let state = self
+                .chat_notifications
+                .lock()
+                .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+            for entry in &state.events {
+                insert_tracked_call(&mut calls, &entry.scope, &entry.call_id);
+            }
+        }
+        {
+            let state = self
+                .active_speaker_reports
+                .lock()
+                .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+            for entry in state.iter() {
+                insert_tracked_call(&mut calls, &entry.scope, &entry.call_id);
+            }
+        }
+        {
+            let state = self
+                .adaptive_media
+                .lock()
+                .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+            for entry in state.iter() {
+                insert_tracked_call(&mut calls, &entry.scope, &entry.call_id);
+            }
+        }
+
+        Ok(calls.into_values().collect())
+    }
+
+    /// Clears all non-durable Conference runtime state for one exact Call.
+    ///
+    /// The operation is idempotent. If a later lock is unavailable, already-cleared state remains
+    /// safely cleared and a retry completes the remaining cleanup.
+    ///
+    /// # Errors
+    /// Returns temporary-unavailable when any bounded runtime-state lock is poisoned.
+    pub fn clear_call_ephemeral_state(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<usize, ConferenceError> {
+        let mut removed = 0usize;
+
+        let mut retain_and_count = |before: usize, after: usize| {
+            removed = removed.saturating_add(before.saturating_sub(after));
+        };
+
+        {
+            let mut state = self
+                .subscriptions
+                .lock()
+                .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+            let before = state.len();
+            state.retain(|entry| entry.scope != *scope || entry.call_id != *call_id);
+            retain_and_count(before, state.len());
+        }
+        {
+            let mut state = self
+                .raised_hands
+                .lock()
+                .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+            let before = state.len();
+            state.retain(|entry| entry.scope != *scope || entry.call_id != *call_id);
+            retain_and_count(before, state.len());
+        }
+        {
+            let mut state = self
+                .reactions
+                .lock()
+                .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+            let before = state.events.len();
+            state
+                .events
+                .retain(|entry| entry.scope != *scope || entry.call_id != *call_id);
+            retain_and_count(before, state.events.len());
+        }
+        {
+            let mut state = self
+                .chat_notifications
+                .lock()
+                .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+            let before = state.events.len();
+            state
+                .events
+                .retain(|entry| entry.scope != *scope || entry.call_id != *call_id);
+            retain_and_count(before, state.events.len());
+        }
+        {
+            let mut state = self
+                .active_speaker_reports
+                .lock()
+                .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+            let before = state.len();
+            state.retain(|entry| entry.scope != *scope || entry.call_id != *call_id);
+            retain_and_count(before, state.len());
+        }
+        {
+            let mut state = self
+                .adaptive_media
+                .lock()
+                .map_err(|_| ConferenceError::SubscriptionStateUnavailable)?;
+            let before = state.len();
+            state.retain(|entry| entry.scope != *scope || entry.call_id != *call_id);
+            retain_and_count(before, state.len());
+        }
+
+        Ok(removed)
+    }
+}
+
+fn insert_tracked_call(
+    calls: &mut BTreeMap<Vec<u8>, (TenantScope, CallId)>,
+    scope: &TenantScope,
+    call_id: &CallId,
+) {
+    let mut key = Vec::new();
+    key.extend_from_slice(scope.tenant_id.as_opaque().as_wire_bytes());
+    key.push(0);
+    if let Some(namespace_id) = scope.namespace_id.as_ref() {
+        key.extend_from_slice(namespace_id.as_opaque().as_wire_bytes());
+    }
+    key.push(0);
+    key.extend_from_slice(call_id.as_opaque().as_wire_bytes());
+    calls
+        .entry(key)
+        .or_insert_with(|| (scope.clone(), call_id.clone()));
 }
 
 #[derive(Debug)]
