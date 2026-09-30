@@ -35,7 +35,8 @@ The system-test crate owns no communication logic. It composes existing canonica
 11. The Message, CommunicationIntent and StoreForwardJob are persisted before transmission.
 12. An intermediary route becomes available.
 13. StoreForwardRuntime moves the opaque encrypted envelope to the intermediary without plaintext
-    ownership.
+    ownership. The intermediary has no recipient Device lifecycle record; revocation metadata stays
+    at the protected-content origin rather than becoming relay state.
 14. Recipient route becomes available.
 15. The intermediary forwards the same opaque envelope and canonical Delivery evidence reaches
     `PresentedToUser -> Delivered`.
