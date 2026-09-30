@@ -47,7 +47,9 @@ The same private loopback service now owns the prepared horizontal-SFU worker co
 Heartbeat TTL is bounded to 1–120 seconds and the in-process directory is capped at 256 workers.
 The API daemon without realtime/SFU runtime returns `failed_precondition` instead of pretending the
 cluster exists. This state is intentionally ephemeral: process restart requires workers to
-re-register, and an expired lease makes the node ineligible for new placement.
+re-register. Expired workers are pruned before heartbeat/list/drain operations, including any stale
+sticky placements that referenced them, so bounded node capacity is reclaimed instead of leaking
+across worker churn.
 
 These operator RPCs do not expose Conference IDs, participants, tenant business data, join grants,
 media keys, plaintext media, TURN credentials, or provider secrets. They also do **not** make the
