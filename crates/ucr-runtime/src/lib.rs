@@ -2225,6 +2225,15 @@ const fn health_label(health: StorageHealth) -> &'static str {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn private_operator_listener_rejects_public_bind_alias() {
+        let bind: SocketAddr = "127.0.0.1:55051".parse().expect("bind");
+        let error = bind_private_operator_listener(bind, bind, "test")
+            .await
+            .expect_err("same public/operator bind must fail closed");
+        assert!(error.contains("operator bind must be different"));
+    }
+
     fn static_machine_auth_verification_keys(
         config: &MachineAuthRuntimeConfig,
     ) -> &MachineTokenPublicKeySet {
