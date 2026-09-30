@@ -263,7 +263,10 @@ mod tests {
         assert_eq!(decoded.active_sessions, 3);
         assert_eq!(decoded.max_sessions, 100);
         assert_eq!(decoded.lease_ttl_ms, 30_000);
-        assert_eq!(decoded.endpoint.address, "127.0.0.1:7001".parse().expect("endpoint"));
+        assert_eq!(
+            decoded.endpoint.address,
+            "127.0.0.1:7001".parse().expect("endpoint")
+        );
     }
 
     #[test]
