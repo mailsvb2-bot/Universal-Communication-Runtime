@@ -808,14 +808,35 @@ mod tests {
                 &store,
             )
             .expect("active device route");
+        assert_eq!(
+            orchestrator.transmit_primary(&value, &active, b"encrypted-protected-content"),
+            Err(CanonicalTransportError::PolicyDenied),
+            "ordinary transmit must not bypass protected lifecycle revalidation"
+        );
+        assert_eq!(calls.lock().expect("calls").len(), 0);
         orchestrator
-            .transmit_primary(&value, &active, b"encrypted-protected-content")
-            .expect("active device transport");
+            .transmit_primary_protected(
+                &value,
+                &active,
+                b"encrypted-protected-content",
+                &store,
+            )
+            .expect("active device protected transport");
         assert_eq!(calls.lock().expect("calls").len(), 1);
 
         store
             .revoke_device(&scope(), &device_id, &identity())
             .expect("revoke device");
+        assert_eq!(
+            orchestrator.transmit_primary_protected(
+                &value,
+                &active,
+                b"new-protected-content-after-revoke",
+                &store,
+            ),
+            Err(CanonicalTransportError::PolicyDenied),
+            "revocation after planning must invalidate the stale protected plan"
+        );
         assert_eq!(
             orchestrator
                 .plan_protected(
