@@ -56,8 +56,10 @@ closed because they do not own an SFU directory. Expired leases remain ineligibl
 placement; operator operations prune expired workers plus stale sticky placements so the bounded
 directory remains reusable across node churn. Workers must re-register after process restart.
 
-The realtime daemon also exposes a separate private `SfuPlacementService` on its loopback gRPC
-boundary. It accepts only canonical tenant scope, Call ID, optional preferred region and the
+The realtime daemon also exposes a separate private `SfuPlacementService` on the same **private
+operator listener**, never on the public realtime listener used as the HTTPS-edge upstream. The CLI
+default is `127.0.0.1:50052` via `--operator-bind`; the runtime rejects reusing the public bind for
+this listener. It accepts only canonical tenant scope, Call ID, optional preferred region and the
 cross-region failover policy, then returns the opaque selected SFU node ID plus sticky/cross-region
 placement facts. `ReleaseCall` releases the directory reservation when the infrastructure owner
 knows that Call placement is finished. The same in-process `SfuClusterDirectory` instance is shared
