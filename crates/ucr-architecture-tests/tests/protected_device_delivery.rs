@@ -21,7 +21,9 @@ fn protected_delivery_reuses_canonical_device_lifecycle_owner() {
     assert!(store_forward.contains("pub fn new_protected_origin"));
     assert!(store_forward.contains("protected_devices: Option<&'a dyn DeviceLifecycleStore>"));
     assert!(store_forward.contains(".plan_protected(intent, resources, hints, options, devices)"));
-    assert!(store_forward.contains("None => self.orchestrator.plan(intent, resources, hints, options)"));
+    assert!(
+        store_forward.contains("None => self.orchestrator.plan(intent, resources, hints, options)")
+    );
     assert!(device_store.contains("impl DeviceLifecycleStore for SqliteLocalStore"));
     assert!(adr.contains("Status: Accepted"));
     assert!(adr.contains("opaque relay"));
