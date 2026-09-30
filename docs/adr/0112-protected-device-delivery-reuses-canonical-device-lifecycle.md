@@ -24,9 +24,15 @@ For `EndpointKind::Device`, a protected route is eligible only when the exact sc
 - owns the target Identity represented by the CommunicationIntent;
 - is in `DeviceLifecycleState::Active`.
 
-Missing, Stale, ReverificationRequired, Expired, and Revoked Devices are filtered before any
-`TransportProvider` invocation. A durable-store read failure fails closed as
-`DeviceLifecycleUnavailable`. Non-Device endpoints retain the normal transport eligibility rules.
+Missing, Stale, ReverificationRequired, Expired, and Revoked Devices are filtered during planning.
+The protected plan retains its Device binding and the lifecycle owner is read again immediately
+before every provider-bearing primary/failover attempt. A revoke racing after planning therefore
+invalidates the stale plan before ciphertext can reach a provider. Ordinary transmit/failover APIs
+reject protected plans, so callers cannot bypass execution-time revalidation accidentally.
+
+A durable-store read failure fails closed. During planning it is explicit as
+`DeviceLifecycleUnavailable`; during execution it stops before provider invocation. Non-Device
+endpoints retain the normal transport eligibility rules.
 
 `StoreForwardRuntime::new_protected_origin` uses this protected planner for newly created protected
 Device content at the origin. The ordinary `StoreForwardRuntime::new` path remains the opaque relay
