@@ -3,7 +3,7 @@
 use std::{
     net::SocketAddr,
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,7 +15,8 @@ use ucr_api_grpc::{
     GrpcEventService, GrpcGroupService, GrpcIntegrationService, GrpcMachineAuthService,
     GrpcOperatorRuntimeService, GrpcRealtimeService, GrpcRecordingService, GrpcStoreForwardService,
     GrpcSyncService, GrpcUniversalConferenceService, MachineAuthDiscovery,
-    MachineTokenVerificationKeyProvider, OperatorRuntimeHealthSource, RealtimeWebRtcDependencies,
+    MachineTokenVerificationKeyProvider, OperatorRuntimeHealthSource, OperatorSfuClusterControl,
+    OperatorSfuClusterError, OperatorSfuNodeHeartbeat, RealtimeWebRtcDependencies,
     UniversalConferenceRuntimeCapabilities, attachment_service_server, call_service_server,
     conference_service_server, device_service_server, event_service_server,
     expire_due_recordings_once, group_service_server, integration_service_server,
@@ -40,7 +41,9 @@ use ucr_model::{
 };
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_secrets::{SecretHandle, SecretProvider, SecretPurpose};
-use ucr_sfu::{SfuForwardSink, SfuForwardSinkError};
+use ucr_sfu::{
+    SfuClusterDirectory, SfuForwardSink, SfuForwardSinkError, SfuNodeDescriptor, SfuPlacementError,
+};
 use ucr_storage_sqlite::{
     RECORDING_RETENTION_WORKER_KIND, SqliteLocalStore, WEBHOOK_DELIVERY_WORKER_KIND,
 };
@@ -572,6 +575,7 @@ struct RealtimeOperatorHealth {
 struct ProductionOperatorHealthSource {
     store: Arc<SqliteLocalStore>,
     realtime: Option<RealtimeOperatorHealth>,
+    sfu_cluster: Option<Arc<Mutex<SfuClusterDirectory>>>,
 }
 
 impl ProductionOperatorHealthSource {
@@ -579,6 +583,7 @@ impl ProductionOperatorHealthSource {
         Self {
             store,
             realtime: None,
+            sfu_cluster: None,
         }
     }
 
@@ -595,6 +600,7 @@ impl ProductionOperatorHealthSource {
                 live_provider,
                 turn_configured,
             }),
+            sfu_cluster: Some(Arc::new(Mutex::new(SfuClusterDirectory::default()))),
         }
     }
 }
@@ -617,6 +623,82 @@ impl OperatorRuntimeHealthSource for ProductionOperatorHealthSource {
             )),
             capacity: Some(realtime.capacity),
         }
+    }
+}
+
+impl OperatorSfuClusterControl for ProductionOperatorHealthSource {
+    fn heartbeat_sfu_node(
+        &self,
+        heartbeat: OperatorSfuNodeHeartbeat,
+    ) -> Result<SfuNodeDescriptor, OperatorSfuClusterError> {
+        let cluster = self
+            .sfu_cluster
+            .as_ref()
+            .ok_or(OperatorSfuClusterError::NotConfigured)?;
+        let now_unix_ms =
+            runtime_now_unix_ms().map_err(|_| OperatorSfuClusterError::Unavailable)?;
+        let lease_expires_at_unix_ms = now_unix_ms
+            .checked_add(i64::from(heartbeat.lease_ttl_ms))
+            .ok_or(OperatorSfuClusterError::InvalidNode)?;
+        let node = SfuNodeDescriptor {
+            node_id: heartbeat.node_id,
+            region: heartbeat.region,
+            state: heartbeat.state,
+            active_sessions: heartbeat.active_sessions,
+            max_sessions: heartbeat.max_sessions,
+            lease_expires_at_unix_ms,
+        };
+        let mut directory = cluster
+            .lock()
+            .map_err(|_| OperatorSfuClusterError::Unavailable)?;
+        directory.prune_expired_nodes(now_unix_ms);
+        directory
+            .upsert_node(node.clone())
+            .map_err(map_sfu_cluster_error)?;
+        Ok(node)
+    }
+
+    fn drain_sfu_node(
+        &self,
+        node_id: &OpaqueId,
+    ) -> Result<SfuNodeDescriptor, OperatorSfuClusterError> {
+        let cluster = self
+            .sfu_cluster
+            .as_ref()
+            .ok_or(OperatorSfuClusterError::NotConfigured)?;
+        let now_unix_ms =
+            runtime_now_unix_ms().map_err(|_| OperatorSfuClusterError::Unavailable)?;
+        let mut directory = cluster
+            .lock()
+            .map_err(|_| OperatorSfuClusterError::Unavailable)?;
+        directory.prune_expired_nodes(now_unix_ms);
+        directory
+            .mark_draining(node_id)
+            .map_err(map_sfu_cluster_error)?;
+        directory
+            .node(node_id)
+            .ok_or(OperatorSfuClusterError::InvalidNode)
+    }
+
+    fn list_sfu_nodes(&self) -> Result<Vec<SfuNodeDescriptor>, OperatorSfuClusterError> {
+        let cluster = self
+            .sfu_cluster
+            .as_ref()
+            .ok_or(OperatorSfuClusterError::NotConfigured)?;
+        let now_unix_ms =
+            runtime_now_unix_ms().map_err(|_| OperatorSfuClusterError::Unavailable)?;
+        let mut directory = cluster
+            .lock()
+            .map_err(|_| OperatorSfuClusterError::Unavailable)?;
+        directory.prune_expired_nodes(now_unix_ms);
+        Ok(directory.nodes())
+    }
+}
+
+const fn map_sfu_cluster_error(error: SfuPlacementError) -> OperatorSfuClusterError {
+    match error {
+        SfuPlacementError::InvalidNode => OperatorSfuClusterError::InvalidNode,
+        SfuPlacementError::NoHealthyCapacity => OperatorSfuClusterError::Unavailable,
     }
 }
 
@@ -2155,6 +2237,57 @@ mod tests {
         );
         assert!(!expired.detail.contains("worker-private-id"));
 
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn operator_sfu_control_registers_lists_and_drains_only_in_realtime_runtime() {
+        let path = std::env::temp_dir().join(format!(
+            "ucr-runtime-sfu-control-{}-{}.sqlite",
+            std::process::id(),
+            runtime_now_unix_ms().expect("clock")
+        ));
+        let store = Arc::new(SqliteLocalStore::open(&path).expect("open store"));
+        let heartbeat = OperatorSfuNodeHeartbeat {
+            node_id: OpaqueId::new("sfu-eu-1").expect("node id"),
+            region: "eu-west-1".to_owned(),
+            state: ucr_sfu::SfuNodeState::Healthy,
+            active_sessions: 2,
+            max_sessions: 100,
+            lease_ttl_ms: 30_000,
+        };
+
+        let basic = ProductionOperatorHealthSource::basic(Arc::clone(&store));
+        assert_eq!(
+            basic.heartbeat_sfu_node(heartbeat.clone()),
+            Err(OperatorSfuClusterError::NotConfigured)
+        );
+
+        let realtime = ProductionOperatorHealthSource::realtime(
+            Arc::clone(&store),
+            Arc::new(RealtimeSessionRegistry::new(8, 2)),
+            Arc::new(LiveWebRtcProvider::new().expect("live provider")),
+            false,
+        );
+        let registered = realtime
+            .heartbeat_sfu_node(heartbeat)
+            .expect("register heartbeat");
+        assert_eq!(registered.node_id.as_str(), "sfu-eu-1");
+        assert_eq!(registered.active_sessions, 2);
+        assert!(registered.lease_expires_at_unix_ms > 0);
+
+        let nodes = realtime.list_sfu_nodes().expect("list nodes");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id.as_str(), "sfu-eu-1");
+
+        let drained = realtime
+            .drain_sfu_node(&OpaqueId::new("sfu-eu-1").expect("node id"))
+            .expect("drain node");
+        assert_eq!(drained.state, ucr_sfu::SfuNodeState::Draining);
+
+        drop(realtime);
+        drop(basic);
         drop(store);
         let _ = std::fs::remove_file(path);
     }

@@ -23,6 +23,9 @@ use ucr_protocol::{
     canonical_sfu_forward_envelope, phase29_sfu_capabilities,
 };
 
+pub const MAX_SFU_CLUSTER_NODES: usize = 256;
+pub const MAX_SFU_REGION_BYTES: usize = 64;
+
 /// Ephemeral health state for one SFU worker in a horizontal deployment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfuNodeState {
@@ -107,17 +110,53 @@ impl SfuClusterDirectory {
     /// Registers or refreshes one ephemeral worker heartbeat.
     ///
     /// # Errors
-    /// Rejects empty region labels, zero capacity, over-capacity counters, or non-positive leases.
+    /// Rejects invalid/oversized region labels, zero capacity, over-capacity counters,
+    /// non-positive leases, or a new node beyond the bounded cluster directory limit.
     pub fn upsert_node(&mut self, node: SfuNodeDescriptor) -> Result<(), SfuPlacementError> {
         if node.region.is_empty()
+            || node.region.len() > MAX_SFU_REGION_BYTES
             || node.max_sessions == 0
             || node.active_sessions > node.max_sessions
             || node.lease_expires_at_unix_ms <= 0
+            || (!self.nodes.contains_key(node.node_id.as_str())
+                && self.nodes.len() >= MAX_SFU_CLUSTER_NODES)
         {
             return Err(SfuPlacementError::InvalidNode);
         }
         self.nodes.insert(node.node_id.as_str().to_owned(), node);
         Ok(())
+    }
+
+    #[must_use]
+    pub fn node(&self, node_id: &ucr_model::OpaqueId) -> Option<SfuNodeDescriptor> {
+        self.nodes.get(node_id.as_str()).cloned()
+    }
+
+    #[must_use]
+    pub fn nodes(&self) -> Vec<SfuNodeDescriptor> {
+        self.nodes.values().cloned().collect()
+    }
+
+    /// Removes workers whose heartbeat lease has expired and clears any sticky placements that
+    /// referenced them. This keeps the bounded ephemeral directory reusable across worker churn.
+    pub fn prune_expired_nodes(&mut self, now_unix_ms: i64) -> usize {
+        let expired = self
+            .nodes
+            .iter()
+            .filter_map(|(node_id, node)| {
+                (node.lease_expires_at_unix_ms <= now_unix_ms).then_some(node_id.clone())
+            })
+            .collect::<Vec<_>>();
+        if expired.is_empty() {
+            return 0;
+        }
+        for node_id in &expired {
+            self.nodes.remove(node_id);
+        }
+        self.placements.retain(|_, assigned_node_id| {
+            !expired.iter().any(|node_id| node_id == assigned_node_id)
+        });
+        expired.len()
     }
 
     pub fn remove_node(&mut self, node_id: &ucr_model::OpaqueId) {
@@ -625,7 +664,8 @@ const fn permissions(
 #[cfg(test)]
 mod horizontal_placement_tests {
     use super::{
-        SfuClusterDirectory, SfuNodeDescriptor, SfuNodeState, SfuPlacementError, SfuPlacementPolicy,
+        MAX_SFU_CLUSTER_NODES, SfuClusterDirectory, SfuNodeDescriptor, SfuNodeState,
+        SfuPlacementError, SfuPlacementPolicy,
     };
     use ucr_model::{CallId, NamespaceId, OpaqueId, TenantId, TenantScope};
 
@@ -933,6 +973,76 @@ mod horizontal_placement_tests {
                 "rendezvous distribution collapsed for {node_id}: {count}"
             );
         }
+    }
+
+    #[test]
+    fn expired_worker_pruning_reclaims_capacity_and_stale_stickiness() {
+        let mut directory = SfuClusterDirectory::default();
+        directory
+            .upsert_node(node("expired", "eu", SfuNodeState::Healthy, 0, 100, 100))
+            .expect("expired node");
+        directory
+            .place_session(
+                &scope(),
+                &call("stale-call"),
+                &SfuPlacementPolicy::default(),
+                50,
+            )
+            .expect("initial placement");
+        directory
+            .upsert_node(node("live", "eu", SfuNodeState::Healthy, 0, 100, 10_000))
+            .expect("live node");
+
+        assert_eq!(directory.prune_expired_nodes(100), 1);
+        assert!(directory.node(&opaque("expired")).is_none());
+
+        let replacement = directory
+            .place_session(
+                &scope(),
+                &call("stale-call"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("fresh placement after prune");
+        assert_eq!(replacement.node_id.as_str(), "live");
+        assert!(!replacement.retained_sticky_placement);
+    }
+
+    #[test]
+    fn cluster_directory_rejects_unbounded_worker_registration() {
+        let mut directory = SfuClusterDirectory::default();
+        for index in 0..MAX_SFU_CLUSTER_NODES {
+            directory
+                .upsert_node(node(
+                    &format!("sfu-{index}"),
+                    "eu",
+                    SfuNodeState::Healthy,
+                    0,
+                    100,
+                    10_000,
+                ))
+                .expect("bounded node");
+        }
+        assert_eq!(directory.nodes().len(), MAX_SFU_CLUSTER_NODES);
+        assert_eq!(
+            directory.upsert_node(node(
+                "sfu-overflow",
+                "eu",
+                SfuNodeState::Healthy,
+                0,
+                100,
+                10_000,
+            )),
+            Err(SfuPlacementError::InvalidNode)
+        );
+
+        directory
+            .upsert_node(node("sfu-0", "eu", SfuNodeState::Draining, 1, 100, 20_000))
+            .expect("existing node refresh remains allowed");
+        assert_eq!(
+            directory.node(&opaque("sfu-0")).expect("node").state,
+            SfuNodeState::Draining
+        );
     }
 
     #[test]

@@ -35,9 +35,20 @@ fn operator_health_is_separate_from_integration_api() {
     }
     assert!(!universal.contains("OperatorRuntimeService"));
     assert!(api.contains("OperatorRuntimeHealthSource"));
+    assert!(api.contains("OperatorSfuClusterControl"));
+    for rpc in ["HeartbeatSfuNode", "DrainSfuNode", "ListSfuNodes"] {
+        assert!(operator.contains(rpc), "missing private operator RPC {rpc}");
+        assert!(
+            !universal.contains(rpc),
+            "operator RPC leaked into integration API"
+        );
+    }
     assert!(runtime.contains("operator_runtime_service_server"));
     assert!(spec.contains("MUST NOT forward or expose this service"));
     assert!(spec.contains("valid TURN configuration is not equivalent to TURN network health"));
+    assert!(spec.contains("Heartbeat TTL is bounded to 1–120 seconds"));
+    assert!(spec.contains("do **not** make the"));
+    assert!(spec.contains("public `horizontal_sfu` capability Production-ready"));
 }
 
 #[test]

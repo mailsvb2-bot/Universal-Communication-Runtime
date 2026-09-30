@@ -34,6 +34,28 @@ The contract must fail closed rather than promote configuration into stronger he
 particular, valid TURN configuration is not equivalent to TURN network health. Webhook worker health
 is also not inferred from process configuration: only a currently unexpired durable lease is healthy.
 
+## Horizontal SFU worker control
+
+The same private loopback service now owns the prepared horizontal-SFU worker control plane:
+
+- `HeartbeatSfuNode` registers or refreshes one bounded worker record with opaque node ID, deployment
+  region, health/draining state, active/max session counters, and a short lease TTL;
+- `DrainSfuNode` atomically marks a known worker draining so fresh placement stops selecting it while
+  existing sticky placements may finish;
+- `ListSfuNodes` returns only bounded infrastructure metadata and the absolute lease expiry.
+
+Heartbeat TTL is bounded to 1–120 seconds and the in-process directory is capped at 256 workers.
+The API daemon without realtime/SFU runtime returns `failed_precondition` instead of pretending the
+cluster exists. This state is intentionally ephemeral: process restart requires workers to
+re-register. Expired workers are pruned before heartbeat/list/drain operations, including any stale
+sticky placements that referenced them, so bounded node capacity is reclaimed instead of leaking
+across worker churn.
+
+These operator RPCs do not expose Conference IDs, participants, tenant business data, join grants,
+media keys, plaintext media, TURN credentials, or provider secrets. They also do **not** make the
+public `horizontal_sfu` capability Production-ready. Concrete inter-node encrypted-media transport
+and runtime placement/failover evidence remain required before that capability can become true.
+
 ## Capacity
 
 Capacity is ephemeral operator state. It is not a quota, billing counter, participant attendance

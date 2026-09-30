@@ -25,6 +25,49 @@ message OperatorCapacityStatus {
   uint32 available_realtime_sessions = 4;
 }
 
+enum OperatorSfuNodeState {
+  OPERATOR_SFU_NODE_STATE_UNSPECIFIED = 0;
+  OPERATOR_SFU_NODE_STATE_HEALTHY = 1;
+  OPERATOR_SFU_NODE_STATE_DRAINING = 2;
+  OPERATOR_SFU_NODE_STATE_UNAVAILABLE = 3;
+}
+
+message OperatorSfuNodeHeartbeatRequest {
+  string node_id = 1;
+  string region = 2;
+  OperatorSfuNodeState state = 3;
+  uint32 active_sessions = 4;
+  uint32 max_sessions = 5;
+  uint32 lease_ttl_ms = 6;
+}
+
+message OperatorSfuNodeSnapshot {
+  string node_id = 1;
+  string region = 2;
+  OperatorSfuNodeState state = 3;
+  uint32 active_sessions = 4;
+  uint32 max_sessions = 5;
+  int64 lease_expires_at_unix_ms = 6;
+}
+
+message OperatorSfuNodeHeartbeatResponse {
+  OperatorSfuNodeSnapshot node = 1;
+}
+
+message OperatorSfuNodeDrainRequest {
+  string node_id = 1;
+}
+
+message OperatorSfuNodeDrainResponse {
+  OperatorSfuNodeSnapshot node = 1;
+}
+
+message OperatorSfuNodeListRequest {}
+
+message OperatorSfuNodeListResponse {
+  repeated OperatorSfuNodeSnapshot nodes = 1;
+}
+
 message OperatorRuntimeHealthRequest {}
 
 message OperatorRuntimeHealthResponse {
@@ -39,4 +82,7 @@ message OperatorRuntimeHealthResponse {
 
 service OperatorRuntimeService {
   rpc GetHealth(OperatorRuntimeHealthRequest) returns (OperatorRuntimeHealthResponse);
+  rpc HeartbeatSfuNode(OperatorSfuNodeHeartbeatRequest) returns (OperatorSfuNodeHeartbeatResponse);
+  rpc DrainSfuNode(OperatorSfuNodeDrainRequest) returns (OperatorSfuNodeDrainResponse);
+  rpc ListSfuNodes(OperatorSfuNodeListRequest) returns (OperatorSfuNodeListResponse);
 }
