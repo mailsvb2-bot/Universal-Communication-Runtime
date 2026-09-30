@@ -3,7 +3,7 @@
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::net::TcpListener;
@@ -952,6 +952,332 @@ async fn verify_call_round_trip(endpoint: &str, env: &DevEnvironment) -> Result<
         ),
         "StartCall",
     )
+}
+
+async fn verify_universal_conference_round_trip(
+    endpoint: &str,
+    env: &DevEnvironment,
+) -> Result<(), String> {
+    let now_unix_ms = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("self-check system clock: {error}"))?
+            .as_millis(),
+    )
+    .map_err(|_| "self-check system clock exceeds i64".to_owned())?;
+
+    let integration_id = pb_id("dev-service-principal");
+    let external_conference_id = b"dev-universal-conference".to_vec();
+    let create_body = pb::UniversalCreateConferenceRequest {
+        scope: Some(pb_scope(&env.scope)),
+        integration_id: Some(integration_id.clone()),
+        external_conference_id: external_conference_id.clone(),
+        idempotency_key: "dev-universal-create".to_owned(),
+        mode: pb::UniversalConferenceMode::Webinar as i32,
+        schedule: Some(pb::ConferenceScheduleMetadata {
+            starts_at_unix_ms: now_unix_ms + 300_000,
+            planned_end_unix_ms: Some(now_unix_ms + 3_900_000),
+            join_before_seconds: 900,
+            join_after_seconds: 300,
+            timezone: Some("UTC".to_owned()),
+        }),
+        metadata: Vec::new(),
+    };
+
+    let mut conference =
+        pb::universal_conference_service_client::UniversalConferenceServiceClient::connect(
+            endpoint.to_owned(),
+        )
+        .await
+        .map_err(|error| format!("self-check UniversalConferenceService connect: {error}"))?;
+
+    let mut create = Request::new(create_body.clone());
+    attach_dev_credential(&mut create, env);
+    let created = conference
+        .create_conference(create)
+        .await
+        .map_err(|error| format!("self-check CreateConference: {error}"))?
+        .into_inner();
+    let descriptor = match created.result {
+        Some(pb::universal_create_conference_response::Result::Conference(value)) => value,
+        _ => return Err("authenticated public CreateConference self-check failed".to_owned()),
+    };
+    let conference_id = descriptor
+        .conference_id
+        .clone()
+        .ok_or_else(|| "CreateConference omitted conference_id".to_owned())?;
+
+    let mut create_retry = Request::new(create_body);
+    attach_dev_credential(&mut create_retry, env);
+    let retried = conference
+        .create_conference(create_retry)
+        .await
+        .map_err(|error| format!("self-check CreateConference retry: {error}"))?
+        .into_inner();
+    let retry_id = match retried.result {
+        Some(pb::universal_create_conference_response::Result::Conference(value)) => {
+            value.conference_id
+        }
+        _ => None,
+    };
+    require_result(
+        retry_id.as_ref() == Some(&conference_id),
+        "CreateConference exact idempotent retry",
+    )?;
+
+    for (external_user_id, role, key) in [
+        (
+            b"dev-owner".as_slice(),
+            pb::ConferenceParticipantRole::Owner,
+            "dev-owner",
+        ),
+        (
+            b"dev-attendee".as_slice(),
+            pb::ConferenceParticipantRole::Attendee,
+            "dev-attendee",
+        ),
+    ] {
+        let mut ensure = Request::new(pb::UniversalEnsureParticipantRequest {
+            scope: Some(pb_scope(&env.scope)),
+            conference_id: Some(conference_id.clone()),
+            integration_id: Some(integration_id.clone()),
+            external_user_id: external_user_id.to_vec(),
+            role: role as i32,
+            idempotency_key: format!("{key}-participant"),
+        });
+        attach_dev_credential(&mut ensure, env);
+        let ensured = conference
+            .ensure_participant(ensure)
+            .await
+            .map_err(|error| format!("self-check EnsureParticipant {key}: {error}"))?
+            .into_inner();
+        require_result(
+            matches!(
+                ensured.result,
+                Some(pb::universal_ensure_participant_response::Result::Participant(_))
+            ),
+            "EnsureParticipant",
+        )?;
+
+        let mut device = Request::new(pb::UniversalEnsureParticipantDeviceRequest {
+            scope: Some(pb_scope(&env.scope)),
+            conference_id: Some(conference_id.clone()),
+            integration_id: Some(integration_id.clone()),
+            external_user_id: external_user_id.to_vec(),
+            idempotency_key: format!("{key}-device"),
+        });
+        attach_dev_credential(&mut device, env);
+        let device = conference
+            .ensure_participant_device(device)
+            .await
+            .map_err(|error| format!("self-check EnsureParticipantDevice {key}: {error}"))?
+            .into_inner();
+        require_result(
+            matches!(
+                device.result,
+                Some(
+                    pb::universal_ensure_participant_device_response::Result::Device(
+                        pb::UniversalParticipantDeviceStatus { active: true, .. }
+                    )
+                )
+            ),
+            "EnsureParticipantDevice",
+        )?;
+    }
+
+    let mut prepare = Request::new(pb::UniversalPrepareConferenceRuntimeRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(integration_id.clone()),
+        idempotency_key: "dev-universal-runtime".to_owned(),
+    });
+    attach_dev_credential(&mut prepare, env);
+    let runtime = conference
+        .prepare_conference_runtime(prepare)
+        .await
+        .map_err(|error| format!("self-check PrepareConferenceRuntime: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            runtime.result,
+            Some(
+                pb::universal_prepare_conference_runtime_response::Result::Runtime(
+                    pb::UniversalConferenceRuntimeStatus {
+                        group_ready: true,
+                        call_ready: true,
+                        admitted_participant_count: 2,
+                    }
+                )
+            )
+        ),
+        "PrepareConferenceRuntime",
+    )?;
+
+    for (target, key) in [
+        (pb::UniversalConferenceLifecycle::Waiting, "dev-waiting"),
+        (pb::UniversalConferenceLifecycle::Live, "dev-live"),
+    ] {
+        let mut transition = Request::new(pb::UniversalConferenceLifecycleRequest {
+            scope: Some(pb_scope(&env.scope)),
+            conference_id: Some(conference_id.clone()),
+            target: target as i32,
+            idempotency_key: key.to_owned(),
+            integration_id: Some(integration_id.clone()),
+        });
+        attach_dev_credential(&mut transition, env);
+        let transitioned = conference
+            .transition_conference(transition)
+            .await
+            .map_err(|error| format!("self-check TransitionConference {key}: {error}"))?
+            .into_inner();
+        require_result(
+            matches!(
+                transitioned.result,
+                Some(pb::universal_conference_lifecycle_response::Result::Conference(_))
+            ),
+            "TransitionConference",
+        )?;
+    }
+
+    let subscription_id = pb_id("dev-attendance-subscription");
+    let mut events = pb::event_service_client::EventServiceClient::connect(endpoint.to_owned())
+        .await
+        .map_err(|error| format!("self-check EventService connect: {error}"))?;
+    let mut subscription = Request::new(pb::EventCreateSubscriptionRequest {
+        subscription: Some(pb::EventSubscription {
+            subscription_id: Some(subscription_id.clone()),
+            scope: Some(pb_scope(&env.scope)),
+            mode: pb::EventSubscriptionMode::DurableStream as i32,
+            webhook_uri: None,
+            event_types: vec!["ucr.conference.attendance.integration.v1".to_owned()],
+            max_in_flight: 8,
+            max_attempts: 3,
+            start: pb::EventSubscriptionStart::Latest as i32,
+        }),
+    });
+    attach_dev_credential(&mut subscription, env);
+    let subscribed = events
+        .create_subscription(subscription)
+        .await
+        .map_err(|error| format!("self-check CreateSubscription: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            subscribed.result,
+            Some(pb::event_create_subscription_response::Result::Subscription(_))
+        ),
+        "CreateSubscription",
+    )?;
+
+    let mut issue = Request::new(pb::UniversalIssueJoinGrantRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id),
+        integration_id: Some(integration_id),
+        external_user_id: b"dev-attendee".to_vec(),
+        ttl_seconds: 300,
+        use_policy: pb::JoinGrantUsePolicy::SingleUse as i32,
+        not_before_unix_ms: None,
+        not_after_unix_ms: None,
+        idempotency_key: "dev-attendee-join".to_owned(),
+    });
+    attach_dev_credential(&mut issue, env);
+    let issued = conference
+        .issue_join_grant(issue)
+        .await
+        .map_err(|error| format!("self-check IssueJoinGrant: {error}"))?
+        .into_inner();
+    let grant = match issued.result {
+        Some(pb::universal_issue_join_grant_response::Result::Grant(value)) => value,
+        _ => return Err("authenticated public IssueJoinGrant self-check failed".to_owned()),
+    };
+    let session_id = grant
+        .session_id
+        .clone()
+        .ok_or_else(|| "IssueJoinGrant omitted session_id".to_owned())?;
+    let token = grant
+        .join_url
+        .split_once("#ucr_join=")
+        .map(|(_, token)| token.to_owned())
+        .ok_or_else(|| "IssueJoinGrant returned malformed join_url".to_owned())?;
+    let claims = env
+        .join_issuer
+        .verify(&token, now_unix_ms)
+        .map_err(|error| format!("self-check signed join claims: {error:?}"))?;
+
+    let mut realtime =
+        pb::realtime_service_client::RealtimeServiceClient::connect(endpoint.to_owned())
+            .await
+            .map_err(|error| format!("self-check RealtimeService connect: {error}"))?;
+    let mut join = Request::new(pb::RealtimeJoinRequest {
+        scope: Some(pb_scope(&env.scope)),
+        call_id: Some(pb::OpaqueId {
+            value: claims.call_id.as_opaque().as_wire_bytes().to_vec(),
+        }),
+        session_id: Some(session_id.clone()),
+    });
+    attach_realtime_bearer(&mut join, &token)?;
+    let joined = realtime
+        .join_realtime(join)
+        .await
+        .map_err(|error| format!("self-check JoinRealtime: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            joined.result,
+            Some(pb::realtime_join_response::Result::Session(_))
+        ),
+        "JoinRealtime",
+    )?;
+
+    let mut leave = Request::new(pb::RealtimeLeaveRequest {
+        scope: Some(pb_scope(&env.scope)),
+        call_id: Some(pb::OpaqueId {
+            value: claims.call_id.as_opaque().as_wire_bytes().to_vec(),
+        }),
+        session_id: Some(session_id),
+    });
+    attach_realtime_bearer(&mut leave, &token)?;
+    let left = realtime
+        .leave_realtime(leave)
+        .await
+        .map_err(|error| format!("self-check LeaveRealtime: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            left.result,
+            Some(pb::realtime_leave_response::Result::Acknowledgement(_))
+        ),
+        "LeaveRealtime",
+    )?;
+
+    let mut poll = Request::new(pb::EventPollRequest {
+        scope: Some(pb_scope(&env.scope)),
+        subscription_id: Some(subscription_id),
+        max_items: 8,
+    });
+    attach_dev_credential(&mut poll, env);
+    let polled = events
+        .poll_events(poll)
+        .await
+        .map_err(|error| format!("self-check PollEvents: {error}"))?
+        .into_inner();
+    let attendance_events = match polled.result {
+        Some(pb::event_poll_response::Result::Batch(batch)) => batch
+            .events
+            .iter()
+            .filter(|event| event.event_type == "ucr.conference.attendance.integration.v1")
+            .count(),
+        _ => 0,
+    };
+    require_result(attendance_events >= 2, "attendance Event projection")
+}
+
+fn attach_realtime_bearer<T>(request: &mut Request<T>, token: &str) -> Result<(), String> {
+    let value = format!("Bearer {token}")
+        .parse()
+        .map_err(|error| format!("self-check realtime Authorization metadata: {error}"))?;
+    request.metadata_mut().insert("authorization", value);
+    Ok(())
 }
 
 fn attach_dev_credential<T>(request: &mut Request<T>, env: &DevEnvironment) {
