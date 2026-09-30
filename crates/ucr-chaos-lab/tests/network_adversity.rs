@@ -143,7 +143,6 @@ fn packet_loss_recovery_restarts_ice_for_the_same_live_webrtc_session() {
     assert_eq!(provider.close_session(&session_id), Ok(()));
 }
 
-
 #[test]
 fn deterministic_jitter_stays_bounded_on_high_latency_links() {
     fn observe_latencies() -> Vec<u64> {
@@ -178,7 +177,9 @@ fn deterministic_jitter_stays_bounded_on_high_latency_links() {
 
     assert_eq!(first, replay, "chaos jitter must be deterministic");
     assert!(
-        first.iter().all(|latency_ms| (400..=520).contains(latency_ms)),
+        first
+            .iter()
+            .all(|latency_ms| (400..=520).contains(latency_ms)),
         "jitter must stay inside the configured latency envelope"
     );
     assert!(
