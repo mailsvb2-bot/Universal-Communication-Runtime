@@ -242,7 +242,18 @@ fn job() -> StoreForwardJob {
     }
 }
 
+fn seed_content(store: &MemoryLocalStore) {
+    store
+        .persist_conversation(&conversation())
+        .expect("conversation");
+    store.persist_message(&message()).expect("message");
+    store
+        .persist_communication_intent(&intent())
+        .expect("intent");
+}
+
 fn seed(store: &MemoryLocalStore) {
+    seed_content(store);
     store
         .register_device(
             &scope(),
@@ -253,13 +264,6 @@ fn seed(store: &MemoryLocalStore) {
             },
         )
         .expect("recipient device");
-    store
-        .persist_conversation(&conversation())
-        .expect("conversation");
-    store.persist_message(&message()).expect("message");
-    store
-        .persist_communication_intent(&intent())
-        .expect("intent");
 }
 
 fn option<'a>(provider: &'a dyn TransportProvider, endpoint: &str) -> TransportRouteOption<'a> {
@@ -304,7 +308,7 @@ fn no_route_reschedules_without_consuming_delivery_attempt() {
     seed(&store);
     let clock = MutableClock::new(1_000);
     let policy = AllowPolicy;
-    let runtime = StoreForwardRuntime::new(&store, &policy, &clock);
+    let runtime = StoreForwardRuntime::new_protected_origin(&store, &policy, &clock);
     let initial = job();
     runtime.enqueue(&initial).expect("enqueue");
 
@@ -333,7 +337,7 @@ fn proven_failure_gets_new_delivery_id_and_later_success_tombstones_job() {
     seed(&store);
     let clock = MutableClock::new(1_000);
     let policy = AllowPolicy;
-    let runtime = StoreForwardRuntime::new(&store, &policy, &clock);
+    let runtime = StoreForwardRuntime::new_protected_origin(&store, &policy, &clock);
     let initial = job();
     runtime.enqueue(&initial).expect("enqueue");
     let failing = MockProvider::new(ProviderOutcome::NotAccepted);
@@ -393,12 +397,39 @@ fn proven_failure_gets_new_delivery_id_and_later_success_tombstones_job() {
 }
 
 #[test]
+fn opaque_relay_does_not_require_recipient_device_lifecycle() {
+    let store = MemoryLocalStore::default();
+    seed_content(&store);
+    assert_eq!(
+        store.device(&scope(), &DeviceId::from_opaque(oid("sf-recipient-device"))),
+        Ok(None)
+    );
+    let clock = MutableClock::new(1_000);
+    let policy = AllowPolicy;
+    let runtime = StoreForwardRuntime::new(&store, &policy, &clock);
+    let initial = job();
+    runtime.enqueue(&initial).expect("enqueue opaque relay job");
+    let provider = MockProvider::new(ProviderOutcome::Accepted);
+
+    assert_eq!(
+        runtime.process_one(
+            &scope(),
+            &initial.store_forward_id,
+            resources(),
+            &[],
+            vec![option(&provider, "sf-relay-endpoint")],
+        ),
+        Ok(StoreForwardOutcome::AcceptedByTransport)
+    );
+    assert_eq!(provider.calls(), 1);
+}
+#[test]
 fn revoked_device_never_receives_new_protected_envelope() {
     let store = MemoryLocalStore::default();
     seed(&store);
     let clock = MutableClock::new(1_000);
     let policy = AllowPolicy;
-    let runtime = StoreForwardRuntime::new(&store, &policy, &clock);
+    let runtime = StoreForwardRuntime::new_protected_origin(&store, &policy, &clock);
     let initial = job();
     runtime.enqueue(&initial).expect("enqueue");
     store
@@ -424,7 +455,7 @@ fn ambiguous_acceptance_blocks_automatic_replay_even_after_lease_expiry() {
     seed(&store);
     let clock = MutableClock::new(1_000);
     let policy = AllowPolicy;
-    let runtime = StoreForwardRuntime::new(&store, &policy, &clock);
+    let runtime = StoreForwardRuntime::new_protected_origin(&store, &policy, &clock);
     let initial = job();
     runtime.enqueue(&initial).expect("enqueue");
     let provider = MockProvider::new(ProviderOutcome::AcceptanceUnknown);
