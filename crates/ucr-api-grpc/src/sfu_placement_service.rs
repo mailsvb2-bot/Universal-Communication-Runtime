@@ -16,7 +16,7 @@ use super::{
 /// Private runtime-only horizontal-SFU placement binding.
 ///
 /// This service owns no Conference, participant, authorization or media state. It only projects the
-/// ephemeral SfuClusterDirectory through a loopback gRPC boundary for trusted infrastructure.
+/// ephemeral `SfuClusterDirectory` through a loopback gRPC boundary for trusted infrastructure.
 pub struct GrpcSfuPlacementService<C> {
     clock: Arc<C>,
     cluster: Arc<Mutex<SfuClusterDirectory>>,
