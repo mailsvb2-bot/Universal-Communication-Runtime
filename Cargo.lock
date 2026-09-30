@@ -3910,9 +3910,11 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "ucr-api-grpc",
+ "ucr-conference",
  "ucr-core",
  "ucr-model",
  "ucr-protocol",
+ "ucr-realtime",
  "ucr-storage-memory",
 ]
 
