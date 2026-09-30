@@ -49,9 +49,15 @@ healthy replacement. Region preference is a routing hint only; strict policy fai
 capacity exists in-region, while an explicitly enabled cross-region policy may choose a healthy
 worker elsewhere and reports that fact in the placement decision.
 
+The private loopback `OperatorRuntimeService` now wires worker registration/heartbeat, bounded
+node listing, and explicit draining into this same ephemeral directory. Heartbeats carry only node
+ID, region, state, active/max session counters and a bounded lease TTL; API-only runtimes fail
+closed because they do not own an SFU directory. Expired leases remain ineligible for fresh
+placement and workers must re-register after process restart.
+
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
 true. Production horizontal SFU still requires a concrete inter-node encrypted-media transport,
-worker registration/heartbeat wiring, runtime integration, failure/drain operational evidence, and
+binding actual realtime sessions to cluster placement, failure/drain operational evidence, and
 load/adversity evidence. The placement directory must never become a Call, Conference, membership,
 authorization, media-key, plaintext-media, Delivery, or recording owner.
 
