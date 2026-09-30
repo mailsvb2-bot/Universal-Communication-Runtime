@@ -21,7 +21,7 @@ ucr-conference = { path = "../ucr-conference" }
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
 ucr-realtime = { path = "../ucr-realtime" }
-ucr-storage-memory = { path = "../ucr-storage-memory" }
+ucr-storage-sqlite = { path = "../ucr-storage-sqlite" }
 
 [lints]
 workspace = true
