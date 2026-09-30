@@ -220,7 +220,7 @@ impl<'a> TransportOrchestrator<'a> {
     /// any provider invocation.
     ///
     /// # Errors
-    /// Returns the normal planning errors plus DeviceLifecycleUnavailable when the canonical
+    /// Returns the normal planning errors plus `DeviceLifecycleUnavailable` when the canonical
     /// lifecycle owner cannot be read safely.
     pub fn plan_protected<'b, S>(
         &self,
