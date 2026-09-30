@@ -751,7 +751,10 @@ async fn verify_public_api(env: &Arc<DevEnvironment>) -> Result<(), String> {
         .local_addr()
         .map_err(|error| format!("self-check address: {error}"))?;
     let incoming = TcpListenerStream::new(listener);
-    let clock = Arc::new(SystemServiceQuotaClock);
+    let foreign =
+        provision_dev_service_account(&env.store, &env.scope, "dev-foreign-service-principal")?;
+    let clock = Arc::new(DevConformanceClock::from_system_time()?);
+    let conformance_clock = Arc::clone(&clock);
     let store = Arc::clone(&env.store);
     let authorization = Arc::clone(&env.store);
     let event_clock = Arc::new(SystemEventDeliveryClock);
@@ -811,7 +814,7 @@ async fn verify_public_api(env: &Arc<DevEnvironment>) -> Result<(), String> {
     verify_attachment_round_trip(&endpoint, env).await?;
     verify_group_round_trip(&endpoint, env).await?;
     verify_call_round_trip(&endpoint, env).await?;
-    verify_universal_conference_round_trip(&endpoint, env).await?;
+    verify_universal_conference_round_trip(&endpoint, env, &foreign, &conformance_clock).await?;
     server.abort();
     Ok(())
 }
@@ -1040,8 +1043,12 @@ async fn verify_call_round_trip(endpoint: &str, env: &DevEnvironment) -> Result<
 async fn verify_universal_conference_round_trip(
     endpoint: &str,
     env: &DevEnvironment,
+    foreign: &DevServiceAccount,
+    clock: &DevConformanceClock,
 ) -> Result<(), String> {
-    let now_unix_ms = system_time_unix_ms("self-check system clock")?;
+    let now_unix_ms = clock
+        .now_unix_ms()
+        .map_err(|_| "self-check conformance clock unavailable".to_owned())?;
     let integration_id = pb_id("dev-service-principal");
     let mut conference =
         pb::universal_conference_service_client::UniversalConferenceServiceClient::connect(
@@ -1056,10 +1063,43 @@ async fn verify_universal_conference_round_trip(
     open_dev_universal_conference(&mut conference, env, &conference_id, &integration_id).await?;
 
     let (mut events, subscription_id) = create_dev_attendance_subscription(endpoint, env).await?;
-    let (token, claims, session_id) =
-        issue_dev_join_grant(&mut conference, env, &conference_id, &integration_id).await?;
+    let (mut foreign_events, foreign_subscription_id) =
+        create_foreign_attendance_subscription(endpoint, env, foreign).await?;
+    verify_foreign_conference_isolation(
+        &mut conference,
+        env,
+        foreign,
+        &conference_id,
+        &integration_id,
+    )
+    .await?;
+
+    let (token, claims, session_id) = issue_dev_join_grant(
+        &mut conference,
+        env,
+        &conference_id,
+        &integration_id,
+        clock,
+    )
+    .await?;
     join_and_leave_dev_realtime(endpoint, env, &token, &claims, &session_id).await?;
-    verify_dev_attendance_projection(&mut events, env, subscription_id).await
+    verify_dev_attendance_projection(&mut events, env, subscription_id).await?;
+    verify_foreign_attendance_isolation(
+        &mut foreign_events,
+        env,
+        foreign,
+        foreign_subscription_id,
+    )
+    .await?;
+    verify_join_grant_time_boundaries(
+        endpoint,
+        &mut conference,
+        env,
+        &conference_id,
+        &integration_id,
+        clock,
+    )
+    .await
 }
 
 fn system_time_unix_ms(context: &str) -> Result<i64, String> {
@@ -1358,6 +1398,7 @@ async fn issue_dev_join_grant(
     env: &DevEnvironment,
     conference_id: &pb::OpaqueId,
     integration_id: &pb::OpaqueId,
+    clock: &DevConformanceClock,
 ) -> Result<(String, ucr_realtime::RealtimeSessionClaims, pb::OpaqueId), String> {
     let mut issue = Request::new(pb::UniversalIssueJoinGrantRequest {
         scope: Some(pb_scope(&env.scope)),
@@ -1391,7 +1432,9 @@ async fn issue_dev_join_grant(
         .join_issuer
         .verify_signed_claims(
             &token,
-            system_time_unix_ms("self-check join verification clock")?,
+            clock
+                .now_unix_ms()
+                .map_err(|_| "self-check join verification clock unavailable".to_owned())?,
         )
         .map_err(|error| format!("self-check signed join claims: {error:?}"))?;
     Ok((token, claims, session_id))
