@@ -982,14 +982,7 @@ mod horizontal_placement_tests {
         );
 
         directory
-            .upsert_node(node(
-                "sfu-0",
-                "eu",
-                SfuNodeState::Draining,
-                1,
-                100,
-                20_000,
-            ))
+            .upsert_node(node("sfu-0", "eu", SfuNodeState::Draining, 1, 100, 20_000))
             .expect("existing node refresh remains allowed");
         assert_eq!(
             directory.node(&opaque("sfu-0")).expect("node").state,
