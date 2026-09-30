@@ -37,6 +37,25 @@ fn horizontal_sfu_placement_remains_ephemeral_and_non_authoritative() {
 }
 
 #[test]
+fn horizontal_sfu_operator_control_wires_heartbeat_list_and_drain_without_public_claim() {
+    let operator = read("proto/ucr/v1/operator_runtime.proto");
+    let api = read("crates/ucr-api-grpc/src/operator_runtime_service.rs");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let spec = read("spec/sfu.md");
+
+    for rpc in ["HeartbeatSfuNode", "DrainSfuNode", "ListSfuNodes"] {
+        assert!(operator.contains(rpc), "missing operator SFU RPC {rpc}");
+    }
+    assert!(api.contains("OperatorSfuClusterControl"));
+    assert!(runtime.contains("sfu_cluster: Some"));
+    assert!(runtime.contains("SfuClusterDirectory::default()"));
+    assert!(runtime.contains("heartbeat_sfu_node"));
+    assert!(runtime.contains("mark_draining"));
+    assert!(spec.contains("workers must re-register after process restart"));
+    assert!(spec.contains("concrete inter-node encrypted-media transport"));
+}
+
+#[test]
 fn horizontal_sfu_capability_stays_fail_closed_until_transport_is_wired() {
     let runtime = read("crates/ucr-runtime/src/lib.rs");
     let spec = read("spec/universal-conference-api.md");
