@@ -22,7 +22,7 @@ use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage,
     AdaptiveMediaTelemetry, CallId, CallParticipantState, CallSignal, CallSignalKind,
-    ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
+    CallSignallingState, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
     ConferenceParticipantRole, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
     DeferredMediaFallback, DeliveryState, DeviceId, DeviceLifecycleState, DeviceRef,
     EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
@@ -2111,6 +2111,116 @@ where
         }
     }
 
+    /// Reaps local realtime/WebRTC and ephemeral Conference state whose durable authority has
+    /// already ended.
+    ///
+    /// This sweep is intentionally node-local. Every realtime node runs it against the shared
+    /// durable Conference/Call state, so a separate management API process never needs access to
+    /// another node's in-memory registry.
+    ///
+    /// # Errors
+    /// Returns explicit durable-store, registry, WebRTC-provider, attendance-event, or runtime-state
+    /// failures. Work completed before an error remains idempotently cleaned and the next sweep can
+    /// finish the remainder.
+    pub fn cleanup_closed_conferences_once(&self) -> Result<RealtimeCleanupSweep, CanonicalError> {
+        let now_unix_ms = self.now()?;
+        self.cleanup_closed_conferences_at(now_unix_ms)
+    }
+
+    fn cleanup_closed_conferences_at(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<RealtimeCleanupSweep, CanonicalError> {
+        let active_claims = self
+            .registry
+            .active_claims_at(now_unix_ms)
+            .map_err(map_registry_error)?;
+        let mut calls = BTreeMap::<Vec<u8>, (TenantScope, CallId)>::new();
+        for claims in &active_claims {
+            insert_cleanup_call(&mut calls, &claims.scope, &claims.call_id);
+        }
+        for (scope, call_id) in self
+            .conference_state
+            .tracked_calls()
+            .map_err(|error| map_conference_error(&error))?
+        {
+            insert_cleanup_call(&mut calls, &scope, &call_id);
+        }
+
+        let mut sweep = RealtimeCleanupSweep {
+            inspected_calls: calls.len(),
+            ..RealtimeCleanupSweep::default()
+        };
+        for (_, (scope, call_id)) in calls {
+            if self.cleanup_decision(&scope, &call_id)?
+                != RuntimeCallCleanupDecision::Cleanup
+            {
+                continue;
+            }
+            sweep.closed_calls = sweep.closed_calls.saturating_add(1);
+
+            for claims in active_claims
+                .iter()
+                .filter(|claims| claims.scope == scope && claims.call_id == call_id)
+            {
+                match self.webrtc_provider.close_session(&claims.session_id) {
+                    Ok(()) | Err(WebRtcProviderError::SessionUnavailable) => {}
+                    Err(error) => return Err(map_webrtc_provider_error(error)),
+                }
+                let transition = match self.registry.leave(claims, now_unix_ms) {
+                    Ok(transition) => transition,
+                    Err(RealtimeRegistryError::SessionUnavailable) => continue,
+                    Err(error) => return Err(map_registry_error(error)),
+                };
+                self.append_attendance(&transition)?;
+                sweep.sessions_reaped = sweep.sessions_reaped.saturating_add(1);
+            }
+
+            let removed = self
+                .conference_state
+                .clear_call_ephemeral_state(&scope, &call_id)
+                .map_err(|error| map_conference_error(&error))?;
+            sweep.ephemeral_entries_removed =
+                sweep.ephemeral_entries_removed.saturating_add(removed);
+        }
+        Ok(sweep)
+    }
+
+    fn cleanup_decision(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<RuntimeCallCleanupDecision, CanonicalError> {
+        let Some(call) = self.store.call(scope, call_id).map_err(map_store_error)? else {
+            return Ok(RuntimeCallCleanupDecision::Cleanup);
+        };
+        if call.signalling_state == CallSignallingState::Terminated {
+            return Ok(RuntimeCallCleanupDecision::Cleanup);
+        }
+        let Some(group) = self
+            .store
+            .group_for_conversation(scope, &call.conversation.conversation_id)
+            .map_err(map_store_error)?
+        else {
+            return Ok(RuntimeCallCleanupDecision::Keep);
+        };
+        let Some(conference) = self
+            .store
+            .universal_conference_profile(scope, &group.group_id)
+            .map_err(map_store_error)?
+        else {
+            return Ok(RuntimeCallCleanupDecision::Keep);
+        };
+        if matches!(
+            conference.lifecycle,
+            UniversalConferenceLifecycle::Ending | UniversalConferenceLifecycle::Ended
+        ) {
+            Ok(RuntimeCallCleanupDecision::Cleanup)
+        } else {
+            Ok(RuntimeCallCleanupDecision::Keep)
+        }
+    }
+
     fn append_attendance(&self, transition: &AttendanceTransition) -> Result<(), CanonicalError> {
         let event = attendance_event(&*self.store, transition)?;
         let Some(integration_event) =
@@ -2127,6 +2237,24 @@ where
             .map(|_| ())
             .map_err(map_store_error)
     }
+}
+
+fn insert_cleanup_call(
+    calls: &mut BTreeMap<Vec<u8>, (TenantScope, CallId)>,
+    scope: &TenantScope,
+    call_id: &CallId,
+) {
+    let mut key = Vec::new();
+    key.extend_from_slice(scope.tenant_id.as_opaque().as_wire_bytes());
+    key.push(0);
+    if let Some(namespace_id) = scope.namespace_id.as_ref() {
+        key.extend_from_slice(namespace_id.as_opaque().as_wire_bytes());
+    }
+    key.push(0);
+    key.extend_from_slice(call_id.as_opaque().as_wire_bytes());
+    calls
+        .entry(key)
+        .or_insert_with(|| (scope.clone(), call_id.clone()));
 }
 
 fn conference_runtime<C, A, S>(
