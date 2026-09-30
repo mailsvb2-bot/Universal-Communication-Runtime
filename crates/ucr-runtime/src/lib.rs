@@ -1445,10 +1445,9 @@ impl ProductionRuntime {
 
         let incoming = TcpListenerStream::new(listener);
         let operator_incoming = match operator_bind {
-            Some(operator_bind) => Some(
-                bind_private_operator_listener(bind, operator_bind, "api")
-                    .await?,
-            ),
+            Some(operator_bind) => {
+                Some(bind_private_operator_listener(bind, operator_bind, "api").await?)
+            }
             None => None,
         };
         let clock = Arc::new(SystemServiceQuotaClock);
@@ -1593,10 +1592,9 @@ impl ProductionRuntime {
 
         let incoming = TcpListenerStream::new(listener);
         let operator_incoming = match operator_bind {
-            Some(operator_bind) => Some(
-                bind_private_operator_listener(bind, operator_bind, "machine-auth")
-                    .await?,
-            ),
+            Some(operator_bind) => {
+                Some(bind_private_operator_listener(bind, operator_bind, "machine-auth").await?)
+            }
             None => None,
         };
         let clock = Arc::new(SystemServiceQuotaClock);
@@ -1725,10 +1723,9 @@ impl ProductionRuntime {
         println!("UCR_RUNTIME_MODE={RUNTIME_MODE} realtime=true tls_edge=required test_mode=false");
         let incoming = TcpListenerStream::new(listener);
         let operator_incoming = match operator_bind {
-            Some(operator_bind) => Some(
-                bind_private_operator_listener(bind, operator_bind, "realtime")
-                    .await?,
-            ),
+            Some(operator_bind) => {
+                Some(bind_private_operator_listener(bind, operator_bind, "realtime").await?)
+            }
             None => None,
         };
         let clock = Arc::new(SystemServiceQuotaClock);
