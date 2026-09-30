@@ -19,9 +19,13 @@ fn protected_delivery_reuses_canonical_device_lifecycle_owner() {
     assert!(orchestrator.contains("pub fn plan_protected"));
     assert!(orchestrator.contains("S: DeviceLifecycleStore + ?Sized"));
     assert!(orchestrator.contains("device_allows_protected_access"));
+    assert!(orchestrator.contains("protected_device_gate"));
+    assert!(orchestrator.contains("revalidate_protected_route"));
+    assert!(orchestrator.contains("transmit_primary_protected"));
     assert!(store_forward.contains("pub fn new_protected_origin"));
     assert!(store_forward.contains("protected_devices: Option<&'a dyn DeviceLifecycleStore>"));
     assert!(store_forward.contains(".plan_protected(intent, resources, hints, options, devices)"));
+    assert!(store_forward.contains("transmit_with_failover_protected"));
     assert!(
         store_forward.contains("None => self.orchestrator.plan(intent, resources, hints, options)")
     );
@@ -31,6 +35,7 @@ fn protected_delivery_reuses_canonical_device_lifecycle_owner() {
     assert!(adr.contains("minimum disclosure"));
     assert!(spec.contains("## Protected Device origin gate"));
     assert!(spec.contains("StoreForwardRuntime::new_protected_origin"));
+    assert!(spec.contains("execution re-reads the canonical"));
     assert!(spec.contains("production worker deployment"));
 }
 
