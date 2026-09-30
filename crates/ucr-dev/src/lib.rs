@@ -1074,14 +1074,8 @@ async fn verify_universal_conference_round_trip(
     )
     .await?;
 
-    let (token, claims, session_id) = issue_dev_join_grant(
-        &mut conference,
-        env,
-        &conference_id,
-        &integration_id,
-        clock,
-    )
-    .await?;
+    let (token, claims, session_id) =
+        issue_dev_join_grant(&mut conference, env, &conference_id, &integration_id, clock).await?;
     join_and_leave_dev_realtime(endpoint, env, &token, &claims, &session_id).await?;
     verify_dev_attendance_projection(&mut events, env, subscription_id).await?;
     verify_foreign_attendance_isolation(
@@ -1602,7 +1596,9 @@ async fn verify_foreign_attendance_isolation(
             .iter()
             .any(|event| event.event_type == "ucr.conference.attendance.integration.v1"),
         Some(pb::event_poll_response::Result::Error(_)) | None => {
-            return Err("authenticated public foreign Event subscription self-check failed".to_owned());
+            return Err(
+                "authenticated public foreign Event subscription self-check failed".to_owned(),
+            );
         }
     };
     require_result(!leaked, "foreign attendance event isolation")
@@ -1632,7 +1628,8 @@ async fn verify_join_grant_time_boundaries(
         "dev-not-before-join",
     )
     .await?;
-    let future = attempt_realtime_join(endpoint, env, &future_token, call_id, &future_session).await?;
+    let future =
+        attempt_realtime_join(endpoint, env, &future_token, call_id, &future_session).await?;
     require_result(
         matches!(
             future.result,
@@ -1874,11 +1871,7 @@ fn attach_dev_credential<T>(request: &mut Request<T>, env: &DevEnvironment) {
 }
 
 fn attach_dev_service_account<T>(request: &mut Request<T>, account: &DevServiceAccount) {
-    attach_service_credential(
-        request,
-        &account.credential_id,
-        &account.credential_secret,
-    );
+    attach_service_credential(request, &account.credential_id, &account.credential_secret);
 }
 
 fn require_result(condition: bool, operation: &str) -> Result<(), String> {
