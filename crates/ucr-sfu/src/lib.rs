@@ -155,7 +155,9 @@ impl SfuClusterDirectory {
         {
             return Err(SfuPlacementError::InvalidNode);
         }
-        self.nodes.insert(node.node_id.as_str().to_owned(), node);
+        let node_id = node.node_id.as_str().to_owned();
+        self.nodes.insert(node_id.clone(), node);
+        self.endpoints.remove(&node_id);
         Ok(())
     }
 
@@ -781,6 +783,40 @@ mod horizontal_placement_tests {
             max_sessions,
             lease_expires_at_unix_ms,
         }
+    }
+
+    #[test]
+    fn endpointless_worker_refresh_cannot_leave_a_stale_route() {
+        let mut directory = SfuClusterDirectory::default();
+        let node_id = opaque("sfu-refresh");
+        directory
+            .upsert_node_with_endpoint(
+                node(
+                    "sfu-refresh",
+                    "eu",
+                    SfuNodeState::Healthy,
+                    0,
+                    100,
+                    20_000,
+                ),
+                SfuNodeEndpoint::new("127.0.0.1:7002".parse().expect("socket"))
+                    .expect("endpoint"),
+            )
+            .expect("node endpoint");
+        directory
+            .upsert_node(node(
+                "sfu-refresh",
+                "eu",
+                SfuNodeState::Healthy,
+                1,
+                100,
+                30_000,
+            ))
+            .expect("endpointless refresh");
+        assert_eq!(
+            directory.resolve_live_endpoint(&node_id, 10_000),
+            Err(SfuPlacementError::EndpointUnavailable)
+        );
     }
 
     #[test]
