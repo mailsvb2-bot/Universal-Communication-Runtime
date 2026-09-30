@@ -2235,6 +2235,57 @@ mod tests {
     }
 
     #[test]
+    fn operator_sfu_control_registers_lists_and_drains_only_in_realtime_runtime() {
+        let path = std::env::temp_dir().join(format!(
+            "ucr-runtime-sfu-control-{}-{}.sqlite",
+            std::process::id(),
+            runtime_now_unix_ms().expect("clock")
+        ));
+        let store = Arc::new(SqliteLocalStore::open(&path).expect("open store"));
+        let heartbeat = OperatorSfuNodeHeartbeat {
+            node_id: OpaqueId::new("sfu-eu-1").expect("node id"),
+            region: "eu-west-1".to_owned(),
+            state: ucr_sfu::SfuNodeState::Healthy,
+            active_sessions: 2,
+            max_sessions: 100,
+            lease_ttl_ms: 30_000,
+        };
+
+        let basic = ProductionOperatorHealthSource::basic(Arc::clone(&store));
+        assert_eq!(
+            basic.heartbeat_sfu_node(heartbeat.clone()),
+            Err(OperatorSfuClusterError::NotConfigured)
+        );
+
+        let realtime = ProductionOperatorHealthSource::realtime(
+            Arc::clone(&store),
+            Arc::new(RealtimeSessionRegistry::new(8, 2)),
+            Arc::new(LiveWebRtcProvider::new().expect("live provider")),
+            false,
+        );
+        let registered = realtime
+            .heartbeat_sfu_node(heartbeat)
+            .expect("register heartbeat");
+        assert_eq!(registered.node_id.as_str(), "sfu-eu-1");
+        assert_eq!(registered.active_sessions, 2);
+        assert!(registered.lease_expires_at_unix_ms > 0);
+
+        let nodes = realtime.list_sfu_nodes().expect("list nodes");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].node_id.as_str(), "sfu-eu-1");
+
+        let drained = realtime
+            .drain_sfu_node(&OpaqueId::new("sfu-eu-1").expect("node id"))
+            .expect("drain node");
+        assert_eq!(drained.state, ucr_sfu::SfuNodeState::Draining);
+
+        drop(realtime);
+        drop(basic);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn diagnostics_and_metrics_are_metadata_only() {
         let diagnostics = RuntimeDiagnostics {
             schema_version: 31,
