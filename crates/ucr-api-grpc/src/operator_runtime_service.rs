@@ -206,7 +206,6 @@ fn map_sfu_control_error(error: OperatorSfuClusterError) -> Status {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
