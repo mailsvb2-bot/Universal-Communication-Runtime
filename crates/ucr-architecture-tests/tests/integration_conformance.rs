@@ -31,6 +31,25 @@ fn integration_conformance_profile_covers_universal_connector_requirements() {
     assert!(spec.contains("## Integration profile"));
     assert!(spec.contains("tenant isolation"));
     assert!(spec.contains("contract + runtime-binding"));
+    assert!(spec.contains("second real Service Account"));
+    assert!(spec.contains("not-before rejection"));
+    assert!(spec.contains("post-expiry Realtime join rejection"));
+
+    let dev = read("crates/ucr-dev/src/lib.rs");
+    for marker in [
+        "DevConformanceClock",
+        "dev-foreign-service-principal",
+        "foreign integration conference read denial",
+        "foreign owner subscription poll denial",
+        "foreign attendance event isolation",
+        "not-before realtime join denial",
+        "expired realtime join denial",
+    ] {
+        assert!(
+            dev.contains(marker),
+            "missing adversarial integration runtime evidence: {marker}"
+        );
+    }
 }
 
 #[test]
