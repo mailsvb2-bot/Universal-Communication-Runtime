@@ -1615,13 +1615,8 @@ async fn verify_foreign_attendance_isolation(
     owner_subscription_id: &pb::OpaqueId,
     foreign_subscription_id: pb::OpaqueId,
 ) -> Result<(), String> {
-    verify_foreign_subscription_visibility_isolation(
-        events,
-        env,
-        foreign,
-        owner_subscription_id,
-    )
-    .await?;
+    verify_foreign_subscription_visibility_isolation(events, env, foreign, owner_subscription_id)
+        .await?;
 
     let mut owner_lookup = Request::new(pb::EventPollRequest {
         scope: Some(pb_scope(&env.scope)),
