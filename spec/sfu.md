@@ -53,7 +53,8 @@ The private loopback `OperatorRuntimeService` now wires worker registration/hear
 node listing, and explicit draining into this same ephemeral directory. Heartbeats carry only node
 ID, region, state, active/max session counters and a bounded lease TTL; API-only runtimes fail
 closed because they do not own an SFU directory. Expired leases remain ineligible for fresh
-placement and workers must re-register after process restart.
+placement; operator operations prune expired workers plus stale sticky placements so the bounded
+directory remains reusable across node churn. Workers must re-register after process restart.
 
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
 true. Production horizontal SFU still requires a concrete inter-node encrypted-media transport,
