@@ -1731,6 +1731,87 @@ impl ProductionRuntime {
     }
 }
 
+async fn serve_api_public_services(
+    clock: Arc<SystemServiceQuotaClock>,
+    event_clock: Arc<SystemEventDeliveryClock>,
+    store: Arc<SqliteLocalStore>,
+    authorization: Arc<SqliteLocalStore>,
+    conference_state: Arc<ConferenceRuntimeState>,
+    machine_bearer: Option<MachineBearerRuntimeConfig>,
+    incoming: TcpListenerStream,
+) -> Result<(), tonic::transport::Error> {
+    let mut universal_service = GrpcUniversalConferenceService::with_state(
+        Arc::clone(&clock),
+        Arc::clone(&authorization),
+        Arc::clone(&store),
+        Arc::clone(&conference_state),
+    );
+    let attachment_service =
+        configured_attachment_service(&clock, &authorization, &store, machine_bearer.as_ref());
+    if let Some(config) = machine_bearer {
+        match config.verification {
+            MachineBearerVerificationConfig::Static(keys) => {
+                universal_service =
+                    universal_service.with_machine_bearer_auth(keys, config.policy);
+            }
+            MachineBearerVerificationConfig::Provider(provider) => {
+                universal_service =
+                    universal_service.with_machine_bearer_auth_provider(provider, config.policy);
+            }
+        }
+    }
+
+    Server::builder()
+        .add_service(integration_service_server(GrpcIntegrationService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(attachment_service_server(attachment_service))
+        .add_service(group_service_server(GrpcGroupService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(device_service_server(GrpcDeviceService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(sync_service_server(GrpcSyncService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(call_service_server(GrpcCallService::new(
+            Arc::clone(&clock),
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(conference_service_server(
+            GrpcConferenceService::with_state(
+                Arc::clone(&clock),
+                Arc::clone(&authorization),
+                Arc::clone(&store),
+                Arc::clone(&conference_state),
+            ),
+        ))
+        .add_service(universal_conference_service_server(universal_service))
+        .add_service(event_service_server(GrpcEventService::new(
+            Arc::clone(&clock),
+            event_clock,
+            Arc::clone(&authorization),
+            Arc::clone(&store),
+        )))
+        .add_service(store_forward_service_server(GrpcStoreForwardService::new(
+            clock,
+            authorization,
+            store,
+        )))
+        .serve_with_incoming(incoming)
+        .await
+}
+
 struct RealtimeServerServices {
     clock: Arc<SystemServiceQuotaClock>,
     event_clock: Arc<SystemEventDeliveryClock>,
