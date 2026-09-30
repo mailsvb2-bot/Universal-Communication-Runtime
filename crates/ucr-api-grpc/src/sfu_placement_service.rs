@@ -276,7 +276,6 @@ mod tests {
         .expect("release placement");
     }
 
-
     #[tokio::test]
     async fn resolve_node_returns_only_live_private_endpoint() {
         let cluster = Arc::new(Mutex::new(SfuClusterDirectory::default()));
@@ -292,8 +291,7 @@ mod tests {
                     max_sessions: 10,
                     lease_expires_at_unix_ms: 20_000,
                 },
-                SfuNodeEndpoint::new("127.0.0.1:7001".parse().expect("socket"))
-                    .expect("endpoint"),
+                SfuNodeEndpoint::new("127.0.0.1:7001".parse().expect("socket")).expect("endpoint"),
             )
             .expect("register node endpoint");
 
