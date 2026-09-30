@@ -32,7 +32,9 @@ fn placement_service_shares_operator_cluster_and_keeps_public_capability_fail_cl
     let runtime = read("crates/ucr-runtime/src/lib.rs");
     let universal = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
 
-    assert!(runtime.contains("let sfu_cluster = Arc::new(Mutex::new(SfuClusterDirectory::default()))"));
+    assert!(
+        runtime.contains("let sfu_cluster = Arc::new(Mutex::new(SfuClusterDirectory::default()))")
+    );
     assert!(runtime.contains("Arc::clone(&sfu_cluster)"));
     assert!(runtime.contains("GrpcSfuPlacementService::new"));
     assert!(universal.contains("horizontal_sfu: false"));
