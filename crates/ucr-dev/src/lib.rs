@@ -281,6 +281,8 @@ pub struct DevEnvironment {
     mock_peer_device_id: DeviceId,
     credential_id: ServiceCredentialId,
     credential_secret: ServiceCredentialSecret,
+    foreign_credential_id: ServiceCredentialId,
+    foreign_credential_secret: ServiceCredentialSecret,
     join_issuer: Arc<JoinTokenIssuer>,
     conference_state: Arc<ConferenceRuntimeState>,
     realtime_registry: Arc<RealtimeSessionRegistry>,
@@ -312,34 +314,10 @@ impl DevEnvironment {
         seed_identity_and_device(&store, &scope, &local_identity_id, &local_device_id)?;
         seed_identity_and_device(&store, &scope, &mock_peer_identity_id, &mock_peer_device_id)?;
 
-        let subject = ScopedPrincipal {
-            scope: scope.clone(),
-            principal: PrincipalRef {
-                principal_id: PrincipalId::from_opaque(opaque("dev-service-principal")),
-                kind: PrincipalKind::ServiceAccount,
-            },
-        };
-        let (record, credential_secret) = issue_service_credential(&subject)
-            .map_err(|error| format!("credential issue: {error:?}"))?;
-        store
-            .provision_service_credential(&record)
-            .map_err(|error| format!("credential persist: {error:?}"))?;
-        for permission in RUNTIME_PERMISSION_IDS {
-            store
-                .grant_permission(&PermissionGrant {
-                    grantee: subject.clone(),
-                    permission: (*permission).to_owned(),
-                    scope: PermissionScope::Exact(scope.clone()),
-                })
-                .map_err(|error| format!("permission grant {permission}: {error:?}"))?;
-        }
-        store
-            .set_service_quota_policy(&ServiceQuotaPolicy {
-                subject,
-                max_requests: 10_000,
-                window_ms: 60_000,
-            })
-            .map_err(|error| format!("quota seed: {error:?}"))?;
+        let (credential_id, credential_secret) =
+            seed_dev_service_account(&store, &scope, "dev-service-principal")?;
+        let (foreign_credential_id, foreign_credential_secret) =
+            seed_dev_service_account(&store, &scope, "dev-foreign-service-principal")?;
 
         let join_issuer = Arc::new(
             JoinTokenIssuer::new(
@@ -360,8 +338,10 @@ impl DevEnvironment {
             local_device_id,
             mock_peer_identity_id,
             mock_peer_device_id,
-            credential_id: record.credential_id,
+            credential_id,
             credential_secret,
+            foreign_credential_id,
+            foreign_credential_secret,
             join_issuer,
             conference_state,
             realtime_registry,
@@ -633,6 +613,44 @@ fn seed_identity_and_device(
             },
         )
         .map_err(|error| format!("device seed: {error:?}"))
+}
+
+fn seed_dev_service_account(
+    store: &SqliteLocalStore,
+    scope: &TenantScope,
+    principal_id: &str,
+) -> Result<(ServiceCredentialId, ServiceCredentialSecret), String> {
+    let subject = ScopedPrincipal {
+        scope: scope.clone(),
+        principal: PrincipalRef {
+            principal_id: PrincipalId::from_opaque(opaque(principal_id)),
+            kind: PrincipalKind::ServiceAccount,
+        },
+    };
+    let (record, secret) = issue_service_credential(&subject)
+        .map_err(|error| format!("credential issue for {principal_id}: {error:?}"))?;
+    store
+        .provision_service_credential(&record)
+        .map_err(|error| format!("credential persist for {principal_id}: {error:?}"))?;
+    for permission in RUNTIME_PERMISSION_IDS {
+        store
+            .grant_permission(&PermissionGrant {
+                grantee: subject.clone(),
+                permission: (*permission).to_owned(),
+                scope: PermissionScope::Exact(scope.clone()),
+            })
+            .map_err(|error| {
+                format!("permission grant {permission} for {principal_id}: {error:?}")
+            })?;
+    }
+    store
+        .set_service_quota_policy(&ServiceQuotaPolicy {
+            subject,
+            max_requests: 10_000,
+            window_ms: 60_000,
+        })
+        .map_err(|error| format!("quota seed for {principal_id}: {error:?}"))?;
+    Ok((record.credential_id, secret))
 }
 
 fn require_seeded(env: &DevEnvironment) -> Result<(), String> {
@@ -1004,6 +1022,15 @@ async fn verify_universal_conference_round_trip(
     open_dev_universal_conference(&mut conference, env, &conference_id, &integration_id).await?;
 
     let (mut events, subscription_id) = create_dev_attendance_subscription(endpoint, env).await?;
+    verify_dev_integration_isolation(
+        &mut conference,
+        &mut events,
+        env,
+        &conference_id,
+        &integration_id,
+        &subscription_id,
+    )
+    .await?;
     let (token, claims, session_id) =
         issue_dev_join_grant(&mut conference, env, &conference_id, &integration_id).await?;
     join_and_leave_dev_realtime(endpoint, env, &token, &claims, &session_id).await?;
@@ -1299,6 +1326,139 @@ async fn create_dev_attendance_subscription(
     Ok((events, subscription_id))
 }
 
+async fn verify_dev_integration_isolation(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    events: &mut pb::event_service_client::EventServiceClient<tonic::transport::Channel>,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    owner_integration_id: &pb::OpaqueId,
+    subscription_id: &pb::OpaqueId,
+) -> Result<(), String> {
+    let foreign_integration_id = pb_id("dev-foreign-service-principal");
+
+    let mut spoof_owner = Request::new(pb::UniversalGetConferenceRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(owner_integration_id.clone()),
+    });
+    attach_foreign_dev_credential(&mut spoof_owner, env);
+    let spoofed = conference
+        .get_conference(spoof_owner)
+        .await
+        .map_err(|error| format!("self-check foreign GetConference spoof transport: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            spoofed.result,
+            Some(pb::universal_get_conference_response::Result::Error(_))
+        ),
+        "foreign credential cannot impersonate owning integration",
+    )?;
+
+    let mut foreign_read = Request::new(pb::UniversalGetConferenceRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(foreign_integration_id.clone()),
+    });
+    attach_foreign_dev_credential(&mut foreign_read, env);
+    let foreign_read = conference
+        .get_conference(foreign_read)
+        .await
+        .map_err(|error| format!("self-check foreign GetConference transport: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            foreign_read.result,
+            Some(pb::universal_get_conference_response::Result::Error(_))
+        ),
+        "foreign integration cannot read owning conference",
+    )?;
+
+    let mut foreign_join = Request::new(pb::UniversalIssueJoinGrantRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(foreign_integration_id.clone()),
+        external_user_id: b"dev-attendee".to_vec(),
+        ttl_seconds: 300,
+        use_policy: pb::JoinGrantUsePolicy::SingleUse as i32,
+        not_before_unix_ms: None,
+        not_after_unix_ms: None,
+        idempotency_key: "dev-foreign-join-denied".to_owned(),
+    });
+    attach_foreign_dev_credential(&mut foreign_join, env);
+    let foreign_join = conference
+        .issue_join_grant(foreign_join)
+        .await
+        .map_err(|error| format!("self-check foreign IssueJoinGrant transport: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            foreign_join.result,
+            Some(pb::universal_issue_join_grant_response::Result::Error(_))
+        ),
+        "foreign integration cannot issue owning conference join grant",
+    )?;
+
+    let mut foreign_attendance = Request::new(pb::UniversalGetParticipantAttendanceRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(foreign_integration_id),
+        external_user_id: b"dev-attendee".to_vec(),
+    });
+    attach_foreign_dev_credential(&mut foreign_attendance, env);
+    let foreign_attendance = conference
+        .get_participant_attendance(foreign_attendance)
+        .await
+        .map_err(|error| format!("self-check foreign attendance transport: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            foreign_attendance.result,
+            Some(pb::universal_get_participant_attendance_response::Result::Error(_))
+        ),
+        "foreign integration cannot read owning conference attendance",
+    )?;
+
+    let mut foreign_subscription = Request::new(pb::EventGetSubscriptionRequest {
+        scope: Some(pb_scope(&env.scope)),
+        subscription_id: Some(subscription_id.clone()),
+    });
+    attach_foreign_dev_credential(&mut foreign_subscription, env);
+    let foreign_subscription = events
+        .get_subscription(foreign_subscription)
+        .await
+        .map_err(|error| format!("self-check foreign Event get transport: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            foreign_subscription.result,
+            Some(pb::event_get_subscription_response::Result::Error(_))
+        ),
+        "foreign integration cannot read owning Event subscription",
+    )?;
+
+    let mut foreign_poll = Request::new(pb::EventPollRequest {
+        scope: Some(pb_scope(&env.scope)),
+        subscription_id: Some(subscription_id.clone()),
+        max_items: 8,
+    });
+    attach_foreign_dev_credential(&mut foreign_poll, env);
+    let foreign_poll = events
+        .poll_events(foreign_poll)
+        .await
+        .map_err(|error| format!("self-check foreign Event poll transport: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            foreign_poll.result,
+            Some(pb::event_poll_response::Result::Error(_))
+        ),
+        "foreign integration cannot poll owning Event subscription",
+    )
+}
+
 async fn issue_dev_join_grant(
     conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
         tonic::transport::Channel,
@@ -1436,6 +1596,14 @@ fn attach_realtime_bearer<T>(request: &mut Request<T>, token: &str) -> Result<()
 
 fn attach_dev_credential<T>(request: &mut Request<T>, env: &DevEnvironment) {
     attach_service_credential(request, &env.credential_id, &env.credential_secret);
+}
+
+fn attach_foreign_dev_credential<T>(request: &mut Request<T>, env: &DevEnvironment) {
+    attach_service_credential(
+        request,
+        &env.foreign_credential_id,
+        &env.foreign_credential_secret,
+    );
 }
 
 fn require_result(condition: bool, operation: &str) -> Result<(), String> {
