@@ -541,7 +541,11 @@ async fn serve_realtime_command(
                 )
                 .await
         }
-        None => runtime.serve_realtime_with_operator(bind, operator_bind, config).await,
+        None => {
+            runtime
+                .serve_realtime_with_operator(bind, operator_bind, config)
+                .await
+        }
     }
 }
 
