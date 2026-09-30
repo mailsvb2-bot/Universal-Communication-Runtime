@@ -285,8 +285,7 @@ impl ChaosTransport {
                 if max_jitter_ms == 0 {
                     self.jitter_ms.remove(&peer_pair(left, right));
                 } else {
-                    self.jitter_ms
-                        .insert(peer_pair(left, right), max_jitter_ms);
+                    self.jitter_ms.insert(peer_pair(left, right), max_jitter_ms);
                 }
             }
             Fault::SetThrottle(left, right, bytes_per_second) => {
