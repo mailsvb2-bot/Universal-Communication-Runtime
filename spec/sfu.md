@@ -36,7 +36,7 @@ Recipients are derived only from current canonical Call participants plus recipi
 
 `SfuClusterDirectory` is the prepared horizontal control-plane boundary. It stores only ephemeral
 worker metadata: opaque node ID, deployment region, health/draining state, active/max session
-capacity, and a bounded lease expiry. Placement is deterministic for the canonical
+capacity, a bounded lease expiry, and an optional private routable node endpoint. Placement is deterministic for the canonical
 `TenantScope + CallId` pair so reconnects can remain sticky without inventing a second Conference
 identity or durable route store.
 
@@ -50,9 +50,10 @@ capacity exists in-region, while an explicitly enabled cross-region policy may c
 worker elsewhere and reports that fact in the placement decision.
 
 The private loopback `OperatorRuntimeService` now wires worker registration/heartbeat, bounded
-node listing, and explicit draining into this same ephemeral directory. Heartbeats carry only node
-ID, region, state, active/max session counters and a bounded lease TTL; API-only runtimes fail
-closed because they do not own an SFU directory. Expired leases remain ineligible for fresh
+node listing, explicit draining, and one validated private `IP:port` media endpoint into this same
+ephemeral directory. Heartbeats carry only node ID, region, state, active/max session counters,
+bounded lease TTL, and that infrastructure endpoint; API-only runtimes fail closed because they do
+not own an SFU directory. Unspecified/multicast/broadcast addresses and port zero are rejected. Expired leases remain ineligible for fresh
 placement; operator operations prune expired workers plus stale sticky placements so the bounded
 directory remains reusable across node churn. Workers must re-register after process restart.
 
@@ -61,15 +62,20 @@ operator listener**, never on the public realtime listener used as the HTTPS-edg
 default is `127.0.0.1:50052` via `--operator-bind`; the runtime rejects reusing the public bind for
 this listener. It accepts only canonical tenant scope, Call ID, optional preferred region and the
 cross-region failover policy, then returns the opaque selected SFU node ID plus sticky/cross-region
-placement facts. `ReleaseCall` releases the directory reservation when the infrastructure owner
-knows that Call placement is finished. The same in-process `SfuClusterDirectory` instance is shared
-with the operator heartbeat/drain control, so node health and placement cannot silently diverge into
-two routing brains.
+placement facts. `ResolveNode` separately resolves a selected opaque node ID to the currently live
+private `IP:port` endpoint; callers still cannot supply a node ID to `PlaceCall`. `ReleaseCall`
+releases the directory reservation when the infrastructure owner knows that Call placement is
+finished. Endpoint state is pruned with the same lease/remove path as node health and sticky
+placement. The same in-process `SfuClusterDirectory` instance is shared with the operator
+heartbeat/drain control, so node health, endpoint resolution, and placement cannot silently diverge
+into separate routing brains.
 
 This service is infrastructure-only and is not added to the Universal Conference protobuf or REST
 adapter. It does not accept participant IDs, join tokens, media payloads, endpoint URLs or provider
-credentials. A later gateway/worker-routing layer may consume the opaque selected node ID, but this
-prepared placement service does not yet claim cross-node participant/media transport.
+credentials. The private resolver returns only the endpoint registered by the trusted operator
+heartbeat for a currently live selected node. This enables a later gateway/worker-routing layer to
+reach that node, but the prepared placement service still does not claim cross-node
+participant/media transport.
 
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
 true. Production horizontal SFU still requires a concrete inter-node encrypted-media transport,
