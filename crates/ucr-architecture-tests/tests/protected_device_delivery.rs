@@ -36,7 +36,9 @@ fn canon_e2e_proves_revoked_device_gets_no_new_protected_provider_call() {
     let spec = read("spec/main-end-to-end.md");
 
     assert!(e2e.contains("e2e-post-revoke-protected-intent"));
-    assert!(e2e.contains(".plan_protected("));
+    assert!(e2e.contains("StoreForwardRuntime::new_protected_origin"));
+    assert!(e2e.contains("e2e-post-revoke-store-forward"));
+    assert!(e2e.contains("StoreForwardOutcome::RescheduledNoRoute"));
     assert!(e2e.contains("revoked device must not receive new protected content"));
     assert!(e2e.contains("provider.captured().is_empty()"));
     assert!(spec.contains("Revoked Device is rejected by protected route planning"));
