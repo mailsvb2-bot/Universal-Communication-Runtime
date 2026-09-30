@@ -52,10 +52,10 @@ record and therefore does not expand intermediary metadata visibility.
 
 ## Rollback
 
-Rollback means reverting the protected planner and StoreForward wiring together. Retaining only the
-StoreForward trait-bound without the routing gate, or retaining only the routing API without using
-it in protected delivery, is not a valid rollback because either state would provide misleading
-security evidence.
+Rollback means reverting the protected planner and protected-origin StoreForward wiring together.
+Retaining only the protected-origin DeviceLifecycleStore dependency without the routing gate, or
+retaining only the routing API without using it in protected delivery, is not a valid rollback
+because either state would provide misleading security evidence.
 
 ## Testing
 
