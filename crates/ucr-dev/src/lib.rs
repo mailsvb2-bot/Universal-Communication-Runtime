@@ -1,8 +1,13 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    fs,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -32,10 +37,23 @@ use ucr_model::{
 };
 use ucr_protocol::{RUNTIME_PERMISSION_IDS, attachment_content_id};
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
-use ucr_storage_memory::MemoryLocalStore;
+use ucr_storage_sqlite::SqliteLocalStore;
 
 pub const DEFAULT_DEV_BIND: &str = "127.0.0.1:50051";
 pub const DEV_TRANSPORT_CAPABILITY: &str = "ucr.transport.test.dev";
+
+static DEV_STORE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug)]
+struct DevStoreCleanup(PathBuf);
+
+impl Drop for DevStoreCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+        let _ = fs::remove_file(format!("{}-wal", self.0.display()));
+        let _ = fs::remove_file(format!("{}-shm", self.0.display()));
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestFault {
@@ -253,7 +271,8 @@ impl TransportProvider for TestTransport {
 
 #[derive(Debug)]
 pub struct DevEnvironment {
-    store: Arc<MemoryLocalStore>,
+    store: Arc<SqliteLocalStore>,
+    _store_cleanup: DevStoreCleanup,
     transport: Arc<TestTransport>,
     scope: TenantScope,
     local_identity_id: IdentityId,
@@ -269,12 +288,21 @@ pub struct DevEnvironment {
 }
 
 impl DevEnvironment {
-    /// Creates one isolated, authenticated dev environment using canonical in-memory owners.
+    /// Creates one isolated, authenticated dev environment using the canonical SQLite owner.
     ///
     /// # Errors
     /// Returns an error when canonical seed state, credentials, grants or quota cannot be created.
     pub fn new() -> Result<Self, String> {
-        let store = Arc::new(MemoryLocalStore::default());
+        let store_sequence = DEV_STORE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let store_path = std::env::temp_dir().join(format!(
+            "ucr-dev-{}-{store_sequence}.sqlite3",
+            std::process::id()
+        ));
+        let store = Arc::new(
+            SqliteLocalStore::open(&store_path)
+                .map_err(|error| format!("open ephemeral dev store: {error:?}"))?,
+        );
+        let store_cleanup = DevStoreCleanup(store_path);
         let scope = dev_scope();
         let local_identity_id = identity_id("dev-local-identity");
         let local_device_id = device_id("dev-local-device");
@@ -325,6 +353,7 @@ impl DevEnvironment {
 
         Ok(Self {
             store,
+            _store_cleanup: store_cleanup,
             transport: Arc::new(TestTransport::default()),
             scope,
             local_identity_id,
@@ -479,7 +508,7 @@ impl DevEnvironment {
             "UCR_DEV_CREDENTIAL_SECRET_HEX={}",
             self.credential_secret_hex()
         );
-        println!("UCR_DEV_MODE=development-only auth=enabled storage=memory loopback=true");
+        println!("UCR_DEV_MODE=development-only auth=enabled storage=sqlite-ephemeral loopback=true");
 
         let incoming = TcpListenerStream::new(listener);
         let clock = Arc::new(SystemServiceQuotaClock);
@@ -578,7 +607,7 @@ pub struct DevDiagnostics {
 }
 
 fn seed_identity_and_device(
-    store: &MemoryLocalStore,
+    store: &SqliteLocalStore,
     scope: &TenantScope,
     identity_id: &IdentityId,
     device_id: &DeviceId,
