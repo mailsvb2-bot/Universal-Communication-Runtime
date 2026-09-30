@@ -815,12 +815,7 @@ mod tests {
         );
         assert_eq!(calls.lock().expect("calls").len(), 0);
         orchestrator
-            .transmit_primary_protected(
-                &value,
-                &active,
-                b"encrypted-protected-content",
-                &store,
-            )
+            .transmit_primary_protected(&value, &active, b"encrypted-protected-content", &store)
             .expect("active device protected transport");
         assert_eq!(calls.lock().expect("calls").len(), 1);
 
