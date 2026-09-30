@@ -15,9 +15,9 @@ use ucr_chat::{
 use ucr_core::{
     AntiEntropyStore, AttachmentStore, AuthorizationEvaluator, CallStore, CanonicalTransportError,
     ClassifiedTransportFailure, CommunicationIntentStore, ConversationStore, DeliveryStore,
-    DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventAppendStatus,
+    DeviceLifecycleStore, DurableRecordStatus, EventAppendStatus,
     EventJournalStore, MessageStore, PolicyDecision, PolicyEvaluator, RouteCandidate, StorageProvider,
-    StoreForwardStore, SyncStore, TransportFailureDisposition, TransportHealth, TransportProvider,
+    StoreForwardStore, SyncStore, TransportHealth, TransportProvider,
     TrustedSigningKeyStore,
 };
 use ucr_crypto::{
@@ -41,7 +41,7 @@ use ucr_model::{
 use ucr_protocol::{
     ALGORITHM_VERSION, H264_VIDEO_CODEC_CAPABILITY, KEY_FORMAT_VERSION, MANDATORY_VIDEO_FRAME_RATE,
     MANDATORY_VIDEO_HEIGHT, MANDATORY_VIDEO_WIDTH, NegotiationResultEnvelope, SIGNATURE_ALGORITHM_ID,
-    VIDEO_MEDIA_CAPABILITY, VersionPolicy, VersionRange, attachment_content_id,
+    VersionPolicy, VersionRange, attachment_content_id,
     canonical_attachment_chunk, negotiate_version, phase21_video_capabilities,
 };
 use ucr_storage_sqlite::SqliteLocalStore;
