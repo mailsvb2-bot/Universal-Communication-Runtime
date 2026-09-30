@@ -94,13 +94,16 @@ fn development_environment_cannot_be_presented_as_production_runtime() {
     let dev_main = read("crates/ucr-dev/src/main.rs");
     let spec = read("spec/production-hardening.md");
 
-    assert!(dev.contains("MemoryLocalStore"));
+    assert!(dev.contains("SqliteLocalStore::open"));
+    assert!(dev.contains("std::env::temp_dir()"));
+    assert!(dev.contains("DevStoreCleanup"));
     assert!(dev.contains("TestTransport"));
     assert!(dev.contains("CapabilityMaturity::Experimental"));
+    assert!(dev.contains("storage=sqlite-ephemeral"));
     assert!(dev_main.contains("ucr dev"));
     assert!(dev_main.contains("ucr dev refuses non-loopback bind addresses"));
     assert!(spec.contains("`ucr dev` remains development-only"));
-    assert!(spec.contains("must not depend on `TestTransport`, `MemoryLocalStore`"));
+    assert!(spec.contains("must not depend on `TestTransport`, sandbox fault injection"));
 }
 
 #[test]
