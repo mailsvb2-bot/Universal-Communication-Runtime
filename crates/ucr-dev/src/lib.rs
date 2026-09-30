@@ -288,7 +288,7 @@ pub struct DevEnvironment {
 }
 
 impl DevEnvironment {
-    /// Creates one isolated, authenticated dev environment using the canonical SQLite owner.
+    /// Creates one isolated, authenticated dev environment using the canonical `SQLite` owner.
     ///
     /// # Errors
     /// Returns an error when canonical seed state, credentials, grants or quota cannot be created.
@@ -989,20 +989,50 @@ async fn verify_universal_conference_round_trip(
     endpoint: &str,
     env: &DevEnvironment,
 ) -> Result<(), String> {
-    let now_unix_ms = i64::try_from(
+    let now_unix_ms = system_time_unix_ms("self-check system clock")?;
+    let integration_id = pb_id("dev-service-principal");
+    let mut conference =
+        pb::universal_conference_service_client::UniversalConferenceServiceClient::connect(
+            endpoint.to_owned(),
+        )
+        .await
+        .map_err(|error| format!("self-check UniversalConferenceService connect: {error}"))?;
+
+    let conference_id =
+        create_dev_universal_conference(&mut conference, env, &integration_id, now_unix_ms).await?;
+    prepare_dev_universal_conference(&mut conference, env, &conference_id, &integration_id).await?;
+    open_dev_universal_conference(&mut conference, env, &conference_id, &integration_id).await?;
+
+    let (mut events, subscription_id) =
+        create_dev_attendance_subscription(endpoint, env).await?;
+    let (token, claims, session_id) =
+        issue_dev_join_grant(&mut conference, env, &conference_id, &integration_id).await?;
+    join_and_leave_dev_realtime(endpoint, env, &token, &claims, &session_id).await?;
+    verify_dev_attendance_projection(&mut events, env, subscription_id).await
+}
+
+fn system_time_unix_ms(context: &str) -> Result<i64, String> {
+    i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|error| format!("self-check system clock: {error}"))?
+            .map_err(|error| format!("{context}: {error}"))?
             .as_millis(),
     )
-    .map_err(|_| "self-check system clock exceeds i64".to_owned())?;
+    .map_err(|_| format!("{context} exceeds i64"))
+}
 
-    let integration_id = pb_id("dev-service-principal");
-    let external_conference_id = b"dev-universal-conference".to_vec();
+async fn create_dev_universal_conference(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    integration_id: &pb::OpaqueId,
+    now_unix_ms: i64,
+) -> Result<pb::OpaqueId, String> {
     let create_body = pb::UniversalCreateConferenceRequest {
         scope: Some(pb_scope(&env.scope)),
         integration_id: Some(integration_id.clone()),
-        external_conference_id: external_conference_id.clone(),
+        external_conference_id: b"dev-universal-conference".to_vec(),
         idempotency_key: "dev-universal-create".to_owned(),
         mode: pb::UniversalConferenceMode::Webinar as i32,
         schedule: Some(pb::ConferenceScheduleMetadata {
@@ -1014,14 +1044,6 @@ async fn verify_universal_conference_round_trip(
         }),
         metadata: Vec::new(),
     };
-
-    let mut conference =
-        pb::universal_conference_service_client::UniversalConferenceServiceClient::connect(
-            endpoint.to_owned(),
-        )
-        .await
-        .map_err(|error| format!("self-check UniversalConferenceService connect: {error}"))?;
-
     let mut create = Request::new(create_body.clone());
     attach_dev_credential(&mut create, env);
     let created = conference
@@ -1029,19 +1051,19 @@ async fn verify_universal_conference_round_trip(
         .await
         .map_err(|error| format!("self-check CreateConference: {error}"))?
         .into_inner();
-    let descriptor = match created.result {
-        Some(pb::universal_create_conference_response::Result::Conference(value)) => value,
-        _ => return Err("authenticated public CreateConference self-check failed".to_owned()),
+    let Some(pb::universal_create_conference_response::Result::Conference(descriptor)) =
+        created.result
+    else {
+        return Err("authenticated public CreateConference self-check failed".to_owned());
     };
     let conference_id = descriptor
         .conference_id
-        .clone()
         .ok_or_else(|| "CreateConference omitted conference_id".to_owned())?;
 
-    let mut create_retry = Request::new(create_body);
-    attach_dev_credential(&mut create_retry, env);
+    let mut retry = Request::new(create_body);
+    attach_dev_credential(&mut retry, env);
     let retried = conference
-        .create_conference(create_retry)
+        .create_conference(retry)
         .await
         .map_err(|error| format!("self-check CreateConference retry: {error}"))?
         .into_inner();
@@ -1055,66 +1077,96 @@ async fn verify_universal_conference_round_trip(
         retry_id.as_ref() == Some(&conference_id),
         "CreateConference exact idempotent retry",
     )?;
+    Ok(conference_id)
+}
 
-    for (external_user_id, role, key) in [
-        (
-            b"dev-owner".as_slice(),
-            pb::ConferenceParticipantRole::Owner,
-            "dev-owner",
+async fn ensure_dev_universal_participant(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    integration_id: &pb::OpaqueId,
+    external_user_id: &[u8],
+    role: pb::ConferenceParticipantRole,
+    key: &str,
+) -> Result<(), String> {
+    let mut ensure = Request::new(pb::UniversalEnsureParticipantRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(integration_id.clone()),
+        external_user_id: external_user_id.to_vec(),
+        role: role as i32,
+        idempotency_key: format!("{key}-participant"),
+    });
+    attach_dev_credential(&mut ensure, env);
+    let ensured = conference
+        .ensure_participant(ensure)
+        .await
+        .map_err(|error| format!("self-check EnsureParticipant {key}: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            ensured.result,
+            Some(pb::universal_ensure_participant_response::Result::Participant(_))
         ),
-        (
-            b"dev-attendee".as_slice(),
-            pb::ConferenceParticipantRole::Attendee,
-            "dev-attendee",
-        ),
-    ] {
-        let mut ensure = Request::new(pb::UniversalEnsureParticipantRequest {
-            scope: Some(pb_scope(&env.scope)),
-            conference_id: Some(conference_id.clone()),
-            integration_id: Some(integration_id.clone()),
-            external_user_id: external_user_id.to_vec(),
-            role: role as i32,
-            idempotency_key: format!("{key}-participant"),
-        });
-        attach_dev_credential(&mut ensure, env);
-        let ensured = conference
-            .ensure_participant(ensure)
-            .await
-            .map_err(|error| format!("self-check EnsureParticipant {key}: {error}"))?
-            .into_inner();
-        require_result(
-            matches!(
-                ensured.result,
-                Some(pb::universal_ensure_participant_response::Result::Participant(_))
-            ),
-            "EnsureParticipant",
-        )?;
+        "EnsureParticipant",
+    )?;
 
-        let mut device = Request::new(pb::UniversalEnsureParticipantDeviceRequest {
-            scope: Some(pb_scope(&env.scope)),
-            conference_id: Some(conference_id.clone()),
-            integration_id: Some(integration_id.clone()),
-            external_user_id: external_user_id.to_vec(),
-            idempotency_key: format!("{key}-device"),
-        });
-        attach_dev_credential(&mut device, env);
-        let device = conference
-            .ensure_participant_device(device)
-            .await
-            .map_err(|error| format!("self-check EnsureParticipantDevice {key}: {error}"))?
-            .into_inner();
-        require_result(
-            matches!(
-                device.result,
-                Some(
-                    pb::universal_ensure_participant_device_response::Result::Device(
-                        pb::UniversalParticipantDeviceStatus { active: true, .. }
-                    )
+    let mut device = Request::new(pb::UniversalEnsureParticipantDeviceRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(integration_id.clone()),
+        external_user_id: external_user_id.to_vec(),
+        idempotency_key: format!("{key}-device"),
+    });
+    attach_dev_credential(&mut device, env);
+    let device = conference
+        .ensure_participant_device(device)
+        .await
+        .map_err(|error| format!("self-check EnsureParticipantDevice {key}: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            device.result,
+            Some(
+                pb::universal_ensure_participant_device_response::Result::Device(
+                    pb::UniversalParticipantDeviceStatus { active: true, .. }
                 )
-            ),
-            "EnsureParticipantDevice",
-        )?;
-    }
+            )
+        ),
+        "EnsureParticipantDevice",
+    )
+}
+
+async fn prepare_dev_universal_conference(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    integration_id: &pb::OpaqueId,
+) -> Result<(), String> {
+    ensure_dev_universal_participant(
+        conference,
+        env,
+        conference_id,
+        integration_id,
+        b"dev-owner",
+        pb::ConferenceParticipantRole::Owner,
+        "dev-owner",
+    )
+    .await?;
+    ensure_dev_universal_participant(
+        conference,
+        env,
+        conference_id,
+        integration_id,
+        b"dev-attendee",
+        pb::ConferenceParticipantRole::Attendee,
+        "dev-attendee",
+    )
+    .await?;
 
     let mut prepare = Request::new(pb::UniversalPrepareConferenceRuntimeRequest {
         scope: Some(pb_scope(&env.scope)),
@@ -1142,8 +1194,17 @@ async fn verify_universal_conference_round_trip(
             )
         ),
         "PrepareConferenceRuntime",
-    )?;
+    )
+}
 
+async fn open_dev_universal_conference(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    integration_id: &pb::OpaqueId,
+) -> Result<(), String> {
     for (target, key) in [
         (pb::UniversalConferenceLifecycle::Waiting, "dev-waiting"),
         (pb::UniversalConferenceLifecycle::Live, "dev-live"),
@@ -1170,6 +1231,43 @@ async fn verify_universal_conference_round_trip(
         )?;
     }
 
+    let mut open = Request::new(pb::UniversalSetEntryOpenRequest {
+        scope: Some(pb_scope(&env.scope)),
+        conference_id: Some(conference_id.clone()),
+        entry_open: true,
+        idempotency_key: "dev-entry-open".to_owned(),
+        integration_id: Some(integration_id.clone()),
+    });
+    attach_dev_credential(&mut open, env);
+    let opened = conference
+        .set_entry_open(open)
+        .await
+        .map_err(|error| format!("self-check SetEntryOpen: {error}"))?
+        .into_inner();
+    require_result(
+        matches!(
+            opened.result,
+            Some(pb::universal_set_entry_open_response::Result::Conference(
+                pb::UniversalConferenceDescriptor {
+                    entry_open: true,
+                    ..
+                }
+            ))
+        ),
+        "SetEntryOpen",
+    )
+}
+
+async fn create_dev_attendance_subscription(
+    endpoint: &str,
+    env: &DevEnvironment,
+) -> Result<
+    (
+        pb::event_service_client::EventServiceClient<tonic::transport::Channel>,
+        pb::OpaqueId,
+    ),
+    String,
+> {
     let subscription_id = pb_id("dev-attendance-subscription");
     let mut events = pb::event_service_client::EventServiceClient::connect(endpoint.to_owned())
         .await
@@ -1199,11 +1297,21 @@ async fn verify_universal_conference_round_trip(
         ),
         "CreateSubscription",
     )?;
+    Ok((events, subscription_id))
+}
 
+async fn issue_dev_join_grant(
+    conference: &mut pb::universal_conference_service_client::UniversalConferenceServiceClient<
+        tonic::transport::Channel,
+    >,
+    env: &DevEnvironment,
+    conference_id: &pb::OpaqueId,
+    integration_id: &pb::OpaqueId,
+) -> Result<(String, ucr_realtime::RealtimeSessionClaims, pb::OpaqueId), String> {
     let mut issue = Request::new(pb::UniversalIssueJoinGrantRequest {
         scope: Some(pb_scope(&env.scope)),
-        conference_id: Some(conference_id),
-        integration_id: Some(integration_id),
+        conference_id: Some(conference_id.clone()),
+        integration_id: Some(integration_id.clone()),
         external_user_id: b"dev-attendee".to_vec(),
         ttl_seconds: 300,
         use_policy: pb::JoinGrantUsePolicy::SingleUse as i32,
@@ -1217,43 +1325,48 @@ async fn verify_universal_conference_round_trip(
         .await
         .map_err(|error| format!("self-check IssueJoinGrant: {error}"))?
         .into_inner();
-    let grant = match issued.result {
-        Some(pb::universal_issue_join_grant_response::Result::Grant(value)) => value,
-        _ => return Err("authenticated public IssueJoinGrant self-check failed".to_owned()),
+    let Some(pb::universal_issue_join_grant_response::Result::Grant(grant)) = issued.result else {
+        return Err("authenticated public IssueJoinGrant self-check failed".to_owned());
     };
     let session_id = grant
         .session_id
-        .clone()
         .ok_or_else(|| "IssueJoinGrant omitted session_id".to_owned())?;
     let token = grant
         .join_url
         .split_once("#ucr_join=")
         .map(|(_, token)| token.to_owned())
         .ok_or_else(|| "IssueJoinGrant returned malformed join_url".to_owned())?;
-    let verify_now_unix_ms = i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| format!("self-check join verification clock: {error}"))?
-            .as_millis(),
-    )
-    .map_err(|_| "self-check join verification clock exceeds i64".to_owned())?;
     let claims = env
         .join_issuer
-        .verify_signed_claims(&token, verify_now_unix_ms)
+        .verify_signed_claims(
+            &token,
+            system_time_unix_ms("self-check join verification clock")?,
+        )
         .map_err(|error| format!("self-check signed join claims: {error:?}"))?;
+    Ok((token, claims, session_id))
+}
 
+async fn join_and_leave_dev_realtime(
+    endpoint: &str,
+    env: &DevEnvironment,
+    token: &str,
+    claims: &ucr_realtime::RealtimeSessionClaims,
+    session_id: &pb::OpaqueId,
+) -> Result<(), String> {
+    let call_id = pb::OpaqueId {
+        value: claims.call_id.as_opaque().as_wire_bytes().to_vec(),
+    };
     let mut realtime =
         pb::realtime_service_client::RealtimeServiceClient::connect(endpoint.to_owned())
             .await
             .map_err(|error| format!("self-check RealtimeService connect: {error}"))?;
+
     let mut join = Request::new(pb::RealtimeJoinRequest {
         scope: Some(pb_scope(&env.scope)),
-        call_id: Some(pb::OpaqueId {
-            value: claims.call_id.as_opaque().as_wire_bytes().to_vec(),
-        }),
+        call_id: Some(call_id.clone()),
         session_id: Some(session_id.clone()),
     });
-    attach_realtime_bearer(&mut join, &token)?;
+    attach_realtime_bearer(&mut join, token)?;
     let joined = realtime
         .join_realtime(join)
         .await
@@ -1269,12 +1382,10 @@ async fn verify_universal_conference_round_trip(
 
     let mut leave = Request::new(pb::RealtimeLeaveRequest {
         scope: Some(pb_scope(&env.scope)),
-        call_id: Some(pb::OpaqueId {
-            value: claims.call_id.as_opaque().as_wire_bytes().to_vec(),
-        }),
-        session_id: Some(session_id),
+        call_id: Some(call_id),
+        session_id: Some(session_id.clone()),
     });
-    attach_realtime_bearer(&mut leave, &token)?;
+    attach_realtime_bearer(&mut leave, token)?;
     let left = realtime
         .leave_realtime(leave)
         .await
@@ -1286,8 +1397,14 @@ async fn verify_universal_conference_round_trip(
             Some(pb::realtime_leave_response::Result::Acknowledgement(_))
         ),
         "LeaveRealtime",
-    )?;
+    )
+}
 
+async fn verify_dev_attendance_projection(
+    events: &mut pb::event_service_client::EventServiceClient<tonic::transport::Channel>,
+    env: &DevEnvironment,
+    subscription_id: pb::OpaqueId,
+) -> Result<(), String> {
     let mut poll = Request::new(pb::EventPollRequest {
         scope: Some(pb_scope(&env.scope)),
         subscription_id: Some(subscription_id),
