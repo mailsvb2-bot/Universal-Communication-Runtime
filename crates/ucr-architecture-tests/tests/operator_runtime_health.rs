@@ -102,7 +102,7 @@ fn operator_rpc_is_not_registered_on_public_runtime_listeners() {
         section(
             &runtime,
             "async fn serve_realtime_services(",
-            "fn configured_attachment_service(",
+            "async fn bind_private_operator_listener(",
         ),
     ] {
         assert!(!public.contains(".add_service(operator_runtime_service_server("));
