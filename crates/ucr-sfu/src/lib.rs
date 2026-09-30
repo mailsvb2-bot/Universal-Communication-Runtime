@@ -23,6 +23,9 @@ use ucr_protocol::{
     canonical_sfu_forward_envelope, phase29_sfu_capabilities,
 };
 
+pub const MAX_SFU_CLUSTER_NODES: usize = 256;
+pub const MAX_SFU_REGION_BYTES: usize = 64;
+
 /// Ephemeral health state for one SFU worker in a horizontal deployment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfuNodeState {
@@ -107,17 +110,31 @@ impl SfuClusterDirectory {
     /// Registers or refreshes one ephemeral worker heartbeat.
     ///
     /// # Errors
-    /// Rejects empty region labels, zero capacity, over-capacity counters, or non-positive leases.
+    /// Rejects invalid/oversized region labels, zero capacity, over-capacity counters,
+    /// non-positive leases, or a new node beyond the bounded cluster directory limit.
     pub fn upsert_node(&mut self, node: SfuNodeDescriptor) -> Result<(), SfuPlacementError> {
         if node.region.is_empty()
+            || node.region.len() > MAX_SFU_REGION_BYTES
             || node.max_sessions == 0
             || node.active_sessions > node.max_sessions
             || node.lease_expires_at_unix_ms <= 0
+            || (!self.nodes.contains_key(node.node_id.as_str())
+                && self.nodes.len() >= MAX_SFU_CLUSTER_NODES)
         {
             return Err(SfuPlacementError::InvalidNode);
         }
         self.nodes.insert(node.node_id.as_str().to_owned(), node);
         Ok(())
+    }
+
+    #[must_use]
+    pub fn node(&self, node_id: &ucr_model::OpaqueId) -> Option<SfuNodeDescriptor> {
+        self.nodes.get(node_id.as_str()).cloned()
+    }
+
+    #[must_use]
+    pub fn nodes(&self) -> Vec<SfuNodeDescriptor> {
+        self.nodes.values().cloned().collect()
     }
 
     pub fn remove_node(&mut self, node_id: &ucr_model::OpaqueId) {
