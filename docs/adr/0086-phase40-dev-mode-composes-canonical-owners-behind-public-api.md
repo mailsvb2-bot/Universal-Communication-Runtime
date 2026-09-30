@@ -2,11 +2,11 @@
 
 ## Decision
 
-Phase 40 adds `ucr dev` as a development-only local host. It seeds canonical in-memory Identity/Device state and Service Principal admission, then exposes the existing public gRPC services on loopback. External dev interactions use the public contract; no second Message, Group, Call, Delivery, Identity, routing or retry owner is introduced.
+Phase 40 adds `ucr dev` as a development-only local host. It seeds canonical Identity/Device state and Service Principal admission in an automatically created ephemeral SQLite store, then exposes the existing public gRPC services on loopback. External dev interactions use the public contract; no second Message, Group, Call, Delivery, Identity, routing or retry owner is introduced.
 
 ## Security boundary
 
-Authentication, permissions and quota admission stay enabled. The host refuses non-loopback bind addresses. Test credentials and state are ephemeral to the development process. Dev Mode must not create an insecure production profile or silently weaken protocol/security rules.
+Authentication, permissions and quota admission stay enabled. The host refuses non-loopback bind addresses. Test credentials and the temporary SQLite database are ephemeral to the development process; using the canonical SQLite implementation is required for MLS-capable Universal Conference flows and does not make Dev Mode a production deployment. Dev Mode must not create an insecure production profile or silently weaken protocol/security rules.
 
 ## Sandbox
 
