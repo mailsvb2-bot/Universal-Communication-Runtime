@@ -48,7 +48,6 @@ message OperatorSfuNodeSnapshot {
   uint32 active_sessions = 4;
   uint32 max_sessions = 5;
   int64 lease_expires_at_unix_ms = 6;
-  bool lease_live = 7;
 }
 
 message OperatorSfuNodeHeartbeatResponse {
