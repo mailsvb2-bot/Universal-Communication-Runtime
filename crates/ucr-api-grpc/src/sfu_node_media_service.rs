@@ -143,8 +143,9 @@ where
                     .envelope
                     .ok_or_else(|| Status::invalid_argument("missing SFU node media envelope"))
                     .and_then(|value| {
-                        decode_sfu_forward_envelope(value)
-                            .map_err(|_| Status::invalid_argument("invalid SFU node media envelope"))
+                        decode_sfu_forward_envelope(value).map_err(|_| {
+                            Status::invalid_argument("invalid SFU node media envelope")
+                        })
                     }) {
                     Ok(envelope) => envelope,
                     Err(status) => {
@@ -210,7 +211,10 @@ where
 }
 
 fn require_mtls_peer<T>(request: &Request<T>) -> Result<(), Status> {
-    if request.peer_certs().is_some_and(|certificates| !certificates.is_empty()) {
+    if request
+        .peer_certs()
+        .is_some_and(|certificates| !certificates.is_empty())
+    {
         Ok(())
     } else {
         Err(Status::unauthenticated(
