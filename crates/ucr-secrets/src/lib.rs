@@ -141,8 +141,174 @@ pub trait SecretProvider: fmt::Debug + Send + Sync {
     ) -> Result<ActiveSecretSet, SecretProviderError>;
 }
 
-pub const MAX_RELOADABLE_SECRET_MANIFEST_BYTES: u64 =
-    (MAX_SECRET_BYTES as u64 * 4) + 4 * 1024;
+pub const MAX_TLS_CERTIFICATE_BYTES: u64 = MAX_SECRET_BYTES as u64;
+pub const MAX_TLS_PRIVATE_KEY_BYTES: u64 = MAX_SECRET_BYTES as u64;
+
+#[derive(Debug, Clone)]
+pub struct ReloadingFileTlsSecretProvider {
+    certificate_path: Arc<str>,
+    private_key_path: Arc<str>,
+    previous_certificate_path: Option<Arc<str>>,
+    previous_private_key_path: Option<Arc<str>>,
+    certificate_handle: SecretHandle,
+    private_key_handle: SecretHandle,
+}
+
+impl ReloadingFileTlsSecretProvider {
+    /// Creates a reloadable file-backed TLS adapter over the shared secret-provider boundary.
+    ///
+    /// Files are re-read on every lookup so atomic replacement is visible to new connections.
+    /// Certificate and private-key rotation can overlap by exposing one bounded previous pair.
+    ///
+    /// # Errors
+    /// Rejects empty paths, malformed handle identifiers, or incomplete previous-pair config.
+    pub fn new(
+        certificate_path: impl Into<String>,
+        private_key_path: impl Into<String>,
+        previous_certificate_path: Option<String>,
+        previous_private_key_path: Option<String>,
+        certificate_secret_id: &str,
+        private_key_secret_id: &str,
+    ) -> Result<Self, String> {
+        let certificate_path = certificate_path.into();
+        let private_key_path = private_key_path.into();
+        if certificate_path.is_empty() || private_key_path.is_empty() {
+            return Err("TLS secret provider paths must not be empty".to_owned());
+        }
+        if previous_certificate_path.is_some() != previous_private_key_path.is_some() {
+            return Err(
+                "previous TLS certificate and private-key paths must be configured together"
+                    .to_owned(),
+            );
+        }
+        Ok(Self {
+            certificate_path: Arc::from(certificate_path),
+            private_key_path: Arc::from(private_key_path),
+            previous_certificate_path: previous_certificate_path.map(Arc::from),
+            previous_private_key_path: previous_private_key_path.map(Arc::from),
+            certificate_handle: SecretHandle {
+                secret_id: OpaqueId::new(certificate_secret_id)
+                    .map_err(|_| "invalid TLS certificate secret id".to_owned())?,
+                purpose: SecretPurpose::TlsCertificate,
+            },
+            private_key_handle: SecretHandle {
+                secret_id: OpaqueId::new(private_key_secret_id)
+                    .map_err(|_| "invalid TLS private-key secret id".to_owned())?,
+                purpose: SecretPurpose::TlsPrivateKey,
+            },
+        })
+    }
+
+    #[must_use]
+    pub fn certificate_handle(&self) -> SecretHandle {
+        self.certificate_handle.clone()
+    }
+
+    #[must_use]
+    pub fn private_key_handle(&self) -> SecretHandle {
+        self.private_key_handle.clone()
+    }
+
+    fn read_material(
+        path: &str,
+        limit: u64,
+        require_private_permissions: bool,
+    ) -> Result<SecretMaterial, SecretProviderError> {
+        let metadata = fs::symlink_metadata(path).map_err(|_| SecretProviderError::Unavailable)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > limit {
+            return Err(SecretProviderError::InvalidMaterial);
+        }
+        #[cfg(unix)]
+        if require_private_permissions {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(SecretProviderError::InvalidMaterial);
+            }
+        }
+        let bytes = fs::read(path).map_err(|_| SecretProviderError::Unavailable)?;
+        SecretMaterial::new(bytes)
+    }
+
+    fn set_for(
+        handle: &SecretHandle,
+        current_path: &str,
+        previous_path: Option<&str>,
+        limit: u64,
+        require_private_permissions: bool,
+    ) -> Result<ActiveSecretSet, SecretProviderError> {
+        let current = SecretVersion {
+            version_id: OpaqueId::new("file-current").map_err(|_| SecretProviderError::Internal)?,
+            material: Self::read_material(current_path, limit, require_private_permissions)?,
+        };
+        let previous = previous_path
+            .map(|path| {
+                Ok(SecretVersion {
+                    version_id: OpaqueId::new("file-previous")
+                        .map_err(|_| SecretProviderError::Internal)?,
+                    material: Self::read_material(path, limit, require_private_permissions)?,
+                })
+            })
+            .transpose()?;
+        Ok(ActiveSecretSet {
+            handle: handle.clone(),
+            current,
+            previous,
+        })
+    }
+}
+
+impl SecretProvider for ReloadingFileTlsSecretProvider {
+    fn provider_id(&self) -> &'static str {
+        "tls-file-reload"
+    }
+
+    fn health(&self) -> SecretProviderHealth {
+        if self
+            .active_secret_set(&self.certificate_handle)
+            .and_then(|_| self.active_secret_set(&self.private_key_handle))
+            .is_ok()
+        {
+            SecretProviderHealth::Healthy
+        } else {
+            SecretProviderHealth::Unavailable
+        }
+    }
+
+    fn active_secret_set(
+        &self,
+        handle: &SecretHandle,
+    ) -> Result<ActiveSecretSet, SecretProviderError> {
+        if handle == &self.certificate_handle {
+            Self::set_for(
+                handle,
+                &self.certificate_path,
+                self.previous_certificate_path.as_deref(),
+                MAX_TLS_CERTIFICATE_BYTES,
+                false,
+            )
+        } else if handle == &self.private_key_handle {
+            Self::set_for(
+                handle,
+                &self.private_key_path,
+                self.previous_private_key_path.as_deref(),
+                MAX_TLS_PRIVATE_KEY_BYTES,
+                true,
+            )
+        } else {
+            Err(SecretProviderError::NotFound)
+        }
+    }
+
+    fn rotate(
+        &self,
+        _handle: &SecretHandle,
+        _new_version: SecretVersion,
+    ) -> Result<ActiveSecretSet, SecretProviderError> {
+        Err(SecretProviderError::Unavailable)
+    }
+}
+
+pub const MAX_RELOADABLE_SECRET_MANIFEST_BYTES: u64 = 1024;
 
 #[derive(Debug, Clone)]
 pub struct ReloadingFileSecretProvider {
@@ -251,7 +417,7 @@ impl ReloadingFileSecretProvider {
         version_id: &str,
         secret_hex: &str,
     ) -> Result<SecretVersion, SecretProviderError> {
-        let bytes = Zeroizing::new(decode_hex_secret(secret_hex)?);
+        let bytes = Zeroizing::new(decode_hex_32(secret_hex)?);
         Ok(SecretVersion {
             version_id: OpaqueId::new(version_id)
                 .map_err(|_| SecretProviderError::InvalidMaterial)?,
@@ -292,16 +458,16 @@ impl SecretProvider for ReloadingFileSecretProvider {
     }
 }
 
-fn decode_hex_secret(value: &str) -> Result<Vec<u8>, SecretProviderError> {
-    if value.is_empty() || value.len() % 2 != 0 || value.len() > MAX_SECRET_BYTES * 2 {
+fn decode_hex_32(value: &str) -> Result<[u8; 32], SecretProviderError> {
+    if value.len() != 64 {
         return Err(SecretProviderError::InvalidMaterial);
     }
+    let mut output = [0_u8; 32];
     let bytes = value.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        let high = hex_nibble(pair[0])?;
-        let low = hex_nibble(pair[1])?;
-        output.push((high << 4) | low);
+    for index in 0..32 {
+        let high = hex_nibble(bytes[index * 2])?;
+        let low = hex_nibble(bytes[index * 2 + 1])?;
+        output[index] = (high << 4) | low;
     }
     Ok(output)
 }
@@ -442,6 +608,69 @@ mod tests {
     }
 
     #[test]
+    fn reloadable_tls_provider_reads_bounded_certificate_and_private_key() {
+        let certificate_path = manifest_path("tls-cert");
+        let private_key_path = manifest_path("tls-key");
+        fs::write(&certificate_path, b"certificate-pem").expect("write certificate");
+        fs::write(&private_key_path, b"private-key-pem").expect("write key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&private_key_path, fs::Permissions::from_mode(0o600))
+                .expect("chmod private key");
+        }
+
+        let provider = ReloadingFileTlsSecretProvider::new(
+            certificate_path.to_string_lossy(),
+            private_key_path.to_string_lossy(),
+            None,
+            None,
+            "tls-cert",
+            "tls-key",
+        )
+        .expect("TLS provider");
+        let certificate = provider
+            .active_secret_set(&provider.certificate_handle())
+            .expect("certificate");
+        let private_key = provider
+            .active_secret_set(&provider.private_key_handle())
+            .expect("private key");
+        assert_eq!(certificate.current.material.as_bytes(), b"certificate-pem");
+        assert_eq!(private_key.current.material.as_bytes(), b"private-key-pem");
+        fs::remove_file(certificate_path).expect("cleanup certificate");
+        fs::remove_file(private_key_path).expect("cleanup key");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reloadable_tls_provider_rejects_group_readable_private_key() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let certificate_path = manifest_path("tls-public-cert");
+        let private_key_path = manifest_path("tls-public-key");
+        fs::write(&certificate_path, b"certificate-pem").expect("write certificate");
+        fs::write(&private_key_path, b"private-key-pem").expect("write key");
+        fs::set_permissions(&private_key_path, fs::Permissions::from_mode(0o640))
+            .expect("chmod private key");
+
+        let provider = ReloadingFileTlsSecretProvider::new(
+            certificate_path.to_string_lossy(),
+            private_key_path.to_string_lossy(),
+            None,
+            None,
+            "tls-public-cert",
+            "tls-public-key",
+        )
+        .expect("TLS provider");
+        assert_eq!(
+            provider.active_secret_set(&provider.private_key_handle()),
+            Err(SecretProviderError::InvalidMaterial)
+        );
+        fs::remove_file(certificate_path).expect("cleanup certificate");
+        fs::remove_file(private_key_path).expect("cleanup key");
+    }
+
+    #[test]
     fn reloadable_file_provider_observes_atomic_overlap_replacement() {
         let path = manifest_path("rotation");
         write_manifest(
@@ -472,46 +701,6 @@ mod tests {
             Some(&oid("v1"))
         );
         fs::remove_file(path).expect("cleanup");
-    }
-
-    #[test]
-    fn reloadable_file_provider_accepts_bounded_variable_length_tls_material() {
-        let path = manifest_path("tls-material");
-        let certificate_pem = b"-----BEGIN CERTIFICATE-----\nUCR test certificate material\n-----END CERTIFICATE-----\n";
-        let encoded = certificate_pem
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        write_manifest(
-            &path,
-            &format!("current_version_id=tls-v1\ncurrent_secret_hex={encoded}\n"),
-        );
-        let handle = SecretHandle {
-            secret_id: oid("tls-certificate"),
-            purpose: SecretPurpose::TlsCertificate,
-        };
-        let provider =
-            ReloadingFileSecretProvider::new(handle.clone(), path.clone()).expect("provider");
-        let material = provider
-            .active_secret_set(&handle)
-            .expect("tls material")
-            .current
-            .material;
-        assert_eq!(material.as_bytes(), certificate_pem);
-        fs::remove_file(path).expect("cleanup");
-    }
-
-    #[test]
-    fn reloadable_file_provider_rejects_oversized_or_odd_hex_material() {
-        assert_eq!(
-            decode_hex_secret("abc"),
-            Err(SecretProviderError::InvalidMaterial)
-        );
-        let oversized = "aa".repeat(MAX_SECRET_BYTES + 1);
-        assert_eq!(
-            decode_hex_secret(&oversized),
-            Err(SecretProviderError::InvalidMaterial)
-        );
     }
 
     #[test]
