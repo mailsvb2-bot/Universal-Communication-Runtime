@@ -120,7 +120,7 @@ target. `Accepted`, `Backpressure`, and `Rejected` remain destination-ingress fa
 acceptance is preserved and no connection write is upgraded to remote success.
 
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
-true. Production horizontal SFU still requires tying this outbound client to
+true. Production horizontal SFU still requires the outbound node client tied to
 `SfuPlacementService.ResolveNode`, binding actual realtime sessions to cluster placement, bounded
 reconnect/failover/drain behavior, live credential reload evidence in the runtime path, and
 load/adversity evidence. The placement directory must never become a Call, Conference, membership,
