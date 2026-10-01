@@ -177,11 +177,13 @@ impl<'a> TransportOrchestrator<'a> {
             validate_endpoint_descriptor(&option.recipient_endpoint)
                 .map_err(|_| TransportOrchestratorError::InvalidEndpoint)?;
             let protected_device_id = match protected_devices {
-                Some(devices) => match protected_device_option_binding(&intent, &option, devices)? {
-                    ProtectedRouteBinding::NonDevice => None,
-                    ProtectedRouteBinding::Device(device_id) => Some(device_id),
-                    ProtectedRouteBinding::Ineligible => continue,
-                },
+                Some(devices) => {
+                    match protected_device_option_binding(&intent, &option, devices)? {
+                        ProtectedRouteBinding::NonDevice => None,
+                        ProtectedRouteBinding::Device(device_id) => Some(device_id),
+                        ProtectedRouteBinding::Ineligible => continue,
+                    }
+                }
                 None => None,
             };
             let route_key = (
