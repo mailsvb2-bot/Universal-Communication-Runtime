@@ -42,7 +42,8 @@ use ucr_model::{
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_secrets::{SecretHandle, SecretProvider, SecretPurpose};
 use ucr_sfu::{
-    SfuClusterDirectory, SfuForwardSink, SfuForwardSinkError, SfuNodeDescriptor, SfuPlacementError,
+    SfuClusterDirectory, SfuForwardSink, SfuForwardSinkError, SfuNodeCapacitySnapshot,
+    SfuNodeDescriptor, SfuPlacementError,
 };
 use ucr_storage_sqlite::{
     RECORDING_RETENTION_WORKER_KIND, SqliteLocalStore, WEBHOOK_DELIVERY_WORKER_KIND,
@@ -632,7 +633,7 @@ impl OperatorSfuClusterControl for ProductionOperatorHealthSource {
     fn heartbeat_sfu_node(
         &self,
         heartbeat: OperatorSfuNodeHeartbeat,
-    ) -> Result<SfuNodeDescriptor, OperatorSfuClusterError> {
+    ) -> Result<SfuNodeCapacitySnapshot, OperatorSfuClusterError> {
         let cluster = self
             .sfu_cluster
             .as_ref()
@@ -658,13 +659,15 @@ impl OperatorSfuClusterControl for ProductionOperatorHealthSource {
         directory
             .upsert_node_with_endpoint(node.clone(), endpoint)
             .map_err(map_sfu_cluster_error)?;
-        Ok(node)
+        directory
+            .node_with_capacity(&node.node_id)
+            .ok_or(OperatorSfuClusterError::InvalidNode)
     }
 
     fn drain_sfu_node(
         &self,
         node_id: &OpaqueId,
-    ) -> Result<SfuNodeDescriptor, OperatorSfuClusterError> {
+    ) -> Result<SfuNodeCapacitySnapshot, OperatorSfuClusterError> {
         let cluster = self
             .sfu_cluster
             .as_ref()
@@ -679,11 +682,11 @@ impl OperatorSfuClusterControl for ProductionOperatorHealthSource {
             .mark_draining(node_id)
             .map_err(map_sfu_cluster_error)?;
         directory
-            .node(node_id)
+            .node_with_capacity(node_id)
             .ok_or(OperatorSfuClusterError::InvalidNode)
     }
 
-    fn list_sfu_nodes(&self) -> Result<Vec<SfuNodeDescriptor>, OperatorSfuClusterError> {
+    fn list_sfu_nodes(&self) -> Result<Vec<SfuNodeCapacitySnapshot>, OperatorSfuClusterError> {
         let cluster = self
             .sfu_cluster
             .as_ref()
@@ -694,7 +697,7 @@ impl OperatorSfuClusterControl for ProductionOperatorHealthSource {
             .lock()
             .map_err(|_| OperatorSfuClusterError::Unavailable)?;
         directory.prune_expired_nodes(now_unix_ms);
-        Ok(directory.nodes())
+        Ok(directory.nodes_with_capacity())
     }
 }
 

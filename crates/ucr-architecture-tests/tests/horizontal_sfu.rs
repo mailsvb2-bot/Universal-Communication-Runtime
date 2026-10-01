@@ -19,8 +19,15 @@ fn horizontal_sfu_placement_remains_ephemeral_and_non_authoritative() {
     assert!(sfu.contains("pub fn place_session"));
     assert!(sfu.contains("pub fn mark_draining"));
     assert!(sfu.contains("pub fn release_session"));
+    assert!(sfu.contains("reservations: BTreeMap<String, u32>"));
+    assert!(sfu.contains("pub struct SfuNodeCapacitySnapshot"));
+    assert!(sfu.contains("pub fn nodes_with_capacity"));
+    assert!(sfu.contains("active_sessions"));
+    assert!(sfu.contains("u64::from(self.reserved_sessions"));
     assert!(sfu.contains("placement_score"));
     assert!(spec.contains("Horizontal placement foundation"));
+    assert!(spec.contains("Worker heartbeat"));
+    assert!(spec.contains("coordinator reservations"));
 
     for forbidden in [
         "ConferenceStore",
@@ -48,6 +55,8 @@ fn horizontal_sfu_operator_control_wires_heartbeat_list_and_drain_without_public
     }
     assert!(operator.contains("endpoint_ip"));
     assert!(operator.contains("endpoint_port"));
+    assert!(operator.contains("reserved_sessions"));
+    assert!(operator.contains("effective_sessions"));
     assert!(api.contains("OperatorSfuClusterControl"));
     assert!(runtime.contains("sfu_cluster: Some"));
     assert!(runtime.contains("SfuClusterDirectory::default()"));

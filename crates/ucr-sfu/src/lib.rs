@@ -82,12 +82,13 @@ impl SfuNodeDescriptor {
         self.lease_expires_at_unix_ms > now_unix_ms && self.state != SfuNodeState::Unavailable
     }
 
-    fn accepts_new_session_at(&self, now_unix_ms: i64) -> bool {
-        self.is_live_at(now_unix_ms)
-            && self.state == SfuNodeState::Healthy
-            && self.max_sessions > 0
-            && self.active_sessions < self.max_sessions
-    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SfuNodeCapacitySnapshot {
+    pub node: SfuNodeDescriptor,
+    pub reserved_sessions: u32,
+    pub effective_sessions: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,19 +125,65 @@ pub enum SfuPlacementError {
 ///
 /// The directory owns no canonical Call, Conference, membership, permission or media state. It
 /// keeps only an in-process Call-to-worker placement map so stickiness cannot be forged by a caller.
-/// New placement never targets draining/unavailable/expired/full nodes. If the sticky node is gone
-/// or unhealthy, deterministic rendezvous-style scoring selects a healthy replacement.
+/// Worker-reported active load and coordinator-owned placement reservations remain separate: a
+/// heartbeat must never erase capacity already reserved by the coordinator. New placement never
+/// targets draining/unavailable/expired/full nodes. If the sticky node is gone or unhealthy,
+/// deterministic rendezvous-style scoring selects a healthy replacement.
 #[derive(Debug, Default)]
 pub struct SfuClusterDirectory {
     nodes: BTreeMap<String, SfuNodeDescriptor>,
     endpoints: BTreeMap<String, SfuNodeEndpoint>,
     placements: BTreeMap<Vec<u8>, String>,
+    reservations: BTreeMap<String, u32>,
 }
 
 impl SfuClusterDirectory {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty() && self.endpoints.is_empty() && self.placements.is_empty()
+        self.nodes.is_empty()
+            && self.endpoints.is_empty()
+            && self.placements.is_empty()
+            && self.reservations.is_empty()
+    }
+
+    fn reserved_sessions(&self, node_id: &str) -> u32 {
+        self.reservations.get(node_id).copied().unwrap_or(0)
+    }
+
+    fn effective_sessions(&self, node: &SfuNodeDescriptor) -> u64 {
+        u64::from(node.active_sessions)
+            + u64::from(self.reserved_sessions(node.node_id.as_str()))
+    }
+
+    fn accepts_new_session_at(&self, node: &SfuNodeDescriptor, now_unix_ms: i64) -> bool {
+        node.is_live_at(now_unix_ms)
+            && node.state == SfuNodeState::Healthy
+            && node.max_sessions > 0
+            && self.effective_sessions(node) < u64::from(node.max_sessions)
+    }
+
+    fn reserve_session(&mut self, node_id: &str) -> Result<(), SfuPlacementError> {
+        let reserved = self.reserved_sessions(node_id);
+        let next = reserved
+            .checked_add(1)
+            .ok_or(SfuPlacementError::NoHealthyCapacity)?;
+        self.reservations.insert(node_id.to_owned(), next);
+        Ok(())
+    }
+
+    fn release_reservation(&mut self, node_id: &str) -> Result<(), SfuPlacementError> {
+        let reserved = self
+            .reservations
+            .get_mut(node_id)
+            .ok_or(SfuPlacementError::InvalidNode)?;
+        if *reserved == 0 {
+            return Err(SfuPlacementError::InvalidNode);
+        }
+        *reserved -= 1;
+        if *reserved == 0 {
+            self.reservations.remove(node_id);
+        }
+        Ok(())
     }
 
     /// Registers or refreshes one ephemeral worker heartbeat.
@@ -218,6 +265,30 @@ impl SfuClusterDirectory {
         self.nodes.values().cloned().collect()
     }
 
+    #[must_use]
+    pub fn node_with_capacity(
+        &self,
+        node_id: &ucr_model::OpaqueId,
+    ) -> Option<SfuNodeCapacitySnapshot> {
+        self.nodes.get(node_id.as_str()).map(|node| SfuNodeCapacitySnapshot {
+            node: node.clone(),
+            reserved_sessions: self.reserved_sessions(node.node_id.as_str()),
+            effective_sessions: self.effective_sessions(node),
+        })
+    }
+
+    #[must_use]
+    pub fn nodes_with_capacity(&self) -> Vec<SfuNodeCapacitySnapshot> {
+        self.nodes
+            .values()
+            .map(|node| SfuNodeCapacitySnapshot {
+                node: node.clone(),
+                reserved_sessions: self.reserved_sessions(node.node_id.as_str()),
+                effective_sessions: self.effective_sessions(node),
+            })
+            .collect()
+    }
+
     /// Removes workers whose heartbeat lease has expired and clears any sticky placements that
     /// referenced them. This keeps the bounded ephemeral directory reusable across worker churn.
     pub fn prune_expired_nodes(&mut self, now_unix_ms: i64) -> usize {
@@ -234,6 +305,7 @@ impl SfuClusterDirectory {
         for node_id in &expired {
             self.nodes.remove(node_id);
             self.endpoints.remove(node_id);
+            self.reservations.remove(node_id);
         }
         self.placements.retain(|_, assigned_node_id| {
             !expired.iter().any(|node_id| node_id == assigned_node_id)
@@ -244,6 +316,7 @@ impl SfuClusterDirectory {
     pub fn remove_node(&mut self, node_id: &ucr_model::OpaqueId) {
         self.nodes.remove(node_id.as_str());
         self.endpoints.remove(node_id.as_str());
+        self.reservations.remove(node_id.as_str());
         self.placements
             .retain(|_, assigned_node_id| assigned_node_id != node_id.as_str());
     }
@@ -298,17 +371,13 @@ impl SfuClusterDirectory {
                 }
             }
             self.placements.remove(&key);
-            if let Some(current) = self.nodes.get_mut(&current_node_id)
-                && current.active_sessions > 0
-            {
-                current.active_sessions -= 1;
-            }
+            self.release_reservation(&current_node_id)?;
         }
 
         let mut candidates = self
             .nodes
             .values()
-            .filter(|node| node.accepts_new_session_at(now_unix_ms))
+            .filter(|node| self.accepts_new_session_at(node, now_unix_ms))
             .collect::<Vec<_>>();
         if candidates.is_empty() {
             return Err(SfuPlacementError::NoHealthyCapacity);
@@ -330,20 +399,18 @@ impl SfuClusterDirectory {
             .ok_or(SfuPlacementError::NoHealthyCapacity)?;
         let selected_id = selected.node_id.as_str().to_owned();
         let selected_region = selected.region.clone();
-        let node = self
+        let selected_node = self
             .nodes
-            .get_mut(&selected_id)
+            .get(&selected_id)
             .ok_or(SfuPlacementError::NoHealthyCapacity)?;
-        if !node.accepts_new_session_at(now_unix_ms) {
+        if !self.accepts_new_session_at(selected_node, now_unix_ms) {
             return Err(SfuPlacementError::NoHealthyCapacity);
         }
-        node.active_sessions = node
-            .active_sessions
-            .checked_add(1)
-            .ok_or(SfuPlacementError::NoHealthyCapacity)?;
+        let selected_node_id = selected_node.node_id.clone();
+        self.reserve_session(&selected_id)?;
         self.placements.insert(key, selected_id);
         Ok(SfuPlacementDecision {
-            node_id: node.node_id.clone(),
+            node_id: selected_node_id,
             retained_sticky_placement: false,
             crossed_region: preferred.is_some_and(|region| selected_region != region),
         })
@@ -363,15 +430,10 @@ impl SfuClusterDirectory {
             .placements
             .remove(&key)
             .ok_or(SfuPlacementError::InvalidNode)?;
-        let node = self
-            .nodes
-            .get_mut(&node_id)
-            .ok_or(SfuPlacementError::InvalidNode)?;
-        if node.active_sessions == 0 {
+        if !self.nodes.contains_key(&node_id) {
             return Err(SfuPlacementError::InvalidNode);
         }
-        node.active_sessions -= 1;
-        Ok(())
+        self.release_reservation(&node_id)
     }
 }
 
@@ -1082,6 +1144,95 @@ mod horizontal_placement_tests {
             )
             .expect("second placement");
         assert_eq!(second.node_id.as_str(), "single");
+    }
+
+    #[test]
+    fn heartbeat_cannot_erase_coordinator_capacity_reservation() {
+        let mut directory = SfuClusterDirectory::default();
+        directory
+            .upsert_node(node("single", "eu", SfuNodeState::Healthy, 0, 1, 10_000))
+            .expect("single node");
+        directory
+            .place_session(
+                &scope(),
+                &call("call-one"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("first placement");
+
+        directory
+            .upsert_node(node("single", "eu", SfuNodeState::Healthy, 0, 1, 20_000))
+            .expect("worker heartbeat refresh");
+        let snapshot = directory
+            .node_with_capacity(&opaque("single"))
+            .expect("capacity snapshot");
+        assert_eq!(snapshot.node.active_sessions, 0);
+        assert_eq!(snapshot.reserved_sessions, 1);
+        assert_eq!(snapshot.effective_sessions, 1);
+
+        assert_eq!(
+            directory.place_session(
+                &scope(),
+                &call("call-two"),
+                &SfuPlacementPolicy::default(),
+                100,
+            ),
+            Err(SfuPlacementError::NoHealthyCapacity)
+        );
+
+        directory
+            .release_session(&scope(), &call("call-one"))
+            .expect("release coordinator reservation");
+        directory
+            .place_session(
+                &scope(),
+                &call("call-two"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("capacity is reusable after release");
+    }
+
+    #[test]
+    fn worker_reported_load_and_pending_reservations_are_counted_conservatively() {
+        let mut directory = SfuClusterDirectory::default();
+        directory
+            .upsert_node(node("node", "eu", SfuNodeState::Healthy, 0, 2, 10_000))
+            .expect("node");
+        directory
+            .place_session(
+                &scope(),
+                &call("reserved"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("reservation");
+
+        directory
+            .upsert_node(node("node", "eu", SfuNodeState::Healthy, 1, 2, 20_000))
+            .expect("worker heartbeat");
+        assert_eq!(
+            directory.place_session(
+                &scope(),
+                &call("second"),
+                &SfuPlacementPolicy::default(),
+                100,
+            ),
+            Err(SfuPlacementError::NoHealthyCapacity)
+        );
+
+        directory
+            .release_session(&scope(), &call("reserved"))
+            .expect("release reservation");
+        directory
+            .place_session(
+                &scope(),
+                &call("second"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("one reported active plus one reservation fits");
     }
 
     #[test]
