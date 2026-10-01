@@ -141,7 +141,8 @@ pub trait SecretProvider: fmt::Debug + Send + Sync {
     ) -> Result<ActiveSecretSet, SecretProviderError>;
 }
 
-pub const MAX_RELOADABLE_SECRET_MANIFEST_BYTES: u64 = 1024;
+pub const MAX_RELOADABLE_SECRET_MANIFEST_BYTES: u64 =
+    (MAX_SECRET_BYTES as u64 * 4) + 4 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ReloadingFileSecretProvider {
@@ -250,7 +251,7 @@ impl ReloadingFileSecretProvider {
         version_id: &str,
         secret_hex: &str,
     ) -> Result<SecretVersion, SecretProviderError> {
-        let bytes = Zeroizing::new(decode_hex_32(secret_hex)?);
+        let bytes = Zeroizing::new(decode_hex_secret(secret_hex)?);
         Ok(SecretVersion {
             version_id: OpaqueId::new(version_id)
                 .map_err(|_| SecretProviderError::InvalidMaterial)?,
@@ -291,16 +292,16 @@ impl SecretProvider for ReloadingFileSecretProvider {
     }
 }
 
-fn decode_hex_32(value: &str) -> Result<[u8; 32], SecretProviderError> {
-    if value.len() != 64 {
+fn decode_hex_secret(value: &str) -> Result<Vec<u8>, SecretProviderError> {
+    if value.is_empty() || value.len() % 2 != 0 || value.len() > MAX_SECRET_BYTES * 2 {
         return Err(SecretProviderError::InvalidMaterial);
     }
-    let mut output = [0_u8; 32];
     let bytes = value.as_bytes();
-    for index in 0..32 {
-        let high = hex_nibble(bytes[index * 2])?;
-        let low = hex_nibble(bytes[index * 2 + 1])?;
-        output[index] = (high << 4) | low;
+    let mut output = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let high = hex_nibble(pair[0])?;
+        let low = hex_nibble(pair[1])?;
+        output.push((high << 4) | low);
     }
     Ok(output)
 }
@@ -471,6 +472,46 @@ mod tests {
             Some(&oid("v1"))
         );
         fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn reloadable_file_provider_accepts_bounded_variable_length_tls_material() {
+        let path = manifest_path("tls-material");
+        let certificate_pem = b"-----BEGIN CERTIFICATE-----\nUCR test certificate material\n-----END CERTIFICATE-----\n";
+        let encoded = certificate_pem
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        write_manifest(
+            &path,
+            &format!("current_version_id=tls-v1\ncurrent_secret_hex={encoded}\n"),
+        );
+        let handle = SecretHandle {
+            secret_id: oid("tls-certificate"),
+            purpose: SecretPurpose::TlsCertificate,
+        };
+        let provider =
+            ReloadingFileSecretProvider::new(handle.clone(), path.clone()).expect("provider");
+        let material = provider
+            .active_secret_set(&handle)
+            .expect("tls material")
+            .current
+            .material;
+        assert_eq!(material.as_bytes(), certificate_pem);
+        fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn reloadable_file_provider_rejects_oversized_or_odd_hex_material() {
+        assert_eq!(
+            decode_hex_secret("abc"),
+            Err(SecretProviderError::InvalidMaterial)
+        );
+        let oversized = "aa".repeat(MAX_SECRET_BYTES + 1);
+        assert_eq!(
+            decode_hex_secret(&oversized),
+            Err(SecretProviderError::InvalidMaterial)
+        );
     }
 
     #[test]
