@@ -360,9 +360,7 @@ mod tests {
             GrpcSfuPlacementService::new(Arc::new(FixedClock(10_000)), Arc::clone(&cluster));
         let request = place_request();
         let scope = decode_scope(request.scope.expect("scope")).expect("decoded scope");
-        let call_id = CallId::from_opaque(
-            decode_opaque(request.call_id).expect("decoded call"),
-        );
+        let call_id = CallId::from_opaque(decode_opaque(request.call_id).expect("decoded call"));
 
         RealtimeSfuPlacementLifecycle::ensure_call_placement(&service, &scope, &call_id)
             .await
