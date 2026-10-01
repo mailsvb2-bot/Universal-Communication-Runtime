@@ -92,8 +92,9 @@ fn horizontal_sfu_node_media_contract_is_private_ciphertext_only_and_non_authori
     assert!(sfu_proto.contains("SfuForwardTarget target = 2"));
     assert!(sfu_proto.contains("SfuForwardEnvelope envelope = 3"));
     assert!(sfu_proto.contains("SFU_NODE_FORWARD_STATUS_BACKPRESSURE"));
-    assert!(spec.contains("mutually authenticated infrastructure node transport"));
-    assert!(spec.contains("not canonical Delivery"));
+    let normalized_spec = spec.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized_spec.contains("mutually authenticated infrastructure node transport"));
+    assert!(normalized_spec.contains("not canonical Delivery"));
     assert!(adr.contains("Status: Accepted"));
     assert!(adr.contains("not UCR"));
     assert!(adr.contains("tenant Service Accounts"));
