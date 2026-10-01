@@ -130,11 +130,13 @@ to loopback. It does not accept caller-supplied media endpoints and does not rel
 each frame.
 
 The realtime-session binding now has an explicit optional lifecycle gate. The existing
-`RealtimeSessionRegistry` remains the only active-session roster: after an authenticated join is
-accepted into that registry, `RealtimeSfuPlacementLifecycle` ensures one sticky placement for the
-canonical `TenantScope + CallId`. A placement failure rolls the just-opened realtime session back.
-Reconnects and additional participants reuse the same Call placement without reserving another
-worker slot. On explicit leave, the registry is queried for the remaining non-expired sessions of
+`RealtimeSessionRegistry` remains the only active-session roster. After authentication and policy
+validation but before mutating reconnect/session state, `RealtimeSfuPlacementLifecycle` ensures
+one sticky placement for the canonical `TenantScope + CallId`. A placement failure therefore
+leaves an existing reconnect session untouched. If registry admission then fails, cleanup releases
+the reservation only when that same registry reports no active session for the Call. Reconnects and
+additional participants reuse the same Call placement without reserving another worker slot. On
+explicit leave, the registry is queried for the remaining non-expired sessions of
 that same Call and the placement is released only when the count reaches zero. Release is
 idempotent so retry/rollback cleanup cannot turn an already-absent placement into a second failure.
 The production runtime wires this only behind the explicit
