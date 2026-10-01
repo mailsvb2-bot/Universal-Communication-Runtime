@@ -249,8 +249,17 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
     let spec = read("spec/sfu.md");
 
     assert!(realtime.contains("pub trait RealtimeSfuPlacementLifecycle"));
-    assert!(realtime.contains(".join(claims.clone(), now)"));
-    assert!(realtime.contains("ensure_sfu_call_placement(&claims).await"));
+    let ensure_index = realtime
+        .find("self.ensure_sfu_call_placement(&claims).await")
+        .expect("placement ensure");
+    let join_index = realtime
+        .find("self.registry.join(claims.clone(), now)")
+        .expect("registry join");
+    assert!(
+        ensure_index < join_index,
+        "placement must fail before reconnect/session registry mutation"
+    );
+    assert!(realtime.contains("release_sfu_call_placement_if_inactive(&claims, now)"));
     assert!(realtime.contains("rollback_realtime_join(&claims, now).await"));
     assert!(realtime.contains("release_sfu_call_placement_if_inactive"));
     assert!(registry.contains("pub fn active_call_session_count_at"));
