@@ -126,3 +126,22 @@ fn horizontal_sfu_node_identity_does_not_reuse_tenant_machine_auth() {
     );
     assert!(adr.contains("infrastructure node identity"));
 }
+
+
+#[test]
+fn horizontal_sfu_node_media_service_requires_tls_peer_and_revalidates_canonical_media() {
+    let api = read("crates/ucr-api-grpc/src/sfu_node_media_service.rs");
+    let manifest = read("crates/ucr-api-grpc/Cargo.toml");
+
+    assert!(manifest.contains("\"tls-ring\""));
+    assert!(api.contains("request.peer_certs()"));
+    assert!(api.contains("SfuRuntime::new"));
+    assert!(api.contains("forward_selected"));
+    assert!(api.contains("PreparedGroupMediaE2eeCapabilities"));
+    assert!(api.contains("PreparedSfuCapabilities"));
+    assert!(api.contains("SFU_NODE_RECEIPT_CHANNEL_CAPACITY"));
+    assert!(api.contains("SfuForwardSinkError::Backpressure"));
+    assert!(api.contains("Status::unauthenticated"));
+    assert!(!api.contains("MachineAccessToken"));
+    assert!(!api.contains("ServiceCredentialSecret"));
+}
