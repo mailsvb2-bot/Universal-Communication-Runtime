@@ -47,6 +47,11 @@ fn phase29_sqlite_public_privacy_and_atomicity_boundaries_are_machine_locked() {
     let sfu_proto = fs::read_to_string(root.join("proto/ucr/v1/sfu.proto")).expect("sfu proto");
     let identity_proto =
         fs::read_to_string(root.join("proto/ucr/v1/identity.proto")).expect("identity proto");
+    let universal_proto =
+        fs::read_to_string(root.join("proto/ucr/v1/universal_conference.proto"))
+            .expect("universal conference proto");
+    let realtime_proto =
+        fs::read_to_string(root.join("proto/ucr/v1/realtime.proto")).expect("realtime proto");
     let spec = fs::read_to_string(root.join("spec/sfu.md")).expect("spec");
     assert!(sqlite.contains("const SQLITE_SCHEMA_V26: u32 = 26"));
     assert!(sqlite.contains("migrate_v25_to_v26"));
@@ -61,7 +66,8 @@ fn phase29_sqlite_public_privacy_and_atomicity_boundaries_are_machine_locked() {
     assert!(group_proto.contains("optional VideoSourceKind video_source_kind = 17"));
     assert!(sfu_proto.contains("EncryptedGroupMediaFrame frame = 1"));
     assert!(identity_proto.contains("message PrincipalIdentityBinding"));
-    assert!(!sfu_proto.contains("service Sfu"));
+    assert!(!universal_proto.contains("SfuNodeMediaService"));
+    assert!(!realtime_proto.contains("SfuNodeMediaService"));
     assert!(!sfu_proto.contains("bytes plaintext ="));
     assert!(!sfu_proto.contains("bytes private_key ="));
     assert!(!sfu_proto.contains("message Conference"));
