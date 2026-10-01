@@ -452,6 +452,9 @@ impl SfuNodeMediaRuntimeConfig {
     }
 
     fn tls_server(&self) -> Result<Server, String> {
+        // The full workspace also contains dependencies that enable another rustls backend.
+        // Select the same provider as the canonical HTTPS edge before Tonic builds TLS state.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let certificates = self
             .provider
             .active_secret_set(&self.certificate_handle)
