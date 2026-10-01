@@ -357,8 +357,7 @@ where
                     self.ensure_accepted_conference_participant_for_join(&claims)?;
                     require_recording_participant_admission(&*self.store, &claims)?;
                     let media_policy = self.effective_universal_media_policy(&claims)?;
-                    let redeemed =
-                        self.redeemed_claims(&token, &scope, &call_id, &session_id)?;
+                    let redeemed = self.redeemed_claims(&token, &scope, &call_id, &session_id)?;
                     if redeemed != claims {
                         return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
                     }
@@ -458,8 +457,9 @@ where
                         .registry
                         .leave(&claims, now)
                         .map_err(map_registry_error)?;
-                    let placement_cleanup =
-                        self.release_sfu_call_placement_if_inactive(&claims, now).await;
+                    let placement_cleanup = self
+                        .release_sfu_call_placement_if_inactive(&claims, now)
+                        .await;
                     self.append_attendance(&transition)?;
                     conference_runtime(self)
                         .clear_raised_hand(&claims.scope, &claims.call_id, &claims.participant)
