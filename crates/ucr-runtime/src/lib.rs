@@ -1815,11 +1815,7 @@ impl ProductionRuntime {
         machine_bearer: Option<MachineBearerRuntimeConfig>,
     ) -> Result<(), String> {
         let (incoming, operator_incoming) = self
-            .prepare_realtime_listeners(
-                bind,
-                operator_bind,
-                config.sfu_placement_lifecycle,
-            )
+            .prepare_realtime_listeners(bind, operator_bind, config.sfu_placement_lifecycle)
             .await?;
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
