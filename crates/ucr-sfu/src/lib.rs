@@ -81,7 +81,6 @@ impl SfuNodeDescriptor {
     fn is_live_at(&self, now_unix_ms: i64) -> bool {
         self.lease_expires_at_unix_ms > now_unix_ms && self.state != SfuNodeState::Unavailable
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,8 +150,7 @@ impl SfuClusterDirectory {
     }
 
     fn effective_sessions(&self, node: &SfuNodeDescriptor) -> u64 {
-        u64::from(node.active_sessions)
-            + u64::from(self.reserved_sessions(node.node_id.as_str()))
+        u64::from(node.active_sessions) + u64::from(self.reserved_sessions(node.node_id.as_str()))
     }
 
     fn accepts_new_session_at(&self, node: &SfuNodeDescriptor, now_unix_ms: i64) -> bool {
@@ -270,11 +268,13 @@ impl SfuClusterDirectory {
         &self,
         node_id: &ucr_model::OpaqueId,
     ) -> Option<SfuNodeCapacitySnapshot> {
-        self.nodes.get(node_id.as_str()).map(|node| SfuNodeCapacitySnapshot {
-            node: node.clone(),
-            reserved_sessions: self.reserved_sessions(node.node_id.as_str()),
-            effective_sessions: self.effective_sessions(node),
-        })
+        self.nodes
+            .get(node_id.as_str())
+            .map(|node| SfuNodeCapacitySnapshot {
+                node: node.clone(),
+                reserved_sessions: self.reserved_sessions(node.node_id.as_str()),
+                effective_sessions: self.effective_sessions(node),
+            })
     }
 
     #[must_use]
