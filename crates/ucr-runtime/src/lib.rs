@@ -409,7 +409,7 @@ impl core::fmt::Debug for SfuNodeMediaRuntimeConfig {
 impl SfuNodeMediaRuntimeConfig {
     /// Builds the private horizontal-SFU node listener configuration.
     ///
-    /// The server identity is resolved through the shared SecretProvider. Client trust anchors are
+    /// The server identity is resolved through the shared `SecretProvider`. Client trust anchors are
     /// public deployment material but remain bounded and are supplied explicitly so this listener
     /// cannot silently trust the system root store.
     ///
@@ -477,8 +477,8 @@ impl SfuNodeMediaRuntimeConfig {
             for private_key in &private_key_versions {
                 let tls = ServerTlsConfig::new()
                     .identity(Identity::from_pem(
-                        certificate.material.as_bytes().to_vec(),
-                        private_key.material.as_bytes().to_vec(),
+                        certificate.material.as_bytes(),
+                        private_key.material.as_bytes(),
                     ))
                     .client_ca_root(Certificate::from_pem(trust.clone()));
                 if let Ok(server) = Server::builder().tls_config(tls) {
@@ -1810,12 +1810,7 @@ impl ProductionRuntime {
         println!("UCR_REALTIME_READY endpoint=http://{address}");
         println!("UCR_RUNTIME_MODE={RUNTIME_MODE} realtime=true tls_edge=required test_mode=false");
         let incoming = TcpListenerStream::new(listener);
-        let operator_incoming = match operator_bind {
-            Some(operator_bind) => {
-                Some(bind_private_operator_listener(bind, operator_bind, "realtime").await?)
-            }
-            None => None,
-        };
+        let operator_incoming = bind_realtime_operator_listener(bind, operator_bind).await?;
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
         let store = Arc::clone(&self.store);
@@ -1900,6 +1895,18 @@ impl ProductionRuntime {
         bridge_task.abort();
         server_result
     }
+}
+
+async fn bind_realtime_operator_listener(
+    public_bind: SocketAddr,
+    operator_bind: Option<SocketAddr>,
+) -> Result<Option<TcpListenerStream>, String> {
+    let Some(operator_bind) = operator_bind else {
+        return Ok(None);
+    };
+    bind_private_operator_listener(public_bind, operator_bind, "realtime")
+        .await
+        .map(Some)
 }
 
 async fn serve_api_public_services(
