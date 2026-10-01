@@ -285,9 +285,13 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
         "SFU placement lifecycle gate must never cross-wire into machine-auth config"
     );
     assert!(
+        runtime[realtime_start..].contains(".prepare_realtime_listeners("),
+        "realtime serve must route listener setup through the guarded preparation path"
+    );
+    assert!(
         runtime[realtime_start..]
-            .contains("if config.sfu_placement_lifecycle && operator_bind.is_none()"),
-        "realtime serve must fail closed without its private operator plane"
+            .contains("if sfu_placement_lifecycle && operator_bind.is_none()"),
+        "realtime listener preparation must fail closed without its private operator plane"
     );
     assert!(runtime_main.contains("UCR_SFU_PLACEMENT_LIFECYCLE_ENABLED"));
     assert!(
