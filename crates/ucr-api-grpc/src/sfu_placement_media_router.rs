@@ -237,10 +237,10 @@ fn is_private_node_endpoint(address: SocketAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{pin::Pin, sync::Arc};
+    use std::sync::Arc;
 
     use tokio::net::TcpListener;
-    use tokio_stream::{Stream, wrappers::TcpListenerStream};
+    use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{Request, Response, Status, transport::Server};
     use ucr_model::{NamespaceId, TenantId};
     use ucr_secrets::{
