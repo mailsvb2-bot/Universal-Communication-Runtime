@@ -512,6 +512,34 @@ pub struct SfuForwardOutcome {
     pub accepted_recipients: usize,
 }
 
+/// Immutable canonical SFU routing work validated against current Call/Group/Device authority.
+///
+/// The constructor is private: callers can inspect the canonical encrypted envelope and ephemeral
+/// targets, but cannot manufacture a batch that bypasses `SfuRuntime` validation. Horizontal
+/// transports may await real remote acceptance for these targets before reporting success.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SfuValidatedForwardBatch {
+    envelope: SfuForwardEnvelope,
+    targets: Vec<SfuForwardTarget>,
+}
+
+impl SfuValidatedForwardBatch {
+    #[must_use]
+    pub fn envelope(&self) -> &SfuForwardEnvelope {
+        &self.envelope
+    }
+
+    #[must_use]
+    pub fn targets(&self) -> &[SfuForwardTarget] {
+        &self.targets
+    }
+
+    #[must_use]
+    pub fn target_count(&self) -> usize {
+        self.targets.len()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SfuError {
     Protocol(SfuProtocolError),
@@ -603,12 +631,34 @@ where
         envelope: &SfuForwardEnvelope,
         sink: &dyn SfuForwardSink,
     ) -> Result<SfuForwardOutcome, SfuError> {
-        self.forward_impl(
+        let batch = self.prepare_forward(
+            authenticated_source,
+            authenticated_source_device_id,
+            envelope,
+        )?;
+        dispatch_validated_forward_batch(&batch, sink)
+    }
+
+    /// Validates and canonicalizes one encrypted frame for current accepted Call participants
+    /// without performing a routing side effect.
+    ///
+    /// This is the async horizontal-SFU handoff boundary: callers may await concrete remote node
+    /// receipts for the returned immutable batch rather than treating local queue admission as
+    /// remote acceptance.
+    ///
+    /// # Errors
+    /// Fails closed on the same canonical authority and media validation errors as `forward`.
+    pub fn prepare_forward(
+        &self,
+        authenticated_source: &ScopedPrincipal,
+        authenticated_source_device_id: &DeviceId,
+        envelope: &SfuForwardEnvelope,
+    ) -> Result<SfuValidatedForwardBatch, SfuError> {
+        self.prepare_forward_impl(
             authenticated_source,
             authenticated_source_device_id,
             envelope,
             None,
-            sink,
         )
     }
 
@@ -628,23 +678,42 @@ where
         recipients: &[ucr_model::PrincipalRef],
         sink: &dyn SfuForwardSink,
     ) -> Result<SfuForwardOutcome, SfuError> {
-        self.forward_impl(
+        let batch = self.prepare_forward_selected(
+            authenticated_source,
+            authenticated_source_device_id,
+            envelope,
+            recipients,
+        )?;
+        dispatch_validated_forward_batch(&batch, sink)
+    }
+
+    /// Validates and canonicalizes one encrypted frame for an explicitly selected current
+    /// recipient set without performing any routing side effect.
+    ///
+    /// # Errors
+    /// Rejects the same invalid recipient, authority and media states as `forward_selected`.
+    pub fn prepare_forward_selected(
+        &self,
+        authenticated_source: &ScopedPrincipal,
+        authenticated_source_device_id: &DeviceId,
+        envelope: &SfuForwardEnvelope,
+        recipients: &[ucr_model::PrincipalRef],
+    ) -> Result<SfuValidatedForwardBatch, SfuError> {
+        self.prepare_forward_impl(
             authenticated_source,
             authenticated_source_device_id,
             envelope,
             Some(recipients),
-            sink,
         )
     }
 
-    fn forward_impl(
+    fn prepare_forward_impl(
         &self,
         authenticated_source: &ScopedPrincipal,
         authenticated_source_device_id: &DeviceId,
         envelope: &SfuForwardEnvelope,
         selected_recipients: Option<&[ucr_model::PrincipalRef]>,
-        sink: &dyn SfuForwardSink,
-    ) -> Result<SfuForwardOutcome, SfuError> {
+    ) -> Result<SfuValidatedForwardBatch, SfuError> {
         let (context, canonical) = canonical_sfu_forward_envelope(envelope)?;
         if authenticated_source.scope != context.scope
             || authenticated_source.principal != canonical.frame.header.source
@@ -716,18 +785,35 @@ where
             targets.push(SfuForwardTarget { recipient });
         }
 
-        for (accepted, target) in targets.iter().enumerate() {
-            if let Err(error) = sink.forward_encrypted(target, &canonical) {
-                return Err(SfuError::Sink {
-                    accepted_before_failure: accepted,
-                    error,
-                });
-            }
-        }
-        Ok(SfuForwardOutcome {
-            accepted_recipients: targets.len(),
+        Ok(SfuValidatedForwardBatch {
+            envelope: canonical,
+            targets,
         })
     }
+}
+
+/// Executes one already-validated canonical routing batch against a synchronous infrastructure sink.
+///
+/// This preserves the existing local SFU semantics. Async horizontal transports should instead
+/// consume the validated batch and await their own concrete per-target acceptance evidence.
+///
+/// # Errors
+/// Returns the exact partial-acceptance count and bounded sink error from the first failed target.
+pub fn dispatch_validated_forward_batch(
+    batch: &SfuValidatedForwardBatch,
+    sink: &dyn SfuForwardSink,
+) -> Result<SfuForwardOutcome, SfuError> {
+    for (accepted, target) in batch.targets.iter().enumerate() {
+        if let Err(error) = sink.forward_encrypted(target, &batch.envelope) {
+            return Err(SfuError::Sink {
+                accepted_before_failure: accepted,
+                error,
+            });
+        }
+    }
+    Ok(SfuForwardOutcome {
+        accepted_recipients: batch.targets.len(),
+    })
 }
 
 fn validate_selected_recipients(

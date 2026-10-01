@@ -30,7 +30,7 @@ Before any sink side effect, the runtime revalidates the current active Group-ba
 
 Recipients are derived only from current canonical Call participants plus recipient-owned Conference subscription preference. The SFU does not persist a recipient roster.
 
-`SfuForwardSink` receives the same canonical encrypted frame for each ephemeral target. Successful sink acceptance is infrastructure routing acceptance only. It is not Device receipt, decrypt evidence, canonical Delivery state, user presentation or Read evidence. Partial acceptance is reported truthfully; there is no rollback or exactly-once fan-out claim.
+`ConferenceRuntime` performs the canonical Conference subscription selection first, then `SfuRuntime` produces an immutable validated forward batch after all canonical source and recipient checks pass. The batch constructor is private, so callers cannot manufacture pre-authorized routing work or bypass canonical Conference subscription selection. The existing synchronous `SfuForwardSink` path dispatches that batch locally and preserves exact partial-acceptance semantics. Horizontal transports must consume the same validated batch and await the destination node's concrete receipt; local queue admission or connection write alone must never be reported as remote `Accepted`. Successful sink/node acceptance is infrastructure routing acceptance only. It is not Device receipt, decrypt evidence, canonical Delivery state, user presentation or Read evidence. Partial acceptance is reported truthfully; there is no rollback or exactly-once fan-out claim.
 
 ## Horizontal placement foundation
 

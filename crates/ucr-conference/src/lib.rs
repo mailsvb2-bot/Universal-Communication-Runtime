@@ -28,7 +28,10 @@ use ucr_protocol::{
     canonical_conference_subscription_set, is_conference_group_kind,
     phase30_conference_capabilities, validate_conference_snapshot,
 };
-use ucr_sfu::{SfuCapabilityProvider, SfuError, SfuForwardOutcome, SfuForwardSink, SfuRuntime};
+use ucr_sfu::{
+    SfuCapabilityProvider, SfuError, SfuForwardOutcome, SfuForwardSink, SfuRuntime,
+    SfuValidatedForwardBatch, dispatch_validated_forward_batch,
+};
 
 pub trait ConferenceCapabilityProvider: fmt::Debug + Send + Sync {
     fn current_capabilities(&self) -> Vec<ucr_model::CapabilityDescriptor>;
@@ -934,6 +937,30 @@ where
         envelope: &SfuForwardEnvelope,
         sink: &dyn SfuForwardSink,
     ) -> Result<SfuForwardOutcome, ConferenceError> {
+        let Some(batch) = self.prepare_forward(actor, actor_device_id, envelope)? else {
+            return Ok(SfuForwardOutcome {
+                accepted_recipients: 0,
+            });
+        };
+        dispatch_validated_forward_batch(&batch, sink).map_err(ConferenceError::Sfu)
+    }
+
+    /// Resolves current Conference subscriptions and performs all canonical SFU validation without
+    /// performing a media-routing side effect.
+    ///
+    /// `None` means that no current accepted participant subscribes to this source/media kind.
+    /// Horizontal transports can use a returned immutable batch and await concrete node receipts
+    /// without duplicating Conference subscription selection.
+    ///
+    /// # Errors
+    /// Fails closed if the source is not a current Conference participant or if any underlying SFU,
+    /// Group/Call/MLS/Device/signature/permission invariant fails.
+    pub fn prepare_forward(
+        &self,
+        actor: &ScopedPrincipal,
+        actor_device_id: &DeviceId,
+        envelope: &SfuForwardEnvelope,
+    ) -> Result<Option<SfuValidatedForwardBatch>, ConferenceError> {
         require_conference_stack(
             self.conference_capabilities,
             self.sfu_capabilities,
@@ -953,9 +980,7 @@ where
             envelope.frame.header.media_kind,
         )?;
         if recipients.is_empty() {
-            return Ok(SfuForwardOutcome {
-                accepted_recipients: 0,
-            });
+            return Ok(None);
         }
         let sfu = SfuRuntime::new(
             self.authorization,
@@ -963,7 +988,8 @@ where
             self.group_e2ee_capabilities,
             self.sfu_capabilities,
         );
-        sfu.forward_selected(actor, actor_device_id, envelope, &recipients, sink)
+        sfu.prepare_forward_selected(actor, actor_device_id, envelope, &recipients)
+            .map(Some)
             .map_err(ConferenceError::Sfu)
     }
 

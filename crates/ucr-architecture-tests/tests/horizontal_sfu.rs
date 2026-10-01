@@ -127,3 +127,24 @@ fn horizontal_sfu_node_identity_does_not_reuse_tenant_machine_auth() {
     );
     assert!(adr.contains("infrastructure node identity"));
 }
+
+#[test]
+fn horizontal_sfu_async_handoff_separates_validation_from_transport_acceptance() {
+    let sfu = read("crates/ucr-sfu/src/lib.rs");
+    let conference = read("crates/ucr-conference/src/lib.rs");
+    let spec = read("spec/sfu.md");
+
+    assert!(sfu.contains("pub struct SfuValidatedForwardBatch"));
+    assert!(sfu.contains("pub fn prepare_forward_selected"));
+    assert!(sfu.contains("pub fn dispatch_validated_forward_batch"));
+    assert!(sfu.contains("envelope: SfuForwardEnvelope"));
+    assert!(sfu.contains("targets: Vec<SfuForwardTarget>"));
+    assert!(conference.contains("pub fn prepare_forward"));
+    assert!(conference.contains("Result<Option<SfuValidatedForwardBatch>, ConferenceError>"));
+    assert!(conference.contains("self.subscribers_for_source"));
+    assert!(conference.contains("dispatch_validated_forward_batch(&batch, sink)"));
+    assert!(spec.contains("immutable validated forward batch"));
+    assert!(spec.contains("canonical Conference subscription selection"));
+    assert!(spec.contains("local queue admission"));
+    assert!(spec.contains("remote `Accepted`"));
+}
