@@ -24,13 +24,12 @@ impl SfuPlacementRoutingPolicy {
         preferred_region: Option<String>,
         allow_cross_region_failover: bool,
     ) -> Result<Self, String> {
-        if let Some(region) = preferred_region.as_deref() {
-            if region.is_empty()
+        if let Some(region) = preferred_region.as_deref()
+            && (region.is_empty()
                 || region.len() > MAX_SFU_REGION_BYTES
-                || region.chars().any(char::is_control)
-            {
-                return Err("invalid preferred SFU region".to_owned());
-            }
+                || region.chars().any(char::is_control))
+        {
+            return Err("invalid preferred SFU region".to_owned());
         }
         Ok(Self {
             preferred_region,
