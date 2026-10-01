@@ -266,7 +266,8 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
     assert!(
         placement.contains("impl<C> RealtimeSfuPlacementLifecycle for GrpcSfuPlacementService<C>")
     );
-    assert!(placement.contains("Ok(()) | Err(SfuPlacementError::InvalidNode) => Ok(())"));
+    assert!(placement.contains("release_session_if_present"));
+    assert!(registry.contains("pub fn active_call_session_count_at"));
     assert!(runtime.contains("with_sfu_placement_lifecycle"));
     assert!(runtime.contains("horizontal_sfu: false"));
     assert!(runtime_main.contains("UCR_SFU_PLACEMENT_LIFECYCLE_ENABLED"));
