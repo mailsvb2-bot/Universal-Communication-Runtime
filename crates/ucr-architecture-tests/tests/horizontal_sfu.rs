@@ -238,3 +238,27 @@ fn horizontal_sfu_placement_router_binds_resolve_node_to_outbound_mtls_without_o
     assert!(spec.contains("placement-aware outbound router"));
     assert!(spec.contains("realtime-session binding"));
 }
+
+#[test]
+fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_stays_fail_closed() {
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let registry = read("crates/ucr-realtime/src/lib.rs");
+    let placement = read("crates/ucr-api-grpc/src/sfu_placement_service.rs");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let runtime_main = read("crates/ucr-runtime/src/main.rs");
+    let spec = read("spec/sfu.md");
+
+    assert!(realtime.contains("pub trait RealtimeSfuPlacementLifecycle"));
+    assert!(realtime.contains(".join(claims.clone(), now)"));
+    assert!(realtime.contains("ensure_sfu_call_placement(&claims).await"));
+    assert!(realtime.contains("rollback_realtime_join(&claims, now).await"));
+    assert!(realtime.contains("release_sfu_call_placement_if_inactive"));
+    assert!(registry.contains("pub fn active_call_session_count_at"));
+    assert!(placement.contains("impl<C> RealtimeSfuPlacementLifecycle for GrpcSfuPlacementService<C>"));
+    assert!(placement.contains("Ok(()) | Err(SfuPlacementError::InvalidNode) => Ok(())"));
+    assert!(runtime.contains("with_sfu_placement_lifecycle"));
+    assert!(runtime.contains("horizontal_sfu: false"));
+    assert!(runtime_main.contains("UCR_SFU_PLACEMENT_LIFECYCLE_ENABLED"));
+    assert!(spec.contains("The realtime-session binding now has an explicit optional lifecycle gate"));
+    assert!(spec.contains("deterministic release for sessions"));
+}
