@@ -1031,17 +1031,15 @@ mod horizontal_placement_tests {
             .place_session(&scope(), &call_id, &SfuPlacementPolicy::default(), 100)
             .expect("placement");
 
-        assert_eq!(
+        assert!(
             directory
                 .release_session_if_present(&scope(), &call_id)
-                .expect("first release"),
-            true
+                .expect("first release")
         );
-        assert_eq!(
-            directory
+        assert!(
+            !directory
                 .release_session_if_present(&scope(), &call_id)
-                .expect("retry release"),
-            false
+                .expect("retry release")
         );
         assert_eq!(
             directory.release_session(&scope(), &call_id),
