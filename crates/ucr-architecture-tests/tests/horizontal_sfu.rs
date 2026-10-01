@@ -127,7 +127,6 @@ fn horizontal_sfu_node_identity_does_not_reuse_tenant_machine_auth() {
     assert!(adr.contains("infrastructure node identity"));
 }
 
-
 #[test]
 fn horizontal_sfu_node_media_service_requires_tls_peer_and_revalidates_canonical_media() {
     let api = read("crates/ucr-api-grpc/src/sfu_node_media_service.rs");
