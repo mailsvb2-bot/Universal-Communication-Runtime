@@ -270,6 +270,26 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
     assert!(registry.contains("pub fn active_call_session_count_at"));
     assert!(runtime.contains("with_sfu_placement_lifecycle"));
     assert!(runtime.contains("horizontal_sfu: false"));
+    let machine_auth_start = runtime
+        .find("async fn serve_machine_auth_inner(")
+        .expect("machine auth serve");
+    let realtime_start = runtime
+        .find("async fn serve_realtime_inner(")
+        .expect("realtime serve");
+    assert!(
+        machine_auth_start < realtime_start,
+        "expected machine-auth serve before realtime serve in runtime source"
+    );
+    assert!(
+        !runtime[machine_auth_start..realtime_start].contains("sfu_placement_lifecycle"),
+        "SFU placement lifecycle gate must never cross-wire into machine-auth config"
+    );
+    assert!(
+        runtime[realtime_start..].contains(
+            "if config.sfu_placement_lifecycle && operator_bind.is_none()"
+        ),
+        "realtime serve must fail closed without its private operator plane"
+    );
     assert!(runtime_main.contains("UCR_SFU_PLACEMENT_LIFECYCLE_ENABLED"));
     assert!(
         spec.contains("The realtime-session binding now has an explicit optional lifecycle gate")
