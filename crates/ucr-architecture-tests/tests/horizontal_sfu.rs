@@ -217,3 +217,24 @@ fn horizontal_sfu_outbound_node_client_is_mtls_receipt_driven_and_still_fail_clo
     assert!(spec.contains("outbound mTLS node client foundation"));
     assert!(adr.contains("outbound client now consumes only"));
 }
+
+#[test]
+fn horizontal_sfu_placement_router_binds_resolve_node_to_outbound_mtls_without_overclaim() {
+    let router = read("crates/ucr-api-grpc/src/sfu_placement_media_router.rs");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let spec = read("spec/sfu.md");
+
+    assert!(router.contains("pub struct PlacementAwareSfuNodeRouter"));
+    assert!(router.contains(".place_call(pb::SfuPlaceCallRequest"));
+    assert!(router.contains(".resolve_node(pb::SfuResolveNodeRequest"));
+    assert!(router.contains("SfuValidatedForwardBatch"));
+    assert!(router.contains("self.node_tls"));
+    assert!(router.contains(".connect(resolved.endpoint.address)"));
+    assert!(router.contains(".forward_batch(batch)"));
+    assert!(router.contains("route_node.value != selected_pb.value"));
+    assert!(router.contains("is_private_node_endpoint"));
+    assert!(router.contains("requires a loopback operator endpoint"));
+    assert!(runtime.contains("horizontal_sfu: false"));
+    assert!(spec.contains("placement-aware outbound router"));
+    assert!(spec.contains("realtime-session binding"));
+}

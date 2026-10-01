@@ -111,6 +111,12 @@ pub use sfu_node_media_client::{
     GrpcSfuNodeMediaClient, SfuNodeMediaClientError, SfuNodeMediaClientTlsConfig,
 };
 
+mod sfu_placement_media_router;
+pub use sfu_placement_media_router::{
+    PlacementAwareSfuNodeRouter, SfuPlacementForwardResult, SfuPlacementMediaRouterError,
+    SfuPlacementRoutingPolicy,
+};
+
 mod machine_auth_service;
 pub use machine_auth_service::{
     GrpcMachineAuthService, MachineAuthDiscovery, machine_auth_service_server,
