@@ -120,12 +120,20 @@ current/previous credential overlap, and waits for an exact monotonic receipt fo
 target. `Accepted`, `Backpressure`, and `Rejected` remain destination-ingress facts; partial
 acceptance is preserved and no connection write is upgraded to remote success.
 
+The outbound node client tied to `SfuPlacementService.ResolveNode` is now represented by a
+placement-aware outbound router that binds the two private boundaries without creating a new
+authority: it derives only canonical `TenantScope + CallId` from `SfuValidatedForwardBatch`,
+calls `PlaceCall`, resolves only that selected node through `ResolveNode`, revalidates the
+returned node identity plus private-network endpoint, then uses the deployment-scoped mTLS node
+client and waits for destination receipts. The plaintext placement control connection is restricted
+to loopback. It does not accept caller-supplied media endpoints and does not release placement after
+each frame, because placement lifetime belongs to the later realtime-session owner.
+
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
-true. Production horizontal SFU still requires the outbound node client tied to
-`SfuPlacementService.ResolveNode`, binding actual realtime sessions to cluster placement, bounded
-reconnect/failover/drain behavior, live credential reload evidence in the runtime path, and
-load/adversity evidence. The placement directory must never become a Call, Conference, membership,
-authorization, media-key, plaintext-media, Delivery, or recording owner.
+true. Production horizontal SFU still requires realtime-session binding to this placement-aware
+router, bounded reconnect/failover/drain behavior, live credential reload evidence in the runtime
+path, and load/adversity evidence. The placement directory must never become a Call, Conference,
+membership, authorization, media-key, plaintext-media, Delivery, or recording owner.
 
 ## Public realtime transport
 

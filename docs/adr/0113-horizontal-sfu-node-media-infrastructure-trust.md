@@ -55,8 +55,11 @@ installs only explicitly configured client CA roots and fails closed when peer a
 be established. The outbound client now consumes only the immutable canonical
 `SfuValidatedForwardBatch`, resolves its mTLS identity through the same `SecretProvider`
 abstraction, trusts only explicit server CA material, and requires one exact destination receipt per
-target before returning success. Placement-aware runtime routing and live listener/client credential
-reload evidence remain separate Production gates.
+target before returning success. A placement-aware router now derives the canonical scope/Call
+coordinates from that validated batch, obtains one sticky placement through the private loopback
+`SfuPlacementService`, resolves only the selected node, revalidates node identity/private endpoint,
+and then invokes the mTLS client. Realtime-session ownership, failover/drain policy, and live
+listener/client credential reload evidence remain separate Production gates.
 
 The stream is bounded and backpressure-aware. `ACCEPTED` means only that the authenticated
 destination SFU process accepted the ciphertext routing item into its bounded ingress. It is not
@@ -124,5 +127,7 @@ The contract and architecture guards must prove:
   service with a trusted deployment certificate;
 - outbound batch success must be driven by exact ordered destination receipts, preserving explicit
   partial acceptance/backpressure/rejection;
-- remaining implementation must prove live credential rotation, placement-aware runtime delivery,
+- placement-aware routing must reject node-ID confusion, public media endpoints, and non-loopback
+  plaintext control-plane connections;
+- remaining implementation must prove live credential rotation, realtime-session binding,
   reconnect, node failure/drain, and load/adversity before the Production claim.
