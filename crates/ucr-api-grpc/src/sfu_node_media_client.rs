@@ -406,9 +406,9 @@ mod tests {
             &self,
             request: Request<tonic::Streaming<pb::SfuNodeEncryptedMedia>>,
         ) -> Result<Response<Self::ForwardEncryptedStream>, Status> {
-            if !request
+            if request
                 .peer_certs()
-                .is_some_and(|certificates| !certificates.is_empty())
+                .is_none_or(|certificates| certificates.is_empty())
             {
                 return Err(Status::unauthenticated("missing mTLS peer"));
             }
