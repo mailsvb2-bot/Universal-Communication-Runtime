@@ -5,8 +5,8 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity
 use ucr_secrets::{MAX_SECRET_BYTES, SecretHandle, SecretProvider, SecretPurpose};
 use ucr_sfu::{SfuForwardOutcome, SfuValidatedForwardBatch};
 
-use super::{GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, pb, pb_principal_ref};
 use super::realtime_service::pb_sfu_forward_envelope;
+use super::{GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, pb, pb_principal_ref};
 
 pub const MAX_SFU_NODE_TLS_SERVER_NAME_BYTES: usize = 253;
 
@@ -47,10 +47,14 @@ impl SfuNodeMediaClientTlsConfig {
         server_name: impl Into<String>,
     ) -> Result<Self, String> {
         if certificate_handle.purpose != SecretPurpose::TlsCertificate {
-            return Err("SFU node client certificate handle must use TlsCertificate purpose".to_owned());
+            return Err(
+                "SFU node client certificate handle must use TlsCertificate purpose".to_owned(),
+            );
         }
         if private_key_handle.purpose != SecretPurpose::TlsPrivateKey {
-            return Err("SFU node client private key handle must use TlsPrivateKey purpose".to_owned());
+            return Err(
+                "SFU node client private key handle must use TlsPrivateKey purpose".to_owned(),
+            );
         }
         provider
             .active_secret_set(&certificate_handle)
@@ -68,7 +72,9 @@ impl SfuNodeMediaClientTlsConfig {
             || server_name.chars().any(char::is_whitespace)
             || server_name.chars().any(char::is_control)
         {
-            return Err("SFU node TLS server name must be a bounded non-whitespace token".to_owned());
+            return Err(
+                "SFU node TLS server name must be a bounded non-whitespace token".to_owned(),
+            );
         }
         Ok(Self {
             provider,
@@ -309,8 +315,8 @@ mod tests {
     };
     use tokio::net::TcpListener;
     use tokio_stream::{Stream, wrappers::TcpListenerStream};
-    use tonic::{Request, Response, Status};
     use tonic::transport::{Identity as ServerIdentity, Server, ServerTlsConfig};
+    use tonic::{Request, Response, Status};
     use ucr_model::OpaqueId;
     use ucr_secrets::{InMemorySecretProvider, SecretMaterial, SecretVersion};
 
@@ -332,11 +338,7 @@ mod tests {
         TestCa { certificate, key }
     }
 
-    fn test_leaf(
-        ca: &TestCa,
-        name: &str,
-        usage: ExtendedKeyUsagePurpose,
-    ) -> (String, String) {
+    fn test_leaf(ca: &TestCa, name: &str, usage: ExtendedKeyUsagePurpose) -> (String, String) {
         let mut params = CertificateParams::new(vec![name.to_owned()]).expect("test leaf params");
         params.key_usages.push(KeyUsagePurpose::DigitalSignature);
         params.extended_key_usages.push(usage);
@@ -418,13 +420,22 @@ mod tests {
     #[tokio::test]
     async fn outbound_node_client_requires_trusted_mtls_identity_and_reaches_service() {
         let trusted_ca = test_ca();
-        let (server_certificate, server_private_key) =
-            test_leaf(&trusted_ca, "localhost", ExtendedKeyUsagePurpose::ServerAuth);
-        let (trusted_client_certificate, trusted_client_private_key) =
-            test_leaf(&trusted_ca, "ucr-sfu-client", ExtendedKeyUsagePurpose::ClientAuth);
+        let (server_certificate, server_private_key) = test_leaf(
+            &trusted_ca,
+            "localhost",
+            ExtendedKeyUsagePurpose::ServerAuth,
+        );
+        let (trusted_client_certificate, trusted_client_private_key) = test_leaf(
+            &trusted_ca,
+            "ucr-sfu-client",
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
         let untrusted_ca = test_ca();
-        let (untrusted_client_certificate, untrusted_client_private_key) =
-            test_leaf(&untrusted_ca, "ucr-sfu-client", ExtendedKeyUsagePurpose::ClientAuth);
+        let (untrusted_client_certificate, untrusted_client_private_key) = test_leaf(
+            &untrusted_ca,
+            "ucr-sfu-client",
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -457,7 +468,10 @@ mod tests {
             .connect(address)
             .await
             .expect("trusted mTLS client connects");
-        client.probe().await.expect("authenticated node service probe");
+        client
+            .probe()
+            .await
+            .expect("authenticated node service probe");
 
         let untrusted = client_config(
             &trusted_ca.certificate.pem(),
