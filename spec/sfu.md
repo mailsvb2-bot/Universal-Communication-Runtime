@@ -41,18 +41,30 @@ capacity, a bounded lease expiry, and an optional private routable node endpoint
 identity or durable route store.
 
 Draining is fail-safe: an explicitly current session may remain on a live draining worker, but
-draining workers never receive fresh placements. Fresh placement reserves one session slot inside
-the directory before returning, and explicit release returns that slot; sequential placement through
-one directory therefore cannot overbook the last advertised capacity unit. Expired, unavailable,
-and full workers are excluded. If the sticky worker becomes unavailable, the directory deterministically selects a
-healthy replacement. Region preference is a routing hint only; strict policy fails closed when no
-capacity exists in-region, while an explicitly enabled cross-region policy may choose a healthy
-worker elsewhere and reports that fact in the placement decision.
+draining workers never receive fresh placements. Fresh placement creates a coordinator-owned
+reservation before returning, and explicit release returns that reservation. Worker heartbeat
+`active_sessions` is observational load reported by the worker; it never overwrites placement
+reservations. Because the aggregate heartbeat does not identify which Calls overlap existing
+coordinator reservations, the directory must not guess that overlap. Until the later session-routing
+boundary provides explicit admission/reconciliation evidence, effective capacity consumption is the
+bounded sum of worker-reported active sessions plus pending coordinator reservations. This may
+temporarily under-utilize a node, but a stale/lower heartbeat can never erase a reservation and
+reopen a full node. Sequential placement through one directory therefore cannot overbook the last
+advertised capacity unit across heartbeat refreshes. Expired, unavailable, and full workers are
+excluded. If the sticky worker becomes unavailable, the directory deterministically selects a
+healthy replacement. Region preference is a routing hint only; strict policy fails closed when no capacity
+exists in-region, while an explicitly enabled cross-region policy may choose a healthy worker
+elsewhere and reports that fact in the placement decision.
 
 The private loopback `OperatorRuntimeService` now wires worker registration/heartbeat, bounded
 node listing, explicit draining, and one validated private `IP:port` media endpoint into this same
-ephemeral directory. Heartbeats carry only node ID, region, state, active/max session counters,
-bounded lease TTL, and that infrastructure endpoint; API-only runtimes fail closed because they do
+directory. Operator node snapshots expose worker-reported `active_sessions`, coordinator
+`reserved_sessions`, and their conservative `effective_sessions` sum so operational capacity
+cannot disagree silently with placement admission. This remains infrastructure-only observability
+and creates no second capacity owner.
+
+Heartbeats carry only node ID, region, state, active/max session counters, bounded lease TTL, and
+that infrastructure endpoint; API-only runtimes fail closed because they do
 not own an SFU directory. Unspecified/multicast/broadcast addresses and port zero are rejected. Expired leases remain ineligible for fresh
 placement; operator operations prune expired workers plus stale sticky placements so the bounded
 directory remains reusable across node churn. Workers must re-register after process restart.

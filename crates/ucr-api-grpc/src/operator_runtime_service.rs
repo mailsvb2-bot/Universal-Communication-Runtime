@@ -6,7 +6,7 @@ use std::{
 
 use tonic::{Request, Response, Status};
 use ucr_model::OpaqueId;
-use ucr_sfu::{MAX_SFU_REGION_BYTES, SfuNodeDescriptor, SfuNodeEndpoint, SfuNodeState};
+use ucr_sfu::{MAX_SFU_REGION_BYTES, SfuNodeCapacitySnapshot, SfuNodeEndpoint, SfuNodeState};
 
 use super::{GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, pb};
 
@@ -50,7 +50,7 @@ pub trait OperatorSfuClusterControl: fmt::Debug + Send + Sync {
     fn heartbeat_sfu_node(
         &self,
         heartbeat: OperatorSfuNodeHeartbeat,
-    ) -> Result<SfuNodeDescriptor, OperatorSfuClusterError>;
+    ) -> Result<SfuNodeCapacitySnapshot, OperatorSfuClusterError>;
 
     /// Marks one known live worker as draining.
     ///
@@ -60,14 +60,14 @@ pub trait OperatorSfuClusterControl: fmt::Debug + Send + Sync {
     fn drain_sfu_node(
         &self,
         node_id: &OpaqueId,
-    ) -> Result<SfuNodeDescriptor, OperatorSfuClusterError>;
+    ) -> Result<SfuNodeCapacitySnapshot, OperatorSfuClusterError>;
 
     /// Returns the bounded current worker snapshot after pruning expired leases.
     ///
     /// # Errors
     /// Returns `NotConfigured` when horizontal SFU control is absent or `Unavailable` when
     /// runtime state cannot be accessed.
-    fn list_sfu_nodes(&self) -> Result<Vec<SfuNodeDescriptor>, OperatorSfuClusterError>;
+    fn list_sfu_nodes(&self) -> Result<Vec<SfuNodeCapacitySnapshot>, OperatorSfuClusterError>;
 }
 
 /// Thin gRPC binding for the private loopback/operator runtime boundary.
@@ -210,7 +210,8 @@ fn decode_node_id(value: &str) -> Result<OpaqueId, Status> {
     OpaqueId::new(value).map_err(|_| Status::invalid_argument("invalid SFU node id"))
 }
 
-fn pb_sfu_node(node: &SfuNodeDescriptor) -> pb::OperatorSfuNodeSnapshot {
+fn pb_sfu_node(snapshot: &SfuNodeCapacitySnapshot) -> pb::OperatorSfuNodeSnapshot {
+    let node = &snapshot.node;
     pb::OperatorSfuNodeSnapshot {
         node_id: node.node_id.as_str().to_owned(),
         region: node.region.clone(),
@@ -222,6 +223,8 @@ fn pb_sfu_node(node: &SfuNodeDescriptor) -> pb::OperatorSfuNodeSnapshot {
         active_sessions: node.active_sessions,
         max_sessions: node.max_sessions,
         lease_expires_at_unix_ms: node.lease_expires_at_unix_ms,
+        reserved_sessions: snapshot.reserved_sessions,
+        effective_sessions: snapshot.effective_sessions,
     }
 }
 
@@ -267,6 +270,27 @@ mod tests {
             decoded.endpoint.address,
             "127.0.0.1:7001".parse::<SocketAddr>().expect("endpoint")
         );
+    }
+
+    #[test]
+    fn operator_snapshot_exposes_capacity_reservations_without_hiding_reported_load() {
+        let snapshot = SfuNodeCapacitySnapshot {
+            node: ucr_sfu::SfuNodeDescriptor {
+                node_id: OpaqueId::new("sfu-eu-1").expect("node"),
+                region: "eu-west-1".to_owned(),
+                state: SfuNodeState::Healthy,
+                active_sessions: 3,
+                max_sessions: 10,
+                lease_expires_at_unix_ms: 20_000,
+            },
+            reserved_sessions: 2,
+            effective_sessions: 5,
+        };
+        let encoded = pb_sfu_node(&snapshot);
+        assert_eq!(encoded.active_sessions, 3);
+        assert_eq!(encoded.reserved_sessions, 2);
+        assert_eq!(encoded.effective_sessions, 5);
+        assert_eq!(encoded.max_sessions, 10);
     }
 
     #[test]
