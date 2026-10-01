@@ -133,7 +133,8 @@ fn horizontal_sfu_node_media_service_requires_tls_peer_and_revalidates_canonical
     let manifest = read("crates/ucr-api-grpc/Cargo.toml");
 
     assert!(manifest.contains("\"tls-ring\""));
-    assert!(api.contains("request.peer_certs()"));
+    assert!(api.contains("require_mtls_peer(&request)?;"));
+    assert!(api.contains(".peer_certs()"));
     assert!(api.contains("SfuRuntime::new"));
     assert!(api.contains("forward_selected"));
     assert!(api.contains("PreparedGroupMediaE2eeCapabilities"));
