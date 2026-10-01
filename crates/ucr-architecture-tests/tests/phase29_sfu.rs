@@ -21,7 +21,9 @@ fn phase29_reuses_group_call_device_crypto_and_permission_owners() {
     assert!(
         runtime.contains("AUDIO_SEND_PERMISSION") && runtime.contains("VIDEO_RECEIVE_PERMISSION")
     );
-    assert!(runtime.contains("sink.forward_encrypted(target, &canonical)"));
+    assert!(runtime.contains("pub struct SfuValidatedForwardBatch"));
+    assert!(runtime.contains("pub fn dispatch_validated_forward_batch"));
+    assert!(runtime.contains("sink.forward_encrypted(target, &batch.envelope)"));
     assert!(media.contains("verify_source_signature"));
     assert!(media.contains("PrincipalIdentityBindingStore"));
     assert!(mls.contains("openmls"));

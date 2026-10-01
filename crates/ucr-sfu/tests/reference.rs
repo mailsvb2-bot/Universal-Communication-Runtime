@@ -14,7 +14,7 @@ use ucr_protocol::{
 };
 use ucr_sfu::{
     PreparedSfuCapabilities, SfuError, SfuForwardOutcome, SfuForwardSink, SfuForwardSinkError,
-    SfuRuntime,
+    SfuRuntime, dispatch_validated_forward_batch,
 };
 use ucr_storage_memory::MemoryLocalStore;
 
@@ -609,6 +609,40 @@ fn selected_encrypted_forwarding_reaches_only_explicit_current_recipient() {
             std::slice::from_ref(&fixture.bob.principal),
             &sink,
         ),
+        Ok(SfuForwardOutcome {
+            accepted_recipients: 1
+        })
+    );
+    let forwarded = sink.forwarded();
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(forwarded[0].0.recipient, fixture.bob.principal);
+    assert_eq!(forwarded[0].1, fixture.envelope);
+}
+
+#[test]
+fn prepared_selected_forwarding_has_no_side_effect_until_explicit_dispatch() {
+    let fixture = build_fixture();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&AllowAll, &fixture.store, &e2ee, &sfu);
+    let sink = CaptureSink::default();
+
+    let batch = runtime
+        .prepare_forward_selected(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+            std::slice::from_ref(&fixture.bob.principal),
+        )
+        .expect("validated forward batch");
+
+    assert_eq!(batch.target_count(), 1);
+    assert_eq!(batch.targets()[0].recipient, fixture.bob.principal);
+    assert_eq!(batch.envelope(), &fixture.envelope);
+    assert!(sink.forwarded().is_empty());
+
+    assert_eq!(
+        dispatch_validated_forward_batch(&batch, &sink),
         Ok(SfuForwardOutcome {
             accepted_recipients: 1
         })
