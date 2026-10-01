@@ -522,6 +522,7 @@ pub struct RealtimeRuntimeConfig {
     webrtc_config: Arc<WebRtcSessionConfigFactory>,
     browser_realtime_gateway: bool,
     sfu_node_media: Option<SfuNodeMediaRuntimeConfig>,
+    sfu_placement_lifecycle: bool,
 }
 
 impl core::fmt::Debug for RealtimeRuntimeConfig {
@@ -532,6 +533,7 @@ impl core::fmt::Debug for RealtimeRuntimeConfig {
             .field("webrtc_config", &self.webrtc_config)
             .field("browser_realtime_gateway", &self.browser_realtime_gateway)
             .field("sfu_node_media", &self.sfu_node_media)
+            .field("sfu_placement_lifecycle", &self.sfu_placement_lifecycle)
             .finish()
     }
 }
@@ -551,6 +553,7 @@ impl RealtimeRuntimeConfig {
             webrtc_config: Arc::new(WebRtcSessionConfigFactory::default()),
             browser_realtime_gateway: false,
             sfu_node_media: None,
+            sfu_placement_lifecycle: false,
         })
     }
 
@@ -570,6 +573,7 @@ impl RealtimeRuntimeConfig {
             webrtc_config: Arc::new(WebRtcSessionConfigFactory::default()),
             browser_realtime_gateway: false,
             sfu_node_media: None,
+            sfu_placement_lifecycle: false,
         })
     }
 
@@ -582,6 +586,17 @@ impl RealtimeRuntimeConfig {
     #[must_use]
     pub fn with_sfu_node_media(mut self, config: SfuNodeMediaRuntimeConfig) -> Self {
         self.sfu_node_media = Some(config);
+        self
+    }
+
+    /// Enables the pre-production Call placement lifecycle gate.
+    ///
+    /// This does not advertise horizontal SFU capability by itself: media forwarding/failover must
+    /// still be proven separately. When enabled, realtime join fails closed until healthy SFU
+    /// capacity has been registered through the private operator plane.
+    #[must_use]
+    pub fn with_sfu_placement_lifecycle(mut self, enabled: bool) -> Self {
+        self.sfu_placement_lifecycle = enabled;
         self
     }
 
@@ -1668,6 +1683,11 @@ impl ProductionRuntime {
         config: MachineAuthRuntimeConfig,
     ) -> Result<(), String> {
         validate_local_bind(bind)?;
+        if config.sfu_placement_lifecycle && operator_bind.is_none() {
+            return Err(
+                "SFU placement lifecycle requires the private realtime operator plane".to_owned(),
+            );
+        }
         if self.diagnostics()?.storage_health != StorageHealth::Healthy {
             return Err("production runtime refuses unhealthy storage".to_owned());
         }
@@ -1821,6 +1841,7 @@ impl ProductionRuntime {
         let conference_state = Arc::new(ConferenceRuntimeState::new());
         let runtime_capabilities = config.universal_conference_capabilities();
         let sfu_node_media_config = config.sfu_node_media.clone();
+        let sfu_placement_lifecycle = config.sfu_placement_lifecycle;
         let dependencies = realtime_dependencies(config)?;
         let join_issuer = Arc::clone(&dependencies.join_issuer);
         let registry = Arc::clone(&dependencies.registry);
@@ -1843,6 +1864,11 @@ impl ProductionRuntime {
             Arc::clone(&conference_state),
             dependencies.webrtc,
         );
+        let realtime_service = if sfu_placement_lifecycle {
+            realtime_service.with_sfu_placement_lifecycle(Arc::new(sfu_placement_service.clone()))
+        } else {
+            realtime_service
+        };
         let bridge_task = spawn_webrtc_e2ee_bridge(
             dependencies.e2ee_ingress,
             &dependencies.live_provider,
@@ -2234,6 +2260,7 @@ fn realtime_dependencies(
         webrtc_config,
         browser_realtime_gateway: _,
         sfu_node_media: _,
+        sfu_placement_lifecycle: _,
     } = config;
     let (e2ee_ingress_tx, e2ee_ingress) =
         tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
@@ -2787,7 +2814,9 @@ mod tests {
                 false,
             )
             .expect("TURN config")
-            .with_browser_realtime_gateway(true);
+            .with_browser_realtime_gateway(true)
+            .with_sfu_placement_lifecycle(true);
+        assert!(configured.sfu_placement_lifecycle);
         let capabilities = configured.universal_conference_capabilities();
         assert!(capabilities.browser_realtime_gateway);
         assert!(!capabilities.production_webrtc);
