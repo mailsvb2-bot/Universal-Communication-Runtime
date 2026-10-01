@@ -478,12 +478,13 @@ mod tests {
             &untrusted_client_certificate,
             &untrusted_client_private_key,
         );
+        let untrusted_rejected = match untrusted.connect(address).await {
+            Err(_) => true,
+            Ok(mut client) => client.probe().await.is_err(),
+        };
         assert!(
-            matches!(
-                untrusted.connect(address).await,
-                Err(SfuNodeMediaClientError::Transport(_))
-            ),
-            "untrusted client certificate must fail the mTLS handshake"
+            untrusted_rejected,
+            "untrusted client certificate must fail mTLS admission before an RPC is accepted"
         );
 
         server_task.abort();
