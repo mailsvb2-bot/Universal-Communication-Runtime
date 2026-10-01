@@ -1,16 +1,17 @@
 use std::sync::{Arc, Mutex};
 
 use ucr_core::{
-    CanonicalTransportError, ClassifiedTransportFailure, PolicyDecision, PolicyEvaluator,
-    RouteCandidate, TransportHealth, TransportProvider,
+    CanonicalTransportError, ClassifiedTransportFailure, DeviceLifecycleStore, PolicyDecision,
+    PolicyEvaluator, RouteCandidate, TransportHealth, TransportProvider,
 };
 use ucr_model::{
     CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, CorrelationContext,
-    EndpointAddress, EndpointDescriptor, EndpointId, EndpointKind, IdentityId, IntentConstraints,
-    IntentId, MediaThermalState, OpaqueId, TenantId, TenantScope, TransportFailoverAttemptOutcome,
-    TransportFailoverPolicy, TransportFailoverStopReason, TransportResourceSnapshot,
-    TransportRouteTelemetry,
+    DeviceDescriptor, DeviceId, DeviceLifecycleState, EndpointAddress, EndpointDescriptor,
+    EndpointId, EndpointKind, IdentityId, IntentConstraints, IntentId, MediaThermalState, OpaqueId,
+    TenantId, TenantScope, TransportFailoverAttemptOutcome, TransportFailoverPolicy,
+    TransportFailoverStopReason, TransportResourceSnapshot, TransportRouteTelemetry,
 };
+use ucr_storage_memory::MemoryLocalStore;
 use ucr_transport_orchestrator::{
     TransportFailoverClock, TransportOrchestrator, TransportRouteOption,
 };
@@ -521,4 +522,70 @@ fn terminal_pre_accept_failure_does_not_walk_the_route_list() {
         TransportFailoverStopReason::TerminalFailure
     );
     assert_eq!(*calls.lock().expect("calls"), vec!["ucr.transport.first"]);
+}
+#[test]
+fn protected_failover_revalidates_revocation_after_planning() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let provider = TestProvider {
+        capability: "ucr.transport.test".into(),
+        health: TransportHealth::Healthy,
+        behavior: ProviderBehavior::Accepted,
+        calls: Arc::clone(&calls),
+    };
+    let store = MemoryLocalStore::default();
+    let device_id = DeviceId::from_opaque(oid("device-only"));
+    store
+        .register_device(
+            &scope(),
+            &DeviceDescriptor {
+                device_id: device_id.clone(),
+                identity_id: identity(),
+                state: DeviceLifecycleState::Active,
+            },
+        )
+        .expect("register active device");
+    let orchestrator = TransportOrchestrator::new(&AllowPolicy);
+    let value = intent();
+    let plan = orchestrator
+        .plan_protected(
+            &value,
+            resources(),
+            &[],
+            vec![option(&provider, "ucr.transport.test", "only", 5)],
+            &store,
+        )
+        .expect("protected plan");
+
+    let bypass = orchestrator
+        .transmit_with_failover(&value, &plan, b"encrypted", policy(1), &FixedClock(1_000))
+        .unwrap_err();
+    assert_eq!(bypass.error, CanonicalTransportError::PolicyDenied);
+    assert_eq!(
+        bypass.decision.stop_reason,
+        TransportFailoverStopReason::PolicyChanged
+    );
+    assert!(calls.lock().expect("calls").is_empty());
+
+    store
+        .revoke_device(&scope(), &device_id, &identity())
+        .expect("revoke after planning");
+    let revoked = orchestrator
+        .transmit_with_failover_protected(
+            &value,
+            &plan,
+            b"new-protected-content",
+            policy(1),
+            &FixedClock(1_000),
+            &store,
+        )
+        .unwrap_err();
+    assert_eq!(revoked.error, CanonicalTransportError::PolicyDenied);
+    assert_eq!(
+        revoked.decision.stop_reason,
+        TransportFailoverStopReason::PolicyChanged
+    );
+    assert!(
+        calls.lock().expect("calls").is_empty(),
+        "revocation after planning must stop before provider invocation"
+    );
 }

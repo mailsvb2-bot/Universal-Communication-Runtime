@@ -18,6 +18,29 @@ The encrypted envelope is transport input, not a second canonical Message body. 
 
 Jobs are bounded to at most 64 provider-bearing Delivery attempts, pages are bounded to 256 jobs, retry delay is capped at seven days, and a processing lease is capped at five minutes. Exponential backoff saturates at the configured maximum.
 
+## Protected Device origin gate
+
+When an origin creates new protected Device content, it uses
+`StoreForwardRuntime::new_protected_origin`. Route planning then composes the normal
+policy/Identity/capability checks with the existing canonical `DeviceLifecycleStore`.
+A Device endpoint is eligible only when the exact scoped Device exists, belongs to the target
+Identity, and is `Active`. Missing, Stale, ReverificationRequired, Expired and Revoked Devices
+fail closed. The protected plan retains its Device binding and execution re-reads the canonical
+lifecycle immediately before every provider-bearing primary/failover attempt, so revocation racing
+after planning still stops before any `TransportProvider` invocation. Ordinary transmit/failover
+entry points reject protected plans and cannot bypass that execution-time gate.
+
+The ordinary `StoreForwardRuntime::new` mode remains available for forwarding an already-created
+opaque encrypted envelope where the forwarding node intentionally does not own the recipient Device
+lifecycle registry. This preserves minimum disclosure: intermediary behavior must not require copying
+recipient revocation metadata merely to relay ciphertext. The distinction does not create a second
+Device owner; protected origin mode reads the canonical lifecycle owner and opaque-forwarding mode
+does not manufacture one.
+
+This origin/forwarding distinction is execution-engine semantics only. It does not claim a completed
+remote Relay protocol, route discovery service, or production worker deployment; those remain
+separate explicit work.
+
 ## Attempt identity and duplicate safety
 
 No-route planning does not consume a Delivery attempt. Route planning receives the current caller-supplied resource snapshot and bounded routing hints on every processing iteration; Store-and-Forward never fabricates battery, power, or thermal state. Only after route planning succeeds does the scheduler create or resume a canonical `DeliveryAttempt`, move it through `Persisted -> Encrypted -> Queued -> RoutePlanned -> InFlight`, and invoke a provider.

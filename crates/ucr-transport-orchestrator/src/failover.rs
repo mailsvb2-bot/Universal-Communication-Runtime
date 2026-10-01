@@ -1,7 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ucr_core::{
-    CanonicalTransportError, PolicyDecision, TransportFailureDisposition, TransportHealth,
+    CanonicalTransportError, DeviceLifecycleStore, PolicyDecision, TransportFailureDisposition,
+    TransportHealth,
 };
 use ucr_model::{
     CommunicationIntent, TransportFailoverAttemptDecision, TransportFailoverAttemptOutcome,
@@ -11,7 +12,9 @@ use ucr_protocol::{
     DEFAULT_MAX_PAYLOAD_LEN, canonical_communication_intent, validate_transport_failover_policy,
 };
 
-use super::{TransportOrchestrator, TransportPlan, capability_is_usable};
+use super::{
+    TransportOrchestrator, TransportPlan, capability_is_usable, revalidate_protected_route,
+};
 
 pub trait TransportFailoverClock: core::fmt::Debug + Send + Sync {
     fn now_unix_ms(&self) -> i64;
@@ -69,7 +72,57 @@ impl TransportOrchestrator<'_> {
         failover_policy: TransportFailoverPolicy,
         clock: &dyn TransportFailoverClock,
     ) -> Result<TransportFailoverDecision, TransportFailoverExecutionError> {
-        let canonical = validate_execution(intent, plan, encrypted_envelope, failover_policy)?;
+        self.transmit_with_failover_inner(
+            intent,
+            plan,
+            encrypted_envelope,
+            failover_policy,
+            clock,
+            None,
+        )
+    }
+
+    /// Executes failover for a protected plan and revalidates canonical Device lifecycle before
+    /// every provider-bearing route attempt.
+    ///
+    /// # Errors
+    /// Fails closed if the plan is not protected, lifecycle state changed or cannot be read, or any
+    /// normal failover execution gate fails.
+    pub fn transmit_with_failover_protected(
+        &self,
+        intent: &CommunicationIntent,
+        plan: &TransportPlan<'_>,
+        encrypted_envelope: &[u8],
+        failover_policy: TransportFailoverPolicy,
+        clock: &dyn TransportFailoverClock,
+        devices: &dyn DeviceLifecycleStore,
+    ) -> Result<TransportFailoverDecision, TransportFailoverExecutionError> {
+        self.transmit_with_failover_inner(
+            intent,
+            plan,
+            encrypted_envelope,
+            failover_policy,
+            clock,
+            Some(devices),
+        )
+    }
+
+    fn transmit_with_failover_inner(
+        &self,
+        intent: &CommunicationIntent,
+        plan: &TransportPlan<'_>,
+        encrypted_envelope: &[u8],
+        failover_policy: TransportFailoverPolicy,
+        clock: &dyn TransportFailoverClock,
+        protected_devices: Option<&dyn DeviceLifecycleStore>,
+    ) -> Result<TransportFailoverDecision, TransportFailoverExecutionError> {
+        let canonical = validate_execution(
+            intent,
+            plan,
+            encrypted_envelope,
+            failover_policy,
+            protected_devices.is_some(),
+        )?;
         execute_ranked_routes(
             self,
             &canonical,
@@ -77,6 +130,7 @@ impl TransportOrchestrator<'_> {
             encrypted_envelope,
             failover_policy,
             clock,
+            protected_devices,
         )
     }
 }
@@ -86,6 +140,7 @@ fn validate_execution(
     plan: &TransportPlan<'_>,
     encrypted_envelope: &[u8],
     policy: TransportFailoverPolicy,
+    protected_execution: bool,
 ) -> Result<CommunicationIntent, TransportFailoverExecutionError> {
     if validate_transport_failover_policy(&policy).is_err() {
         return Err(error_without_attempts(
@@ -103,6 +158,7 @@ fn validate_execution(
         || plan.binding.scope != canonical.scope
         || plan.binding.target_identity_id != canonical.target_identity_id
         || plan.binding.constraints != canonical.constraints
+        || plan.binding.protected_device_gate != protected_execution
     {
         return Err(error_without_attempts(
             CanonicalTransportError::PolicyDenied,
@@ -126,6 +182,7 @@ fn execute_ranked_routes(
     encrypted_envelope: &[u8],
     policy: TransportFailoverPolicy,
     clock: &dyn TransportFailoverClock,
+    protected_devices: Option<&dyn DeviceLifecycleStore>,
 ) -> Result<TransportFailoverDecision, TransportFailoverExecutionError> {
     let mut attempts = Vec::new();
     let mut provider_attempts = 0_u16;
@@ -157,6 +214,15 @@ fn execute_ranked_routes(
                 attempts,
                 TransportFailoverStopReason::AttemptBudgetExhausted,
             ));
+        }
+        if let Some(devices) = protected_devices {
+            revalidate_protected_route(intent, planned, devices).map_err(|error| {
+                TransportFailoverExecutionError::new(
+                    error,
+                    attempts.clone(),
+                    TransportFailoverStopReason::PolicyChanged,
+                )
+            })?;
         }
         provider_attempts += 1;
         match planned.provider.transmit_classified(

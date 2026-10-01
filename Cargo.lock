@@ -4231,6 +4231,7 @@ dependencies = [
  "ucr-core",
  "ucr-model",
  "ucr-protocol",
+ "ucr-storage-memory",
 ]
 
 [[package]]

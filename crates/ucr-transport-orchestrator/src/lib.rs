@@ -9,21 +9,22 @@ use core::{cmp::Ordering, fmt};
 use std::collections::BTreeSet;
 
 use ucr_core::{
-    CanonicalTransportError, PolicyDecision, PolicyEvaluator, RouteCandidate, TransportHealth,
-    TransportProvider,
+    CanonicalTransportError, DeviceLifecycleStore, PolicyDecision, PolicyEvaluator, RouteCandidate,
+    TransportHealth, TransportProvider,
 };
 use ucr_model::{
-    CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, EndpointDescriptor,
-    IntentConstraints, MediaThermalState, TenantScope, TransportOrchestrationDecision,
-    TransportResourceSnapshot, TransportRouteDecision, TransportRouteTelemetry,
-    TransportRoutingHint,
+    CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, DeviceId, EndpointDescriptor,
+    EndpointKind, IntentConstraints, MediaThermalState, TenantScope,
+    TransportOrchestrationDecision, TransportResourceSnapshot, TransportRouteDecision,
+    TransportRouteTelemetry, TransportRoutingHint,
 };
 use ucr_protocol::{
     DEFAULT_MAX_PAYLOAD_LEN, IntentError, MAX_TRANSPORT_BANDWIDTH_BPS,
     TransportOrchestratorProtocolError, canonical_communication_intent,
-    canonical_transport_routing_hints, validate_endpoint_descriptor,
-    validate_transport_priority_class, validate_transport_resource_snapshot,
-    validate_transport_route_candidate_count, validate_transport_route_telemetry,
+    canonical_transport_routing_hints, device_allows_protected_access,
+    validate_endpoint_descriptor, validate_transport_priority_class,
+    validate_transport_resource_snapshot, validate_transport_route_candidate_count,
+    validate_transport_route_telemetry,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub enum TransportOrchestratorError {
     DuplicateRoute,
     PolicyDenied,
     PolicyPending,
+    DeviceLifecycleUnavailable,
     NoEligibleRoute,
 }
 
@@ -76,12 +78,14 @@ struct PlanBinding {
     scope: TenantScope,
     target_identity_id: ucr_model::IdentityId,
     constraints: IntentConstraints,
+    protected_device_gate: bool,
 }
 
 struct PlannedTransportRoute<'a> {
     provider: &'a dyn TransportProvider,
     route: RouteCandidate,
     decision: TransportRouteDecision,
+    protected_device_id: Option<DeviceId>,
 }
 
 impl fmt::Debug for PlannedTransportRoute<'_> {
@@ -141,6 +145,17 @@ impl<'a> TransportOrchestrator<'a> {
         hints: &[TransportRoutingHint],
         options: Vec<TransportRouteOption<'b>>,
     ) -> Result<TransportPlan<'b>, TransportOrchestratorError> {
+        self.plan_internal(intent, resources, hints, options, None)
+    }
+
+    fn plan_internal<'b>(
+        &self,
+        intent: &CommunicationIntent,
+        resources: TransportResourceSnapshot,
+        hints: &[TransportRoutingHint],
+        options: Vec<TransportRouteOption<'b>>,
+        protected_devices: Option<&dyn DeviceLifecycleStore>,
+    ) -> Result<TransportPlan<'b>, TransportOrchestratorError> {
         let intent = canonical_communication_intent(intent)?;
         validate_transport_resource_snapshot(&resources)?;
         validate_transport_priority_class(intent.constraints.priority_class)?;
@@ -161,6 +176,16 @@ impl<'a> TransportOrchestrator<'a> {
             validate_transport_route_telemetry(&option.telemetry)?;
             validate_endpoint_descriptor(&option.recipient_endpoint)
                 .map_err(|_| TransportOrchestratorError::InvalidEndpoint)?;
+            let protected_device_id = match protected_devices {
+                Some(devices) => {
+                    match protected_device_option_binding(&intent, &option, devices)? {
+                        ProtectedRouteBinding::NonDevice => None,
+                        ProtectedRouteBinding::Device(device_id) => Some(device_id),
+                        ProtectedRouteBinding::Ineligible => continue,
+                    }
+                }
+                None => None,
+            };
             let route_key = (
                 option.route.endpoint_id.as_opaque().as_str().to_owned(),
                 option.route.transport_capability.clone(),
@@ -172,19 +197,19 @@ impl<'a> TransportOrchestrator<'a> {
             }
             if option_is_eligible(&intent, &option) {
                 let score = RouteScore::new(&intent, resources, &hints, &option);
-                eligible.push((score, option));
+                eligible.push((score, option, protected_device_id));
             }
         }
         if eligible.is_empty() {
             return Err(TransportOrchestratorError::NoEligibleRoute);
         }
-        eligible.sort_by(|(left_score, left), (right_score, right)| {
+        eligible.sort_by(|(left_score, left, _), (right_score, right, _)| {
             compare_scores(left_score, right_score, &intent, &hints)
                 .then_with(|| stable_route_cmp(&left.route, &right.route))
         });
 
         let mut ranked_routes = Vec::with_capacity(eligible.len());
-        for (index, (_, option)) in eligible.into_iter().enumerate() {
+        for (index, (_, option, protected_device_id)) in eligible.into_iter().enumerate() {
             let rank =
                 u16::try_from(index + 1).map_err(|_| TransportOrchestratorError::TooManyRoutes)?;
             ranked_routes.push(PlannedTransportRoute {
@@ -195,6 +220,7 @@ impl<'a> TransportOrchestrator<'a> {
                     rank,
                 },
                 route: option.route,
+                protected_device_id,
             });
         }
 
@@ -204,11 +230,33 @@ impl<'a> TransportOrchestrator<'a> {
                 scope: intent.scope,
                 target_identity_id: intent.target_identity_id,
                 constraints: intent.constraints,
+                protected_device_gate: protected_devices.is_some(),
             },
             ranked_routes,
         })
     }
 
+    /// Produces a protected-content route plan that additionally gates Device endpoints through
+    /// the canonical durable Device lifecycle owner.
+    ///
+    /// Non-Device endpoints retain normal route eligibility. Device endpoints are eligible only
+    /// when the exact scoped Device exists, belongs to the target Identity, and is Active.
+    /// Missing, stale, re-verification-required, expired, or revoked Devices fail closed before
+    /// any provider invocation.
+    ///
+    /// # Errors
+    /// Returns the normal planning errors plus `DeviceLifecycleUnavailable` when the canonical
+    /// lifecycle owner cannot be read safely.
+    pub fn plan_protected<'b>(
+        &self,
+        intent: &CommunicationIntent,
+        resources: TransportResourceSnapshot,
+        hints: &[TransportRoutingHint],
+        options: Vec<TransportRouteOption<'b>>,
+        devices: &dyn DeviceLifecycleStore,
+    ) -> Result<TransportPlan<'b>, TransportOrchestratorError> {
+        self.plan_internal(intent, resources, hints, options, Some(devices))
+    }
     /// Transmits through the primary planned route exactly once at the orchestrator layer.
     /// Provider-internal bounded reconnect semantics remain provider-owned. A transport error is
     /// returned directly: Phase 24 does not try the next ranked route (Automatic Failover is Phase 25).
@@ -222,8 +270,37 @@ impl<'a> TransportOrchestrator<'a> {
         plan: &TransportPlan<'_>,
         encrypted_envelope: &[u8],
     ) -> Result<(), CanonicalTransportError> {
+        self.transmit_primary_inner(intent, plan, encrypted_envelope, None)
+    }
+
+    /// Transmits one protected plan while revalidating canonical Device lifecycle immediately before
+    /// provider invocation.
+    ///
+    /// # Errors
+    /// Fails closed if the plan was not created by `plan_protected`, Device lifecycle changed,
+    /// lifecycle state cannot be read, or any normal primary-transmit gate fails.
+    pub fn transmit_primary_protected(
+        &self,
+        intent: &CommunicationIntent,
+        plan: &TransportPlan<'_>,
+        encrypted_envelope: &[u8],
+        devices: &dyn DeviceLifecycleStore,
+    ) -> Result<(), CanonicalTransportError> {
+        self.transmit_primary_inner(intent, plan, encrypted_envelope, Some(devices))
+    }
+
+    fn transmit_primary_inner(
+        &self,
+        intent: &CommunicationIntent,
+        plan: &TransportPlan<'_>,
+        encrypted_envelope: &[u8],
+        protected_devices: Option<&dyn DeviceLifecycleStore>,
+    ) -> Result<(), CanonicalTransportError> {
         let canonical = canonical_communication_intent(intent)
             .map_err(|_| CanonicalTransportError::PolicyDenied)?;
+        if plan.binding.protected_device_gate != protected_devices.is_some() {
+            return Err(CanonicalTransportError::PolicyDenied);
+        }
         if plan.binding.intent_id != canonical.intent_id
             || plan.binding.scope != canonical.scope
             || plan.binding.target_identity_id != canonical.target_identity_id
@@ -252,12 +329,63 @@ impl<'a> TransportOrchestrator<'a> {
         ) {
             return Err(CanonicalTransportError::UnsupportedCapability);
         }
+        if let Some(devices) = protected_devices {
+            revalidate_protected_route(&canonical, primary, devices)?;
+        }
         primary
             .provider
             .transmit(&canonical.scope, &primary.route, encrypted_envelope)
     }
 }
 
+enum ProtectedRouteBinding {
+    NonDevice,
+    Device(DeviceId),
+    Ineligible,
+}
+
+fn protected_device_option_binding(
+    intent: &CommunicationIntent,
+    option: &TransportRouteOption<'_>,
+    devices: &dyn DeviceLifecycleStore,
+) -> Result<ProtectedRouteBinding, TransportOrchestratorError> {
+    if option.recipient_endpoint.kind != EndpointKind::Device {
+        return Ok(ProtectedRouteBinding::NonDevice);
+    }
+    let Some(device_id) = option.recipient_endpoint.device_id.as_ref() else {
+        return Ok(ProtectedRouteBinding::Ineligible);
+    };
+    let device = devices
+        .device(&intent.scope, device_id)
+        .map_err(|_| TransportOrchestratorError::DeviceLifecycleUnavailable)?;
+    if device.is_some_and(|device| {
+        device.identity_id == intent.target_identity_id && device_allows_protected_access(&device)
+    }) {
+        Ok(ProtectedRouteBinding::Device(device_id.clone()))
+    } else {
+        Ok(ProtectedRouteBinding::Ineligible)
+    }
+}
+
+pub(crate) fn revalidate_protected_route(
+    intent: &CommunicationIntent,
+    planned: &PlannedTransportRoute<'_>,
+    devices: &dyn DeviceLifecycleStore,
+) -> Result<(), CanonicalTransportError> {
+    let Some(device_id) = planned.protected_device_id.as_ref() else {
+        return Ok(());
+    };
+    let device = devices
+        .device(&intent.scope, device_id)
+        .map_err(|_| CanonicalTransportError::Internal)?;
+    if device.is_some_and(|device| {
+        device.identity_id == intent.target_identity_id && device_allows_protected_access(&device)
+    }) {
+        Ok(())
+    } else {
+        Err(CanonicalTransportError::PolicyDenied)
+    }
+}
 fn option_is_eligible(intent: &CommunicationIntent, option: &TransportRouteOption<'_>) -> bool {
     if option.provider.health() == TransportHealth::Unavailable
         || !option.telemetry.recipient_reachable
@@ -461,15 +589,18 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use ucr_core::{
-        CanonicalTransportError, PolicyDecision, PolicyEvaluator, RouteCandidate, TransportHealth,
-        TransportProvider,
+        CanonicalTransportError, DeviceLifecycleStore, PolicyDecision, PolicyEvaluator,
+        RouteCandidate, TransportHealth, TransportProvider,
     };
     use ucr_model::{
         CapabilityDescriptor, CapabilityMaturity, CommunicationIntent, CorrelationContext,
-        EndpointAddress, EndpointDescriptor, EndpointId, EndpointKind, IdentityId,
-        IntentConstraints, IntentId, MediaThermalState, OpaqueId, TenantId, TenantScope,
-        TransportResourceSnapshot, TransportRouteTelemetry, TransportRoutingHint,
+        DeviceDescriptor, DeviceLifecycleState, EndpointAddress, EndpointDescriptor, EndpointId,
+        EndpointKind, IdentityId, IntentConstraints, IntentId, MediaThermalState, OpaqueId,
+        TenantId, TenantScope, TransportResourceSnapshot, TransportRouteTelemetry,
+        TransportRoutingHint,
     };
+
+    use ucr_storage_memory::MemoryLocalStore;
 
     use super::{TransportOrchestrator, TransportOrchestratorError, TransportRouteOption};
 
@@ -644,6 +775,95 @@ mod tests {
         }
     }
 
+    #[test]
+    fn protected_plan_filters_revoked_device_before_transport() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let provider = MockProvider {
+            capability: "ucr.transport.test".into(),
+            health: TransportHealth::Healthy,
+            calls: Arc::clone(&calls),
+            result: Ok(()),
+        };
+        let store = MemoryLocalStore::default();
+        let device_id = ucr_model::DeviceId::from_opaque(oid("device-route"));
+        let descriptor = DeviceDescriptor {
+            device_id: device_id.clone(),
+            identity_id: identity(),
+            state: DeviceLifecycleState::Active,
+        };
+        store
+            .register_device(&scope(), &descriptor)
+            .expect("register device");
+        let orchestrator = TransportOrchestrator::new(&AllowPolicy);
+        let value = intent();
+
+        let active = orchestrator
+            .plan_protected(
+                &value,
+                resources(),
+                &[],
+                vec![option(
+                    &provider,
+                    "ucr.transport.test",
+                    "route",
+                    10,
+                    10,
+                    9999,
+                    1,
+                )],
+                &store,
+            )
+            .expect("active device route");
+        assert_eq!(
+            orchestrator.transmit_primary(&value, &active, b"encrypted-protected-content"),
+            Err(CanonicalTransportError::PolicyDenied),
+            "ordinary transmit must not bypass protected lifecycle revalidation"
+        );
+        assert_eq!(calls.lock().expect("calls").len(), 0);
+        orchestrator
+            .transmit_primary_protected(&value, &active, b"encrypted-protected-content", &store)
+            .expect("active device protected transport");
+        assert_eq!(calls.lock().expect("calls").len(), 1);
+
+        store
+            .revoke_device(&scope(), &device_id, &identity())
+            .expect("revoke device");
+        assert_eq!(
+            orchestrator.transmit_primary_protected(
+                &value,
+                &active,
+                b"new-protected-content-after-revoke",
+                &store,
+            ),
+            Err(CanonicalTransportError::PolicyDenied),
+            "revocation after planning must invalidate the stale protected plan"
+        );
+        assert_eq!(
+            orchestrator
+                .plan_protected(
+                    &value,
+                    resources(),
+                    &[],
+                    vec![option(
+                        &provider,
+                        "ucr.transport.test",
+                        "route",
+                        10,
+                        10,
+                        9999,
+                        1,
+                    )],
+                    &store,
+                )
+                .unwrap_err(),
+            TransportOrchestratorError::NoEligibleRoute
+        );
+        assert_eq!(
+            calls.lock().expect("calls").len(),
+            1,
+            "revoked device must be filtered before provider invocation"
+        );
+    }
     #[test]
     fn policy_and_hard_intent_constraints_filter_before_ranking() {
         let calls = Arc::new(Mutex::new(Vec::new()));

@@ -3,10 +3,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ucr_core::{
-    AuthorizationEvaluator, DeliveryStore, DurableRecordStatus, DurableStoreError,
-    IdGenerationError, PolicyEvaluator, ServiceAuditStore, ServiceCredentialSecret,
-    ServiceCredentialStore, ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore,
-    StoreForwardStore, generate_opaque_id,
+    AuthorizationEvaluator, DeliveryStore, DeviceLifecycleStore, DurableRecordStatus,
+    DurableStoreError, IdGenerationError, PolicyEvaluator, ServiceAuditStore,
+    ServiceCredentialSecret, ServiceCredentialStore, ServicePrincipalRequestGate,
+    ServiceQuotaClock, ServiceQuotaStore, StoreForwardStore, generate_opaque_id,
 };
 use ucr_model::{
     AuthorizationRequest, DeliveryAttempt, DeliveryEvidence, DeliveryEvidenceKind, DeliveryPolicy,
@@ -272,6 +272,7 @@ pub struct StoreForwardRuntime<'a, S> {
     store: &'a S,
     orchestrator: TransportOrchestrator<'a>,
     clock: &'a dyn StoreForwardClock,
+    protected_devices: Option<&'a dyn DeviceLifecycleStore>,
 }
 
 impl<'a, S> StoreForwardRuntime<'a, S> {
@@ -285,6 +286,31 @@ impl<'a, S> StoreForwardRuntime<'a, S> {
             store,
             orchestrator: TransportOrchestrator::new(policy),
             clock,
+            protected_devices: None,
+        }
+    }
+}
+
+impl<'a, S> StoreForwardRuntime<'a, S>
+where
+    S: DeviceLifecycleStore,
+{
+    /// Creates an origin-side Store-and-Forward runtime for newly protected Device content.
+    ///
+    /// This mode consults the canonical durable Device lifecycle before any Device endpoint may
+    /// receive a newly created encrypted envelope. Relays forwarding an already-created opaque
+    /// envelope should use `new` and therefore do not require recipient Device lifecycle state.
+    #[must_use]
+    pub fn new_protected_origin(
+        store: &'a S,
+        policy: &'a dyn PolicyEvaluator,
+        clock: &'a dyn StoreForwardClock,
+    ) -> Self {
+        Self {
+            store,
+            orchestrator: TransportOrchestrator::new(policy),
+            clock,
+            protected_devices: Some(store),
         }
     }
 }
@@ -427,7 +453,12 @@ where
         hints: &[TransportRoutingHint],
         options: Vec<TransportRouteOption<'route>>,
     ) -> Result<ucr_transport_orchestrator::TransportPlan<'route>, TransportOrchestratorError> {
-        self.orchestrator.plan(intent, resources, hints, options)
+        match self.protected_devices {
+            Some(devices) => self
+                .orchestrator
+                .plan_protected(intent, resources, hints, options, devices),
+            None => self.orchestrator.plan(intent, resources, hints, options),
+        }
     }
 
     fn prepare_attempt(
@@ -482,13 +513,24 @@ where
             expires_at_unix_ms: job.policy.expires_at_unix_ms,
         };
         let clock = StoreForwardFailoverClock(self.clock);
-        match self.orchestrator.transmit_with_failover(
-            intent,
-            plan,
-            &job.encrypted_envelope,
-            failover,
-            &clock,
-        ) {
+        let result = match self.protected_devices {
+            Some(devices) => self.orchestrator.transmit_with_failover_protected(
+                intent,
+                plan,
+                &job.encrypted_envelope,
+                failover,
+                &clock,
+                devices,
+            ),
+            None => self.orchestrator.transmit_with_failover(
+                intent,
+                plan,
+                &job.encrypted_envelope,
+                failover,
+                &clock,
+            ),
+        };
+        match result {
             Ok(_) => self.accept_attempt(lease, &prepared.attempt, now),
             Err(error)
                 if error.decision.stop_reason

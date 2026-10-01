@@ -669,6 +669,18 @@ fn phase_failover_lan_and_file(s: &Scenario, sender: &SqliteLocalStore) {
     assert_eq!(local.captured(), vec![b"encrypted-file-envelope".to_vec()]);
 }
 
+fn register_bob_device(store: &SqliteLocalStore, s: &Scenario) {
+    store
+        .register_device(
+            &s.scope,
+            &DeviceDescriptor {
+                device_id: DeviceId::from_opaque(oid("e2e-bob-device")),
+                identity_id: IdentityId::from_opaque(oid("e2e-bob-identity")),
+                state: DeviceLifecycleState::Active,
+            },
+        )
+        .expect("register Bob device");
+}
 fn phase_offline_store_forward(
     s: &Scenario,
     sender: &SqliteLocalStore,
@@ -676,6 +688,12 @@ fn phase_offline_store_forward(
     recipient: &SqliteLocalStore,
 ) -> MessageEnvelope {
     let offline = message(s, "e2e-offline-message", 3, b"queued while offline");
+    register_bob_device(sender, s);
+    assert_eq!(
+        intermediary.device(&s.scope, &DeviceId::from_opaque(oid("e2e-bob-device"))),
+        Ok(None),
+        "intermediary must not require recipient Device lifecycle metadata"
+    );
     sender
         .persist_message(&offline)
         .expect("step 10/11: durable message");
@@ -684,7 +702,7 @@ fn phase_offline_store_forward(
         .persist_communication_intent(&sf_intent)
         .expect("persist sender intent");
     let job = store_forward_job(s, &offline, &sf_intent, "e2e-sender-sf");
-    let runtime = StoreForwardRuntime::new(sender, &AllowAll, &FixedClock(4_000));
+    let runtime = StoreForwardRuntime::new_protected_origin(sender, &AllowAll, &FixedClock(4_000));
     runtime.enqueue(&job).expect("enqueue offline job");
     assert_eq!(
         runtime.process_one(
@@ -715,7 +733,7 @@ fn phase_offline_store_forward(
     let intermediary_provider =
         CapturingProvider::new(STORE_FORWARD_INTERNET_CAPABILITY, ProviderOutcome::Accepted);
     let clock = FixedClock(4_100);
-    let sender_runtime = StoreForwardRuntime::new(sender, &AllowAll, &clock);
+    let sender_runtime = StoreForwardRuntime::new_protected_origin(sender, &AllowAll, &clock);
     let pending = sender
         .store_forward_job(&s.scope, &job.store_forward_id)
         .expect("load pending")
@@ -1040,6 +1058,15 @@ fn phase_restart_old_client_and_revocation(s: &Scenario, sent: &[MessageEnvelope
             .revoke_device(&s.scope, &device.device_id, &device.identity_id)
             .expect("revoke device");
     }
+    assert_revoked_device_security_persists(s, &device, &key);
+    assert_revoked_origin_blocks_new_protected_store_forward(s);
+}
+
+fn assert_revoked_device_security_persists(
+    s: &Scenario,
+    device: &DeviceDescriptor,
+    key: &PublicKeyDescriptor,
+) {
     let restarted = SqliteLocalStore::open(s.recipient_db.path()).expect("restart after revoke");
     let revoked = restarted
         .device(&s.scope, &device.device_id)
@@ -1055,6 +1082,66 @@ fn phase_restart_old_client_and_revocation(s: &Scenario, sent: &[MessageEnvelope
             &key.key_id,
         ),
         Err(TrustedKeyResolutionError::NotTrusted)
+    );
+}
+
+fn assert_revoked_origin_blocks_new_protected_store_forward(s: &Scenario) {
+    let sender = SqliteLocalStore::open(s.sender_db.path()).expect("restart sender for revoke");
+    let device_id = DeviceId::from_opaque(oid("e2e-bob-device"));
+    let identity_id = IdentityId::from_opaque(oid("e2e-bob-identity"));
+    assert_eq!(
+        sender
+            .device(&s.scope, &device_id)
+            .expect("read sender recipient device")
+            .expect("recipient device exists")
+            .state,
+        DeviceLifecycleState::Active
+    );
+    sender
+        .revoke_device(&s.scope, &device_id, &identity_id)
+        .expect("revoke origin recipient device");
+
+    let protected_message = message(s, "e2e-post-revoke-message", 4, b"new protected content");
+    sender
+        .persist_message(&protected_message)
+        .expect("persist post-revoke message");
+    let protected_intent = intent(
+        s,
+        "e2e-post-revoke-protected-intent",
+        &protected_message.content,
+    );
+    sender
+        .persist_communication_intent(&protected_intent)
+        .expect("persist post-revoke intent");
+    let job = store_forward_job(
+        s,
+        &protected_message,
+        &protected_intent,
+        "e2e-post-revoke-store-forward",
+    );
+    let runtime = StoreForwardRuntime::new_protected_origin(&sender, &AllowAll, &FixedClock(6_000));
+    runtime.enqueue(&job).expect("enqueue post-revoke job");
+    let provider =
+        CapturingProvider::new(STORE_FORWARD_INTERNET_CAPABILITY, ProviderOutcome::Accepted);
+
+    assert_eq!(
+        runtime.process_one(
+            &s.scope,
+            &job.store_forward_id,
+            resources(),
+            &[],
+            vec![route_option(
+                &provider,
+                STORE_FORWARD_INTERNET_CAPABILITY,
+                "revoked-device-route",
+                5,
+            )],
+        ),
+        Ok(StoreForwardOutcome::RescheduledNoRoute)
+    );
+    assert!(
+        provider.captured().is_empty(),
+        "step 22: revoked device must not receive new protected content"
     );
 }
 

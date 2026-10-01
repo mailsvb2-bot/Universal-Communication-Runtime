@@ -5,18 +5,18 @@ use std::sync::{
 
 use ucr_core::{
     CanonicalTransportError, ClassifiedTransportFailure, CommunicationIntentStore,
-    ConversationStore, DeliveryStore, MessageStore, PolicyDecision, PolicyEvaluator,
-    RouteCandidate, StoreForwardStore, TransportFailureDisposition, TransportHealth,
-    TransportProvider,
+    ConversationStore, DeliveryStore, DeviceLifecycleStore, MessageStore, PolicyDecision,
+    PolicyEvaluator, RouteCandidate, StoreForwardStore, TransportFailureDisposition,
+    TransportHealth, TransportProvider,
 };
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CapabilityDescriptor, CapabilityMaturity, CommunicationIntent,
     ConversationKind, ConversationRecord, ConversationRef, CorrelationContext, DeliveryPolicy,
-    DeliveryState, DeviceId, DeviceRef, EndpointAddress, EndpointDescriptor, EndpointId,
-    EndpointKind, IdentityId, IntentConstraints, IntentId, MediaThermalState, MessageEnvelope,
-    MessageId, OpaqueId, OriginRef, PrincipalId, StoreForwardId, StoreForwardJob,
-    StoreForwardOutcome, StoreForwardPolicy, TenantId, TenantScope, TransportResourceSnapshot,
-    TransportRouteTelemetry,
+    DeliveryState, DeviceDescriptor, DeviceId, DeviceLifecycleState, DeviceRef, EndpointAddress,
+    EndpointDescriptor, EndpointId, EndpointKind, IdentityId, IntentConstraints, IntentId,
+    MediaThermalState, MessageEnvelope, MessageId, OpaqueId, OriginRef, PrincipalId,
+    StoreForwardId, StoreForwardJob, StoreForwardOutcome, StoreForwardPolicy, TenantId,
+    TenantScope, TransportResourceSnapshot, TransportRouteTelemetry,
 };
 use ucr_storage_memory::MemoryLocalStore;
 use ucr_store_forward::{
@@ -241,7 +241,7 @@ fn job() -> StoreForwardJob {
     }
 }
 
-fn seed(store: &MemoryLocalStore) {
+fn seed_content(store: &MemoryLocalStore) {
     store
         .persist_conversation(&conversation())
         .expect("conversation");
@@ -249,6 +249,20 @@ fn seed(store: &MemoryLocalStore) {
     store
         .persist_communication_intent(&intent())
         .expect("intent");
+}
+
+fn seed(store: &MemoryLocalStore) {
+    seed_content(store);
+    store
+        .register_device(
+            &scope(),
+            &DeviceDescriptor {
+                device_id: DeviceId::from_opaque(oid("sf-recipient-device")),
+                identity_id: target_identity(),
+                state: DeviceLifecycleState::Active,
+            },
+        )
+        .expect("recipient device");
 }
 
 fn option<'a>(provider: &'a dyn TransportProvider, endpoint: &str) -> TransportRouteOption<'a> {
@@ -293,7 +307,7 @@ fn no_route_reschedules_without_consuming_delivery_attempt() {
     seed(&store);
     let clock = MutableClock::new(1_000);
     let policy = AllowPolicy;
-    let runtime = StoreForwardRuntime::new(&store, &policy, &clock);
+    let runtime = StoreForwardRuntime::new_protected_origin(&store, &policy, &clock);
     let initial = job();
     runtime.enqueue(&initial).expect("enqueue");
 
@@ -322,7 +336,7 @@ fn proven_failure_gets_new_delivery_id_and_later_success_tombstones_job() {
     seed(&store);
     let clock = MutableClock::new(1_000);
     let policy = AllowPolicy;
-    let runtime = StoreForwardRuntime::new(&store, &policy, &clock);
+    let runtime = StoreForwardRuntime::new_protected_origin(&store, &policy, &clock);
     let initial = job();
     runtime.enqueue(&initial).expect("enqueue");
     let failing = MockProvider::new(ProviderOutcome::NotAccepted);
@@ -382,12 +396,73 @@ fn proven_failure_gets_new_delivery_id_and_later_success_tombstones_job() {
 }
 
 #[test]
+fn opaque_relay_does_not_require_recipient_device_lifecycle() {
+    let store = MemoryLocalStore::default();
+    seed_content(&store);
+    assert_eq!(
+        store.device(&scope(), &DeviceId::from_opaque(oid("sf-recipient-device"))),
+        Ok(None)
+    );
+    let clock = MutableClock::new(1_000);
+    let policy = AllowPolicy;
+    let runtime = StoreForwardRuntime::new(&store, &policy, &clock);
+    let initial = job();
+    runtime.enqueue(&initial).expect("enqueue opaque relay job");
+    let provider = MockProvider::new(ProviderOutcome::Accepted);
+
+    assert_eq!(
+        runtime.process_one(
+            &scope(),
+            &initial.store_forward_id,
+            resources(),
+            &[],
+            vec![option(&provider, "sf-relay-endpoint")],
+        ),
+        Ok(StoreForwardOutcome::AcceptedByTransport)
+    );
+    assert_eq!(provider.calls(), 1);
+}
+#[test]
+fn revoked_device_never_receives_new_protected_envelope() {
+    let store = MemoryLocalStore::default();
+    seed(&store);
+    let clock = MutableClock::new(1_000);
+    let policy = AllowPolicy;
+    let runtime = StoreForwardRuntime::new_protected_origin(&store, &policy, &clock);
+    let initial = job();
+    runtime.enqueue(&initial).expect("enqueue");
+    store
+        .revoke_device(
+            &scope(),
+            &DeviceId::from_opaque(oid("sf-recipient-device")),
+            &target_identity(),
+        )
+        .expect("revoke recipient device");
+    let provider = MockProvider::new(ProviderOutcome::Accepted);
+
+    assert_eq!(
+        runtime.process_one(
+            &scope(),
+            &initial.store_forward_id,
+            resources(),
+            &[],
+            vec![option(&provider, "sf-revoked-endpoint")],
+        ),
+        Ok(StoreForwardOutcome::RescheduledNoRoute)
+    );
+    assert_eq!(
+        provider.calls(),
+        0,
+        "revoked device must be filtered before provider invocation"
+    );
+}
+#[test]
 fn ambiguous_acceptance_blocks_automatic_replay_even_after_lease_expiry() {
     let store = MemoryLocalStore::default();
     seed(&store);
     let clock = MutableClock::new(1_000);
     let policy = AllowPolicy;
-    let runtime = StoreForwardRuntime::new(&store, &policy, &clock);
+    let runtime = StoreForwardRuntime::new_protected_origin(&store, &policy, &clock);
     let initial = job();
     runtime.enqueue(&initial).expect("enqueue");
     let provider = MockProvider::new(ProviderOutcome::AcceptanceUnknown);
