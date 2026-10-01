@@ -361,14 +361,17 @@ where
                     if redeemed != claims {
                         return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
                     }
-                    let outcome = self
-                        .registry
-                        .join(claims.clone(), now)
-                        .map_err(map_registry_error)?;
-                    if let Err(error) = self.ensure_sfu_call_placement(&claims).await {
-                        let _ = self.rollback_realtime_join(&claims, now).await;
-                        return Err(error);
-                    }
+                    self.ensure_sfu_call_placement(&claims).await?;
+                    let outcome = match self.registry.join(claims.clone(), now) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            let error = map_registry_error(error);
+                            let _ = self
+                                .release_sfu_call_placement_if_inactive(&claims, now)
+                                .await;
+                            return Err(error);
+                        }
+                    };
                     if let Err(error) = self.append_attendance(&outcome.transition) {
                         let _ = self.rollback_realtime_join(&claims, now).await;
                         return Err(error);
