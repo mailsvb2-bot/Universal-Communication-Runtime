@@ -112,7 +112,8 @@ grant participant membership or media permission. The receiver revalidates canon
 Device, capability and media permissions before its local sink can accept the encrypted envelope.
 Endpoint E2EE remains unchanged. See ADR-0113.
 
-The outbound mTLS node client foundation is now concrete as well. It accepts only a
+The receiving network boundary is now concrete, and the outbound mTLS node client foundation is
+now concrete as well. It accepts only a
 `SfuValidatedForwardBatch`, resolves its client certificate/private key through the shared
 `SecretProvider`, trusts only explicitly configured server CA material, supports bounded
 current/previous credential overlap, and waits for an exact monotonic receipt for every submitted
