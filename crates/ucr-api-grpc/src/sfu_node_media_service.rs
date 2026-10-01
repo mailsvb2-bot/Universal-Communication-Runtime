@@ -92,119 +92,127 @@ where
     ) -> Result<Response<Self::ForwardEncryptedStream>, Status> {
         require_mtls_peer(&request)?;
 
-        let mut inbound = request.into_inner();
+        let inbound = request.into_inner();
         let authorization = Arc::clone(&self.authorization);
         let store = Arc::clone(&self.store);
         let sink = Arc::clone(&self.sink);
         let (sender, receiver) = tokio::sync::mpsc::channel(SFU_NODE_RECEIPT_CHANNEL_CAPACITY);
 
         tokio::spawn(async move {
-            let mut expected_sequence = 1_u64;
-            while let Some(item) = inbound.next().await {
-                let body = match item {
-                    Ok(body) => body,
-                    Err(_) => {
-                        let _ = sender
-                            .send(Err(Status::invalid_argument(
-                                "invalid SFU node media stream item",
-                            )))
-                            .await;
-                        return;
-                    }
-                };
-                if body.stream_sequence != expected_sequence {
-                    let _ = sender
-                        .send(Err(Status::invalid_argument(
-                            "invalid SFU node media stream sequence",
-                        )))
-                        .await;
-                    return;
-                }
-                let Some(next_sequence) = expected_sequence.checked_add(1) else {
-                    let _ = sender
-                        .send(Err(Status::resource_exhausted(
-                            "SFU node media stream sequence exhausted",
-                        )))
-                        .await;
-                    return;
-                };
-
-                let target = match decode_target(body.target) {
-                    Ok(target) => target,
-                    Err(status) => {
-                        let _ = sender.send(Err(status)).await;
-                        return;
-                    }
-                };
-                let envelope = match body
-                    .envelope
-                    .ok_or_else(|| Status::invalid_argument("missing SFU node media envelope"))
-                    .and_then(|value| {
-                        decode_sfu_forward_envelope(value).map_err(|_| {
-                            Status::invalid_argument("invalid SFU node media envelope")
-                        })
-                    }) {
-                    Ok(envelope) => envelope,
-                    Err(status) => {
-                        let _ = sender.send(Err(status)).await;
-                        return;
-                    }
-                };
-
-                let authenticated_source = ScopedPrincipal {
-                    scope: envelope.frame.header.scope.clone(),
-                    principal: envelope.frame.header.source.clone(),
-                };
-                let authenticated_source_device = envelope.frame.header.source_device_id.clone();
-                let group_media = PreparedGroupMediaE2eeCapabilities;
-                let sfu_capabilities = PreparedSfuCapabilities;
-                let runtime = SfuRuntime::new(
-                    authorization.as_ref(),
-                    store.as_ref(),
-                    &group_media,
-                    &sfu_capabilities,
-                );
-                let status = match runtime.forward_selected(
-                    &authenticated_source,
-                    &authenticated_source_device,
-                    &envelope,
-                    std::slice::from_ref(&target.recipient),
-                    sink.as_ref(),
-                ) {
-                    Ok(_) => pb::SfuNodeForwardStatus::Accepted,
-                    Err(SfuError::Sink {
-                        error: SfuForwardSinkError::Backpressure,
-                        ..
-                    }) => pb::SfuNodeForwardStatus::Backpressure,
-                    Err(SfuError::Sink {
-                        error: SfuForwardSinkError::Unavailable | SfuForwardSinkError::Rejected,
-                        ..
-                    }) => pb::SfuNodeForwardStatus::Rejected,
-                    Err(_) => {
-                        let _ = sender
-                            .send(Err(Status::permission_denied(
-                                "SFU node media authorization rejected",
-                            )))
-                            .await;
-                        return;
-                    }
-                };
-                if sender
-                    .send(Ok(pb::SfuNodeForwardReceipt {
-                        stream_sequence: body.stream_sequence,
-                        status: status as i32,
-                    }))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                expected_sequence = next_sequence;
+            if let Err(status) =
+                forward_node_media_stream(inbound, &sender, authorization, store, sink).await
+            {
+                let _ = sender.send(Err(status)).await;
             }
         });
 
         Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
     }
+}
+
+async fn forward_node_media_stream<A, S>(
+    mut inbound: tonic::Streaming<pb::SfuNodeEncryptedMedia>,
+    sender: &tokio::sync::mpsc::Sender<Result<pb::SfuNodeForwardReceipt, Status>>,
+    authorization: Arc<A>,
+    store: Arc<S>,
+    sink: Arc<dyn SfuForwardSink>,
+) -> Result<(), Status>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore
+        + GroupStore
+        + DeviceLifecycleStore
+        + PrincipalIdentityBindingStore
+        + TrustedSigningKeyResolver,
+{
+    let mut expected_sequence = 1_u64;
+    while let Some(item) = inbound.next().await {
+        let body = item
+            .map_err(|_| Status::invalid_argument("invalid SFU node media stream item"))?;
+        let (receipt, next_sequence) = process_node_media_item(
+            authorization.as_ref(),
+            store.as_ref(),
+            sink.as_ref(),
+            body,
+            expected_sequence,
+        )?;
+        if sender.send(Ok(receipt)).await.is_err() {
+            return Ok(());
+        }
+        expected_sequence = next_sequence;
+    }
+    Ok(())
+}
+
+fn process_node_media_item<A, S>(
+    authorization: &A,
+    store: &S,
+    sink: &dyn SfuForwardSink,
+    body: pb::SfuNodeEncryptedMedia,
+    expected_sequence: u64,
+) -> Result<(pb::SfuNodeForwardReceipt, u64), Status>
+where
+    A: AuthorizationEvaluator,
+    S: CallStore
+        + GroupStore
+        + DeviceLifecycleStore
+        + PrincipalIdentityBindingStore
+        + TrustedSigningKeyResolver,
+{
+    if body.stream_sequence != expected_sequence {
+        return Err(Status::invalid_argument(
+            "invalid SFU node media stream sequence",
+        ));
+    }
+    let next_sequence = expected_sequence
+        .checked_add(1)
+        .ok_or_else(|| Status::resource_exhausted("SFU node media stream sequence exhausted"))?;
+    let target = decode_target(body.target)?;
+    let envelope = body
+        .envelope
+        .ok_or_else(|| Status::invalid_argument("missing SFU node media envelope"))
+        .and_then(|value| {
+            decode_sfu_forward_envelope(value)
+                .map_err(|_| Status::invalid_argument("invalid SFU node media envelope"))
+        })?;
+
+    let authenticated_source = ScopedPrincipal {
+        scope: envelope.frame.header.scope.clone(),
+        principal: envelope.frame.header.source.clone(),
+    };
+    let authenticated_source_device = envelope.frame.header.source_device_id.clone();
+    let group_media = PreparedGroupMediaE2eeCapabilities;
+    let sfu_capabilities = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(authorization, store, &group_media, &sfu_capabilities);
+    let status = match runtime.forward_selected(
+        &authenticated_source,
+        &authenticated_source_device,
+        &envelope,
+        std::slice::from_ref(&target.recipient),
+        sink,
+    ) {
+        Ok(_) => pb::SfuNodeForwardStatus::Accepted,
+        Err(SfuError::Sink {
+            error: SfuForwardSinkError::Backpressure,
+            ..
+        }) => pb::SfuNodeForwardStatus::Backpressure,
+        Err(SfuError::Sink {
+            error: SfuForwardSinkError::Unavailable | SfuForwardSinkError::Rejected,
+            ..
+        }) => pb::SfuNodeForwardStatus::Rejected,
+        Err(_) => {
+            return Err(Status::permission_denied(
+                "SFU node media authorization rejected",
+            ));
+        }
+    };
+    Ok((
+        pb::SfuNodeForwardReceipt {
+            stream_sequence: body.stream_sequence,
+            status: status as i32,
+        },
+        next_sequence,
+    ))
 }
 
 fn require_mtls_peer<T>(request: &Request<T>) -> Result<(), Status> {
