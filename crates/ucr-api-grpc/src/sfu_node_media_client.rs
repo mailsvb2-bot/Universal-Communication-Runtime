@@ -1,6 +1,5 @@
 use std::{fmt, net::SocketAddr, sync::Arc};
 
-use tokio_stream::StreamExt;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use ucr_secrets::{MAX_SECRET_BYTES, SecretHandle, SecretProvider, SecretPurpose};
 use ucr_sfu::{SfuForwardOutcome, SfuValidatedForwardBatch};
@@ -447,7 +446,7 @@ mod tests {
                 server_private_key.as_bytes(),
             ))
             .client_ca_root(Certificate::from_pem(trusted_ca.certificate.pem()));
-        let server = Server::builder().tls_config(tls).expect("server TLS");
+        let mut server = Server::builder().tls_config(tls).expect("server TLS");
         let server_task = tokio::spawn(async move {
             server
                 .add_service(
