@@ -12,9 +12,12 @@ use ucr_protocol::{CanonicalError, CanonicalErrorCode};
 use ucr_runtime::{
     DEFAULT_OPERATOR_BIND, DEFAULT_RECORDING_RETENTION_POLL_INTERVAL, DEFAULT_RUNTIME_BIND,
     DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MachineAuthRuntimeConfig, MachineBearerRuntimeConfig,
-    ProductionRuntime, RealtimeRuntimeConfig,
+    ProductionRuntime, RealtimeRuntimeConfig, SfuNodeMediaRuntimeConfig,
 };
-use ucr_secrets::{ReloadingFileSecretProvider, SecretHandle, SecretProvider, SecretPurpose};
+use ucr_secrets::{
+    MAX_SECRET_BYTES, ReloadingFileSecretProvider, ReloadingFileTlsSecretProvider, SecretHandle,
+    SecretProvider, SecretPurpose,
+};
 use zeroize::Zeroizing;
 
 #[tokio::main]
@@ -457,6 +460,87 @@ fn read_machine_token_signing_key(path: &str) -> Result<[u8; 32], String> {
     decode_key_hex_named(encoded, "machine token signing key file")
 }
 
+fn sfu_node_media_config_from_env() -> Result<Option<SfuNodeMediaRuntimeConfig>, String> {
+    let dependent_variables = [
+        "UCR_SFU_NODE_CERT_FILE",
+        "UCR_SFU_NODE_KEY_FILE",
+        "UCR_SFU_NODE_CLIENT_CA_FILE",
+        "UCR_SFU_NODE_PREVIOUS_CERT_FILE",
+        "UCR_SFU_NODE_PREVIOUS_KEY_FILE",
+        "UCR_SFU_NODE_PREVIOUS_CLIENT_CA_FILE",
+    ];
+    let Some(bind) = std::env::var("UCR_SFU_NODE_BIND").ok() else {
+        if dependent_variables
+            .iter()
+            .any(|variable| std::env::var(variable).is_ok())
+        {
+            return Err(
+                "UCR_SFU_NODE_BIND is required when SFU node TLS configuration is present"
+                    .to_owned(),
+            );
+        }
+        return Ok(None);
+    };
+
+    let bind = bind
+        .parse::<SocketAddr>()
+        .map_err(|error| format!("invalid UCR_SFU_NODE_BIND address: {error}"))?;
+    let certificate_path = std::env::var("UCR_SFU_NODE_CERT_FILE")
+        .map_err(|_| "UCR_SFU_NODE_CERT_FILE is required with UCR_SFU_NODE_BIND".to_owned())?;
+    let private_key_path = std::env::var("UCR_SFU_NODE_KEY_FILE")
+        .map_err(|_| "UCR_SFU_NODE_KEY_FILE is required with UCR_SFU_NODE_BIND".to_owned())?;
+    let client_ca_path = std::env::var("UCR_SFU_NODE_CLIENT_CA_FILE")
+        .map_err(|_| "UCR_SFU_NODE_CLIENT_CA_FILE is required with UCR_SFU_NODE_BIND".to_owned())?;
+    let previous_certificate_path = std::env::var("UCR_SFU_NODE_PREVIOUS_CERT_FILE").ok();
+    let previous_private_key_path = std::env::var("UCR_SFU_NODE_PREVIOUS_KEY_FILE").ok();
+    let previous_client_ca_path = std::env::var("UCR_SFU_NODE_PREVIOUS_CLIENT_CA_FILE").ok();
+    let certificate_secret_id = std::env::var("UCR_SFU_NODE_CERT_SECRET_ID")
+        .unwrap_or_else(|_| "sfu-node-certificate".to_owned());
+    let private_key_secret_id = std::env::var("UCR_SFU_NODE_KEY_SECRET_ID")
+        .unwrap_or_else(|_| "sfu-node-private-key".to_owned());
+
+    let provider = Arc::new(ReloadingFileTlsSecretProvider::new(
+        certificate_path,
+        private_key_path,
+        previous_certificate_path,
+        previous_private_key_path,
+        &certificate_secret_id,
+        &private_key_secret_id,
+    )?);
+    let certificate_handle = provider.certificate_handle();
+    let private_key_handle = provider.private_key_handle();
+    let client_ca_pem = read_sfu_node_ca_file(&client_ca_path)?;
+    let previous_client_ca_pem = previous_client_ca_path
+        .as_deref()
+        .map(read_sfu_node_ca_file)
+        .transpose()?;
+    let provider: Arc<dyn SecretProvider> = provider;
+    SfuNodeMediaRuntimeConfig::new(
+        bind,
+        provider,
+        certificate_handle,
+        private_key_handle,
+        client_ca_pem,
+        previous_client_ca_pem,
+    )
+    .map(Some)
+}
+
+fn read_sfu_node_ca_file(path: &str) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect SFU node client CA file: {error}"))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_SECRET_BYTES as u64
+    {
+        return Err(
+            "SFU node client CA must be a non-empty bounded regular non-symlink file".to_owned(),
+        );
+    }
+    fs::read(path).map_err(|error| format!("read SFU node client CA file: {error}"))
+}
+
 async fn serve_realtime_command(
     database: &PathBuf,
     bind: &str,
@@ -529,6 +613,9 @@ async fn serve_realtime_command(
     config = config.with_browser_realtime_gateway(
         bool_env("UCR_BROWSER_REALTIME_GATEWAY_ENABLED")?.unwrap_or(false),
     );
+    if let Some(sfu_node_media) = sfu_node_media_config_from_env()? {
+        config = config.with_sfu_node_media(sfu_node_media);
+    }
     let runtime = Arc::new(ProductionRuntime::open_existing(database)?);
     match machine_bearer_config_from_env()? {
         Some(machine_bearer) => {

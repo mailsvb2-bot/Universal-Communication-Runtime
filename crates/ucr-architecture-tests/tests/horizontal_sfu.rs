@@ -49,6 +49,7 @@ fn horizontal_sfu_operator_control_wires_heartbeat_list_and_drain_without_public
     let api = read("crates/ucr-api-grpc/src/operator_runtime_service.rs");
     let runtime = read("crates/ucr-runtime/src/lib.rs");
     let spec = read("spec/sfu.md");
+    let spec_words = spec.split_whitespace().collect::<Vec<_>>().join(" ");
 
     for rpc in ["HeartbeatSfuNode", "DrainSfuNode", "ListSfuNodes"] {
         assert!(operator.contains(rpc), "missing operator SFU RPC {rpc}");
@@ -65,7 +66,8 @@ fn horizontal_sfu_operator_control_wires_heartbeat_list_and_drain_without_public
     assert!(runtime.contains("mark_draining"));
     assert!(spec.contains("Workers must re-register after process restart"));
     assert!(spec.contains("`ResolveNode` separately resolves"));
-    assert!(spec.contains("concrete inter-node encrypted-media transport"));
+    assert!(spec_words.contains("receiving network boundary is now concrete"));
+    assert!(spec_words.contains("outbound node client tied to `SfuPlacementService.ResolveNode`"));
 }
 
 #[test]
@@ -93,7 +95,8 @@ fn horizontal_sfu_node_media_contract_is_private_ciphertext_only_and_non_authori
     assert!(sfu_proto.contains("SfuForwardTarget target = 2"));
     assert!(sfu_proto.contains("SfuForwardEnvelope envelope = 3"));
     assert!(sfu_proto.contains("SFU_NODE_FORWARD_STATUS_BACKPRESSURE"));
-    assert!(spec_words.contains("mutually authenticated infrastructure node transport"));
+    assert!(spec_words.contains("private mTLS node listener for this exact service"));
+    assert!(spec_words.contains("explicitly configured client CA roots"));
     assert!(spec.contains("not canonical Delivery"));
     assert!(adr.contains("Status: Accepted"));
     assert!(adr.contains("not UCR"));
@@ -166,4 +169,28 @@ fn horizontal_sfu_async_handoff_separates_validation_from_transport_acceptance()
     assert!(spec.contains("canonical Conference subscription selection"));
     assert!(spec.contains("local queue admission"));
     assert!(spec.contains("remote `Accepted`"));
+}
+
+#[test]
+fn horizontal_sfu_node_media_listener_is_private_mtls_and_not_a_public_capability_claim() {
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let runtime_main = read("crates/ucr-runtime/src/main.rs");
+    let manifest = read("crates/ucr-runtime/Cargo.toml");
+    let spec = read("spec/sfu.md");
+
+    assert!(manifest.contains("\"tls-ring\""));
+    assert!(runtime.contains("pub struct SfuNodeMediaRuntimeConfig"));
+    assert!(runtime.contains("validate_private_sfu_node_bind"));
+    assert!(runtime.contains("ServerTlsConfig::new()"));
+    assert!(runtime.contains(".client_ca_root("));
+    assert!(runtime.contains("sfu_node_media_service_server(service)"));
+    assert!(runtime.contains("UCR_SFU_NODE_MEDIA_READY"));
+    assert!(runtime.contains("horizontal_sfu: false"));
+    assert!(runtime_main.contains("UCR_SFU_NODE_BIND"));
+    assert!(runtime_main.contains("UCR_SFU_NODE_CERT_FILE"));
+    assert!(runtime_main.contains("UCR_SFU_NODE_KEY_FILE"));
+    assert!(runtime_main.contains("UCR_SFU_NODE_CLIENT_CA_FILE"));
+    assert!(runtime_main.contains("ReloadingFileTlsSecretProvider"));
+    assert!(spec.contains("private mTLS node listener"));
+    assert!(spec.contains("outbound node client"));
 }

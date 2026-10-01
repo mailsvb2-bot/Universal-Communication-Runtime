@@ -48,10 +48,12 @@ Add an internal streaming `SfuNodeMediaService` contract that carries only:
 
 The service is private infrastructure and must be exposed only through a mutually authenticated
 node transport. The node trust root/certificates are deployment credentials, not UCR
-`Identity`/`Device`/`Principal` records and not tenant Service Accounts. A later concrete
-runtime binding must source private key/certificate material through the shared secret-provider
-boundary, support bounded rotation overlap, and fail closed when peer authentication cannot be
-established.
+`Identity`/`Device`/`Principal` records and not tenant Service Accounts. The concrete receiving
+runtime binding uses an isolated private mTLS listener and sources server certificate/private-key
+material through the shared secret-provider boundary with bounded current/previous overlap. It
+installs only explicitly configured client CA roots and fails closed when peer authentication cannot
+be established. Outbound node-client routing and live listener credential reload remain separate
+Production gates.
 
 The stream is bounded and backpressure-aware. `ACCEPTED` means only that the authenticated
 destination SFU process accepted the ciphertext routing item into its bounded ingress. It is not
@@ -113,5 +115,7 @@ The contract and architecture guards must prove:
 - machine-token/Service Account identity is not reused as node identity;
 - `horizontal_sfu` remains false until a concrete authenticated transport and session routing are
   wired;
-- later implementation must add mTLS/authentication failure, secret rotation, bounded
-  backpressure, reconnect, node failure/drain, and load/adversity tests before Production claim.
+- the receiving binding must prove real mTLS/authentication failure and bounded backpressure over
+  the network boundary;
+- remaining implementation must prove live credential rotation, outbound placement-aware delivery,
+  reconnect, node failure/drain, and load/adversity before the Production claim.
