@@ -418,6 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn outbound_node_client_requires_trusted_mtls_identity_and_reaches_service() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let trusted_ca = test_ca();
         let (server_certificate, server_private_key) = test_leaf(
             &trusted_ca,
