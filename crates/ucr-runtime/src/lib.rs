@@ -2486,18 +2486,24 @@ mod tests {
         let registered = realtime
             .heartbeat_sfu_node(heartbeat)
             .expect("register heartbeat");
-        assert_eq!(registered.node_id.as_str(), "sfu-eu-1");
-        assert_eq!(registered.active_sessions, 2);
-        assert!(registered.lease_expires_at_unix_ms > 0);
+        assert_eq!(registered.node.node_id.as_str(), "sfu-eu-1");
+        assert_eq!(registered.node.active_sessions, 2);
+        assert_eq!(registered.reserved_sessions, 0);
+        assert_eq!(registered.effective_sessions, 2);
+        assert!(registered.node.lease_expires_at_unix_ms > 0);
 
         let nodes = realtime.list_sfu_nodes().expect("list nodes");
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].node_id.as_str(), "sfu-eu-1");
+        assert_eq!(nodes[0].node.node_id.as_str(), "sfu-eu-1");
+        assert_eq!(nodes[0].reserved_sessions, 0);
+        assert_eq!(nodes[0].effective_sessions, 2);
 
         let drained = realtime
             .drain_sfu_node(&OpaqueId::new("sfu-eu-1").expect("node id"))
             .expect("drain node");
-        assert_eq!(drained.state, ucr_sfu::SfuNodeState::Draining);
+        assert_eq!(drained.node.state, ucr_sfu::SfuNodeState::Draining);
+        assert_eq!(drained.reserved_sessions, 0);
+        assert_eq!(drained.effective_sessions, 2);
 
         drop(realtime);
         drop(basic);
