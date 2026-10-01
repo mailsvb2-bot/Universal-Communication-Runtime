@@ -127,8 +127,8 @@ where
 {
     let mut expected_sequence = 1_u64;
     while let Some(item) = inbound.next().await {
-        let body = item
-            .map_err(|_| Status::invalid_argument("invalid SFU node media stream item"))?;
+        let body =
+            item.map_err(|_| Status::invalid_argument("invalid SFU node media stream item"))?;
         let (receipt, next_sequence) = process_node_media_item(
             authorization.as_ref(),
             store.as_ref(),
