@@ -98,17 +98,26 @@ can report only `Accepted`, `Backpressure`, or `Rejected` at the destination SFU
 not canonical Delivery, device receipt, decrypt, presentation, or read evidence.
 
 This service is **not** authorized by tenant Device, Principal, Service Account or public M2M
-identity. A concrete deployment must put it behind a mutually authenticated infrastructure node
-transport and source deployment credential material through the shared secret-provider boundary.
-Possession of a cluster credential authenticates an SFU process only; it does not grant participant
-membership or media permission. Sender-side SFU validation remains canonical and endpoint E2EE
-remains unchanged. See ADR-0113.
+identity. The realtime runtime now has an optional private mTLS node listener for this exact service.
+It accepts only loopback/private-network binds, requires a server certificate/private key resolved
+through the shared `SecretProvider`, installs only explicitly configured client CA roots, and the
+service still requires a non-empty TLS peer-certificate chain before decoding media. The deployment
+CLI wires this through `UCR_SFU_NODE_BIND`, `UCR_SFU_NODE_CERT_FILE`,
+`UCR_SFU_NODE_KEY_FILE`, and `UCR_SFU_NODE_CLIENT_CA_FILE`; optional previous certificate/key
+and CA files provide bounded migration overlap. The public realtime listener never serves this
+service.
+
+Possession of an accepted cluster TLS credential authenticates an SFU process only; it does not
+grant participant membership or media permission. The receiver revalidates canonical Group/Call,
+Device, capability and media permissions before its local sink can accept the encrypted envelope.
+Endpoint E2EE remains unchanged. See ADR-0113.
 
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
-true. Production horizontal SFU still requires a concrete inter-node encrypted-media transport,
-binding actual realtime sessions to cluster placement, failure/drain operational evidence, and
-load/adversity evidence. The placement directory must never become a Call, Conference, membership,
-authorization, media-key, plaintext-media, Delivery, or recording owner.
+true. The receiving network boundary is now concrete, but Production horizontal SFU still requires
+an outbound node client tied to `SfuPlacementService.ResolveNode`, binding actual realtime sessions
+to cluster placement, bounded reconnect/failover/drain behavior, live credential reload evidence,
+and load/adversity evidence. The placement directory must never become a Call, Conference,
+membership, authorization, media-key, plaintext-media, Delivery, or recording owner.
 
 ## Public realtime transport
 

@@ -9,20 +9,21 @@ use std::{
 
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::Server;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use ucr_api_grpc::{
     GrpcAttachmentService, GrpcCallService, GrpcConferenceService, GrpcDeviceService,
     GrpcEventService, GrpcGroupService, GrpcIntegrationService, GrpcMachineAuthService,
-    GrpcOperatorRuntimeService, GrpcRealtimeService, GrpcRecordingService, GrpcSfuPlacementService,
-    GrpcStoreForwardService, GrpcSyncService, GrpcUniversalConferenceService, MachineAuthDiscovery,
-    MachineTokenVerificationKeyProvider, OperatorRuntimeHealthSource, OperatorSfuClusterControl,
-    OperatorSfuClusterError, OperatorSfuNodeHeartbeat, RealtimeWebRtcDependencies,
-    UniversalConferenceRuntimeCapabilities, attachment_service_server, call_service_server,
-    conference_service_server, device_service_server, event_service_server,
-    expire_due_recordings_once, group_service_server, integration_service_server,
-    machine_auth_service_server, operator_runtime_service_server, pb, realtime_service_server,
-    recording_service_server, sfu_placement_service_server, store_forward_service_server,
-    sync_service_server, universal_conference_service_server,
+    GrpcOperatorRuntimeService, GrpcRealtimeService, GrpcRecordingService, GrpcSfuNodeMediaService,
+    GrpcSfuPlacementService, GrpcStoreForwardService, GrpcSyncService,
+    GrpcUniversalConferenceService, MachineAuthDiscovery, MachineTokenVerificationKeyProvider,
+    OperatorRuntimeHealthSource, OperatorSfuClusterControl, OperatorSfuClusterError,
+    OperatorSfuNodeHeartbeat, RealtimeWebRtcDependencies, UniversalConferenceRuntimeCapabilities,
+    attachment_service_server, call_service_server, conference_service_server,
+    device_service_server, event_service_server, expire_due_recordings_once, group_service_server,
+    integration_service_server, machine_auth_service_server, operator_runtime_service_server, pb,
+    realtime_service_server, recording_service_server, sfu_node_media_service_server,
+    sfu_placement_service_server, store_forward_service_server, sync_service_server,
+    universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
@@ -40,7 +41,7 @@ use ucr_model::{
     TenantId, TenantScope,
 };
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
-use ucr_secrets::{SecretHandle, SecretProvider, SecretPurpose};
+use ucr_secrets::{MAX_SECRET_BYTES, SecretHandle, SecretProvider, SecretPurpose};
 use ucr_sfu::{
     SfuClusterDirectory, SfuForwardSink, SfuForwardSinkError, SfuNodeCapacitySnapshot,
     SfuNodeDescriptor, SfuPlacementError,
@@ -384,10 +385,143 @@ impl MachineBearerRuntimeConfig {
 }
 
 #[derive(Clone)]
+pub struct SfuNodeMediaRuntimeConfig {
+    bind: SocketAddr,
+    provider: Arc<dyn SecretProvider>,
+    certificate_handle: SecretHandle,
+    private_key_handle: SecretHandle,
+    client_ca_pem: Arc<[u8]>,
+    previous_client_ca_pem: Option<Arc<[u8]>>,
+}
+
+impl core::fmt::Debug for SfuNodeMediaRuntimeConfig {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("SfuNodeMediaRuntimeConfig")
+            .field("bind", &self.bind)
+            .field("certificate_handle", &self.certificate_handle)
+            .field("private_key_handle", &self.private_key_handle)
+            .field("client_ca", &"<redacted-public-trust-material>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl SfuNodeMediaRuntimeConfig {
+    /// Builds the private horizontal-SFU node listener configuration.
+    ///
+    /// The server identity is resolved through the shared `SecretProvider`. Client trust anchors are
+    /// public deployment material but remain bounded and are supplied explicitly so this listener
+    /// cannot silently trust the system root store.
+    ///
+    /// # Errors
+    /// Rejects public/unspecified binds, wrong-purpose handles, unavailable secret material, or
+    /// empty/oversized client trust anchors.
+    pub fn new(
+        bind: SocketAddr,
+        provider: Arc<dyn SecretProvider>,
+        certificate_handle: SecretHandle,
+        private_key_handle: SecretHandle,
+        client_ca_pem: Vec<u8>,
+        previous_client_ca_pem: Option<Vec<u8>>,
+    ) -> Result<Self, String> {
+        validate_private_sfu_node_bind(bind)?;
+        if certificate_handle.purpose != SecretPurpose::TlsCertificate {
+            return Err("SFU node certificate handle must use TlsCertificate purpose".to_owned());
+        }
+        if private_key_handle.purpose != SecretPurpose::TlsPrivateKey {
+            return Err("SFU node private key handle must use TlsPrivateKey purpose".to_owned());
+        }
+        provider
+            .active_secret_set(&certificate_handle)
+            .map_err(|error| format!("resolve SFU node certificate secret: {error:?}"))?;
+        provider
+            .active_secret_set(&private_key_handle)
+            .map_err(|error| format!("resolve SFU node private-key secret: {error:?}"))?;
+        validate_sfu_node_ca(&client_ca_pem)?;
+        if let Some(previous) = previous_client_ca_pem.as_deref() {
+            validate_sfu_node_ca(previous)?;
+        }
+        Ok(Self {
+            bind,
+            provider,
+            certificate_handle,
+            private_key_handle,
+            client_ca_pem: Arc::from(client_ca_pem),
+            previous_client_ca_pem: previous_client_ca_pem.map(Arc::from),
+        })
+    }
+
+    fn tls_server(&self) -> Result<Server, String> {
+        // The full workspace also contains dependencies that enable another rustls backend.
+        // Select the same provider as the canonical HTTPS edge before Tonic builds TLS state.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certificates = self
+            .provider
+            .active_secret_set(&self.certificate_handle)
+            .map_err(|error| format!("resolve SFU node certificate secret: {error:?}"))?;
+        let private_keys = self
+            .provider
+            .active_secret_set(&self.private_key_handle)
+            .map_err(|error| format!("resolve SFU node private-key secret: {error:?}"))?;
+
+        let certificate_versions = std::iter::once(&certificates.current)
+            .chain(certificates.previous.iter())
+            .collect::<Vec<_>>();
+        let private_key_versions = std::iter::once(&private_keys.current)
+            .chain(private_keys.previous.iter())
+            .collect::<Vec<_>>();
+        let mut trust = self.client_ca_pem.as_ref().to_vec();
+        if let Some(previous) = &self.previous_client_ca_pem {
+            trust.extend_from_slice(b"\n");
+            trust.extend_from_slice(previous);
+        }
+
+        for certificate in certificate_versions {
+            for private_key in &private_key_versions {
+                let tls = ServerTlsConfig::new()
+                    .identity(Identity::from_pem(
+                        certificate.material.as_bytes(),
+                        private_key.material.as_bytes(),
+                    ))
+                    .client_ca_root(Certificate::from_pem(trust.clone()));
+                if let Ok(server) = Server::builder().tls_config(tls) {
+                    return Ok(server);
+                }
+            }
+        }
+        Err("no active SFU node TLS certificate/private-key pair is valid".to_owned())
+    }
+}
+
+fn validate_sfu_node_ca(value: &[u8]) -> Result<(), String> {
+    if value.is_empty() || value.len() > MAX_SECRET_BYTES {
+        Err("SFU node client CA material must be non-empty and bounded".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_private_sfu_node_bind(bind: SocketAddr) -> Result<(), String> {
+    let private = match bind.ip() {
+        std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+        std::net::IpAddr::V6(ip) => {
+            let first = ip.segments()[0];
+            ip.is_loopback() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
+        }
+    };
+    if private {
+        Ok(())
+    } else {
+        Err("SFU node media listener must bind loopback or private network address".to_owned())
+    }
+}
+
+#[derive(Clone)]
 pub struct RealtimeRuntimeConfig {
     join_issuer: Arc<JoinTokenIssuer>,
     webrtc_config: Arc<WebRtcSessionConfigFactory>,
     browser_realtime_gateway: bool,
+    sfu_node_media: Option<SfuNodeMediaRuntimeConfig>,
 }
 
 impl core::fmt::Debug for RealtimeRuntimeConfig {
@@ -397,6 +531,7 @@ impl core::fmt::Debug for RealtimeRuntimeConfig {
             .field("join_issuer", &"<redacted-provider-aware>")
             .field("webrtc_config", &self.webrtc_config)
             .field("browser_realtime_gateway", &self.browser_realtime_gateway)
+            .field("sfu_node_media", &self.sfu_node_media)
             .finish()
     }
 }
@@ -415,6 +550,7 @@ impl RealtimeRuntimeConfig {
             join_issuer: Arc::new(join_issuer),
             webrtc_config: Arc::new(WebRtcSessionConfigFactory::default()),
             browser_realtime_gateway: false,
+            sfu_node_media: None,
         })
     }
 
@@ -433,12 +569,19 @@ impl RealtimeRuntimeConfig {
             join_issuer: Arc::new(join_issuer),
             webrtc_config: Arc::new(WebRtcSessionConfigFactory::default()),
             browser_realtime_gateway: false,
+            sfu_node_media: None,
         })
     }
 
     #[must_use]
     pub fn with_browser_realtime_gateway(mut self, enabled: bool) -> Self {
         self.browser_realtime_gateway = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_sfu_node_media(mut self, config: SfuNodeMediaRuntimeConfig) -> Self {
+        self.sfu_node_media = Some(config);
         self
     }
 
@@ -1670,18 +1813,14 @@ impl ProductionRuntime {
         println!("UCR_REALTIME_READY endpoint=http://{address}");
         println!("UCR_RUNTIME_MODE={RUNTIME_MODE} realtime=true tls_edge=required test_mode=false");
         let incoming = TcpListenerStream::new(listener);
-        let operator_incoming = match operator_bind {
-            Some(operator_bind) => {
-                Some(bind_private_operator_listener(bind, operator_bind, "realtime").await?)
-            }
-            None => None,
-        };
+        let operator_incoming = bind_realtime_operator_listener(bind, operator_bind).await?;
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
         let store = Arc::clone(&self.store);
         let authorization = Arc::clone(&self.store);
         let conference_state = Arc::new(ConferenceRuntimeState::new());
         let runtime_capabilities = config.universal_conference_capabilities();
+        let sfu_node_media_config = config.sfu_node_media.clone();
         let dependencies = realtime_dependencies(config)?;
         let join_issuer = Arc::clone(&dependencies.join_issuer);
         let registry = Arc::clone(&dependencies.registry);
@@ -1710,6 +1849,13 @@ impl ProductionRuntime {
             &registry,
             &realtime_service,
         );
+        let sfu_node_media_service = sfu_node_media_config.as_ref().map(|_| {
+            let sink: Arc<dyn SfuForwardSink> = Arc::new(WebRtcE2eeForwardSink {
+                registry: Arc::clone(&registry),
+                provider: Arc::clone(&dependencies.live_provider),
+            });
+            GrpcSfuNodeMediaService::new(Arc::clone(&authorization), Arc::clone(&store), sink)
+        });
 
         let services = RealtimeServerServices {
             clock,
@@ -1723,20 +1869,47 @@ impl ProductionRuntime {
             realtime_service,
         };
         let public_server = serve_realtime_services(services, incoming);
-        let server_result = match operator_incoming {
-            Some(operator_incoming) => {
-                let operator_server = serve_realtime_operator_services(
-                    operator_health,
-                    sfu_placement_service,
-                    operator_incoming,
-                );
-                tokio::try_join!(public_server, operator_server).map(|_| ())
+        let public_and_operator = async move {
+            match operator_incoming {
+                Some(operator_incoming) => {
+                    let operator_server = serve_realtime_operator_services(
+                        operator_health,
+                        sfu_placement_service,
+                        operator_incoming,
+                    );
+                    tokio::try_join!(public_server, operator_server)
+                        .map(|_| ())
+                        .map_err(|error| format!("local realtime/operator API server: {error}"))
+                }
+                None => public_server
+                    .await
+                    .map_err(|error| format!("local realtime API server: {error}")),
             }
-            None => public_server.await,
+        };
+        let server_result = match (sfu_node_media_config, sfu_node_media_service) {
+            (Some(config), Some(service)) => tokio::try_join!(
+                public_and_operator,
+                serve_sfu_node_media_services(config, service)
+            )
+            .map(|_| ()),
+            (None, None) => public_and_operator.await,
+            _ => Err("SFU node media runtime configuration mismatch".to_owned()),
         };
         bridge_task.abort();
-        server_result.map_err(|error| format!("local realtime/operator API server: {error}"))
+        server_result
     }
+}
+
+async fn bind_realtime_operator_listener(
+    public_bind: SocketAddr,
+    operator_bind: Option<SocketAddr>,
+) -> Result<Option<TcpListenerStream>, String> {
+    let Some(operator_bind) = operator_bind else {
+        return Ok(None);
+    };
+    bind_private_operator_listener(public_bind, operator_bind, "realtime")
+        .await
+        .map(Some)
 }
 
 async fn serve_api_public_services(
@@ -1941,6 +2114,25 @@ async fn bind_private_operator_listener(
     Ok(TcpListenerStream::new(listener))
 }
 
+async fn serve_sfu_node_media_services(
+    config: SfuNodeMediaRuntimeConfig,
+    service: GrpcSfuNodeMediaService<SqliteLocalStore, SqliteLocalStore>,
+) -> Result<(), String> {
+    let listener = TcpListener::bind(config.bind)
+        .await
+        .map_err(|error| format!("bind private SFU node media listener: {error}"))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("resolve private SFU node media listener: {error}"))?;
+    let mut server = config.tls_server()?;
+    println!("UCR_SFU_NODE_MEDIA_READY endpoint=https://{address} private=true mtls=required");
+    server
+        .add_service(sfu_node_media_service_server(service))
+        .serve_with_incoming(TcpListenerStream::new(listener))
+        .await
+        .map_err(|error| format!("private SFU node media server: {error}"))
+}
+
 async fn serve_basic_operator_services(
     operator_health: Arc<ProductionOperatorHealthSource>,
     incoming: TcpListenerStream,
@@ -2041,6 +2233,7 @@ fn realtime_dependencies(
         join_issuer,
         webrtc_config,
         browser_realtime_gateway: _,
+        sfu_node_media: _,
     } = config;
     let (e2ee_ingress_tx, e2ee_ingress) =
         tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
@@ -2062,7 +2255,6 @@ fn realtime_dependencies(
 struct WebRtcE2eeForwardSink {
     registry: Arc<RealtimeSessionRegistry>,
     provider: Arc<LiveWebRtcProvider>,
-    now_unix_ms: i64,
 }
 
 impl SfuForwardSink for WebRtcE2eeForwardSink {
@@ -2071,13 +2263,14 @@ impl SfuForwardSink for WebRtcE2eeForwardSink {
         target: &ucr_model::SfuForwardTarget,
         envelope: &SfuForwardEnvelope,
     ) -> Result<(), SfuForwardSinkError> {
+        let now_unix_ms = runtime_now_unix_ms().map_err(|_| SfuForwardSinkError::Unavailable)?;
         let sessions = self
             .registry
             .active_session_ids_for_recipient(
                 &envelope.frame.header.scope,
                 &envelope.frame.header.call_id,
                 &target.recipient,
-                self.now_unix_ms,
+                now_unix_ms,
             )
             .map_err(|_| SfuForwardSinkError::Unavailable)?;
         if sessions.is_empty() {
@@ -2169,7 +2362,6 @@ fn route_webrtc_e2ee_frame(
     let sink = WebRtcE2eeForwardSink {
         registry: Arc::clone(registry),
         provider: Arc::clone(provider),
-        now_unix_ms,
     };
     service
         .forward_authenticated_e2ee_media(&claims, &frame.envelope, &sink)
@@ -2249,6 +2441,207 @@ const fn health_label(health: StorageHealth) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{
+        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+        KeyUsagePurpose,
+    };
+    use ucr_secrets::{InMemorySecretProvider, SecretMaterial, SecretVersion};
+
+    struct TestMtlsMaterial {
+        ca: String,
+        server_certificate: String,
+        server_private_key: String,
+        client_certificate: String,
+        client_private_key: String,
+    }
+
+    fn test_mtls_leaf(
+        ca: &rcgen::Certificate,
+        ca_key: &KeyPair,
+        name: &str,
+        usage: ExtendedKeyUsagePurpose,
+    ) -> (String, String) {
+        let mut params =
+            CertificateParams::new(vec![name.to_owned()]).expect("test certificate name");
+        params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+        params.extended_key_usages.push(usage);
+        let key = KeyPair::generate().expect("test leaf key");
+        let certificate = params
+            .signed_by(&key, ca, ca_key)
+            .expect("test leaf certificate");
+        (certificate.pem(), key.serialize_pem())
+    }
+
+    fn test_mtls_material() -> TestMtlsMaterial {
+        let mut ca_params = CertificateParams::new(Vec::new()).expect("test CA params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+        ca_params.key_usages.push(KeyUsagePurpose::KeyCertSign);
+        ca_params.key_usages.push(KeyUsagePurpose::CrlSign);
+        let ca_key = KeyPair::generate().expect("test CA key");
+        let ca = ca_params.self_signed(&ca_key).expect("test CA certificate");
+        let (server_certificate_pem, server_private_key_pem) = test_mtls_leaf(
+            &ca,
+            &ca_key,
+            "localhost",
+            ExtendedKeyUsagePurpose::ServerAuth,
+        );
+        let (client_certificate_pem, client_private_key_pem) = test_mtls_leaf(
+            &ca,
+            &ca_key,
+            "ucr-sfu-client",
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
+        TestMtlsMaterial {
+            ca: ca.pem(),
+            server_certificate: server_certificate_pem,
+            server_private_key: server_private_key_pem,
+            client_certificate: client_certificate_pem,
+            client_private_key: client_private_key_pem,
+        }
+    }
+
+    fn test_sfu_node_tls_config(material: &TestMtlsMaterial) -> SfuNodeMediaRuntimeConfig {
+        let provider = InMemorySecretProvider::default();
+        let certificate_handle = SecretHandle {
+            secret_id: OpaqueId::new("sfu-test-certificate").expect("certificate secret id"),
+            purpose: SecretPurpose::TlsCertificate,
+        };
+        let private_key_handle = SecretHandle {
+            secret_id: OpaqueId::new("sfu-test-private-key").expect("private key secret id"),
+            purpose: SecretPurpose::TlsPrivateKey,
+        };
+        provider
+            .provision(
+                certificate_handle.clone(),
+                SecretVersion {
+                    version_id: OpaqueId::new("cert-v1").expect("certificate version id"),
+                    material: SecretMaterial::new(material.server_certificate.as_bytes().to_vec())
+                        .expect("certificate material"),
+                },
+            )
+            .expect("provision certificate");
+        provider
+            .provision(
+                private_key_handle.clone(),
+                SecretVersion {
+                    version_id: OpaqueId::new("key-v1").expect("private key version id"),
+                    material: SecretMaterial::new(material.server_private_key.as_bytes().to_vec())
+                        .expect("private key material"),
+                },
+            )
+            .expect("provision private key");
+        let provider: Arc<dyn SecretProvider> = Arc::new(provider);
+        SfuNodeMediaRuntimeConfig::new(
+            "127.0.0.1:0".parse().expect("private bind"),
+            provider,
+            certificate_handle,
+            private_key_handle,
+            material.ca.as_bytes().to_vec(),
+            None,
+        )
+        .expect("SFU node TLS config")
+    }
+
+    #[derive(Debug)]
+    struct AcceptAllSfuSink;
+
+    impl SfuForwardSink for AcceptAllSfuSink {
+        fn forward_encrypted(
+            &self,
+            _target: &ucr_model::SfuForwardTarget,
+            _envelope: &SfuForwardEnvelope,
+        ) -> Result<(), SfuForwardSinkError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn private_sfu_node_listener_rejects_public_or_unspecified_bind() {
+        assert!(
+            validate_private_sfu_node_bind("127.0.0.1:7001".parse().expect("loopback")).is_ok()
+        );
+        assert!(validate_private_sfu_node_bind("10.42.0.8:7001".parse().expect("private")).is_ok());
+        assert!(validate_private_sfu_node_bind("8.8.8.8:7001".parse().expect("public")).is_err());
+        assert!(
+            validate_private_sfu_node_bind("0.0.0.0:7001".parse().expect("unspecified")).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn private_sfu_node_listener_enforces_real_mtls_handshake() {
+        let material = test_mtls_material();
+        let config = test_sfu_node_tls_config(&material);
+        let listener = TcpListener::bind(config.bind)
+            .await
+            .expect("bind SFU node listener");
+        let address = listener.local_addr().expect("SFU node listener address");
+        let path = std::env::temp_dir().join(format!(
+            "ucr-runtime-sfu-mtls-{}-{}.sqlite",
+            std::process::id(),
+            runtime_now_unix_ms().expect("clock")
+        ));
+        let store = Arc::new(SqliteLocalStore::open(&path).expect("open store"));
+        let sink: Arc<dyn SfuForwardSink> = Arc::new(AcceptAllSfuSink);
+        let service = GrpcSfuNodeMediaService::new(Arc::clone(&store), Arc::clone(&store), sink);
+        let mut server = config.tls_server().expect("SFU node TLS server");
+        let server_task = tokio::spawn(async move {
+            server
+                .add_service(sfu_node_media_service_server(service))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+        });
+
+        let uri = format!("https://127.0.0.1:{}", address.port());
+        let unauthenticated_tls = tonic::transport::ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(material.ca.as_bytes()))
+            .domain_name("localhost");
+        let unauthenticated_rejected = match tonic::transport::Endpoint::from_shared(uri.clone())
+            .expect("unauthenticated endpoint")
+            .tls_config(unauthenticated_tls)
+            .expect("unauthenticated TLS config")
+            .connect()
+            .await
+        {
+            Err(_) => true,
+            Ok(channel) => {
+                let mut client =
+                    pb::sfu_node_media_service_client::SfuNodeMediaServiceClient::new(channel);
+                client
+                    .forward_encrypted(tokio_stream::empty::<pb::SfuNodeEncryptedMedia>())
+                    .await
+                    .is_err()
+            }
+        };
+        assert!(
+            unauthenticated_rejected,
+            "server accepted an SFU node RPC without a client certificate"
+        );
+
+        let authenticated_tls = tonic::transport::ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(material.ca.as_bytes()))
+            .domain_name("localhost")
+            .identity(Identity::from_pem(
+                material.client_certificate.as_bytes(),
+                material.client_private_key.as_bytes(),
+            ));
+        let channel = tonic::transport::Endpoint::from_shared(uri)
+            .expect("authenticated endpoint")
+            .tls_config(authenticated_tls)
+            .expect("authenticated TLS config")
+            .connect()
+            .await
+            .expect("mutually authenticated channel");
+        let mut client = pb::sfu_node_media_service_client::SfuNodeMediaServiceClient::new(channel);
+        client
+            .forward_encrypted(tokio_stream::empty::<pb::SfuNodeEncryptedMedia>())
+            .await
+            .expect("mTLS request reaches peer-certificate-gated service");
+
+        server_task.abort();
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
 
     #[tokio::test]
     async fn private_operator_listener_rejects_public_bind_alias() {
