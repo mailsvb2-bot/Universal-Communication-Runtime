@@ -18,6 +18,37 @@ message SfuForwardTarget {
   PrincipalRef recipient = 1;
 }
 
+// Private horizontal-SFU node-to-node stream item. This is infrastructure routing metadata only.
+// `stream_sequence` is connection-local correlation/backpressure sequencing; it is not a DeliveryId,
+// MessageId, durable idempotency key, or user-visible media sequence.
+message SfuNodeEncryptedMedia {
+  uint64 stream_sequence = 1;
+  SfuForwardTarget target = 2;
+  SfuForwardEnvelope envelope = 3;
+}
+
+enum SfuNodeForwardStatus {
+  SFU_NODE_FORWARD_STATUS_UNSPECIFIED = 0;
+  SFU_NODE_FORWARD_STATUS_ACCEPTED = 1;
+  SFU_NODE_FORWARD_STATUS_BACKPRESSURE = 2;
+  SFU_NODE_FORWARD_STATUS_REJECTED = 3;
+}
+
+// Receipt proves only that the authenticated destination SFU process accepted/rejected one
+// ciphertext routing item at its bounded ingress. It is not canonical Delivery evidence and does
+// not prove endpoint receipt, decryption, presentation or read.
+message SfuNodeForwardReceipt {
+  uint64 stream_sequence = 1;
+  SfuNodeForwardStatus status = 2;
+}
+
+// Infrastructure-only media data plane for authenticated cluster peers. Deployments MUST expose
+// this service only on a mutually authenticated private node transport. It is deliberately not a
+// Universal Conference/public-integration service and carries no plaintext media or media keys.
+service SfuNodeMediaService {
+  rpc ForwardEncrypted(stream SfuNodeEncryptedMedia) returns (stream SfuNodeForwardReceipt);
+}
+
 // The stable external realtime boundary is defined by realtime.proto. SfuRuntime remains the
 // internal encrypted fan-out authority; realtime transport must not become a second roster,
 // authorization, signalling, crypto, recording, or Delivery owner.

@@ -89,6 +89,21 @@ heartbeat for a currently live selected node. This enables a later gateway/worke
 reach that node, but the prepared placement service still does not claim cross-node
 participant/media transport.
 
+## Private node media contract
+
+The next horizontal data-plane boundary is `SfuNodeMediaService`, a private bidirectional stream
+for already-encrypted SFU routing items. Each item contains only a connection-local
+`stream_sequence`, one `SfuForwardTarget`, and the canonical `SfuForwardEnvelope`. Its receipt
+can report only `Accepted`, `Backpressure`, or `Rejected` at the destination SFU ingress; it is
+not canonical Delivery, device receipt, decrypt, presentation, or read evidence.
+
+This service is **not** authorized by tenant Device, Principal, Service Account or public M2M
+identity. A concrete deployment must put it behind a mutually authenticated infrastructure node
+transport and source deployment credential material through the shared secret-provider boundary.
+Possession of a cluster credential authenticates an SFU process only; it does not grant participant
+membership or media permission. Sender-side SFU validation remains canonical and endpoint E2EE
+remains unchanged. See ADR-0113.
+
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
 true. Production horizontal SFU still requires a concrete inter-node encrypted-media transport,
 binding actual realtime sessions to cluster placement, failure/drain operational evidence, and

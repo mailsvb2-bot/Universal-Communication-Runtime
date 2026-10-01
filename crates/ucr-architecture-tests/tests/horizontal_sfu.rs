@@ -78,3 +78,52 @@ fn horizontal_sfu_capability_stays_fail_closed_until_transport_is_wired() {
         "Recording and horizontal-SFU remain false until corresponding providers are wired"
     ));
 }
+
+#[test]
+fn horizontal_sfu_node_media_contract_is_private_ciphertext_only_and_non_authoritative() {
+    let sfu_proto = read("proto/ucr/v1/sfu.proto");
+    let spec = read("spec/sfu.md");
+    let adr = read("docs/adr/0113-horizontal-sfu-node-media-infrastructure-trust.md");
+    let universal = read("proto/ucr/v1/universal_conference.proto");
+    let realtime = read("proto/ucr/v1/realtime.proto");
+
+    assert!(sfu_proto.contains("service SfuNodeMediaService"));
+    assert!(sfu_proto.contains("rpc ForwardEncrypted(stream SfuNodeEncryptedMedia)"));
+    assert!(sfu_proto.contains("SfuForwardTarget target = 2"));
+    assert!(sfu_proto.contains("SfuForwardEnvelope envelope = 3"));
+    assert!(sfu_proto.contains("SFU_NODE_FORWARD_STATUS_BACKPRESSURE"));
+    let normalized_spec = spec.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized_spec.contains("mutually authenticated infrastructure node transport"));
+    assert!(normalized_spec.contains("not canonical Delivery"));
+    assert!(adr.contains("Status: Accepted"));
+    assert!(adr.contains("not UCR"));
+    assert!(adr.contains("tenant Service Accounts"));
+
+    for forbidden in [
+        "plaintext_media",
+        "media_private_key",
+        "traffic_key",
+        "service_credential_secret",
+        "join_token",
+    ] {
+        assert!(
+            !sfu_proto.contains(forbidden),
+            "private SFU node wire gained forbidden secret/plaintext field: {forbidden}"
+        );
+    }
+    assert!(!universal.contains("SfuNodeMediaService"));
+    assert!(!realtime.contains("SfuNodeMediaService"));
+}
+
+#[test]
+fn horizontal_sfu_node_identity_does_not_reuse_tenant_machine_auth() {
+    let adr = read("docs/adr/0113-horizontal-sfu-node-media-infrastructure-trust.md");
+    let machine_token = read("crates/ucr-crypto/src/machine_token.rs");
+
+    assert!(machine_token.contains("PrincipalKind::ServiceAccount"));
+    assert!(machine_token.contains("tenant_id"));
+    assert!(
+        adr.contains("machine access tokens authenticate tenant-scoped canonical Service Accounts")
+    );
+    assert!(adr.contains("infrastructure node identity"));
+}
