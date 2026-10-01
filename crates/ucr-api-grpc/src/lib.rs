@@ -101,6 +101,11 @@ pub use operator_runtime_service::{
 mod sfu_placement_service;
 pub use sfu_placement_service::{GrpcSfuPlacementService, sfu_placement_service_server};
 
+mod sfu_node_media_service;
+pub use sfu_node_media_service::{
+    GrpcSfuNodeMediaService, SFU_NODE_RECEIPT_CHANNEL_CAPACITY, sfu_node_media_service_server,
+};
+
 mod machine_auth_service;
 pub use machine_auth_service::{
     GrpcMachineAuthService, MachineAuthDiscovery, machine_auth_service_server,

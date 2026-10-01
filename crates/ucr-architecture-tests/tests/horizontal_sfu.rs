@@ -92,9 +92,8 @@ fn horizontal_sfu_node_media_contract_is_private_ciphertext_only_and_non_authori
     assert!(sfu_proto.contains("SfuForwardTarget target = 2"));
     assert!(sfu_proto.contains("SfuForwardEnvelope envelope = 3"));
     assert!(sfu_proto.contains("SFU_NODE_FORWARD_STATUS_BACKPRESSURE"));
-    let normalized_spec = spec.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(normalized_spec.contains("mutually authenticated infrastructure node transport"));
-    assert!(normalized_spec.contains("not canonical Delivery"));
+    assert!(spec.contains("mutually authenticated infrastructure node transport"));
+    assert!(spec.contains("not canonical Delivery"));
     assert!(adr.contains("Status: Accepted"));
     assert!(adr.contains("not UCR"));
     assert!(adr.contains("tenant Service Accounts"));
@@ -126,4 +125,23 @@ fn horizontal_sfu_node_identity_does_not_reuse_tenant_machine_auth() {
         adr.contains("machine access tokens authenticate tenant-scoped canonical Service Accounts")
     );
     assert!(adr.contains("infrastructure node identity"));
+}
+
+#[test]
+fn horizontal_sfu_node_media_service_requires_tls_peer_and_revalidates_canonical_media() {
+    let api = read("crates/ucr-api-grpc/src/sfu_node_media_service.rs");
+    let manifest = read("crates/ucr-api-grpc/Cargo.toml");
+
+    assert!(manifest.contains("\"tls-ring\""));
+    assert!(api.contains("require_mtls_peer(&request)?;"));
+    assert!(api.contains(".peer_certs()"));
+    assert!(api.contains("SfuRuntime::new"));
+    assert!(api.contains("forward_selected"));
+    assert!(api.contains("PreparedGroupMediaE2eeCapabilities"));
+    assert!(api.contains("PreparedSfuCapabilities"));
+    assert!(api.contains("SFU_NODE_RECEIPT_CHANNEL_CAPACITY"));
+    assert!(api.contains("SfuForwardSinkError::Backpressure"));
+    assert!(api.contains("Status::unauthenticated"));
+    assert!(!api.contains("MachineAccessToken"));
+    assert!(!api.contains("ServiceCredentialSecret"));
 }

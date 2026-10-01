@@ -2049,7 +2049,7 @@ fn decode_media_kind(value: i32) -> Result<MediaKind, CanonicalError> {
     }
 }
 
-fn decode_sfu_forward_envelope(
+pub(crate) fn decode_sfu_forward_envelope(
     value: pb::SfuForwardEnvelope,
 ) -> Result<SfuForwardEnvelope, CanonicalError> {
     let frame = value.frame.ok_or_else(invalid_argument)?;

@@ -11,7 +11,7 @@ build = "build.rs"
 base64 = "=0.22.1"
 prost = "=0.14.4"
 sha2 = "=0.11.0"
-tonic = { version = "=0.14.6", features = ["transport"] }
+tonic = { version = "=0.14.6", features = ["transport", "tls-ring"] }
 tonic-prost = "=0.14.6"
 ucr-conference = { path = "../ucr-conference" }
 ucr-core = { path = "../ucr-core" }
