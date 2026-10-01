@@ -47,9 +47,8 @@ fn phase29_sqlite_public_privacy_and_atomicity_boundaries_are_machine_locked() {
     let sfu_proto = fs::read_to_string(root.join("proto/ucr/v1/sfu.proto")).expect("sfu proto");
     let identity_proto =
         fs::read_to_string(root.join("proto/ucr/v1/identity.proto")).expect("identity proto");
-    let universal_proto =
-        fs::read_to_string(root.join("proto/ucr/v1/universal_conference.proto"))
-            .expect("universal conference proto");
+    let universal_proto = fs::read_to_string(root.join("proto/ucr/v1/universal_conference.proto"))
+        .expect("universal conference proto");
     let realtime_proto =
         fs::read_to_string(root.join("proto/ucr/v1/realtime.proto")).expect("realtime proto");
     let spec = fs::read_to_string(root.join("spec/sfu.md")).expect("spec");
