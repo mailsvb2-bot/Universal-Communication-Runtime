@@ -133,6 +133,27 @@ impl fmt::Debug for RealtimeWebRtcDependencies {
     }
 }
 
+#[tonic::async_trait]
+pub trait RealtimeSfuPlacementLifecycle: Send + Sync {
+    /// Ensures that the canonical Call has one sticky horizontal-SFU placement.
+    ///
+    /// Implementations must be idempotent for repeated joins/reconnects of the same Call.
+    async fn ensure_call_placement(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<(), CanonicalError>;
+
+    /// Releases the canonical Call placement when its final realtime session has left.
+    ///
+    /// Implementations must tolerate an already-absent placement so rollback/cleanup is idempotent.
+    async fn release_call_placement(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<(), CanonicalError>;
+}
+
 pub struct GrpcRealtimeService<C, A, S> {
     clock: Arc<C>,
     authorization: Arc<A>,
@@ -142,6 +163,7 @@ pub struct GrpcRealtimeService<C, A, S> {
     conference_state: Arc<ConferenceRuntimeState>,
     webrtc_provider: Arc<dyn WebRtcProvider>,
     webrtc_config: Arc<WebRtcSessionConfigFactory>,
+    sfu_placement_lifecycle: Option<Arc<dyn RealtimeSfuPlacementLifecycle>>,
 }
 
 impl<C, A, S> GrpcRealtimeService<C, A, S> {
@@ -184,7 +206,60 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             conference_state,
             webrtc_provider: webrtc.provider,
             webrtc_config: webrtc.config,
+            sfu_placement_lifecycle: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_sfu_placement_lifecycle(
+        mut self,
+        lifecycle: Arc<dyn RealtimeSfuPlacementLifecycle>,
+    ) -> Self {
+        self.sfu_placement_lifecycle = Some(lifecycle);
+        self
+    }
+
+    async fn ensure_sfu_call_placement(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<(), CanonicalError> {
+        if let Some(lifecycle) = &self.sfu_placement_lifecycle {
+            lifecycle
+                .ensure_call_placement(&claims.scope, &claims.call_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn release_sfu_call_placement_if_inactive(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<(), CanonicalError> {
+        let active = self
+            .registry
+            .active_call_session_count_at(&claims.scope, &claims.call_id, now_unix_ms)
+            .map_err(map_registry_error)?;
+        if active == 0
+            && let Some(lifecycle) = &self.sfu_placement_lifecycle
+        {
+            lifecycle
+                .release_call_placement(&claims.scope, &claims.call_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn rollback_realtime_join(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<(), CanonicalError> {
+        self.registry
+            .leave(claims, now_unix_ms)
+            .map_err(map_registry_error)?;
+        self.release_sfu_call_placement_if_inactive(claims, now_unix_ms)
+            .await
     }
 }
 
@@ -199,6 +274,7 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             conference_state: Arc::clone(&self.conference_state),
             webrtc_provider: Arc::clone(&self.webrtc_provider),
             webrtc_config: Arc::clone(&self.webrtc_config),
+            sfu_placement_lifecycle: self.sfu_placement_lifecycle.clone(),
         }
     }
 }
@@ -262,9 +338,10 @@ where
         let token = decode_bearer_token(request.metadata());
         let request = decode_realtime_lookup(request.into_inner());
         let result = match (token, request) {
-            (Ok(token), Ok((scope, call_id, session_id))) => self
-                .authenticated_claims(&token, &scope, &call_id, &session_id)
-                .and_then(|claims| {
+            (Ok(token), Ok((scope, call_id, session_id))) => {
+                async {
+                    let claims =
+                        self.authenticated_claims(&token, &scope, &call_id, &session_id)?;
                     let now = self.now()?;
                     let admission = self.realtime_admission_state(&claims)?;
                     if admission == pb::RealtimeAdmissionState::Closed {
@@ -280,7 +357,8 @@ where
                     self.ensure_accepted_conference_participant_for_join(&claims)?;
                     require_recording_participant_admission(&*self.store, &claims)?;
                     let media_policy = self.effective_universal_media_policy(&claims)?;
-                    let redeemed = self.redeemed_claims(&token, &scope, &call_id, &session_id)?;
+                    let redeemed =
+                        self.redeemed_claims(&token, &scope, &call_id, &session_id)?;
                     if redeemed != claims {
                         return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
                     }
@@ -288,12 +366,18 @@ where
                         .registry
                         .join(claims.clone(), now)
                         .map_err(map_registry_error)?;
+                    if let Err(error) = self.ensure_sfu_call_placement(&claims).await {
+                        let _ = self.rollback_realtime_join(&claims, now).await;
+                        return Err(error);
+                    }
                     if let Err(error) = self.append_attendance(&outcome.transition) {
-                        let _ = self.registry.leave(&claims, now);
+                        let _ = self.rollback_realtime_join(&claims, now).await;
                         return Err(error);
                     }
                     Ok(pb_realtime_session(&claims, admission, media_policy))
-                }),
+                }
+                .await
+            }
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RealtimeJoinResponse {
@@ -365,13 +449,17 @@ where
         let token = decode_bearer_token(request.metadata());
         let lookup = decode_realtime_lookup(request.into_inner());
         let result = match (token, lookup) {
-            (Ok(token), Ok((scope, call_id, session_id))) => self
-                .authenticated_claims(&token, &scope, &call_id, &session_id)
-                .and_then(|claims| {
+            (Ok(token), Ok((scope, call_id, session_id))) => {
+                async {
+                    let claims =
+                        self.authenticated_claims(&token, &scope, &call_id, &session_id)?;
+                    let now = self.now()?;
                     let transition = self
                         .registry
-                        .leave(&claims, self.now()?)
+                        .leave(&claims, now)
                         .map_err(map_registry_error)?;
+                    let placement_cleanup =
+                        self.release_sfu_call_placement_if_inactive(&claims, now).await;
                     self.append_attendance(&transition)?;
                     conference_runtime(self)
                         .clear_raised_hand(&claims.scope, &claims.call_id, &claims.participant)
@@ -387,10 +475,13 @@ where
                             &claims.session_id,
                         )
                         .map_err(|error| map_conference_error(&error))?;
+                    placement_cleanup?;
                     Ok(pb_acknowledgement(acknowledgement_for(
                         claims.session_id.as_opaque().clone(),
                     )))
-                }),
+                }
+                .await
+            }
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RealtimeLeaveResponse {
