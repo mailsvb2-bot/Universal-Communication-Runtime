@@ -1018,7 +1018,14 @@ mod horizontal_placement_tests {
         let mut directory = SfuClusterDirectory::default();
         let call_id = call("release-call");
         directory
-            .upsert_node(node("sfu-release", "eu", SfuNodeState::Healthy, 0, 10, 10_000))
+            .upsert_node(node(
+                "sfu-release",
+                "eu",
+                SfuNodeState::Healthy,
+                0,
+                10,
+                10_000,
+            ))
             .expect("node");
         directory
             .place_session(&scope(), &call_id, &SfuPlacementPolicy::default(), 100)
