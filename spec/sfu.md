@@ -120,7 +120,8 @@ current/previous credential overlap, and waits for an exact monotonic receipt fo
 target. `Accepted`, `Backpressure`, and `Rejected` remain destination-ingress facts; partial
 acceptance is preserved and no connection write is upgraded to remote success.
 
-A placement-aware outbound router now binds the two private boundaries without creating a new
+The outbound node client tied to `SfuPlacementService.ResolveNode` is now represented by a
+placement-aware outbound router that binds the two private boundaries without creating a new
 authority: it derives only canonical `TenantScope + CallId` from `SfuValidatedForwardBatch`,
 calls `PlaceCall`, resolves only that selected node through `ResolveNode`, revalidates the
 returned node identity plus private-network endpoint, then uses the deployment-scoped mTLS node
