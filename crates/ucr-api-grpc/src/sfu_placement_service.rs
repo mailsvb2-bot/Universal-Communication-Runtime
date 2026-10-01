@@ -81,10 +81,10 @@ where
             .cluster
             .lock()
             .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
-        match cluster.release_session(scope, call_id) {
-            Ok(()) | Err(SfuPlacementError::InvalidNode) => Ok(()),
-            Err(error) => Err(map_lifecycle_placement_error(error)),
-        }
+        cluster
+            .release_session_if_present(scope, call_id)
+            .map(|_| ())
+            .map_err(map_lifecycle_placement_error)
     }
 }
 
@@ -164,10 +164,9 @@ where
             .cluster
             .lock()
             .map_err(|_| Status::unavailable("SFU placement directory unavailable"))?;
-        match cluster.release_session(&scope, &call_id) {
-            Ok(()) | Err(SfuPlacementError::InvalidNode) => {}
-            Err(error) => return Err(map_placement_error(error)),
-        }
+        cluster
+            .release_session_if_present(&scope, &call_id)
+            .map_err(map_placement_error)?;
 
         Ok(Response::new(pb::SfuReleaseCallResponse {
             released_call_id: Some(pb_opaque(call_id.as_opaque())),
