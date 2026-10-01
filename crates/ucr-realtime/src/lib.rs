@@ -715,6 +715,30 @@ impl RealtimeSessionRegistry {
         Ok(entries.len())
     }
 
+    /// Returns the number of non-expired realtime sessions that belong to one canonical Call.
+    ///
+    /// This query deliberately reads the existing session registry rather than maintaining a
+    /// second Call/session roster for SFU placement lifecycle decisions.
+    ///
+    /// # Errors
+    /// Fails when the bounded registry state is unavailable.
+    pub fn active_call_session_count_at(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+        now_unix_ms: i64,
+    ) -> Result<usize, RealtimeRegistryError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        prune_expired(&mut entries, now_unix_ms);
+        Ok(entries
+            .iter()
+            .filter(|entry| entry.claims.scope == *scope && entry.claims.call_id == *call_id)
+            .count())
+    }
+
     /// Returns whether the exact signed session is already active.
     ///
     /// This is used by admission policy to distinguish a first entry from a reconnect when a
@@ -1965,6 +1989,52 @@ mod tests {
             registry
                 .active_session_count_at(expires_at)
                 .expect("expired count"),
+            0
+        );
+    }
+
+    #[test]
+    fn call_session_count_reuses_registry_and_prunes_expiry() {
+        let issuer = issuer();
+        let call_id = CallId::from_opaque(id("placement-lifecycle-call"));
+        let first = issuer
+            .issue(
+                scope(),
+                call_id.clone(),
+                participant(),
+                Some(DeviceId::from_opaque(id("placement-device-a"))),
+                300,
+                29_500,
+            )
+            .expect("first issue")
+            .claims;
+        let second = RealtimeSessionClaims {
+            device_id: Some(DeviceId::from_opaque(id("placement-device-b"))),
+            session_id: SessionId::from_opaque(id("placement-session-b")),
+            ..first.clone()
+        };
+        let other_call = RealtimeSessionClaims {
+            call_id: CallId::from_opaque(id("placement-other-call")),
+            device_id: Some(DeviceId::from_opaque(id("placement-device-c"))),
+            session_id: SessionId::from_opaque(id("placement-session-c")),
+            ..first.clone()
+        };
+        let expires_at = first.expires_at_unix_ms;
+        let registry = RealtimeSessionRegistry::new(8, 2);
+        registry.join(first.clone(), 29_501).expect("first join");
+        registry.join(second, 29_502).expect("second join");
+        registry.join(other_call, 29_503).expect("other join");
+
+        assert_eq!(
+            registry
+                .active_call_session_count_at(&first.scope, &call_id, 29_504)
+                .expect("call count"),
+            2
+        );
+        assert_eq!(
+            registry
+                .active_call_session_count_at(&first.scope, &call_id, expires_at)
+                .expect("expired call count"),
             0
         );
     }
