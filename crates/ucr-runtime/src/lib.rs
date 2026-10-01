@@ -2438,6 +2438,120 @@ const fn health_label(health: StorageHealth) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{
+        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+        KeyUsagePurpose,
+    };
+    use ucr_secrets::{InMemorySecretProvider, SecretMaterial, SecretVersion};
+
+    struct TestMtlsMaterial {
+        ca: String,
+        server_certificate: String,
+        server_private_key: String,
+        client_certificate: String,
+        client_private_key: String,
+    }
+
+    fn test_mtls_leaf(
+        ca: &rcgen::Certificate,
+        ca_key: &KeyPair,
+        name: &str,
+        usage: ExtendedKeyUsagePurpose,
+    ) -> (String, String) {
+        let mut params =
+            CertificateParams::new(vec![name.to_owned()]).expect("test certificate name");
+        params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+        params.extended_key_usages.push(usage);
+        let key = KeyPair::generate().expect("test leaf key");
+        let certificate = params
+            .signed_by(&key, ca, ca_key)
+            .expect("test leaf certificate");
+        (certificate.pem(), key.serialize_pem())
+    }
+
+    fn test_mtls_material() -> TestMtlsMaterial {
+        let mut ca_params = CertificateParams::new(Vec::new()).expect("test CA params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages.push(KeyUsagePurpose::DigitalSignature);
+        ca_params.key_usages.push(KeyUsagePurpose::KeyCertSign);
+        ca_params.key_usages.push(KeyUsagePurpose::CrlSign);
+        let ca_key = KeyPair::generate().expect("test CA key");
+        let ca = ca_params.self_signed(&ca_key).expect("test CA certificate");
+        let (server_certificate_pem, server_private_key_pem) = test_mtls_leaf(
+            &ca,
+            &ca_key,
+            "localhost",
+            ExtendedKeyUsagePurpose::ServerAuth,
+        );
+        let (client_certificate_pem, client_private_key_pem) = test_mtls_leaf(
+            &ca,
+            &ca_key,
+            "ucr-sfu-client",
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
+        TestMtlsMaterial {
+            ca: ca.pem(),
+            server_certificate: server_certificate_pem,
+            server_private_key: server_private_key_pem,
+            client_certificate: client_certificate_pem,
+            client_private_key: client_private_key_pem,
+        }
+    }
+
+    fn test_sfu_node_tls_config(material: &TestMtlsMaterial) -> SfuNodeMediaRuntimeConfig {
+        let provider = InMemorySecretProvider::default();
+        let certificate_handle = SecretHandle {
+            secret_id: OpaqueId::new("sfu-test-certificate").expect("certificate secret id"),
+            purpose: SecretPurpose::TlsCertificate,
+        };
+        let private_key_handle = SecretHandle {
+            secret_id: OpaqueId::new("sfu-test-private-key").expect("private key secret id"),
+            purpose: SecretPurpose::TlsPrivateKey,
+        };
+        provider
+            .provision(
+                certificate_handle.clone(),
+                SecretVersion {
+                    version_id: OpaqueId::new("cert-v1").expect("certificate version id"),
+                    material: SecretMaterial::new(material.server_certificate.as_bytes().to_vec())
+                        .expect("certificate material"),
+                },
+            )
+            .expect("provision certificate");
+        provider
+            .provision(
+                private_key_handle.clone(),
+                SecretVersion {
+                    version_id: OpaqueId::new("key-v1").expect("private key version id"),
+                    material: SecretMaterial::new(material.server_private_key.as_bytes().to_vec())
+                        .expect("private key material"),
+                },
+            )
+            .expect("provision private key");
+        let provider: Arc<dyn SecretProvider> = Arc::new(provider);
+        SfuNodeMediaRuntimeConfig::new(
+            "127.0.0.1:0".parse().expect("private bind"),
+            provider,
+            certificate_handle,
+            private_key_handle,
+            material.ca.as_bytes().to_vec(),
+            None,
+        )
+        .expect("SFU node TLS config")
+    }
+
+    #[derive(Debug)]
+    struct AcceptAllSfuSink;
+
+    impl SfuForwardSink for AcceptAllSfuSink {
+        fn forward_encrypted(
+            &self,
+            _target: &ucr_model::SfuForwardTarget,
+            _envelope: &SfuForwardEnvelope,
+        ) -> Result<(), SfuForwardSinkError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn private_sfu_node_listener_rejects_public_or_unspecified_bind() {
@@ -2449,6 +2563,81 @@ mod tests {
         assert!(
             validate_private_sfu_node_bind("0.0.0.0:7001".parse().expect("unspecified")).is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn private_sfu_node_listener_enforces_real_mtls_handshake() {
+        let material = test_mtls_material();
+        let config = test_sfu_node_tls_config(&material);
+        let listener = TcpListener::bind(config.bind)
+            .await
+            .expect("bind SFU node listener");
+        let address = listener.local_addr().expect("SFU node listener address");
+        let path = std::env::temp_dir().join(format!(
+            "ucr-runtime-sfu-mtls-{}-{}.sqlite",
+            std::process::id(),
+            runtime_now_unix_ms().expect("clock")
+        ));
+        let store = Arc::new(SqliteLocalStore::open(&path).expect("open store"));
+        let sink: Arc<dyn SfuForwardSink> = Arc::new(AcceptAllSfuSink);
+        let service = GrpcSfuNodeMediaService::new(Arc::clone(&store), Arc::clone(&store), sink);
+        let mut server = config.tls_server().expect("SFU node TLS server");
+        let server_task = tokio::spawn(async move {
+            server
+                .add_service(sfu_node_media_service_server(service))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+        });
+
+        let uri = format!("https://127.0.0.1:{}", address.port());
+        let unauthenticated_tls = tonic::transport::ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(material.ca.as_bytes()))
+            .domain_name("localhost");
+        let unauthenticated_rejected = match tonic::transport::Endpoint::from_shared(uri.clone())
+            .expect("unauthenticated endpoint")
+            .tls_config(unauthenticated_tls)
+            .expect("unauthenticated TLS config")
+            .connect()
+            .await
+        {
+            Err(_) => true,
+            Ok(channel) => {
+                let mut client =
+                    pb::sfu_node_media_service_client::SfuNodeMediaServiceClient::new(channel);
+                client
+                    .forward_encrypted(tokio_stream::empty::<pb::SfuNodeEncryptedMedia>())
+                    .await
+                    .is_err()
+            }
+        };
+        assert!(
+            unauthenticated_rejected,
+            "server accepted an SFU node RPC without a client certificate"
+        );
+
+        let authenticated_tls = tonic::transport::ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(material.ca.as_bytes()))
+            .domain_name("localhost")
+            .identity(Identity::from_pem(
+                material.client_certificate.as_bytes(),
+                material.client_private_key.as_bytes(),
+            ));
+        let channel = tonic::transport::Endpoint::from_shared(uri)
+            .expect("authenticated endpoint")
+            .tls_config(authenticated_tls)
+            .expect("authenticated TLS config")
+            .connect()
+            .await
+            .expect("mutually authenticated channel");
+        let mut client = pb::sfu_node_media_service_client::SfuNodeMediaServiceClient::new(channel);
+        client
+            .forward_encrypted(tokio_stream::empty::<pb::SfuNodeEncryptedMedia>())
+            .await
+            .expect("mTLS request reaches peer-certificate-gated service");
+
+        server_task.abort();
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
