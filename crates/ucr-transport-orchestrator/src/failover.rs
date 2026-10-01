@@ -216,13 +216,13 @@ fn execute_ranked_routes(
             ));
         }
         if let Some(devices) = protected_devices {
-            if let Err(error) = revalidate_protected_route(intent, planned, devices) {
-                return Err(TransportFailoverExecutionError::new(
+            revalidate_protected_route(intent, planned, devices).map_err(|error| {
+                TransportFailoverExecutionError::new(
                     error,
-                    attempts,
+                    attempts.clone(),
                     TransportFailoverStopReason::PolicyChanged,
-                ));
-            }
+                )
+            })?;
         }
         provider_attempts += 1;
         match planned.provider.transmit_classified(
