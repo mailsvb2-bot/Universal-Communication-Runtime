@@ -1683,11 +1683,6 @@ impl ProductionRuntime {
         config: MachineAuthRuntimeConfig,
     ) -> Result<(), String> {
         validate_local_bind(bind)?;
-        if config.sfu_placement_lifecycle && operator_bind.is_none() {
-            return Err(
-                "SFU placement lifecycle requires the private realtime operator plane".to_owned(),
-            );
-        }
         if self.diagnostics()?.storage_health != StorageHealth::Healthy {
             return Err("production runtime refuses unhealthy storage".to_owned());
         }
@@ -1820,6 +1815,11 @@ impl ProductionRuntime {
         machine_bearer: Option<MachineBearerRuntimeConfig>,
     ) -> Result<(), String> {
         validate_local_bind(bind)?;
+        if config.sfu_placement_lifecycle && operator_bind.is_none() {
+            return Err(
+                "SFU placement lifecycle requires the private realtime operator plane".to_owned(),
+            );
+        }
         if self.diagnostics()?.storage_health != StorageHealth::Healthy {
             return Err("production runtime refuses unhealthy storage".to_owned());
         }
