@@ -177,13 +177,11 @@ impl<'a> TransportOrchestrator<'a> {
             validate_endpoint_descriptor(&option.recipient_endpoint)
                 .map_err(|_| TransportOrchestratorError::InvalidEndpoint)?;
             let protected_device_id = match protected_devices {
-                Some(devices) => {
-                    match protected_device_option_binding(&intent, &option, devices)? {
-                        Some(device_id) => device_id,
-                        None if option.recipient_endpoint.kind == EndpointKind::Device => continue,
-                        None => None,
-                    }
-                }
+                Some(devices) => match protected_device_option_binding(&intent, &option, devices)? {
+                    ProtectedRouteBinding::NonDevice => None,
+                    ProtectedRouteBinding::Device(device_id) => Some(device_id),
+                    ProtectedRouteBinding::Ineligible => continue,
+                },
                 None => None,
             };
             let route_key = (
@@ -338,16 +336,22 @@ impl<'a> TransportOrchestrator<'a> {
     }
 }
 
+enum ProtectedRouteBinding {
+    NonDevice,
+    Device(DeviceId),
+    Ineligible,
+}
+
 fn protected_device_option_binding(
     intent: &CommunicationIntent,
     option: &TransportRouteOption<'_>,
     devices: &dyn DeviceLifecycleStore,
-) -> Result<Option<Option<DeviceId>>, TransportOrchestratorError> {
+) -> Result<ProtectedRouteBinding, TransportOrchestratorError> {
     if option.recipient_endpoint.kind != EndpointKind::Device {
-        return Ok(Some(None));
+        return Ok(ProtectedRouteBinding::NonDevice);
     }
     let Some(device_id) = option.recipient_endpoint.device_id.as_ref() else {
-        return Ok(None);
+        return Ok(ProtectedRouteBinding::Ineligible);
     };
     let device = devices
         .device(&intent.scope, device_id)
@@ -355,9 +359,9 @@ fn protected_device_option_binding(
     if device.is_some_and(|device| {
         device.identity_id == intent.target_identity_id && device_allows_protected_access(&device)
     }) {
-        Ok(Some(Some(device_id.clone())))
+        Ok(ProtectedRouteBinding::Device(device_id.clone()))
     } else {
-        Ok(None)
+        Ok(ProtectedRouteBinding::Ineligible)
     }
 }
 
