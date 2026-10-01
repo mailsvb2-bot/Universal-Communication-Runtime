@@ -9,9 +9,7 @@ use ucr_core::{
 use ucr_crypto::TrustedSigningKeyResolver;
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{ScopedPrincipal, SfuForwardTarget};
-use ucr_sfu::{
-    PreparedSfuCapabilities, SfuError, SfuForwardSink, SfuForwardSinkError, SfuRuntime,
-};
+use ucr_sfu::{PreparedSfuCapabilities, SfuError, SfuForwardSink, SfuForwardSinkError, SfuRuntime};
 
 use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_principal_ref, pb,
@@ -75,8 +73,7 @@ where
 }
 
 #[tonic::async_trait]
-impl<A, S> pb::sfu_node_media_service_server::SfuNodeMediaService
-    for GrpcSfuNodeMediaService<A, S>
+impl<A, S> pb::sfu_node_media_service_server::SfuNodeMediaService for GrpcSfuNodeMediaService<A, S>
 where
     A: AuthorizationEvaluator + 'static,
     S: CallStore
