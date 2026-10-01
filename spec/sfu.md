@@ -112,12 +112,19 @@ grant participant membership or media permission. The receiver revalidates canon
 Device, capability and media permissions before its local sink can accept the encrypted envelope.
 Endpoint E2EE remains unchanged. See ADR-0113.
 
+The outbound mTLS node client foundation is now concrete as well. It accepts only a
+`SfuValidatedForwardBatch`, resolves its client certificate/private key through the shared
+`SecretProvider`, trusts only explicitly configured server CA material, supports bounded
+current/previous credential overlap, and waits for an exact monotonic receipt for every submitted
+target. `Accepted`, `Backpressure`, and `Rejected` remain destination-ingress facts; partial
+acceptance is preserved and no connection write is upgraded to remote success.
+
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
-true. The receiving network boundary is now concrete, but Production horizontal SFU still requires
-an outbound node client tied to `SfuPlacementService.ResolveNode`, binding actual realtime sessions
-to cluster placement, bounded reconnect/failover/drain behavior, live credential reload evidence,
-and load/adversity evidence. The placement directory must never become a Call, Conference,
-membership, authorization, media-key, plaintext-media, Delivery, or recording owner.
+true. Production horizontal SFU still requires tying this outbound client to
+`SfuPlacementService.ResolveNode`, binding actual realtime sessions to cluster placement, bounded
+reconnect/failover/drain behavior, live credential reload evidence in the runtime path, and
+load/adversity evidence. The placement directory must never become a Call, Conference, membership,
+authorization, media-key, plaintext-media, Delivery, or recording owner.
 
 ## Public realtime transport
 

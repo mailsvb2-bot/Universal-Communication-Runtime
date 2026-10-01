@@ -52,8 +52,11 @@ node transport. The node trust root/certificates are deployment credentials, not
 runtime binding uses an isolated private mTLS listener and sources server certificate/private-key
 material through the shared secret-provider boundary with bounded current/previous overlap. It
 installs only explicitly configured client CA roots and fails closed when peer authentication cannot
-be established. Outbound node-client routing and live listener credential reload remain separate
-Production gates.
+be established. The outbound client now consumes only the immutable canonical
+`SfuValidatedForwardBatch`, resolves its mTLS identity through the same `SecretProvider`
+abstraction, trusts only explicit server CA material, and requires one exact destination receipt per
+target before returning success. Placement-aware runtime routing and live listener/client credential
+reload evidence remain separate Production gates.
 
 The stream is bounded and backpressure-aware. `ACCEPTED` means only that the authenticated
 destination SFU process accepted the ciphertext routing item into its bounded ingress. It is not
@@ -117,5 +120,9 @@ The contract and architecture guards must prove:
   wired;
 - the receiving binding must prove real mTLS/authentication failure and bounded backpressure over
   the network boundary;
-- remaining implementation must prove live credential rotation, outbound placement-aware delivery,
+- outbound client mTLS must reject an untrusted client certificate and reach the private node
+  service with a trusted deployment certificate;
+- outbound batch success must be driven by exact ordered destination receipts, preserving explicit
+  partial acceptance/backpressure/rejection;
+- remaining implementation must prove live credential rotation, placement-aware runtime delivery,
   reconnect, node failure/drain, and load/adversity before the Production claim.

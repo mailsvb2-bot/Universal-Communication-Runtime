@@ -106,6 +106,11 @@ pub use sfu_node_media_service::{
     GrpcSfuNodeMediaService, SFU_NODE_RECEIPT_CHANNEL_CAPACITY, sfu_node_media_service_server,
 };
 
+mod sfu_node_media_client;
+pub use sfu_node_media_client::{
+    GrpcSfuNodeMediaClient, SfuNodeMediaClientError, SfuNodeMediaClientTlsConfig,
+};
+
 mod machine_auth_service;
 pub use machine_auth_service::{
     GrpcMachineAuthService, MachineAuthDiscovery, machine_auth_service_server,
