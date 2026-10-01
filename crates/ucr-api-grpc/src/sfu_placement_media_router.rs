@@ -2,9 +2,7 @@ use std::{fmt, net::SocketAddr};
 
 use tonic::transport::{Channel, Endpoint};
 use ucr_model::{CallId, OpaqueId, TenantScope};
-use ucr_sfu::{
-    MAX_SFU_REGION_BYTES, SfuForwardOutcome, SfuNodeEndpoint, SfuValidatedForwardBatch,
-};
+use ucr_sfu::{MAX_SFU_REGION_BYTES, SfuForwardOutcome, SfuNodeEndpoint, SfuValidatedForwardBatch};
 
 use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, SfuNodeMediaClientError,
@@ -99,10 +97,9 @@ impl PlacementAwareSfuNodeRouter {
             .connect()
             .await
             .map_err(|error| SfuPlacementMediaRouterError::PlacementTransport(error.to_string()))?;
-        let placement =
-            pb::sfu_placement_service_client::SfuPlacementServiceClient::new(channel)
-                .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
-                .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
+        let placement = pb::sfu_placement_service_client::SfuPlacementServiceClient::new(channel)
+            .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
+            .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
         Ok(Self {
             placement,
             node_tls,
@@ -183,11 +180,9 @@ impl PlacementAwareSfuNodeRouter {
             .ok_or(SfuPlacementMediaRouterError::Protocol(
                 "SFU node resolution omitted route",
             ))?;
-        let route_node = route
-            .node_id
-            .ok_or(SfuPlacementMediaRouterError::Protocol(
-                "SFU node resolution omitted node id",
-            ))?;
+        let route_node = route.node_id.ok_or(SfuPlacementMediaRouterError::Protocol(
+            "SFU node resolution omitted node id",
+        ))?;
         if route_node.value != selected_pb.value {
             return Err(SfuPlacementMediaRouterError::Protocol(
                 "SFU node resolution returned a different node",
@@ -244,7 +239,7 @@ mod tests {
     use tonic::{Request, Response, Status, transport::Server};
     use ucr_model::{NamespaceId, TenantId};
     use ucr_secrets::{
-        InMemorySecretProvider, SecretHandle, SecretMaterial, SecretPurpose, SecretProvider,
+        InMemorySecretProvider, SecretHandle, SecretMaterial, SecretProvider, SecretPurpose,
         SecretVersion,
     };
 
@@ -360,8 +355,10 @@ mod tests {
 
     async fn router_for(
         service: FixedPlacementService,
-    ) -> (PlacementAwareSfuNodeRouter, tokio::task::JoinHandle<Result<(), tonic::transport::Error>>)
-    {
+    ) -> (
+        PlacementAwareSfuNodeRouter,
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind placement service");
