@@ -2133,7 +2133,7 @@ fn decode_crypto_suite(value: i32) -> Result<CryptoSuite, CanonicalError> {
     }
 }
 
-fn pb_sfu_forward_envelope(value: &SfuForwardEnvelope) -> pb::SfuForwardEnvelope {
+pub(crate) fn pb_sfu_forward_envelope(value: &SfuForwardEnvelope) -> pb::SfuForwardEnvelope {
     pb::SfuForwardEnvelope {
         frame: Some(pb::EncryptedGroupMediaFrame {
             header: Some(pb::GroupMediaFrameHeader {

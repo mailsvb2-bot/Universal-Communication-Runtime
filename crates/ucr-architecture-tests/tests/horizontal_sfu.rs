@@ -194,3 +194,26 @@ fn horizontal_sfu_node_media_listener_is_private_mtls_and_not_a_public_capabilit
     assert!(spec.contains("private mTLS node listener"));
     assert!(spec.contains("outbound node client"));
 }
+
+#[test]
+fn horizontal_sfu_outbound_node_client_is_mtls_receipt_driven_and_still_fail_closed() {
+    let client = read("crates/ucr-api-grpc/src/sfu_node_media_client.rs");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let spec = read("spec/sfu.md");
+    let adr = read("docs/adr/0113-horizontal-sfu-node-media-infrastructure-trust.md");
+
+    assert!(client.contains("pub struct SfuNodeMediaClientTlsConfig"));
+    assert!(client.contains("pub struct GrpcSfuNodeMediaClient"));
+    assert!(client.contains("SfuValidatedForwardBatch"));
+    assert!(client.contains("ClientTlsConfig::new()"));
+    assert!(client.contains(".identity(Identity::from_pem("));
+    assert!(client.contains(".ca_certificate(Certificate::from_pem("));
+    assert!(client.contains("forward_batch"));
+    assert!(client.contains("receipt.stream_sequence"));
+    assert!(client.contains("SfuNodeForwardStatus::Backpressure"));
+    assert!(client.contains("accepted_before_failure"));
+    assert!(client.contains("active_secret_set"));
+    assert!(runtime.contains("horizontal_sfu: false"));
+    assert!(spec.contains("outbound mTLS node client foundation"));
+    assert!(adr.contains("outbound client now consumes only"));
+}
