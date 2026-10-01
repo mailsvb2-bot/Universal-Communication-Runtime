@@ -41,7 +41,8 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     assert!(https_edge.contains("SecretPurpose::TlsCertificate"));
     assert!(https_edge.contains("SecretPurpose::TlsPrivateKey"));
     assert!(https_edge.contains("current_acceptor"));
-    assert!(https_edge.contains("ReloadingFileTlsSecretProvider"));
+    assert!(https_edge.contains("pub use ucr_secrets::ReloadingFileTlsSecretProvider"));
+    assert!(!https_edge.contains("pub struct ReloadingFileTlsSecretProvider"));
     assert!(https_edge.contains("UCR_HTTPS_EDGE_SECRET_PROVIDER"));
     assert!(https_edge_main.contains("run_configured"));
     assert!(machine_auth.contains("GrpcMachineAuthService::with_secret_provider"));
@@ -77,6 +78,7 @@ fn secret_provider_is_replaceable_and_does_not_become_a_second_security_owner() 
     assert!(runtime_main.contains("dispatch_webhook_once_with_secret_provider"));
     assert!(secrets.contains("pub trait SecretProvider"));
     assert!(secrets.contains("pub struct ReloadingFileSecretProvider"));
+    assert!(secrets.contains("pub struct ReloadingFileTlsSecretProvider"));
     assert!(secrets.contains("MAX_RELOADABLE_SECRET_MANIFEST_BYTES"));
     assert!(secrets.contains("pub enum SecretPurpose"));
     assert!(secrets.contains("MachineTokenSigning"));

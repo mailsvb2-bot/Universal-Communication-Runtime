@@ -99,12 +99,18 @@ rotation, and recovery behavior.
 
 ### Shipped HTTPS-edge provider mode
 
-The shipped `ucr-https-edge` binary enters the provider-backed path through
-`run_configured()`. Setting `UCR_HTTPS_EDGE_SECRET_PROVIDER=file-reload` selects the
-`ReloadingFileTlsSecretProvider` compatibility adapter; current certificate/private-key files are
-re-read for new connections, and optional previous files provide the bounded overlap pair during a
-staged rotation. Secret IDs are configurable through the corresponding certificate/key secret-id
-environment variables.
+The shared `ucr-secrets::ReloadingFileTlsSecretProvider` is the shipped file-backed TLS adapter.
+It is infrastructure-neutral so HTTPS edge, private SFU node transport, and future TLS consumers do
+not grow separate file-secret implementations. Current certificate/private-key files are re-read on
+each lookup, and optional previous files provide the bounded overlap pair during staged rotation.
+Symlinks and oversized material fail closed; on Unix, private-key files must not grant group/other
+permissions.
+
+The `ucr-https-edge` binary enters this provider-backed path through `run_configured()`. Setting
+`UCR_HTTPS_EDGE_SECRET_PROVIDER=file-reload` selects the shared adapter while retaining the
+existing `ucr_https_edge::ReloadingFileTlsSecretProvider` re-export for source compatibility.
+Secret IDs remain configurable through the corresponding certificate/key secret-id environment
+variables.
 
 Provider lookup and PEM parsing do not run in the serial accept loop. Each accepted TCP connection
 resolves its TLS material inside that connection task, so one slow provider operation cannot stop
