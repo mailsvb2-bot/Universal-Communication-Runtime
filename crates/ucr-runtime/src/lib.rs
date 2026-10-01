@@ -1814,26 +1814,13 @@ impl ProductionRuntime {
         config: RealtimeRuntimeConfig,
         machine_bearer: Option<MachineBearerRuntimeConfig>,
     ) -> Result<(), String> {
-        validate_local_bind(bind)?;
-        if config.sfu_placement_lifecycle && operator_bind.is_none() {
-            return Err(
-                "SFU placement lifecycle requires the private realtime operator plane".to_owned(),
-            );
-        }
-        if self.diagnostics()?.storage_health != StorageHealth::Healthy {
-            return Err("production runtime refuses unhealthy storage".to_owned());
-        }
-
-        let listener = TcpListener::bind(bind)
-            .await
-            .map_err(|error| format!("bind local realtime API: {error}"))?;
-        let address = listener
-            .local_addr()
-            .map_err(|error| format!("resolve local realtime API: {error}"))?;
-        println!("UCR_REALTIME_READY endpoint=http://{address}");
-        println!("UCR_RUNTIME_MODE={RUNTIME_MODE} realtime=true tls_edge=required test_mode=false");
-        let incoming = TcpListenerStream::new(listener);
-        let operator_incoming = bind_realtime_operator_listener(bind, operator_bind).await?;
+        let (incoming, operator_incoming) = self
+            .prepare_realtime_listeners(
+                bind,
+                operator_bind,
+                config.sfu_placement_lifecycle,
+            )
+            .await?;
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
         let store = Arc::clone(&self.store);
@@ -1923,6 +1910,35 @@ impl ProductionRuntime {
         };
         bridge_task.abort();
         server_result
+    }
+
+    async fn prepare_realtime_listeners(
+        &self,
+        bind: SocketAddr,
+        operator_bind: Option<SocketAddr>,
+        sfu_placement_lifecycle: bool,
+    ) -> Result<(TcpListenerStream, Option<TcpListenerStream>), String> {
+        validate_local_bind(bind)?;
+        if sfu_placement_lifecycle && operator_bind.is_none() {
+            return Err(
+                "SFU placement lifecycle requires the private realtime operator plane".to_owned(),
+            );
+        }
+        if self.diagnostics()?.storage_health != StorageHealth::Healthy {
+            return Err("production runtime refuses unhealthy storage".to_owned());
+        }
+
+        let listener = TcpListener::bind(bind)
+            .await
+            .map_err(|error| format!("bind local realtime API: {error}"))?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| format!("resolve local realtime API: {error}"))?;
+        println!("UCR_REALTIME_READY endpoint=http://{address}");
+        println!("UCR_RUNTIME_MODE={RUNTIME_MODE} realtime=true tls_edge=required test_mode=false");
+        let incoming = TcpListenerStream::new(listener);
+        let operator_incoming = bind_realtime_operator_listener(bind, operator_bind).await?;
+        Ok((incoming, operator_incoming))
     }
 }
 
