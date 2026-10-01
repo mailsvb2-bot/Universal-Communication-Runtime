@@ -289,8 +289,7 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
         "realtime serve must route listener setup through the guarded preparation path"
     );
     assert!(
-        runtime[realtime_start..]
-            .contains("if sfu_placement_lifecycle && operator_bind.is_none()"),
+        runtime[realtime_start..].contains("if sfu_placement_lifecycle && operator_bind.is_none()"),
         "realtime listener preparation must fail closed without its private operator plane"
     );
     assert!(runtime_main.contains("UCR_SFU_PLACEMENT_LIFECYCLE_ENABLED"));
