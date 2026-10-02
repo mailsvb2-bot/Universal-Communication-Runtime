@@ -326,6 +326,10 @@ fn horizontal_sfu_realtime_publication_uses_validated_placement_router_and_stays
     assert!(realtime.contains("router.forward_validated_batch(&batch).await"));
     assert!(realtime.contains("SfuValidatedForwardBatch"));
 
+    let placement = read("crates/ucr-api-grpc/src/sfu_placement_service.rs");
+    assert!(placement.contains("lifecycle_policy: SfuPlacementPolicy"));
+    assert!(placement.contains(".place_session(scope, call_id, &self.lifecycle_policy"));
+
     assert!(router.contains("pub fn connect_lazy"));
     assert!(router.contains("impl RealtimeSfuMediaRouter for PlacementAwareSfuNodeRouter"));
     assert!(router.contains("let mut router = self.clone();"));
@@ -334,6 +338,8 @@ fn horizontal_sfu_realtime_publication_uses_validated_placement_router_and_stays
 
     assert!(runtime.contains("pub struct SfuPlacementMediaRuntimeConfig"));
     assert!(runtime.contains("configure_sfu_placement_media_router"));
+    assert!(runtime.contains("lifecycle_placement_policy"));
+    assert!(runtime.contains("GrpcSfuPlacementService::with_lifecycle_policy"));
     assert!(runtime.contains("resolved_operator_endpoint"));
     assert!(runtime.contains("operator_incoming.as_ref().map(|(_, address)| *address)"));
     assert!(runtime.contains("PlacementAwareSfuNodeRouter::connect_lazy"));
