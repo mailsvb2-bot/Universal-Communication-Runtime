@@ -20,8 +20,7 @@ use ucr_api_grpc::{
     OperatorSfuNodeHeartbeat, PlacementAwareSfuNodeRouter, RealtimeSfuMediaRouter,
     RealtimeSfuPlacementLifecycle, RealtimeWebRtcDependencies, SfuNodeMediaClientTlsConfig,
     SfuPlacementRoutingPolicy, UniversalConferenceRuntimeCapabilities, attachment_service_server,
-    call_service_server,
-    conference_service_server, device_service_server, event_service_server,
+    call_service_server, conference_service_server, device_service_server, event_service_server,
     expire_due_recordings_once, group_service_server, integration_service_server,
     machine_auth_service_server, operator_runtime_service_server, pb, realtime_service_server,
     recording_service_server, sfu_node_media_service_server, sfu_placement_service_server,
@@ -527,10 +526,7 @@ pub struct SfuPlacementMediaRuntimeConfig {
 
 impl SfuPlacementMediaRuntimeConfig {
     #[must_use]
-    pub fn new(
-        node_tls: SfuNodeMediaClientTlsConfig,
-        policy: SfuPlacementRoutingPolicy,
-    ) -> Self {
+    pub fn new(node_tls: SfuNodeMediaClientTlsConfig, policy: SfuPlacementRoutingPolicy) -> Self {
         Self { node_tls, policy }
     }
 }
@@ -2425,10 +2421,8 @@ fn configure_sfu_placement_media_router(
     >,
     operator_bind: Option<SocketAddr>,
     config: Option<SfuPlacementMediaRuntimeConfig>,
-) -> Result<
-    GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
-    String,
-> {
+) -> Result<GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>, String>
+{
     let Some(config) = config else {
         return Ok(realtime_service);
     };
@@ -2515,10 +2509,7 @@ async fn run_webrtc_e2ee_bridge(
     while let Some(frame) = ingress.recv().await {
         if service.has_sfu_media_router() {
             let _ = route_webrtc_e2ee_frame_via_configured_route(
-                &service,
-                &registry,
-                &provider,
-                &frame,
+                &service, &registry, &provider, &frame,
             )
             .await;
             continue;
@@ -2554,11 +2545,7 @@ async fn route_webrtc_e2ee_frame_via_configured_route(
         provider: Arc::clone(provider),
     };
     service
-        .forward_authenticated_e2ee_media_via_configured_route(
-            &claims,
-            &frame.envelope,
-            &sink,
-        )
+        .forward_authenticated_e2ee_media_via_configured_route(&claims, &frame.envelope, &sink)
         .await
         .map_err(|_| ())
 }
