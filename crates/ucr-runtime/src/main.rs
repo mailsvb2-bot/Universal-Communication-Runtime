@@ -544,8 +544,7 @@ fn read_sfu_ca_file(path: &str, label: &str) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|error| format!("read {label} file: {error}"))
 }
 
-fn sfu_placement_media_config_from_env(
-) -> Result<Option<SfuPlacementMediaRuntimeConfig>, String> {
+fn sfu_placement_media_config_from_env() -> Result<Option<SfuPlacementMediaRuntimeConfig>, String> {
     let enabled = bool_env("UCR_SFU_PLACEMENT_MEDIA_ENABLED")?.unwrap_or(false);
     let dependent_variables = [
         "UCR_SFU_ROUTER_CLIENT_CERT_FILE",
