@@ -563,8 +563,7 @@ fn sfu_placement_media_config_from_env() -> Result<Option<SfuPlacementMediaRunti
             .any(|variable| std::env::var(variable).is_ok())
         {
             return Err(
-                "SFU router configuration requires UCR_SFU_PLACEMENT_MEDIA_ENABLED=true"
-                    .to_owned(),
+                "SFU router configuration requires UCR_SFU_PLACEMENT_MEDIA_ENABLED=true".to_owned(),
             );
         }
         return Ok(None);
@@ -583,15 +582,11 @@ fn sfu_placement_media_config_from_env() -> Result<Option<SfuPlacementMediaRunti
             .to_owned()
     })?;
     let server_name = std::env::var("UCR_SFU_ROUTER_SERVER_NAME").map_err(|_| {
-        "UCR_SFU_ROUTER_SERVER_NAME is required when placement media routing is enabled"
-            .to_owned()
+        "UCR_SFU_ROUTER_SERVER_NAME is required when placement media routing is enabled".to_owned()
     })?;
-    let previous_certificate_path =
-        std::env::var("UCR_SFU_ROUTER_PREVIOUS_CLIENT_CERT_FILE").ok();
-    let previous_private_key_path =
-        std::env::var("UCR_SFU_ROUTER_PREVIOUS_CLIENT_KEY_FILE").ok();
-    let previous_server_ca_path =
-        std::env::var("UCR_SFU_ROUTER_PREVIOUS_SERVER_CA_FILE").ok();
+    let previous_certificate_path = std::env::var("UCR_SFU_ROUTER_PREVIOUS_CLIENT_CERT_FILE").ok();
+    let previous_private_key_path = std::env::var("UCR_SFU_ROUTER_PREVIOUS_CLIENT_KEY_FILE").ok();
+    let previous_server_ca_path = std::env::var("UCR_SFU_ROUTER_PREVIOUS_SERVER_CA_FILE").ok();
     let certificate_secret_id = std::env::var("UCR_SFU_ROUTER_CLIENT_CERT_SECRET_ID")
         .unwrap_or_else(|_| "sfu-router-client-certificate".to_owned());
     let private_key_secret_id = std::env::var("UCR_SFU_ROUTER_CLIENT_KEY_SECRET_ID")
