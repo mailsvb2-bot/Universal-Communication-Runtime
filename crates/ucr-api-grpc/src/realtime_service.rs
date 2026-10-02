@@ -1141,8 +1141,8 @@ where
                         )
                         .await
                         .and_then(|accepted_recipients| {
-                            let accepted_recipient_count =
-                                u32::try_from(accepted_recipients).map_err(|_| {
+                            let accepted_recipient_count = u32::try_from(accepted_recipients)
+                                .map_err(|_| {
                                     CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
                                 })?;
                             Ok(pb::RealtimePublishMediaReceipt {
