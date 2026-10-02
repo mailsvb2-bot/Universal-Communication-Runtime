@@ -149,7 +149,11 @@ that same `RealtimeSessionRegistry`. Pruning an expired final session records on
 roster. A cleanup candidate remains pending until the idempotent placement release succeeds, so a
 transient infrastructure failure is retried on the next bounded sweep. If a Call becomes active
 again before cleanup, the registry's live-session count wins and the stale candidate is acknowledged
-without releasing the active placement. The sweeper is aborted with the realtime server and its
+without releasing the active placement. Fresh join admission, explicit final leave/rollback, and
+expiry cleanup share one async placement-transition mutex, so cleanup cannot release a reservation
+between a fresh join's placement ensure and its canonical registry admission. The normal registry
+keeps expiry-cleanup tracking disabled when the placement lifecycle gate is off, preserving the
+non-horizontal realtime capacity semantics. The sweeper is aborted with the realtime server and its
 state is intentionally ephemeral because the in-process placement directory is ephemeral too.
 
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
