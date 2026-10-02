@@ -338,46 +338,18 @@ impl SfuClusterDirectory {
         Ok(())
     }
 
-    /// Places one already-authorized canonical Call and reserves capacity for a fresh placement.
-    ///
-    /// Stickiness is resolved only from this directory's ephemeral Call-to-worker map; callers
-    /// cannot claim an arbitrary current worker. A draining worker is retained only for a Call
-    /// already mapped to it. Fresh placement increments the selected worker's active-session count
-    /// before returning, so one directory instance cannot overbook the last slot.
-    ///
-    /// # Errors
-    /// Returns `NoHealthyCapacity` when policy leaves no live worker capacity.
-    pub fn place_session(
-        &mut self,
-        scope: &ucr_model::TenantScope,
-        call_id: &ucr_model::CallId,
+    fn select_placement_candidate(
+        &self,
+        key: &[u8],
         policy: &SfuPlacementPolicy,
         now_unix_ms: i64,
-    ) -> Result<SfuPlacementDecision, SfuPlacementError> {
-        let key = placement_key(scope, call_id);
-        if let Some(current_node_id) = self.placements.get(&key).cloned() {
-            if let Some(current) = self.nodes.get(&current_node_id)
-                && current.is_live_at(now_unix_ms)
-                && current.active_sessions <= current.max_sessions
-            {
-                let preferred = policy.preferred_region.as_deref();
-                let crossed_region = preferred.is_some_and(|region| current.region != region);
-                if !crossed_region || policy.allow_cross_region_failover {
-                    return Ok(SfuPlacementDecision {
-                        node_id: current.node_id.clone(),
-                        retained_sticky_placement: true,
-                        crossed_region,
-                    });
-                }
-            }
-            self.placements.remove(&key);
-            self.release_reservation(&current_node_id)?;
-        }
-
+        excluded_node_id: Option<&str>,
+    ) -> Result<(String, String, ucr_model::OpaqueId), SfuPlacementError> {
         let mut candidates = self
             .nodes
             .values()
             .filter(|node| self.accepts_new_session_at(node, now_unix_ms))
+            .filter(|node| excluded_node_id != Some(node.node_id.as_str()))
             .collect::<Vec<_>>();
         if candidates.is_empty() {
             return Err(SfuPlacementError::NoHealthyCapacity);
@@ -395,20 +367,124 @@ impl SfuClusterDirectory {
 
         let selected = candidates
             .into_iter()
-            .max_by_key(|node| placement_score(&key, node.node_id.as_wire_bytes()))
+            .max_by_key(|node| placement_score(key, node.node_id.as_wire_bytes()))
             .ok_or(SfuPlacementError::NoHealthyCapacity)?;
-        let selected_id = selected.node_id.as_str().to_owned();
-        let selected_region = selected.region.clone();
-        let selected_node = self
-            .nodes
-            .get(&selected_id)
-            .ok_or(SfuPlacementError::NoHealthyCapacity)?;
-        if !self.accepts_new_session_at(selected_node, now_unix_ms) {
+        Ok((
+            selected.node_id.as_str().to_owned(),
+            selected.region.clone(),
+            selected.node_id.clone(),
+        ))
+    }
+
+    fn migrate_session_placement(
+        &mut self,
+        key: &[u8],
+        current_node_id: &str,
+        policy: &SfuPlacementPolicy,
+        now_unix_ms: i64,
+    ) -> Result<Option<SfuPlacementDecision>, SfuPlacementError> {
+        let (selected_id, selected_region, selected_node_id) =
+            match self.select_placement_candidate(
+                key,
+                policy,
+                now_unix_ms,
+                Some(current_node_id),
+            ) {
+                Ok(selected) => selected,
+                Err(SfuPlacementError::NoHealthyCapacity) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+
+        self.reserve_session(&selected_id)?;
+        if let Err(error) = self.release_reservation(current_node_id) {
+            let _ = self.release_reservation(&selected_id);
+            return Err(error);
+        }
+        self.placements.insert(key.to_vec(), selected_id);
+        let preferred = policy.preferred_region.as_deref();
+        Ok(Some(SfuPlacementDecision {
+            node_id: selected_node_id,
+            retained_sticky_placement: false,
+            crossed_region: preferred.is_some_and(|region| selected_region != region),
+        }))
+    }
+
+    /// Places one already-authorized canonical Call and reserves capacity for a fresh placement.
+    ///
+    /// Stickiness is resolved only from this directory's ephemeral Call-to-worker map; callers
+    /// cannot claim an arbitrary current worker. Healthy sticky placement is retained while its
+    /// policy remains valid. A draining sticky worker is migrated on the next placement attempt
+    /// when policy-compliant healthy capacity exists; if no replacement exists, the still-live
+    /// draining worker is retained rather than disrupting the Call. Unavailable/policy-invalid
+    /// stickiness fails closed when no replacement exists. Migration reserves the destination
+    /// before releasing the source reservation, so bounded failover cannot transiently overbook or
+    /// lose the last viable placement.
+    ///
+    /// # Errors
+    /// Returns `NoHealthyCapacity` when a fresh or unusable sticky placement has no policy-compliant
+    /// live worker capacity, or an invariant error when reservation accounting is inconsistent.
+    pub fn place_session(
+        &mut self,
+        scope: &ucr_model::TenantScope,
+        call_id: &ucr_model::CallId,
+        policy: &SfuPlacementPolicy,
+        now_unix_ms: i64,
+    ) -> Result<SfuPlacementDecision, SfuPlacementError> {
+        let key = placement_key(scope, call_id);
+        if let Some(current_node_id) = self.placements.get(&key).cloned() {
+            if let Some(current) = self.nodes.get(&current_node_id).cloned() {
+                let preferred = policy.preferred_region.as_deref();
+                let crossed_region = preferred.is_some_and(|region| current.region != region);
+                let policy_allows_current =
+                    !crossed_region || policy.allow_cross_region_failover;
+                let current_capacity_valid = current.active_sessions <= current.max_sessions;
+
+                if current.is_live_at(now_unix_ms)
+                    && current.state == SfuNodeState::Healthy
+                    && current_capacity_valid
+                    && policy_allows_current
+                {
+                    return Ok(SfuPlacementDecision {
+                        node_id: current.node_id,
+                        retained_sticky_placement: true,
+                        crossed_region,
+                    });
+                }
+
+                if current.is_live_at(now_unix_ms)
+                    && current.state == SfuNodeState::Draining
+                    && current_capacity_valid
+                    && policy_allows_current
+                {
+                    if let Some(migrated) = self.migrate_session_placement(
+                        &key,
+                        &current_node_id,
+                        policy,
+                        now_unix_ms,
+                    )? {
+                        return Ok(migrated);
+                    }
+                    return Ok(SfuPlacementDecision {
+                        node_id: current.node_id,
+                        retained_sticky_placement: true,
+                        crossed_region,
+                    });
+                }
+            }
+
+            if let Some(migrated) =
+                self.migrate_session_placement(&key, &current_node_id, policy, now_unix_ms)?
+            {
+                return Ok(migrated);
+            }
             return Err(SfuPlacementError::NoHealthyCapacity);
         }
-        let selected_node_id = selected_node.node_id.clone();
+
+        let (selected_id, selected_region, selected_node_id) =
+            self.select_placement_candidate(&key, policy, now_unix_ms, None)?;
         self.reserve_session(&selected_id)?;
         self.placements.insert(key, selected_id);
+        let preferred = policy.preferred_region.as_deref();
         Ok(SfuPlacementDecision {
             node_id: selected_node_id,
             retained_sticky_placement: false,
@@ -1080,7 +1156,7 @@ mod horizontal_placement_tests {
     }
 
     #[test]
-    fn draining_node_keeps_existing_session_but_receives_no_new_placement() {
+    fn draining_node_migrates_existing_session_and_receives_no_new_placement() {
         let mut directory = SfuClusterDirectory::default();
         let draining_id = opaque("sfu-drain");
         directory
@@ -1110,16 +1186,30 @@ mod horizontal_placement_tests {
             .mark_draining(&draining_id)
             .expect("mark draining");
 
-        let sticky = directory
+        let migrated = directory
             .place_session(
                 &scope(),
                 &call("call-draining"),
                 &SfuPlacementPolicy::default(),
                 100,
             )
-            .expect("sticky draining");
-        assert_eq!(sticky.node_id, draining_id);
-        assert!(sticky.retained_sticky_placement);
+            .expect("migrate draining placement");
+        assert_eq!(migrated.node_id.as_str(), "sfu-new");
+        assert!(!migrated.retained_sticky_placement);
+        assert_eq!(
+            directory
+                .node_with_capacity(&draining_id)
+                .expect("draining capacity")
+                .reserved_sessions,
+            0
+        );
+        assert_eq!(
+            directory
+                .node_with_capacity(&opaque("sfu-new"))
+                .expect("replacement capacity")
+                .reserved_sessions,
+            1
+        );
 
         let fresh = directory
             .place_session(
@@ -1131,6 +1221,61 @@ mod horizontal_placement_tests {
             .expect("fresh placement");
         assert_eq!(fresh.node_id.as_str(), "sfu-new");
         assert!(!fresh.retained_sticky_placement);
+    }
+
+    #[test]
+    fn draining_node_retains_existing_session_when_no_replacement_capacity_exists() {
+        let mut directory = SfuClusterDirectory::default();
+        let draining_id = opaque("sfu-drain-only");
+        directory
+            .upsert_node(node(
+                draining_id.as_str(),
+                "eu",
+                SfuNodeState::Healthy,
+                0,
+                1,
+                10_000,
+            ))
+            .expect("draining candidate");
+        directory
+            .place_session(
+                &scope(),
+                &call("call-draining-only"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("initial placement");
+        directory
+            .upsert_node(node("sfu-full", "eu", SfuNodeState::Healthy, 1, 1, 10_000))
+            .expect("full replacement");
+        directory
+            .mark_draining(&draining_id)
+            .expect("mark draining");
+
+        let retained = directory
+            .place_session(
+                &scope(),
+                &call("call-draining-only"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("retain draining placement");
+        assert_eq!(retained.node_id, draining_id);
+        assert!(retained.retained_sticky_placement);
+        assert_eq!(
+            directory
+                .node_with_capacity(&draining_id)
+                .expect("draining capacity")
+                .reserved_sessions,
+            1
+        );
+        assert_eq!(
+            directory
+                .node_with_capacity(&opaque("sfu-full"))
+                .expect("full capacity")
+                .reserved_sessions,
+            0
+        );
     }
 
     #[test]
