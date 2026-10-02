@@ -22,6 +22,20 @@ The reference browser/mobile binding is `ucr-realtime-web`: it serves a self-con
 
 A dropped browser downlink may be reattached to the exact still-authenticated realtime session without redeeming the join grant again. The registry creates a fresh bounded queue only after the prior receiver is actually closed, advances the session sequence, and emits the canonical `reconnected` attendance transition; a competing live second consumer is rejected. The browser retries the media stream after temporary network loss and `offline -> online` transitions while the signed session remains valid. This preserves one-time join-grant semantics while allowing transport reconnection.
 
+The production realtime daemon also runs a bounded terminal-cleanup sweep. It snapshots only current
+non-expired local session claims plus Calls represented in the shared ephemeral Conference runtime
+state, resolves their durable Call/Universal Conference authority, and reaps local WebRTC/session
+state when the Call is already terminated or the Universal Conference is `ending|ended`. It appends
+the canonical left-attendance transition and clears exact-Call ephemeral Conference state. Legacy or
+non-Universal Calls are not inferred as closed. When the optional horizontal-SFU placement lifecycle
+is enabled, terminal cleanup enters the same serialized placement transition used by join/leave,
+queues the exact Call in the existing bounded cleanup-retry coordinates before removing sessions,
+releases placement after the final local session is gone, acknowledges the retry coordinate only
+after successful release, and clears ephemeral Conference state last. A transient placement-release
+failure therefore remains retryable and cannot silently leak capacity or race a fresh placement.
+The worker logs counts only, never IDs, join grants, TURN credentials, media material or participant
+data.
+
 The same authenticated session now owns the WebRTC signalling lifecycle. `StartWebRtc`, `SetWebRtcRemoteDescription`, `AddWebRtcIceCandidate`, and `CloseWebRtc` are methods of the existing `ucr.v1.RealtimeService`; they do not introduce a second signalling/authentication owner. Each call revalidates the signed grant, exact scope/call/session tuple, accepted Conference participant and active realtime registry session before touching ephemeral peer state. Blocking peer-engine operations execute outside the Tokio gRPC executor.
 
 Browser-origin policy is fail-closed. Same-origin browser requests are accepted by exact `Origin` + `Host` match. Additional embedding/application origins must be enumerated in `UCR_REALTIME_ALLOWED_ORIGINS`; wildcard origins are rejected. Allowed cross-origin responses echo only the validated exact origin, include `Vary: Origin`, and expose only the bounded POST/OPTIONS + Authorization/Content-Type preflight surface. A disallowed browser origin is rejected before bearer-token or request-body processing.

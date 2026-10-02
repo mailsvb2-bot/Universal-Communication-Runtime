@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -21,14 +22,15 @@ use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage,
     AdaptiveMediaTelemetry, CallId, CallParticipantState, CallSignal, CallSignalKind,
-    ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
-    ConferenceParticipantRole, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
-    DeferredMediaFallback, DeliveryState, DeviceId, DeviceLifecycleState, DeviceRef,
-    EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind, MediaThermalState,
-    MessageEnvelope, MessageId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, ScopedPrincipal,
-    SessionId, SfuForwardEnvelope, SfuForwardTarget, TenantScope, UniversalConferenceLifecycle,
-    VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType, WebRtcSessionDescription,
+    CallSignallingState, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy,
+    ConferenceMediaSubscription, ConferenceParticipantRole, ConferenceSubscriptionSet,
+    CorrelationContext, CryptoSuite, DeferredMediaFallback, DeliveryState, DeviceId,
+    DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId,
+    GroupMediaFrameHeader, GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind,
+    MediaThermalState, MessageEnvelope, MessageId, OpaqueId, OriginRef, PrincipalId, PrincipalKind,
+    ScopedPrincipal, SessionId, SfuForwardEnvelope, SfuForwardTarget, TenantScope,
+    UniversalConferenceLifecycle, VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
+    WebRtcSessionDescription,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
@@ -56,6 +58,20 @@ use super::{
 pub const REALTIME_AUTHORIZATION_METADATA_KEY: &str = "authorization";
 const REALTIME_BEARER_PREFIX: &str = "Bearer ";
 const REALTIME_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RealtimeCleanupSweep {
+    pub inspected_calls: usize,
+    pub closed_calls: usize,
+    pub sessions_reaped: usize,
+    pub ephemeral_entries_removed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeCallCleanupDecision {
+    Keep,
+    Cleanup,
+}
 
 #[derive(Debug)]
 struct BandwidthQuotaSink<'a> {
@@ -2096,6 +2112,135 @@ where
         }
     }
 
+    /// Reaps local realtime/WebRTC and ephemeral Conference state whose durable authority has
+    /// already ended.
+    ///
+    /// This sweep is intentionally node-local. Every realtime node runs it against the shared
+    /// durable Conference/Call state, so a separate management API process never needs access to
+    /// another node's in-memory registry. When horizontal SFU placement is enabled, the sweep uses
+    /// the same serialized placement transition and bounded retry queue as ordinary expiry cleanup.
+    ///
+    /// # Errors
+    /// Returns explicit durable-store, registry, WebRTC-provider, attendance-event, placement, or
+    /// runtime-state failures. Placement release failures remain queued for retry; ephemeral Call
+    /// state is cleared only after placement cleanup succeeds.
+    pub async fn cleanup_closed_conferences_once(
+        &self,
+    ) -> Result<RealtimeCleanupSweep, CanonicalError> {
+        let now_unix_ms = self.now()?;
+        self.cleanup_closed_conferences_at(now_unix_ms).await
+    }
+
+    async fn cleanup_closed_conferences_at(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<RealtimeCleanupSweep, CanonicalError> {
+        let active_claims = self
+            .registry
+            .active_claims_at(now_unix_ms)
+            .map_err(map_registry_error)?;
+        let mut calls = BTreeMap::<Vec<u8>, (TenantScope, CallId)>::new();
+        for claims in &active_claims {
+            insert_cleanup_call(&mut calls, &claims.scope, &claims.call_id);
+        }
+        for (scope, call_id) in self
+            .conference_state
+            .tracked_calls()
+            .map_err(|error| map_conference_error(&error))?
+        {
+            insert_cleanup_call(&mut calls, &scope, &call_id);
+        }
+
+        let mut sweep = RealtimeCleanupSweep {
+            inspected_calls: calls.len(),
+            ..RealtimeCleanupSweep::default()
+        };
+        for (_, (scope, call_id)) in calls {
+            if self.cleanup_decision(&scope, &call_id)? != RuntimeCallCleanupDecision::Cleanup {
+                continue;
+            }
+            sweep.closed_calls = sweep.closed_calls.saturating_add(1);
+
+            let _placement_guard = self.sfu_placement_transition_guard().await;
+            if self.sfu_placement_lifecycle.is_some() {
+                self.registry
+                    .queue_call_cleanup_candidate(&scope, &call_id)
+                    .map_err(map_registry_error)?;
+            }
+
+            for claims in active_claims
+                .iter()
+                .filter(|claims| claims.scope == scope && claims.call_id == call_id)
+            {
+                let provider = Arc::clone(&self.webrtc_provider);
+                let session_id = claims.session_id.clone();
+                match tokio::task::spawn_blocking(move || provider.close_session(&session_id)).await
+                {
+                    Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => {}
+                    Ok(Err(error)) => return Err(map_webrtc_provider_error(error)),
+                    Err(_) => return Err(CanonicalError::new(CanonicalErrorCode::Internal)),
+                }
+                let transition = match self.registry.leave(claims, now_unix_ms) {
+                    Ok(transition) => transition,
+                    Err(RealtimeRegistryError::SessionUnavailable) => continue,
+                    Err(error) => return Err(map_registry_error(error)),
+                };
+                self.append_attendance(&transition)?;
+                sweep.sessions_reaped = sweep.sessions_reaped.saturating_add(1);
+            }
+
+            if let Some(lifecycle) = &self.sfu_placement_lifecycle {
+                lifecycle.release_call_placement(&scope, &call_id).await?;
+                self.registry
+                    .acknowledge_expired_call_cleanup(&scope, &call_id)
+                    .map_err(map_registry_error)?;
+            }
+
+            let removed = self
+                .conference_state
+                .clear_call_ephemeral_state(&scope, &call_id)
+                .map_err(|error| map_conference_error(&error))?;
+            sweep.ephemeral_entries_removed =
+                sweep.ephemeral_entries_removed.saturating_add(removed);
+        }
+        Ok(sweep)
+    }
+
+    fn cleanup_decision(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<RuntimeCallCleanupDecision, CanonicalError> {
+        let Some(call) = self.store.call(scope, call_id).map_err(map_store_error)? else {
+            return Ok(RuntimeCallCleanupDecision::Keep);
+        };
+        if call.signalling_state == CallSignallingState::Terminated {
+            return Ok(RuntimeCallCleanupDecision::Cleanup);
+        }
+        let Some(group) = self
+            .store
+            .group_for_conversation(scope, &call.conversation.conversation_id)
+            .map_err(map_store_error)?
+        else {
+            return Ok(RuntimeCallCleanupDecision::Keep);
+        };
+        let Some(conference) = self
+            .store
+            .universal_conference_profile(scope, &group.group_id)
+            .map_err(map_store_error)?
+        else {
+            return Ok(RuntimeCallCleanupDecision::Keep);
+        };
+        if matches!(
+            conference.lifecycle,
+            UniversalConferenceLifecycle::Ending | UniversalConferenceLifecycle::Ended
+        ) {
+            Ok(RuntimeCallCleanupDecision::Cleanup)
+        } else {
+            Ok(RuntimeCallCleanupDecision::Keep)
+        }
+    }
+
     fn append_attendance(&self, transition: &AttendanceTransition) -> Result<(), CanonicalError> {
         let event = attendance_event(&*self.store, transition)?;
         let Some(integration_event) =
@@ -2112,6 +2257,24 @@ where
             .map(|_| ())
             .map_err(map_store_error)
     }
+}
+
+fn insert_cleanup_call(
+    calls: &mut BTreeMap<Vec<u8>, (TenantScope, CallId)>,
+    scope: &TenantScope,
+    call_id: &CallId,
+) {
+    let mut key = Vec::new();
+    key.extend_from_slice(scope.tenant_id.as_opaque().as_wire_bytes());
+    key.push(0);
+    if let Some(namespace_id) = scope.namespace_id.as_ref() {
+        key.extend_from_slice(namespace_id.as_opaque().as_wire_bytes());
+    }
+    key.push(0);
+    key.extend_from_slice(call_id.as_opaque().as_wire_bytes());
+    calls
+        .entry(key)
+        .or_insert_with(|| (scope.clone(), call_id.clone()));
 }
 
 fn conference_runtime<C, A, S>(

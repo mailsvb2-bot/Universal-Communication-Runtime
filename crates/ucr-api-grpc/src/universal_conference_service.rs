@@ -594,13 +594,14 @@ where
                         &idempotency_key,
                         now_unix_ms,
                     )?;
+                    let next_entry_open = lifecycle_entry_open(target, current.entry_open);
                     self.store
                         .transition_universal_conference_with_event(
                             &scope,
                             &conference_id,
                             current.revision,
                             target,
-                            current.entry_open,
+                            next_entry_open,
                             event.as_ref(),
                         )
                         .map_err(map_store_error)
@@ -653,6 +654,15 @@ where
                         &conference_id,
                         &integration_id,
                     )?;
+                    if entry_open
+                        && matches!(
+                            current.lifecycle,
+                            UniversalConferenceLifecycle::Ending
+                                | UniversalConferenceLifecycle::Ended
+                        )
+                    {
+                        return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+                    }
                     if current.entry_open == entry_open {
                         return Ok(current);
                     }
@@ -3786,6 +3796,20 @@ fn create_or_resolve<S: UniversalConferenceStore + CommandAcceptanceStore>(
     Ok(profile)
 }
 
+const fn lifecycle_entry_open(
+    target: UniversalConferenceLifecycle,
+    current_entry_open: bool,
+) -> bool {
+    if matches!(
+        target,
+        UniversalConferenceLifecycle::Ending | UniversalConferenceLifecycle::Ended
+    ) {
+        false
+    } else {
+        current_entry_open
+    }
+}
+
 const fn pb_lifecycle(value: UniversalConferenceLifecycle) -> pb::UniversalConferenceLifecycle {
     match value {
         UniversalConferenceLifecycle::Scheduled => pb::UniversalConferenceLifecycle::Scheduled,
@@ -3949,6 +3973,7 @@ mod bearer_ingress_tests {
         IntegrationId, KeyId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuthenticationRef,
         ServiceCredentialId, ServiceQuotaPolicy, TenantId, TenantScope,
+        UniversalConferenceLifecycle,
     };
     use ucr_protocol::{CONFERENCE_READ_PERMISSION, CanonicalErrorCode};
     use ucr_storage_memory::MemoryLocalStore;
@@ -3957,7 +3982,7 @@ mod bearer_ingress_tests {
 
     use super::{
         GrpcUniversalConferenceService, UniversalConferenceAuthentication,
-        decode_universal_conference_authentication,
+        decode_universal_conference_authentication, lifecycle_entry_open,
     };
 
     #[derive(Debug, Clone, Copy)]
@@ -3967,6 +3992,22 @@ mod bearer_ingress_tests {
         fn now_unix_ms(&self) -> Result<i64, ServiceQuotaClockError> {
             Ok(self.0)
         }
+    }
+
+    #[test]
+    fn ending_and_ended_force_entry_closed() {
+        assert!(lifecycle_entry_open(
+            UniversalConferenceLifecycle::Live,
+            true
+        ));
+        assert!(!lifecycle_entry_open(
+            UniversalConferenceLifecycle::Ending,
+            true
+        ));
+        assert!(!lifecycle_entry_open(
+            UniversalConferenceLifecycle::Ended,
+            true
+        ));
     }
 
     fn oid(value: &str) -> OpaqueId {

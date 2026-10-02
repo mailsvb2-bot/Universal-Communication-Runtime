@@ -80,6 +80,7 @@ pub const MIN_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_milli
 pub const MAX_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_mins(1);
 const RECORDING_RETENTION_WORKER_LEASE_DURATION_MS: i64 = 120_000;
 const DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+pub const DEFAULT_REALTIME_CLEANUP_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct WebhookWorkerSweep {
@@ -770,6 +771,7 @@ struct PreparedRealtimeRuntime {
     realtime_service:
         GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
     sfu_expiry_task: Option<tokio::task::JoinHandle<()>>,
+    cleanup_task: tokio::task::JoinHandle<()>,
     bridge_task: tokio::task::JoinHandle<()>,
     sfu_node_media_service: Option<GrpcSfuNodeMediaService<SqliteLocalStore, SqliteLocalStore>>,
     operator_health: Arc<ProductionOperatorHealthSource>,
@@ -1890,6 +1892,7 @@ impl ProductionRuntime {
             sfu_placement_service,
             realtime_service,
             sfu_expiry_task,
+            cleanup_task,
             bridge_task,
             sfu_node_media_service,
             operator_health,
@@ -1935,6 +1938,7 @@ impl ProductionRuntime {
             _ => Err("SFU node media runtime configuration mismatch".to_owned()),
         };
         bridge_task.abort();
+        cleanup_task.abort();
         if let Some(task) = sfu_expiry_task {
             task.abort();
         }
@@ -2001,6 +2005,7 @@ impl ProductionRuntime {
             resolved_operator_endpoint,
             sfu_placement_media_config,
         )?;
+        let cleanup_task = spawn_realtime_cleanup_worker(&realtime_service);
         let bridge_task = spawn_webrtc_e2ee_bridge(
             dependencies.e2ee_ingress,
             &dependencies.live_provider,
@@ -2026,6 +2031,7 @@ impl ProductionRuntime {
             sfu_placement_service,
             realtime_service,
             sfu_expiry_task,
+            cleanup_task,
             bridge_task,
             sfu_node_media_service,
             operator_health,
@@ -2631,6 +2637,40 @@ fn configure_sfu_placement_lifecycle(
         DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL,
     );
     (realtime_service, Some(task))
+}
+
+fn spawn_realtime_cleanup_worker(
+    service: &GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run_realtime_cleanup_worker(service.clone()))
+}
+
+async fn run_realtime_cleanup_worker(
+    service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+) {
+    let mut ticker = tokio::time::interval(DEFAULT_REALTIME_CLEANUP_POLL_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        match service.cleanup_closed_conferences_once().await {
+            Ok(sweep) => {
+                if sweep.closed_calls > 0
+                    || sweep.sessions_reaped > 0
+                    || sweep.ephemeral_entries_removed > 0
+                {
+                    println!(
+                        "UCR_REALTIME_CLEANUP_SWEEP inspected_calls={} closed_calls={} sessions_reaped={} ephemeral_entries_removed={}",
+                        sweep.inspected_calls,
+                        sweep.closed_calls,
+                        sweep.sessions_reaped,
+                        sweep.ephemeral_entries_removed,
+                    );
+                }
+            }
+            Err(_) => eprintln!("UCR_REALTIME_CLEANUP_UNAVAILABLE"),
+        }
+    }
 }
 
 fn spawn_sfu_placement_expiry_sweeper(

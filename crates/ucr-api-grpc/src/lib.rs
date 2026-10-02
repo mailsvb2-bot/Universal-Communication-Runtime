@@ -75,8 +75,9 @@ pub use conference_service::{GrpcConferenceService, conference_service_server};
 
 mod realtime_service;
 pub use realtime_service::{
-    GrpcRealtimeService, REALTIME_AUTHORIZATION_METADATA_KEY, RealtimeSfuMediaRouter,
-    RealtimeSfuPlacementLifecycle, RealtimeWebRtcDependencies, realtime_service_server,
+    GrpcRealtimeService, REALTIME_AUTHORIZATION_METADATA_KEY, RealtimeCleanupSweep,
+    RealtimeSfuMediaRouter, RealtimeSfuPlacementLifecycle, RealtimeWebRtcDependencies,
+    realtime_service_server,
 };
 
 mod recording_service;
