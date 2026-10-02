@@ -2904,28 +2904,34 @@ mod tests {
             listener,
         ));
 
-        let connect = |server_ca: String| async move {
-            let uri = format!("https://127.0.0.1:{}", address.port());
-            let tls = tonic::transport::ClientTlsConfig::new()
-                .ca_certificate(Certificate::from_pem(server_ca))
-                .domain_name("localhost")
-                .identity(Identity::from_pem(
-                    initial.client_certificate.as_bytes(),
-                    initial.client_private_key.as_bytes(),
-                ));
-            let channel = tonic::transport::Endpoint::from_shared(uri)
-                .expect("endpoint")
-                .tls_config(tls)
-                .expect("TLS config")
-                .connect()
-                .await
-                .expect("mTLS channel");
-            let mut client =
-                pb::sfu_node_media_service_client::SfuNodeMediaServiceClient::new(channel);
-            client
-                .forward_encrypted(tokio_stream::empty::<pb::SfuNodeEncryptedMedia>())
-                .await
-                .expect("mTLS request");
+        let client_certificate = initial.client_certificate.clone();
+        let client_private_key = initial.client_private_key.clone();
+        let connect = |server_ca: String| {
+            let client_certificate = client_certificate.clone();
+            let client_private_key = client_private_key.clone();
+            async move {
+                let uri = format!("https://127.0.0.1:{}", address.port());
+                let tls = tonic::transport::ClientTlsConfig::new()
+                    .ca_certificate(Certificate::from_pem(server_ca))
+                    .domain_name("localhost")
+                    .identity(Identity::from_pem(
+                        client_certificate.as_bytes(),
+                        client_private_key.as_bytes(),
+                    ));
+                let channel = tonic::transport::Endpoint::from_shared(uri)
+                    .expect("endpoint")
+                    .tls_config(tls)
+                    .expect("TLS config")
+                    .connect()
+                    .await
+                    .expect("mTLS channel");
+                let mut client =
+                    pb::sfu_node_media_service_client::SfuNodeMediaServiceClient::new(channel);
+                client
+                    .forward_encrypted(tokio_stream::empty::<pb::SfuNodeEncryptedMedia>())
+                    .await
+                    .expect("mTLS request");
+            }
         };
 
         connect(initial.ca.clone()).await;
