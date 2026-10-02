@@ -2864,6 +2864,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn private_operator_listener_reports_resolved_ephemeral_address() {
+        let public_bind: SocketAddr = "127.0.0.1:55051".parse().expect("public bind");
+        let operator_bind: SocketAddr = "127.0.0.1:0".parse().expect("operator bind");
+        let (_incoming, resolved) =
+            bind_private_operator_listener(public_bind, operator_bind, "test")
+                .await
+                .expect("bind ephemeral operator listener");
+
+        assert!(resolved.ip().is_loopback());
+        assert_ne!(resolved.port(), 0);
+    }
+
+    #[tokio::test]
     async fn private_operator_listener_rejects_public_bind_alias() {
         let bind: SocketAddr = "127.0.0.1:55051".parse().expect("bind");
         let error = bind_private_operator_listener(bind, bind, "test")
