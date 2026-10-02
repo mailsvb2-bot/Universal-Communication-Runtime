@@ -2179,10 +2179,7 @@ mod tests {
             use_policy: JoinGrantUsePolicy::Reusable,
         };
         registry.join(claims, now).expect("join");
-        assert_eq!(
-            registry.active_session_count_at(now + 1).expect("prune"),
-            0
-        );
+        assert_eq!(registry.active_session_count_at(now + 1).expect("prune"), 0);
         assert!(
             registry
                 .expired_call_cleanup_candidates_at(now + 1)
