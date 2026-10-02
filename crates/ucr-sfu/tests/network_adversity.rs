@@ -71,3 +71,48 @@ fn sfu_node_restart_fails_over_without_rebinding_canonical_call() {
     assert!(after_restart.retained_sticky_placement);
     assert_ne!(after_restart.node_id, failed_node);
 }
+
+#[test]
+fn sfu_graceful_drain_moves_active_placement_only_when_replacement_capacity_exists() {
+    let mut directory = SfuClusterDirectory::default();
+    let draining = id("sfu-drain-a");
+    let replacement = id("sfu-drain-b");
+    directory
+        .upsert_node(node(draining.clone()))
+        .expect("register draining candidate");
+
+    let scope = scope();
+    let call_id = CallId::from_opaque(id("sfu-drain-call"));
+    let policy = SfuPlacementPolicy {
+        preferred_region: Some("eu-test".to_owned()),
+        allow_cross_region_failover: false,
+    };
+    let initial = directory
+        .place_session(&scope, &call_id, &policy, 10_000)
+        .expect("initial placement");
+    assert_eq!(initial.node_id, draining);
+
+    directory
+        .mark_draining(&initial.node_id)
+        .expect("mark draining");
+    let retained = directory
+        .place_session(&scope, &call_id, &policy, 10_050)
+        .expect("retain while no replacement exists");
+    assert_eq!(retained.node_id, initial.node_id);
+    assert!(retained.retained_sticky_placement);
+
+    directory
+        .upsert_node(node(replacement.clone()))
+        .expect("register replacement");
+    let migrated = directory
+        .place_session(&scope, &call_id, &policy, 10_100)
+        .expect("migrate after replacement appears");
+    assert_eq!(migrated.node_id, replacement);
+    assert!(!migrated.retained_sticky_placement);
+
+    let after_migration = directory
+        .place_session(&scope, &call_id, &policy, 10_150)
+        .expect("sticky replacement");
+    assert_eq!(after_migration.node_id, replacement);
+    assert!(after_migration.retained_sticky_placement);
+}

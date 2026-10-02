@@ -360,3 +360,26 @@ fn horizontal_sfu_realtime_publication_uses_validated_placement_router_and_stays
     assert!(spec.contains("WebRTC E2EE ingress"));
     assert!(spec.contains("horizontal_sfu"));
 }
+
+#[test]
+fn horizontal_sfu_drain_and_failure_migration_is_bounded_and_keeps_canonical_owners() {
+    let sfu = read("crates/ucr-sfu/src/lib.rs");
+    let spec = read("spec/sfu.md");
+
+    assert!(sfu.contains("fn migrate_session_placement"));
+    assert!(sfu.contains("current.state == SfuNodeState::Draining"));
+    assert!(sfu.contains("self.reserve_session(&selected_id)?;"));
+    assert!(sfu.contains("self.release_reservation(current_node_id)"));
+    assert!(sfu.contains("return Err(SfuPlacementError::NoHealthyCapacity)"));
+
+    assert!(spec.contains("placement resolution attempts exactly one bounded migration"));
+    assert!(
+        spec.contains(
+            "destination reservation is acquired before the source reservation is released"
+        )
+    );
+    assert!(spec.contains("canonical Call/session authority"));
+    assert!(
+        spec.contains("Production horizontal SFU still requires live credential reload evidence")
+    );
+}
