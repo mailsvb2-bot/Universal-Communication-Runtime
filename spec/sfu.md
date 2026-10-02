@@ -161,7 +161,10 @@ The runtime now has a separate explicit **placement-aware realtime media routing
 gate and private operator plane. Both gRPC `PublishMedia` and WebRTC E2EE ingress first execute
 the same long-lived realtime-session checks, Conference subscription selection, and canonical SFU
 validation, producing one immutable `SfuValidatedForwardBatch`. Only that validated batch crosses
-the horizontal boundary. The placement-aware router then uses the sticky canonical Call placement,
+the horizontal boundary. The join lifecycle and media router use the same bounded placement policy,
+so preferred-region/cross-region rules apply before the first sticky reservation rather than being
+introduced after the Call is already placed. The placement-aware router then uses that sticky
+canonical Call placement,
 resolves only the selected live private endpoint, opens the deployment-scoped mTLS node connection,
 and waits for concrete destination-ingress receipts. Local realtime forwarding is unchanged when
 the gate is disabled.
