@@ -17,8 +17,10 @@ use ucr_api_grpc::{
     GrpcSfuPlacementService, GrpcStoreForwardService, GrpcSyncService,
     GrpcUniversalConferenceService, MachineAuthDiscovery, MachineTokenVerificationKeyProvider,
     OperatorRuntimeHealthSource, OperatorSfuClusterControl, OperatorSfuClusterError,
-    OperatorSfuNodeHeartbeat, RealtimeSfuPlacementLifecycle, RealtimeWebRtcDependencies,
-    UniversalConferenceRuntimeCapabilities, attachment_service_server, call_service_server,
+    OperatorSfuNodeHeartbeat, PlacementAwareSfuNodeRouter, RealtimeSfuMediaRouter,
+    RealtimeSfuPlacementLifecycle, RealtimeWebRtcDependencies, SfuNodeMediaClientTlsConfig,
+    SfuPlacementRoutingPolicy, UniversalConferenceRuntimeCapabilities, attachment_service_server,
+    call_service_server,
     conference_service_server, device_service_server, event_service_server,
     expire_due_recordings_once, group_service_server, integration_service_server,
     machine_auth_service_server, operator_runtime_service_server, pb, realtime_service_server,
@@ -517,6 +519,22 @@ fn validate_private_sfu_node_bind(bind: SocketAddr) -> Result<(), String> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SfuPlacementMediaRuntimeConfig {
+    node_tls: SfuNodeMediaClientTlsConfig,
+    policy: SfuPlacementRoutingPolicy,
+}
+
+impl SfuPlacementMediaRuntimeConfig {
+    #[must_use]
+    pub fn new(
+        node_tls: SfuNodeMediaClientTlsConfig,
+        policy: SfuPlacementRoutingPolicy,
+    ) -> Self {
+        Self { node_tls, policy }
+    }
+}
+
 #[derive(Clone)]
 pub struct RealtimeRuntimeConfig {
     join_issuer: Arc<JoinTokenIssuer>,
@@ -524,6 +542,7 @@ pub struct RealtimeRuntimeConfig {
     browser_realtime_gateway: bool,
     sfu_node_media: Option<SfuNodeMediaRuntimeConfig>,
     sfu_placement_lifecycle: bool,
+    sfu_placement_media: Option<SfuPlacementMediaRuntimeConfig>,
 }
 
 impl core::fmt::Debug for RealtimeRuntimeConfig {
@@ -535,6 +554,7 @@ impl core::fmt::Debug for RealtimeRuntimeConfig {
             .field("browser_realtime_gateway", &self.browser_realtime_gateway)
             .field("sfu_node_media", &self.sfu_node_media)
             .field("sfu_placement_lifecycle", &self.sfu_placement_lifecycle)
+            .field("sfu_placement_media", &self.sfu_placement_media)
             .finish()
     }
 }
@@ -555,6 +575,7 @@ impl RealtimeRuntimeConfig {
             browser_realtime_gateway: false,
             sfu_node_media: None,
             sfu_placement_lifecycle: false,
+            sfu_placement_media: None,
         })
     }
 
@@ -575,6 +596,7 @@ impl RealtimeRuntimeConfig {
             browser_realtime_gateway: false,
             sfu_node_media: None,
             sfu_placement_lifecycle: false,
+            sfu_placement_media: None,
         })
     }
 
@@ -598,6 +620,15 @@ impl RealtimeRuntimeConfig {
     #[must_use]
     pub fn with_sfu_placement_lifecycle(mut self, enabled: bool) -> Self {
         self.sfu_placement_lifecycle = enabled;
+        self
+    }
+
+    /// Enables placement-aware forwarding of canonically validated realtime media batches.
+    ///
+    /// This remains pre-production and does not advertise the public horizontal-SFU capability.
+    #[must_use]
+    pub fn with_sfu_placement_media(mut self, config: SfuPlacementMediaRuntimeConfig) -> Self {
+        self.sfu_placement_media = Some(config);
         self
     }
 
@@ -1815,6 +1846,11 @@ impl ProductionRuntime {
         config: RealtimeRuntimeConfig,
         machine_bearer: Option<MachineBearerRuntimeConfig>,
     ) -> Result<(), String> {
+        if config.sfu_placement_media.is_some() && !config.sfu_placement_lifecycle {
+            return Err(
+                "SFU placement media routing requires the placement lifecycle gate".to_owned(),
+            );
+        }
         let (incoming, operator_incoming) = self
             .prepare_realtime_listeners(bind, operator_bind, config.sfu_placement_lifecycle)
             .await?;
@@ -1826,6 +1862,7 @@ impl ProductionRuntime {
         let runtime_capabilities = config.universal_conference_capabilities();
         let sfu_node_media_config = config.sfu_node_media.clone();
         let sfu_placement_lifecycle = config.sfu_placement_lifecycle;
+        let sfu_placement_media_config = config.sfu_placement_media.clone();
         let dependencies = realtime_dependencies(config)?;
         let join_issuer = Arc::clone(&dependencies.join_issuer);
         let registry = Arc::clone(&dependencies.registry);
@@ -1853,6 +1890,11 @@ impl ProductionRuntime {
             &sfu_placement_service,
             sfu_placement_lifecycle,
         );
+        let realtime_service = configure_sfu_placement_media_router(
+            realtime_service,
+            operator_bind,
+            sfu_placement_media_config,
+        )?;
         let bridge_task = spawn_webrtc_e2ee_bridge(
             dependencies.e2ee_ingress,
             &dependencies.live_provider,
@@ -2277,6 +2319,7 @@ fn realtime_dependencies(
         browser_realtime_gateway: _,
         sfu_node_media: _,
         sfu_placement_lifecycle,
+        sfu_placement_media: _,
     } = config;
     let (e2ee_ingress_tx, e2ee_ingress) =
         tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
@@ -2363,6 +2406,35 @@ fn realtime_operator_health(
     ))
 }
 
+fn configure_sfu_placement_media_router(
+    realtime_service: GrpcRealtimeService<
+        SystemServiceQuotaClock,
+        SqliteLocalStore,
+        SqliteLocalStore,
+    >,
+    operator_bind: Option<SocketAddr>,
+    config: Option<SfuPlacementMediaRuntimeConfig>,
+) -> Result<
+    GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+    String,
+> {
+    let Some(config) = config else {
+        return Ok(realtime_service);
+    };
+    let operator_endpoint = operator_bind.ok_or_else(|| {
+        "SFU placement media routing requires the private realtime operator plane".to_owned()
+    })?;
+    let router = PlacementAwareSfuNodeRouter::connect_lazy(
+        operator_endpoint,
+        config.node_tls,
+        config.policy,
+    )
+    .map_err(|error| format!("configure SFU placement media router: {error:?}"))?;
+    let router: Arc<dyn RealtimeSfuMediaRouter> =
+        Arc::new(tokio::sync::Mutex::new(router));
+    Ok(realtime_service.with_sfu_media_router(router))
+}
+
 fn configure_sfu_placement_lifecycle(
     realtime_service: GrpcRealtimeService<
         SystemServiceQuotaClock,
@@ -2431,6 +2503,16 @@ async fn run_webrtc_e2ee_bridge(
     service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
 ) {
     while let Some(frame) = ingress.recv().await {
+        if service.has_sfu_media_router() {
+            let _ = route_webrtc_e2ee_frame_via_configured_route(
+                &service,
+                &registry,
+                &provider,
+                &frame,
+            )
+            .await;
+            continue;
+        }
         let provider = Arc::clone(&provider);
         let registry = Arc::clone(&registry);
         let service = service.clone();
@@ -2439,6 +2521,36 @@ async fn run_webrtc_e2ee_bridge(
         })
         .await;
     }
+}
+
+async fn route_webrtc_e2ee_frame_via_configured_route(
+    service: &GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+    registry: &Arc<RealtimeSessionRegistry>,
+    provider: &Arc<LiveWebRtcProvider>,
+    frame: &WebRtcE2eeIngressFrame,
+) -> Result<usize, ()> {
+    let now_unix_ms = runtime_now_unix_ms().map_err(|_| ())?;
+    let header = &frame.envelope.frame.header;
+    let claims = registry
+        .active_claims_for_ingress(
+            &frame.session_id,
+            &header.scope,
+            &header.call_id,
+            now_unix_ms,
+        )
+        .map_err(|_| ())?;
+    let sink = WebRtcE2eeForwardSink {
+        registry: Arc::clone(registry),
+        provider: Arc::clone(provider),
+    };
+    service
+        .forward_authenticated_e2ee_media_via_configured_route(
+            &claims,
+            &frame.envelope,
+            &sink,
+        )
+        .await
+        .map_err(|_| ())
 }
 
 fn route_webrtc_e2ee_frame(
