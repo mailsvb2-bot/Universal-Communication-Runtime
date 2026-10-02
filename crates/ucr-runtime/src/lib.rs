@@ -17,7 +17,8 @@ use ucr_api_grpc::{
     GrpcSfuPlacementService, GrpcStoreForwardService, GrpcSyncService,
     GrpcUniversalConferenceService, MachineAuthDiscovery, MachineTokenVerificationKeyProvider,
     OperatorRuntimeHealthSource, OperatorSfuClusterControl, OperatorSfuClusterError,
-    OperatorSfuNodeHeartbeat, RealtimeWebRtcDependencies, UniversalConferenceRuntimeCapabilities,
+    OperatorSfuNodeHeartbeat, RealtimeSfuPlacementLifecycle, RealtimeWebRtcDependencies,
+    UniversalConferenceRuntimeCapabilities,
     attachment_service_server, call_service_server, conference_service_server,
     device_service_server, event_service_server, expire_due_recordings_once, group_service_server,
     integration_service_server, machine_auth_service_server, operator_runtime_service_server, pb,
@@ -40,7 +41,9 @@ use ucr_model::{
     EventSubscriptionId, IceTransportPolicy, KeyId, NamespaceId, OpaqueId, SfuForwardEnvelope,
     TenantId, TenantScope,
 };
-use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
+use ucr_realtime::{
+    JoinTokenIssuer, JoinTokenKey, RealtimeRegistryError, RealtimeSessionRegistry,
+};
 use ucr_secrets::{MAX_SECRET_BYTES, SecretHandle, SecretProvider, SecretPurpose};
 use ucr_sfu::{
     SfuClusterDirectory, SfuForwardSink, SfuForwardSinkError, SfuNodeCapacitySnapshot,
@@ -72,6 +75,7 @@ pub const DEFAULT_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_s
 pub const MIN_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub const MAX_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_mins(1);
 const RECORDING_RETENTION_WORKER_LEASE_DURATION_MS: i64 = 120_000;
+const DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct WebhookWorkerSweep {
@@ -1847,11 +1851,20 @@ impl ProductionRuntime {
             Arc::clone(&conference_state),
             dependencies.webrtc,
         );
-        let realtime_service = if sfu_placement_lifecycle {
-            realtime_service.with_sfu_placement_lifecycle(Arc::new(sfu_placement_service.clone()))
+        let placement_lifecycle: Option<Arc<dyn RealtimeSfuPlacementLifecycle>> =
+            sfu_placement_lifecycle.then(|| Arc::new(sfu_placement_service.clone()) as Arc<_>);
+        let realtime_service = if let Some(lifecycle) = placement_lifecycle.as_ref() {
+            realtime_service.with_sfu_placement_lifecycle(Arc::clone(lifecycle))
         } else {
             realtime_service
         };
+        let sfu_expiry_task = placement_lifecycle.as_ref().map(|lifecycle| {
+            spawn_sfu_placement_expiry_sweeper(
+                Arc::clone(&registry),
+                Arc::clone(lifecycle),
+                DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL,
+            )
+        });
         let bridge_task = spawn_webrtc_e2ee_bridge(
             dependencies.e2ee_ingress,
             &dependencies.live_provider,
@@ -1905,6 +1918,9 @@ impl ProductionRuntime {
             _ => Err("SFU node media runtime configuration mismatch".to_owned()),
         };
         bridge_task.abort();
+        if let Some(task) = sfu_expiry_task {
+            task.abort();
+        }
         server_result
     }
 
@@ -2349,6 +2365,62 @@ fn realtime_operator_health(
         turn_configured,
         Arc::clone(sfu_cluster),
     ))
+}
+
+fn spawn_sfu_placement_expiry_sweeper(
+    registry: Arc<RealtimeSessionRegistry>,
+    lifecycle: Arc<dyn RealtimeSfuPlacementLifecycle>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run_sfu_placement_expiry_sweeper(
+        registry, lifecycle, interval,
+    ))
+}
+
+async fn run_sfu_placement_expiry_sweeper(
+    registry: Arc<RealtimeSessionRegistry>,
+    lifecycle: Arc<dyn RealtimeSfuPlacementLifecycle>,
+    interval: Duration,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        let Ok(now_unix_ms) = runtime_now_unix_ms() else {
+            continue;
+        };
+        let _ = sweep_expired_sfu_placements_once(
+            registry.as_ref(),
+            lifecycle.as_ref(),
+            now_unix_ms,
+        )
+        .await;
+    }
+}
+
+async fn sweep_expired_sfu_placements_once(
+    registry: &RealtimeSessionRegistry,
+    lifecycle: &dyn RealtimeSfuPlacementLifecycle,
+    now_unix_ms: i64,
+) -> Result<usize, RealtimeRegistryError> {
+    let candidates = registry.expired_call_cleanup_candidates_at(now_unix_ms)?;
+    let mut released = 0_usize;
+    for (scope, call_id) in candidates {
+        if registry.active_call_session_count_at(&scope, &call_id, now_unix_ms)? != 0 {
+            registry.acknowledge_expired_call_cleanup(&scope, &call_id)?;
+            continue;
+        }
+        if lifecycle
+            .release_call_placement(&scope, &call_id)
+            .await
+            .is_ok()
+        {
+            registry.acknowledge_expired_call_cleanup(&scope, &call_id)?;
+            released = released.saturating_add(1);
+        }
+    }
+    Ok(released)
 }
 
 fn spawn_webrtc_e2ee_bridge(
