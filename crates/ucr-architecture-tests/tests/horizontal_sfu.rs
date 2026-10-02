@@ -263,6 +263,8 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
     assert!(realtime.contains("rollback_realtime_join(&claims, now).await"));
     assert!(realtime.contains("release_sfu_call_placement_if_inactive"));
     assert!(registry.contains("pub fn active_call_session_count_at"));
+    assert!(registry.contains("expired_call_cleanup_candidates_at"));
+    assert!(registry.contains("acknowledge_expired_call_cleanup"));
     assert!(
         placement.contains("impl<C> RealtimeSfuPlacementLifecycle for GrpcSfuPlacementService<C>")
     );
@@ -293,8 +295,12 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
         "realtime listener preparation must fail closed without its private operator plane"
     );
     assert!(runtime_main.contains("UCR_SFU_PLACEMENT_LIFECYCLE_ENABLED"));
+    assert!(runtime.contains("DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL"));
+    assert!(runtime.contains("spawn_sfu_placement_expiry_sweeper"));
+    assert!(runtime.contains("sweep_expired_sfu_placements_once"));
     assert!(
         spec.contains("The realtime-session binding now has an explicit optional lifecycle gate")
     );
-    assert!(spec.contains("deterministic release for sessions"));
+    assert!(spec.contains("bounded expiry sweeper"));
+    assert!(spec.contains("cleanup candidate remains pending until"));
 }
