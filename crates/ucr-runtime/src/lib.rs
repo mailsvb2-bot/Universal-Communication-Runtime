@@ -45,7 +45,7 @@ use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_secrets::{MAX_SECRET_BYTES, SecretHandle, SecretProvider, SecretPurpose};
 use ucr_sfu::{
     SfuClusterDirectory, SfuForwardSink, SfuForwardSinkError, SfuNodeCapacitySnapshot,
-    SfuNodeDescriptor, SfuPlacementError,
+    SfuNodeDescriptor, SfuPlacementError, SfuPlacementPolicy,
 };
 use ucr_storage_sqlite::{
     RECORDING_RETENTION_WORKER_KIND, SqliteLocalStore, WEBHOOK_DELIVERY_WORKER_KIND,
@@ -1875,8 +1875,18 @@ impl ProductionRuntime {
             runtime_capabilities.turn,
             &sfu_cluster,
         );
-        let sfu_placement_service =
-            GrpcSfuPlacementService::new(Arc::clone(&clock), Arc::clone(&sfu_cluster));
+        let lifecycle_placement_policy = sfu_placement_media_config
+            .as_ref()
+            .map(|config| SfuPlacementPolicy {
+                preferred_region: config.policy.preferred_region.clone(),
+                allow_cross_region_failover: config.policy.allow_cross_region_failover,
+            })
+            .unwrap_or_default();
+        let sfu_placement_service = GrpcSfuPlacementService::with_lifecycle_policy(
+            Arc::clone(&clock),
+            Arc::clone(&sfu_cluster),
+            lifecycle_placement_policy,
+        );
         let realtime_service = GrpcRealtimeService::with_webrtc(
             Arc::clone(&clock),
             Arc::clone(&authorization),
