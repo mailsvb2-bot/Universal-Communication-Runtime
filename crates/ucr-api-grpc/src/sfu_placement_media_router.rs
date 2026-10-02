@@ -430,6 +430,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn placement_router_lazy_bootstrap_does_not_require_running_operator_server() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve loopback address");
+        let address = listener.local_addr().expect("operator address");
+        drop(listener);
+
+        PlacementAwareSfuNodeRouter::connect_lazy(
+            address,
+            dummy_node_tls(),
+            SfuPlacementRoutingPolicy::default(),
+        )
+        .expect("lazy router must not connect during bootstrap");
+    }
+
+    #[tokio::test]
     async fn placement_router_uses_selected_private_route_only() {
         let (mut router, task) = router_for(FixedPlacementService {
             route_node_id: "node-a",
