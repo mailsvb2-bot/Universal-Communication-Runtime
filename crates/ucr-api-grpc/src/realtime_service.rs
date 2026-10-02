@@ -1613,6 +1613,11 @@ where
         Ok(outcome.accepted_recipients)
     }
 
+    /// Forwards one authenticated E2EE media envelope through the caller-provided SFU sink.
+    ///
+    /// # Errors
+    /// Returns a canonical error when session/media validation, quota accounting, SFU forwarding,
+    /// or attendance persistence fails.
     pub fn forward_authenticated_e2ee_media(
         &self,
         claims: &RealtimeSessionClaims,
