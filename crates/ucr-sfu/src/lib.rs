@@ -1328,6 +1328,96 @@ mod horizontal_placement_tests {
     }
 
     #[test]
+    fn unavailable_sticky_preserves_source_reservation_until_failover_can_commit() {
+        let mut directory = SfuClusterDirectory::default();
+        let failed = opaque("sfu-unavailable");
+        directory
+            .upsert_node(node(
+                failed.as_str(),
+                "eu",
+                SfuNodeState::Healthy,
+                0,
+                1,
+                10_000,
+            ))
+            .expect("initial node");
+        directory
+            .place_session(
+                &scope(),
+                &call("call-unavailable"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("initial placement");
+
+        directory
+            .upsert_node(node(
+                failed.as_str(),
+                "eu",
+                SfuNodeState::Unavailable,
+                0,
+                1,
+                10_000,
+            ))
+            .expect("mark unavailable");
+        directory
+            .upsert_node(node("sfu-full", "eu", SfuNodeState::Healthy, 1, 1, 10_000))
+            .expect("full replacement");
+
+        assert_eq!(
+            directory.place_session(
+                &scope(),
+                &call("call-unavailable"),
+                &SfuPlacementPolicy::default(),
+                100,
+            ),
+            Err(SfuPlacementError::NoHealthyCapacity)
+        );
+        assert_eq!(
+            directory
+                .node_with_capacity(&failed)
+                .expect("failed node accounting")
+                .reserved_sessions,
+            1
+        );
+        assert_eq!(
+            directory
+                .node_with_capacity(&opaque("sfu-full"))
+                .expect("full node accounting")
+                .reserved_sessions,
+            0
+        );
+
+        directory
+            .upsert_node(node("sfu-full", "eu", SfuNodeState::Healthy, 0, 1, 20_000))
+            .expect("replacement recovers capacity");
+        let migrated = directory
+            .place_session(
+                &scope(),
+                &call("call-unavailable"),
+                &SfuPlacementPolicy::default(),
+                100,
+            )
+            .expect("retry migration");
+        assert_eq!(migrated.node_id.as_str(), "sfu-full");
+        assert!(!migrated.retained_sticky_placement);
+        assert_eq!(
+            directory
+                .node_with_capacity(&failed)
+                .expect("failed node accounting")
+                .reserved_sessions,
+            0
+        );
+        assert_eq!(
+            directory
+                .node_with_capacity(&opaque("sfu-full"))
+                .expect("replacement accounting")
+                .reserved_sessions,
+            1
+        );
+    }
+
+    #[test]
     fn removing_worker_clears_stale_stickiness_and_allows_fresh_failover() {
         let mut directory = SfuClusterDirectory::default();
         directory
