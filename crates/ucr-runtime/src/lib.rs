@@ -1643,7 +1643,7 @@ impl ProductionRuntime {
                 bind_private_operator_listener(bind, operator_bind, "api")
                     .await?
                     .0,
-            )
+            ),
             None => None,
         };
         let clock = Arc::new(SystemServiceQuotaClock);
@@ -1732,7 +1732,7 @@ impl ProductionRuntime {
                 bind_private_operator_listener(bind, operator_bind, "machine-auth")
                     .await?
                     .0,
-            )
+            ),
             None => None,
         };
         let clock = Arc::new(SystemServiceQuotaClock);
