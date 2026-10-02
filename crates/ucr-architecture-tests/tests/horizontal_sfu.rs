@@ -253,7 +253,7 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
         .find("self.ensure_sfu_call_placement(&claims).await")
         .expect("placement ensure");
     let join_index = realtime
-        .find("self.registry.join(claims.clone(), now)")
+        .find("self.registry.join(claims.clone(), now_unix_ms)")
         .expect("registry join");
     assert!(
         ensure_index < join_index,
