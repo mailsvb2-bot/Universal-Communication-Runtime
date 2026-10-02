@@ -327,7 +327,7 @@ fn horizontal_sfu_realtime_publication_uses_validated_placement_router_and_stays
     assert!(realtime.contains("SfuValidatedForwardBatch"));
 
     let placement = read("crates/ucr-api-grpc/src/sfu_placement_service.rs");
-    assert!(placement.contains("lifecycle_policy: SfuPlacementPolicy"));
+    assert!(placement.contains("lifecycle_policy: Option<SfuPlacementPolicy>"));
     assert!(placement.contains(".place_session(scope, call_id, &self.lifecycle_policy"));
 
     assert!(router.contains("pub fn connect_lazy"));
