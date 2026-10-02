@@ -327,9 +327,8 @@ fn horizontal_sfu_realtime_publication_uses_validated_placement_router_and_stays
     assert!(realtime.contains("SfuValidatedForwardBatch"));
 
     assert!(router.contains("pub fn connect_lazy"));
-    assert!(router.contains(
-        "impl RealtimeSfuMediaRouter for tokio::sync::Mutex<PlacementAwareSfuNodeRouter>"
-    ));
+    assert!(router.contains("impl RealtimeSfuMediaRouter for PlacementAwareSfuNodeRouter"));
+    assert!(router.contains("let mut router = self.clone();"));
     assert!(router.contains(".forward_batch(batch)"));
     assert!(router.contains("requires a loopback operator endpoint"));
 
