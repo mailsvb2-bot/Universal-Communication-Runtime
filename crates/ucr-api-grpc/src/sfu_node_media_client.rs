@@ -494,11 +494,8 @@ mod tests {
     async fn outbound_node_client_observes_rotated_identity_without_reconstruction() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let server_ca = test_ca();
-        let (server_certificate, server_private_key) = test_leaf(
-            &server_ca,
-            "localhost",
-            ExtendedKeyUsagePurpose::ServerAuth,
-        );
+        let (server_certificate, server_private_key) =
+            test_leaf(&server_ca, "localhost", ExtendedKeyUsagePurpose::ServerAuth);
         let client_ca_v1 = test_ca();
         let (client_certificate_v1, client_private_key_v1) = test_leaf(
             &client_ca_v1,
