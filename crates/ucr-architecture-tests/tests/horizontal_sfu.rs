@@ -392,12 +392,18 @@ fn horizontal_sfu_node_identity_reload_is_live_for_new_connections() {
     assert!(runtime.contains("serve_sfu_node_media_listener"));
     assert!(runtime.contains("let connection_config = config.clone();"));
     assert!(runtime.contains("connection_config.tls_server()"));
-    assert!(runtime.contains("private_sfu_node_listener_observes_rotated_server_identity_on_new_connection"));
+    assert!(
+        runtime.contains(
+            "private_sfu_node_listener_observes_rotated_server_identity_on_new_connection"
+        )
+    );
 
     assert!(client.contains("self.provider"));
     assert!(client.contains("active_secret_set(&self.certificate_handle)"));
     assert!(client.contains("active_secret_set(&self.private_key_handle)"));
-    assert!(client.contains("outbound_node_client_observes_rotated_identity_without_reconstruction"));
+    assert!(
+        client.contains("outbound_node_client_observes_rotated_identity_without_reconstruction")
+    );
 
     assert!(spec.contains("fresh certificate/private-key snapshot for every newly"));
     assert!(spec.contains("provider failure rejects only the new connection"));
