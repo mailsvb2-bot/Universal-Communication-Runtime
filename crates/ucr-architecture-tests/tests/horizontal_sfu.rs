@@ -328,7 +328,8 @@ fn horizontal_sfu_realtime_publication_uses_validated_placement_router_and_stays
 
     let placement = read("crates/ucr-api-grpc/src/sfu_placement_service.rs");
     assert!(placement.contains("lifecycle_policy: Option<SfuPlacementPolicy>"));
-    assert!(placement.contains(".place_session(scope, call_id, &self.lifecycle_policy"));
+    assert!(placement.contains("let policy = self.lifecycle_policy.clone().unwrap_or_default()"));
+    assert!(placement.contains(".place_session(scope, call_id, &policy"));
 
     assert!(router.contains("pub fn connect_lazy"));
     assert!(router.contains("impl RealtimeSfuMediaRouter for PlacementAwareSfuNodeRouter"));
