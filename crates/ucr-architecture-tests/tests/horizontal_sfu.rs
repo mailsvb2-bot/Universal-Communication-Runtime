@@ -238,3 +238,63 @@ fn horizontal_sfu_placement_router_binds_resolve_node_to_outbound_mtls_without_o
     assert!(spec.contains("placement-aware outbound router"));
     assert!(spec.contains("realtime-session binding"));
 }
+
+#[test]
+fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_stays_fail_closed() {
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let registry = read("crates/ucr-realtime/src/lib.rs");
+    let placement = read("crates/ucr-api-grpc/src/sfu_placement_service.rs");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let runtime_main = read("crates/ucr-runtime/src/main.rs");
+    let spec = read("spec/sfu.md");
+
+    assert!(realtime.contains("pub trait RealtimeSfuPlacementLifecycle"));
+    let ensure_index = realtime
+        .find("self.ensure_sfu_call_placement(&claims).await")
+        .expect("placement ensure");
+    let join_index = realtime
+        .find("self.registry.join(claims.clone(), now)")
+        .expect("registry join");
+    assert!(
+        ensure_index < join_index,
+        "placement must fail before reconnect/session registry mutation"
+    );
+    assert!(realtime.contains("release_sfu_call_placement_if_inactive(&claims, now)"));
+    assert!(realtime.contains("rollback_realtime_join(&claims, now).await"));
+    assert!(realtime.contains("release_sfu_call_placement_if_inactive"));
+    assert!(registry.contains("pub fn active_call_session_count_at"));
+    assert!(
+        placement.contains("impl<C> RealtimeSfuPlacementLifecycle for GrpcSfuPlacementService<C>")
+    );
+    assert!(placement.contains("release_session_if_present"));
+    assert!(registry.contains("pub fn active_call_session_count_at"));
+    assert!(runtime.contains("with_sfu_placement_lifecycle"));
+    assert!(runtime.contains("horizontal_sfu: false"));
+    let machine_auth_start = runtime
+        .find("async fn serve_machine_auth_inner(")
+        .expect("machine auth serve");
+    let realtime_start = runtime
+        .find("async fn serve_realtime_inner(")
+        .expect("realtime serve");
+    assert!(
+        machine_auth_start < realtime_start,
+        "expected machine-auth serve before realtime serve in runtime source"
+    );
+    assert!(
+        !runtime[machine_auth_start..realtime_start].contains("sfu_placement_lifecycle"),
+        "SFU placement lifecycle gate must never cross-wire into machine-auth config"
+    );
+    assert!(
+        runtime[realtime_start..].contains(".prepare_realtime_listeners("),
+        "realtime serve must route listener setup through the guarded preparation path"
+    );
+    assert!(
+        runtime[realtime_start..].contains("if sfu_placement_lifecycle && operator_bind.is_none()"),
+        "realtime listener preparation must fail closed without its private operator plane"
+    );
+    assert!(runtime_main.contains("UCR_SFU_PLACEMENT_LIFECYCLE_ENABLED"));
+    assert!(
+        spec.contains("The realtime-session binding now has an explicit optional lifecycle gate")
+    );
+    assert!(spec.contains("deterministic release for sessions"));
+}

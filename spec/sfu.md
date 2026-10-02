@@ -127,12 +127,27 @@ calls `PlaceCall`, resolves only that selected node through `ResolveNode`, reval
 returned node identity plus private-network endpoint, then uses the deployment-scoped mTLS node
 client and waits for destination receipts. The plaintext placement control connection is restricted
 to loopback. It does not accept caller-supplied media endpoints and does not release placement after
-each frame, because placement lifetime belongs to the later realtime-session owner.
+each frame.
+
+The realtime-session binding now has an explicit optional lifecycle gate. The existing
+`RealtimeSessionRegistry` remains the only active-session roster. After authentication and policy
+validation but before mutating reconnect/session state, `RealtimeSfuPlacementLifecycle` ensures
+one sticky placement for the canonical `TenantScope + CallId`. A placement failure therefore
+leaves an existing reconnect session untouched. If registry admission then fails, cleanup releases
+the reservation only when that same registry reports no active session for the Call. Reconnects and
+additional participants reuse the same Call placement without reserving another worker slot. On
+explicit leave, the registry is queried for the remaining non-expired sessions of
+that same Call and the placement is released only when the count reaches zero. Release is
+idempotent so retry/rollback cleanup cannot turn an already-absent placement into a second failure.
+The production runtime wires this only behind the explicit
+`UCR_SFU_PLACEMENT_LIFECYCLE_ENABLED` gate and refuses that gate without the private operator
+plane. Enabling this pre-production gate still does not change the advertised public capability.
 
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
-true. Production horizontal SFU still requires realtime-session binding to this placement-aware
-router, bounded reconnect/failover/drain behavior, live credential reload evidence in the runtime
-path, and load/adversity evidence. The placement directory must never become a Call, Conference,
+true. Production horizontal SFU still requires the placement-aware validated media path to be wired
+into realtime publication, bounded node-failure/drain migration, deterministic release for sessions
+that expire without an explicit leave, live credential reload evidence in the runtime path, and
+load/adversity evidence. The placement directory must never become a Call, Conference,
 membership, authorization, media-key, plaintext-media, Delivery, or recording owner.
 
 ## Public realtime transport

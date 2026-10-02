@@ -613,6 +613,9 @@ async fn serve_realtime_command(
     config = config.with_browser_realtime_gateway(
         bool_env("UCR_BROWSER_REALTIME_GATEWAY_ENABLED")?.unwrap_or(false),
     );
+    config = config.with_sfu_placement_lifecycle(
+        bool_env("UCR_SFU_PLACEMENT_LIFECYCLE_ENABLED")?.unwrap_or(false),
+    );
     if let Some(sfu_node_media) = sfu_node_media_config_from_env()? {
         config = config.with_sfu_node_media(sfu_node_media);
     }

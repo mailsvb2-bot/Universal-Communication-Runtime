@@ -133,6 +133,27 @@ impl fmt::Debug for RealtimeWebRtcDependencies {
     }
 }
 
+#[tonic::async_trait]
+pub trait RealtimeSfuPlacementLifecycle: Send + Sync {
+    /// Ensures that the canonical Call has one sticky horizontal-SFU placement.
+    ///
+    /// Implementations must be idempotent for repeated joins/reconnects of the same Call.
+    async fn ensure_call_placement(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<(), CanonicalError>;
+
+    /// Releases the canonical Call placement when its final realtime session has left.
+    ///
+    /// Implementations must tolerate an already-absent placement so rollback/cleanup is idempotent.
+    async fn release_call_placement(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<(), CanonicalError>;
+}
+
 pub struct GrpcRealtimeService<C, A, S> {
     clock: Arc<C>,
     authorization: Arc<A>,
@@ -142,6 +163,7 @@ pub struct GrpcRealtimeService<C, A, S> {
     conference_state: Arc<ConferenceRuntimeState>,
     webrtc_provider: Arc<dyn WebRtcProvider>,
     webrtc_config: Arc<WebRtcSessionConfigFactory>,
+    sfu_placement_lifecycle: Option<Arc<dyn RealtimeSfuPlacementLifecycle>>,
 }
 
 impl<C, A, S> GrpcRealtimeService<C, A, S> {
@@ -184,7 +206,60 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             conference_state,
             webrtc_provider: webrtc.provider,
             webrtc_config: webrtc.config,
+            sfu_placement_lifecycle: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_sfu_placement_lifecycle(
+        mut self,
+        lifecycle: Arc<dyn RealtimeSfuPlacementLifecycle>,
+    ) -> Self {
+        self.sfu_placement_lifecycle = Some(lifecycle);
+        self
+    }
+
+    async fn ensure_sfu_call_placement(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<(), CanonicalError> {
+        if let Some(lifecycle) = &self.sfu_placement_lifecycle {
+            lifecycle
+                .ensure_call_placement(&claims.scope, &claims.call_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn release_sfu_call_placement_if_inactive(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<(), CanonicalError> {
+        let active = self
+            .registry
+            .active_call_session_count_at(&claims.scope, &claims.call_id, now_unix_ms)
+            .map_err(map_registry_error)?;
+        if active == 0
+            && let Some(lifecycle) = &self.sfu_placement_lifecycle
+        {
+            lifecycle
+                .release_call_placement(&claims.scope, &claims.call_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn rollback_realtime_join(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<(), CanonicalError> {
+        self.registry
+            .leave(claims, now_unix_ms)
+            .map_err(map_registry_error)?;
+        self.release_sfu_call_placement_if_inactive(claims, now_unix_ms)
+            .await
     }
 }
 
@@ -199,6 +274,7 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             conference_state: Arc::clone(&self.conference_state),
             webrtc_provider: Arc::clone(&self.webrtc_provider),
             webrtc_config: Arc::clone(&self.webrtc_config),
+            sfu_placement_lifecycle: self.sfu_placement_lifecycle.clone(),
         }
     }
 }
@@ -262,9 +338,10 @@ where
         let token = decode_bearer_token(request.metadata());
         let request = decode_realtime_lookup(request.into_inner());
         let result = match (token, request) {
-            (Ok(token), Ok((scope, call_id, session_id))) => self
-                .authenticated_claims(&token, &scope, &call_id, &session_id)
-                .and_then(|claims| {
+            (Ok(token), Ok((scope, call_id, session_id))) => {
+                async {
+                    let claims =
+                        self.authenticated_claims(&token, &scope, &call_id, &session_id)?;
                     let now = self.now()?;
                     let admission = self.realtime_admission_state(&claims)?;
                     if admission == pb::RealtimeAdmissionState::Closed {
@@ -284,16 +361,25 @@ where
                     if redeemed != claims {
                         return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
                     }
-                    let outcome = self
-                        .registry
-                        .join(claims.clone(), now)
-                        .map_err(map_registry_error)?;
+                    self.ensure_sfu_call_placement(&claims).await?;
+                    let outcome = match self.registry.join(claims.clone(), now) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            let error = map_registry_error(error);
+                            let _ = self
+                                .release_sfu_call_placement_if_inactive(&claims, now)
+                                .await;
+                            return Err(error);
+                        }
+                    };
                     if let Err(error) = self.append_attendance(&outcome.transition) {
-                        let _ = self.registry.leave(&claims, now);
+                        let _ = self.rollback_realtime_join(&claims, now).await;
                         return Err(error);
                     }
                     Ok(pb_realtime_session(&claims, admission, media_policy))
-                }),
+                }
+                .await
+            }
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RealtimeJoinResponse {
@@ -365,13 +451,18 @@ where
         let token = decode_bearer_token(request.metadata());
         let lookup = decode_realtime_lookup(request.into_inner());
         let result = match (token, lookup) {
-            (Ok(token), Ok((scope, call_id, session_id))) => self
-                .authenticated_claims(&token, &scope, &call_id, &session_id)
-                .and_then(|claims| {
+            (Ok(token), Ok((scope, call_id, session_id))) => {
+                async {
+                    let claims =
+                        self.authenticated_claims(&token, &scope, &call_id, &session_id)?;
+                    let now = self.now()?;
                     let transition = self
                         .registry
-                        .leave(&claims, self.now()?)
+                        .leave(&claims, now)
                         .map_err(map_registry_error)?;
+                    let placement_cleanup = self
+                        .release_sfu_call_placement_if_inactive(&claims, now)
+                        .await;
                     self.append_attendance(&transition)?;
                     conference_runtime(self)
                         .clear_raised_hand(&claims.scope, &claims.call_id, &claims.participant)
@@ -387,10 +478,13 @@ where
                             &claims.session_id,
                         )
                         .map_err(|error| map_conference_error(&error))?;
+                    placement_cleanup?;
                     Ok(pb_acknowledgement(acknowledgement_for(
                         claims.session_id.as_opaque().clone(),
                     )))
-                }),
+                }
+                .await
+            }
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RealtimeLeaveResponse {
@@ -2761,6 +2855,145 @@ fn status_from_canonical(error: CanonicalError) -> Status {
         CanonicalErrorCode::Internal => tonic::Code::Internal,
     };
     Status::new(code, "realtime request rejected")
+}
+
+#[cfg(test)]
+mod sfu_placement_lifecycle_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use ucr_model::{NamespaceId, PrincipalRef, TenantId};
+    use ucr_realtime::{JoinGrantUsePolicy, JoinTokenKey};
+
+    #[derive(Debug, Default)]
+    struct RecordingPlacementLifecycle {
+        ensures: AtomicUsize,
+        releases: AtomicUsize,
+    }
+
+    #[tonic::async_trait]
+    impl RealtimeSfuPlacementLifecycle for RecordingPlacementLifecycle {
+        async fn ensure_call_placement(
+            &self,
+            _scope: &TenantScope,
+            _call_id: &CallId,
+        ) -> Result<(), CanonicalError> {
+            self.ensures.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn release_call_placement(
+            &self,
+            _scope: &TenantScope,
+            _call_id: &CallId,
+        ) -> Result<(), CanonicalError> {
+            self.releases.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    fn id(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn claims(session: &str, device: &str) -> RealtimeSessionClaims {
+        RealtimeSessionClaims {
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(id("placement-tenant")),
+                namespace_id: Some(NamespaceId::from_opaque(id("placement-namespace"))),
+            },
+            call_id: CallId::from_opaque(id("placement-call")),
+            participant: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(id("placement-participant")),
+                kind: PrincipalKind::Person,
+            },
+            device_id: Some(DeviceId::from_opaque(id(device))),
+            session_id: SessionId::from_opaque(id(session)),
+            issued_at_unix_ms: 1_000,
+            not_before_unix_ms: 1_000,
+            expires_at_unix_ms: 60_000,
+            use_policy: JoinGrantUsePolicy::Reusable,
+        }
+    }
+
+    fn service(
+        registry: Arc<RealtimeSessionRegistry>,
+        lifecycle: Arc<RecordingPlacementLifecycle>,
+    ) -> GrpcRealtimeService<(), (), ()> {
+        let join_issuer = Arc::new(
+            JoinTokenIssuer::new(
+                JoinTokenKey::from_bytes([9_u8; 32]),
+                "https://conference.example.test/join",
+            )
+            .expect("join issuer"),
+        );
+        let lifecycle: Arc<dyn RealtimeSfuPlacementLifecycle> = lifecycle;
+        GrpcRealtimeService::new(
+            Arc::new(()),
+            Arc::new(()),
+            Arc::new(()),
+            join_issuer,
+            registry,
+            Arc::new(ConferenceRuntimeState::new()),
+        )
+        .with_sfu_placement_lifecycle(lifecycle)
+    }
+
+    #[tokio::test]
+    async fn call_placement_releases_only_after_last_realtime_session_leaves() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let lifecycle = Arc::new(RecordingPlacementLifecycle::default());
+        let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
+        let first = claims("placement-session-a", "placement-device-a");
+        let second = claims("placement-session-b", "placement-device-b");
+
+        service
+            .ensure_sfu_call_placement(&first)
+            .await
+            .expect("first placement");
+        registry.join(first.clone(), 1_001).expect("first join");
+        service
+            .ensure_sfu_call_placement(&second)
+            .await
+            .expect("sticky placement");
+        registry.join(second.clone(), 1_002).expect("second join");
+        assert_eq!(lifecycle.ensures.load(Ordering::Relaxed), 2);
+
+        registry.leave(&first, 1_003).expect("first leave");
+        service
+            .release_sfu_call_placement_if_inactive(&first, 1_003)
+            .await
+            .expect("first cleanup");
+        assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 0);
+
+        registry.leave(&second, 1_004).expect("second leave");
+        service
+            .release_sfu_call_placement_if_inactive(&second, 1_004)
+            .await
+            .expect("last cleanup");
+        assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn fresh_join_rollback_removes_session_and_releases_call_placement() {
+        let registry = Arc::new(RealtimeSessionRegistry::new(8, 2));
+        let lifecycle = Arc::new(RecordingPlacementLifecycle::default());
+        let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
+        let claims = claims("placement-rollback-session", "placement-rollback-device");
+
+        service
+            .ensure_sfu_call_placement(&claims)
+            .await
+            .expect("placement");
+        registry.join(claims.clone(), 1_001).expect("join");
+        service
+            .rollback_realtime_join(&claims, 1_002)
+            .await
+            .expect("rollback");
+
+        assert_eq!(registry.active_session_count(), 0);
+        assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 1);
+    }
 }
 
 #[cfg(test)]

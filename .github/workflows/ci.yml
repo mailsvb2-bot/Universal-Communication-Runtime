@@ -72,7 +72,9 @@ jobs:
 
   release-tests:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Release-mode workspace compilation is substantially slower on a cold hosted runner.
+    # Keep this above the observed cold-cache path so healthy tests are not cancelled mid-suite.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Install pinned Rust toolchain

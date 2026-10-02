@@ -5,12 +5,13 @@ use std::{
 
 use tonic::{Request, Response, Status};
 use ucr_core::ServiceQuotaClock;
-use ucr_model::CallId;
+use ucr_model::{CallId, TenantScope};
+use ucr_protocol::{CanonicalError, CanonicalErrorCode};
 use ucr_sfu::{MAX_SFU_REGION_BYTES, SfuClusterDirectory, SfuPlacementError, SfuPlacementPolicy};
 
 use super::{
-    GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_opaque, decode_scope,
-    pb, pb_opaque,
+    GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, RealtimeSfuPlacementLifecycle,
+    decode_opaque, decode_scope, pb, pb_opaque,
 };
 
 /// Private runtime-only horizontal-SFU placement binding.
@@ -43,6 +44,47 @@ impl<C> fmt::Debug for GrpcSfuPlacementService<C> {
         formatter
             .debug_struct("GrpcSfuPlacementService")
             .finish_non_exhaustive()
+    }
+}
+
+#[tonic::async_trait]
+impl<C> RealtimeSfuPlacementLifecycle for GrpcSfuPlacementService<C>
+where
+    C: ServiceQuotaClock + 'static,
+{
+    async fn ensure_call_placement(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<(), CanonicalError> {
+        let now_unix_ms = self
+            .clock
+            .now_unix_ms()
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+        let mut cluster = self
+            .cluster
+            .lock()
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+        cluster.prune_expired_nodes(now_unix_ms);
+        cluster
+            .place_session(scope, call_id, &SfuPlacementPolicy::default(), now_unix_ms)
+            .map(|_| ())
+            .map_err(map_lifecycle_placement_error)
+    }
+
+    async fn release_call_placement(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<(), CanonicalError> {
+        let mut cluster = self
+            .cluster
+            .lock()
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+        cluster
+            .release_session_if_present(scope, call_id)
+            .map(|_| ())
+            .map_err(map_lifecycle_placement_error)
     }
 }
 
@@ -123,7 +165,7 @@ where
             .lock()
             .map_err(|_| Status::unavailable("SFU placement directory unavailable"))?;
         cluster
-            .release_session(&scope, &call_id)
+            .release_session_if_present(&scope, &call_id)
             .map_err(map_placement_error)?;
 
         Ok(Response::new(pb::SfuReleaseCallResponse {
@@ -176,6 +218,18 @@ fn map_placement_error(error: SfuPlacementError) -> Status {
         SfuPlacementError::EndpointUnavailable => Status::unavailable("SFU endpoint unavailable"),
         SfuPlacementError::NoHealthyCapacity => {
             Status::resource_exhausted("no healthy SFU capacity")
+        }
+    }
+}
+
+fn map_lifecycle_placement_error(error: SfuPlacementError) -> CanonicalError {
+    match error {
+        SfuPlacementError::NoHealthyCapacity => {
+            CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
+        }
+        SfuPlacementError::InvalidEndpoint => CanonicalError::new(CanonicalErrorCode::Internal),
+        SfuPlacementError::InvalidNode | SfuPlacementError::EndpointUnavailable => {
+            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
         }
     }
 }
@@ -274,6 +328,65 @@ mod tests {
         )
         .await
         .expect("release placement");
+
+        pb::sfu_placement_service_server::SfuPlacementService::release_call(
+            &service,
+            Request::new(pb::SfuReleaseCallRequest {
+                scope: place_request().scope,
+                call_id: Some(pb_id("call-a")),
+            }),
+        )
+        .await
+        .expect("idempotent release retry");
+    }
+
+    #[tokio::test]
+    async fn realtime_lifecycle_reuses_sticky_call_and_release_is_idempotent() {
+        let cluster = Arc::new(Mutex::new(SfuClusterDirectory::default()));
+        cluster
+            .lock()
+            .expect("cluster")
+            .upsert_node(SfuNodeDescriptor {
+                node_id: OpaqueId::new("sfu-lifecycle").expect("node"),
+                region: "eu".to_owned(),
+                state: SfuNodeState::Healthy,
+                active_sessions: 0,
+                max_sessions: 1,
+                lease_expires_at_unix_ms: 20_000,
+            })
+            .expect("register node");
+        let service =
+            GrpcSfuPlacementService::new(Arc::new(FixedClock(10_000)), Arc::clone(&cluster));
+        let request = place_request();
+        let scope = decode_scope(request.scope.expect("scope")).expect("decoded scope");
+        let call_id = CallId::from_opaque(decode_opaque(request.call_id).expect("decoded call"));
+
+        RealtimeSfuPlacementLifecycle::ensure_call_placement(&service, &scope, &call_id)
+            .await
+            .expect("first placement");
+        RealtimeSfuPlacementLifecycle::ensure_call_placement(&service, &scope, &call_id)
+            .await
+            .expect("sticky placement");
+
+        let snapshot = cluster
+            .lock()
+            .expect("cluster")
+            .node_with_capacity(&OpaqueId::new("sfu-lifecycle").expect("node"))
+            .expect("snapshot");
+        assert_eq!(snapshot.reserved_sessions, 1);
+
+        RealtimeSfuPlacementLifecycle::release_call_placement(&service, &scope, &call_id)
+            .await
+            .expect("release");
+        RealtimeSfuPlacementLifecycle::release_call_placement(&service, &scope, &call_id)
+            .await
+            .expect("idempotent release retry");
+        let snapshot = cluster
+            .lock()
+            .expect("cluster")
+            .node_with_capacity(&OpaqueId::new("sfu-lifecycle").expect("node"))
+            .expect("snapshot");
+        assert_eq!(snapshot.reserved_sessions, 0);
     }
 
     #[tokio::test]

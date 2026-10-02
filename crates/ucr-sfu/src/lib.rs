@@ -419,21 +419,43 @@ impl SfuClusterDirectory {
     /// Releases one previously reserved horizontal-SFU session slot.
     ///
     /// # Errors
-    /// Returns `InvalidNode` when the Call has no placement or its worker has no reserved session.
+    /// Returns `InvalidNode` when the Call has no placement or its worker/reservation invariant is
+    /// unavailable.
     pub fn release_session(
         &mut self,
         scope: &ucr_model::TenantScope,
         call_id: &ucr_model::CallId,
     ) -> Result<(), SfuPlacementError> {
+        if self.release_session_if_present(scope, call_id)? {
+            Ok(())
+        } else {
+            Err(SfuPlacementError::InvalidNode)
+        }
+    }
+
+    /// Idempotently releases a Call placement when one exists.
+    ///
+    /// `Ok(false)` means there was no Call placement, which is safe for retry/rollback cleanup.
+    /// A present placement with a missing worker or reservation still fails closed rather than
+    /// being mistaken for an idempotent retry.
+    ///
+    /// # Errors
+    /// Returns `InvalidNode` when a present placement violates worker/reservation accounting.
+    pub fn release_session_if_present(
+        &mut self,
+        scope: &ucr_model::TenantScope,
+        call_id: &ucr_model::CallId,
+    ) -> Result<bool, SfuPlacementError> {
         let key = placement_key(scope, call_id);
-        let node_id = self
-            .placements
-            .remove(&key)
-            .ok_or(SfuPlacementError::InvalidNode)?;
+        let Some(node_id) = self.placements.get(&key).cloned() else {
+            return Ok(false);
+        };
         if !self.nodes.contains_key(&node_id) {
             return Err(SfuPlacementError::InvalidNode);
         }
-        self.release_reservation(&node_id)
+        self.release_reservation(&node_id)?;
+        self.placements.remove(&key);
+        Ok(true)
     }
 }
 
@@ -989,6 +1011,40 @@ mod horizontal_placement_tests {
             Err(SfuPlacementError::InvalidNode)
         );
         assert!(directory.is_empty());
+    }
+
+    #[test]
+    fn idempotent_release_distinguishes_absence_from_broken_accounting() {
+        let mut directory = SfuClusterDirectory::default();
+        let call_id = call("release-call");
+        directory
+            .upsert_node(node(
+                "sfu-release",
+                "eu",
+                SfuNodeState::Healthy,
+                0,
+                10,
+                10_000,
+            ))
+            .expect("node");
+        directory
+            .place_session(&scope(), &call_id, &SfuPlacementPolicy::default(), 100)
+            .expect("placement");
+
+        assert!(
+            directory
+                .release_session_if_present(&scope(), &call_id)
+                .expect("first release")
+        );
+        assert!(
+            !directory
+                .release_session_if_present(&scope(), &call_id)
+                .expect("retry release")
+        );
+        assert_eq!(
+            directory.release_session(&scope(), &call_id),
+            Err(SfuPlacementError::InvalidNode)
+        );
     }
 
     #[test]
