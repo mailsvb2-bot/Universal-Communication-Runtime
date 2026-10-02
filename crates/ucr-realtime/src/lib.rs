@@ -756,9 +756,12 @@ impl RealtimeSessionRegistry {
         {
             let scope = &entry.claims.scope;
             let call_id = &entry.claims.call_id;
-            if final_expired_calls.iter().any(|(candidate_scope, candidate_call_id)| {
-                candidate_scope == scope && candidate_call_id == call_id
-            }) {
+            if final_expired_calls
+                .iter()
+                .any(|(candidate_scope, candidate_call_id)| {
+                    candidate_scope == scope && candidate_call_id == call_id
+                })
+            {
                 continue;
             }
             let has_live_session = entries.iter().any(|candidate| {
