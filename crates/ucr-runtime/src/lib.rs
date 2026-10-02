@@ -17,13 +17,13 @@ use ucr_api_grpc::{
     GrpcSfuPlacementService, GrpcStoreForwardService, GrpcSyncService,
     GrpcUniversalConferenceService, MachineAuthDiscovery, MachineTokenVerificationKeyProvider,
     OperatorRuntimeHealthSource, OperatorSfuClusterControl, OperatorSfuClusterError,
-    OperatorSfuNodeHeartbeat, RealtimeWebRtcDependencies, UniversalConferenceRuntimeCapabilities,
-    attachment_service_server, call_service_server, conference_service_server,
-    device_service_server, event_service_server, expire_due_recordings_once, group_service_server,
-    integration_service_server, machine_auth_service_server, operator_runtime_service_server, pb,
-    realtime_service_server, recording_service_server, sfu_node_media_service_server,
-    sfu_placement_service_server, store_forward_service_server, sync_service_server,
-    universal_conference_service_server,
+    OperatorSfuNodeHeartbeat, RealtimeSfuPlacementLifecycle, RealtimeWebRtcDependencies,
+    UniversalConferenceRuntimeCapabilities, attachment_service_server, call_service_server,
+    conference_service_server, device_service_server, event_service_server,
+    expire_due_recordings_once, group_service_server, integration_service_server,
+    machine_auth_service_server, operator_runtime_service_server, pb, realtime_service_server,
+    recording_service_server, sfu_node_media_service_server, sfu_placement_service_server,
+    store_forward_service_server, sync_service_server, universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
@@ -72,6 +72,7 @@ pub const DEFAULT_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_s
 pub const MIN_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub const MAX_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_mins(1);
 const RECORDING_RETENTION_WORKER_LEASE_DURATION_MS: i64 = 120_000;
+const DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct WebhookWorkerSweep {
@@ -1847,11 +1848,11 @@ impl ProductionRuntime {
             Arc::clone(&conference_state),
             dependencies.webrtc,
         );
-        let realtime_service = if sfu_placement_lifecycle {
-            realtime_service.with_sfu_placement_lifecycle(Arc::new(sfu_placement_service.clone()))
-        } else {
-            realtime_service
-        };
+        let (realtime_service, sfu_expiry_task) = configure_sfu_placement_lifecycle(
+            realtime_service,
+            &sfu_placement_service,
+            sfu_placement_lifecycle,
+        );
         let bridge_task = spawn_webrtc_e2ee_bridge(
             dependencies.e2ee_ingress,
             &dependencies.live_provider,
@@ -1905,6 +1906,9 @@ impl ProductionRuntime {
             _ => Err("SFU node media runtime configuration mismatch".to_owned()),
         };
         bridge_task.abort();
+        if let Some(task) = sfu_expiry_task {
+            task.abort();
+        }
         server_result
     }
 
@@ -2272,7 +2276,7 @@ fn realtime_dependencies(
         webrtc_config,
         browser_realtime_gateway: _,
         sfu_node_media: _,
-        sfu_placement_lifecycle: _,
+        sfu_placement_lifecycle,
     } = config;
     let (e2ee_ingress_tx, e2ee_ingress) =
         tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
@@ -2281,9 +2285,17 @@ fn realtime_dependencies(
             .map_err(|error| format!("start live WebRTC provider: {error:?}"))?,
     );
     let provider: Arc<dyn WebRtcProvider> = live_provider.clone();
+    let registry = if sfu_placement_lifecycle {
+        RealtimeSessionRegistry::with_expired_call_cleanup(
+            ucr_realtime::MAX_REALTIME_SESSIONS,
+            ucr_realtime::DEFAULT_REALTIME_QUEUE_CAPACITY,
+        )
+    } else {
+        RealtimeSessionRegistry::default()
+    };
     Ok(RealtimeRuntimeDependencies {
         join_issuer,
-        registry: Arc::new(RealtimeSessionRegistry::default()),
+        registry: Arc::new(registry),
         webrtc: RealtimeWebRtcDependencies::new(provider, webrtc_config),
         live_provider,
         e2ee_ingress,
@@ -2349,6 +2361,53 @@ fn realtime_operator_health(
         turn_configured,
         Arc::clone(sfu_cluster),
     ))
+}
+
+fn configure_sfu_placement_lifecycle(
+    realtime_service: GrpcRealtimeService<
+        SystemServiceQuotaClock,
+        SqliteLocalStore,
+        SqliteLocalStore,
+    >,
+    sfu_placement_service: &GrpcSfuPlacementService<SystemServiceQuotaClock>,
+    enabled: bool,
+) -> (
+    GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    if !enabled {
+        return (realtime_service, None);
+    }
+    let lifecycle: Arc<dyn RealtimeSfuPlacementLifecycle> = Arc::new(sfu_placement_service.clone());
+    let realtime_service = realtime_service.with_sfu_placement_lifecycle(lifecycle);
+    let task = spawn_sfu_placement_expiry_sweeper(
+        realtime_service.clone(),
+        DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL,
+    );
+    (realtime_service, Some(task))
+}
+
+fn spawn_sfu_placement_expiry_sweeper(
+    service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run_sfu_placement_expiry_sweeper(service, interval))
+}
+
+async fn run_sfu_placement_expiry_sweeper(
+    service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+    interval: Duration,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        let Ok(now_unix_ms) = runtime_now_unix_ms() else {
+            continue;
+        };
+        let _ = service.sweep_expired_sfu_placements_at(now_unix_ms).await;
+    }
 }
 
 fn spawn_webrtc_e2ee_bridge(

@@ -37,7 +37,7 @@ use ucr_protocol::{
 };
 use ucr_realtime::{
     AttendanceTransition, AttendanceTransitionKind, JoinTokenError, JoinTokenIssuer,
-    RealtimeRegistryError, RealtimeSessionClaims, RealtimeSessionRegistry,
+    RealtimeJoinOutcome, RealtimeRegistryError, RealtimeSessionClaims, RealtimeSessionRegistry,
 };
 use ucr_sfu::{PreparedSfuCapabilities, SfuForwardSink, SfuForwardSinkError};
 use ucr_webrtc::{
@@ -164,6 +164,7 @@ pub struct GrpcRealtimeService<C, A, S> {
     webrtc_provider: Arc<dyn WebRtcProvider>,
     webrtc_config: Arc<WebRtcSessionConfigFactory>,
     sfu_placement_lifecycle: Option<Arc<dyn RealtimeSfuPlacementLifecycle>>,
+    sfu_placement_transition: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl<C, A, S> GrpcRealtimeService<C, A, S> {
@@ -207,6 +208,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             webrtc_provider: webrtc.provider,
             webrtc_config: webrtc.config,
             sfu_placement_lifecycle: None,
+            sfu_placement_transition: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -217,6 +219,15 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     ) -> Self {
         self.sfu_placement_lifecycle = Some(lifecycle);
         self
+    }
+
+    async fn sfu_placement_transition_guard(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        self.sfu_placement_lifecycle.as_ref()?;
+        Some(
+            Arc::clone(&self.sfu_placement_transition)
+                .lock_owned()
+                .await,
+        )
     }
 
     async fn ensure_sfu_call_placement(
@@ -250,16 +261,97 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         Ok(())
     }
 
+    async fn admit_realtime_session_with_sfu_placement(
+        &self,
+        claims: RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<RealtimeJoinOutcome, CanonicalError> {
+        let _guard = self.sfu_placement_transition_guard().await;
+        self.ensure_sfu_call_placement(&claims).await?;
+        match self.registry.join(claims.clone(), now_unix_ms) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                let error = map_registry_error(error);
+                let _ = self
+                    .release_sfu_call_placement_if_inactive(&claims, now_unix_ms)
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn leave_realtime_session_with_sfu_placement(
+        &self,
+        claims: &RealtimeSessionClaims,
+        now_unix_ms: i64,
+    ) -> Result<(AttendanceTransition, Result<(), CanonicalError>), CanonicalError> {
+        let _guard = self.sfu_placement_transition_guard().await;
+        let transition = self
+            .registry
+            .leave(claims, now_unix_ms)
+            .map_err(map_registry_error)?;
+        let placement_cleanup = self
+            .release_sfu_call_placement_if_inactive(claims, now_unix_ms)
+            .await;
+        Ok((transition, placement_cleanup))
+    }
+
     async fn rollback_realtime_join(
         &self,
         claims: &RealtimeSessionClaims,
         now_unix_ms: i64,
     ) -> Result<(), CanonicalError> {
+        let _guard = self.sfu_placement_transition_guard().await;
         self.registry
             .leave(claims, now_unix_ms)
             .map_err(map_registry_error)?;
         self.release_sfu_call_placement_if_inactive(claims, now_unix_ms)
             .await
+    }
+
+    /// Sweeps final-session expiry cleanup through the same serialized SFU placement transition.
+    ///
+    /// This prevents a cleanup release from racing between a fresh join's placement ensure and
+    /// canonical realtime-session admission. Release failures remain pending for a later sweep.
+    ///
+    /// # Errors
+    /// Returns bounded registry-state failures.
+    pub async fn sweep_expired_sfu_placements_at(
+        &self,
+        now_unix_ms: i64,
+    ) -> Result<usize, CanonicalError> {
+        let Some(lifecycle) = self.sfu_placement_lifecycle.as_ref() else {
+            return Ok(0);
+        };
+        let _guard = self.sfu_placement_transition_guard().await;
+        let candidates = self
+            .registry
+            .expired_call_cleanup_candidates_at(now_unix_ms)
+            .map_err(map_registry_error)?;
+        let mut released = 0_usize;
+        for (scope, call_id) in candidates {
+            let active = self
+                .registry
+                .active_call_session_count_at(&scope, &call_id, now_unix_ms)
+                .map_err(map_registry_error)?;
+            if active != 0 {
+                self.registry
+                    .acknowledge_expired_call_cleanup(&scope, &call_id)
+                    .map_err(map_registry_error)?;
+                continue;
+            }
+            if lifecycle
+                .release_call_placement(&scope, &call_id)
+                .await
+                .is_ok()
+            {
+                self.registry
+                    .acknowledge_expired_call_cleanup(&scope, &call_id)
+                    .map_err(map_registry_error)?;
+                released = released.saturating_add(1);
+            }
+        }
+        Ok(released)
     }
 }
 
@@ -275,6 +367,7 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             webrtc_provider: Arc::clone(&self.webrtc_provider),
             webrtc_config: Arc::clone(&self.webrtc_config),
             sfu_placement_lifecycle: self.sfu_placement_lifecycle.clone(),
+            sfu_placement_transition: Arc::clone(&self.sfu_placement_transition),
         }
     }
 }
@@ -361,17 +454,9 @@ where
                     if redeemed != claims {
                         return Err(CanonicalError::new(CanonicalErrorCode::Unauthenticated));
                     }
-                    self.ensure_sfu_call_placement(&claims).await?;
-                    let outcome = match self.registry.join(claims.clone(), now) {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
-                            let error = map_registry_error(error);
-                            let _ = self
-                                .release_sfu_call_placement_if_inactive(&claims, now)
-                                .await;
-                            return Err(error);
-                        }
-                    };
+                    let outcome = self
+                        .admit_realtime_session_with_sfu_placement(claims.clone(), now)
+                        .await?;
                     if let Err(error) = self.append_attendance(&outcome.transition) {
                         let _ = self.rollback_realtime_join(&claims, now).await;
                         return Err(error);
@@ -456,13 +541,9 @@ where
                     let claims =
                         self.authenticated_claims(&token, &scope, &call_id, &session_id)?;
                     let now = self.now()?;
-                    let transition = self
-                        .registry
-                        .leave(&claims, now)
-                        .map_err(map_registry_error)?;
-                    let placement_cleanup = self
-                        .release_sfu_call_placement_if_inactive(&claims, now)
-                        .await;
+                    let (transition, placement_cleanup) = self
+                        .leave_realtime_session_with_sfu_placement(&claims, now)
+                        .await?;
                     self.append_attendance(&transition)?;
                     conference_runtime(self)
                         .clear_raised_hand(&claims.scope, &claims.call_id, &claims.participant)
@@ -2862,6 +2943,7 @@ mod sfu_placement_lifecycle_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use tokio::sync::Notify;
     use ucr_model::{NamespaceId, PrincipalRef, TenantId};
     use ucr_realtime::{JoinGrantUsePolicy, JoinTokenKey};
 
@@ -2916,10 +2998,13 @@ mod sfu_placement_lifecycle_tests {
         }
     }
 
-    fn service(
+    fn service<L>(
         registry: Arc<RealtimeSessionRegistry>,
-        lifecycle: Arc<RecordingPlacementLifecycle>,
-    ) -> GrpcRealtimeService<(), (), ()> {
+        lifecycle: Arc<L>,
+    ) -> GrpcRealtimeService<(), (), ()>
+    where
+        L: RealtimeSfuPlacementLifecycle + 'static,
+    {
         let join_issuer = Arc::new(
             JoinTokenIssuer::new(
                 JoinTokenKey::from_bytes([9_u8; 32]),
@@ -2937,6 +3022,80 @@ mod sfu_placement_lifecycle_tests {
             Arc::new(ConferenceRuntimeState::new()),
         )
         .with_sfu_placement_lifecycle(lifecycle)
+    }
+
+    #[derive(Debug, Default)]
+    struct BlockingReleasePlacementLifecycle {
+        ensures: AtomicUsize,
+        releases: AtomicUsize,
+        release_started: Notify,
+        allow_release: Notify,
+    }
+
+    #[tonic::async_trait]
+    impl RealtimeSfuPlacementLifecycle for BlockingReleasePlacementLifecycle {
+        async fn ensure_call_placement(
+            &self,
+            _scope: &TenantScope,
+            _call_id: &CallId,
+        ) -> Result<(), CanonicalError> {
+            self.ensures.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn release_call_placement(
+            &self,
+            _scope: &TenantScope,
+            _call_id: &CallId,
+        ) -> Result<(), CanonicalError> {
+            self.releases.fetch_add(1, Ordering::Relaxed);
+            self.release_started.notify_one();
+            self.allow_release.notified().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn expiry_cleanup_cannot_release_between_fresh_join_placement_and_admission() {
+        let registry = Arc::new(RealtimeSessionRegistry::with_expired_call_cleanup(8, 2));
+        let lifecycle = Arc::new(BlockingReleasePlacementLifecycle::default());
+        let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
+        let mut expired = claims("placement-expired-session", "placement-expired-device");
+        expired.expires_at_unix_ms = 1_010;
+        registry
+            .join(expired.clone(), 1_001)
+            .expect("expired seed join");
+
+        let sweep_service = service.clone();
+        let sweep = tokio::spawn(async move {
+            sweep_service
+                .sweep_expired_sfu_placements_at(1_010)
+                .await
+                .expect("expiry sweep")
+        });
+        lifecycle.release_started.notified().await;
+
+        let fresh = claims("placement-fresh-session", "placement-fresh-device");
+        let join_service = service.clone();
+        let join = tokio::spawn(async move {
+            join_service
+                .admit_realtime_session_with_sfu_placement(fresh, 1_011)
+                .await
+                .expect("fresh join")
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            lifecycle.ensures.load(Ordering::Relaxed),
+            0,
+            "fresh ensure must wait until the serialized release completes"
+        );
+
+        lifecycle.allow_release.notify_one();
+        assert_eq!(sweep.await.expect("sweep task"), 1);
+        join.await.expect("join task");
+        assert_eq!(lifecycle.releases.load(Ordering::Relaxed), 1);
+        assert_eq!(lifecycle.ensures.load(Ordering::Relaxed), 1);
+        assert_eq!(registry.active_session_count(), 1);
     }
 
     #[tokio::test]
