@@ -116,4 +116,3 @@ fn sfu_graceful_drain_moves_active_placement_only_when_replacement_capacity_exis
     assert_eq!(after_migration.node_id, replacement);
     assert!(after_migration.retained_sticky_placement);
 }
-
