@@ -4,7 +4,9 @@ mod turn_secret_reconcile;
 
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
-use ucr_api_grpc::MachineTokenVerificationKeyProvider;
+use ucr_api_grpc::{
+    MachineTokenVerificationKeyProvider, SfuNodeMediaClientTlsConfig, SfuPlacementRoutingPolicy,
+};
 use ucr_core::WebhookDispatchOutcome;
 use ucr_crypto::{MAX_MACHINE_TOKEN_JWKS_BYTES, MachineTokenPublicKeySet};
 use ucr_model::OpaqueId;
@@ -13,6 +15,7 @@ use ucr_runtime::{
     DEFAULT_OPERATOR_BIND, DEFAULT_RECORDING_RETENTION_POLL_INTERVAL, DEFAULT_RUNTIME_BIND,
     DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MachineAuthRuntimeConfig, MachineBearerRuntimeConfig,
     ProductionRuntime, RealtimeRuntimeConfig, SfuNodeMediaRuntimeConfig,
+    SfuPlacementMediaRuntimeConfig,
 };
 use ucr_secrets::{
     MAX_SECRET_BYTES, ReloadingFileSecretProvider, ReloadingFileTlsSecretProvider, SecretHandle,
@@ -509,10 +512,10 @@ fn sfu_node_media_config_from_env() -> Result<Option<SfuNodeMediaRuntimeConfig>,
     )?);
     let certificate_handle = provider.certificate_handle();
     let private_key_handle = provider.private_key_handle();
-    let client_ca_pem = read_sfu_node_ca_file(&client_ca_path)?;
+    let client_ca_pem = read_sfu_ca_file(&client_ca_path, "SFU node client CA")?;
     let previous_client_ca_pem = previous_client_ca_path
         .as_deref()
-        .map(read_sfu_node_ca_file)
+        .map(|path| read_sfu_ca_file(path, "SFU node previous client CA"))
         .transpose()?;
     let provider: Arc<dyn SecretProvider> = provider;
     SfuNodeMediaRuntimeConfig::new(
@@ -526,19 +529,98 @@ fn sfu_node_media_config_from_env() -> Result<Option<SfuNodeMediaRuntimeConfig>,
     .map(Some)
 }
 
-fn read_sfu_node_ca_file(path: &str) -> Result<Vec<u8>, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("inspect SFU node client CA file: {error}"))?;
+fn read_sfu_ca_file(path: &str, label: &str) -> Result<Vec<u8>, String> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("inspect {label} file: {error}"))?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.len() == 0
         || metadata.len() > MAX_SECRET_BYTES as u64
     {
-        return Err(
-            "SFU node client CA must be a non-empty bounded regular non-symlink file".to_owned(),
-        );
+        return Err(format!(
+            "{label} must be a non-empty bounded regular non-symlink file"
+        ));
     }
-    fs::read(path).map_err(|error| format!("read SFU node client CA file: {error}"))
+    fs::read(path).map_err(|error| format!("read {label} file: {error}"))
+}
+
+fn sfu_placement_media_config_from_env() -> Result<Option<SfuPlacementMediaRuntimeConfig>, String> {
+    let enabled = bool_env("UCR_SFU_PLACEMENT_MEDIA_ENABLED")?.unwrap_or(false);
+    let dependent_variables = [
+        "UCR_SFU_ROUTER_CLIENT_CERT_FILE",
+        "UCR_SFU_ROUTER_CLIENT_KEY_FILE",
+        "UCR_SFU_ROUTER_SERVER_CA_FILE",
+        "UCR_SFU_ROUTER_PREVIOUS_CLIENT_CERT_FILE",
+        "UCR_SFU_ROUTER_PREVIOUS_CLIENT_KEY_FILE",
+        "UCR_SFU_ROUTER_PREVIOUS_SERVER_CA_FILE",
+        "UCR_SFU_ROUTER_SERVER_NAME",
+        "UCR_SFU_ROUTER_PREFERRED_REGION",
+        "UCR_SFU_ROUTER_ALLOW_CROSS_REGION_FAILOVER",
+    ];
+    if !enabled {
+        if dependent_variables
+            .iter()
+            .any(|variable| std::env::var(variable).is_ok())
+        {
+            return Err(
+                "SFU router configuration requires UCR_SFU_PLACEMENT_MEDIA_ENABLED=true".to_owned(),
+            );
+        }
+        return Ok(None);
+    }
+
+    let certificate_path = std::env::var("UCR_SFU_ROUTER_CLIENT_CERT_FILE").map_err(|_| {
+        "UCR_SFU_ROUTER_CLIENT_CERT_FILE is required when placement media routing is enabled"
+            .to_owned()
+    })?;
+    let private_key_path = std::env::var("UCR_SFU_ROUTER_CLIENT_KEY_FILE").map_err(|_| {
+        "UCR_SFU_ROUTER_CLIENT_KEY_FILE is required when placement media routing is enabled"
+            .to_owned()
+    })?;
+    let server_ca_path = std::env::var("UCR_SFU_ROUTER_SERVER_CA_FILE").map_err(|_| {
+        "UCR_SFU_ROUTER_SERVER_CA_FILE is required when placement media routing is enabled"
+            .to_owned()
+    })?;
+    let server_name = std::env::var("UCR_SFU_ROUTER_SERVER_NAME").map_err(|_| {
+        "UCR_SFU_ROUTER_SERVER_NAME is required when placement media routing is enabled".to_owned()
+    })?;
+    let previous_certificate_path = std::env::var("UCR_SFU_ROUTER_PREVIOUS_CLIENT_CERT_FILE").ok();
+    let previous_private_key_path = std::env::var("UCR_SFU_ROUTER_PREVIOUS_CLIENT_KEY_FILE").ok();
+    let previous_server_ca_path = std::env::var("UCR_SFU_ROUTER_PREVIOUS_SERVER_CA_FILE").ok();
+    let certificate_secret_id = std::env::var("UCR_SFU_ROUTER_CLIENT_CERT_SECRET_ID")
+        .unwrap_or_else(|_| "sfu-router-client-certificate".to_owned());
+    let private_key_secret_id = std::env::var("UCR_SFU_ROUTER_CLIENT_KEY_SECRET_ID")
+        .unwrap_or_else(|_| "sfu-router-client-private-key".to_owned());
+
+    let provider = Arc::new(ReloadingFileTlsSecretProvider::new(
+        certificate_path,
+        private_key_path,
+        previous_certificate_path,
+        previous_private_key_path,
+        &certificate_secret_id,
+        &private_key_secret_id,
+    )?);
+    let certificate_handle = provider.certificate_handle();
+    let private_key_handle = provider.private_key_handle();
+    let server_ca_pem = read_sfu_ca_file(&server_ca_path, "SFU router server CA")?;
+    let previous_server_ca_pem = previous_server_ca_path
+        .as_deref()
+        .map(|path| read_sfu_ca_file(path, "SFU router previous server CA"))
+        .transpose()?;
+    let provider: Arc<dyn SecretProvider> = provider;
+    let node_tls = SfuNodeMediaClientTlsConfig::new(
+        provider,
+        certificate_handle,
+        private_key_handle,
+        server_ca_pem,
+        previous_server_ca_pem,
+        server_name,
+    )?;
+    let policy = SfuPlacementRoutingPolicy::new(
+        std::env::var("UCR_SFU_ROUTER_PREFERRED_REGION").ok(),
+        bool_env("UCR_SFU_ROUTER_ALLOW_CROSS_REGION_FAILOVER")?.unwrap_or(false),
+    )?;
+    Ok(Some(SfuPlacementMediaRuntimeConfig::new(node_tls, policy)))
 }
 
 async fn serve_realtime_command(
@@ -618,6 +700,9 @@ async fn serve_realtime_command(
     );
     if let Some(sfu_node_media) = sfu_node_media_config_from_env()? {
         config = config.with_sfu_node_media(sfu_node_media);
+    }
+    if let Some(sfu_placement_media) = sfu_placement_media_config_from_env()? {
+        config = config.with_sfu_placement_media(sfu_placement_media);
     }
     let runtime = Arc::new(ProductionRuntime::open_existing(database)?);
     match machine_bearer_config_from_env()? {

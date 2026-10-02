@@ -39,7 +39,10 @@ use ucr_realtime::{
     AttendanceTransition, AttendanceTransitionKind, JoinTokenError, JoinTokenIssuer,
     RealtimeJoinOutcome, RealtimeRegistryError, RealtimeSessionClaims, RealtimeSessionRegistry,
 };
-use ucr_sfu::{PreparedSfuCapabilities, SfuForwardSink, SfuForwardSinkError};
+use ucr_sfu::{
+    PreparedSfuCapabilities, SfuForwardOutcome, SfuForwardSink, SfuForwardSinkError,
+    SfuValidatedForwardBatch,
+};
 use ucr_webrtc::{
     PreparedWebRtcProvider, WebRtcProvider, WebRtcProviderError, WebRtcSessionConfigFactory,
 };
@@ -134,6 +137,18 @@ impl fmt::Debug for RealtimeWebRtcDependencies {
 }
 
 #[tonic::async_trait]
+pub trait RealtimeSfuMediaRouter: fmt::Debug + Send + Sync {
+    /// Forwards one already-canonicalized encrypted SFU batch through the configured horizontal
+    /// data plane and returns only concrete destination-ingress acceptance.
+    ///
+    /// Implementations must not reinterpret participant authority or mutate the validated batch.
+    async fn forward_validated_batch(
+        &self,
+        batch: &SfuValidatedForwardBatch,
+    ) -> Result<SfuForwardOutcome, CanonicalError>;
+}
+
+#[tonic::async_trait]
 pub trait RealtimeSfuPlacementLifecycle: Send + Sync {
     /// Ensures that the canonical Call has one sticky horizontal-SFU placement.
     ///
@@ -164,6 +179,7 @@ pub struct GrpcRealtimeService<C, A, S> {
     webrtc_provider: Arc<dyn WebRtcProvider>,
     webrtc_config: Arc<WebRtcSessionConfigFactory>,
     sfu_placement_lifecycle: Option<Arc<dyn RealtimeSfuPlacementLifecycle>>,
+    sfu_media_router: Option<Arc<dyn RealtimeSfuMediaRouter>>,
     sfu_placement_transition: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -208,6 +224,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             webrtc_provider: webrtc.provider,
             webrtc_config: webrtc.config,
             sfu_placement_lifecycle: None,
+            sfu_media_router: None,
             sfu_placement_transition: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -219,6 +236,17 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     ) -> Self {
         self.sfu_placement_lifecycle = Some(lifecycle);
         self
+    }
+
+    #[must_use]
+    pub fn with_sfu_media_router(mut self, router: Arc<dyn RealtimeSfuMediaRouter>) -> Self {
+        self.sfu_media_router = Some(router);
+        self
+    }
+
+    #[must_use]
+    pub fn has_sfu_media_router(&self) -> bool {
+        self.sfu_media_router.is_some()
     }
 
     async fn sfu_placement_transition_guard(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
@@ -367,6 +395,7 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             webrtc_provider: Arc::clone(&self.webrtc_provider),
             webrtc_config: Arc::clone(&self.webrtc_config),
             sfu_placement_lifecycle: self.sfu_placement_lifecycle.clone(),
+            sfu_media_router: self.sfu_media_router.clone(),
             sfu_placement_transition: Arc::clone(&self.sfu_placement_transition),
         }
     }
@@ -1102,19 +1131,29 @@ where
             .ok_or_else(invalid_argument)
             .and_then(decode_sfu_forward_envelope);
         let result = match (token, lookup, envelope) {
-            (Ok(token), Ok((scope, call_id, session_id)), Ok(envelope)) => self
-                .authenticated_claims(&token, &scope, &call_id, &session_id)
-                .and_then(|claims| {
-                    let accepted_recipients =
-                        self.forward_authenticated_e2ee_media(&claims, &envelope, &*self.registry)?;
-                    let accepted_recipient_count = u32::try_from(accepted_recipients)
-                        .map_err(|_| CanonicalError::new(CanonicalErrorCode::ResourceExhausted))?;
-                    Ok(pb::RealtimePublishMediaReceipt {
-                        call_id: Some(pb_opaque(claims.call_id.as_opaque())),
-                        session_id: Some(pb_opaque(claims.session_id.as_opaque())),
-                        accepted_recipient_count,
-                    })
-                }),
+            (Ok(token), Ok((scope, call_id, session_id)), Ok(envelope)) => {
+                match self.authenticated_claims(&token, &scope, &call_id, &session_id) {
+                    Ok(claims) => self
+                        .forward_authenticated_e2ee_media_via_configured_route(
+                            &claims,
+                            &envelope,
+                            &*self.registry,
+                        )
+                        .await
+                        .and_then(|accepted_recipients| {
+                            let accepted_recipient_count = u32::try_from(accepted_recipients)
+                                .map_err(|_| {
+                                    CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
+                                })?;
+                            Ok(pb::RealtimePublishMediaReceipt {
+                                call_id: Some(pb_opaque(claims.call_id.as_opaque())),
+                                session_id: Some(pb_opaque(claims.session_id.as_opaque())),
+                                accepted_recipient_count,
+                            })
+                        }),
+                    Err(error) => Err(error),
+                }
+            }
             (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RealtimePublishMediaResponse {
@@ -1480,6 +1519,105 @@ where
     /// # Errors
     /// Fails closed for revoked/expired sessions, invalid Device/source bindings, policy denial,
     /// malformed ciphertext, SFU validation failures or unavailable bounded routing state.
+    /// Routes one already-encrypted endpoint media envelope through either the configured
+    /// placement-aware horizontal data plane or the supplied local sink.
+    ///
+    /// Horizontal mode first performs the exact canonical Conference/SFU validation and derives one
+    /// immutable validated forward batch. The complete bounded egress quota for that batch is
+    /// charged before the first remote side effect so quota failure cannot create partial remote
+    /// fan-out. The router then waits for concrete destination ingress receipts.
+    ///
+    /// # Errors
+    /// Fails closed on the same canonical validation errors as the local path, quota exhaustion, or
+    /// any placement/node routing failure.
+    pub async fn forward_authenticated_e2ee_media_via_configured_route(
+        &self,
+        claims: &RealtimeSessionClaims,
+        envelope: &SfuForwardEnvelope,
+        local_sink: &dyn SfuForwardSink,
+    ) -> Result<usize, CanonicalError> {
+        let Some(router) = self.sfu_media_router.as_ref() else {
+            return self.forward_authenticated_e2ee_media(claims, envelope, local_sink);
+        };
+
+        self.require_live_transport_claims(claims)?;
+        self.registry
+            .heartbeat(claims, self.now()?)
+            .map_err(map_registry_error)?;
+        let device_id = claims
+            .device_id
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
+        self.require_universal_publish_allowed(
+            claims,
+            envelope.frame.header.media_kind,
+            envelope.frame.header.video_source_kind,
+        )?;
+        self.claim_universal_publisher_quota(claims)?;
+
+        let bandwidth_quota = self.universal_bandwidth_quota(claims)?;
+        let encoded_wire_bytes = if bandwidth_quota.is_some() {
+            Some(
+                encode_sfu_forward_envelope(envelope)
+                    .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?
+                    .len(),
+            )
+        } else {
+            None
+        };
+        if let (Some((owner, max_aggregate_bandwidth_bps)), Some(wire_bytes)) =
+            (&bandwidth_quota, encoded_wire_bytes)
+        {
+            self.registry
+                .charge_aggregate_bandwidth(
+                    owner,
+                    *max_aggregate_bandwidth_bps,
+                    wire_bytes,
+                    self.now()?,
+                )
+                .map_err(map_registry_error)?;
+        }
+
+        let Some(batch) = conference_runtime(self)
+            .prepare_forward(&actor_for(claims), device_id, envelope)
+            .map_err(|error| map_conference_error(&error))?
+        else {
+            return Ok(0);
+        };
+
+        if let (Some((owner, max_aggregate_bandwidth_bps)), Some(wire_bytes)) =
+            (&bandwidth_quota, encoded_wire_bytes)
+        {
+            let egress_bytes = wire_bytes
+                .checked_mul(batch.target_count())
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::ResourceExhausted))?;
+            self.registry
+                .charge_aggregate_bandwidth(
+                    owner,
+                    *max_aggregate_bandwidth_bps,
+                    egress_bytes,
+                    self.now()?,
+                )
+                .map_err(map_registry_error)?;
+        }
+
+        let outcome = router.forward_validated_batch(&batch).await?;
+        if outcome.accepted_recipients > 0
+            && let Some(transition) = self
+                .registry
+                .mark_media_ready(claims, self.now()?)
+                .map_err(map_registry_error)?
+        {
+            self.append_attendance(&transition)?;
+        }
+        Ok(outcome.accepted_recipients)
+    }
+
+    /// Forwards one authenticated E2EE media envelope through the caller-provided SFU sink.
+    ///
+    /// # Errors
+    /// Returns a canonical error when session/media validation, quota accounting, SFU forwarding,
+    /// or attendance persistence fails.
     pub fn forward_authenticated_e2ee_media(
         &self,
         claims: &RealtimeSessionClaims,

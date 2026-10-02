@@ -21,12 +21,30 @@ use super::{
 pub struct GrpcSfuPlacementService<C> {
     clock: Arc<C>,
     cluster: Arc<Mutex<SfuClusterDirectory>>,
+    lifecycle_policy: Option<SfuPlacementPolicy>,
 }
 
 impl<C> GrpcSfuPlacementService<C> {
     #[must_use]
     pub const fn new(clock: Arc<C>, cluster: Arc<Mutex<SfuClusterDirectory>>) -> Self {
-        Self { clock, cluster }
+        Self {
+            clock,
+            cluster,
+            lifecycle_policy: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_lifecycle_policy(
+        clock: Arc<C>,
+        cluster: Arc<Mutex<SfuClusterDirectory>>,
+        lifecycle_policy: SfuPlacementPolicy,
+    ) -> Self {
+        Self {
+            clock,
+            cluster,
+            lifecycle_policy: Some(lifecycle_policy),
+        }
     }
 }
 
@@ -35,6 +53,7 @@ impl<C> Clone for GrpcSfuPlacementService<C> {
         Self {
             clock: Arc::clone(&self.clock),
             cluster: Arc::clone(&self.cluster),
+            lifecycle_policy: self.lifecycle_policy.clone(),
         }
     }
 }
@@ -66,8 +85,9 @@ where
             .lock()
             .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
         cluster.prune_expired_nodes(now_unix_ms);
+        let policy = self.lifecycle_policy.clone().unwrap_or_default();
         cluster
-            .place_session(scope, call_id, &SfuPlacementPolicy::default(), now_unix_ms)
+            .place_session(scope, call_id, &policy, now_unix_ms)
             .map(|_| ())
             .map_err(map_lifecycle_placement_error)
     }
@@ -119,10 +139,14 @@ where
             decode_opaque(body.call_id).map_err(|_| Status::invalid_argument("invalid call id"))?,
         );
         let preferred_region = decode_preferred_region(&body.preferred_region)?;
-        let policy = SfuPlacementPolicy {
+        let requested_policy = SfuPlacementPolicy {
             preferred_region,
             allow_cross_region_failover: body.allow_cross_region_failover,
         };
+        // When realtime media routing is configured, join admission owns the one canonical
+        // placement policy. A later media-side PlaceCall must not relocate an already-admitted
+        // Call by supplying different region hints.
+        let policy = self.lifecycle_policy.clone().unwrap_or(requested_policy);
         let now_unix_ms = self
             .clock
             .now_unix_ms()
@@ -338,6 +362,57 @@ mod tests {
         )
         .await
         .expect("idempotent release retry");
+    }
+
+    #[tokio::test]
+    async fn realtime_lifecycle_applies_routing_policy_before_sticky_media_resolution() {
+        let cluster = Arc::new(Mutex::new(SfuClusterDirectory::default()));
+        {
+            let mut directory = cluster.lock().expect("cluster");
+            for (node_id, region) in [("sfu-eu", "eu"), ("sfu-us", "us")] {
+                directory
+                    .upsert_node(SfuNodeDescriptor {
+                        node_id: OpaqueId::new(node_id).expect("node"),
+                        region: region.to_owned(),
+                        state: SfuNodeState::Healthy,
+                        active_sessions: 0,
+                        max_sessions: 10,
+                        lease_expires_at_unix_ms: 20_000,
+                    })
+                    .expect("register node");
+            }
+        }
+        let service = GrpcSfuPlacementService::with_lifecycle_policy(
+            Arc::new(FixedClock(10_000)),
+            cluster,
+            SfuPlacementPolicy {
+                preferred_region: Some("eu".to_owned()),
+                allow_cross_region_failover: false,
+            },
+        );
+        let request = place_request();
+        let scope = decode_scope(request.scope.clone().expect("scope")).expect("decoded scope");
+        let call_id =
+            CallId::from_opaque(decode_opaque(request.call_id.clone()).expect("decoded call"));
+
+        RealtimeSfuPlacementLifecycle::ensure_call_placement(&service, &scope, &call_id)
+            .await
+            .expect("lifecycle placement");
+
+        let mut conflicting_media_request = request;
+        conflicting_media_request.preferred_region = "us".to_owned();
+        let sticky = pb::sfu_placement_service_server::SfuPlacementService::place_call(
+            &service,
+            Request::new(conflicting_media_request),
+        )
+        .await
+        .expect("sticky media placement")
+        .into_inner()
+        .placement
+        .expect("placement");
+
+        assert_eq!(sticky.node_id.expect("node id").value, b"sfu-eu");
+        assert!(sticky.retained_sticky_placement);
     }
 
     #[tokio::test]

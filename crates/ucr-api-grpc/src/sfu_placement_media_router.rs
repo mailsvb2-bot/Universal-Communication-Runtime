@@ -2,11 +2,13 @@ use std::{fmt, net::SocketAddr};
 
 use tonic::transport::{Channel, Endpoint};
 use ucr_model::{CallId, OpaqueId, TenantScope};
+use ucr_protocol::{CanonicalError, CanonicalErrorCode};
 use ucr_sfu::{MAX_SFU_REGION_BYTES, SfuForwardOutcome, SfuNodeEndpoint, SfuValidatedForwardBatch};
 
 use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, SfuNodeMediaClientError,
     SfuNodeMediaClientTlsConfig, decode_opaque, pb, pb_opaque, pb_scope,
+    realtime_service::RealtimeSfuMediaRouter,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -80,6 +82,42 @@ impl PlacementAwareSfuNodeRouter {
     ///
     /// # Errors
     /// Rejects non-loopback control-plane endpoints and connection failures.
+    /// Builds a placement-aware router without requiring the operator listener to have started
+    /// accepting connections yet. The Tonic channel connects on the first placement RPC.
+    ///
+    /// This is the runtime-safe constructor for a colocated operator service: eager connection
+    /// during bootstrap would otherwise dead-start before the server future is polled.
+    ///
+    /// # Errors
+    /// Rejects a non-loopback plaintext placement endpoint or malformed URI.
+    pub fn connect_lazy(
+        operator_endpoint: SocketAddr,
+        node_tls: SfuNodeMediaClientTlsConfig,
+        policy: SfuPlacementRoutingPolicy,
+    ) -> Result<Self, SfuPlacementMediaRouterError> {
+        if !operator_endpoint.ip().is_loopback() {
+            return Err(SfuPlacementMediaRouterError::PlacementTransport(
+                "SFU placement client requires a loopback operator endpoint".to_owned(),
+            ));
+        }
+        let uri = format!("http://{operator_endpoint}");
+        let channel = Endpoint::from_shared(uri)
+            .map_err(|error| SfuPlacementMediaRouterError::PlacementTransport(error.to_string()))?
+            .connect_lazy();
+        let placement = pb::sfu_placement_service_client::SfuPlacementServiceClient::new(channel)
+            .max_decoding_message_size(GRPC_MAX_DECODING_MESSAGE_SIZE)
+            .max_encoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
+        Ok(Self {
+            placement,
+            node_tls,
+            policy,
+        })
+    }
+
+    /// Connects eagerly to the private loopback placement service.
+    ///
+    /// # Errors
+    /// Rejects a non-loopback plaintext placement endpoint, malformed URI, or connection failure.
     pub async fn connect(
         operator_endpoint: SocketAddr,
         node_tls: SfuNodeMediaClientTlsConfig,
@@ -217,6 +255,21 @@ struct ResolvedPlacement {
     retained_sticky_placement: bool,
     crossed_region: bool,
     endpoint: SfuNodeEndpoint,
+}
+
+#[tonic::async_trait]
+impl RealtimeSfuMediaRouter for PlacementAwareSfuNodeRouter {
+    async fn forward_validated_batch(
+        &self,
+        batch: &SfuValidatedForwardBatch,
+    ) -> Result<SfuForwardOutcome, CanonicalError> {
+        let mut router = self.clone();
+        router
+            .forward_batch(batch)
+            .await
+            .map(|result| result.outcome)
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))
+    }
 }
 
 fn is_private_node_endpoint(address: SocketAddr) -> bool {
@@ -378,6 +431,22 @@ mod tests {
         .await
         .expect("router");
         (router, server_task)
+    }
+
+    #[tokio::test]
+    async fn placement_router_lazy_bootstrap_does_not_require_running_operator_server() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve loopback address");
+        let address = listener.local_addr().expect("operator address");
+        drop(listener);
+
+        PlacementAwareSfuNodeRouter::connect_lazy(
+            address,
+            dummy_node_tls(),
+            SfuPlacementRoutingPolicy::default(),
+        )
+        .expect("lazy router must not connect during bootstrap");
     }
 
     #[tokio::test]

@@ -310,3 +310,53 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
     assert!(spec.contains("bounded expiry sweeper"));
     assert!(spec.contains("cleanup candidate remains pending until"));
 }
+
+#[test]
+fn horizontal_sfu_realtime_publication_uses_validated_placement_router_and_stays_fail_closed() {
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let router = read("crates/ucr-api-grpc/src/sfu_placement_media_router.rs");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let runtime_main = read("crates/ucr-runtime/src/main.rs");
+    let spec = read("spec/sfu.md");
+
+    assert!(realtime.contains("pub trait RealtimeSfuMediaRouter"));
+    assert!(realtime.contains("pub fn with_sfu_media_router"));
+    assert!(realtime.contains("forward_authenticated_e2ee_media_via_configured_route"));
+    assert!(realtime.contains(".prepare_forward(&actor_for(claims), device_id, envelope)"));
+    assert!(realtime.contains("router.forward_validated_batch(&batch).await"));
+    assert!(realtime.contains("SfuValidatedForwardBatch"));
+
+    let placement = read("crates/ucr-api-grpc/src/sfu_placement_service.rs");
+    assert!(placement.contains("lifecycle_policy: Option<SfuPlacementPolicy>"));
+    assert!(placement.contains("let policy = self.lifecycle_policy.clone().unwrap_or_default()"));
+    assert!(placement.contains(".place_session(scope, call_id, &policy"));
+
+    assert!(router.contains("pub fn connect_lazy"));
+    assert!(router.contains("impl RealtimeSfuMediaRouter for PlacementAwareSfuNodeRouter"));
+    assert!(router.contains("let mut router = self.clone();"));
+    assert!(router.contains(".forward_batch(batch)"));
+    assert!(router.contains("requires a loopback operator endpoint"));
+
+    assert!(runtime.contains("pub struct SfuPlacementMediaRuntimeConfig"));
+    assert!(runtime.contains("configure_sfu_placement_media_router"));
+    assert!(runtime.contains("lifecycle_placement_policy"));
+    assert!(runtime.contains("GrpcSfuPlacementService::with_lifecycle_policy"));
+    assert!(runtime.contains("resolved_operator_endpoint"));
+    assert!(runtime.contains("operator_incoming.as_ref().map(|(_, address)| *address)"));
+    assert!(runtime.contains("PlacementAwareSfuNodeRouter::connect_lazy"));
+    assert!(runtime.contains("with_sfu_media_router"));
+    assert!(runtime.contains("route_webrtc_e2ee_frame_via_configured_route"));
+    assert!(runtime.contains("SFU placement media routing requires the placement lifecycle gate"));
+    assert!(runtime.contains("horizontal_sfu: false"));
+
+    assert!(runtime_main.contains("UCR_SFU_PLACEMENT_MEDIA_ENABLED"));
+    assert!(runtime_main.contains("UCR_SFU_ROUTER_CLIENT_CERT_FILE"));
+    assert!(runtime_main.contains("UCR_SFU_ROUTER_CLIENT_KEY_FILE"));
+    assert!(runtime_main.contains("UCR_SFU_ROUTER_SERVER_CA_FILE"));
+    assert!(runtime_main.contains("UCR_SFU_ROUTER_SERVER_NAME"));
+
+    assert!(spec.contains("placement-aware realtime media routing gate"));
+    assert!(spec.contains("gRPC `PublishMedia`"));
+    assert!(spec.contains("WebRTC E2EE ingress"));
+    assert!(spec.contains("horizontal_sfu"));
+}
