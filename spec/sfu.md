@@ -143,12 +143,20 @@ The production runtime wires this only behind the explicit
 `UCR_SFU_PLACEMENT_LIFECYCLE_ENABLED` gate and refuses that gate without the private operator
 plane. Enabling this pre-production gate still does not change the advertised public capability.
 
+When the placement lifecycle gate is enabled, the runtime also runs a bounded expiry sweeper over
+that same `RealtimeSessionRegistry`. Pruning an expired final session records only its canonical
+`TenantScope + CallId` as derived cleanup metadata; it does not create a second participant/session
+roster. A cleanup candidate remains pending until the idempotent placement release succeeds, so a
+transient infrastructure failure is retried on the next bounded sweep. If a Call becomes active
+again before cleanup, the registry's live-session count wins and the stale candidate is acknowledged
+without releasing the active placement. The sweeper is aborted with the realtime server and its
+state is intentionally ephemeral because the in-process placement directory is ephemeral too.
+
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
 true. Production horizontal SFU still requires the placement-aware validated media path to be wired
-into realtime publication, bounded node-failure/drain migration, deterministic release for sessions
-that expire without an explicit leave, live credential reload evidence in the runtime path, and
-load/adversity evidence. The placement directory must never become a Call, Conference,
-membership, authorization, media-key, plaintext-media, Delivery, or recording owner.
+into realtime publication, bounded node-failure/drain migration, live credential reload evidence in
+the runtime path, and load/adversity evidence. The placement directory must never become a Call,
+Conference, membership, authorization, media-key, plaintext-media, Delivery, or recording owner.
 
 ## Public realtime transport
 
