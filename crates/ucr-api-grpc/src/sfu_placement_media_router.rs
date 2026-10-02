@@ -114,6 +114,10 @@ impl PlacementAwareSfuNodeRouter {
         })
     }
 
+    /// Connects eagerly to the private loopback placement service.
+    ///
+    /// # Errors
+    /// Rejects a non-loopback plaintext placement endpoint, malformed URI, or connection failure.
     pub async fn connect(
         operator_endpoint: SocketAddr,
         node_tls: SfuNodeMediaClientTlsConfig,
