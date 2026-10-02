@@ -69,3 +69,19 @@ fn realtime_join_enforces_recording_participant_churn_policy() {
     assert!(sqlite.contains("state='active'"));
     assert!(memory.contains("recording.state == RecordingState::Active"));
 }
+
+#[test]
+fn recording_provider_outbox_has_restart_safe_single_owner_runtime_worker() {
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let sqlite = read("crates/ucr-storage-sqlite/src/runtime_worker_store.rs");
+    let spec = read("spec/recording.md");
+
+    assert!(sqlite.contains("RECORDING_PROVIDER_WORKER_KIND"));
+    assert!(runtime.contains("run_recording_provider_worker"));
+    assert!(runtime.contains("try_acquire_runtime_worker_lease"));
+    assert!(runtime.contains("renew_recording_provider_worker_lease"));
+    assert!(runtime.contains("dispatch_recording_provider_operations_once"));
+    assert!(runtime.contains("UCR_RECORDING_PROVIDER_SWEEP"));
+    assert!(spec.contains("durable single-owner provider dispatcher worker"));
+    assert!(spec.contains("does not make Recording capability available"));
+}

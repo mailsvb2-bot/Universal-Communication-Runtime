@@ -54,7 +54,8 @@ use ucr_sfu::{
     SfuNodeDescriptor, SfuPlacementError, SfuPlacementPolicy,
 };
 use ucr_storage_sqlite::{
-    RECORDING_RETENTION_WORKER_KIND, SqliteLocalStore, WEBHOOK_DELIVERY_WORKER_KIND,
+    RECORDING_PROVIDER_WORKER_KIND, RECORDING_RETENTION_WORKER_KIND, SqliteLocalStore,
+    WEBHOOK_DELIVERY_WORKER_KIND,
 };
 use ucr_webhook::{
     HardenedWebhookSink, NativeTlsWebhookExecutor, SystemWebhookDnsResolver, WebhookSigningSecret,
@@ -79,6 +80,10 @@ pub const DEFAULT_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_s
 pub const MIN_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub const MAX_RECORDING_RETENTION_POLL_INTERVAL: Duration = Duration::from_mins(1);
 const RECORDING_RETENTION_WORKER_LEASE_DURATION_MS: i64 = 120_000;
+pub const DEFAULT_RECORDING_PROVIDER_POLL_INTERVAL: Duration = Duration::from_secs(1);
+pub const MIN_RECORDING_PROVIDER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+pub const MAX_RECORDING_PROVIDER_POLL_INTERVAL: Duration = Duration::from_mins(1);
+const RECORDING_PROVIDER_WORKER_LEASE_DURATION_MS: i64 = 120_000;
 const DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_REALTIME_CLEANUP_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -1396,6 +1401,131 @@ impl ProductionRuntime {
             MAX_RECORDING_PROVIDER_OPERATION_BATCH,
         )
         .map_err(|error| format!("dispatch recording provider operations: {error:?}"))
+    }
+
+    /// Runs the durable Recording provider-operation dispatcher with single-owner lease semantics.
+    ///
+    /// The canonical Recording lifecycle and outbox remain durable owners. This worker only drains
+    /// already-authorized Start/Stop/Delete provider obligations. A provider failure follows the
+    /// existing bounded retry/terminal-failure policy and survives process restart.
+    ///
+    /// This method does not advertise Recording capability: a deployment still needs a concrete
+    /// media provider, capture/finalization path, encrypted storage, export/deletion authorization
+    /// and conformance evidence before `recording=true` is valid.
+    ///
+    /// # Errors
+    /// Rejects unsafe polling intervals, a competing live worker, lease loss, clock failures, or
+    /// durable outbox failures.
+    pub async fn run_recording_provider_worker(
+        self: Arc<Self>,
+        provider: Arc<dyn RecordingMediaProvider>,
+        poll_interval: Duration,
+    ) -> Result<(), String> {
+        if !(MIN_RECORDING_PROVIDER_POLL_INTERVAL..=MAX_RECORDING_PROVIDER_POLL_INTERVAL)
+            .contains(&poll_interval)
+        {
+            return Err(
+                "recording provider poll interval must be between 100 ms and 60 s".to_owned(),
+            );
+        }
+
+        let holder_id = generate_opaque_id()
+            .map_err(|_| "generate recording provider worker lease holder id".to_owned())?
+            .as_str()
+            .to_owned();
+        let now_unix_ms = runtime_now_unix_ms()?;
+        let acquired = self
+            .store
+            .try_acquire_runtime_worker_lease(
+                RECORDING_PROVIDER_WORKER_KIND,
+                &holder_id,
+                now_unix_ms,
+                RECORDING_PROVIDER_WORKER_LEASE_DURATION_MS,
+            )
+            .map_err(|error| format!("acquire recording provider worker lease: {error:?}"))?;
+        if !acquired {
+            return Err("another recording provider worker holds the durable lease".to_owned());
+        }
+
+        println!(
+            "UCR_RECORDING_PROVIDER_WORKER_READY provider={} poll_interval_ms={}",
+            provider.provider_id(),
+            poll_interval.as_millis()
+        );
+
+        loop {
+            if let Err(error) = self.renew_recording_provider_worker_lease(&holder_id) {
+                let _ = self
+                    .store
+                    .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id);
+                return Err(error);
+            }
+            let now_unix_ms = match runtime_now_unix_ms() {
+                Ok(now_unix_ms) => now_unix_ms,
+                Err(error) => {
+                    let _ = self
+                        .store
+                        .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id);
+                    return Err(error);
+                }
+            };
+            let sweep = match dispatch_recording_provider_operations_once(
+                self.store.as_ref(),
+                provider.as_ref(),
+                now_unix_ms,
+                MAX_RECORDING_PROVIDER_OPERATION_BATCH,
+            ) {
+                Ok(sweep) => sweep,
+                Err(error) => {
+                    let _ = self
+                        .store
+                        .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id);
+                    return Err(format!("dispatch recording provider operations: {error:?}"));
+                }
+            };
+            if sweep.examined > 0 {
+                println!(
+                    "UCR_RECORDING_PROVIDER_SWEEP examined={} applied={} retried={} failed={}",
+                    sweep.examined, sweep.applied, sweep.retried, sweep.failed
+                );
+            }
+
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => {
+                    if let Err(error) = result {
+                        let _ = self.store.release_runtime_worker_lease(
+                            RECORDING_PROVIDER_WORKER_KIND,
+                            &holder_id,
+                        );
+                        return Err(format!("recording provider shutdown signal: {error}"));
+                    }
+                    self.store
+                        .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id)
+                        .map_err(|error| format!("release recording provider worker lease: {error:?}"))?;
+                    println!("UCR_RECORDING_PROVIDER_WORKER_STOPPED");
+                    return Ok(());
+                }
+                () = tokio::time::sleep(poll_interval) => {}
+            }
+        }
+    }
+
+    fn renew_recording_provider_worker_lease(&self, holder_id: &str) -> Result<(), String> {
+        let now_unix_ms = runtime_now_unix_ms()?;
+        let renewed = self
+            .store
+            .renew_runtime_worker_lease(
+                RECORDING_PROVIDER_WORKER_KIND,
+                holder_id,
+                now_unix_ms,
+                RECORDING_PROVIDER_WORKER_LEASE_DURATION_MS,
+            )
+            .map_err(|error| format!("renew recording provider worker lease: {error:?}"))?;
+        if renewed {
+            Ok(())
+        } else {
+            Err("recording provider worker durable lease was lost or expired".to_owned())
+        }
     }
 
     /// Runs the durable finite-retention executor for Recording lifecycle state.
@@ -3162,6 +3292,94 @@ mod tests {
 
         server_task.abort();
         drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[derive(Debug)]
+    struct RecordingWorkerTestProvider;
+
+    impl ucr_core::RecordingMediaProvider for RecordingWorkerTestProvider {
+        fn provider_id(&self) -> &'static str {
+            "test.recording-worker"
+        }
+
+        fn health(&self) -> ucr_core::RecordingProviderHealth {
+            ucr_core::RecordingProviderHealth::Healthy
+        }
+
+        fn apply(
+            &self,
+            _request: &ucr_core::RecordingProviderRequest,
+        ) -> Result<(), ucr_core::RecordingProviderError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn recording_provider_worker_rejects_unsafe_poll_interval_before_side_effects() {
+        let path = std::env::temp_dir().join(format!(
+            "ucr-recording-provider-poll-{}-{}.sqlite",
+            std::process::id(),
+            runtime_now_unix_ms().expect("clock")
+        ));
+        ProductionRuntime::initialize_database(&path).expect("initialize store");
+        let runtime = Arc::new(ProductionRuntime::open_existing(&path).expect("open runtime"));
+        let error = Arc::clone(&runtime)
+            .run_recording_provider_worker(
+                Arc::new(RecordingWorkerTestProvider),
+                Duration::from_millis(99),
+            )
+            .await
+            .expect_err("unsafe polling interval must fail closed");
+        assert!(error.contains("between 100 ms and 60 s"));
+        assert!(
+            runtime
+                .store
+                .runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND)
+                .expect("worker lease lookup")
+                .is_none()
+        );
+        drop(runtime);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn recording_provider_worker_refuses_competing_live_lease() {
+        let path = std::env::temp_dir().join(format!(
+            "ucr-recording-provider-lease-{}-{}.sqlite",
+            std::process::id(),
+            runtime_now_unix_ms().expect("clock")
+        ));
+        ProductionRuntime::initialize_database(&path).expect("initialize store");
+        let runtime = Arc::new(ProductionRuntime::open_existing(&path).expect("open runtime"));
+        let now = runtime_now_unix_ms().expect("clock");
+        assert!(
+            runtime
+                .store
+                .try_acquire_runtime_worker_lease(
+                    RECORDING_PROVIDER_WORKER_KIND,
+                    "existing-recording-provider-worker",
+                    now,
+                    RECORDING_PROVIDER_WORKER_LEASE_DURATION_MS,
+                )
+                .expect("seed competing lease")
+        );
+
+        let error = Arc::clone(&runtime)
+            .run_recording_provider_worker(
+                Arc::new(RecordingWorkerTestProvider),
+                DEFAULT_RECORDING_PROVIDER_POLL_INTERVAL,
+            )
+            .await
+            .expect_err("second worker must fail closed");
+        assert!(error.contains("another recording provider worker holds the durable lease"));
+        let lease = runtime
+            .store
+            .runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND)
+            .expect("worker lease lookup")
+            .expect("existing lease retained");
+        assert_eq!(lease.holder_id, "existing-recording-provider-worker");
+        drop(runtime);
         let _ = std::fs::remove_file(path);
     }
 

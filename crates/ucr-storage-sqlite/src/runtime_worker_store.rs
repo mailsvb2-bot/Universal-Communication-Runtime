@@ -5,6 +5,7 @@ use super::{SqliteLocalStore, map_schema_change_error, map_sqlite_error, verify_
 
 pub const WEBHOOK_DELIVERY_WORKER_KIND: &str = "webhook_delivery";
 pub const RECORDING_RETENTION_WORKER_KIND: &str = "recording_retention";
+pub const RECORDING_PROVIDER_WORKER_KIND: &str = "recording_provider";
 const MAX_WORKER_KIND_BYTES: usize = 64;
 const MAX_HOLDER_ID_BYTES: usize = 128;
 const MAX_WORKER_LEASE_MS: i64 = 10 * 60 * 1000;

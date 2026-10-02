@@ -99,7 +99,15 @@ memory store mirrors the same semantics under one mutex for conformance tests. S
 prove this combined atomicity inherit fail-closed default methods rather than silently performing a
 second non-atomic write.
 
-This outbox is infrastructure for a concrete recorder, not the recorder itself. The shipped runtime
-still reports recorder NotConfigured and `ucr.conference.recording` remains unavailable until a
-real encrypted media provider, provider health wiring, capture/finalization behavior, access/export
-authorization, deletion proof and recovery/conformance evidence are present.
+The runtime now also exposes a durable single-owner provider dispatcher worker over this outbox.
+It holds a SQLite-backed worker lease, renews that lease while active, drains only bounded due
+Start/Stop/Delete operations through `dispatch_recording_provider_operations_once`, and leaves all
+retry/terminal-failure semantics in the canonical outbox. A competing live worker fails closed and an
+unsafe polling interval is rejected before provider side effects. Logs contain only aggregate sweep
+counts plus the provider implementation ID at startup, never Recording/Call IDs or media/key data.
+The worker does not make Recording capability available by itself.
+
+This outbox and worker are infrastructure for a concrete recorder, not the recorder itself. The
+shipped runtime still reports recorder NotConfigured and `ucr.conference.recording` remains
+unavailable until a real encrypted media provider, provider health wiring, capture/finalization
+behavior, access/export authorization, deletion proof and recovery/conformance evidence are present.
