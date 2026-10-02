@@ -382,11 +382,9 @@ mod tests {
             },
         );
         let request = place_request();
-        let scope =
-            decode_scope(request.scope.clone().expect("scope")).expect("decoded scope");
-        let call_id = CallId::from_opaque(
-            decode_opaque(request.call_id.clone()).expect("decoded call"),
-        );
+        let scope = decode_scope(request.scope.clone().expect("scope")).expect("decoded scope");
+        let call_id =
+            CallId::from_opaque(decode_opaque(request.call_id.clone()).expect("decoded call"));
 
         RealtimeSfuPlacementLifecycle::ensure_call_placement(&service, &scope, &call_id)
             .await
