@@ -133,5 +133,6 @@ The contract and architecture guards must prove:
   partial acceptance/backpressure/rejection;
 - placement-aware routing must reject node-ID confusion, public media endpoints, and non-loopback
   plaintext control-plane connections;
-- remaining implementation must prove live credential rotation, realtime-session binding,
-  reconnect, node failure/drain, and load/adversity before the Production claim.
+- live credential rotation, realtime-session binding, reconnect, and node failure/drain have
+  executable evidence; target-scale load/adversity evidence remains required before the Production
+  claim.
