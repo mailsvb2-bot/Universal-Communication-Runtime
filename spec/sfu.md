@@ -197,10 +197,26 @@ never falls back to that unusable source and fails closed when no replacement ex
 placement movement only: canonical Call/session authority, subscriptions, media keys and plaintext
 media are not copied into the directory.
 
+The repository now also has a fixed production-profile encrypted-SFU fan-out scale gate. It runs
+real canonical membership/Call validation, source Device/signing-key validation, group-media E2EE
+frame sealing, `SfuRuntime` validation/fan-out and bounded sink acceptance at 10/100/500/1000
+participants with 1/2/4/8 concurrent publishers respectively. The 1000-participant profile therefore
+executes 7,992 recipient fan-out attempts per sample, and a separate 1000-participant test proves
+that sink backpressure reports the exact accepted-before-failure count instead of upgrading partial
+acceptance to success. `tools/horizontal_sfu_scale_gate.py` records exact-commit machine-readable
+evidence and fixed source-controlled budgets.
+
+That evidence is intentionally narrower than Requirement 55 browser load. Its JSON explicitly sets
+`browser_webrtc_end_to_end_proven=false`, `wan_capacity_proven=false`, and
+`requirement_55_status=partial`. The existing Phase-43 adversity suite separately covers packet
+loss, deterministic jitter/high latency, network switching/reconnect and SFU restart/drain behavior,
+but those deterministic tests likewise do not prove target-environment browser/WAN capacity.
+
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
-true. Production horizontal SFU still requires load/adversity evidence at the target deployment
-scale. The placement directory must never become a Call, Conference, membership, authorization,
-media-key, plaintext-media, Delivery, or recording owner.
+true. Production horizontal SFU still requires real browser/WebRTC load evidence at the target
+deployment scale, including the 1000-connected-client case required by the project specification.
+The placement directory must never become a Call, Conference, membership, authorization, media-key,
+plaintext-media, Delivery, or recording owner.
 
 ## Public realtime transport
 

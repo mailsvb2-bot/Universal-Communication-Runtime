@@ -379,7 +379,9 @@ fn horizontal_sfu_drain_and_failure_migration_is_bounded_and_keeps_canonical_own
         )
     );
     assert!(spec.contains("canonical Call/session authority"));
-    assert!(spec.contains("Production horizontal SFU still requires load/adversity evidence"));
+    assert!(
+        spec.contains("Production horizontal SFU still requires real browser/WebRTC load evidence")
+    );
 }
 
 #[test]
@@ -428,4 +430,42 @@ fn terminal_conference_cleanup_reuses_serialized_sfu_placement_retry_path() {
     assert!(runtime.contains("cleanup_task.abort()"));
     assert!(spec.contains("same serialized placement transition used by join/leave"));
     assert!(spec.contains("cannot silently leak capacity or race a fresh placement"));
+}
+
+#[test]
+fn horizontal_sfu_scale_gate_exercises_encrypted_fanout_without_claiming_browser_load() {
+    let scale = read("crates/ucr-sfu/tests/scale_matrix.rs");
+    let gate = read("tools/horizontal_sfu_scale_gate.py");
+    let workflow = read(".github/workflows/phase45-production-hardening.yml");
+    let spec = read("spec/sfu.md");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+
+    for marker in [
+        "assert_encrypted_fanout_scale(10, 1)",
+        "assert_encrypted_fanout_scale(100, 2)",
+        "assert_encrypted_fanout_scale(500, 4)",
+        "assert_encrypted_fanout_scale(1000, 8)",
+        "accepted_before_failure: 128",
+    ] {
+        assert!(scale.contains(marker), "missing scale marker: {marker}");
+    }
+    for marker in [
+        "ucr.horizontal-sfu-scale-evidence.v1",
+        "browser_webrtc_end_to_end_proven",
+        "wan_capacity_proven",
+        "requirement_55_status",
+        "\"participants\": 1000",
+        "\"publishers\": 8",
+    ] {
+        assert!(gate.contains(marker), "missing evidence marker: {marker}");
+    }
+    assert!(gate.contains("\"requirement_55_status\": \"partial\""));
+    assert!(gate.contains("\"browser_webrtc_end_to_end_proven\": False"));
+    assert!(gate.contains("def _build_test_binary(root: Path) -> Path:"));
+    assert!(gate.contains("[str(test_binary), test_name, \"--exact\"]"));
+    assert!(workflow.contains("Horizontal SFU encrypted-fanout scale gate"));
+    assert!(workflow.contains("horizontal-sfu-scale-evidence.json"));
+    assert!(spec.contains("7,992 recipient fan-out attempts per sample"));
+    assert!(spec.contains("real browser/WebRTC load evidence"));
+    assert!(runtime.contains("horizontal_sfu: false"));
 }
