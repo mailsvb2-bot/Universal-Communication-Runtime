@@ -1644,7 +1644,7 @@ impl ProductionRuntime {
         let incoming = TcpListenerStream::new(listener);
         let operator_incoming = match operator_bind {
             Some(operator_bind) => {
-                Some(bind_private_operator_listener(bind, operator_bind, "api").await?)
+                Some(bind_private_operator_listener(bind, operator_bind, "api").await?.0)
             }
             None => None,
         };
@@ -1731,7 +1731,11 @@ impl ProductionRuntime {
         let incoming = TcpListenerStream::new(listener);
         let operator_incoming = match operator_bind {
             Some(operator_bind) => {
-                Some(bind_private_operator_listener(bind, operator_bind, "machine-auth").await?)
+                Some(
+                    bind_private_operator_listener(bind, operator_bind, "machine-auth")
+                        .await?
+                        .0,
+                )
             }
             None => None,
         };
@@ -1854,6 +1858,7 @@ impl ProductionRuntime {
         let (incoming, operator_incoming) = self
             .prepare_realtime_listeners(bind, operator_bind, config.sfu_placement_lifecycle)
             .await?;
+        let resolved_operator_endpoint = operator_incoming.as_ref().map(|(_, address)| *address);
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
         let store = Arc::clone(&self.store);
@@ -1892,7 +1897,7 @@ impl ProductionRuntime {
         );
         let realtime_service = configure_sfu_placement_media_router(
             realtime_service,
-            operator_bind,
+            resolved_operator_endpoint,
             sfu_placement_media_config,
         )?;
         let bridge_task = spawn_webrtc_e2ee_bridge(
@@ -1923,7 +1928,7 @@ impl ProductionRuntime {
         let public_server = serve_realtime_services(services, incoming);
         let public_and_operator = async move {
             match operator_incoming {
-                Some(operator_incoming) => {
+                Some((operator_incoming, _operator_endpoint)) => {
                     let operator_server = serve_realtime_operator_services(
                         operator_health,
                         sfu_placement_service,
@@ -1959,7 +1964,13 @@ impl ProductionRuntime {
         bind: SocketAddr,
         operator_bind: Option<SocketAddr>,
         sfu_placement_lifecycle: bool,
-    ) -> Result<(TcpListenerStream, Option<TcpListenerStream>), String> {
+    ) -> Result<
+        (
+            TcpListenerStream,
+            Option<(TcpListenerStream, SocketAddr)>,
+        ),
+        String,
+    > {
         validate_local_bind(bind)?;
         if sfu_placement_lifecycle && operator_bind.is_none() {
             return Err(
@@ -1987,7 +1998,7 @@ impl ProductionRuntime {
 async fn bind_realtime_operator_listener(
     public_bind: SocketAddr,
     operator_bind: Option<SocketAddr>,
-) -> Result<Option<TcpListenerStream>, String> {
+) -> Result<Option<(TcpListenerStream, SocketAddr)>, String> {
     let Some(operator_bind) = operator_bind else {
         return Ok(None);
     };
@@ -2183,7 +2194,7 @@ async fn bind_private_operator_listener(
     public_bind: SocketAddr,
     operator_bind: SocketAddr,
     mode: &str,
-) -> Result<TcpListenerStream, String> {
+) -> Result<(TcpListenerStream, SocketAddr), String> {
     validate_local_bind(operator_bind)?;
     if public_bind == operator_bind && public_bind.port() != 0 {
         return Err("operator bind must be different from the public runtime bind".to_owned());
@@ -2195,7 +2206,7 @@ async fn bind_private_operator_listener(
         .local_addr()
         .map_err(|error| format!("resolve private operator API: {error}"))?;
     println!("UCR_OPERATOR_READY endpoint=http://{address} mode={mode} private=true");
-    Ok(TcpListenerStream::new(listener))
+    Ok((TcpListenerStream::new(listener), address))
 }
 
 async fn serve_sfu_node_media_services(
