@@ -146,10 +146,7 @@ where
         // When realtime media routing is configured, join admission owns the one canonical
         // placement policy. A later media-side PlaceCall must not relocate an already-admitted
         // Call by supplying different region hints.
-        let policy = self
-            .lifecycle_policy
-            .clone()
-            .unwrap_or(requested_policy);
+        let policy = self.lifecycle_policy.clone().unwrap_or(requested_policy);
         let now_unix_ms = self
             .clock
             .now_unix_ms()
