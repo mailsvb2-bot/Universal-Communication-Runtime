@@ -2281,13 +2281,40 @@ async fn serve_sfu_node_media_services(
     let address = listener
         .local_addr()
         .map_err(|error| format!("resolve private SFU node media listener: {error}"))?;
-    let mut server = config.tls_server()?;
     println!("UCR_SFU_NODE_MEDIA_READY endpoint=https://{address} private=true mtls=required");
-    server
-        .add_service(sfu_node_media_service_server(service))
-        .serve_with_incoming(TcpListenerStream::new(listener))
-        .await
-        .map_err(|error| format!("private SFU node media server: {error}"))
+    serve_sfu_node_media_listener(config, service, listener).await
+}
+
+async fn serve_sfu_node_media_listener(
+    config: SfuNodeMediaRuntimeConfig,
+    service: GrpcSfuNodeMediaService<SqliteLocalStore, SqliteLocalStore>,
+    listener: TcpListener,
+) -> Result<(), String> {
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .map_err(|error| format!("accept private SFU node media connection: {error}"))?;
+        let connection_config = config.clone();
+        let connection_service = service.clone();
+        tokio::spawn(async move {
+            let mut server = match connection_config.tls_server() {
+                Ok(server) => server,
+                Err(error) => {
+                    eprintln!("ucr-runtime: reject SFU node media connection: {error}");
+                    return;
+                }
+            };
+            let incoming = tokio_stream::once(Ok::<_, std::io::Error>(stream));
+            if let Err(error) = server
+                .add_service(sfu_node_media_service_server(connection_service))
+                .serve_with_incoming(incoming)
+                .await
+            {
+                eprintln!("ucr-runtime: SFU node media connection closed: {error}");
+            }
+        });
+    }
 }
 
 async fn serve_basic_operator_services(
