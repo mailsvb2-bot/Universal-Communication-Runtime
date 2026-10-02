@@ -254,12 +254,12 @@ struct ResolvedPlacement {
 }
 
 #[tonic::async_trait]
-impl RealtimeSfuMediaRouter for tokio::sync::Mutex<PlacementAwareSfuNodeRouter> {
+impl RealtimeSfuMediaRouter for PlacementAwareSfuNodeRouter {
     async fn forward_validated_batch(
         &self,
         batch: &SfuValidatedForwardBatch,
     ) -> Result<SfuForwardOutcome, CanonicalError> {
-        let mut router = self.lock().await;
+        let mut router = self.clone();
         router
             .forward_batch(batch)
             .await
