@@ -21,12 +21,26 @@ use super::{
 pub struct GrpcSfuPlacementService<C> {
     clock: Arc<C>,
     cluster: Arc<Mutex<SfuClusterDirectory>>,
+    lifecycle_policy: SfuPlacementPolicy,
 }
 
 impl<C> GrpcSfuPlacementService<C> {
     #[must_use]
-    pub const fn new(clock: Arc<C>, cluster: Arc<Mutex<SfuClusterDirectory>>) -> Self {
-        Self { clock, cluster }
+    pub fn new(clock: Arc<C>, cluster: Arc<Mutex<SfuClusterDirectory>>) -> Self {
+        Self::with_lifecycle_policy(clock, cluster, SfuPlacementPolicy::default())
+    }
+
+    #[must_use]
+    pub const fn with_lifecycle_policy(
+        clock: Arc<C>,
+        cluster: Arc<Mutex<SfuClusterDirectory>>,
+        lifecycle_policy: SfuPlacementPolicy,
+    ) -> Self {
+        Self {
+            clock,
+            cluster,
+            lifecycle_policy,
+        }
     }
 }
 
@@ -35,6 +49,7 @@ impl<C> Clone for GrpcSfuPlacementService<C> {
         Self {
             clock: Arc::clone(&self.clock),
             cluster: Arc::clone(&self.cluster),
+            lifecycle_policy: self.lifecycle_policy.clone(),
         }
     }
 }
@@ -67,7 +82,7 @@ where
             .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
         cluster.prune_expired_nodes(now_unix_ms);
         cluster
-            .place_session(scope, call_id, &SfuPlacementPolicy::default(), now_unix_ms)
+            .place_session(scope, call_id, &self.lifecycle_policy, now_unix_ms)
             .map(|_| ())
             .map_err(map_lifecycle_placement_error)
     }
