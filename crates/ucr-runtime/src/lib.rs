@@ -1848,23 +1848,11 @@ impl ProductionRuntime {
             Arc::clone(&conference_state),
             dependencies.webrtc,
         );
-        let placement_lifecycle: Option<Arc<dyn RealtimeSfuPlacementLifecycle>> =
-            if sfu_placement_lifecycle {
-                Some(Arc::new(sfu_placement_service.clone()))
-            } else {
-                None
-            };
-        let realtime_service = if let Some(lifecycle) = placement_lifecycle.as_ref() {
-            realtime_service.with_sfu_placement_lifecycle(Arc::clone(lifecycle))
-        } else {
-            realtime_service
-        };
-        let sfu_expiry_task = placement_lifecycle.as_ref().map(|_| {
-            spawn_sfu_placement_expiry_sweeper(
-                realtime_service.clone(),
-                DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL,
-            )
-        });
+        let (realtime_service, sfu_expiry_task) = configure_sfu_placement_lifecycle(
+            realtime_service,
+            &sfu_placement_service,
+            sfu_placement_lifecycle,
+        );
         let bridge_task = spawn_webrtc_e2ee_bridge(
             dependencies.e2ee_ingress,
             &dependencies.live_provider,
@@ -2373,6 +2361,31 @@ fn realtime_operator_health(
         turn_configured,
         Arc::clone(sfu_cluster),
     ))
+}
+
+fn configure_sfu_placement_lifecycle(
+    realtime_service: GrpcRealtimeService<
+        SystemServiceQuotaClock,
+        SqliteLocalStore,
+        SqliteLocalStore,
+    >,
+    sfu_placement_service: &GrpcSfuPlacementService<SystemServiceQuotaClock>,
+    enabled: bool,
+) -> (
+    GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+    Option<tokio::task::JoinHandle<()>>,
+) {
+    if !enabled {
+        return (realtime_service, None);
+    }
+    let lifecycle: Arc<dyn RealtimeSfuPlacementLifecycle> =
+        Arc::new(sfu_placement_service.clone());
+    let realtime_service = realtime_service.with_sfu_placement_lifecycle(lifecycle);
+    let task = spawn_sfu_placement_expiry_sweeper(
+        realtime_service.clone(),
+        DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL,
+    );
+    (realtime_service, Some(task))
 }
 
 fn spawn_sfu_placement_expiry_sweeper(
