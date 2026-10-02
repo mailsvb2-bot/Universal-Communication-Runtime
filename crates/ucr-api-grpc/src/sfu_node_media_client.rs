@@ -416,6 +416,38 @@ mod tests {
         }
     }
 
+    async fn start_empty_node_server(
+        server_certificate: &str,
+        server_private_key: &str,
+        client_ca_pem: &str,
+    ) -> (
+        SocketAddr,
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind node service");
+        let address = listener.local_addr().expect("node service address");
+        let tls = ServerTlsConfig::new()
+            .identity(ServerIdentity::from_pem(
+                server_certificate.as_bytes(),
+                server_private_key.as_bytes(),
+            ))
+            .client_ca_root(Certificate::from_pem(client_ca_pem));
+        let mut server = Server::builder().tls_config(tls).expect("server TLS");
+        let task = tokio::spawn(async move {
+            server
+                .add_service(
+                    pb::sfu_node_media_service_server::SfuNodeMediaServiceServer::new(
+                        EmptyNodeService,
+                    ),
+                )
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+        });
+        (address, task)
+    }
+
     #[tokio::test]
     async fn outbound_node_client_requires_trusted_mtls_identity_and_reaches_service() {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -549,36 +581,12 @@ mod tests {
         )
         .expect("reloadable client config");
 
-        let start_server = |client_ca_pem: String| {
-            let server_certificate = server_certificate.clone();
-            let server_private_key = server_private_key.clone();
-            async move {
-                let listener = TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("bind node service");
-                let address = listener.local_addr().expect("node service address");
-                let tls = ServerTlsConfig::new()
-                    .identity(ServerIdentity::from_pem(
-                        server_certificate.as_bytes(),
-                        server_private_key.as_bytes(),
-                    ))
-                    .client_ca_root(Certificate::from_pem(client_ca_pem));
-                let mut server = Server::builder().tls_config(tls).expect("server TLS");
-                let task = tokio::spawn(async move {
-                    server
-                        .add_service(
-                            pb::sfu_node_media_service_server::SfuNodeMediaServiceServer::new(
-                                EmptyNodeService,
-                            ),
-                        )
-                        .serve_with_incoming(TcpListenerStream::new(listener))
-                        .await
-                });
-                (address, task)
-            }
-        };
-
-        let (v1_address, v1_task) = start_server(client_ca_v1.certificate.pem()).await;
+        let (v1_address, v1_task) = start_empty_node_server(
+            &server_certificate,
+            &server_private_key,
+            &client_ca_v1.certificate.pem(),
+        )
+        .await;
         let mut v1_client = client_config
             .connect(v1_address)
             .await
@@ -607,7 +615,12 @@ mod tests {
             )
             .expect("rotate private key");
 
-        let (v2_address, v2_task) = start_server(client_ca_v2.certificate.pem()).await;
+        let (v2_address, v2_task) = start_empty_node_server(
+            &server_certificate,
+            &server_private_key,
+            &client_ca_v2.certificate.pem(),
+        )
+        .await;
         let mut v2_client = client_config
             .connect(v2_address)
             .await
