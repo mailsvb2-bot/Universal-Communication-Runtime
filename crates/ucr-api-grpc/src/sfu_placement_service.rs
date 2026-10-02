@@ -356,6 +356,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn realtime_lifecycle_applies_routing_policy_before_sticky_media_resolution() {
+        let cluster = Arc::new(Mutex::new(SfuClusterDirectory::default()));
+        {
+            let mut directory = cluster.lock().expect("cluster");
+            for (node_id, region) in [("sfu-eu", "eu"), ("sfu-us", "us")] {
+                directory
+                    .upsert_node(SfuNodeDescriptor {
+                        node_id: OpaqueId::new(node_id).expect("node"),
+                        region: region.to_owned(),
+                        state: SfuNodeState::Healthy,
+                        active_sessions: 0,
+                        max_sessions: 10,
+                        lease_expires_at_unix_ms: 20_000,
+                    })
+                    .expect("register node");
+            }
+        }
+        let service = GrpcSfuPlacementService::with_lifecycle_policy(
+            Arc::new(FixedClock(10_000)),
+            cluster,
+            SfuPlacementPolicy {
+                preferred_region: Some("eu".to_owned()),
+                allow_cross_region_failover: false,
+            },
+        );
+        let request = place_request();
+        let scope =
+            decode_scope(request.scope.clone().expect("scope")).expect("decoded scope");
+        let call_id = CallId::from_opaque(
+            decode_opaque(request.call_id.clone()).expect("decoded call"),
+        );
+
+        RealtimeSfuPlacementLifecycle::ensure_call_placement(&service, &scope, &call_id)
+            .await
+            .expect("lifecycle placement");
+
+        let mut conflicting_media_request = request;
+        conflicting_media_request.preferred_region = "us".to_owned();
+        let sticky = pb::sfu_placement_service_server::SfuPlacementService::place_call(
+            &service,
+            Request::new(conflicting_media_request),
+        )
+        .await
+        .expect("sticky media placement")
+        .into_inner()
+        .placement
+        .expect("placement");
+
+        assert_eq!(sticky.node_id.expect("node id").value, b"sfu-eu");
+        assert!(sticky.retained_sticky_placement);
+    }
+
+    #[tokio::test]
     async fn realtime_lifecycle_reuses_sticky_call_and_release_is_idempotent() {
         let cluster = Arc::new(Mutex::new(SfuClusterDirectory::default()));
         cluster
