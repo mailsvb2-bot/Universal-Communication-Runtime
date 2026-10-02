@@ -752,6 +752,24 @@ pub struct ProductionRuntime {
     store: Arc<SqliteLocalStore>,
 }
 
+struct PreparedRealtimeRuntime {
+    clock: Arc<SystemServiceQuotaClock>,
+    event_clock: Arc<SystemEventDeliveryClock>,
+    store: Arc<SqliteLocalStore>,
+    authorization: Arc<SqliteLocalStore>,
+    conference_state: Arc<ConferenceRuntimeState>,
+    runtime_capabilities: UniversalConferenceRuntimeCapabilities,
+    sfu_node_media_config: Option<SfuNodeMediaRuntimeConfig>,
+    sfu_placement_service: GrpcSfuPlacementService<SystemServiceQuotaClock>,
+    realtime_service:
+        GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
+    sfu_expiry_task: Option<tokio::task::JoinHandle<()>>,
+    bridge_task: tokio::task::JoinHandle<()>,
+    sfu_node_media_service: Option<GrpcSfuNodeMediaService<SqliteLocalStore, SqliteLocalStore>>,
+    operator_health: Arc<ProductionOperatorHealthSource>,
+    join_issuer: Arc<JoinTokenIssuer>,
+}
+
 #[derive(Debug)]
 struct RealtimeOperatorHealth {
     registry: Arc<RealtimeSessionRegistry>,
@@ -1855,6 +1873,73 @@ impl ProductionRuntime {
             .prepare_realtime_listeners(bind, operator_bind, config.sfu_placement_lifecycle)
             .await?;
         let resolved_operator_endpoint = operator_incoming.as_ref().map(|(_, address)| *address);
+        let PreparedRealtimeRuntime {
+            clock,
+            event_clock,
+            store,
+            authorization,
+            conference_state,
+            runtime_capabilities,
+            sfu_node_media_config,
+            sfu_placement_service,
+            realtime_service,
+            sfu_expiry_task,
+            bridge_task,
+            sfu_node_media_service,
+            operator_health,
+            join_issuer,
+        } = self.prepare_realtime_runtime(config, resolved_operator_endpoint)?;
+
+        let services = RealtimeServerServices {
+            clock,
+            event_clock,
+            store,
+            authorization,
+            conference_state,
+            runtime_capabilities,
+            join_issuer,
+            machine_bearer,
+            realtime_service,
+        };
+        let public_server = serve_realtime_services(services, incoming);
+        let public_and_operator = async move {
+            match operator_incoming {
+                Some((operator_incoming, _operator_endpoint)) => {
+                    let operator_server = serve_realtime_operator_services(
+                        operator_health,
+                        sfu_placement_service,
+                        operator_incoming,
+                    );
+                    tokio::try_join!(public_server, operator_server)
+                        .map(|_| ())
+                        .map_err(|error| format!("local realtime/operator API server: {error}"))
+                }
+                None => public_server
+                    .await
+                    .map_err(|error| format!("local realtime API server: {error}")),
+            }
+        };
+        let server_result = match (sfu_node_media_config, sfu_node_media_service) {
+            (Some(config), Some(service)) => tokio::try_join!(
+                public_and_operator,
+                serve_sfu_node_media_services(config, service)
+            )
+            .map(|_| ()),
+            (None, None) => public_and_operator.await,
+            _ => Err("SFU node media runtime configuration mismatch".to_owned()),
+        };
+        bridge_task.abort();
+        if let Some(task) = sfu_expiry_task {
+            task.abort();
+        }
+        server_result
+    }
+
+    fn prepare_realtime_runtime(
+        &self,
+        config: RealtimeRuntimeConfig,
+        resolved_operator_endpoint: Option<SocketAddr>,
+    ) -> Result<PreparedRealtimeRuntime, String> {
         let clock = Arc::new(SystemServiceQuotaClock);
         let event_clock = Arc::new(SystemEventDeliveryClock);
         let store = Arc::clone(&self.store);
@@ -1924,49 +2009,22 @@ impl ProductionRuntime {
             GrpcSfuNodeMediaService::new(Arc::clone(&authorization), Arc::clone(&store), sink)
         });
 
-        let services = RealtimeServerServices {
+        Ok(PreparedRealtimeRuntime {
             clock,
             event_clock,
             store,
             authorization,
             conference_state,
             runtime_capabilities,
-            join_issuer,
-            machine_bearer,
+            sfu_node_media_config,
+            sfu_placement_service,
             realtime_service,
-        };
-        let public_server = serve_realtime_services(services, incoming);
-        let public_and_operator = async move {
-            match operator_incoming {
-                Some((operator_incoming, _operator_endpoint)) => {
-                    let operator_server = serve_realtime_operator_services(
-                        operator_health,
-                        sfu_placement_service,
-                        operator_incoming,
-                    );
-                    tokio::try_join!(public_server, operator_server)
-                        .map(|_| ())
-                        .map_err(|error| format!("local realtime/operator API server: {error}"))
-                }
-                None => public_server
-                    .await
-                    .map_err(|error| format!("local realtime API server: {error}")),
-            }
-        };
-        let server_result = match (sfu_node_media_config, sfu_node_media_service) {
-            (Some(config), Some(service)) => tokio::try_join!(
-                public_and_operator,
-                serve_sfu_node_media_services(config, service)
-            )
-            .map(|_| ()),
-            (None, None) => public_and_operator.await,
-            _ => Err("SFU node media runtime configuration mismatch".to_owned()),
-        };
-        bridge_task.abort();
-        if let Some(task) = sfu_expiry_task {
-            task.abort();
-        }
-        server_result
+            sfu_expiry_task,
+            bridge_task,
+            sfu_node_media_service,
+            operator_health,
+            join_issuer,
+        })
     }
 
     async fn prepare_realtime_listeners(
