@@ -410,3 +410,22 @@ fn horizontal_sfu_node_identity_reload_is_live_for_new_connections() {
     assert!(adr.contains("fresh mTLS server"));
     assert!(runtime.contains("horizontal_sfu: false"));
 }
+
+#[test]
+fn terminal_conference_cleanup_reuses_serialized_sfu_placement_retry_path() {
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let registry = read("crates/ucr-realtime/src/lib.rs");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let spec = read("spec/realtime.md");
+
+    assert!(realtime.contains("cleanup_closed_conferences_once"));
+    assert!(realtime.contains("sfu_placement_transition_guard().await"));
+    assert!(realtime.contains("queue_call_cleanup_candidate(&scope, &call_id)"));
+    assert!(realtime.contains("release_call_placement(&scope, &call_id).await"));
+    assert!(realtime.contains("acknowledge_expired_call_cleanup(&scope, &call_id)"));
+    assert!(registry.contains("pub fn queue_call_cleanup_candidate"));
+    assert!(runtime.contains("spawn_realtime_cleanup_worker"));
+    assert!(runtime.contains("cleanup_task.abort()"));
+    assert!(spec.contains("same serialized placement transition used by join/leave"));
+    assert!(spec.contains("cannot silently leak capacity or race a fresh placement"));
+}

@@ -22,14 +22,15 @@ use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage,
     AdaptiveMediaTelemetry, CallId, CallParticipantState, CallSignal, CallSignalKind,
-    CallSignallingState, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy, ConferenceMediaSubscription,
-    ConferenceParticipantRole, ConferenceSubscriptionSet, CorrelationContext, CryptoSuite,
-    DeferredMediaFallback, DeliveryState, DeviceId, DeviceLifecycleState, DeviceRef,
-    EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind, MediaThermalState,
-    MessageEnvelope, MessageId, OpaqueId, OriginRef, PrincipalId, PrincipalKind, ScopedPrincipal,
-    SessionId, SfuForwardEnvelope, SfuForwardTarget, TenantScope, UniversalConferenceLifecycle,
-    VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType, WebRtcSessionDescription,
+    CallSignallingState, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy,
+    ConferenceMediaSubscription, ConferenceParticipantRole, ConferenceSubscriptionSet,
+    CorrelationContext, CryptoSuite, DeferredMediaFallback, DeliveryState, DeviceId,
+    DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId,
+    GroupMediaFrameHeader, GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind,
+    MediaThermalState, MessageEnvelope, MessageId, OpaqueId, OriginRef, PrincipalId, PrincipalKind,
+    ScopedPrincipal, SessionId, SfuForwardEnvelope, SfuForwardTarget, TenantScope,
+    UniversalConferenceLifecycle, VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
+    WebRtcSessionDescription,
 };
 use ucr_protocol::{
     CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
@@ -2116,18 +2117,21 @@ where
     ///
     /// This sweep is intentionally node-local. Every realtime node runs it against the shared
     /// durable Conference/Call state, so a separate management API process never needs access to
-    /// another node's in-memory registry.
+    /// another node's in-memory registry. When horizontal SFU placement is enabled, the sweep uses
+    /// the same serialized placement transition and bounded retry queue as ordinary expiry cleanup.
     ///
     /// # Errors
-    /// Returns explicit durable-store, registry, WebRTC-provider, attendance-event, or runtime-state
-    /// failures. Work completed before an error remains idempotently cleaned and the next sweep can
-    /// finish the remainder.
-    pub fn cleanup_closed_conferences_once(&self) -> Result<RealtimeCleanupSweep, CanonicalError> {
+    /// Returns explicit durable-store, registry, WebRTC-provider, attendance-event, placement, or
+    /// runtime-state failures. Placement release failures remain queued for retry; ephemeral Call
+    /// state is cleared only after placement cleanup succeeds.
+    pub async fn cleanup_closed_conferences_once(
+        &self,
+    ) -> Result<RealtimeCleanupSweep, CanonicalError> {
         let now_unix_ms = self.now()?;
-        self.cleanup_closed_conferences_at(now_unix_ms)
+        self.cleanup_closed_conferences_at(now_unix_ms).await
     }
 
-    fn cleanup_closed_conferences_at(
+    async fn cleanup_closed_conferences_at(
         &self,
         now_unix_ms: i64,
     ) -> Result<RealtimeCleanupSweep, CanonicalError> {
@@ -2152,20 +2156,29 @@ where
             ..RealtimeCleanupSweep::default()
         };
         for (_, (scope, call_id)) in calls {
-            if self.cleanup_decision(&scope, &call_id)?
-                != RuntimeCallCleanupDecision::Cleanup
-            {
+            if self.cleanup_decision(&scope, &call_id)? != RuntimeCallCleanupDecision::Cleanup {
                 continue;
             }
             sweep.closed_calls = sweep.closed_calls.saturating_add(1);
+
+            let _placement_guard = self.sfu_placement_transition_guard().await;
+            if self.sfu_placement_lifecycle.is_some() {
+                self.registry
+                    .queue_call_cleanup_candidate(&scope, &call_id)
+                    .map_err(map_registry_error)?;
+            }
 
             for claims in active_claims
                 .iter()
                 .filter(|claims| claims.scope == scope && claims.call_id == call_id)
             {
-                match self.webrtc_provider.close_session(&claims.session_id) {
-                    Ok(()) | Err(WebRtcProviderError::SessionUnavailable) => {}
-                    Err(error) => return Err(map_webrtc_provider_error(error)),
+                let provider = Arc::clone(&self.webrtc_provider);
+                let session_id = claims.session_id.clone();
+                match tokio::task::spawn_blocking(move || provider.close_session(&session_id)).await
+                {
+                    Ok(Ok(()) | Err(WebRtcProviderError::SessionUnavailable)) => {}
+                    Ok(Err(error)) => return Err(map_webrtc_provider_error(error)),
+                    Err(_) => return Err(CanonicalError::new(CanonicalErrorCode::Internal)),
                 }
                 let transition = match self.registry.leave(claims, now_unix_ms) {
                     Ok(transition) => transition,
@@ -2174,6 +2187,13 @@ where
                 };
                 self.append_attendance(&transition)?;
                 sweep.sessions_reaped = sweep.sessions_reaped.saturating_add(1);
+            }
+
+            if let Some(lifecycle) = &self.sfu_placement_lifecycle {
+                lifecycle.release_call_placement(&scope, &call_id).await?;
+                self.registry
+                    .acknowledge_expired_call_cleanup(&scope, &call_id)
+                    .map_err(map_registry_error)?;
             }
 
             let removed = self

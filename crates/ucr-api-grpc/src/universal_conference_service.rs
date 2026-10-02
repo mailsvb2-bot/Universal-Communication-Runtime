@@ -3973,6 +3973,7 @@ mod bearer_ingress_tests {
         IntegrationId, KeyId, NamespaceId, OpaqueId, PermissionGrant, PermissionScope, PrincipalId,
         PrincipalKind, PrincipalRef, ScopedPrincipal, ServiceAuthenticationRef,
         ServiceCredentialId, ServiceQuotaPolicy, TenantId, TenantScope,
+        UniversalConferenceLifecycle,
     };
     use ucr_protocol::{CONFERENCE_READ_PERMISSION, CanonicalErrorCode};
     use ucr_storage_memory::MemoryLocalStore;
@@ -3981,7 +3982,7 @@ mod bearer_ingress_tests {
 
     use super::{
         GrpcUniversalConferenceService, UniversalConferenceAuthentication,
-        decode_universal_conference_authentication,
+        decode_universal_conference_authentication, lifecycle_entry_open,
     };
 
     #[derive(Debug, Clone, Copy)]
@@ -4184,8 +4185,8 @@ mod universal_runtime_tests {
         EnsureParticipantDeviceInput, EnsureParticipantInput, GROUP_MLS_CAPABILITY,
         IssueJoinGrantInput, PrepareConferenceRuntimeInput, SetConferenceMetadataInput,
         UpdateParticipantInput, accept_integration_mutation_id, conference_for_integration,
-        ensure_participant, ensure_participant_device, issue_join_grant, lifecycle_entry_open,
-        lifecycle_event, participant_attendance, prepare_conference_runtime, resolve_join_call, resolve_join_device,
+        ensure_participant, ensure_participant_device, issue_join_grant, lifecycle_event,
+        participant_attendance, prepare_conference_runtime, resolve_join_call, resolve_join_device,
         resolve_person_principal, set_conference_metadata, update_participant,
     };
 

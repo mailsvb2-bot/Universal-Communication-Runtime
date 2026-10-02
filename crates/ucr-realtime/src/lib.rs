@@ -717,8 +717,9 @@ impl RealtimeSessionRegistry {
         }
     }
 
-    /// Returns Calls whose final authenticated realtime session has expired and whose SFU
-    /// placement cleanup has not yet been acknowledged.
+    /// Returns Calls whose SFU placement cleanup has not yet been acknowledged.
+    ///
+    /// Candidates originate from final-session expiry or explicit terminal-conference cleanup.
     ///
     /// This is derived, bounded infrastructure cleanup metadata only. The canonical session roster
     /// remains `entries`; cleanup coordinates contain no participant, authorization or media state.
@@ -760,6 +761,38 @@ impl RealtimeSessionRegistry {
         pending.retain(|(candidate_scope, candidate_call_id)| {
             candidate_scope != scope || candidate_call_id != call_id
         });
+        Ok(())
+    }
+
+    /// Queues one canonical Call for idempotent infrastructure cleanup after terminal reaping.
+    ///
+    /// The queue is enabled only for registries that opted into SFU placement cleanup. Repeated
+    /// queueing of the same scope/Call is idempotent and the bounded queue contains coordinates
+    /// only, never participant, authorization, media, or key material.
+    ///
+    /// # Errors
+    /// Fails when cleanup state is unavailable or the bounded cleanup queue is exhausted.
+    pub fn queue_call_cleanup_candidate(
+        &self,
+        scope: &TenantScope,
+        call_id: &CallId,
+    ) -> Result<(), RealtimeRegistryError> {
+        if !self.track_expired_call_cleanup {
+            return Ok(());
+        }
+        let mut pending = self
+            .expired_call_cleanup
+            .lock()
+            .map_err(|_| RealtimeRegistryError::SessionUnavailable)?;
+        if pending.iter().any(|(pending_scope, pending_call_id)| {
+            pending_scope == scope && pending_call_id == call_id
+        }) {
+            return Ok(());
+        }
+        if pending.len() >= self.max_sessions {
+            return Err(RealtimeRegistryError::CapacityExceeded);
+        }
+        pending.push((scope.clone(), call_id.clone()));
         Ok(())
     }
 
@@ -2103,6 +2136,40 @@ mod tests {
         assert_eq!(
             registry.charge_aggregate_bandwidth(&owner_a, 7, 1, now + BANDWIDTH_WINDOW_MS + 1),
             Err(RealtimeRegistryError::CapacityExceeded)
+        );
+    }
+
+    #[test]
+    fn explicit_call_cleanup_candidate_is_bounded_idempotent_and_acknowledged() {
+        let registry = RealtimeSessionRegistry::with_expired_call_cleanup(1, 1);
+        let first_scope = scope();
+        let first_call = CallId::from_opaque(id("cleanup-first"));
+        registry
+            .queue_call_cleanup_candidate(&first_scope, &first_call)
+            .expect("queue first cleanup");
+        registry
+            .queue_call_cleanup_candidate(&first_scope, &first_call)
+            .expect("duplicate cleanup is idempotent");
+        assert_eq!(
+            registry
+                .expired_call_cleanup_candidates_at(1_000)
+                .expect("pending cleanup"),
+            vec![(first_scope.clone(), first_call.clone())]
+        );
+
+        assert_eq!(
+            registry
+                .queue_call_cleanup_candidate(&scope(), &CallId::from_opaque(id("cleanup-second"))),
+            Err(RealtimeRegistryError::CapacityExceeded)
+        );
+        registry
+            .acknowledge_expired_call_cleanup(&first_scope, &first_call)
+            .expect("ack cleanup");
+        assert!(
+            registry
+                .expired_call_cleanup_candidates_at(1_001)
+                .expect("cleanup drained")
+                .is_empty()
         );
     }
 

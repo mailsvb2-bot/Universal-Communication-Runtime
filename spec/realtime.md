@@ -27,8 +27,14 @@ non-expired local session claims plus Calls represented in the shared ephemeral 
 state, resolves their durable Call/Universal Conference authority, and reaps local WebRTC/session
 state when the Call is already terminated or the Universal Conference is `ending|ended`. It appends
 the canonical left-attendance transition and clears exact-Call ephemeral Conference state. Legacy or
-non-Universal Calls are not inferred as closed. The worker logs counts only, never IDs, join grants,
-TURN credentials, media material or participant data.
+non-Universal Calls are not inferred as closed. When the optional horizontal-SFU placement lifecycle
+is enabled, terminal cleanup enters the same serialized placement transition used by join/leave,
+queues the exact Call in the existing bounded cleanup-retry coordinates before removing sessions,
+releases placement after the final local session is gone, acknowledges the retry coordinate only
+after successful release, and clears ephemeral Conference state last. A transient placement-release
+failure therefore remains retryable and cannot silently leak capacity or race a fresh placement.
+The worker logs counts only, never IDs, join grants, TURN credentials, media material or participant
+data.
 
 The same authenticated session now owns the WebRTC signalling lifecycle. `StartWebRtc`, `SetWebRtcRemoteDescription`, `AddWebRtcIceCandidate`, and `CloseWebRtc` are methods of the existing `ucr.v1.RealtimeService`; they do not introduce a second signalling/authentication owner. Each call revalidates the signed grant, exact scope/call/session tuple, accepted Conference participant and active realtime registry session before touching ephemeral peer state. Blocking peer-engine operations execute outside the Tokio gRPC executor.
 

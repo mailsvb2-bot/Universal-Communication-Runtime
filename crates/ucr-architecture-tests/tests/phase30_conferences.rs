@@ -90,3 +90,14 @@ fn phase30_public_contract_docs_permissions_and_fuzz_are_machine_locked() {
     assert!(fuzz.contains("canonical_conference_start"));
     assert!(smoke.contains("run_target conference_start 4096 512"));
 }
+
+#[test]
+fn terminal_universal_conference_lifecycle_closes_entry_fail_closed() {
+    let universal = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
+
+    assert!(universal.contains("lifecycle_entry_open(target, current.entry_open)"));
+    assert!(universal.contains("UniversalConferenceLifecycle::Ending"));
+    assert!(universal.contains("UniversalConferenceLifecycle::Ended"));
+    assert!(universal.contains("CanonicalErrorCode::PolicyDenied"));
+    assert!(universal.contains("ending_and_ended_force_entry_closed"));
+}

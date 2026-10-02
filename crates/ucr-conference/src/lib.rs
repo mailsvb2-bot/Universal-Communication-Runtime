@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use std::{collections::BTreeMap, sync::{Arc, Mutex}};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use core::fmt;
 
@@ -1658,7 +1661,12 @@ mod subscription_state_tests {
                 .expect("clear"),
             3
         );
-        assert!(state.tracked_calls().expect("tracked after clear").is_empty());
+        assert!(
+            state
+                .tracked_calls()
+                .expect("tracked after clear")
+                .is_empty()
+        );
         assert_eq!(
             state
                 .clear_call_ephemeral_state(&scope(), &tracked[0].1)
