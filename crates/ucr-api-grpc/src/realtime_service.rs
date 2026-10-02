@@ -222,9 +222,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     }
 
     async fn sfu_placement_transition_guard(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-        if self.sfu_placement_lifecycle.is_none() {
-            return None;
-        }
+        self.sfu_placement_lifecycle.as_ref()?;
         Some(
             Arc::clone(&self.sfu_placement_transition)
                 .lock_owned()
