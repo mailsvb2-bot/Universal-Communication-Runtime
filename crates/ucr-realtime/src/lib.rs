@@ -663,6 +663,7 @@ impl fmt::Debug for SessionEntry {
 pub struct RealtimeSessionRegistry {
     entries: Mutex<Vec<SessionEntry>>,
     expired_call_cleanup: Mutex<Vec<(TenantScope, CallId)>>,
+    track_expired_call_cleanup: bool,
     bandwidth_usage: Mutex<Vec<BandwidthWindow>>,
     max_sessions: usize,
     queue_capacity: usize,
@@ -692,6 +693,24 @@ impl RealtimeSessionRegistry {
         Self {
             entries: Mutex::new(Vec::new()),
             expired_call_cleanup: Mutex::new(Vec::new()),
+            track_expired_call_cleanup: false,
+            bandwidth_usage: Mutex::new(Vec::new()),
+            max_sessions,
+            queue_capacity,
+        }
+    }
+
+    /// Creates a registry that additionally tracks final-session expiry coordinates for the
+    /// optional horizontal-SFU placement lifecycle.
+    ///
+    /// The normal registry intentionally leaves this disabled so deployments that do not enable
+    /// SFU placement cannot accumulate cleanup-only state or inherit a new capacity failure mode.
+    #[must_use]
+    pub const fn with_expired_call_cleanup(max_sessions: usize, queue_capacity: usize) -> Self {
+        Self {
+            entries: Mutex::new(Vec::new()),
+            expired_call_cleanup: Mutex::new(Vec::new()),
+            track_expired_call_cleanup: true,
             bandwidth_usage: Mutex::new(Vec::new()),
             max_sessions,
             queue_capacity,
@@ -749,6 +768,11 @@ impl RealtimeSessionRegistry {
         entries: &mut Vec<SessionEntry>,
         now_unix_ms: i64,
     ) -> Result<(), RealtimeRegistryError> {
+        if !self.track_expired_call_cleanup {
+            entries.retain(|entry| now_unix_ms < entry.claims.expires_at_unix_ms);
+            return Ok(());
+        }
+
         let mut final_expired_calls = Vec::new();
         for entry in entries
             .iter()
@@ -2140,9 +2164,37 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_registry_prunes_expiry_without_creating_sfu_cleanup_state() {
+        let now = 29_700;
+        let registry = RealtimeSessionRegistry::new(1, 1);
+        let claims = RealtimeSessionClaims {
+            scope: scope(),
+            call_id: CallId::from_opaque(id("ordinary-expiry-call")),
+            participant: participant(),
+            device_id: None,
+            session_id: SessionId::from_opaque(id("ordinary-expiry-session")),
+            issued_at_unix_ms: now,
+            not_before_unix_ms: now,
+            expires_at_unix_ms: now + 1,
+            use_policy: JoinGrantUsePolicy::Reusable,
+        };
+        registry.join(claims, now).expect("join");
+        assert_eq!(
+            registry.active_session_count_at(now + 1).expect("prune"),
+            0
+        );
+        assert!(
+            registry
+                .expired_call_cleanup_candidates_at(now + 1)
+                .expect("no placement tracking")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn expired_call_cleanup_candidates_track_only_final_session_and_require_ack() {
         let now = 29_750;
-        let registry = RealtimeSessionRegistry::new(8, 2);
+        let registry = RealtimeSessionRegistry::with_expired_call_cleanup(8, 2);
         let first = RealtimeSessionClaims {
             scope: scope(),
             call_id: CallId::from_opaque(id("expiry-cleanup-call")),
