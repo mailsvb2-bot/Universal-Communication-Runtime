@@ -173,8 +173,17 @@ Outbound router credentials are deployment infrastructure credentials, not tenan
 The runtime requires an explicit client certificate/key, explicit server CA trust material and TLS
 server name. Certificate/key material is resolved through the shared reload-capable
 `SecretProvider`; bounded previous certificate/key and CA material may be configured for rotation
-overlap. The colocated placement client is created lazily so runtime bootstrap cannot dead-start by
-trying to connect to its own operator listener before that listener is serving.
+overlap. The outbound client resolves its certificate/private-key snapshot for every new node
+connection, so rotating the provider changes the next mTLS identity without reconstructing the
+placement router.
+
+The private node listener likewise resolves a fresh certificate/private-key snapshot for every newly
+accepted TCP connection before Tonic performs mTLS. Existing HTTP/2/TLS sessions keep the identity
+with which they already negotiated; provider failure rejects only the new connection and does not
+silently reuse a stale snapshot. Runtime regression evidence rotates the server identity to a
+certificate under a different CA and proves a new connection sees only the rotated identity. The
+colocated placement client is created lazily so runtime bootstrap cannot dead-start by trying to
+connect to its own operator listener before that listener is serving.
 
 Draining and failed-node movement stays inside the same ephemeral placement authority. A
 `Draining` node immediately stops receiving fresh Calls. For an already-sticky Call, the next
@@ -188,9 +197,9 @@ placement movement only: canonical Call/session authority, subscriptions, media 
 media are not copied into the directory.
 
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
-true. Production horizontal SFU still requires live credential reload evidence in the runtime path
-and load/adversity evidence. The placement directory must never become a Call, Conference,
-membership, authorization, media-key, plaintext-media, Delivery, or recording owner.
+true. Production horizontal SFU still requires load/adversity evidence at the target deployment
+scale. The placement directory must never become a Call, Conference, membership, authorization,
+media-key, plaintext-media, Delivery, or recording owner.
 
 ## Public realtime transport
 
