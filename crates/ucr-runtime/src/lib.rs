@@ -2378,8 +2378,7 @@ fn configure_sfu_placement_lifecycle(
     if !enabled {
         return (realtime_service, None);
     }
-    let lifecycle: Arc<dyn RealtimeSfuPlacementLifecycle> =
-        Arc::new(sfu_placement_service.clone());
+    let lifecycle: Arc<dyn RealtimeSfuPlacementLifecycle> = Arc::new(sfu_placement_service.clone());
     let realtime_service = realtime_service.with_sfu_placement_lifecycle(lifecycle);
     let task = spawn_sfu_placement_expiry_sweeper(
         realtime_service.clone(),
