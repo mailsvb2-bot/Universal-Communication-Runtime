@@ -259,7 +259,10 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
         ensure_index < join_index,
         "placement must fail before reconnect/session registry mutation"
     );
-    assert!(realtime.contains("release_sfu_call_placement_if_inactive(&claims, now)"));
+    assert!(realtime.contains("admit_realtime_session_with_sfu_placement"));
+    assert!(realtime.contains("leave_realtime_session_with_sfu_placement"));
+    assert!(realtime.contains("sfu_placement_transition_guard"));
+    assert!(realtime.contains("release_sfu_call_placement_if_inactive"));
     assert!(realtime.contains("rollback_realtime_join(&claims, now).await"));
     assert!(realtime.contains("release_sfu_call_placement_if_inactive"));
     assert!(registry.contains("pub fn active_call_session_count_at"));
@@ -300,7 +303,7 @@ fn horizontal_sfu_realtime_lifecycle_uses_the_canonical_session_registry_and_sta
     assert!(runtime.contains("DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL"));
     assert!(runtime.contains("RealtimeSessionRegistry::with_expired_call_cleanup"));
     assert!(runtime.contains("spawn_sfu_placement_expiry_sweeper"));
-    assert!(runtime.contains("sweep_expired_sfu_placements_once"));
+    assert!(realtime.contains("sweep_expired_sfu_placements_at"));
     assert!(
         spec.contains("The realtime-session binding now has an explicit optional lifecycle gate")
     );
