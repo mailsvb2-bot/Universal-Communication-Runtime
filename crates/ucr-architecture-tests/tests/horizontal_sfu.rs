@@ -334,6 +334,8 @@ fn horizontal_sfu_realtime_publication_uses_validated_placement_router_and_stays
 
     assert!(runtime.contains("pub struct SfuPlacementMediaRuntimeConfig"));
     assert!(runtime.contains("configure_sfu_placement_media_router"));
+    assert!(runtime.contains("resolved_operator_endpoint"));
+    assert!(runtime.contains("operator_incoming.as_ref().map(|(_, address)| *address)"));
     assert!(runtime.contains("PlacementAwareSfuNodeRouter::connect_lazy"));
     assert!(runtime.contains("with_sfu_media_router"));
     assert!(runtime.contains("route_webrtc_e2ee_frame_via_configured_route"));
