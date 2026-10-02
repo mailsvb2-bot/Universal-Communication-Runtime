@@ -398,7 +398,7 @@ fn horizontal_sfu_node_identity_reload_is_live_for_new_connections() {
         )
     );
 
-    assert!(client.contains("self.provider"));
+    assert!(client.contains("provider: Arc<dyn SecretProvider>"));
     assert!(client.contains("active_secret_set(&self.certificate_handle)"));
     assert!(client.contains("active_secret_set(&self.private_key_handle)"));
     assert!(
