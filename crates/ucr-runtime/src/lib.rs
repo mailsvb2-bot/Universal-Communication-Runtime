@@ -2430,8 +2430,7 @@ fn configure_sfu_placement_media_router(
         config.policy,
     )
     .map_err(|error| format!("configure SFU placement media router: {error:?}"))?;
-    let router: Arc<dyn RealtimeSfuMediaRouter> =
-        Arc::new(tokio::sync::Mutex::new(router));
+    let router: Arc<dyn RealtimeSfuMediaRouter> = Arc::new(router);
     Ok(realtime_service.with_sfu_media_router(router))
 }
 
