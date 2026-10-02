@@ -372,9 +372,17 @@ fn horizontal_sfu_drain_and_failure_migration_is_bounded_and_keeps_canonical_own
     assert!(sfu.contains("self.release_reservation(current_node_id)"));
     assert!(sfu.contains("return Err(SfuPlacementError::NoHealthyCapacity)"));
 
-    assert!(spec.contains("placement resolution attempts exactly one bounded migration"));
-    assert!(spec.contains("destination reservation is acquired before the source reservation is released"));
+    assert!(
+        spec.contains("placement resolution attempts exactly one bounded migration")
+    );
+    assert!(
+        spec.contains(
+            "destination reservation is acquired before the source reservation is released"
+        )
+    );
     assert!(spec.contains("canonical Call/session authority"));
-    assert!(spec.contains("Production horizontal SFU still requires live credential reload evidence"));
+    assert!(
+        spec.contains("Production horizontal SFU still requires live credential reload evidence")
+    );
 }
 
