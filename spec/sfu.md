@@ -180,8 +180,9 @@ placement router.
 The private node listener likewise resolves a fresh certificate/private-key snapshot for every newly
 accepted TCP connection before Tonic performs mTLS. Existing HTTP/2/TLS sessions keep the identity
 with which they already negotiated; provider failure rejects only the new connection and does not
-silently reuse a stale snapshot. Runtime regression evidence rotates the server identity to a
-certificate under a different CA and proves a new connection sees only the rotated identity. The
+silently reuse a stale snapshot. Runtime regression evidence rotates the server certificate and
+private key to a distinct DNS identity under the same explicit CA trust anchor; the second client
+verifies the new hostname, so the pre-rotation certificate cannot satisfy the proof. The
 colocated placement client is created lazily so runtime bootstrap cannot dead-start by trying to
 connect to its own operator listener before that listener is serving.
 
