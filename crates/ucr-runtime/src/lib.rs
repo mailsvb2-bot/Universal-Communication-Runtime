@@ -40,7 +40,7 @@ use ucr_model::{
     EventSubscriptionId, IceTransportPolicy, KeyId, NamespaceId, OpaqueId, SfuForwardEnvelope,
     TenantId, TenantScope,
 };
-use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeRegistryError, RealtimeSessionRegistry};
+use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_secrets::{MAX_SECRET_BYTES, SecretHandle, SecretProvider, SecretPurpose};
 use ucr_sfu::{
     SfuClusterDirectory, SfuForwardSink, SfuForwardSinkError, SfuNodeCapacitySnapshot,
@@ -1859,10 +1859,9 @@ impl ProductionRuntime {
         } else {
             realtime_service
         };
-        let sfu_expiry_task = placement_lifecycle.as_ref().map(|lifecycle| {
+        let sfu_expiry_task = placement_lifecycle.as_ref().map(|_| {
             spawn_sfu_placement_expiry_sweeper(
-                Arc::clone(&registry),
-                Arc::clone(lifecycle),
+                realtime_service.clone(),
                 DEFAULT_SFU_PLACEMENT_EXPIRY_SWEEP_INTERVAL,
             )
         });
@@ -2377,18 +2376,14 @@ fn realtime_operator_health(
 }
 
 fn spawn_sfu_placement_expiry_sweeper(
-    registry: Arc<RealtimeSessionRegistry>,
-    lifecycle: Arc<dyn RealtimeSfuPlacementLifecycle>,
+    service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run_sfu_placement_expiry_sweeper(
-        registry, lifecycle, interval,
-    ))
+    tokio::spawn(run_sfu_placement_expiry_sweeper(service, interval))
 }
 
 async fn run_sfu_placement_expiry_sweeper(
-    registry: Arc<RealtimeSessionRegistry>,
-    lifecycle: Arc<dyn RealtimeSfuPlacementLifecycle>,
+    service: GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
     interval: Duration,
 ) {
     let mut ticker = tokio::time::interval(interval);
@@ -2399,34 +2394,8 @@ async fn run_sfu_placement_expiry_sweeper(
         let Ok(now_unix_ms) = runtime_now_unix_ms() else {
             continue;
         };
-        let _ =
-            sweep_expired_sfu_placements_once(registry.as_ref(), lifecycle.as_ref(), now_unix_ms)
-                .await;
+        let _ = service.sweep_expired_sfu_placements_at(now_unix_ms).await;
     }
-}
-
-async fn sweep_expired_sfu_placements_once(
-    registry: &RealtimeSessionRegistry,
-    lifecycle: &dyn RealtimeSfuPlacementLifecycle,
-    now_unix_ms: i64,
-) -> Result<usize, RealtimeRegistryError> {
-    let candidates = registry.expired_call_cleanup_candidates_at(now_unix_ms)?;
-    let mut released = 0_usize;
-    for (scope, call_id) in candidates {
-        if registry.active_call_session_count_at(&scope, &call_id, now_unix_ms)? != 0 {
-            registry.acknowledge_expired_call_cleanup(&scope, &call_id)?;
-            continue;
-        }
-        if lifecycle
-            .release_call_placement(&scope, &call_id)
-            .await
-            .is_ok()
-        {
-            registry.acknowledge_expired_call_cleanup(&scope, &call_id)?;
-            released = released.saturating_add(1);
-        }
-    }
-    Ok(released)
 }
 
 fn spawn_webrtc_e2ee_bridge(
