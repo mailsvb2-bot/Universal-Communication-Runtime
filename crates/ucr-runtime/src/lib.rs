@@ -2315,9 +2315,11 @@ impl Drop for SfuNodeMediaConnection {
 }
 
 impl Connected for SfuNodeMediaConnection {
-    type ConnectInfo = ();
+    type ConnectInfo = <TcpStream as Connected>::ConnectInfo;
 
-    fn connect_info(&self) -> Self::ConnectInfo {}
+    fn connect_info(&self) -> Self::ConnectInfo {
+        self.stream.connect_info()
+    }
 }
 
 impl AsyncRead for SfuNodeMediaConnection {
