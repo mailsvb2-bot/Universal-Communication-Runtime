@@ -2751,6 +2751,8 @@ mod tests {
         ca: String,
         server_certificate: String,
         server_private_key: String,
+        rotated_server_certificate: String,
+        rotated_server_private_key: String,
         client_certificate: String,
         client_private_key: String,
     }
@@ -2786,6 +2788,12 @@ mod tests {
             "localhost",
             ExtendedKeyUsagePurpose::ServerAuth,
         );
+        let (rotated_server_certificate_pem, rotated_server_private_key_pem) = test_mtls_leaf(
+            &ca,
+            &ca_key,
+            "rotated.localhost",
+            ExtendedKeyUsagePurpose::ServerAuth,
+        );
         let (client_certificate_pem, client_private_key_pem) = test_mtls_leaf(
             &ca,
             &ca_key,
@@ -2796,6 +2804,8 @@ mod tests {
             ca: ca.pem(),
             server_certificate: server_certificate_pem,
             server_private_key: server_private_key_pem,
+            rotated_server_certificate: rotated_server_certificate_pem,
+            rotated_server_private_key: rotated_server_private_key_pem,
             client_certificate: client_certificate_pem,
             client_private_key: client_private_key_pem,
         }
@@ -2883,7 +2893,6 @@ mod tests {
     #[tokio::test]
     async fn private_sfu_node_listener_observes_rotated_server_identity_on_new_connection() {
         let initial = test_mtls_material();
-        let rotated = test_mtls_material();
         let (config, provider, certificate_handle, private_key_handle) =
             test_sfu_node_tls_config_with_provider(&initial);
         let listener = TcpListener::bind(config.bind)
@@ -2902,14 +2911,14 @@ mod tests {
 
         let client_certificate = initial.client_certificate.clone();
         let client_private_key = initial.client_private_key.clone();
-        let connect = |server_ca: String| {
+        let connect = |server_ca: String, server_name: &'static str| {
             let client_certificate = client_certificate.clone();
             let client_private_key = client_private_key.clone();
             async move {
                 let uri = format!("https://127.0.0.1:{}", address.port());
                 let tls = tonic::transport::ClientTlsConfig::new()
                     .ca_certificate(Certificate::from_pem(server_ca))
-                    .domain_name("localhost")
+                    .domain_name(server_name)
                     .identity(Identity::from_pem(
                         client_certificate.as_bytes(),
                         client_private_key.as_bytes(),
@@ -2930,15 +2939,17 @@ mod tests {
             }
         };
 
-        connect(initial.ca.clone()).await;
+        connect(initial.ca.clone(), "localhost").await;
 
         provider
             .rotate(
                 &certificate_handle,
                 SecretVersion {
                     version_id: OpaqueId::new("cert-v2").expect("certificate version id"),
-                    material: SecretMaterial::new(rotated.server_certificate.as_bytes().to_vec())
-                        .expect("certificate material"),
+                    material: SecretMaterial::new(
+                        initial.rotated_server_certificate.as_bytes().to_vec(),
+                    )
+                    .expect("certificate material"),
                 },
             )
             .expect("rotate server certificate");
@@ -2947,13 +2958,15 @@ mod tests {
                 &private_key_handle,
                 SecretVersion {
                     version_id: OpaqueId::new("key-v2").expect("private key version id"),
-                    material: SecretMaterial::new(rotated.server_private_key.as_bytes().to_vec())
-                        .expect("private key material"),
+                    material: SecretMaterial::new(
+                        initial.rotated_server_private_key.as_bytes().to_vec(),
+                    )
+                    .expect("private key material"),
                 },
             )
             .expect("rotate server private key");
 
-        connect(rotated.ca.clone()).await;
+        connect(initial.ca.clone(), "rotated.localhost").await;
 
         server_task.abort();
         drop(store);
