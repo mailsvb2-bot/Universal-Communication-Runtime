@@ -176,11 +176,21 @@ server name. Certificate/key material is resolved through the shared reload-capa
 overlap. The colocated placement client is created lazily so runtime bootstrap cannot dead-start by
 trying to connect to its own operator listener before that listener is serving.
 
+Draining and failed-node movement stays inside the same ephemeral placement authority. A
+`Draining` node immediately stops receiving fresh Calls. For an already-sticky Call, the next
+canonical placement resolution attempts exactly one bounded migration to policy-compliant healthy
+capacity. The destination reservation is acquired before the source reservation is released, and the
+mapping changes only after both accounting steps succeed. If no replacement capacity exists while
+the draining source is still live, the existing placement is retained instead of interrupting the
+Call; a later media resolution retries migration. An unavailable or policy-invalid sticky placement
+never falls back to that unusable source and fails closed when no replacement exists. This is
+placement movement only: canonical Call/session authority, subscriptions, media keys and plaintext
+media are not copied into the directory.
+
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
-true. Production horizontal SFU still requires bounded node-failure/drain migration, live credential
-reload evidence in the runtime path, and load/adversity evidence. The placement directory must never
-become a Call, Conference, membership, authorization, media-key, plaintext-media, Delivery, or
-recording owner.
+true. Production horizontal SFU still requires live credential reload evidence in the runtime path
+and load/adversity evidence. The placement directory must never become a Call, Conference,
+membership, authorization, media-key, plaintext-media, Delivery, or recording owner.
 
 ## Public realtime transport
 
