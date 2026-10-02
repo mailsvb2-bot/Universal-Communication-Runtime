@@ -79,7 +79,7 @@ ADR 0092 fixes the Phase-45 production-profile performance regression contract. 
 
 `tools/performance_gate.py` owns every participant level and threshold as source code. They are intentionally not workflow parameters. Adding a stronger profile does not weaken the existing 1000-person baseline. Removing a level, reducing sample count, or relaxing any threshold requires an explicit ADR and replacement evidence; a red CI run alone is not a reason to relax it.
 
-These profiles remain bounded functional-scale models rather than a public Internet/media latency SLA. Phase 45 supplies concrete production-profile regression budgets without overclaiming WAN throughput, codec density or hardware-wide capacity planning.
+These profiles remain bounded functional-scale models rather than a public Internet/media latency SLA. Phase 45 supplies concrete production-profile regression budgets without overclaiming WAN throughput, codec density or hardware-wide capacity planning. They do not by themselves satisfy the project's 1000-connected-browser load requirement. A separate `horizontal_sfu_scale_gate.py` adds production-profile encrypted SFU authorization/fan-out evidence at 10/100/500/1000 participants and varied publisher counts, while its evidence schema explicitly keeps browser/WebRTC end-to-end and WAN-capacity claims false until a target-environment load run exists.
 
 ## Observability and telemetry privacy
 

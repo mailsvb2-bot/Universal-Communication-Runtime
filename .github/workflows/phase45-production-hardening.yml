@@ -103,6 +103,22 @@ jobs:
             --output dist/phase45/performance-evidence.json \
             --source-commit "$UCR_SOURCE_COMMIT"
 
+      - name: Horizontal SFU encrypted-fanout scale gate
+        env:
+          UCR_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 tools/horizontal_sfu_scale_gate.py \
+            --output dist/phase45/horizontal-sfu-scale-evidence.json \
+            --source-commit "$UCR_SOURCE_COMMIT"
+
+      - name: Upload horizontal SFU scale evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: horizontal-sfu-scale-evidence-${{ github.sha }}
+          path: dist/phase45/horizontal-sfu-scale-evidence.json
+          if-no-files-found: error
+
       - name: Candidate critical Chaos gate
         run: cargo test --manifest-path crates/ucr-chaos-lab/Cargo.toml --locked
 
