@@ -2898,11 +2898,7 @@ mod tests {
         let store = Arc::new(SqliteLocalStore::open(&path).expect("open store"));
         let sink: Arc<dyn SfuForwardSink> = Arc::new(AcceptAllSfuSink);
         let service = GrpcSfuNodeMediaService::new(Arc::clone(&store), Arc::clone(&store), sink);
-        let server_task = tokio::spawn(serve_sfu_node_media_listener(
-            config,
-            service,
-            listener,
-        ));
+        let server_task = tokio::spawn(serve_sfu_node_media_listener(config, service, listener));
 
         let client_certificate = initial.client_certificate.clone();
         let client_private_key = initial.client_private_key.clone();
