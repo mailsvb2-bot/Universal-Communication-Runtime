@@ -77,7 +77,13 @@ fn operator_health_uses_durable_webhook_lease_and_does_not_claim_missing_provide
     assert!(runtime.contains("webhook delivery worker durable lease has expired"));
     assert!(runtime.contains("webhook delivery worker has no durable lease"));
     assert!(runtime.contains("runtime_worker_lease(WEBHOOK_DELIVERY_WORKER_KIND)"));
-    assert!(!runtime.contains("lease.holder_id"));
+    let webhook_health = section(
+        &runtime,
+        "fn operator_webhook_worker_health_at(",
+        "fn operator_storage_health(",
+    );
+    assert!(!webhook_health.contains("lease.holder_id"));
+    assert!(!webhook_health.contains("holder_id"));
     assert!(runtime.contains("recording provider is not configured"));
     assert!(runtime.contains("TURN configured but network reachability is unverified"));
 }
