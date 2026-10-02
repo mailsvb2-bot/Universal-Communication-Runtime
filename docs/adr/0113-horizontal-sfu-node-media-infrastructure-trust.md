@@ -58,8 +58,11 @@ abstraction, trusts only explicit server CA material, and requires one exact des
 target before returning success. A placement-aware router now derives the canonical scope/Call
 coordinates from that validated batch, obtains one sticky placement through the private loopback
 `SfuPlacementService`, resolves only the selected node, revalidates node identity/private endpoint,
-and then invokes the mTLS client. Realtime-session ownership, failover/drain policy, and live
-listener/client credential reload evidence remain separate Production gates.
+and then invokes the mTLS client. Realtime-session ownership and bounded failover/drain are wired
+through the canonical placement lifecycle. New outbound connections resolve the current client
+certificate/private-key provider snapshot, and the private node listener builds a fresh mTLS server
+snapshot per accepted TCP connection; therefore certificate/private-key rotation becomes visible to
+new connections without restarting the runtime. Existing negotiated TLS sessions are not rewritten.
 
 The stream is bounded and backpressure-aware. `ACCEPTED` means only that the authenticated
 destination SFU process accepted the ciphertext routing item into its bounded ingress. It is not
@@ -96,8 +99,9 @@ tenant-wide identity export.
 
 This is an additive private protobuf service. Existing public Universal Conference, REST,
 RealtimeService, SDK and integration contracts do not change. Existing local single-process SFU
-forwarding remains valid. `horizontal_sfu` stays false until the concrete node transport, realtime
-placement binding, failover/reconnect evidence, and load/adversity evidence are all wired.
+forwarding remains valid. `horizontal_sfu` stays false until load/adversity evidence at the target
+deployment scale is complete; the authenticated node transport, realtime placement binding,
+failover/drain, and live node-identity reload paths are now wired.
 
 ## Migration strategy
 
