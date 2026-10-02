@@ -1852,7 +1852,11 @@ impl ProductionRuntime {
             dependencies.webrtc,
         );
         let placement_lifecycle: Option<Arc<dyn RealtimeSfuPlacementLifecycle>> =
-            sfu_placement_lifecycle.then(|| Arc::new(sfu_placement_service.clone()) as Arc<_>);
+            if sfu_placement_lifecycle {
+                Some(Arc::new(sfu_placement_service.clone()))
+            } else {
+                None
+            };
         let realtime_service = if let Some(lifecycle) = placement_lifecycle.as_ref() {
             realtime_service.with_sfu_placement_lifecycle(Arc::clone(lifecycle))
         } else {
