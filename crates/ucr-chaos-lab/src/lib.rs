@@ -124,6 +124,7 @@ pub enum Fault {
     Merge(PeerId, PeerId),
     SetLatency(PeerId, PeerId, u64),
     SetJitter(PeerId, PeerId, u64),
+    SetLossBasisPoints(PeerId, PeerId, u16),
     SetThrottle(PeerId, PeerId, u64),
     SetClockDrift(PeerId, i64),
     SetSlowConsumer(PeerId, bool),
@@ -140,6 +141,7 @@ pub enum ChaosError {
     NetworkPartitioned(PeerId, PeerId),
     InfrastructureUnavailable(InfrastructureComponent),
     InvalidThrottle,
+    InvalidLossBasisPoints(u16),
     InvalidBatteryPercent(u8),
     BatteryLimited {
         peer: PeerId,
@@ -198,6 +200,7 @@ pub struct ChaosTransport {
     partitions: BTreeSet<(PeerId, PeerId)>,
     latency_ms: BTreeMap<(PeerId, PeerId), u64>,
     jitter_ms: BTreeMap<(PeerId, PeerId), u64>,
+    loss_basis_points: BTreeMap<(PeerId, PeerId), u16>,
     throttle_bytes_per_second: BTreeMap<(PeerId, PeerId), u64>,
     minimum_send_battery_percent: u8,
     one_shot: BTreeSet<OneShotFault>,
@@ -229,6 +232,7 @@ impl ChaosTransport {
             partitions: BTreeSet::new(),
             latency_ms: BTreeMap::new(),
             jitter_ms: BTreeMap::new(),
+            loss_basis_points: BTreeMap::new(),
             throttle_bytes_per_second: BTreeMap::new(),
             minimum_send_battery_percent: 0,
             one_shot: BTreeSet::new(),
@@ -288,6 +292,19 @@ impl ChaosTransport {
                     self.jitter_ms.insert(peer_pair(left, right), max_jitter_ms);
                 }
             }
+            Fault::SetLossBasisPoints(left, right, loss_basis_points) => {
+                self.require_peer(left)?;
+                self.require_peer(right)?;
+                if loss_basis_points > 10_000 {
+                    return Err(ChaosError::InvalidLossBasisPoints(loss_basis_points));
+                }
+                if loss_basis_points == 0 {
+                    self.loss_basis_points.remove(&peer_pair(left, right));
+                } else {
+                    self.loss_basis_points
+                        .insert(peer_pair(left, right), loss_basis_points);
+                }
+            }
             Fault::SetThrottle(left, right, bytes_per_second) => {
                 self.require_peer(left)?;
                 self.require_peer(right)?;
@@ -331,6 +348,15 @@ impl ChaosTransport {
         self.require_sendable(&packet)?;
 
         if self.one_shot.remove(&OneShotFault::Drop) {
+            return Ok(Vec::new());
+        }
+        let pair = peer_pair(packet.source, packet.destination);
+        if self
+            .loss_basis_points
+            .get(&pair)
+            .copied()
+            .is_some_and(|basis_points| deterministic_loss_roll(packet.packet_id) < basis_points)
+        {
             return Ok(Vec::new());
         }
 
@@ -450,6 +476,18 @@ impl ChaosTransport {
             .get_mut(&peer)
             .ok_or(ChaosError::UnknownPeer(peer))
     }
+}
+
+fn deterministic_loss_roll(packet_id: PacketId) -> u16 {
+    let mixed = packet_id
+        .0
+        .wrapping_mul(0xd6e8_feb8_6659_fd93)
+        .rotate_left(23)
+        ^ packet_id
+            .0
+            .wrapping_mul(0xa076_1d64_78bd_642f)
+            .rotate_right(7);
+    u16::try_from(mixed % 10_000).expect("loss roll must fit basis points")
 }
 
 fn deterministic_jitter_delay_ms(packet_id: PacketId, max_jitter_ms: u64) -> u64 {
@@ -744,6 +782,52 @@ mod tests {
         assert_eq!(
             transport.send(packet(51, 0, 2, RouteKind::Direct)),
             Err(ChaosError::PeerOffline(PeerId(2)))
+        );
+    }
+
+    #[test]
+    fn sustained_packet_loss_profile_is_bounded_repeatable_and_disableable() {
+        fn observe() -> Vec<bool> {
+            let mut transport = ChaosTransport::with_peers(2);
+            transport
+                .apply(Fault::SetLossBasisPoints(PeerId(0), PeerId(1), 2_000))
+                .expect("20 percent loss profile");
+            (0_u64..1_000)
+                .map(|packet_id| {
+                    transport
+                        .send(packet(packet_id, 0, 1, RouteKind::Direct))
+                        .expect("profiled send")
+                        .is_empty()
+                })
+                .collect()
+        }
+
+        let first = observe();
+        let replay = observe();
+        assert_eq!(first, replay, "loss profile must replay exactly");
+        let lost = first.iter().filter(|lost| **lost).count();
+        assert!(
+            (150..=250).contains(&lost),
+            "20 percent profile produced {lost} losses"
+        );
+
+        let mut transport = ChaosTransport::with_peers(2);
+        assert_eq!(
+            transport.apply(Fault::SetLossBasisPoints(PeerId(0), PeerId(1), 10_001)),
+            Err(ChaosError::InvalidLossBasisPoints(10_001))
+        );
+        transport
+            .apply(Fault::SetLossBasisPoints(PeerId(0), PeerId(1), 2_000))
+            .expect("enable loss");
+        transport
+            .apply(Fault::SetLossBasisPoints(PeerId(0), PeerId(1), 0))
+            .expect("disable loss");
+        assert_eq!(
+            transport
+                .send(packet(77, 0, 1, RouteKind::Direct))
+                .expect("loss disabled")
+                .len(),
+            1
         );
     }
 

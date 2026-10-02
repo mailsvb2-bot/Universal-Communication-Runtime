@@ -106,17 +106,31 @@ fn packet_loss_recovery_restarts_ice_for_the_same_live_webrtc_session() {
     let initial = provider.create_session(&config).expect("initial offer");
 
     let mut network = ChaosTransport::with_peers(2);
-    network.apply(Fault::DropNext).expect("drop next");
-    let lost = network
-        .send(LabPacket::new(
-            PacketId(2),
-            PeerId(0),
-            PeerId(1),
-            RouteKind::Direct,
-            b"ice-connectivity-check".to_vec(),
-        ))
-        .expect("loss injection");
-    assert!(lost.is_empty());
+    network
+        .apply(Fault::SetLossBasisPoints(PeerId(0), PeerId(1), 2_000))
+        .expect("20 percent loss profile");
+    let outcomes = (0_u64..50)
+        .map(|offset| {
+            network
+                .send(LabPacket::new(
+                    PacketId(2 + offset),
+                    PeerId(0),
+                    PeerId(1),
+                    RouteKind::Direct,
+                    b"ice-connectivity-check".to_vec(),
+                ))
+                .expect("loss-profile send")
+                .is_empty()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        outcomes.iter().any(|lost| *lost),
+        "loss profile must drop packets"
+    );
+    assert!(
+        outcomes.iter().any(|lost| !*lost),
+        "loss profile must preserve some connectivity probes"
+    );
 
     let restarted = provider
         .restart_session(&config)
@@ -124,6 +138,9 @@ fn packet_loss_recovery_restarts_ice_for_the_same_live_webrtc_session() {
     assert_eq!(restarted.session_id, session_id);
     assert_ne!(initial.sdp, restarted.sdp);
 
+    network
+        .apply(Fault::SetLossBasisPoints(PeerId(0), PeerId(1), 0))
+        .expect("clear sustained loss");
     network
         .apply(Fault::SetLatency(PeerId(0), PeerId(1), 250))
         .expect("latency");

@@ -39,7 +39,7 @@ Deterministic fault injection supports the Canon test-transport surface:
 
 - delay through per-link latency;
 - bounded deterministic per-link jitter layered on top of base latency;
-- drop;
+- drop, including one-shot drop and sustained deterministic per-link loss in basis points;
 - duplicate;
 - reorder;
 - disconnect/reconnect through peer online state;
@@ -90,7 +90,7 @@ Chaos Lab remains the only deterministic fault substrate; it does not implement 
 
 The product requirement for network adversity is represented explicitly:
 
-- **packet loss** — deterministic `DropNext` plus a real `LiveWebRtcProvider::restart_session` ICE restart on the same realtime session;
+- **packet loss** — a deterministic sustained per-link `SetLossBasisPoints` profile (the cross-boundary WebRTC evidence uses 2,000 basis points / 20% across 50 connectivity probes), followed by a real `LiveWebRtcProvider::restart_session` ICE restart on the same realtime session; the legacy one-shot `DropNext` primitive remains available for exact single-packet fault cases;
 - **jitter** — deterministic bounded per-link jitter with repeatable packet-specific latency variation;
 - **high latency** — explicit base latency remains observable before/after recovery and composes with jitter/throttling;
 - **Wi-Fi -> LTE / network switch** — `SwitchNetwork` advances the destination network generation while the same authenticated realtime session is retained;

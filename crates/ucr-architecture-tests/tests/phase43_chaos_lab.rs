@@ -46,6 +46,7 @@ fn phase43_chaos_lab_covers_the_canonical_failure_surface() {
         "SetPeerOnline",
         "SetLatency",
         "SetJitter",
+        "SetLossBasisPoints",
         "SetThrottle",
     ] {
         assert!(
@@ -122,7 +123,8 @@ fn phase43_locks_data_safety_and_explicit_failure_evidence() {
         "RealtimeSessionRegistry",
         "LiveWebRtcProvider",
         "Fault::SwitchNetwork",
-        "Fault::DropNext",
+        "Fault::SetLossBasisPoints",
+        "2_000",
         "restart_session",
         "JoinGrantUsePolicy::SingleUse",
     ] {
