@@ -221,13 +221,15 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         self
     }
 
-    async fn sfu_placement_transition_guard(
-        &self,
-    ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    async fn sfu_placement_transition_guard(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
         if self.sfu_placement_lifecycle.is_none() {
             return None;
         }
-        Some(Arc::clone(&self.sfu_placement_transition).lock_owned().await)
+        Some(
+            Arc::clone(&self.sfu_placement_transition)
+                .lock_owned()
+                .await,
+        )
     }
 
     async fn ensure_sfu_call_placement(
@@ -3062,7 +3064,9 @@ mod sfu_placement_lifecycle_tests {
         let service = service(Arc::clone(&registry), Arc::clone(&lifecycle));
         let mut expired = claims("placement-expired-session", "placement-expired-device");
         expired.expires_at_unix_ms = 1_010;
-        registry.join(expired.clone(), 1_001).expect("expired seed join");
+        registry
+            .join(expired.clone(), 1_001)
+            .expect("expired seed join");
 
         let sweep_service = service.clone();
         let sweep = tokio::spawn(async move {
