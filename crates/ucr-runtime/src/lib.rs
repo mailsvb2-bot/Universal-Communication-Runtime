@@ -1876,10 +1876,12 @@ impl ProductionRuntime {
             &sfu_cluster,
         );
         let lifecycle_placement_policy =
-            sfu_placement_media_config.as_ref().map(|config| SfuPlacementPolicy {
-                preferred_region: config.policy.preferred_region.clone(),
-                allow_cross_region_failover: config.policy.allow_cross_region_failover,
-            });
+            sfu_placement_media_config
+                .as_ref()
+                .map(|config| SfuPlacementPolicy {
+                    preferred_region: config.policy.preferred_region.clone(),
+                    allow_cross_region_failover: config.policy.allow_cross_region_failover,
+                });
         let sfu_placement_service = if let Some(policy) = lifecycle_placement_policy {
             GrpcSfuPlacementService::with_lifecycle_policy(
                 Arc::clone(&clock),
