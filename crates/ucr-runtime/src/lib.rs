@@ -3,13 +3,19 @@
 use std::{
     net::SocketAddr,
     path::Path,
+    pin::Pin,
     sync::{Arc, Mutex},
+    task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use tokio::net::TcpListener;
-use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::{TcpListener, TcpStream},
+    sync::oneshot,
+};
+use tokio_stream::{StreamExt as _, wrappers::TcpListenerStream};
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig, server::Connected};
 use ucr_api_grpc::{
     GrpcAttachmentService, GrpcCallService, GrpcConferenceService, GrpcDeviceService,
     GrpcEventService, GrpcGroupService, GrpcIntegrationService, GrpcMachineAuthService,
@@ -2285,6 +2291,69 @@ async fn serve_sfu_node_media_services(
     serve_sfu_node_media_listener(config, service, listener).await
 }
 
+#[derive(Debug)]
+struct SfuNodeMediaConnection {
+    stream: TcpStream,
+    closed: Option<oneshot::Sender<()>>,
+}
+
+impl SfuNodeMediaConnection {
+    fn new(stream: TcpStream, closed: oneshot::Sender<()>) -> Self {
+        Self {
+            stream,
+            closed: Some(closed),
+        }
+    }
+}
+
+impl Drop for SfuNodeMediaConnection {
+    fn drop(&mut self) {
+        if let Some(closed) = self.closed.take() {
+            let _ = closed.send(());
+        }
+    }
+}
+
+impl Connected for SfuNodeMediaConnection {
+    type ConnectInfo = ();
+
+    fn connect_info(&self) -> Self::ConnectInfo {}
+}
+
+impl AsyncRead for SfuNodeMediaConnection {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for SfuNodeMediaConnection {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        Pin::new(&mut self.get_mut().stream).poll_write(context, buffer)
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.get_mut().stream).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.get_mut().stream).poll_shutdown(context)
+    }
+}
+
 async fn serve_sfu_node_media_listener(
     config: SfuNodeMediaRuntimeConfig,
     service: GrpcSfuNodeMediaService<SqliteLocalStore, SqliteLocalStore>,
@@ -2305,10 +2374,16 @@ async fn serve_sfu_node_media_listener(
                     return;
                 }
             };
-            let incoming = tokio_stream::once(Ok::<_, std::io::Error>(stream));
+            let (closed_tx, closed_rx) = oneshot::channel();
+            let connection = SfuNodeMediaConnection::new(stream, closed_tx);
+            let incoming = tokio_stream::once(Ok::<_, std::io::Error>(connection)).chain(
+                tokio_stream::pending::<Result<SfuNodeMediaConnection, std::io::Error>>(),
+            );
             if let Err(error) = server
                 .add_service(sfu_node_media_service_server(connection_service))
-                .serve_with_incoming(incoming)
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = closed_rx.await;
+                })
                 .await
             {
                 eprintln!("ucr-runtime: SFU node media connection closed: {error}");
