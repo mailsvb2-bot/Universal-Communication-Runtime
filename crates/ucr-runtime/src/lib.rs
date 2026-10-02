@@ -1639,9 +1639,11 @@ impl ProductionRuntime {
 
         let incoming = TcpListenerStream::new(listener);
         let operator_incoming = match operator_bind {
-            Some(operator_bind) => {
-                Some(bind_private_operator_listener(bind, operator_bind, "api").await?.0)
-            }
+            Some(operator_bind) => Some(
+                bind_private_operator_listener(bind, operator_bind, "api")
+                    .await?
+                    .0,
+            )
             None => None,
         };
         let clock = Arc::new(SystemServiceQuotaClock);
@@ -1726,13 +1728,11 @@ impl ProductionRuntime {
 
         let incoming = TcpListenerStream::new(listener);
         let operator_incoming = match operator_bind {
-            Some(operator_bind) => {
-                Some(
-                    bind_private_operator_listener(bind, operator_bind, "machine-auth")
-                        .await?
-                        .0,
-                )
-            }
+            Some(operator_bind) => Some(
+                bind_private_operator_listener(bind, operator_bind, "machine-auth")
+                    .await?
+                    .0,
+            )
             None => None,
         };
         let clock = Arc::new(SystemServiceQuotaClock);
@@ -1970,13 +1970,7 @@ impl ProductionRuntime {
         bind: SocketAddr,
         operator_bind: Option<SocketAddr>,
         sfu_placement_lifecycle: bool,
-    ) -> Result<
-        (
-            TcpListenerStream,
-            Option<(TcpListenerStream, SocketAddr)>,
-        ),
-        String,
-    > {
+    ) -> Result<(TcpListenerStream, Option<(TcpListenerStream, SocketAddr)>), String> {
         validate_local_bind(bind)?;
         if sfu_placement_lifecycle && operator_bind.is_none() {
             return Err(
