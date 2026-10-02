@@ -21,13 +21,17 @@ use super::{
 pub struct GrpcSfuPlacementService<C> {
     clock: Arc<C>,
     cluster: Arc<Mutex<SfuClusterDirectory>>,
-    lifecycle_policy: SfuPlacementPolicy,
+    lifecycle_policy: Option<SfuPlacementPolicy>,
 }
 
 impl<C> GrpcSfuPlacementService<C> {
     #[must_use]
-    pub fn new(clock: Arc<C>, cluster: Arc<Mutex<SfuClusterDirectory>>) -> Self {
-        Self::with_lifecycle_policy(clock, cluster, SfuPlacementPolicy::default())
+    pub const fn new(clock: Arc<C>, cluster: Arc<Mutex<SfuClusterDirectory>>) -> Self {
+        Self {
+            clock,
+            cluster,
+            lifecycle_policy: None,
+        }
     }
 
     #[must_use]
@@ -39,7 +43,7 @@ impl<C> GrpcSfuPlacementService<C> {
         Self {
             clock,
             cluster,
-            lifecycle_policy,
+            lifecycle_policy: Some(lifecycle_policy),
         }
     }
 }
@@ -81,8 +85,9 @@ where
             .lock()
             .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
         cluster.prune_expired_nodes(now_unix_ms);
+        let policy = self.lifecycle_policy.clone().unwrap_or_default();
         cluster
-            .place_session(scope, call_id, &self.lifecycle_policy, now_unix_ms)
+            .place_session(scope, call_id, &policy, now_unix_ms)
             .map(|_| ())
             .map_err(map_lifecycle_placement_error)
     }
@@ -134,10 +139,17 @@ where
             decode_opaque(body.call_id).map_err(|_| Status::invalid_argument("invalid call id"))?,
         );
         let preferred_region = decode_preferred_region(&body.preferred_region)?;
-        let policy = SfuPlacementPolicy {
+        let requested_policy = SfuPlacementPolicy {
             preferred_region,
             allow_cross_region_failover: body.allow_cross_region_failover,
         };
+        // When realtime media routing is configured, join admission owns the one canonical
+        // placement policy. A later media-side PlaceCall must not relocate an already-admitted
+        // Call by supplying different region hints.
+        let policy = self
+            .lifecycle_policy
+            .clone()
+            .unwrap_or(requested_policy);
         let now_unix_ms = self
             .clock
             .now_unix_ms()
