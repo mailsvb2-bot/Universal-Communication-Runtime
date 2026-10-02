@@ -383,17 +383,13 @@ impl SfuClusterDirectory {
         policy: &SfuPlacementPolicy,
         now_unix_ms: i64,
     ) -> Result<Option<SfuPlacementDecision>, SfuPlacementError> {
-        let (selected_id, selected_region, selected_node_id) =
-            match self.select_placement_candidate(
-                key,
-                policy,
-                now_unix_ms,
-                Some(current_node_id),
-            ) {
-                Ok(selected) => selected,
-                Err(SfuPlacementError::NoHealthyCapacity) => return Ok(None),
-                Err(error) => return Err(error),
-            };
+        let (selected_id, selected_region, selected_node_id) = match self
+            .select_placement_candidate(key, policy, now_unix_ms, Some(current_node_id))
+        {
+            Ok(selected) => selected,
+            Err(SfuPlacementError::NoHealthyCapacity) => return Ok(None),
+            Err(error) => return Err(error),
+        };
 
         self.reserve_session(&selected_id)?;
         if let Err(error) = self.release_reservation(current_node_id) {
@@ -435,8 +431,7 @@ impl SfuClusterDirectory {
             if let Some(current) = self.nodes.get(&current_node_id).cloned() {
                 let preferred = policy.preferred_region.as_deref();
                 let crossed_region = preferred.is_some_and(|region| current.region != region);
-                let policy_allows_current =
-                    !crossed_region || policy.allow_cross_region_failover;
+                let policy_allows_current = !crossed_region || policy.allow_cross_region_failover;
                 let current_capacity_valid = current.active_sessions <= current.max_sessions;
 
                 if current.is_live_at(now_unix_ms)
@@ -456,12 +451,9 @@ impl SfuClusterDirectory {
                     && current_capacity_valid
                     && policy_allows_current
                 {
-                    if let Some(migrated) = self.migrate_session_placement(
-                        &key,
-                        &current_node_id,
-                        policy,
-                        now_unix_ms,
-                    )? {
+                    if let Some(migrated) =
+                        self.migrate_session_placement(&key, &current_node_id, policy, now_unix_ms)?
+                    {
                         return Ok(migrated);
                     }
                     return Ok(SfuPlacementDecision {
