@@ -156,11 +156,28 @@ keeps expiry-cleanup tracking disabled when the placement lifecycle gate is off,
 non-horizontal realtime capacity semantics. The sweeper is aborted with the realtime server and its
 state is intentionally ephemeral because the in-process placement directory is ephemeral too.
 
+The runtime now has a separate explicit **placement-aware realtime media routing gate**. When
+`UCR_SFU_PLACEMENT_MEDIA_ENABLED=true`, the gate requires the existing placement-lifecycle
+gate and private operator plane. Both gRPC `PublishMedia` and WebRTC E2EE ingress first execute
+the same long-lived realtime-session checks, Conference subscription selection, and canonical SFU
+validation, producing one immutable `SfuValidatedForwardBatch`. Only that validated batch crosses
+the horizontal boundary. The placement-aware router then uses the sticky canonical Call placement,
+resolves only the selected live private endpoint, opens the deployment-scoped mTLS node connection,
+and waits for concrete destination-ingress receipts. Local realtime forwarding is unchanged when
+the gate is disabled.
+
+Outbound router credentials are deployment infrastructure credentials, not tenant/user authority.
+The runtime requires an explicit client certificate/key, explicit server CA trust material and TLS
+server name. Certificate/key material is resolved through the shared reload-capable
+`SecretProvider`; bounded previous certificate/key and CA material may be configured for rotation
+overlap. The colocated placement client is created lazily so runtime bootstrap cannot dead-start by
+trying to connect to its own operator listener before that listener is serving.
+
 This foundation deliberately does **not** set the public `horizontal_sfu` runtime capability to
-true. Production horizontal SFU still requires the placement-aware validated media path to be wired
-into realtime publication, bounded node-failure/drain migration, live credential reload evidence in
-the runtime path, and load/adversity evidence. The placement directory must never become a Call,
-Conference, membership, authorization, media-key, plaintext-media, Delivery, or recording owner.
+true. Production horizontal SFU still requires bounded node-failure/drain migration, live credential
+reload evidence in the runtime path, and load/adversity evidence. The placement directory must never
+become a Call, Conference, membership, authorization, media-key, plaintext-media, Delivery, or
+recording owner.
 
 ## Public realtime transport
 
