@@ -379,7 +379,34 @@ fn horizontal_sfu_drain_and_failure_migration_is_bounded_and_keeps_canonical_own
         )
     );
     assert!(spec.contains("canonical Call/session authority"));
+    assert!(spec.contains("Production horizontal SFU still requires load/adversity evidence"));
+}
+
+#[test]
+fn horizontal_sfu_node_identity_reload_is_live_for_new_connections() {
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let client = read("crates/ucr-api-grpc/src/sfu_node_media_client.rs");
+    let spec = read("spec/sfu.md");
+    let adr = read("docs/adr/0113-horizontal-sfu-node-media-infrastructure-trust.md");
+
+    assert!(runtime.contains("serve_sfu_node_media_listener"));
+    assert!(runtime.contains("let connection_config = config.clone();"));
+    assert!(runtime.contains("connection_config.tls_server()"));
     assert!(
-        spec.contains("Production horizontal SFU still requires live credential reload evidence")
+        runtime.contains(
+            "private_sfu_node_listener_observes_rotated_server_identity_on_new_connection"
+        )
     );
+
+    assert!(client.contains("provider: Arc<dyn SecretProvider>"));
+    assert!(client.contains("active_secret_set(&self.certificate_handle)"));
+    assert!(client.contains("active_secret_set(&self.private_key_handle)"));
+    assert!(
+        client.contains("outbound_node_client_observes_rotated_identity_without_reconstruction")
+    );
+
+    assert!(spec.contains("fresh certificate/private-key snapshot for every newly"));
+    assert!(spec.contains("provider failure rejects only the new connection"));
+    assert!(adr.contains("fresh mTLS server"));
+    assert!(runtime.contains("horizontal_sfu: false"));
 }

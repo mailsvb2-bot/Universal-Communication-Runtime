@@ -416,6 +416,38 @@ mod tests {
         }
     }
 
+    async fn start_empty_node_server(
+        server_certificate: &str,
+        server_private_key: &str,
+        client_ca_pem: &str,
+    ) -> (
+        SocketAddr,
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind node service");
+        let address = listener.local_addr().expect("node service address");
+        let tls = ServerTlsConfig::new()
+            .identity(ServerIdentity::from_pem(
+                server_certificate.as_bytes(),
+                server_private_key.as_bytes(),
+            ))
+            .client_ca_root(Certificate::from_pem(client_ca_pem));
+        let mut server = Server::builder().tls_config(tls).expect("server TLS");
+        let task = tokio::spawn(async move {
+            server
+                .add_service(
+                    pb::sfu_node_media_service_server::SfuNodeMediaServiceServer::new(
+                        EmptyNodeService,
+                    ),
+                )
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+        });
+        (address, task)
+    }
+
     #[tokio::test]
     async fn outbound_node_client_requires_trusted_mtls_identity_and_reaches_service() {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -488,6 +520,113 @@ mod tests {
         );
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn outbound_node_client_observes_rotated_identity_without_reconstruction() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let server_ca = test_ca();
+        let (server_certificate, server_private_key) =
+            test_leaf(&server_ca, "localhost", ExtendedKeyUsagePurpose::ServerAuth);
+        let client_ca_v1 = test_ca();
+        let (client_certificate_v1, client_private_key_v1) = test_leaf(
+            &client_ca_v1,
+            "ucr-sfu-client",
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
+        let client_ca_v2 = test_ca();
+        let (client_certificate_v2, client_private_key_v2) = test_leaf(
+            &client_ca_v2,
+            "ucr-sfu-client",
+            ExtendedKeyUsagePurpose::ClientAuth,
+        );
+
+        let provider = Arc::new(InMemorySecretProvider::default());
+        let certificate_handle = SecretHandle {
+            secret_id: OpaqueId::new("reload-client-certificate").expect("certificate id"),
+            purpose: SecretPurpose::TlsCertificate,
+        };
+        let private_key_handle = SecretHandle {
+            secret_id: OpaqueId::new("reload-client-private-key").expect("private key id"),
+            purpose: SecretPurpose::TlsPrivateKey,
+        };
+        provider
+            .provision(
+                certificate_handle.clone(),
+                SecretVersion {
+                    version_id: OpaqueId::new("client-cert-v1").expect("certificate version"),
+                    material: SecretMaterial::new(client_certificate_v1.as_bytes().to_vec())
+                        .expect("certificate material"),
+                },
+            )
+            .expect("provision certificate");
+        provider
+            .provision(
+                private_key_handle.clone(),
+                SecretVersion {
+                    version_id: OpaqueId::new("client-key-v1").expect("private key version"),
+                    material: SecretMaterial::new(client_private_key_v1.as_bytes().to_vec())
+                        .expect("private key material"),
+                },
+            )
+            .expect("provision private key");
+        let provider_boundary: Arc<dyn SecretProvider> = provider.clone();
+        let client_config = SfuNodeMediaClientTlsConfig::new(
+            provider_boundary,
+            certificate_handle.clone(),
+            private_key_handle.clone(),
+            server_ca.certificate.pem().into_bytes(),
+            None,
+            "localhost",
+        )
+        .expect("reloadable client config");
+
+        let (v1_address, v1_task) = start_empty_node_server(
+            &server_certificate,
+            &server_private_key,
+            &client_ca_v1.certificate.pem(),
+        )
+        .await;
+        let mut v1_client = client_config
+            .connect(v1_address)
+            .await
+            .expect("v1 client identity connects");
+        v1_client.probe().await.expect("v1 authenticated probe");
+        v1_task.abort();
+
+        provider
+            .rotate(
+                &certificate_handle,
+                SecretVersion {
+                    version_id: OpaqueId::new("client-cert-v2").expect("certificate version"),
+                    material: SecretMaterial::new(client_certificate_v2.as_bytes().to_vec())
+                        .expect("certificate material"),
+                },
+            )
+            .expect("rotate certificate");
+        provider
+            .rotate(
+                &private_key_handle,
+                SecretVersion {
+                    version_id: OpaqueId::new("client-key-v2").expect("private key version"),
+                    material: SecretMaterial::new(client_private_key_v2.as_bytes().to_vec())
+                        .expect("private key material"),
+                },
+            )
+            .expect("rotate private key");
+
+        let (v2_address, v2_task) = start_empty_node_server(
+            &server_certificate,
+            &server_private_key,
+            &client_ca_v2.certificate.pem(),
+        )
+        .await;
+        let mut v2_client = client_config
+            .connect(v2_address)
+            .await
+            .expect("same config observes v2 client identity");
+        v2_client.probe().await.expect("v2 authenticated probe");
+        v2_task.abort();
     }
 
     #[test]
