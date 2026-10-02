@@ -2289,7 +2289,7 @@ fn realtime_dependencies(
         webrtc_config,
         browser_realtime_gateway: _,
         sfu_node_media: _,
-        sfu_placement_lifecycle: _,
+        sfu_placement_lifecycle,
     } = config;
     let (e2ee_ingress_tx, e2ee_ingress) =
         tokio::sync::mpsc::channel(LIVE_WEBRTC_E2EE_INGRESS_CAPACITY);
@@ -2298,9 +2298,17 @@ fn realtime_dependencies(
             .map_err(|error| format!("start live WebRTC provider: {error:?}"))?,
     );
     let provider: Arc<dyn WebRtcProvider> = live_provider.clone();
+    let registry = if sfu_placement_lifecycle {
+        RealtimeSessionRegistry::with_expired_call_cleanup(
+            ucr_realtime::MAX_REALTIME_SESSIONS,
+            ucr_realtime::DEFAULT_REALTIME_QUEUE_CAPACITY,
+        )
+    } else {
+        RealtimeSessionRegistry::default()
+    };
     Ok(RealtimeRuntimeDependencies {
         join_issuer,
-        registry: Arc::new(RealtimeSessionRegistry::default()),
+        registry: Arc::new(registry),
         webrtc: RealtimeWebRtcDependencies::new(provider, webrtc_config),
         live_provider,
         e2ee_ingress,
