@@ -177,6 +177,9 @@ consumers instead of forcing deployment secrets to remain static process configu
   `UCR_WEBRTC_TURN_SECRET_FILE` and optional `UCR_WEBRTC_TURN_SECRET_ID`.
 - Webhook signing: `UCR_WEBHOOK_SECRET_PROVIDER=file-reload` with
   `UCR_WEBHOOK_SIGNING_SECRET_FILE` and optional `UCR_WEBHOOK_SIGNING_SECRET_ID`.
+- Recording at rest: `UCR_RECORDING_AT_REST_SECRET_PROVIDER=file-reload` with
+  `UCR_RECORDING_AT_REST_SECRET_FILE` and optional `UCR_RECORDING_AT_REST_SECRET_ID`, used only
+  when `UCR_RECORDING_PROVIDER=encrypted-archive-v1`.
 
 The manifest is a single bounded, non-symlink file so current/previous rotation is observed as one
 snapshot. Generic field names are `current_version_id`, `current_secret_hex`,
@@ -203,9 +206,11 @@ always sealed with current. The provider persists the bounded version identifier
 object envelope but never persists the key bytes in Recording state, SQLite, filenames, logs, or
 diagnostics. Temporary key copies are zeroized after AEAD use.
 
-The shipped provider can consume any `SecretProvider` implementation with this purpose. Runtime CLI
-wiring to the file-reload adapter is a separate deployment step; an external KMS/Vault/HSM adapter
-can implement the same contract without changing Recording lifecycle ownership.
+The shipped provider can consume any `SecretProvider` implementation with this purpose.
+`ucr-runtime serve-realtime` now wires the shared file-reload adapter when the encrypted archive
+provider is explicitly selected. An external KMS/Vault/HSM adapter can implement the same contract
+without changing Recording lifecycle ownership; no Recording at-rest key is accepted as endpoint or
+MLS media-crypto authority.
 
 ## MediaCrypto scope
 
