@@ -29,7 +29,8 @@ use ucr_api_grpc::{
     attachment_service_server, call_service_server, conference_service_server,
     device_service_server, event_service_server, expire_due_recordings_once, group_service_server,
     integration_service_server, machine_auth_service_server, operator_runtime_service_server, pb,
-    realtime_service_server, recording_service_server, sfu_node_media_service_server,
+    realtime_service_server, recording_provider_ready_event, recording_service_server,
+    sfu_node_media_service_server,
     sfu_placement_service_server, store_forward_service_server, sync_service_server,
     universal_conference_service_server,
 };
@@ -39,17 +40,19 @@ use ucr_core::{
     MAX_RECORDING_PROVIDER_OPERATION_BATCH, MAX_RECORDING_RETENTION_BATCH, RecordingMediaProvider,
     RecordingProviderCaptureContext, RecordingProviderDispatchSweep, RecordingProviderError,
     RecordingProviderHealth, RecordingProviderOperation, RecordingProviderOperationState,
-    RecordingProviderOperationStore, RecordingStore, StorageHealth, StorageProvider,
+    RecordingProviderOperationStore, RecordingProviderRequest, RecordingStore, StorageHealth,
+    StorageProvider,
     SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome,
-    dispatch_recording_provider_operations_once, generate_opaque_id,
+    dispatch_recording_provider_operations_with_ready_once, generate_opaque_id,
+    recover_recording_provider_ready_events_once,
 };
 use ucr_crypto::{
     MAX_MACHINE_TOKEN_TTL_SECONDS, MachineTokenPolicy, MachineTokenPublicKeySet,
     MachineTokenSigningKey,
 };
 use ucr_model::{
-    EncryptedGroupMediaFrame, EventSubscriptionId, IceTransportPolicy, KeyId, NamespaceId,
-    OpaqueId, SfuForwardEnvelope, TenantId, TenantScope,
+    EncryptedGroupMediaFrame, EventEnvelope, EventSubscriptionId, IceTransportPolicy, KeyId,
+    NamespaceId, OpaqueId, SfuForwardEnvelope, TenantId, TenantScope,
 };
 use ucr_protocol::{CanonicalError, CanonicalErrorCode};
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
@@ -1710,13 +1713,42 @@ impl ProductionRuntime {
         provider: &dyn RecordingMediaProvider,
     ) -> Result<RecordingProviderDispatchSweep, String> {
         let now_unix_ms = runtime_now_unix_ms()?;
-        dispatch_recording_provider_operations_once(
+        dispatch_recording_provider_operations_with_ready_once(
             self.store.as_ref(),
             provider,
             now_unix_ms,
             MAX_RECORDING_PROVIDER_OPERATION_BATCH,
+            |request, provider_id, ready_at_unix_ms, recovered_after_upgrade| {
+                self.recording_provider_ready_event(
+                    request,
+                    provider_id,
+                    ready_at_unix_ms,
+                    recovered_after_upgrade,
+                )
+            },
         )
         .map_err(|error| format!("dispatch recording provider operations: {error:?}"))
+    }
+
+    fn recording_provider_ready_event(
+        &self,
+        request: &RecordingProviderRequest,
+        provider_id: &'static str,
+        ready_at_unix_ms: i64,
+        recovered_after_upgrade: bool,
+    ) -> Result<EventEnvelope, DurableStoreError> {
+        let recording = self
+            .store
+            .recording(&request.scope, &request.recording_id)?
+            .ok_or(DurableStoreError::Conflict)?;
+        recording_provider_ready_event(
+            &recording,
+            request,
+            provider_id,
+            ready_at_unix_ms,
+            recovered_after_upgrade,
+        )
+        .map_err(|_| DurableStoreError::InvalidRecord)
     }
 
     /// Runs the durable Recording provider-operation dispatcher with single-owner lease semantics.
@@ -1777,17 +1809,40 @@ impl ProductionRuntime {
         loop {
             self.renew_recording_provider_worker_lease(&holder_id)?;
             let now_unix_ms = runtime_now_unix_ms()?;
-            let sweep = dispatch_recording_provider_operations_once(
+            let recovered = recover_recording_provider_ready_events_once(
+                self.store.as_ref(),
+                provider.provider_id(),
+                now_unix_ms,
+                MAX_RECORDING_PROVIDER_OPERATION_BATCH,
+                |request, provider_id, ready_at_unix_ms, recovered_after_upgrade| {
+                    self.recording_provider_ready_event(
+                        request,
+                        provider_id,
+                        ready_at_unix_ms,
+                        recovered_after_upgrade,
+                    )
+                },
+            )
+            .map_err(|error| format!("recover recording provider ready events: {error:?}"))?;
+            let sweep = dispatch_recording_provider_operations_with_ready_once(
                 self.store.as_ref(),
                 provider.as_ref(),
                 now_unix_ms,
                 MAX_RECORDING_PROVIDER_OPERATION_BATCH,
+                |request, provider_id, ready_at_unix_ms, recovered_after_upgrade| {
+                    self.recording_provider_ready_event(
+                        request,
+                        provider_id,
+                        ready_at_unix_ms,
+                        recovered_after_upgrade,
+                    )
+                },
             )
             .map_err(|error| format!("dispatch recording provider operations: {error:?}"))?;
-            if sweep.examined > 0 {
+            if recovered > 0 || sweep.examined > 0 {
                 println!(
-                    "UCR_RECORDING_PROVIDER_SWEEP examined={} applied={} retried={} failed={}",
-                    sweep.examined, sweep.applied, sweep.retried, sweep.failed
+                    "UCR_RECORDING_PROVIDER_SWEEP recovered_ready={} examined={} applied={} retried={} failed={}",
+                    recovered, sweep.examined, sweep.applied, sweep.retried, sweep.failed
                 );
             }
 
