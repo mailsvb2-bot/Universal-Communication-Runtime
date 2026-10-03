@@ -60,3 +60,28 @@ fn encrypted_archive_locks_idempotency_rotation_tamper_and_delete_evidence() {
     assert!(provider.contains("self.write_idempotent(&self.operation_path(request)"));
     assert!(provider.contains("self.delete_recording_objects(&request.scope"));
 }
+
+#[test]
+fn encrypted_archive_runtime_wiring_is_opt_in_same_runtime_and_cancellation_safe() {
+    let manifest = read("crates/ucr-runtime/Cargo.toml");
+    let main = read("crates/ucr-runtime/src/main.rs");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+
+    assert!(manifest.contains("ucr-recording = { path = \"../ucr-recording\" }"));
+    assert!(main.contains("UCR_RECORDING_PROVIDER"));
+    assert!(main.contains("encrypted-archive-v1"));
+    assert!(main.contains("UCR_RECORDING_ARCHIVE_ROOT"));
+    assert!(main.contains("UCR_RECORDING_AT_REST_SECRET_PROVIDER"));
+    assert!(main.contains("SecretPurpose::RecordingAtRest"));
+    assert!(main.contains("EncryptedArchiveRecordingProvider::new"));
+    assert!(main.contains("serve_realtime_with_optional_recording_provider"));
+    assert!(main.contains("run_recording_provider_worker"));
+    assert!(main.contains("tokio::select!"));
+    assert!(main.contains("biased;"));
+    assert!(runtime.contains("struct RecordingProviderWorkerLeaseGuard"));
+    assert!(runtime.contains("impl Drop for RecordingProviderWorkerLeaseGuard"));
+    assert!(runtime.contains(
+        "recording_provider_worker_cancellation_releases_lease_and_registration"
+    ));
+    assert!(runtime.contains("recording: false"));
+}
