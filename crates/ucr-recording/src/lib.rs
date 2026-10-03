@@ -1150,6 +1150,71 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn provider_rejects_insecure_and_symlink_roots() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let insecure = temp_root("insecure-root");
+        fs::create_dir_all(&insecure).expect("create insecure root");
+        fs::set_permissions(&insecure, fs::Permissions::from_mode(0o755))
+            .expect("set insecure permissions");
+        let secrets = Arc::new(InMemorySecretProvider::default());
+        let handle = secret_handle();
+        secrets
+            .provision(handle.clone(), secret_version("key-v1", 7))
+            .expect("provision");
+        let secret_provider: Arc<dyn SecretProvider> = secrets.clone();
+        assert_eq!(
+            EncryptedArchiveRecordingProvider::new(&insecure, secret_provider, handle.clone()).err(),
+            Some(RecordingProviderError::PolicyDenied)
+        );
+
+        let target = temp_root("symlink-target");
+        fs::create_dir_all(&target).expect("create symlink target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700))
+            .expect("secure target");
+        let link = temp_root("symlink-root");
+        symlink(&target, &link).expect("create symlink");
+        let secret_provider: Arc<dyn SecretProvider> = secrets;
+        assert_eq!(
+            EncryptedArchiveRecordingProvider::new(&link, secret_provider, handle).err(),
+            Some(RecordingProviderError::PolicyDenied)
+        );
+
+        let _ = fs::remove_file(link);
+        let _ = fs::remove_dir_all(target);
+        let _ = fs::remove_dir_all(insecure);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_retry_rejects_weakened_file_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = temp_root("object-permissions");
+        let (provider, _, _) = provider(&root);
+        provider
+            .apply(&request(RecordingProviderOperation::Start, 2))
+            .expect("start");
+        let context = context();
+        let frame = frame(14, 6);
+        provider
+            .capture_encrypted_frame(&context, &frame)
+            .expect("capture");
+        let path = provider.frame_path(&context, &frame);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+            .expect("weaken permissions");
+        assert_eq!(
+            provider.capture_encrypted_frame(&context, &frame),
+            Err(RecordingProviderError::PolicyDenied)
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("restore permissions");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn stop_requires_a_started_archive() {
         let root = temp_root("stop");
