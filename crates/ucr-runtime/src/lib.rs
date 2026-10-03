@@ -3867,6 +3867,45 @@ mod tests {
         }
     }
 
+    fn recording_capture_stop_event(
+        active: &ucr_model::RecordingSession,
+        now_unix_ms: i64,
+    ) -> ucr_model::EventEnvelope {
+        ucr_model::EventEnvelope {
+            event_id: ucr_model::EventId::from_opaque(
+                OpaqueId::new("recording-capture-stop-event").expect("id"),
+            ),
+            scope: active.scope.clone(),
+            event_type: "ucr.recording.stopped".to_owned(),
+            payload: vec![2],
+            actor: ucr_model::ActorRef {
+                actor_id: ucr_model::ActorId::from_opaque(
+                    OpaqueId::new("recording-capture-stop-actor").expect("id"),
+                ),
+                kind: ucr_model::ActorKind::System,
+                on_behalf_of: Some(active.requested_by.principal_id.clone()),
+            },
+            source_device: ucr_model::DeviceRef {
+                device_id: ucr_model::DeviceId::from_opaque(
+                    OpaqueId::new("recording-capture-stop-device").expect("id"),
+                ),
+                identity_id: ucr_model::IdentityId::from_opaque(
+                    OpaqueId::new("recording-capture-stop-identity").expect("id"),
+                ),
+            },
+            wall_time_unix_ms: now_unix_ms,
+            logical_order: active.revision + 1,
+            correlation: ucr_model::CorrelationContext {
+                correlation_id: OpaqueId::new("recording-capture-stop-correlation").expect("id"),
+                causation_id: None,
+                idempotency_key: Some("recording-capture-stop".to_owned()),
+            },
+            schema_version: ucr_model::ProtocolVersion::new(1, 0),
+            integrity_metadata: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
     fn install_active_recording_at(
         store: &SqliteLocalStore,
         requested_at_unix_ms: i64,
@@ -4255,6 +4294,142 @@ mod tests {
                 .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, holder_id)
                 .expect("release provider lease")
         );
+        drop(runtime);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn recording_provider_stop_commits_ready_event_atomically() {
+        let path = std::env::temp_dir().join(format!(
+            "ucr-recording-ready-dispatch-{}-{}.sqlite",
+            std::process::id(),
+            runtime_now_unix_ms().expect("clock")
+        ));
+        ProductionRuntime::initialize_database(&path).expect("initialize store");
+        let runtime = ProductionRuntime::open_existing(&path).expect("open runtime");
+        let active = install_active_recording(runtime.store.as_ref());
+        let stop_at_unix_ms = runtime_now_unix_ms().expect("clock");
+        let stop_event = recording_capture_stop_event(&active, stop_at_unix_ms);
+        let stopped = runtime
+            .store
+            .stop_recording_with_event_and_provider_operation(
+                &active.scope,
+                &active.recording_id,
+                active.revision,
+                stop_at_unix_ms,
+                &stop_event,
+            )
+            .expect("stop with provider operation");
+        assert_eq!(stopped.state, ucr_model::RecordingState::Stopped);
+
+        let provider = RecordingWorkerTestProvider;
+        let sweep = runtime
+            .dispatch_recording_provider_once(&provider)
+            .expect("dispatch provider operations");
+        assert_eq!(sweep.failed, 0);
+        let ready_events = ucr_core::EventJournalStore::events_for_types(
+            runtime.store.as_ref(),
+            &stopped.scope,
+            &["ucr.recording.ready"],
+            10,
+        )
+        .expect("ready events");
+        assert_eq!(ready_events.len(), 1);
+        assert_eq!(ready_events[0].logical_order, stopped.revision);
+        assert_eq!(ready_events[0].actor.kind, ucr_model::ActorKind::System);
+        assert_eq!(
+            ready_events[0].actor.on_behalf_of,
+            Some(stopped.requested_by.principal_id.clone())
+        );
+
+        let stop_request = ucr_core::RecordingProviderRequest::for_session(
+            &stopped,
+            ucr_core::RecordingProviderOperation::Stop,
+        );
+        let applied = runtime
+            .store
+            .recording_provider_operation(&stop_request)
+            .expect("stop operation")
+            .expect("stop operation exists");
+        assert_eq!(
+            applied.state,
+            ucr_core::RecordingProviderOperationState::Applied
+        );
+        assert!(
+            runtime
+                .store
+                .recording_provider_stops_needing_ready_event(10)
+                .expect("recovery candidates")
+                .is_empty()
+        );
+
+        drop(runtime);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn recording_provider_ready_recovery_does_not_repeat_provider_stop() {
+        let path = std::env::temp_dir().join(format!(
+            "ucr-recording-ready-recovery-{}-{}.sqlite",
+            std::process::id(),
+            runtime_now_unix_ms().expect("clock")
+        ));
+        ProductionRuntime::initialize_database(&path).expect("initialize store");
+        let runtime = ProductionRuntime::open_existing(&path).expect("open runtime");
+        let active = install_active_recording(runtime.store.as_ref());
+        let stop_at_unix_ms = runtime_now_unix_ms().expect("clock");
+        let stop_event = recording_capture_stop_event(&active, stop_at_unix_ms);
+        let stopped = runtime
+            .store
+            .stop_recording_with_event_and_provider_operation(
+                &active.scope,
+                &active.recording_id,
+                active.revision,
+                stop_at_unix_ms,
+                &stop_event,
+            )
+            .expect("stop with provider operation");
+        let stop_request = ucr_core::RecordingProviderRequest::for_session(
+            &stopped,
+            ucr_core::RecordingProviderOperation::Stop,
+        );
+        runtime
+            .store
+            .mark_recording_provider_operation_applied(&stop_request)
+            .expect("simulate legacy applied stop");
+
+        let recovered = recover_recording_provider_ready_events_once(
+            runtime.store.as_ref(),
+            "test.recording-worker",
+            stop_at_unix_ms + 1,
+            MAX_RECORDING_PROVIDER_OPERATION_BATCH,
+            |request, provider_id, ready_at_unix_ms, recovered_after_upgrade| {
+                runtime.recording_provider_ready_event(
+                    request,
+                    provider_id,
+                    ready_at_unix_ms,
+                    recovered_after_upgrade,
+                )
+            },
+        )
+        .expect("recover ready event");
+        assert_eq!(recovered, 1);
+        let ready_events = ucr_core::EventJournalStore::events_for_types(
+            runtime.store.as_ref(),
+            &stopped.scope,
+            &["ucr.recording.ready"],
+            10,
+        )
+        .expect("ready events");
+        assert_eq!(ready_events.len(), 1);
+        assert!(
+            runtime
+                .store
+                .recording_provider_stops_needing_ready_event(10)
+                .expect("recovery candidates")
+                .is_empty()
+        );
+
         drop(runtime);
         let _ = std::fs::remove_file(path);
     }
