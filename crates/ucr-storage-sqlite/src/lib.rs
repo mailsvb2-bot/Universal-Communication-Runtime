@@ -2838,7 +2838,7 @@ mod tests {
         {
             let connection = rusqlite::Connection::open(db.path()).expect("open current store");
             connection
-                .pragma_update(None, "user_version", SQLITE_SCHEMA_V47)
+                .pragma_update(None, "user_version", super::SQLITE_SCHEMA_V47)
                 .expect("simulate committed v48 objects before version bump");
         }
 
