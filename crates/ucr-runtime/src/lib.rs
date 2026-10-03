@@ -1716,10 +1716,9 @@ impl ProductionRuntime {
             provider,
             now_unix_ms,
             MAX_RECORDING_PROVIDER_OPERATION_BATCH,
-            |request, provider_id, ready_at_unix_ms, recovered_after_upgrade| {
+            |request, ready_at_unix_ms, recovered_after_upgrade| {
                 self.recording_provider_ready_event(
                     request,
-                    provider_id,
                     ready_at_unix_ms,
                     recovered_after_upgrade,
                 )
@@ -1731,7 +1730,6 @@ impl ProductionRuntime {
     fn recording_provider_ready_event(
         &self,
         request: &RecordingProviderRequest,
-        provider_id: &'static str,
         ready_at_unix_ms: i64,
         recovered_after_upgrade: bool,
     ) -> Result<EventEnvelope, DurableStoreError> {
@@ -1742,7 +1740,6 @@ impl ProductionRuntime {
         recording_provider_ready_event(
             &recording,
             request,
-            provider_id,
             ready_at_unix_ms,
             recovered_after_upgrade,
         )
@@ -1809,13 +1806,11 @@ impl ProductionRuntime {
             let now_unix_ms = runtime_now_unix_ms()?;
             let recovered = recover_recording_provider_ready_events_once(
                 self.store.as_ref(),
-                provider.provider_id(),
                 now_unix_ms,
                 MAX_RECORDING_PROVIDER_OPERATION_BATCH,
-                |request, provider_id, ready_at_unix_ms, recovered_after_upgrade| {
+                |request, ready_at_unix_ms, recovered_after_upgrade| {
                     self.recording_provider_ready_event(
                         request,
-                        provider_id,
                         ready_at_unix_ms,
                         recovered_after_upgrade,
                     )
@@ -1827,10 +1822,9 @@ impl ProductionRuntime {
                 provider.as_ref(),
                 now_unix_ms,
                 MAX_RECORDING_PROVIDER_OPERATION_BATCH,
-                |request, provider_id, ready_at_unix_ms, recovered_after_upgrade| {
+                |request, ready_at_unix_ms, recovered_after_upgrade| {
                     self.recording_provider_ready_event(
                         request,
-                        provider_id,
                         ready_at_unix_ms,
                         recovered_after_upgrade,
                     )
@@ -4398,13 +4392,11 @@ mod tests {
 
         let recovered = recover_recording_provider_ready_events_once(
             runtime.store.as_ref(),
-            "test.recording-worker",
             stop_at_unix_ms + 1,
             MAX_RECORDING_PROVIDER_OPERATION_BATCH,
-            |request, provider_id, ready_at_unix_ms, recovered_after_upgrade| {
+            |request, ready_at_unix_ms, recovered_after_upgrade| {
                 runtime.recording_provider_ready_event(
                     request,
-                    provider_id,
                     ready_at_unix_ms,
                     recovered_after_upgrade,
                 )
