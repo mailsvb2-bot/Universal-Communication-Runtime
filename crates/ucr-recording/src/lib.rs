@@ -908,12 +908,10 @@ mod tests {
         secrets
             .provision(handle.clone(), secret_version("key-v1", 7))
             .expect("provision");
-        let provider = EncryptedArchiveRecordingProvider::new(
-            root,
-            Arc::clone(&secrets) as Arc<dyn SecretProvider>,
-            handle.clone(),
-        )
-        .expect("provider");
+        let secret_provider: Arc<dyn SecretProvider> = secrets.clone();
+        let provider =
+            EncryptedArchiveRecordingProvider::new(root, secret_provider, handle.clone())
+                .expect("provider");
         (provider, secrets, handle)
     }
 
@@ -1128,11 +1126,8 @@ mod tests {
         secrets
             .provision(handle.clone(), secret_version("key-v1", 7))
             .expect("provision");
-        let result = EncryptedArchiveRecordingProvider::new(
-            &root,
-            secrets as Arc<dyn SecretProvider>,
-            handle,
-        );
+        let secret_provider: Arc<dyn SecretProvider> = secrets;
+        let result = EncryptedArchiveRecordingProvider::new(&root, secret_provider, handle);
         assert_eq!(result.err(), Some(RecordingProviderError::PolicyDenied));
         let _ = fs::remove_dir_all(root);
     }
