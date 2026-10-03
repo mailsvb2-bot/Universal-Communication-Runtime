@@ -322,7 +322,9 @@ fn horizontal_sfu_realtime_publication_uses_validated_placement_router_and_stays
     assert!(realtime.contains("pub trait RealtimeSfuMediaRouter"));
     assert!(realtime.contains("pub fn with_sfu_media_router"));
     assert!(realtime.contains("forward_authenticated_e2ee_media_via_configured_route"));
-    assert!(realtime.contains(".prepare_forward(&actor_for(claims), device_id, envelope)"));
+    assert!(realtime.contains("prepare_observed_forward(claims, device_id, envelope)"));
+    assert!(realtime.contains(".validate_source_frame(&actor_for(claims), device_id, envelope)"));
+    assert!(realtime.contains(".prepare_forward_from_validated_source(validated)"));
     assert!(realtime.contains("router.forward_validated_batch(&batch).await"));
     assert!(realtime.contains("SfuValidatedForwardBatch"));
 
