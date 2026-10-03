@@ -66,6 +66,7 @@ This repository intentionally does not begin with chat UI, messenger adapters, W
 - `crates/ucr-audio/` — Prepared Phase-20 realtime Opus reference layer over canonical Call authority.
 - `crates/ucr-video/` — Prepared Phase-21 realtime H.264 camera/screen-share reference layer over canonical Call authority.
 - `crates/ucr-media-e2ee/` — Prepared Phase-22 direct-call E2EE media protection over canonical Call/Crypto/Capability owners.
+- `crates/ucr-recording/` — opt-in encrypted-at-rest Recording archive provider over the canonical Recording provider boundary.
 - `crates/ucr-media-adaptive/` — Prepared Phase-23 media adaptation policy over existing Audio/Video controls.
 - `crates/ucr-transport-orchestrator/` — Prepared Phase-24 route planning and Phase-25 duplicate-safe bounded failover over canonical Intent/Policy/Endpoint/Transport owners.
 - `crates/ucr-crypto/` — versioned cryptographic reference implementation and non-exporting key-operation boundaries.
