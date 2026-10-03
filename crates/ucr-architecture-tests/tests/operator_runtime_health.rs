@@ -80,7 +80,7 @@ fn operator_health_uses_durable_webhook_lease_and_does_not_claim_missing_provide
     let webhook_health = section(
         &runtime,
         "fn operator_webhook_worker_health_at(",
-        "fn operator_storage_health(",
+        "fn operator_recording_provider_health(",
     );
     assert!(!webhook_health.contains("lease.holder_id"));
     assert!(!webhook_health.contains("holder_id"));

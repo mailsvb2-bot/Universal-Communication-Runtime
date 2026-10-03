@@ -107,6 +107,16 @@ unsafe polling interval is rejected before provider side effects. Logs contain o
 counts plus the provider implementation ID at startup, never Recording/Call IDs or media/key data.
 The worker does not make Recording capability available by itself.
 
+The private operator health projection observes the provider registered by that same
+ProductionRuntime worker. With no active worker/provider it reports NotConfigured. Before trusting
+the provider's own Healthy, Degraded, or Unavailable state, every health snapshot revalidates the
+durable recording-provider worker lease and requires the exact registered holder plus an unexpired
+lease. Expiry, takeover by another process, a missing lease, or lease-read failure reports
+Unavailable even if the stale in-process provider still reports Healthy. Registration occurs only
+after the durable worker lease is acquired and is removed when the worker exits. Provider IDs,
+worker-holder IDs, Recording IDs, Call IDs and media/key material are not copied into health details.
+This health wiring does not change the public recording capability flag.
+
 This outbox and worker are infrastructure for a concrete recorder, not the recorder itself. The
 shipped runtime still reports recorder NotConfigured and `ucr.conference.recording` remains
 unavailable until a real encrypted media provider, provider health wiring, capture/finalization
