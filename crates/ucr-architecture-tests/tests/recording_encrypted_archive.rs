@@ -52,7 +52,10 @@ fn encrypted_archive_locks_idempotency_rotation_tamper_and_delete_evidence() {
         "tampered_archive_fails_closed",
         "wrong_secret_purpose_is_rejected",
     ] {
-        assert!(provider.contains(test_name), "missing provider evidence: {test_name}");
+        assert!(
+            provider.contains(test_name),
+            "missing provider evidence: {test_name}"
+        );
     }
     assert!(provider.contains("self.write_idempotent(&self.operation_path(request)"));
     assert!(provider.contains("self.delete_recording_objects(&request.scope"));
