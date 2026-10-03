@@ -36,8 +36,9 @@ use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
     DurableStoreError, EventWebhookDispatcher, MAX_RECORDING_PROVIDER_OPERATION_BATCH,
     MAX_RECORDING_RETENTION_BATCH, RecordingMediaProvider, RecordingProviderDispatchSweep,
-    StorageHealth, StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock,
-    WebhookDispatchOutcome, dispatch_recording_provider_operations_once, generate_opaque_id,
+    RecordingProviderHealth, StorageHealth, StorageProvider, SystemEventDeliveryClock,
+    SystemServiceQuotaClock, WebhookDispatchOutcome, dispatch_recording_provider_operations_once,
+    generate_opaque_id,
 };
 use ucr_crypto::{
     MAX_MACHINE_TOKEN_TTL_SECONDS, MachineTokenPolicy, MachineTokenPublicKeySet,
@@ -759,9 +760,25 @@ impl RuntimeDiagnostics {
     }
 }
 
+type RecordingProviderRegistry = Arc<Mutex<Option<Arc<dyn RecordingMediaProvider>>>>;
+
+#[derive(Debug)]
+struct RecordingProviderRegistration {
+    registry: RecordingProviderRegistry,
+}
+
+impl Drop for RecordingProviderRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.registry.lock() {
+            *slot = None;
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ProductionRuntime {
     store: Arc<SqliteLocalStore>,
+    recording_provider: RecordingProviderRegistry,
 }
 
 struct PreparedRealtimeRuntime {
@@ -795,14 +812,16 @@ struct ProductionOperatorHealthSource {
     store: Arc<SqliteLocalStore>,
     realtime: Option<RealtimeOperatorHealth>,
     sfu_cluster: Option<Arc<Mutex<SfuClusterDirectory>>>,
+    recording_provider: RecordingProviderRegistry,
 }
 
 impl ProductionOperatorHealthSource {
-    fn basic(store: Arc<SqliteLocalStore>) -> Self {
+    fn basic(store: Arc<SqliteLocalStore>, recording_provider: RecordingProviderRegistry) -> Self {
         Self {
             store,
             realtime: None,
             sfu_cluster: None,
+            recording_provider,
         }
     }
 
@@ -812,6 +831,7 @@ impl ProductionOperatorHealthSource {
         live_provider: Arc<LiveWebRtcProvider>,
         turn_configured: bool,
         sfu_cluster: Arc<Mutex<SfuClusterDirectory>>,
+        recording_provider: RecordingProviderRegistry,
     ) -> Self {
         Self {
             store,
@@ -821,6 +841,7 @@ impl ProductionOperatorHealthSource {
                 turn_configured,
             }),
             sfu_cluster: Some(sfu_cluster),
+            recording_provider,
         }
     }
 }
@@ -837,10 +858,7 @@ impl OperatorRuntimeHealthSource for ProductionOperatorHealthSource {
             turn: Some(realtime.turn),
             storage: Some(operator_storage_health(self.store.as_ref())),
             webhook_worker: Some(operator_webhook_worker_health(self.store.as_ref())),
-            recorder: Some(operator_component(
-                pb::OperatorComponentStatus::NotConfigured,
-                "recording provider is not configured",
-            )),
+            recorder: Some(operator_recording_provider_health(&self.recording_provider)),
             capacity: Some(realtime.capacity),
         }
     }
@@ -966,6 +984,37 @@ fn operator_webhook_worker_health_at(
         Err(_) => operator_component(
             pb::OperatorComponentStatus::Unavailable,
             "webhook delivery worker lease health check failed",
+        ),
+    }
+}
+
+fn operator_recording_provider_health(
+    registry: &RecordingProviderRegistry,
+) -> pb::OperatorComponentHealth {
+    let Ok(provider) = registry.lock() else {
+        return operator_component(
+            pb::OperatorComponentStatus::Unavailable,
+            "recording provider health registry is unavailable",
+        );
+    };
+    let Some(provider) = provider.as_ref() else {
+        return operator_component(
+            pb::OperatorComponentStatus::NotConfigured,
+            "recording provider is not configured",
+        );
+    };
+    match provider.health() {
+        RecordingProviderHealth::Healthy => operator_component(
+            pb::OperatorComponentStatus::Healthy,
+            "recording provider reports healthy",
+        ),
+        RecordingProviderHealth::Degraded => operator_component(
+            pb::OperatorComponentStatus::Degraded,
+            "recording provider reports degraded",
+        ),
+        RecordingProviderHealth::Unavailable => operator_component(
+            pb::OperatorComponentStatus::Unavailable,
+            "recording provider reports unavailable",
         ),
     }
 }
@@ -1121,7 +1170,10 @@ impl ProductionRuntime {
         if diagnostics.storage_health != StorageHealth::Healthy {
             return Err("production runtime refuses an unhealthy durable store".to_owned());
         }
-        Ok(Self { store })
+        Ok(Self {
+            store,
+            recording_provider: Arc::new(Mutex::new(None)),
+        })
     }
 
     /// Returns redaction-safe operational health and schema diagnostics only.
@@ -1382,6 +1434,25 @@ impl ProductionRuntime {
         }
     }
 
+    fn register_recording_provider(
+        &self,
+        provider: Arc<dyn RecordingMediaProvider>,
+    ) -> Result<RecordingProviderRegistration, String> {
+        let mut slot = self
+            .recording_provider
+            .lock()
+            .map_err(|_| "recording provider health registry is unavailable".to_owned())?;
+        if slot.is_some() {
+            return Err(
+                "recording provider health registry already has an active provider".to_owned(),
+            );
+        }
+        *slot = Some(provider);
+        Ok(RecordingProviderRegistration {
+            registry: Arc::clone(&self.recording_provider),
+        })
+    }
+
     /// Executes one bounded durable Recording provider-operation sweep.
     ///
     /// This method does not enable Recording capability by itself. A deployment must provide a
@@ -1446,6 +1517,15 @@ impl ProductionRuntime {
         if !acquired {
             return Err("another recording provider worker holds the durable lease".to_owned());
         }
+        let _provider_registration = match self.register_recording_provider(Arc::clone(&provider)) {
+            Ok(registration) => registration,
+            Err(error) => {
+                let _ = self
+                    .store
+                    .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id);
+                return Err(error);
+            }
+        };
 
         println!(
             "UCR_RECORDING_PROVIDER_WORKER_READY provider={} poll_interval_ms={}",
@@ -1807,7 +1887,10 @@ impl ProductionRuntime {
         let store = Arc::clone(&self.store);
         let authorization = Arc::clone(&self.store);
         let conference_state = Arc::new(ConferenceRuntimeState::new());
-        let operator_health = Arc::new(ProductionOperatorHealthSource::basic(Arc::clone(&store)));
+        let operator_health = Arc::new(ProductionOperatorHealthSource::basic(
+            Arc::clone(&store),
+            Arc::clone(&self.recording_provider),
+        ));
         let public_server = serve_api_public_services(
             clock,
             event_clock,
@@ -1893,7 +1976,10 @@ impl ProductionRuntime {
         };
         let clock = Arc::new(SystemServiceQuotaClock);
         let store = Arc::clone(&self.store);
-        let operator_health = Arc::new(ProductionOperatorHealthSource::basic(Arc::clone(&store)));
+        let operator_health = Arc::new(ProductionOperatorHealthSource::basic(
+            Arc::clone(&store),
+            Arc::clone(&self.recording_provider),
+        ));
         let service = match config.signing {
             MachineAuthSigningConfig::Static {
                 signing_key,
@@ -2099,6 +2185,7 @@ impl ProductionRuntime {
             &dependencies.live_provider,
             runtime_capabilities.turn,
             &sfu_cluster,
+            &self.recording_provider,
         );
         let lifecycle_placement_policy =
             sfu_placement_media_config
@@ -2709,6 +2796,7 @@ fn realtime_operator_health(
     live_provider: &Arc<LiveWebRtcProvider>,
     turn_configured: bool,
     sfu_cluster: &Arc<Mutex<SfuClusterDirectory>>,
+    recording_provider: &RecordingProviderRegistry,
 ) -> Arc<ProductionOperatorHealthSource> {
     Arc::new(ProductionOperatorHealthSource::realtime(
         Arc::clone(store),
@@ -2716,6 +2804,7 @@ fn realtime_operator_health(
         Arc::clone(live_provider),
         turn_configured,
         Arc::clone(sfu_cluster),
+        Arc::clone(recording_provider),
     ))
 }
 
@@ -3296,6 +3385,78 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct RecordingHealthTestProvider(RecordingProviderHealth);
+
+    impl ucr_core::RecordingMediaProvider for RecordingHealthTestProvider {
+        fn provider_id(&self) -> &'static str {
+            "test.recording-health"
+        }
+
+        fn health(&self) -> RecordingProviderHealth {
+            self.0
+        }
+
+        fn apply(
+            &self,
+            _request: &ucr_core::RecordingProviderRequest,
+        ) -> Result<(), ucr_core::RecordingProviderError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn recording_provider_health_tracks_runtime_registration_and_clears_on_drop() {
+        let path = std::env::temp_dir().join(format!(
+            "ucr-recording-provider-health-{}-{}.sqlite",
+            std::process::id(),
+            runtime_now_unix_ms().expect("clock")
+        ));
+        ProductionRuntime::initialize_database(&path).expect("initialize store");
+        let runtime = ProductionRuntime::open_existing(&path).expect("open runtime");
+        let source = ProductionOperatorHealthSource::basic(
+            Arc::clone(&runtime.store),
+            Arc::clone(&runtime.recording_provider),
+        );
+
+        let not_configured = source.snapshot().recorder.expect("recorder health");
+        assert_eq!(
+            not_configured.status,
+            pb::OperatorComponentStatus::NotConfigured as i32
+        );
+
+        for (health, expected) in [
+            (
+                RecordingProviderHealth::Healthy,
+                pb::OperatorComponentStatus::Healthy,
+            ),
+            (
+                RecordingProviderHealth::Degraded,
+                pb::OperatorComponentStatus::Degraded,
+            ),
+            (
+                RecordingProviderHealth::Unavailable,
+                pb::OperatorComponentStatus::Unavailable,
+            ),
+        ] {
+            let registration = runtime
+                .register_recording_provider(Arc::new(RecordingHealthTestProvider(health)))
+                .expect("register provider");
+            let recorder = source.snapshot().recorder.expect("recorder health");
+            assert_eq!(recorder.status, expected as i32);
+            assert!(!recorder.detail.contains("test.recording-health"));
+            drop(registration);
+            let cleared = source.snapshot().recorder.expect("cleared recorder health");
+            assert_eq!(
+                cleared.status,
+                pb::OperatorComponentStatus::NotConfigured as i32
+            );
+        }
+
+        drop(runtime);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[derive(Debug)]
     struct RecordingWorkerTestProvider;
 
     impl ucr_core::RecordingMediaProvider for RecordingWorkerTestProvider {
@@ -3339,6 +3500,13 @@ mod tests {
                 .expect("worker lease lookup")
                 .is_none()
         );
+        assert!(
+            runtime
+                .recording_provider
+                .lock()
+                .expect("provider health registry")
+                .is_none()
+        );
         drop(runtime);
         let _ = std::fs::remove_file(path);
     }
@@ -3379,6 +3547,13 @@ mod tests {
             .expect("worker lease lookup")
             .expect("existing lease retained");
         assert_eq!(lease.holder_id, "existing-recording-provider-worker");
+        assert!(
+            runtime
+                .recording_provider
+                .lock()
+                .expect("provider health registry")
+                .is_none()
+        );
         drop(runtime);
         let _ = std::fs::remove_file(path);
     }
@@ -3618,7 +3793,11 @@ mod tests {
                 .expect("valid endpoint"),
         };
 
-        let basic = ProductionOperatorHealthSource::basic(Arc::clone(&store));
+        let recording_provider = Arc::new(Mutex::new(None));
+        let basic = ProductionOperatorHealthSource::basic(
+            Arc::clone(&store),
+            Arc::clone(&recording_provider),
+        );
         assert_eq!(
             basic.heartbeat_sfu_node(heartbeat.clone()),
             Err(OperatorSfuClusterError::NotConfigured)
@@ -3630,6 +3809,7 @@ mod tests {
             Arc::new(LiveWebRtcProvider::new().expect("live provider")),
             false,
             Arc::new(Mutex::new(SfuClusterDirectory::default())),
+            recording_provider,
         );
         let registered = realtime
             .heartbeat_sfu_node(heartbeat)
