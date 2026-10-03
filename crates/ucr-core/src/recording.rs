@@ -840,6 +840,23 @@ mod tests {
         assert_eq!(context.expires_at_unix_ms, session.expires_at_unix_ms);
     }
 
+    #[test]
+    fn provider_capture_context_can_preserve_authorizing_start_revision() {
+        let mut session = session();
+        let provider_start_revision = session.revision;
+        session.revision = session.revision.checked_add(2).expect("revision");
+        let context = RecordingProviderCaptureContext::for_session_with_lifecycle_revision(
+            &session,
+            provider_start_revision,
+        );
+        assert_eq!(context.scope, session.scope);
+        assert_eq!(context.recording_id, session.recording_id);
+        assert_eq!(context.call_id, session.call_id);
+        assert_eq!(context.lifecycle_revision, provider_start_revision);
+        assert_ne!(context.lifecycle_revision, session.revision);
+        assert_eq!(context.expires_at_unix_ms, session.expires_at_unix_ms);
+    }
+
     fn capture_frame(
         media_kind: ucr_model::MediaKind,
         negotiation_ref: &str,
