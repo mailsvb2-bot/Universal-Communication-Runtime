@@ -1903,7 +1903,53 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v48_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let provider_table_exists: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_schema
+            WHERE type='table' AND name='recording_provider_operations'
+        )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !provider_table_exists {
+        return Ok(());
+    }
+
+    let mut statement = connection.prepare("PRAGMA table_info(recording_provider_operations)")?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    let mut has_ready_marker = false;
+    for column in columns {
+        if column? == "ready_event_emitted" {
+            has_ready_marker = true;
+            break;
+        }
+    }
+    drop(statement);
+
+    if has_ready_marker {
+        connection.execute_batch(
+            "DROP INDEX IF EXISTS recording_provider_ready_recovery;
+             ALTER TABLE recording_provider_operations DROP COLUMN ready_event_emitted;",
+        )?;
+    } else {
+        connection.execute_batch("DROP INDEX IF EXISTS recording_provider_ready_recovery;")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn test_remove_v47_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v48_objects(connection)?;
+    connection.execute_batch(
+        "DROP INDEX IF EXISTS recording_provider_operations_due;
+         DROP TABLE IF EXISTS recording_provider_operations;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v46_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v47_objects(connection)?;
     connection.execute_batch("DROP TABLE IF EXISTS universal_conference_metadata;")
 }
 
