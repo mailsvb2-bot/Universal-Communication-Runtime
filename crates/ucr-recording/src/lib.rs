@@ -651,7 +651,8 @@ fn require_private_permissions(metadata: &fs::Metadata) -> Result<(), RecordingP
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        if metadata.permissions().mode() & 0o077 != 0 {
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 || mode & 0o700 != 0o700 {
             return Err(RecordingProviderError::PolicyDenied);
         }
     }
@@ -662,9 +663,20 @@ fn require_private_file_permissions(metadata: &fs::Metadata) -> Result<(), Recor
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        if metadata.permissions().mode() & 0o077 != 0 {
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 || mode & 0o600 != 0o600 {
             return Err(RecordingProviderError::PolicyDenied);
         }
+    }
+    Ok(())
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<(), RecordingProviderError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
     }
     Ok(())
 }
@@ -688,6 +700,9 @@ fn read_regular_file_if_present(path: &Path) -> Result<Option<Vec<u8>>, Recordin
     let mut bytes = Vec::with_capacity(capacity);
     file.read_to_end(&mut bytes)
         .map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ARCHIVE_OBJECT_BYTES {
+        return Err(RecordingProviderError::CapacityExceeded);
+    }
     Ok(Some(bytes))
 }
 
@@ -704,7 +719,10 @@ fn create_private_temporary_file(parent: &Path) -> Result<(PathBuf, File), Recor
             options.mode(0o600);
         }
         match options.open(&path) {
-            Ok(file) => return Ok((path, file)),
+            Ok(file) => {
+                set_private_file_permissions(&path)?;
+                return Ok((path, file));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(_) => return Err(RecordingProviderError::TemporarilyUnavailable),
         }
