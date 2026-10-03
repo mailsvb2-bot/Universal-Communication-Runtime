@@ -797,9 +797,34 @@ mod tests {
                     namespace_id TEXT NOT NULL,
                     recording_id TEXT NOT NULL,
                     PRIMARY KEY(tenant_id, namespace_present, namespace_id, recording_id)
-                ) WITHOUT ROWID;",
+                ) WITHOUT ROWID;
+                 CREATE TABLE events (
+                    journal_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL,
+                    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+                    namespace_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    actor_id TEXT NOT NULL,
+                    actor_kind TEXT NOT NULL,
+                    on_behalf_of TEXT,
+                    source_device_id TEXT NOT NULL,
+                    source_identity_id TEXT NOT NULL,
+                    wall_time_unix_ms INTEGER NOT NULL,
+                    logical_order BLOB NOT NULL CHECK(length(logical_order) = 8),
+                    correlation_id TEXT NOT NULL,
+                    causation_id TEXT,
+                    idempotency_key TEXT,
+                    schema_major INTEGER NOT NULL,
+                    schema_minor INTEGER NOT NULL,
+                    integrity_metadata BLOB NOT NULL,
+                    UNIQUE(tenant_id, namespace_present, namespace_id, event_id),
+                    CHECK((namespace_present = 0 AND namespace_id = '') OR
+                          (namespace_present = 1 AND namespace_id <> ''))
+                 );",
             )
-            .expect("recordings table");
+            .expect("recordings and event journal base tables");
         {
             let transaction = connection.unchecked_transaction().expect("transaction");
             event_journal::create_v8_objects(&transaction).expect("event journal");
