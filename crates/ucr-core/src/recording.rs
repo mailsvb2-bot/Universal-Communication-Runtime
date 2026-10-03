@@ -62,11 +62,21 @@ pub struct RecordingProviderCaptureContext {
 impl RecordingProviderCaptureContext {
     #[must_use]
     pub fn for_session(session: &RecordingSession) -> Self {
+        Self::for_session_with_lifecycle_revision(session, session.revision)
+    }
+
+    /// Builds capture context while preserving the provider Start revision that authorized media
+    /// capture even when later consent evidence advances the canonical Recording revision.
+    #[must_use]
+    pub fn for_session_with_lifecycle_revision(
+        session: &RecordingSession,
+        lifecycle_revision: u64,
+    ) -> Self {
         Self {
             scope: session.scope.clone(),
             recording_id: session.recording_id.clone(),
             call_id: session.call_id.clone(),
-            lifecycle_revision: session.revision,
+            lifecycle_revision,
             expires_at_unix_ms: session.expires_at_unix_ms,
         }
     }
@@ -227,6 +237,23 @@ pub trait RecordingProviderOperationStore: StorageProvider {
     fn recording_provider_operation(
         &self,
         request: &RecordingProviderRequest,
+    ) -> Result<Option<RecordingProviderOperationRecord>, DurableStoreError>;
+
+    /// Loads the newest matching provider operation at or before one lifecycle revision.
+    ///
+    /// ACTIVE Recording state may advance its canonical revision when participant consent evidence
+    /// changes without creating a second provider Start side effect. Capture therefore resolves the
+    /// Start that actually authorized the provider lifecycle instead of requiring an impossible
+    /// Start record at the newest consent revision.
+    ///
+    /// # Errors
+    /// Returns explicit durable-store failures and fails closed on corrupt persisted state.
+    fn latest_recording_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        operation: RecordingProviderOperation,
+        max_lifecycle_revision: u64,
     ) -> Result<Option<RecordingProviderOperationRecord>, DurableStoreError>;
 
     /// Marks one exact pending operation applied.
