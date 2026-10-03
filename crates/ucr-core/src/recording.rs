@@ -1,8 +1,8 @@
 use core::fmt;
 
 use ucr_model::{
-    CallId, EventEnvelope, PrincipalRef, RecordingConsentState, RecordingId, RecordingSession,
-    RecordingState, TenantScope,
+    CallId, EncryptedGroupMediaFrame, EventEnvelope, PrincipalRef, RecordingConsentState,
+    RecordingId, RecordingSession, RecordingState, TenantScope,
 };
 
 use crate::{DurableRecordStatus, DurableStoreError, StorageProvider};
@@ -49,6 +49,34 @@ impl RecordingProviderRequest {
     }
 }
 
+/// Canonical Recording identity attached to one already-validated encrypted media frame.
+///
+/// Capture idempotency is the tuple
+/// `(scope, recording_id, lifecycle_revision, source_device_id, stream_id, sequence, crypto_epoch)`
+/// from this context plus the encrypted frame. Providers must accept exact retries without
+/// duplicating stored media and must reject changed reuse as `Conflict`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingProviderCaptureContext {
+    pub scope: TenantScope,
+    pub recording_id: RecordingId,
+    pub call_id: CallId,
+    pub lifecycle_revision: u64,
+    pub expires_at_unix_ms: i64,
+}
+
+impl RecordingProviderCaptureContext {
+    #[must_use]
+    pub fn for_session(session: &RecordingSession) -> Self {
+        Self {
+            scope: session.scope.clone(),
+            recording_id: session.recording_id.clone(),
+            call_id: session.call_id.clone(),
+            lifecycle_revision: session.revision,
+            expires_at_unix_ms: session.expires_at_unix_ms,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingProviderHealth {
     Healthy,
@@ -80,6 +108,22 @@ pub trait RecordingMediaProvider: fmt::Debug + Send + Sync {
     /// Returns a bounded provider failure. A changed request reusing an already-applied canonical
     /// operation identity must fail with `Conflict` rather than silently widening behavior.
     fn apply(&self, request: &RecordingProviderRequest) -> Result<(), RecordingProviderError>;
+
+    /// Captures one already source-authenticated encrypted media frame for an ACTIVE Recording.
+    ///
+    /// The provider receives no media plaintext or MLS/exporter key material. Exact frame retries
+    /// must be idempotent; changed reuse of the same capture identity must fail with `Conflict`.
+    ///
+    /// # Errors
+    /// Defaults fail-closed until a concrete recorder implements media capture.
+    fn capture_encrypted_frame(
+        &self,
+        context: &RecordingProviderCaptureContext,
+        frame: &EncryptedGroupMediaFrame,
+    ) -> Result<(), RecordingProviderError> {
+        let _ = (context, frame);
+        Err(RecordingProviderError::TemporarilyUnavailable)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -571,8 +615,8 @@ mod tests {
     };
 
     use super::{
-        RecordingMediaProvider, RecordingProviderError, RecordingProviderHealth,
-        RecordingProviderOperation, RecordingProviderRequest,
+        RecordingMediaProvider, RecordingProviderCaptureContext, RecordingProviderError,
+        RecordingProviderHealth, RecordingProviderOperation, RecordingProviderRequest,
         recording_allows_realtime_participant,
     };
 
@@ -693,6 +737,17 @@ mod tests {
         assert_eq!(request.lifecycle_revision, session.revision);
         assert_eq!(request.expires_at_unix_ms, session.expires_at_unix_ms);
         assert_eq!(request.operation, RecordingProviderOperation::Start);
+    }
+
+    #[test]
+    fn provider_capture_context_copies_only_recording_identity_and_lifecycle_revision() {
+        let session = session();
+        let context = RecordingProviderCaptureContext::for_session(&session);
+        assert_eq!(context.scope, session.scope);
+        assert_eq!(context.recording_id, session.recording_id);
+        assert_eq!(context.call_id, session.call_id);
+        assert_eq!(context.lifecycle_revision, session.revision);
+        assert_eq!(context.expires_at_unix_ms, session.expires_at_unix_ms);
     }
 
     #[test]

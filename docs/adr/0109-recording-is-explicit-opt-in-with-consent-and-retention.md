@@ -12,7 +12,7 @@ Recording is a separate capability `ucr.conference.recording` and separate `Reco
 
 Every recording has explicit policy, participant notification behavior, finite retention and encrypted-at-rest storage. Where policy requires consent, ACTIVE state is impossible until required current participants have granted consent. Denial/revocation fails closed according to policy; silence is never treated as consent.
 
-SFU forwarding never archives media implicitly. Recording lifecycle/consent evidence is durable and auditable, but Call/Group membership remains owned by canonical Call/Group state. Expiry/delete semantics apply only to controlled recording storage/key material and do not claim remote physical erasure of already exported copies.
+SFU forwarding never archives media implicitly. A configured recorder observes only source-authenticated encrypted frames after canonical Conference/SFU validation, and only ACTIVE Recording rows may cause provider capture. The realtime path remains recorder-independent when no ACTIVE Recording exists. When capture is required, a missing, stale, taken-over or unavailable provider fails closed before live fan-out rather than silently producing a partial recording. Recording lifecycle/consent evidence is durable and auditable, but Call/Group membership remains owned by canonical Call/Group state. Expiry/delete semantics apply only to controlled recording storage/key material and do not claim remote physical erasure of already exported copies.
 
 ## Consequences
 
