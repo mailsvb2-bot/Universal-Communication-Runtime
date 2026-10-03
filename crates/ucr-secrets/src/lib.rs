@@ -22,6 +22,7 @@ pub enum SecretPurpose {
     TlsCertificate,
     TlsPrivateKey,
     MediaCrypto,
+    RecordingAtRest,
     TurnCredentials,
 }
 
