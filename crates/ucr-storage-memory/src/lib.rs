@@ -9434,6 +9434,30 @@ impl RecordingProviderOperationStore for MemoryLocalStore {
         }
     }
 
+    fn latest_recording_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        operation: RecordingProviderOperation,
+        max_lifecycle_revision: u64,
+    ) -> Result<Option<RecordingProviderOperationRecord>, DurableStoreError> {
+        if max_lifecycle_revision == 0 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        Ok(state
+            .recording_provider_operations
+            .values()
+            .filter(|record| {
+                record.request.scope == *scope
+                    && record.request.recording_id == *recording_id
+                    && record.request.operation == operation
+                    && record.request.lifecycle_revision <= max_lifecycle_revision
+            })
+            .max_by_key(|record| record.request.lifecycle_revision)
+            .cloned())
+    }
+
     fn mark_recording_provider_operation_applied(
         &self,
         request: &RecordingProviderRequest,
