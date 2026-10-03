@@ -1167,6 +1167,121 @@ const fn map_store_error(error: DurableStoreError) -> CanonicalError {
 }
 
 #[cfg(test)]
+mod provider_ready_event_tests {
+    use prost::Message as _;
+    use ucr_core::{RecordingProviderOperation, RecordingProviderRequest};
+    use ucr_model::{
+        CallId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingId, RecordingPolicy,
+        RecordingSession, RecordingState, TenantId, TenantScope,
+    };
+
+    use super::{pb, recording_provider_ready_event};
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("id")
+    }
+
+    fn stopped_recording() -> RecordingSession {
+        RecordingSession {
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(oid("ready-tenant")),
+                namespace_id: None,
+            },
+            recording_id: RecordingId::from_opaque(oid("ready-recording")),
+            call_id: CallId::from_opaque(oid("ready-call")),
+            requested_by: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("ready-requester")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+            policy: RecordingPolicy {
+                require_all_participant_consent: false,
+                notify_all_participants: true,
+                retention_seconds: 3_600,
+                policy_reference: None,
+            },
+            state: RecordingState::Stopped,
+            consents: Vec::new(),
+            requested_at_unix_ms: 10,
+            started_at_unix_ms: Some(20),
+            stopped_at_unix_ms: Some(30),
+            expires_at_unix_ms: 3_600_010,
+            revision: 3,
+        }
+    }
+
+    #[test]
+    fn provider_ready_event_is_deterministic_and_not_lifecycle_ready() {
+        let recording = stopped_recording();
+        let request =
+            RecordingProviderRequest::for_session(&recording, RecordingProviderOperation::Stop);
+        let first = recording_provider_ready_event(
+            &recording,
+            &request,
+            "encrypted-archive-v1",
+            40,
+            false,
+        )
+        .expect("ready event");
+        let retry = recording_provider_ready_event(
+            &recording,
+            &request,
+            "encrypted-archive-v1",
+            40,
+            false,
+        )
+        .expect("ready retry");
+        assert_eq!(first, retry);
+        assert_eq!(first.event_type, "ucr.recording.ready");
+        assert_eq!(first.logical_order, recording.revision);
+        assert_eq!(
+            first.actor.on_behalf_of,
+            Some(recording.requested_by.principal_id.clone())
+        );
+
+        let payload =
+            pb::RecordingReadyEvent::decode(first.payload.as_slice()).expect("ready payload");
+        assert_eq!(payload.lifecycle_revision, recording.revision);
+        assert_eq!(payload.provider_id, "encrypted-archive-v1");
+        assert_eq!(payload.ready_at_unix_ms, 40);
+        assert!(!payload.recovered_after_upgrade);
+    }
+
+    #[test]
+    fn provider_ready_event_marks_upgrade_recovery_without_changing_identity() {
+        let recording = stopped_recording();
+        let request =
+            RecordingProviderRequest::for_session(&recording, RecordingProviderOperation::Stop);
+        let normal = recording_provider_ready_event(
+            &recording,
+            &request,
+            "encrypted-archive-v1",
+            40,
+            false,
+        )
+        .expect("normal event");
+        let recovered = recording_provider_ready_event(
+            &recording,
+            &request,
+            "encrypted-archive-v1",
+            50,
+            true,
+        )
+        .expect("recovered event");
+        assert_eq!(normal.event_id, recovered.event_id);
+        assert_eq!(normal.actor.actor_id, recovered.actor.actor_id);
+        assert_eq!(
+            normal.source_device.device_id,
+            recovered.source_device.device_id
+        );
+
+        let payload =
+            pb::RecordingReadyEvent::decode(recovered.payload.as_slice()).expect("payload");
+        assert!(payload.recovered_after_upgrade);
+        assert_eq!(payload.ready_at_unix_ms, 50);
+    }
+}
+
+#[cfg(test)]
 mod retention_tests {
     use ucr_core::RecordingStore as _;
     use ucr_model::{
