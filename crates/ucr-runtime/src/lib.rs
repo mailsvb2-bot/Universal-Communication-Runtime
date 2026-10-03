@@ -4462,6 +4462,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recording_provider_worker_cancellation_releases_lease_and_registration() {
+        let path = std::env::temp_dir().join(format!(
+            "ucr-recording-provider-cancel-{}-{}.sqlite",
+            std::process::id(),
+            runtime_now_unix_ms().expect("clock")
+        ));
+        ProductionRuntime::initialize_database(&path).expect("initialize store");
+        let runtime = Arc::new(ProductionRuntime::open_existing(&path).expect("open runtime"));
+        let task = tokio::spawn(
+            Arc::clone(&runtime).run_recording_provider_worker(
+                Arc::new(RecordingWorkerTestProvider),
+                DEFAULT_RECORDING_PROVIDER_POLL_INTERVAL,
+            ),
+        );
+
+        let mut ready = false;
+        for _ in 0..200 {
+            let lease_present = runtime
+                .store
+                .runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND)
+                .expect("worker lease lookup")
+                .is_some();
+            let provider_present = runtime
+                .recording_provider
+                .lock()
+                .expect("provider health registry")
+                .is_some();
+            if lease_present && provider_present {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(ready, "recording provider worker never became ready");
+
+        task.abort();
+        let cancelled = task.await.expect_err("worker task must be cancelled");
+        assert!(cancelled.is_cancelled());
+        assert!(
+            runtime
+                .store
+                .runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND)
+                .expect("worker lease lookup after cancellation")
+                .is_none(),
+            "cancelled worker must release the durable lease immediately"
+        );
+        assert!(
+            runtime
+                .recording_provider
+                .lock()
+                .expect("provider health registry after cancellation")
+                .is_none(),
+            "cancelled worker must unregister the in-process provider"
+        );
+
+        drop(runtime);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn private_operator_listener_reports_resolved_ephemeral_address() {
         let public_bind: SocketAddr = "127.0.0.1:55051".parse().expect("public bind");
         let operator_bind: SocketAddr = "127.0.0.1:0".parse().expect("operator bind");
