@@ -9532,6 +9532,80 @@ impl RecordingProviderOperationStore for MemoryLocalStore {
     }
 }
 
+#[cfg(test)]
+mod recording_provider_operation_tests {
+    use ucr_core::{
+        DurableRecordStatus, RecordingProviderOperation, RecordingProviderOperationRecord,
+        RecordingProviderOperationState, RecordingProviderOperationStore, RecordingProviderRequest,
+    };
+    use ucr_model::{CallId, OpaqueId, RecordingId, TenantId, TenantScope};
+
+    use super::MemoryLocalStore;
+
+    fn opaque(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn request(
+        lifecycle_revision: u64,
+        operation: RecordingProviderOperation,
+    ) -> RecordingProviderRequest {
+        RecordingProviderRequest {
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(opaque("tenant-recording-provider-memory")),
+                namespace_id: None,
+            },
+            recording_id: RecordingId::from_opaque(opaque("recording-provider-memory")),
+            call_id: CallId::from_opaque(opaque("call-recording-provider-memory")),
+            lifecycle_revision,
+            operation,
+            expires_at_unix_ms: 10_000,
+        }
+    }
+
+    #[test]
+    fn latest_operation_before_revision_finds_authorizing_start() {
+        let store = MemoryLocalStore::default();
+        for revision in [2_u64, 5] {
+            let record = RecordingProviderOperationRecord {
+                request: request(revision, RecordingProviderOperation::Start),
+                state: RecordingProviderOperationState::Applied,
+                attempts: 1,
+                available_at_unix_ms: 100,
+            };
+            assert_eq!(
+                store.prepare_recording_provider_operation(&record),
+                Ok(DurableRecordStatus::Persisted)
+            );
+        }
+
+        let current = request(7, RecordingProviderOperation::Start);
+        let latest = store
+            .latest_recording_provider_operation(
+                &current.scope,
+                &current.recording_id,
+                RecordingProviderOperation::Start,
+                7,
+            )
+            .expect("latest operation")
+            .expect("start operation");
+        assert_eq!(latest.request.lifecycle_revision, 5);
+        assert_eq!(latest.state, RecordingProviderOperationState::Applied);
+
+        assert!(
+            store
+                .latest_recording_provider_operation(
+                    &current.scope,
+                    &current.recording_id,
+                    RecordingProviderOperation::Start,
+                    1,
+                )
+                .expect("before first")
+                .is_none()
+        );
+    }
+}
+
 impl ConferenceJoinGrantStore for MemoryLocalStore {
     fn persist_conference_join_grant(
         &self,
