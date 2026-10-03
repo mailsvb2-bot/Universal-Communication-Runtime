@@ -406,7 +406,6 @@ where
     P: RecordingMediaProvider + ?Sized,
     F: FnMut(
         &RecordingProviderRequest,
-        &'static str,
         i64,
         bool,
     ) -> Result<EventEnvelope, DurableStoreError>,
@@ -419,8 +418,7 @@ where
         match provider.apply(&record.request) {
             Ok(()) => {
                 if record.request.operation == RecordingProviderOperation::Stop {
-                    let event =
-                        ready_event(&record.request, provider.provider_id(), now_unix_ms, false)?;
+                    let event = ready_event(&record.request, now_unix_ms, false)?;
                     store.commit_recording_provider_stop_ready_event(&record.request, &event)?;
                 } else {
                     store.mark_recording_provider_operation_applied(&record.request)?;
@@ -462,7 +460,6 @@ where
 /// Returns validation or durable-store failures.
 pub fn recover_recording_provider_ready_events_once<S, F>(
     store: &S,
-    provider_id: &'static str,
     now_unix_ms: i64,
     limit: usize,
     mut ready_event: F,
@@ -471,7 +468,6 @@ where
     S: RecordingProviderOperationStore,
     F: FnMut(
         &RecordingProviderRequest,
-        &'static str,
         i64,
         bool,
     ) -> Result<EventEnvelope, DurableStoreError>,
@@ -484,7 +480,7 @@ where
         {
             return Err(DurableStoreError::Corrupt);
         }
-        let event = ready_event(&record.request, provider_id, now_unix_ms, true)?;
+        let event = ready_event(&record.request, now_unix_ms, true)?;
         store.commit_recording_provider_stop_ready_event(&record.request, &event)?;
         recovered = recovered.saturating_add(1);
     }
