@@ -4129,6 +4129,7 @@ dependencies = [
  "ucr-model",
  "ucr-protocol",
  "ucr-realtime",
+ "ucr-recording",
  "ucr-secrets",
  "ucr-sfu",
  "ucr-storage-sqlite",
