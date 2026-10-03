@@ -404,11 +404,7 @@ pub fn dispatch_recording_provider_operations_with_ready_once<S, P, F>(
 where
     S: RecordingProviderOperationStore,
     P: RecordingMediaProvider + ?Sized,
-    F: FnMut(
-        &RecordingProviderRequest,
-        i64,
-        bool,
-    ) -> Result<EventEnvelope, DurableStoreError>,
+    F: FnMut(&RecordingProviderRequest, i64, bool) -> Result<EventEnvelope, DurableStoreError>,
 {
     let pending = store.pending_recording_provider_operations(now_unix_ms, limit)?;
     let mut sweep = RecordingProviderDispatchSweep::default();
@@ -466,11 +462,7 @@ pub fn recover_recording_provider_ready_events_once<S, F>(
 ) -> Result<usize, DurableStoreError>
 where
     S: RecordingProviderOperationStore,
-    F: FnMut(
-        &RecordingProviderRequest,
-        i64,
-        bool,
-    ) -> Result<EventEnvelope, DurableStoreError>,
+    F: FnMut(&RecordingProviderRequest, i64, bool) -> Result<EventEnvelope, DurableStoreError>,
 {
     let candidates = store.recording_provider_stops_needing_ready_event(limit)?;
     let mut recovered = 0_usize;
