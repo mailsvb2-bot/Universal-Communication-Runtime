@@ -100,12 +100,15 @@ the durable lifecycle worker. For every validated frame it performs a bounded
 `active_recordings_for_call` lookup. With no ACTIVE Recording it returns immediately and Conference
 remains independent from any recorder. An ACTIVE row whose `expires_at_unix_ms` has already passed
 is excluded on the media hot path even if the retention worker has not swept it yet. Every remaining
-Recording must also have its exact provider `Start` operation in durable `Applied` state; a Pending
+Recording must also have its newest matching provider `Start` operation at or before its current
+canonical revision in durable `Applied` state. This matters because participant consent evidence may
+advance an ACTIVE Recording revision without creating another provider Start side effect. A Pending
 Start fails temporarily closed, while a missing or terminally Failed Start is treated as an internal
-invariant failure. Only then does runtime require the exact registered provider holder to still own
-an unexpired durable worker lease, reject an Unavailable provider, and invoke
-`capture_encrypted_frame` once for each capturable Recording using
-`RecordingProviderCaptureContext`. Capture failure is fail-closed before live recipient fan-out so
+invariant failure. Runtime carries that provider Start revision into
+`RecordingProviderCaptureContext`, preserving the capture idempotency domain across later consent
+revisions. Only then does runtime require the exact registered provider holder to still own an
+unexpired durable worker lease, reject an Unavailable provider, and invoke
+`capture_encrypted_frame` once for each capturable Recording. Capture failure is fail-closed before live recipient fan-out so
 the system cannot silently advertise a continuous recording while dropping media.
 
 `RecordingProviderCaptureContext::capture_identity` builds the complete provider idempotency key

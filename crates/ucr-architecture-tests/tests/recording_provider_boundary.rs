@@ -161,10 +161,11 @@ fn runtime_recording_capture_reuses_active_recording_and_provider_lease_owners()
     assert!(runtime.contains("active_recordings_for_call("));
     assert!(runtime.contains("MAX_ACTIVE_RECORDINGS_PER_CALL"));
     assert!(runtime.contains("recording.expires_at_unix_ms <= now_unix_ms"));
-    assert!(runtime.contains(".recording_provider_operation(&start)"));
-    assert!(runtime.contains("Some(RecordingProviderOperationState::Applied)"));
-    assert!(runtime.contains("Some(RecordingProviderOperationState::Pending)"));
-    assert!(runtime.contains("Some(RecordingProviderOperationState::Failed) | None"));
+    assert!(runtime.contains(".latest_recording_provider_operation("));
+    assert!(runtime.contains("record.state == RecordingProviderOperationState::Applied"));
+    assert!(runtime.contains("record.state == RecordingProviderOperationState::Pending"));
+    assert!(runtime.contains("Some(_) | None"));
+    assert!(runtime.contains("for_session_with_lifecycle_revision("));
     assert!(runtime.contains("runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND)"));
     assert!(runtime.contains("lease.holder_id != holder_id"));
     assert!(runtime.contains("provider.health() == RecordingProviderHealth::Unavailable"));
@@ -173,7 +174,7 @@ fn runtime_recording_capture_reuses_active_recording_and_provider_lease_owners()
     assert!(runtime.contains("recording: false"));
     assert!(spec.contains("With no ACTIVE Recording it returns immediately"));
     assert!(spec.contains("has already passed"));
-    assert!(spec.contains("provider `Start` operation in durable `Applied` state"));
+    assert!(spec.contains("newest matching provider `Start` operation at or before its current"));
     assert!(spec.contains("Media kind and negotiation"));
     assert!(spec.contains("Capture failure is fail-closed before live recipient fan-out"));
     assert!(spec.contains("no concrete encrypted-at-rest object/storage implementation"));

@@ -62,11 +62,21 @@ pub struct RecordingProviderCaptureContext {
 impl RecordingProviderCaptureContext {
     #[must_use]
     pub fn for_session(session: &RecordingSession) -> Self {
+        Self::for_session_with_lifecycle_revision(session, session.revision)
+    }
+
+    /// Builds capture context while preserving the provider Start revision that authorized media
+    /// capture even when later consent evidence advances the canonical Recording revision.
+    #[must_use]
+    pub fn for_session_with_lifecycle_revision(
+        session: &RecordingSession,
+        lifecycle_revision: u64,
+    ) -> Self {
         Self {
             scope: session.scope.clone(),
             recording_id: session.recording_id.clone(),
             call_id: session.call_id.clone(),
-            lifecycle_revision: session.revision,
+            lifecycle_revision,
             expires_at_unix_ms: session.expires_at_unix_ms,
         }
     }
@@ -228,6 +238,29 @@ pub trait RecordingProviderOperationStore: StorageProvider {
         &self,
         request: &RecordingProviderRequest,
     ) -> Result<Option<RecordingProviderOperationRecord>, DurableStoreError>;
+
+    /// Loads the newest matching provider operation at or before one lifecycle revision.
+    ///
+    /// ACTIVE Recording state may advance its canonical revision when participant consent evidence
+    /// changes without creating a second provider Start side effect. Capture therefore resolves the
+    /// Start that actually authorized the provider lifecycle instead of requiring an impossible
+    /// Start record at the newest consent revision.
+    ///
+    /// # Errors
+    /// Returns explicit durable-store failures and fails closed on corrupt persisted state.
+    fn latest_recording_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        operation: RecordingProviderOperation,
+        max_lifecycle_revision: u64,
+    ) -> Result<Option<RecordingProviderOperationRecord>, DurableStoreError> {
+        if max_lifecycle_revision == 0 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let _ = (scope, recording_id, operation);
+        Ok(None)
+    }
 
     /// Marks one exact pending operation applied.
     ///
@@ -804,6 +837,23 @@ mod tests {
         assert_eq!(context.recording_id, session.recording_id);
         assert_eq!(context.call_id, session.call_id);
         assert_eq!(context.lifecycle_revision, session.revision);
+        assert_eq!(context.expires_at_unix_ms, session.expires_at_unix_ms);
+    }
+
+    #[test]
+    fn provider_capture_context_can_preserve_authorizing_start_revision() {
+        let mut session = session();
+        let provider_start_revision = session.revision;
+        session.revision = session.revision.checked_add(2).expect("revision");
+        let context = RecordingProviderCaptureContext::for_session_with_lifecycle_revision(
+            &session,
+            provider_start_revision,
+        );
+        assert_eq!(context.scope, session.scope);
+        assert_eq!(context.recording_id, session.recording_id);
+        assert_eq!(context.call_id, session.call_id);
+        assert_eq!(context.lifecycle_revision, provider_start_revision);
+        assert_ne!(context.lifecycle_revision, session.revision);
         assert_eq!(context.expires_at_unix_ms, session.expires_at_unix_ms);
     }
 

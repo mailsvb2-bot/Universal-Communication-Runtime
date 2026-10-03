@@ -221,6 +221,48 @@ impl RecordingProviderOperationStore for SqliteLocalStore {
         }
     }
 
+    fn latest_recording_provider_operation(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+        operation: RecordingProviderOperation,
+        max_lifecycle_revision: u64,
+    ) -> Result<Option<RecordingProviderOperationRecord>, DurableStoreError> {
+        if max_lifecycle_revision == 0 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let namespace = namespace_storage_key(scope);
+        let max_revision = max_lifecycle_revision.to_be_bytes();
+        let connection = self.lock_connection()?;
+        let revision = connection
+            .query_row(
+                "SELECT lifecycle_revision
+                 FROM recording_provider_operations
+                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                   AND recording_id=?4 AND operation=?5 AND lifecycle_revision<=?6
+                 ORDER BY lifecycle_revision DESC
+                 LIMIT 1",
+                params![
+                    scope.tenant_id.as_opaque().as_str(),
+                    namespace.present,
+                    namespace.value,
+                    recording_id.as_opaque().as_str(),
+                    operation_text(operation),
+                    max_revision.as_slice(),
+                ],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|error| map_sqlite_error(&error))?;
+        let Some(revision) = revision else {
+            return Ok(None);
+        };
+        let revision = decode_u64(&revision)?;
+        load_operation(&connection, scope, recording_id, revision, operation)?
+            .map(Some)
+            .ok_or(DurableStoreError::Corrupt)
+    }
+
     fn mark_recording_provider_operation_applied(
         &self,
         request: &RecordingProviderRequest,
@@ -619,6 +661,45 @@ mod tests {
             .expect("applied operation");
         assert_eq!(applied.state, RecordingProviderOperationState::Applied);
         assert_eq!(applied.request, record.request);
+    }
+
+    #[test]
+    fn latest_operation_before_revision_finds_start_that_authorized_active_capture() {
+        let store = store();
+        for revision in [2_u64, 5] {
+            let record = RecordingProviderOperationRecord {
+                request: request(revision, RecordingProviderOperation::Start),
+                state: RecordingProviderOperationState::Applied,
+                attempts: 1,
+                available_at_unix_ms: 100,
+            };
+            store
+                .prepare_recording_provider_operation(&record)
+                .expect("prepare");
+        }
+
+        let current = request(7, RecordingProviderOperation::Start);
+        let latest = store
+            .latest_recording_provider_operation(
+                &current.scope,
+                &current.recording_id,
+                RecordingProviderOperation::Start,
+                7,
+            )
+            .expect("latest operation")
+            .expect("start operation");
+        assert_eq!(latest.request.lifecycle_revision, 5);
+        assert_eq!(latest.state, RecordingProviderOperationState::Applied);
+
+        let before_first = store
+            .latest_recording_provider_operation(
+                &current.scope,
+                &current.recording_id,
+                RecordingProviderOperation::Start,
+                1,
+            )
+            .expect("before first");
+        assert!(before_first.is_none());
     }
 
     #[test]
