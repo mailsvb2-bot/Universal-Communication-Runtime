@@ -125,11 +125,7 @@ impl EncryptedArchiveRecordingProvider {
         sha256(encoded.as_slice())
     }
 
-    fn recording_dir(
-        &self,
-        scope: &TenantScope,
-        recording_id: &ucr_model::RecordingId,
-    ) -> PathBuf {
+    fn recording_dir(&self, scope: &TenantScope, recording_id: &ucr_model::RecordingId) -> PathBuf {
         self.objects_dir()
             .join(hex_digest(&self.recording_digest(scope, recording_id)))
     }
@@ -144,8 +140,10 @@ impl EncryptedArchiveRecordingProvider {
     }
 
     fn operation_path(&self, request: &RecordingProviderRequest) -> PathBuf {
-        self.operations_dir()
-            .join(format!("{}.uar", hex_digest(&self.operation_binding(request))))
+        self.operations_dir().join(format!(
+            "{}.uar",
+            hex_digest(&self.operation_binding(request))
+        ))
     }
 
     fn frame_binding(
@@ -179,7 +177,10 @@ impl EncryptedArchiveRecordingProvider {
         frame: &EncryptedGroupMediaFrame,
     ) -> PathBuf {
         self.recording_dir(&context.scope, &context.recording_id)
-            .join(format!("{}.uar", hex_digest(&self.frame_binding(context, frame))))
+            .join(format!(
+                "{}.uar",
+                hex_digest(&self.frame_binding(context, frame))
+            ))
     }
 
     fn encode_operation(
@@ -251,11 +252,7 @@ impl EncryptedArchiveRecordingProvider {
         seal_with_version(&set.current, plaintext, binding)
     }
 
-    fn open(
-        &self,
-        encoded: &[u8],
-        binding: &[u8; 32],
-    ) -> Result<Vec<u8>, RecordingProviderError> {
+    fn open(&self, encoded: &[u8], binding: &[u8; 32]) -> Result<Vec<u8>, RecordingProviderError> {
         if u64::try_from(encoded.len()).unwrap_or(u64::MAX) > MAX_ARCHIVE_OBJECT_BYTES {
             return Err(RecordingProviderError::CapacityExceeded);
         }
@@ -533,13 +530,11 @@ fn open_with_version(
         .map_err(|_| RecordingProviderError::Internal)
 }
 
-fn archive_aad(
-    version_id: &[u8],
-    binding: &[u8; 32],
-) -> Result<Vec<u8>, RecordingProviderError> {
+fn archive_aad(version_id: &[u8], binding: &[u8; 32]) -> Result<Vec<u8>, RecordingProviderError> {
     let version_len =
         u16::try_from(version_id.len()).map_err(|_| RecordingProviderError::CapacityExceeded)?;
-    let mut aad = Vec::with_capacity(ARCHIVE_AAD_DOMAIN.len() + 2 + version_id.len() + binding.len());
+    let mut aad =
+        Vec::with_capacity(ARCHIVE_AAD_DOMAIN.len() + 2 + version_id.len() + binding.len());
     aad.extend_from_slice(ARCHIVE_AAD_DOMAIN);
     aad.extend_from_slice(&version_len.to_be_bytes());
     aad.extend_from_slice(version_id);
@@ -571,8 +566,8 @@ impl<'a> SealedEnvelope<'a> {
             .try_into()
             .map_err(|_| RecordingProviderError::Internal)?;
         let ciphertext_len = read_u64(encoded, &mut offset)?;
-        let ciphertext_len =
-            usize::try_from(ciphertext_len).map_err(|_| RecordingProviderError::CapacityExceeded)?;
+        let ciphertext_len = usize::try_from(ciphertext_len)
+            .map_err(|_| RecordingProviderError::CapacityExceeded)?;
         let ciphertext = take(encoded, &mut offset, ciphertext_len)?;
         if offset != encoded.len() {
             return Err(RecordingProviderError::Internal);
@@ -623,8 +618,7 @@ fn ensure_private_directory(path: &Path) -> Result<(), RecordingProviderError> {
             require_private_permissions(&metadata)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(path)
-                .map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
+            fs::create_dir_all(path).map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
             set_private_directory_permissions(path)?;
             let metadata = fs::symlink_metadata(path)
                 .map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
@@ -1018,7 +1012,9 @@ mod tests {
         let opened = provider.open(&stored, &binding).expect("decrypt at rest");
         assert_eq!(
             opened,
-            provider.encode_frame(&context, &frame).expect("frame record")
+            provider
+                .encode_frame(&context, &frame)
+                .expect("frame record")
         );
 
         let _ = fs::remove_dir_all(root);
@@ -1166,14 +1162,14 @@ mod tests {
             .expect("provision");
         let secret_provider: Arc<dyn SecretProvider> = secrets.clone();
         assert_eq!(
-            EncryptedArchiveRecordingProvider::new(&insecure, secret_provider, handle.clone()).err(),
+            EncryptedArchiveRecordingProvider::new(&insecure, secret_provider, handle.clone())
+                .err(),
             Some(RecordingProviderError::PolicyDenied)
         );
 
         let target = temp_root("symlink-target");
         fs::create_dir_all(&target).expect("create symlink target");
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o700))
-            .expect("secure target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).expect("secure target");
         let link = temp_root("symlink-root");
         symlink(&target, &link).expect("create symlink");
         let secret_provider: Arc<dyn SecretProvider> = secrets;
@@ -1203,14 +1199,12 @@ mod tests {
             .capture_encrypted_frame(&context, &frame)
             .expect("capture");
         let path = provider.frame_path(&context, &frame);
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
-            .expect("weaken permissions");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("weaken permissions");
         assert_eq!(
             provider.capture_encrypted_frame(&context, &frame),
             Err(RecordingProviderError::PolicyDenied)
         );
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .expect("restore permissions");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("restore permissions");
 
         let _ = fs::remove_dir_all(root);
     }
