@@ -4,9 +4,7 @@ use ucr_core::{
     RecordingProviderOperation, RecordingProviderOperationRecord, RecordingProviderOperationState,
     RecordingProviderOperationStore, RecordingProviderRequest,
 };
-use ucr_model::{
-    CallId, EventEnvelope, NamespaceId, OpaqueId, RecordingId, TenantId, TenantScope,
-};
+use ucr_model::{CallId, EventEnvelope, NamespaceId, OpaqueId, RecordingId, TenantId, TenantScope};
 
 use super::{
     SqliteLocalStore, event_journal, map_schema_change_error, map_sqlite_error,
@@ -933,11 +931,8 @@ mod tests {
 
         EventEnvelope {
             event_id: EventId::from_opaque(
-                OpaqueId::new(format!(
-                    "ready-event-{}",
-                    request.lifecycle_revision
-                ))
-                .expect("event id"),
+                OpaqueId::new(format!("ready-event-{}", request.lifecycle_revision))
+                    .expect("event id"),
             ),
             scope: request.scope.clone(),
             event_type: "ucr.recording.ready".to_owned(),
@@ -1000,13 +995,9 @@ mod tests {
                 .expect("recovery view")
                 .is_empty()
         );
-        let persisted = ucr_core::EventJournalStore::event(
-            &store,
-            &event.scope,
-            &event.event_id,
-        )
-        .expect("event lookup")
-        .expect("ready event");
+        let persisted = ucr_core::EventJournalStore::event(&store, &event.scope, &event.event_id)
+            .expect("event lookup")
+            .expect("ready event");
         assert_eq!(persisted, event);
     }
 
