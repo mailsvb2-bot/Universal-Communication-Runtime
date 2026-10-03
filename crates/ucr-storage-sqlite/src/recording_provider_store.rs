@@ -202,6 +202,25 @@ impl RecordingProviderOperationStore for SqliteLocalStore {
             .collect()
     }
 
+    fn recording_provider_operation(
+        &self,
+        request: &RecordingProviderRequest,
+    ) -> Result<Option<RecordingProviderOperationRecord>, DurableStoreError> {
+        let connection = self.lock_connection()?;
+        let record = load_operation(
+            &connection,
+            &request.scope,
+            &request.recording_id,
+            request.lifecycle_revision,
+            request.operation,
+        )?;
+        match record {
+            Some(record) if record.request == *request => Ok(Some(record)),
+            Some(_) => Err(DurableStoreError::Conflict),
+            None => Ok(None),
+        }
+    }
+
     fn mark_recording_provider_operation_applied(
         &self,
         request: &RecordingProviderRequest,
@@ -594,6 +613,12 @@ mod tests {
         store
             .mark_recording_provider_operation_applied(&record.request)
             .expect("applied retry is idempotent");
+        let applied = store
+            .recording_provider_operation(&record.request)
+            .expect("load applied operation")
+            .expect("applied operation");
+        assert_eq!(applied.state, RecordingProviderOperationState::Applied);
+        assert_eq!(applied.request, record.request);
     }
 
     #[test]

@@ -38,8 +38,9 @@ use ucr_core::{
     DurableStoreError, EventWebhookDispatcher, MAX_ACTIVE_RECORDINGS_PER_CALL,
     MAX_RECORDING_PROVIDER_OPERATION_BATCH, MAX_RECORDING_RETENTION_BATCH, RecordingMediaProvider,
     RecordingProviderCaptureContext, RecordingProviderDispatchSweep, RecordingProviderError,
-    RecordingProviderHealth, RecordingStore, StorageHealth, StorageProvider,
-    SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome,
+    RecordingProviderHealth, RecordingProviderOperation, RecordingProviderOperationState,
+    RecordingProviderOperationStore, RecordingProviderRequest, RecordingStore, StorageHealth,
+    StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome,
     dispatch_recording_provider_operations_once, generate_opaque_id,
 };
 use ucr_crypto::{
@@ -812,6 +813,38 @@ impl RuntimeRecordingMediaObserver {
             return Ok(());
         }
 
+        let now_unix_ms = runtime_now_unix_ms()
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+        let mut capturable = Vec::with_capacity(active.len());
+        for recording in active {
+            if recording.expires_at_unix_ms <= now_unix_ms {
+                continue;
+            }
+            let start = RecordingProviderRequest::for_session(
+                &recording,
+                RecordingProviderOperation::Start,
+            );
+            let start_state = self
+                .store
+                .recording_provider_operation(&start)
+                .map_err(map_recording_capture_store_error)?
+                .map(|record| record.state);
+            match start_state {
+                Some(RecordingProviderOperationState::Applied) => capturable.push(recording),
+                Some(RecordingProviderOperationState::Pending) => {
+                    return Err(CanonicalError::new(
+                        CanonicalErrorCode::TemporarilyUnavailable,
+                    ));
+                }
+                Some(RecordingProviderOperationState::Failed) | None => {
+                    return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+                }
+            }
+        }
+        if capturable.is_empty() {
+            return Ok(());
+        }
+
         let (holder_id, provider) = {
             let registry = self
                 .recording_provider
@@ -826,8 +859,6 @@ impl RuntimeRecordingMediaObserver {
             )
         };
 
-        let now_unix_ms = runtime_now_unix_ms()
-            .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
         let lease = self
             .store
             .runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND)
@@ -844,7 +875,7 @@ impl RuntimeRecordingMediaObserver {
             ));
         }
 
-        for recording in active {
+        for recording in capturable {
             let context = RecordingProviderCaptureContext::for_session(&recording);
             provider
                 .capture_encrypted_frame(&context, frame)
@@ -3699,7 +3730,7 @@ mod tests {
             .expect("persist recording capture call");
     }
 
-    fn recording_capture_ready_session() -> ucr_model::RecordingSession {
+    fn recording_capture_ready_session(requested_at_unix_ms: i64) -> ucr_model::RecordingSession {
         let host = recording_capture_host();
         ucr_model::RecordingSession {
             scope: recording_capture_scope(),
@@ -3716,23 +3747,78 @@ mod tests {
             },
             state: ucr_model::RecordingState::Ready,
             consents: Vec::new(),
-            requested_at_unix_ms: 1_000,
+            requested_at_unix_ms,
             started_at_unix_ms: None,
             stopped_at_unix_ms: None,
-            expires_at_unix_ms: 3_601_000,
+            expires_at_unix_ms: requested_at_unix_ms + 3_600_000,
             revision: 1,
         }
     }
 
-    fn install_active_recording(store: &SqliteLocalStore) -> ucr_model::RecordingSession {
+    fn recording_capture_start_event(
+        ready: &ucr_model::RecordingSession,
+        now_unix_ms: i64,
+    ) -> ucr_model::EventEnvelope {
+        ucr_model::EventEnvelope {
+            event_id: ucr_model::EventId::from_opaque(
+                OpaqueId::new("recording-capture-start-event").expect("id"),
+            ),
+            scope: ready.scope.clone(),
+            event_type: "ucr.recording.started".to_owned(),
+            payload: vec![1],
+            actor: ucr_model::ActorRef {
+                actor_id: ucr_model::ActorId::from_opaque(
+                    OpaqueId::new("recording-capture-actor").expect("id"),
+                ),
+                kind: ucr_model::ActorKind::System,
+                on_behalf_of: Some(ready.requested_by.principal_id.clone()),
+            },
+            source_device: ucr_model::DeviceRef {
+                device_id: ucr_model::DeviceId::from_opaque(
+                    OpaqueId::new("recording-capture-event-device").expect("id"),
+                ),
+                identity_id: ucr_model::IdentityId::from_opaque(
+                    OpaqueId::new("recording-capture-event-identity").expect("id"),
+                ),
+            },
+            wall_time_unix_ms: now_unix_ms,
+            logical_order: ready.revision + 1,
+            correlation: ucr_model::CorrelationContext {
+                correlation_id: OpaqueId::new("recording-capture-correlation").expect("id"),
+                causation_id: None,
+                idempotency_key: Some("recording-capture-start".to_owned()),
+            },
+            schema_version: ucr_model::ProtocolVersion::new(1, 0),
+            integrity_metadata: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    fn install_active_recording_at(
+        store: &SqliteLocalStore,
+        requested_at_unix_ms: i64,
+    ) -> ucr_model::RecordingSession {
         install_recording_capture_call(store);
-        let ready = recording_capture_ready_session();
+        let ready = recording_capture_ready_session(requested_at_unix_ms);
         store
             .persist_recording(&ready)
             .expect("persist ready recording");
+        let start_at_unix_ms = requested_at_unix_ms + 100;
+        let event = recording_capture_start_event(&ready, start_at_unix_ms);
         store
-            .start_recording(&ready.scope, &ready.recording_id, ready.revision, 1_100)
-            .expect("start recording")
+            .start_recording_with_event_and_provider_operation(
+                &ready.scope,
+                &ready.recording_id,
+                ready.revision,
+                start_at_unix_ms,
+                &event,
+            )
+            .expect("start recording with provider operation")
+    }
+
+    fn install_active_recording(store: &SqliteLocalStore) -> ucr_model::RecordingSession {
+        let now_unix_ms = runtime_now_unix_ms().expect("clock");
+        install_active_recording_at(store, now_unix_ms.saturating_sub(1_000))
     }
 
     fn recording_capture_frame(sequence: u64) -> EncryptedGroupMediaFrame {
@@ -3808,11 +3894,52 @@ mod tests {
 
         let stopped = runtime
             .store
-            .stop_recording(&active.scope, &active.recording_id, active.revision, 1_200)
+            .stop_recording(
+                &active.scope,
+                &active.recording_id,
+                active.revision,
+                runtime_now_unix_ms().expect("clock"),
+            )
             .expect("stop recording");
         assert_eq!(stopped.state, ucr_model::RecordingState::Stopped);
         assert_eq!(
             observer.capture_encrypted_frame(&recording_capture_frame(42)),
+            Ok(())
+        );
+
+        drop(runtime);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn recording_capture_stops_at_expiry_without_waiting_for_retention_sweep() {
+        let (path, runtime) = recording_health_runtime("capture-expired");
+        let active = install_active_recording_at(runtime.store.as_ref(), 1_000);
+        assert_eq!(active.state, ucr_model::RecordingState::Active);
+        assert!(
+            runtime_now_unix_ms().expect("clock") >= active.expires_at_unix_ms,
+            "test fixture must already be past the recording expiry"
+        );
+        assert_eq!(
+            runtime
+                .store
+                .active_recordings_for_call(
+                    &active.scope,
+                    &active.call_id,
+                    MAX_ACTIVE_RECORDINGS_PER_CALL,
+                )
+                .expect("active lookup")
+                .len(),
+            1,
+            "retention sweep has intentionally not transitioned the ACTIVE row yet"
+        );
+
+        let observer = RuntimeRecordingMediaObserver {
+            store: Arc::clone(&runtime.store),
+            recording_provider: Arc::clone(&runtime.recording_provider),
+        };
+        assert_eq!(
+            observer.capture_encrypted_frame(&recording_capture_frame(45)),
             Ok(())
         );
 
@@ -3851,6 +3978,16 @@ mod tests {
             .expect("register capture provider");
 
         let frame = recording_capture_frame(42);
+        assert_eq!(
+            observer.capture_encrypted_frame(&frame),
+            Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable
+            ))
+        );
+        let sweep = runtime
+            .dispatch_recording_provider_once(provider.as_ref())
+            .expect("dispatch provider start");
+        assert_eq!(sweep.applied, 1);
         assert_eq!(observer.capture_encrypted_frame(&frame), Ok(()));
         assert_eq!(
             provider.captures(),
@@ -3922,6 +4059,10 @@ mod tests {
         let registration = runtime
             .register_recording_provider(provider.clone(), holder_id)
             .expect("register unavailable provider");
+        let sweep = runtime
+            .dispatch_recording_provider_once(provider.as_ref())
+            .expect("dispatch provider start");
+        assert_eq!(sweep.applied, 1);
 
         assert_eq!(
             observer.capture_encrypted_frame(&recording_capture_frame(44)),

@@ -150,11 +150,21 @@ fn runtime_recording_capture_reuses_active_recording_and_provider_lease_owners()
     let spec = read("spec/recording.md");
 
     assert!(core.contains("pub struct RecordingProviderCaptureContext"));
+    assert!(core.contains("pub struct RecordingProviderCaptureIdentity"));
+    assert!(core.contains("pub fn capture_identity("));
+    assert!(core.contains("media_kind: frame.header.media_kind"));
+    assert!(core.contains("negotiation_ref: frame.header.negotiation_ref.clone()"));
+    assert!(core.contains("negotiation_generation: frame.header.negotiation_generation"));
     assert!(core.contains("fn capture_encrypted_frame("));
     assert!(core.contains("EncryptedGroupMediaFrame"));
     assert!(runtime.contains("struct RuntimeRecordingMediaObserver"));
     assert!(runtime.contains("active_recordings_for_call("));
     assert!(runtime.contains("MAX_ACTIVE_RECORDINGS_PER_CALL"));
+    assert!(runtime.contains("recording.expires_at_unix_ms <= now_unix_ms"));
+    assert!(runtime.contains(".recording_provider_operation(&start)"));
+    assert!(runtime.contains("Some(RecordingProviderOperationState::Applied)"));
+    assert!(runtime.contains("Some(RecordingProviderOperationState::Pending)"));
+    assert!(runtime.contains("Some(RecordingProviderOperationState::Failed) | None"));
     assert!(runtime.contains("runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND)"));
     assert!(runtime.contains("lease.holder_id != holder_id"));
     assert!(runtime.contains("provider.health() == RecordingProviderHealth::Unavailable"));
@@ -162,6 +172,9 @@ fn runtime_recording_capture_reuses_active_recording_and_provider_lease_owners()
     assert!(runtime.contains("with_validated_media_observer(recording_media_observer)"));
     assert!(runtime.contains("recording: false"));
     assert!(spec.contains("With no ACTIVE Recording it returns immediately"));
+    assert!(spec.contains("has already passed"));
+    assert!(spec.contains("provider `Start` operation in durable `Applied` state"));
+    assert!(spec.contains("Media kind and negotiation"));
     assert!(spec.contains("Capture failure is fail-closed before live recipient fan-out"));
     assert!(spec.contains("no concrete encrypted-at-rest object/storage implementation"));
     assert!(spec.contains("ucr.conference.recording"));

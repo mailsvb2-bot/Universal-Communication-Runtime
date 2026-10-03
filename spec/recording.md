@@ -98,17 +98,25 @@ observer rejects it, preventing silent recording/composition loss while delivery
 Production runtime now binds this seam to the same registered `RecordingMediaProvider` used by
 the durable lifecycle worker. For every validated frame it performs a bounded
 `active_recordings_for_call` lookup. With no ACTIVE Recording it returns immediately and Conference
-remains independent from any recorder. With one or more ACTIVE Recordings it requires the exact
-registered provider holder to still own an unexpired durable worker lease, rejects an Unavailable
-provider, and invokes `capture_encrypted_frame` once for each ACTIVE Recording using
+remains independent from any recorder. An ACTIVE row whose `expires_at_unix_ms` has already passed
+is excluded on the media hot path even if the retention worker has not swept it yet. Every remaining
+Recording must also have its exact provider `Start` operation in durable `Applied` state; a Pending
+Start fails temporarily closed, while a missing or terminally Failed Start is treated as an internal
+invariant failure. Only then does runtime require the exact registered provider holder to still own
+an unexpired durable worker lease, reject an Unavailable provider, and invoke
+`capture_encrypted_frame` once for each capturable Recording using
 `RecordingProviderCaptureContext`. Capture failure is fail-closed before live recipient fan-out so
 the system cannot silently advertise a continuous recording while dropping media.
 
-The capture identity is
-`(scope, recording_id, lifecycle_revision, source_device_id, stream_id, sequence, crypto_epoch)`.
-Exact retries must be idempotent at the provider boundary; changed reuse conflicts. The provider
-receives the already source-authenticated encrypted frame and never receives endpoint/MLS exporter
-key material from this path.
+`RecordingProviderCaptureContext::capture_identity` builds the complete provider idempotency key
+from Recording identity plus the authenticated media dimensions: scope, recording ID, Call ID,
+lifecycle revision, Group, source principal/device, media kind, video source kind, stream ID,
+negotiation reference/generation, crypto epoch/state and sequence. Media kind and negotiation
+binding are explicit because valid audio/video streams can share a stream/sequence pair and a fresh
+negotiation may restart sequence state. Exact retries must be idempotent at the provider boundary;
+changed payload reuse for the same complete identity conflicts. The provider receives the already
+source-authenticated encrypted frame and never receives endpoint/MLS exporter key material from this
+path.
 
 This is still infrastructure rather than a Production recorder. The default capture method fails
 closed, no concrete encrypted-at-rest object/storage implementation is shipped here, export/access

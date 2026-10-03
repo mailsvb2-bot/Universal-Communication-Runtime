@@ -50,11 +50,6 @@ impl RecordingProviderRequest {
 }
 
 /// Canonical Recording identity attached to one already-validated encrypted media frame.
-///
-/// Capture idempotency is the tuple
-/// `(scope, recording_id, lifecycle_revision, source_device_id, stream_id, sequence, crypto_epoch)`
-/// from this context plus the encrypted frame. Providers must accept exact retries without
-/// duplicating stored media and must reject changed reuse as `Conflict`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingProviderCaptureContext {
     pub scope: TenantScope,
@@ -75,6 +70,59 @@ impl RecordingProviderCaptureContext {
             expires_at_unix_ms: session.expires_at_unix_ms,
         }
     }
+
+    /// Builds the complete idempotency identity for one validated encrypted frame.
+    ///
+    /// Sequence alone is not globally unique: audio/video streams and a fresh negotiation may
+    /// legitimately restart sequence state. The identity therefore binds media kind, source,
+    /// stream, negotiation generation/reference and crypto epoch/state as well as the Recording
+    /// lifecycle revision.
+    #[must_use]
+    pub fn capture_identity(
+        &self,
+        frame: &EncryptedGroupMediaFrame,
+    ) -> RecordingProviderCaptureIdentity {
+        RecordingProviderCaptureIdentity {
+            scope: self.scope.clone(),
+            recording_id: self.recording_id.clone(),
+            call_id: self.call_id.clone(),
+            lifecycle_revision: self.lifecycle_revision,
+            group_id: frame.header.group_id.clone(),
+            source: frame.header.source.clone(),
+            source_device_id: frame.header.source_device_id.clone(),
+            media_kind: frame.header.media_kind,
+            video_source_kind: frame.header.video_source_kind,
+            stream_id: frame.header.stream_id.clone(),
+            negotiation_ref: frame.header.negotiation_ref.clone(),
+            negotiation_generation: frame.header.negotiation_generation,
+            crypto_epoch: frame.header.crypto_epoch,
+            crypto_state_ref: frame.header.crypto_state_ref.clone(),
+            sequence: frame.header.sequence,
+        }
+    }
+}
+
+/// Complete collision-resistant provider capture identity for one canonical encrypted frame.
+///
+/// Providers must treat exact retries of this identity idempotently and reject changed payload reuse
+/// as `Conflict`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingProviderCaptureIdentity {
+    pub scope: TenantScope,
+    pub recording_id: RecordingId,
+    pub call_id: CallId,
+    pub lifecycle_revision: u64,
+    pub group_id: ucr_model::GroupId,
+    pub source: PrincipalRef,
+    pub source_device_id: ucr_model::DeviceId,
+    pub media_kind: ucr_model::MediaKind,
+    pub video_source_kind: Option<ucr_model::VideoSourceKind>,
+    pub stream_id: ucr_model::OpaqueId,
+    pub negotiation_ref: ucr_model::OpaqueId,
+    pub negotiation_generation: u64,
+    pub crypto_epoch: u64,
+    pub crypto_state_ref: ucr_model::OpaqueId,
+    pub sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +219,15 @@ pub trait RecordingProviderOperationStore: StorageProvider {
         now_unix_ms: i64,
         limit: usize,
     ) -> Result<Vec<RecordingProviderOperationRecord>, DurableStoreError>;
+
+    /// Loads one exact provider operation by its canonical request identity.
+    ///
+    /// # Errors
+    /// Returns explicit durable-store failures and fails closed on corrupt persisted state.
+    fn recording_provider_operation(
+        &self,
+        request: &RecordingProviderRequest,
+    ) -> Result<Option<RecordingProviderOperationRecord>, DurableStoreError>;
 
     /// Marks one exact pending operation applied.
     ///
@@ -748,6 +805,77 @@ mod tests {
         assert_eq!(context.call_id, session.call_id);
         assert_eq!(context.lifecycle_revision, session.revision);
         assert_eq!(context.expires_at_unix_ms, session.expires_at_unix_ms);
+    }
+
+    fn capture_frame(
+        media_kind: ucr_model::MediaKind,
+        negotiation_ref: &str,
+        negotiation_generation: u64,
+    ) -> ucr_model::EncryptedGroupMediaFrame {
+        ucr_model::EncryptedGroupMediaFrame {
+            header: ucr_model::GroupMediaFrameHeader {
+                scope: session().scope,
+                call_id: session().call_id,
+                group_id: ucr_model::GroupId::from_opaque(opaque("group")),
+                stream_id: opaque("shared-stream"),
+                source: PrincipalRef {
+                    principal_id: PrincipalId::from_opaque(opaque("source")),
+                    kind: PrincipalKind::Person,
+                },
+                source_device_id: ucr_model::DeviceId::from_opaque(opaque("device")),
+                negotiation_ref: opaque(negotiation_ref),
+                negotiation_generation,
+                crypto_epoch: 3,
+                crypto_state_ref: opaque("crypto-state"),
+                crypto_suite: ucr_model::CryptoSuite::UcrV1,
+                header_version: ucr_protocol::GROUP_MEDIA_FRAME_HEADER_V1,
+                media_kind,
+                video_source_kind: if media_kind == ucr_model::MediaKind::Video {
+                    Some(ucr_model::VideoSourceKind::Camera)
+                } else {
+                    None
+                },
+                sequence: 9,
+                media_timestamp: 10,
+                keyframe: false,
+            },
+            nonce: [1; 24],
+            ciphertext: vec![1, 2, 3],
+            source_signature: ucr_model::GroupMediaSourceSignature {
+                key_id: ucr_model::KeyId::from_opaque(opaque("key")),
+                algorithm_id: "test.signature".to_owned(),
+                algorithm_version: 1,
+                signature: vec![4],
+            },
+        }
+    }
+
+    #[test]
+    fn provider_capture_identity_separates_media_kind_and_negotiation_generation() {
+        let context = RecordingProviderCaptureContext::for_session(&session());
+        let audio = context.capture_identity(&capture_frame(
+            ucr_model::MediaKind::Audio,
+            "negotiation-a",
+            1,
+        ));
+        let video = context.capture_identity(&capture_frame(
+            ucr_model::MediaKind::Video,
+            "negotiation-a",
+            1,
+        ));
+        let renegotiated = context.capture_identity(&capture_frame(
+            ucr_model::MediaKind::Audio,
+            "negotiation-b",
+            2,
+        ));
+
+        assert_ne!(audio, video);
+        assert_ne!(audio, renegotiated);
+        assert_eq!(audio.media_kind, ucr_model::MediaKind::Audio);
+        assert_eq!(audio.negotiation_generation, 1);
+        assert_eq!(renegotiated.negotiation_generation, 2);
+        assert_eq!(audio.sequence, renegotiated.sequence);
+        assert_eq!(audio.stream_id, renegotiated.stream_id);
     }
 
     #[test]
