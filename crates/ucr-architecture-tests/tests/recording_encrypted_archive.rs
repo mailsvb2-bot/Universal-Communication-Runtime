@@ -115,4 +115,3 @@ fn recording_ready_is_atomic_recoverable_and_not_lifecycle_ready() {
     assert!(runtime.contains("recording: false"));
     assert!(spec.contains("SQLite schema v48"));
 }
-
