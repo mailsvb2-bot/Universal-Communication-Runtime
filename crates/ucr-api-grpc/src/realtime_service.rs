@@ -43,7 +43,7 @@ use ucr_realtime::{
 };
 use ucr_sfu::{
     PreparedSfuCapabilities, SfuForwardOutcome, SfuForwardSink, SfuForwardSinkError,
-    SfuValidatedForwardBatch, SfuValidatedSourceFrame,
+    SfuValidatedForwardBatch, SfuValidatedSourceFrame, dispatch_validated_forward_batch,
 };
 use ucr_webrtc::{
     PreparedWebRtcProvider, WebRtcProvider, WebRtcProviderError, WebRtcSessionConfigFactory,
@@ -1555,19 +1555,22 @@ where
         + ConferenceJoinGrantStore
         + ServiceQuotaStore,
 {
-    fn observe_validated_media_if_configured(
+    fn prepare_observed_forward(
         &self,
         claims: &RealtimeSessionClaims,
         device_id: &DeviceId,
         envelope: &SfuForwardEnvelope,
-    ) -> Result<(), CanonicalError> {
-        let Some(observer) = self.validated_media_observer.as_ref() else {
-            return Ok(());
-        };
-        let validated = conference_runtime(self)
+    ) -> Result<Option<SfuValidatedForwardBatch>, CanonicalError> {
+        let runtime = conference_runtime(self);
+        let validated = runtime
             .validate_source_frame(&actor_for(claims), device_id, envelope)
             .map_err(|error| map_conference_error(&error))?;
-        observer.observe_validated_media(&validated)
+        if let Some(observer) = self.validated_media_observer.as_ref() {
+            observer.observe_validated_media(validated.media_frame())?;
+        }
+        runtime
+            .prepare_forward_from_validated_source(validated)
+            .map_err(|error| map_conference_error(&error))
     }
 
     /// Routes one already-encrypted endpoint media envelope through the exact canonical
@@ -1637,12 +1640,7 @@ where
                 )
                 .map_err(map_registry_error)?;
         }
-        self.observe_validated_media_if_configured(claims, device_id, envelope)?;
-
-        let Some(batch) = conference_runtime(self)
-            .prepare_forward(&actor_for(claims), device_id, envelope)
-            .map_err(|error| map_conference_error(&error))?
-        else {
+        let Some(batch) = self.prepare_observed_forward(claims, device_id, envelope)? else {
             return Ok(0);
         };
 
@@ -1722,7 +1720,9 @@ where
                 )
                 .map_err(map_registry_error)?;
         }
-        self.observe_validated_media_if_configured(claims, device_id, envelope)?;
+        let Some(batch) = self.prepare_observed_forward(claims, device_id, envelope)? else {
+            return Ok(0);
+        };
 
         let outcome = if let (Some((owner, max_aggregate_bandwidth_bps)), Some(wire_bytes)) =
             (bandwidth_quota, encoded_wire_bytes)
@@ -1736,24 +1736,18 @@ where
                 now_unix_ms,
                 quota_error: Mutex::new(None),
             };
-            match conference_runtime(self).forward(
-                &actor_for(claims),
-                device_id,
-                envelope,
-                &quota_sink,
-            ) {
+            match dispatch_validated_forward_batch(&batch, &quota_sink) {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     if let Some(quota_error) = quota_sink.quota_error()? {
                         return Err(map_registry_error(quota_error));
                     }
-                    return Err(map_conference_error(&error));
+                    return Err(map_conference_error(&ConferenceError::Sfu(error)));
                 }
             }
         } else {
-            conference_runtime(self)
-                .forward(&actor_for(claims), device_id, envelope, sink)
-                .map_err(|error| map_conference_error(&error))?
+            dispatch_validated_forward_batch(&batch, sink)
+                .map_err(|error| map_conference_error(&ConferenceError::Sfu(error)))?
         };
         if outcome.accepted_recipients > 0
             && let Some(transition) = self

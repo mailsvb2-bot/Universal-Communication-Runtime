@@ -126,12 +126,17 @@ fn recording_media_observer_uses_canonical_source_validation_not_recipient_fanou
 
     assert!(sfu.contains("pub struct SfuValidatedSourceFrame"));
     assert!(sfu.contains("pub fn validate_source_frame("));
+    assert!(sfu.contains("prepare_forward_selected_from_validated_source"));
     assert!(conference.contains("pub fn validate_source_frame("));
+    assert!(conference.contains("prepare_forward_from_validated_source"));
     assert!(grpc.contains("pub trait RealtimeValidatedMediaObserver"));
-    assert!(grpc.contains("observe_validated_media_if_configured"));
+    assert!(grpc.contains("prepare_observed_forward"));
     assert!(grpc.contains(".validate_source_frame(&actor_for(claims), device_id, envelope)"));
+    assert!(grpc.contains(".prepare_forward_from_validated_source(validated)"));
     assert!(exports.contains("RealtimeValidatedMediaObserver"));
     assert!(spec.contains("independent from subscription"));
+    assert!(spec.contains("single-use token"));
+    assert!(spec.contains("is not repeated on the frame-rate-sensitive"));
     assert!(spec.contains("contains ciphertext plus authenticated routing metadata"));
     assert!(spec.contains("`ucr.conference.recording` remains unavailable"));
 }

@@ -635,9 +635,17 @@ impl SfuValidatedForwardBatch {
 /// This intentionally carries no recipient set. Recording/composition observers can consume the
 /// source frame independently from live subscription fan-out without receiving media plaintext or
 /// endpoint key material.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SfuValidatedSourceFrame {
     envelope: SfuForwardEnvelope,
+    call: ucr_model::CallSession,
+}
+
+impl fmt::Debug for SfuValidatedSourceFrame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SfuValidatedSourceFrame")
+            .finish_non_exhaustive()
+    }
 }
 
 impl SfuValidatedSourceFrame {
@@ -790,7 +798,22 @@ where
             authenticated_source_device_id,
             envelope,
         )
-        .map(|(validated, _)| validated)
+    }
+
+    /// Consumes one source-validation token and derives an explicitly selected recipient batch.
+    ///
+    /// The token can only be constructed by `validate_source_frame`; consuming it avoids repeating
+    /// source/device/MLS/signature/send authorization on a frame-rate-sensitive path. Recipient
+    /// membership and receive permission are still checked before the first sink side effect.
+    ///
+    /// # Errors
+    /// Rejects invalid recipients, stale recipient membership/permission, or bounded fan-out state.
+    pub fn prepare_forward_selected_from_validated_source(
+        &self,
+        validated: SfuValidatedSourceFrame,
+        recipients: &[ucr_model::PrincipalRef],
+    ) -> Result<SfuValidatedForwardBatch, SfuError> {
+        self.prepare_forward_from_validated_impl(validated, Some(recipients))
     }
 
     /// Fans one source-authenticated encrypted frame only to the explicitly selected current Call
@@ -843,7 +866,7 @@ where
         authenticated_source: &ScopedPrincipal,
         authenticated_source_device_id: &DeviceId,
         envelope: &SfuForwardEnvelope,
-    ) -> Result<(SfuValidatedSourceFrame, ucr_model::CallSession), SfuError> {
+    ) -> Result<SfuValidatedSourceFrame, SfuError> {
         let (context, canonical) = canonical_sfu_forward_envelope(envelope)?;
         if authenticated_source.scope != context.scope
             || authenticated_source.principal != canonical.frame.header.source
@@ -865,12 +888,10 @@ where
                 resource_scope: context.scope,
             })
             .map_err(SfuError::Authorization)?;
-        Ok((
-            SfuValidatedSourceFrame {
-                envelope: canonical,
-            },
+        Ok(SfuValidatedSourceFrame {
+            envelope: canonical,
             call,
-        ))
+        })
     }
 
     fn prepare_forward_impl(
@@ -880,14 +901,27 @@ where
         envelope: &SfuForwardEnvelope,
         selected_recipients: Option<&[ucr_model::PrincipalRef]>,
     ) -> Result<SfuValidatedForwardBatch, SfuError> {
-        let (validated, call) = self.validate_source_frame_impl(
+        let validated = self.validate_source_frame_impl(
             authenticated_source,
             authenticated_source_device_id,
             envelope,
         )?;
+        self.prepare_forward_from_validated_impl(validated, selected_recipients)
+    }
+
+    fn prepare_forward_from_validated_impl(
+        &self,
+        validated: SfuValidatedSourceFrame,
+        selected_recipients: Option<&[ucr_model::PrincipalRef]>,
+    ) -> Result<SfuValidatedForwardBatch, SfuError> {
         let SfuValidatedSourceFrame {
             envelope: canonical,
+            call,
         } = validated;
+        let authenticated_source = ScopedPrincipal {
+            scope: canonical.frame.header.scope.clone(),
+            principal: canonical.frame.header.source.clone(),
+        };
         let (_, receive) = permissions(
             canonical.frame.header.media_kind,
             canonical.frame.header.video_source_kind,
@@ -919,7 +953,7 @@ where
             let membership = self
                 .store
                 .group_membership_for_active_member(
-                    authenticated_source,
+                    &authenticated_source,
                     &canonical.frame.header.scope,
                     &canonical.frame.header.group_id,
                     &recipient,

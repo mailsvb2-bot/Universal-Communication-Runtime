@@ -89,9 +89,11 @@ plaintext media or endpoint/MLS key material.
 The observer runs before recipient fan-out and is deliberately independent from subscription
 selection. Recording/composition infrastructure therefore does not disappear merely because no
 participant currently subscribes to the source, and it does not need to duplicate recipient
-authorization logic. A configured observer failure is fail-closed: the frame is not routed live
-after the observer rejects it, preventing silent recording/composition loss while delivery
-continues.
+authorization logic. Source validation produces a single-use token: the observer inspects that
+token by reference and the same token is then consumed to derive the recipient batch, so
+Call/Group/Device/MLS/signature/send authorization is not repeated on the frame-rate-sensitive
+media path. A configured observer failure is fail-closed: the frame is not routed live after the
+observer rejects it, preventing silent recording/composition loss while delivery continues.
 
 This seam is infrastructure only. No concrete recording capture/storage provider is shipped by
 this change, `ucr.conference.recording` remains unavailable, and the observer itself is not
