@@ -4041,6 +4041,109 @@ mod tests {
     }
 
     #[test]
+    fn recording_capture_survives_active_consent_revision_change() {
+        let (path, runtime) = recording_health_runtime("capture-consent-revision");
+        install_recording_capture_call(runtime.store.as_ref());
+        let now = runtime_now_unix_ms().expect("clock");
+        let mut ready = recording_capture_ready_session(now.saturating_sub(1_000));
+        ready.consents.push(ucr_model::RecordingConsent {
+            participant: ready.requested_by.clone(),
+            state: ucr_model::RecordingConsentState::Granted,
+            decided_at_unix_ms: ready.requested_at_unix_ms,
+        });
+        runtime
+            .store
+            .persist_recording(&ready)
+            .expect("persist ready recording");
+        let start_at_unix_ms = ready.requested_at_unix_ms + 100;
+        let event = recording_capture_start_event(&ready, start_at_unix_ms);
+        let active = runtime
+            .store
+            .start_recording_with_event_and_provider_operation(
+                &ready.scope,
+                &ready.recording_id,
+                ready.revision,
+                start_at_unix_ms,
+                &event,
+            )
+            .expect("start recording with provider operation");
+        assert_eq!(active.state, ucr_model::RecordingState::Active);
+        assert_eq!(active.revision, 2);
+
+        let observer = RuntimeRecordingMediaObserver {
+            store: Arc::clone(&runtime.store),
+            recording_provider: Arc::clone(&runtime.recording_provider),
+        };
+        let holder_id = "recording-capture-consent-revision";
+        assert!(
+            runtime
+                .store
+                .try_acquire_runtime_worker_lease(
+                    RECORDING_PROVIDER_WORKER_KIND,
+                    holder_id,
+                    now,
+                    RECORDING_PROVIDER_WORKER_LEASE_DURATION_MS,
+                )
+                .expect("acquire provider lease")
+        );
+        let provider = Arc::new(RecordingCaptureTestProvider::new(
+            RecordingProviderHealth::Healthy,
+        ));
+        let registration = runtime
+            .register_recording_provider(provider.clone(), holder_id)
+            .expect("register capture provider");
+        let sweep = runtime
+            .dispatch_recording_provider_once(provider.as_ref())
+            .expect("dispatch provider start");
+        assert_eq!(sweep.applied, 1);
+
+        assert_eq!(
+            observer.capture_encrypted_frame(&recording_capture_frame(50)),
+            Ok(())
+        );
+        assert_eq!(
+            provider.captures(),
+            vec![("recording-capture-id".to_owned(), 2, 50)]
+        );
+
+        let revised = runtime
+            .store
+            .set_recording_consent(
+                &active.scope,
+                &active.recording_id,
+                active.revision,
+                &active.requested_by,
+                ucr_model::RecordingConsentState::Granted,
+                now,
+            )
+            .expect("refresh granted consent");
+        assert_eq!(revised.state, ucr_model::RecordingState::Active);
+        assert_eq!(revised.revision, 3);
+
+        assert_eq!(
+            observer.capture_encrypted_frame(&recording_capture_frame(51)),
+            Ok(())
+        );
+        assert_eq!(
+            provider.captures(),
+            vec![
+                ("recording-capture-id".to_owned(), 2, 50),
+                ("recording-capture-id".to_owned(), 2, 51),
+            ]
+        );
+
+        drop(registration);
+        assert!(
+            runtime
+                .store
+                .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, holder_id)
+                .expect("release provider lease")
+        );
+        drop(runtime);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn recording_capture_rejects_unavailable_provider_before_side_effect() {
         let (path, runtime) = recording_health_runtime("capture-unavailable");
         let active = install_active_recording(runtime.store.as_ref());
