@@ -226,10 +226,12 @@ Lifecycle `Ready` means consent/policy gates are satisfied **before** Start. The
 recording artifact.
 
 The public payload is `RecordingReadyEvent`: scope, Recording ID, Call ID, the exact provider Stop
-lifecycle revision, provider ID, ready-observation timestamp and a
-`recovered_after_upgrade` flag. Event identity, system actor and source-device identities are
-deterministically derived from the canonical Stop identity plus provider ID, so exact retries do not
-invent a second fact. Actor attribution remains on behalf of the original recording requester.
+lifecycle revision, ready-observation timestamp and a `recovered_after_upgrade` flag. Event
+identity, system actor and source-device identities are deterministically derived from the canonical
+Stop identity, so exact retries do not invent a second fact. The Event is intentionally
+provider-neutral: pre-v48 Applied Stop rows do not durably prove which provider implementation
+performed finalization, so recovery must not attribute them to whichever provider happens to be
+configured after upgrade. Actor attribution remains on behalf of the original recording requester.
 
 Provider finalization is necessarily outside the local SQLite transaction, so the execution order is
 provider Stop first, then local durable commit. Exact provider Stop requests are idempotent. If the
@@ -240,10 +242,11 @@ storage-only ready marker. Event conflict rolls the entire local transition back
 
 Upgrade recovery is explicit. v47 databases migrate to SQLite schema v48 with
 `ready_event_emitted=0`. Already-Applied legacy Stop rows are discovered by a bounded recovery
-view. The worker creates the same deterministic ready fact with
+view. The worker creates the same deterministic provider-neutral ready fact with
 `recovered_after_upgrade=true` and atomically appends it plus the marker **without calling the
-provider again**. This closes the old-binary upgrade gap while preserving exactly one provider
-finalization.
+provider again**. Recovery remains valid even if the Recording has subsequently advanced from
+STOPPED to EXPIRED or DELETED; the ready fact remains bound to the exact earlier Stop revision.
+This closes the old-binary upgrade gap while preserving exactly one provider finalization.
 
 Because `recording.ready` is in the same canonical Event journal, existing durable-stream and
 Webhook subscriptions can receive it through the normal Event delivery machinery. No recording
