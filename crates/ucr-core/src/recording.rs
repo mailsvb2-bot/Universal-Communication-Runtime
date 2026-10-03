@@ -254,7 +254,13 @@ pub trait RecordingProviderOperationStore: StorageProvider {
         recording_id: &RecordingId,
         operation: RecordingProviderOperation,
         max_lifecycle_revision: u64,
-    ) -> Result<Option<RecordingProviderOperationRecord>, DurableStoreError>;
+    ) -> Result<Option<RecordingProviderOperationRecord>, DurableStoreError> {
+        if max_lifecycle_revision == 0 {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let _ = (scope, recording_id, operation);
+        Ok(None)
+    }
 
     /// Marks one exact pending operation applied.
     ///
