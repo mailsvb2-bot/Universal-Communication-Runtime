@@ -56,7 +56,7 @@ impl core::fmt::Debug for EncryptedArchiveRecordingProvider {
 impl EncryptedArchiveRecordingProvider {
     /// Creates a local encrypted-at-rest archive provider.
     ///
-    /// The configured secret handle must use SecretPurpose::RecordingAtRest. Provider-owned paths
+    /// The configured secret handle must use `SecretPurpose::RecordingAtRest`. Provider-owned paths
     /// are private on Unix and symlinks/non-directories at those paths are rejected.
     ///
     /// # Errors
@@ -115,7 +115,6 @@ impl EncryptedArchiveRecordingProvider {
     }
 
     fn recording_digest(
-        &self,
         scope: &TenantScope,
         recording_id: &ucr_model::RecordingId,
     ) -> [u8; 32] {
@@ -127,10 +126,10 @@ impl EncryptedArchiveRecordingProvider {
 
     fn recording_dir(&self, scope: &TenantScope, recording_id: &ucr_model::RecordingId) -> PathBuf {
         self.objects_dir()
-            .join(hex_digest(&self.recording_digest(scope, recording_id)))
+            .join(hex_digest(&Self::recording_digest(scope, recording_id)))
     }
 
-    fn operation_binding(&self, request: &RecordingProviderRequest) -> [u8; 32] {
+    fn operation_binding(request: &RecordingProviderRequest) -> [u8; 32] {
         let mut encoded = CanonicalWriter::new(OPERATION_PATH_DOMAIN);
         encoded.scope(&request.scope);
         encoded.bytes(request.recording_id.as_opaque().as_wire_bytes());
@@ -142,12 +141,11 @@ impl EncryptedArchiveRecordingProvider {
     fn operation_path(&self, request: &RecordingProviderRequest) -> PathBuf {
         self.operations_dir().join(format!(
             "{}.uar",
-            hex_digest(&self.operation_binding(request))
+            hex_digest(&Self::operation_binding(request))
         ))
     }
 
     fn frame_binding(
-        &self,
         context: &RecordingProviderCaptureContext,
         frame: &EncryptedGroupMediaFrame,
     ) -> [u8; 32] {
@@ -179,12 +177,11 @@ impl EncryptedArchiveRecordingProvider {
         self.recording_dir(&context.scope, &context.recording_id)
             .join(format!(
                 "{}.uar",
-                hex_digest(&self.frame_binding(context, frame))
+                hex_digest(&Self::frame_binding(context, frame))
             ))
     }
 
     fn encode_operation(
-        &self,
         request: &RecordingProviderRequest,
     ) -> Result<Vec<u8>, RecordingProviderError> {
         let mut encoded = CanonicalWriter::new(OPERATION_RECORD_MAGIC);
@@ -198,7 +195,6 @@ impl EncryptedArchiveRecordingProvider {
     }
 
     fn encode_frame(
-        &self,
         context: &RecordingProviderCaptureContext,
         frame: &EncryptedGroupMediaFrame,
     ) -> Result<Vec<u8>, RecordingProviderError> {
@@ -292,23 +288,20 @@ impl EncryptedArchiveRecordingProvider {
                 .map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
             drop(temporary_file);
 
-            match fs::hard_link(&temporary_path, path) {
-                Ok(()) => {
-                    fs::remove_file(&temporary_path)
-                        .map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
-                    sync_directory(parent);
+            if fs::hard_link(&temporary_path, path).is_ok() {
+                fs::remove_file(&temporary_path)
+                    .map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
+                sync_directory(parent);
+                Ok(())
+            } else {
+                let _ = fs::remove_file(&temporary_path);
+                let existing = read_regular_file_if_present(path)?
+                    .ok_or(RecordingProviderError::TemporarilyUnavailable)?;
+                let decoded = self.open(&existing, binding)?;
+                if decoded == plaintext {
                     Ok(())
-                }
-                Err(_) => {
-                    let _ = fs::remove_file(&temporary_path);
-                    let existing = read_regular_file_if_present(path)?
-                        .ok_or(RecordingProviderError::TemporarilyUnavailable)?;
-                    let decoded = self.open(&existing, binding)?;
-                    if decoded == plaintext {
-                        Ok(())
-                    } else {
-                        Err(RecordingProviderError::Conflict)
-                    }
+                } else {
+                    Err(RecordingProviderError::Conflict)
                 }
             }
         })();
@@ -399,8 +392,8 @@ impl RecordingMediaProvider for EncryptedArchiveRecordingProvider {
 
     fn apply(&self, request: &RecordingProviderRequest) -> Result<(), RecordingProviderError> {
         self.ensure_layout()?;
-        let plaintext = self.encode_operation(request)?;
-        let binding = self.operation_binding(request);
+        let plaintext = Self::encode_operation(request)?;
+        let binding = Self::operation_binding(request);
 
         match request.operation {
             RecordingProviderOperation::Start => {
@@ -426,8 +419,8 @@ impl RecordingMediaProvider for EncryptedArchiveRecordingProvider {
     ) -> Result<(), RecordingProviderError> {
         self.ensure_layout()?;
         self.require_started_recording_dir(&context.scope, &context.recording_id)?;
-        let plaintext = self.encode_frame(context, frame)?;
-        let binding = self.frame_binding(context, frame);
+        let plaintext = Self::encode_frame(context, frame)?;
+        let binding = Self::frame_binding(context, frame);
         self.write_idempotent(&self.frame_path(context, frame), &plaintext, &binding)
     }
 }
@@ -717,7 +710,7 @@ fn create_private_temporary_file(parent: &Path) -> Result<(PathBuf, File), Recor
                 set_private_file_permissions(&path)?;
                 return Ok((path, file));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(_) => return Err(RecordingProviderError::TemporarilyUnavailable),
         }
     }
@@ -1008,7 +1001,7 @@ mod tests {
                 .any(|window| window == frame.ciphertext),
             "inner media ciphertext must still be encrypted by the at-rest layer"
         );
-        let binding = provider.frame_binding(&context, &frame);
+        let binding = EncryptedArchiveRecordingProvider::frame_binding(&context, &frame);
         let opened = provider.open(&stored, &binding).expect("decrypt at rest");
         assert_eq!(
             opened,
@@ -1055,9 +1048,9 @@ mod tests {
         provider.apply(&start).expect("retry can read previous key");
         assert_eq!(
             provider
-                .open(&old_object, &provider.operation_binding(&start))
+                .open(&old_object, &EncryptedArchiveRecordingProvider::operation_binding(&start))
                 .expect("old object decrypts through overlap"),
-            provider.encode_operation(&start).expect("operation")
+            EncryptedArchiveRecordingProvider::encode_operation(&start).expect("operation")
         );
 
         let context = context();
