@@ -2829,7 +2829,7 @@ mod tests {
     }
 
     #[test]
-    fn v47_partial_v48_ready_marker_recovers_idempotently() {
+    fn v47_store_migrates_ready_marker_to_v48_and_reopens_cleanly() {
         let db = TestDbPath::new();
         {
             let store = SqliteLocalStore::open(db.path()).expect("create current store");
@@ -2842,14 +2842,14 @@ mod tests {
                 .expect("simulate committed v48 objects before version bump");
         }
 
-        // create_v48_objects is intentionally not IF NOT EXISTS for the column, so a partial
-        // migration with the column already present must be treated as current schema, not rerun.
-        // Restore an exact v47 fixture by removing the v48-only column through table rebuild below.
+        // Restore the exact committed v47 table shape by removing the v48-only marker through a
+        // table rebuild, then prove the normal v47 -> v48 migration and reopen path.
         {
             let connection = rusqlite::Connection::open(db.path()).expect("open partial store");
             connection
                 .execute_batch(
                     "DROP INDEX IF EXISTS recording_provider_ready_recovery;
+                     DROP INDEX IF EXISTS recording_provider_operations_due;
                      ALTER TABLE recording_provider_operations RENAME TO recording_provider_operations_v48;
                      CREATE TABLE recording_provider_operations (
                          tenant_id TEXT NOT NULL,
