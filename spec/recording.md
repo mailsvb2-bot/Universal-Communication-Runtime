@@ -152,6 +152,31 @@ recording frame objects. This makes retry after an interrupted delete determinis
 raw media. It does not claim erasure of copies exported to another system and does not yet provide
 the authorized export/read surface required for Production Recording.
 
+
+### Opt-in realtime runtime wiring
+
+`ucr-runtime serve-realtime` can now opt into the concrete archive with
+`UCR_RECORDING_PROVIDER=encrypted-archive-v1`. Configuration is deliberately fail-closed:
+`UCR_RECORDING_ARCHIVE_ROOT` must be an absolute path, the at-rest key must come from
+`UCR_RECORDING_AT_REST_SECRET_PROVIDER=file-reload` with
+`UCR_RECORDING_AT_REST_SECRET_FILE` and an optional
+`UCR_RECORDING_AT_REST_SECRET_ID`, and the provider poll interval is bounded to 100 ms through
+60 s. Recording-related dependent variables without the explicit provider selector are rejected
+instead of silently ignored.
+
+The provider worker and realtime server use the same `ProductionRuntime` instance. Startup
+orchestration polls the worker first so it acquires the durable single-owner lease and registers the
+provider before the realtime server can begin accepting media. The server and worker then run under
+one `tokio::select!`: provider failure stops the combined command, while server termination cancels
+the worker. A cancellation-safe lease guard unregisters the in-process provider and releases the
+durable worker lease when the worker future is dropped, avoiding a stale lease after startup/bind
+failure or coordinated shutdown.
+
+This wiring is opt-in infrastructure only. No provider is configured by default and the public
+`ucr.conference.recording` capability remains false. Finalization/readiness, access-controlled
+export/download, deletion/recovery conformance and the remaining Production evidence are still
+required before the capability may be advertised.
+
 ### Durable provider-operation outbox
 
 Recording lifecycle transitions that require provider side effects now prepare a durable
@@ -191,8 +216,8 @@ after the durable worker lease is acquired and is removed when the worker exits.
 worker-holder IDs, Recording IDs, Call IDs and media/key material are not copied into health details.
 This health wiring does not change the public recording capability flag.
 
-This outbox, worker, validated capture path and encrypted archive provider are still not a complete
-Production recorder. The shipped runtime has no configured provider by default and
-`ucr.conference.recording` remains unavailable until operational provider wiring, finalization
-behavior, access/export authorization, recording-ready delivery, deletion/recovery conformance and
-the remaining Production evidence are present.
+This outbox, worker, validated capture path, encrypted archive provider and opt-in runtime wiring
+are still not a complete Production recorder. The shipped runtime has no configured provider by
+default and `ucr.conference.recording` remains unavailable until finalization behavior,
+access/export authorization, recording-ready delivery, deletion/recovery conformance and the
+remaining Production evidence are present.
