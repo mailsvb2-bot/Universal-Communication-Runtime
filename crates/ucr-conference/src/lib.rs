@@ -33,7 +33,7 @@ use ucr_protocol::{
 };
 use ucr_sfu::{
     SfuCapabilityProvider, SfuError, SfuForwardOutcome, SfuForwardSink, SfuRuntime,
-    SfuValidatedForwardBatch, dispatch_validated_forward_batch,
+    SfuValidatedForwardBatch, SfuValidatedSourceFrame, dispatch_validated_forward_batch,
 };
 
 pub trait ConferenceCapabilityProvider: fmt::Debug + Send + Sync {
@@ -46,6 +46,26 @@ pub struct PreparedConferenceCapabilities;
 impl ConferenceCapabilityProvider for PreparedConferenceCapabilities {
     fn current_capabilities(&self) -> Vec<ucr_model::CapabilityDescriptor> {
         phase30_conference_capabilities()
+    }
+}
+
+pub struct ConferenceValidatedSourceFrame {
+    call: CallSession,
+    media: SfuValidatedSourceFrame,
+}
+
+impl fmt::Debug for ConferenceValidatedSourceFrame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConferenceValidatedSourceFrame")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ConferenceValidatedSourceFrame {
+    #[must_use]
+    pub fn media_frame(&self) -> &SfuValidatedSourceFrame {
+        &self.media
     }
 }
 
@@ -1094,6 +1114,49 @@ where
         Ok(())
     }
 
+    /// Validates one source-authenticated encrypted Conference frame without requiring subscribers.
+    ///
+    /// This observer path intentionally performs no routing side effect. It exists so recording,
+    /// composition and similar infrastructure can consume one canonical source frame after current
+    /// Conference participant plus SFU Group/Call/Device/MLS/signature authorization is proven,
+    /// even when no live participant currently subscribes to that source.
+    ///
+    /// # Errors
+    /// Fails closed for a non-participant source or any underlying canonical SFU/media validation
+    /// failure.
+    pub fn validate_source_frame(
+        &self,
+        actor: &ScopedPrincipal,
+        actor_device_id: &DeviceId,
+        envelope: &SfuForwardEnvelope,
+    ) -> Result<ConferenceValidatedSourceFrame, ConferenceError> {
+        require_conference_stack(
+            self.conference_capabilities,
+            self.sfu_capabilities,
+            self.group_e2ee_capabilities,
+        )?;
+        let snapshot = conference_projection(
+            self.store,
+            actor,
+            &envelope.frame.header.scope,
+            &envelope.frame.header.call_id,
+        )?;
+        require_accepted_participant(&snapshot.call, &actor.principal)?;
+        let sfu = SfuRuntime::new(
+            self.authorization,
+            self.store,
+            self.group_e2ee_capabilities,
+            self.sfu_capabilities,
+        );
+        let media = sfu
+            .validate_source_frame(actor, actor_device_id, envelope)
+            .map_err(ConferenceError::Sfu)?;
+        Ok(ConferenceValidatedSourceFrame {
+            call: snapshot.call,
+            media,
+        })
+    }
+
     /// Routes one already-encrypted Conference frame through the Phase-29 SFU boundary.
     ///
     /// # Errors
@@ -1130,24 +1193,28 @@ where
         actor_device_id: &DeviceId,
         envelope: &SfuForwardEnvelope,
     ) -> Result<Option<SfuValidatedForwardBatch>, ConferenceError> {
-        require_conference_stack(
-            self.conference_capabilities,
-            self.sfu_capabilities,
-            self.group_e2ee_capabilities,
-        )?;
-        self.prune_subscriptions(&envelope.frame.header.scope, &envelope.frame.header.call_id)?;
-        let snapshot = conference_projection(
-            self.store,
-            actor,
-            &envelope.frame.header.scope,
-            &envelope.frame.header.call_id,
-        )?;
-        require_accepted_participant(&snapshot.call, &actor.principal)?;
-        let recipients = self.subscribers_for_source(
-            &snapshot.call,
-            &actor.principal,
-            envelope.frame.header.media_kind,
-        )?;
+        let validated = self.validate_source_frame(actor, actor_device_id, envelope)?;
+        self.prepare_forward_from_validated_source(validated)
+    }
+
+    /// Consumes one Conference/SFU source-validation token and derives current subscriber fan-out.
+    ///
+    /// This is the hot-path continuation used after an optional media observer has inspected the
+    /// same validated ciphertext. It deliberately does not repeat source/device/MLS/signature/send
+    /// authorization; recipient membership and receive permission remain fail-closed.
+    ///
+    /// # Errors
+    /// Returns subscription-state or recipient authorization failures.
+    pub fn prepare_forward_from_validated_source(
+        &self,
+        validated: ConferenceValidatedSourceFrame,
+    ) -> Result<Option<SfuValidatedForwardBatch>, ConferenceError> {
+        let scope = validated.media.envelope().frame.header.scope.clone();
+        let call_id = validated.media.envelope().frame.header.call_id.clone();
+        let source = validated.media.envelope().frame.header.source.clone();
+        let media_kind = validated.media.envelope().frame.header.media_kind;
+        self.prune_subscriptions(&scope, &call_id)?;
+        let recipients = self.subscribers_for_source(&validated.call, &source, media_kind)?;
         if recipients.is_empty() {
             return Ok(None);
         }
@@ -1157,7 +1224,7 @@ where
             self.group_e2ee_capabilities,
             self.sfu_capabilities,
         );
-        sfu.prepare_forward_selected(actor, actor_device_id, envelope, &recipients)
+        sfu.prepare_forward_selected_from_validated_source(validated.media, &recipients)
             .map(Some)
             .map_err(ConferenceError::Sfu)
     }

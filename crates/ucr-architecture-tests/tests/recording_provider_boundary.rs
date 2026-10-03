@@ -115,3 +115,28 @@ fn recording_provider_outbox_has_restart_safe_single_owner_runtime_worker() {
         "provider health must not register before the durable worker lease is acquired"
     );
 }
+
+#[test]
+fn recording_media_observer_uses_canonical_source_validation_not_recipient_fanout() {
+    let sfu = read("crates/ucr-sfu/src/lib.rs");
+    let conference = read("crates/ucr-conference/src/lib.rs");
+    let grpc = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let exports = read("crates/ucr-api-grpc/src/lib.rs");
+    let spec = read("spec/recording.md");
+
+    assert!(sfu.contains("pub struct SfuValidatedSourceFrame"));
+    assert!(sfu.contains("pub fn validate_source_frame("));
+    assert!(sfu.contains("prepare_forward_selected_from_validated_source"));
+    assert!(conference.contains("pub fn validate_source_frame("));
+    assert!(conference.contains("prepare_forward_from_validated_source"));
+    assert!(grpc.contains("pub trait RealtimeValidatedMediaObserver"));
+    assert!(grpc.contains("prepare_observed_forward"));
+    assert!(grpc.contains(".validate_source_frame(&actor_for(claims), device_id, envelope)"));
+    assert!(grpc.contains(".prepare_forward_from_validated_source(validated)"));
+    assert!(exports.contains("RealtimeValidatedMediaObserver"));
+    assert!(spec.contains("independent from subscription"));
+    assert!(spec.contains("single-use token"));
+    assert!(spec.contains("is not repeated on the frame-rate-sensitive"));
+    assert!(spec.contains("contains ciphertext plus authenticated routing metadata"));
+    assert!(spec.contains("`ucr.conference.recording` remains unavailable"));
+}

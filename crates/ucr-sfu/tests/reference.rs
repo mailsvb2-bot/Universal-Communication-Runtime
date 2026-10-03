@@ -1,4 +1,7 @@
-use std::sync::Mutex;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use ucr_core::{
     AuthorizationEvaluator, CallStore, DeviceLifecycleStore, GroupStore, IdentityStore,
@@ -10,7 +13,8 @@ use ucr_model::*;
 use ucr_protocol::{
     ALGORITHM_VERSION, CanonicalError, CanonicalErrorCode, GROUP_MEDIA_FRAME_HEADER_V2,
     GROUP_MLS_CAPABILITY, KEY_FORMAT_VERSION, NegotiatedSession, SCREEN_SHARE_SEND_PERMISSION,
-    SCREEN_SHARE_VIDEO_CAPABILITY, SIGNATURE_ALGORITHM_ID, screen_share_v2_negotiation,
+    SCREEN_SHARE_VIDEO_CAPABILITY, SIGNATURE_ALGORITHM_ID, VIDEO_RECEIVE_PERMISSION,
+    VIDEO_SEND_PERMISSION, screen_share_v2_negotiation,
 };
 use ucr_sfu::{
     PreparedSfuCapabilities, SfuError, SfuForwardOutcome, SfuForwardSink, SfuForwardSinkError,
@@ -35,6 +39,24 @@ impl AuthorizationEvaluator for DenyReceive {
         } else {
             Ok(())
         }
+    }
+}
+
+#[derive(Debug, Default)]
+struct CountingAuthorization {
+    sends: AtomicUsize,
+    receives: AtomicUsize,
+}
+
+impl AuthorizationEvaluator for CountingAuthorization {
+    fn authorize(&self, request: &AuthorizationRequest) -> Result<(), CanonicalError> {
+        if request.permission == VIDEO_SEND_PERMISSION {
+            self.sends.fetch_add(1, Ordering::Relaxed);
+        }
+        if request.permission == VIDEO_RECEIVE_PERMISSION {
+            self.receives.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
     }
 }
 
@@ -490,6 +512,77 @@ fn encrypted_group_frame_fans_out_bit_exactly_to_current_call_recipients() {
         .collect::<Vec<_>>();
     assert!(recipients.contains(&fixture.bob.principal));
     assert!(recipients.contains(&fixture.charlie.principal));
+}
+
+#[test]
+fn validated_source_frame_is_independent_from_recipient_authorization() {
+    let fixture = build_fixture();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&DenyReceive, &fixture.store, &e2ee, &sfu);
+
+    let validated = runtime
+        .validate_source_frame(&fixture.alice, &fixture.alice_device, &fixture.envelope)
+        .expect("validated source frame");
+    assert_eq!(validated.envelope(), &fixture.envelope);
+
+    let sink = CaptureSink::default();
+    assert!(matches!(
+        runtime.forward(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+            &sink,
+        ),
+        Err(SfuError::Authorization(error))
+            if error.code == CanonicalErrorCode::PermissionDenied
+    ));
+    assert!(sink.forwarded().is_empty());
+}
+
+#[test]
+fn validated_source_token_reuses_source_authorization_for_recipient_batch() {
+    let fixture = build_fixture();
+    let authorization = CountingAuthorization::default();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&authorization, &fixture.store, &e2ee, &sfu);
+
+    let validated = runtime
+        .validate_source_frame(&fixture.alice, &fixture.alice_device, &fixture.envelope)
+        .expect("validated source frame");
+    assert_eq!(authorization.sends.load(Ordering::Relaxed), 1);
+    assert_eq!(authorization.receives.load(Ordering::Relaxed), 0);
+
+    let batch = runtime
+        .prepare_forward_selected_from_validated_source(
+            validated,
+            std::slice::from_ref(&fixture.bob.principal),
+        )
+        .expect("recipient batch from validated source");
+    assert_eq!(batch.target_count(), 1);
+    assert_eq!(authorization.sends.load(Ordering::Relaxed), 1);
+    assert_eq!(authorization.receives.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn validated_source_frame_rejects_spoofed_device_and_tampered_ciphertext() {
+    let fixture = build_fixture();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&AllowAll, &fixture.store, &e2ee, &sfu);
+
+    assert!(matches!(
+        runtime.validate_source_frame(&fixture.alice, &device("bob"), &fixture.envelope,),
+        Err(SfuError::SourceMismatch)
+    ));
+
+    let mut tampered = fixture.envelope.clone();
+    tampered.frame.ciphertext[0] ^= 0x01;
+    assert!(matches!(
+        runtime.validate_source_frame(&fixture.alice, &fixture.alice_device, &tampered,),
+        Err(SfuError::MediaE2ee(_))
+    ));
 }
 
 #[test]
