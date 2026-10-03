@@ -419,12 +419,8 @@ where
         match provider.apply(&record.request) {
             Ok(()) => {
                 if record.request.operation == RecordingProviderOperation::Stop {
-                    let event = ready_event(
-                        &record.request,
-                        provider.provider_id(),
-                        now_unix_ms,
-                        false,
-                    )?;
+                    let event =
+                        ready_event(&record.request, provider.provider_id(), now_unix_ms, false)?;
                     store.commit_recording_provider_stop_ready_event(&record.request, &event)?;
                 } else {
                     store.mark_recording_provider_operation_applied(&record.request)?;
