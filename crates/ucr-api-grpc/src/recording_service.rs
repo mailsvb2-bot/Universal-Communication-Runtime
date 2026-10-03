@@ -1192,11 +1192,9 @@ mod provider_ready_event_tests {
         let request =
             RecordingProviderRequest::for_session(&recording, RecordingProviderOperation::Stop);
         let first =
-            recording_provider_ready_event(&recording, &request, 40, false)
-                .expect("ready event");
+            recording_provider_ready_event(&recording, &request, 40, false).expect("ready event");
         let retry =
-            recording_provider_ready_event(&recording, &request, "encrypted-archive-v1", 40, false)
-                .expect("ready retry");
+            recording_provider_ready_event(&recording, &request, 40, false).expect("ready retry");
         assert_eq!(first, retry);
         assert_eq!(first.event_type, "ucr.recording.ready");
         assert_eq!(first.logical_order, recording.revision);
@@ -1233,11 +1231,9 @@ mod provider_ready_event_tests {
         let request =
             RecordingProviderRequest::for_session(&recording, RecordingProviderOperation::Stop);
         let normal =
-            recording_provider_ready_event(&recording, &request, "encrypted-archive-v1", 40, false)
-                .expect("normal event");
-        let recovered =
-            recording_provider_ready_event(&recording, &request, 50, true)
-                .expect("recovered event");
+            recording_provider_ready_event(&recording, &request, 40, false).expect("normal event");
+        let recovered = recording_provider_ready_event(&recording, &request, 50, true)
+            .expect("recovered event");
         assert_eq!(normal.event_id, recovered.event_id);
         assert_eq!(normal.actor.actor_id, recovered.actor.actor_id);
         assert_eq!(
