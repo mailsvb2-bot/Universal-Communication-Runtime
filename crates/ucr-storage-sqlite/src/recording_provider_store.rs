@@ -803,6 +803,7 @@ mod tests {
         {
             let transaction = connection.unchecked_transaction().expect("transaction");
             create_v47_objects(&transaction).expect("v47 objects");
+            create_v48_objects(&transaction).expect("v48 objects");
             transaction.commit().expect("commit schema");
         }
         connection
@@ -896,6 +897,154 @@ mod tests {
             .expect("applied operation");
         assert_eq!(applied.state, RecordingProviderOperationState::Applied);
         assert_eq!(applied.request, record.request);
+    }
+
+    fn ready_event(request: &RecordingProviderRequest, payload: &[u8]) -> EventEnvelope {
+        use ucr_model::{
+            ActorId, ActorKind, ActorRef, CorrelationContext, DeviceId, DeviceRef, EventId,
+            IdentityId, PrincipalId, ProtocolVersion,
+        };
+
+        EventEnvelope {
+            event_id: EventId::from_opaque(
+                OpaqueId::new(format!(
+                    "ready-event-{}",
+                    request.lifecycle_revision
+                ))
+                .expect("event id"),
+            ),
+            scope: request.scope.clone(),
+            event_type: "ucr.recording.ready".to_owned(),
+            payload: payload.to_vec(),
+            actor: ActorRef {
+                actor_id: ActorId::from_opaque(OpaqueId::new("ready-actor").expect("actor")),
+                kind: ActorKind::System,
+                on_behalf_of: Some(PrincipalId::from_opaque(
+                    OpaqueId::new("ready-requester").expect("requester"),
+                )),
+            },
+            source_device: DeviceRef {
+                device_id: DeviceId::from_opaque(OpaqueId::new("ready-device").expect("device")),
+                identity_id: IdentityId::from_opaque(
+                    OpaqueId::new("ready-identity").expect("identity"),
+                ),
+            },
+            wall_time_unix_ms: 200,
+            logical_order: request.lifecycle_revision,
+            correlation: CorrelationContext {
+                correlation_id: OpaqueId::new("ready-correlation").expect("correlation"),
+                causation_id: None,
+                idempotency_key: Some("ready".to_owned()),
+            },
+            schema_version: ProtocolVersion::new(1, 0),
+            integrity_metadata: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn stop_ready_event_commit_is_atomic_and_idempotent() {
+        let store = store();
+        let record = RecordingProviderOperationRecord {
+            request: request(3, RecordingProviderOperation::Stop),
+            state: RecordingProviderOperationState::Pending,
+            attempts: 0,
+            available_at_unix_ms: 100,
+        };
+        store
+            .prepare_recording_provider_operation(&record)
+            .expect("prepare stop");
+        let event = ready_event(&record.request, b"ready");
+        store
+            .commit_recording_provider_stop_ready_event(&record.request, &event)
+            .expect("commit ready event");
+        store
+            .commit_recording_provider_stop_ready_event(&record.request, &event)
+            .expect("exact ready retry");
+
+        let applied = store
+            .recording_provider_operation(&record.request)
+            .expect("load stop")
+            .expect("stop");
+        assert_eq!(applied.state, RecordingProviderOperationState::Applied);
+        assert_eq!(applied.attempts, 1);
+        assert!(
+            store
+                .recording_provider_stops_needing_ready_event(10)
+                .expect("recovery view")
+                .is_empty()
+        );
+        let persisted = ucr_core::EventJournalStore::event(
+            &store,
+            &event.scope,
+            &event.event_id,
+        )
+        .expect("event lookup")
+        .expect("ready event");
+        assert_eq!(persisted, event);
+    }
+
+    #[test]
+    fn conflicting_ready_event_rolls_back_stop_application() {
+        let store = store();
+        let record = RecordingProviderOperationRecord {
+            request: request(3, RecordingProviderOperation::Stop),
+            state: RecordingProviderOperationState::Pending,
+            attempts: 0,
+            available_at_unix_ms: 100,
+        };
+        store
+            .prepare_recording_provider_operation(&record)
+            .expect("prepare stop");
+        let expected = ready_event(&record.request, b"expected");
+        let mut conflicting = expected.clone();
+        conflicting.payload = b"conflict".to_vec();
+        ucr_core::EventJournalStore::append_event(&store, &conflicting).expect("seed conflict");
+
+        assert_eq!(
+            store.commit_recording_provider_stop_ready_event(&record.request, &expected),
+            Err(DurableStoreError::Conflict)
+        );
+        let pending = store
+            .recording_provider_operation(&record.request)
+            .expect("load stop")
+            .expect("stop");
+        assert_eq!(pending.state, RecordingProviderOperationState::Pending);
+        assert_eq!(pending.attempts, 0);
+    }
+
+    #[test]
+    fn legacy_applied_stop_is_discovered_for_ready_recovery() {
+        let store = store();
+        let record = RecordingProviderOperationRecord {
+            request: request(3, RecordingProviderOperation::Stop),
+            state: RecordingProviderOperationState::Pending,
+            attempts: 0,
+            available_at_unix_ms: 100,
+        };
+        store
+            .prepare_recording_provider_operation(&record)
+            .expect("prepare stop");
+        store
+            .mark_recording_provider_operation_applied(&record.request)
+            .expect("legacy applied stop");
+
+        let due = store
+            .recording_provider_stops_needing_ready_event(10)
+            .expect("recovery candidates");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].request, record.request);
+
+        let event = ready_event(&record.request, b"recovered");
+        store
+            .commit_recording_provider_stop_ready_event(&record.request, &event)
+            .expect("backfill event");
+        assert!(
+            store
+                .recording_provider_stops_needing_ready_event(10)
+                .expect("recovery candidates after backfill")
+                .is_empty()
+        );
     }
 
     #[test]
