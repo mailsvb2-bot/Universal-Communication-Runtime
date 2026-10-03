@@ -71,6 +71,10 @@ fn encrypted_archive_runtime_wiring_is_opt_in_same_runtime_and_cancellation_safe
     assert!(main.contains("UCR_RECORDING_PROVIDER"));
     assert!(main.contains("encrypted-archive-v1"));
     assert!(main.contains("UCR_RECORDING_ARCHIVE_ROOT"));
+    assert!(main.contains("UCR_RECORDING_ARCHIVE_ROOT must be an absolute path"));
+    assert!(main.contains("requires UCR_RECORDING_PROVIDER=encrypted-archive-v1"));
+    assert!(main.contains("MIN_RECORDING_PROVIDER_POLL_INTERVAL"));
+    assert!(main.contains("MAX_RECORDING_PROVIDER_POLL_INTERVAL"));
     assert!(main.contains("UCR_RECORDING_AT_REST_SECRET_PROVIDER"));
     assert!(main.contains("SecretPurpose::RecordingAtRest"));
     assert!(main.contains("EncryptedArchiveRecordingProvider::new"));
