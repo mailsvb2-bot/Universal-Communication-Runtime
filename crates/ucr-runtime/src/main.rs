@@ -267,8 +267,7 @@ fn recording_provider_from_env() -> Result<Option<ConfiguredRecordingProvider>, 
                 .parse::<u64>()
                 .map(Duration::from_millis)
                 .map_err(|_| {
-                    "UCR_RECORDING_PROVIDER_POLL_INTERVAL_MS must be an unsigned integer"
-                        .to_owned()
+                    "UCR_RECORDING_PROVIDER_POLL_INTERVAL_MS must be an unsigned integer".to_owned()
                 })
         })
         .transpose()?
