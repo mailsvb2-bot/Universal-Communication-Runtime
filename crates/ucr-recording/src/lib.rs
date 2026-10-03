@@ -1002,8 +1002,7 @@ mod tests {
         let opened = provider.open(&stored, &binding).expect("decrypt at rest");
         assert_eq!(
             opened,
-            provider
-                .encode_frame(&context, &frame)
+            EncryptedArchiveRecordingProvider::encode_frame(&context, &frame)
                 .expect("frame record")
         );
 
