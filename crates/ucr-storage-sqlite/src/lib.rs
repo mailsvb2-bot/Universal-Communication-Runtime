@@ -675,7 +675,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v47(connection);
+        return verify_schema_v48(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -2829,7 +2829,7 @@ mod tests {
     }
 
     #[test]
-    fn v46_partial_v47_outbox_recovers_idempotently() {
+    fn v47_partial_v48_ready_marker_recovers_idempotently() {
         let db = TestDbPath::new();
         {
             let store = SqliteLocalStore::open(db.path()).expect("create current store");
@@ -2838,11 +2838,58 @@ mod tests {
         {
             let connection = rusqlite::Connection::open(db.path()).expect("open current store");
             connection
-                .pragma_update(None, "user_version", SQLITE_SCHEMA_V46)
-                .expect("simulate committed objects before version bump");
+                .pragma_update(None, "user_version", SQLITE_SCHEMA_V47)
+                .expect("simulate committed v48 objects before version bump");
         }
 
-        let recovered = SqliteLocalStore::open(db.path()).expect("recover partial v47 migration");
+        // create_v48_objects is intentionally not IF NOT EXISTS for the column, so a partial
+        // migration with the column already present must be treated as current schema, not rerun.
+        // Restore an exact v47 fixture by removing the v48-only column through table rebuild below.
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open partial store");
+            connection
+                .execute_batch(
+                    "DROP INDEX IF EXISTS recording_provider_ready_recovery;
+                     ALTER TABLE recording_provider_operations RENAME TO recording_provider_operations_v48;
+                     CREATE TABLE recording_provider_operations (
+                         tenant_id TEXT NOT NULL,
+                         namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+                         namespace_id TEXT NOT NULL,
+                         recording_id TEXT NOT NULL,
+                         lifecycle_revision BLOB NOT NULL CHECK(length(lifecycle_revision) = 8),
+                         operation TEXT NOT NULL CHECK(operation IN ('start','stop','delete')),
+                         call_id TEXT NOT NULL,
+                         expires_at_unix_ms INTEGER NOT NULL,
+                         state TEXT NOT NULL CHECK(state IN ('pending','applied','failed')),
+                         attempts INTEGER NOT NULL CHECK(attempts BETWEEN 0 AND 4294967295),
+                         available_at_unix_ms INTEGER NOT NULL,
+                         PRIMARY KEY(
+                             tenant_id, namespace_present, namespace_id, recording_id,
+                             lifecycle_revision, operation
+                         ),
+                         FOREIGN KEY(tenant_id, namespace_present, namespace_id, recording_id)
+                             REFERENCES recordings(tenant_id, namespace_present, namespace_id, recording_id)
+                             ON DELETE CASCADE,
+                         CHECK((namespace_present = 0 AND namespace_id = '') OR
+                               (namespace_present = 1 AND namespace_id <> ''))
+                     ) WITHOUT ROWID;
+                     INSERT INTO recording_provider_operations (
+                         tenant_id, namespace_present, namespace_id, recording_id,
+                         lifecycle_revision, operation, call_id, expires_at_unix_ms,
+                         state, attempts, available_at_unix_ms
+                     )
+                     SELECT tenant_id, namespace_present, namespace_id, recording_id,
+                            lifecycle_revision, operation, call_id, expires_at_unix_ms,
+                            state, attempts, available_at_unix_ms
+                     FROM recording_provider_operations_v48;
+                     DROP TABLE recording_provider_operations_v48;
+                     CREATE INDEX recording_provider_operations_due
+                         ON recording_provider_operations(state, available_at_unix_ms);",
+                )
+                .expect("rebuild exact v47 provider table");
+        }
+
+        let recovered = SqliteLocalStore::open(db.path()).expect("migrate v47 to v48");
         assert_eq!(recovered.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
         drop(recovered);
 
