@@ -762,7 +762,7 @@ fn migrate_v46_to_v47(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     recording_provider_store::create_v47_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V47)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
