@@ -173,9 +173,9 @@ durable worker lease when the worker future is dropped, avoiding a stale lease a
 failure or coordinated shutdown.
 
 This wiring is opt-in infrastructure only. No provider is configured by default and the public
-`ucr.conference.recording` capability remains false. Finalization/readiness, access-controlled
-export/download, deletion/recovery conformance and the remaining Production evidence are still
-required before the capability may be advertised.
+`ucr.conference.recording` capability remains false. Provider finalization/readiness is now
+durable and Event-backed, but access-controlled export/download, deletion/recovery conformance and
+the remaining Production evidence are still required before the capability may be advertised.
 
 ### Durable provider-operation outbox
 
@@ -188,10 +188,12 @@ canonical lifecycle commit is durable.
 
 The provider-operation identity is exactly
 `(scope, recording_id, lifecycle_revision, operation)`. Exact prepare retries deduplicate; changed
-reuse conflicts. Pending operations survive restart in SQLite schema v47. A bounded dispatcher
-applies only due pending operations, marks successful requests Applied, schedules bounded
-exponential retry for transient provider failures, and marks permanent or retry-exhausted requests
-Failed. The dispatcher never changes canonical Recording lifecycle state.
+reuse conflicts. Pending operations survive restart. SQLite schema v48 adds a storage-only
+`ready_event_emitted` marker to Stop operations. A bounded dispatcher applies only due pending
+operations, schedules bounded exponential retry for transient provider failures, and marks permanent
+or retry-exhausted requests Failed. Start/Delete success uses the normal Applied transition. Stop
+success instead commits Applied plus the canonical `ucr.recording.ready` Event in one SQLite
+transaction. The dispatcher never changes canonical Recording lifecycle state.
 
 SQLite commits Recording snapshot + Event + provider operation in one IMMEDIATE transaction. The
 memory store mirrors the same semantics under one mutex for conformance tests. Stores that cannot
@@ -200,8 +202,8 @@ second non-atomic write.
 
 The runtime now also exposes a durable single-owner provider dispatcher worker over this outbox.
 It holds a SQLite-backed worker lease, renews that lease while active, drains only bounded due
-Start/Stop/Delete operations through `dispatch_recording_provider_operations_once`, and leaves all
-retry/terminal-failure semantics in the canonical outbox. A competing live worker fails closed and an
+Start/Stop/Delete operations through the ready-aware dispatcher, and leaves all retry/terminal-failure
+semantics in the canonical outbox. A competing live worker fails closed and an
 unsafe polling interval is rejected before provider side effects. Logs contain only aggregate sweep
 counts plus the provider implementation ID at startup, never Recording/Call IDs or media/key data.
 The worker does not make Recording capability available by itself.
@@ -216,8 +218,39 @@ after the durable worker lease is acquired and is removed when the worker exits.
 worker-holder IDs, Recording IDs, Call IDs and media/key material are not copied into health details.
 This health wiring does not change the public recording capability flag.
 
-This outbox, worker, validated capture path, encrypted archive provider and opt-in runtime wiring
-are still not a complete Production recorder. The shipped runtime has no configured provider by
-default and `ucr.conference.recording` remains unavailable until finalization behavior,
-access/export authorization, recording-ready delivery, deletion/recovery conformance and the
-remaining Production evidence are present.
+### Provider finalization and recording-ready Event
+
+`RecordingState::Ready` and `ucr.recording.ready` deliberately mean different things.
+Lifecycle `Ready` means consent/policy gates are satisfied **before** Start. The
+`ucr.recording.ready` Event means a provider Stop has successfully finalized the stopped
+recording artifact.
+
+The public payload is `RecordingReadyEvent`: scope, Recording ID, Call ID, the exact provider Stop
+lifecycle revision, provider ID, ready-observation timestamp and a
+`recovered_after_upgrade` flag. Event identity, system actor and source-device identities are
+deterministically derived from the canonical Stop identity plus provider ID, so exact retries do not
+invent a second fact. Actor attribution remains on behalf of the original recording requester.
+
+Provider finalization is necessarily outside the local SQLite transaction, so the execution order is
+provider Stop first, then local durable commit. Exact provider Stop requests are idempotent. If the
+process crashes after provider success but before the local commit, the Stop remains Pending and the
+same provider operation is retried safely. Once provider success is known, SQLite atomically marks
+that Stop Applied, appends `ucr.recording.ready` to the canonical Event journal, and flips the
+storage-only ready marker. Event conflict rolls the entire local transition back.
+
+Upgrade recovery is explicit. v47 databases migrate to SQLite schema v48 with
+`ready_event_emitted=0`. Already-Applied legacy Stop rows are discovered by a bounded recovery
+view. The worker creates the same deterministic ready fact with
+`recovered_after_upgrade=true` and atomically appends it plus the marker **without calling the
+provider again**. This closes the old-binary upgrade gap while preserving exactly one provider
+finalization.
+
+Because `recording.ready` is in the same canonical Event journal, existing durable-stream and
+Webhook subscriptions can receive it through the normal Event delivery machinery. No recording
+media bytes, storage paths, encryption keys or export URLs are placed in this Event.
+
+This outbox, worker, validated capture path, encrypted archive provider, opt-in runtime wiring and
+durable provider-ready Event are still not a complete Production recorder. The shipped runtime has
+no configured provider by default and `ucr.conference.recording` remains unavailable until
+access/export authorization, deletion/recovery conformance and the remaining Production evidence
+are present.
