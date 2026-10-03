@@ -39,7 +39,7 @@ use ucr_core::{
     MAX_RECORDING_PROVIDER_OPERATION_BATCH, MAX_RECORDING_RETENTION_BATCH, RecordingMediaProvider,
     RecordingProviderCaptureContext, RecordingProviderDispatchSweep, RecordingProviderError,
     RecordingProviderHealth, RecordingProviderOperation, RecordingProviderOperationState,
-    RecordingProviderOperationStore, RecordingProviderRequest, RecordingStore, StorageHealth,
+    RecordingProviderOperationStore, RecordingStore, StorageHealth,
     StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome,
     dispatch_recording_provider_operations_once, generate_opaque_id,
 };
