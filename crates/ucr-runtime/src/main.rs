@@ -7,13 +7,16 @@ use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use ucr_api_grpc::{
     MachineTokenVerificationKeyProvider, SfuNodeMediaClientTlsConfig, SfuPlacementRoutingPolicy,
 };
-use ucr_core::WebhookDispatchOutcome;
+use ucr_core::{RecordingMediaProvider, WebhookDispatchOutcome};
 use ucr_crypto::{MAX_MACHINE_TOKEN_JWKS_BYTES, MachineTokenPublicKeySet};
 use ucr_model::OpaqueId;
 use ucr_protocol::{CanonicalError, CanonicalErrorCode};
+use ucr_recording::EncryptedArchiveRecordingProvider;
 use ucr_runtime::{
-    DEFAULT_OPERATOR_BIND, DEFAULT_RECORDING_RETENTION_POLL_INTERVAL, DEFAULT_RUNTIME_BIND,
-    DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MachineAuthRuntimeConfig, MachineBearerRuntimeConfig,
+    DEFAULT_OPERATOR_BIND, DEFAULT_RECORDING_PROVIDER_POLL_INTERVAL,
+    DEFAULT_RECORDING_RETENTION_POLL_INTERVAL, DEFAULT_RUNTIME_BIND,
+    DEFAULT_WEBHOOK_WORKER_POLL_INTERVAL, MAX_RECORDING_PROVIDER_POLL_INTERVAL,
+    MIN_RECORDING_PROVIDER_POLL_INTERVAL, MachineAuthRuntimeConfig, MachineBearerRuntimeConfig,
     ProductionRuntime, RealtimeRuntimeConfig, SfuNodeMediaRuntimeConfig,
     SfuPlacementMediaRuntimeConfig,
 };
@@ -224,6 +227,127 @@ fn secret_provider_from_env(
             .map_err(|error| format!("load secret provider manifest: {error:?}"))?,
     );
     Ok(Some((provider, handle)))
+}
+
+struct ConfiguredRecordingProvider {
+    provider: Arc<dyn RecordingMediaProvider>,
+    poll_interval: Duration,
+}
+
+fn recording_provider_from_env() -> Result<Option<ConfiguredRecordingProvider>, String> {
+    const DEPENDENT_VARIABLES: [&str; 5] = [
+        "UCR_RECORDING_ARCHIVE_ROOT",
+        "UCR_RECORDING_AT_REST_SECRET_PROVIDER",
+        "UCR_RECORDING_AT_REST_SECRET_FILE",
+        "UCR_RECORDING_AT_REST_SECRET_ID",
+        "UCR_RECORDING_PROVIDER_POLL_INTERVAL_MS",
+    ];
+
+    let Some(provider_kind) = std::env::var("UCR_RECORDING_PROVIDER").ok() else {
+        if let Some(variable) = DEPENDENT_VARIABLES
+            .into_iter()
+            .find(|variable| std::env::var_os(variable).is_some())
+        {
+            return Err(format!(
+                "{variable} requires UCR_RECORDING_PROVIDER=encrypted-archive-v1"
+            ));
+        }
+        return Ok(None);
+    };
+    if provider_kind != "encrypted-archive-v1" {
+        return Err(
+            "UCR_RECORDING_PROVIDER must be encrypted-archive-v1 when configured".to_owned(),
+        );
+    }
+
+    let poll_interval = std::env::var("UCR_RECORDING_PROVIDER_POLL_INTERVAL_MS")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map(Duration::from_millis)
+                .map_err(|_| {
+                    "UCR_RECORDING_PROVIDER_POLL_INTERVAL_MS must be an unsigned integer"
+                        .to_owned()
+                })
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_RECORDING_PROVIDER_POLL_INTERVAL);
+    if !(MIN_RECORDING_PROVIDER_POLL_INTERVAL..=MAX_RECORDING_PROVIDER_POLL_INTERVAL)
+        .contains(&poll_interval)
+    {
+        return Err(
+            "UCR_RECORDING_PROVIDER_POLL_INTERVAL_MS must be between 100 and 60000".to_owned(),
+        );
+    }
+
+    let archive_root = PathBuf::from(required_env("UCR_RECORDING_ARCHIVE_ROOT")?);
+    if !archive_root.is_absolute() {
+        return Err("UCR_RECORDING_ARCHIVE_ROOT must be an absolute path".to_owned());
+    }
+    let (secret_provider, secret_handle) = secret_provider_from_env(
+        "UCR_RECORDING_AT_REST_SECRET_PROVIDER",
+        "UCR_RECORDING_AT_REST_SECRET_FILE",
+        "UCR_RECORDING_AT_REST_SECRET_ID",
+        "recording-at-rest",
+        SecretPurpose::RecordingAtRest,
+    )?
+    .ok_or_else(|| {
+        "UCR_RECORDING_AT_REST_SECRET_PROVIDER=file-reload is required when recording is configured"
+            .to_owned()
+    })?;
+    let provider: Arc<dyn RecordingMediaProvider> = Arc::new(
+        EncryptedArchiveRecordingProvider::new(archive_root, secret_provider, secret_handle)
+            .map_err(|error| format!("configure encrypted recording archive: {error:?}"))?,
+    );
+    Ok(Some(ConfiguredRecordingProvider {
+        provider,
+        poll_interval,
+    }))
+}
+
+async fn serve_realtime_with_optional_recording_provider(
+    runtime: Arc<ProductionRuntime>,
+    bind: SocketAddr,
+    operator_bind: SocketAddr,
+    config: RealtimeRuntimeConfig,
+    machine_bearer: Option<MachineBearerRuntimeConfig>,
+    recording: Option<ConfiguredRecordingProvider>,
+) -> Result<(), String> {
+    let server_runtime = Arc::clone(&runtime);
+    let server = async move {
+        match machine_bearer {
+            Some(machine_bearer) => {
+                server_runtime
+                    .serve_realtime_with_machine_bearer_and_operator(
+                        bind,
+                        operator_bind,
+                        config,
+                        machine_bearer,
+                    )
+                    .await
+            }
+            None => {
+                server_runtime
+                    .serve_realtime_with_operator(bind, operator_bind, config)
+                    .await
+            }
+        }
+    };
+
+    let Some(recording) = recording else {
+        return server.await;
+    };
+    let worker = Arc::clone(&runtime)
+        .run_recording_provider_worker(recording.provider, recording.poll_interval);
+    tokio::pin!(worker);
+    tokio::pin!(server);
+
+    tokio::select! {
+        biased;
+        worker_result = &mut worker => worker_result,
+        server_result = &mut server => server_result,
+    }
 }
 
 fn reconcile_turn_secrets_command(
@@ -704,24 +828,18 @@ async fn serve_realtime_command(
     if let Some(sfu_placement_media) = sfu_placement_media_config_from_env()? {
         config = config.with_sfu_placement_media(sfu_placement_media);
     }
+    let recording = recording_provider_from_env()?;
+    let machine_bearer = machine_bearer_config_from_env()?;
     let runtime = Arc::new(ProductionRuntime::open_existing(database)?);
-    match machine_bearer_config_from_env()? {
-        Some(machine_bearer) => {
-            runtime
-                .serve_realtime_with_machine_bearer_and_operator(
-                    bind,
-                    operator_bind,
-                    config,
-                    machine_bearer,
-                )
-                .await
-        }
-        None => {
-            runtime
-                .serve_realtime_with_operator(bind, operator_bind, config)
-                .await
-        }
-    }
+    serve_realtime_with_optional_recording_provider(
+        runtime,
+        bind,
+        operator_bind,
+        config,
+        machine_bearer,
+        recording,
+    )
+    .await
 }
 
 fn dispatch_webhook_once(
