@@ -78,6 +78,25 @@ session. The integration may stop/recreate the recording with the new roster rat
 recording a participant with no notification/consent evidence. Lookup is bounded; exceeding the
 active-recording scan ceiling fails closed rather than skipping an active recording.
 
+### Validated encrypted-media observer seam
+
+The realtime service now has one optional `RealtimeValidatedMediaObserver` seam on the canonical
+Conference/SFU source path. The observer is invoked only after the exact source participant, Device,
+Call/Group/MLS context, source signature and send permission validate. It receives the canonical
+`SfuValidatedSourceFrame`, which contains ciphertext plus authenticated routing metadata but no
+plaintext media or endpoint/MLS key material.
+
+The observer runs before recipient fan-out and is deliberately independent from subscription
+selection. Recording/composition infrastructure therefore does not disappear merely because no
+participant currently subscribes to the source, and it does not need to duplicate recipient
+authorization logic. A configured observer failure is fail-closed: the frame is not routed live
+after the observer rejects it, preventing silent recording/composition loss while delivery
+continues.
+
+This seam is infrastructure only. No concrete recording capture/storage provider is shipped by
+this change, `ucr.conference.recording` remains unavailable, and the observer itself is not
+Production recording evidence.
+
 ### Durable provider-operation outbox
 
 Recording lifecycle transitions that require provider side effects now prepare a durable

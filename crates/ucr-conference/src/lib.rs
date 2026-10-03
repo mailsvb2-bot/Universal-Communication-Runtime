@@ -33,7 +33,7 @@ use ucr_protocol::{
 };
 use ucr_sfu::{
     SfuCapabilityProvider, SfuError, SfuForwardOutcome, SfuForwardSink, SfuRuntime,
-    SfuValidatedForwardBatch, dispatch_validated_forward_batch,
+    SfuValidatedForwardBatch, SfuValidatedSourceFrame, dispatch_validated_forward_batch,
 };
 
 pub trait ConferenceCapabilityProvider: fmt::Debug + Send + Sync {
@@ -1092,6 +1092,44 @@ where
                 || entry.session_id != *session_id
         });
         Ok(())
+    }
+
+    /// Validates one source-authenticated encrypted Conference frame without requiring subscribers.
+    ///
+    /// This observer path intentionally performs no routing side effect. It exists so recording,
+    /// composition and similar infrastructure can consume one canonical source frame after current
+    /// Conference participant plus SFU Group/Call/Device/MLS/signature authorization is proven,
+    /// even when no live participant currently subscribes to that source.
+    ///
+    /// # Errors
+    /// Fails closed for a non-participant source or any underlying canonical SFU/media validation
+    /// failure.
+    pub fn validate_source_frame(
+        &self,
+        actor: &ScopedPrincipal,
+        actor_device_id: &DeviceId,
+        envelope: &SfuForwardEnvelope,
+    ) -> Result<SfuValidatedSourceFrame, ConferenceError> {
+        require_conference_stack(
+            self.conference_capabilities,
+            self.sfu_capabilities,
+            self.group_e2ee_capabilities,
+        )?;
+        let snapshot = conference_projection(
+            self.store,
+            actor,
+            &envelope.frame.header.scope,
+            &envelope.frame.header.call_id,
+        )?;
+        require_accepted_participant(&snapshot.call, &actor.principal)?;
+        let sfu = SfuRuntime::new(
+            self.authorization,
+            self.store,
+            self.group_e2ee_capabilities,
+            self.sfu_capabilities,
+        );
+        sfu.validate_source_frame(actor, actor_device_id, envelope)
+            .map_err(ConferenceError::Sfu)
     }
 
     /// Routes one already-encrypted Conference frame through the Phase-29 SFU boundary.

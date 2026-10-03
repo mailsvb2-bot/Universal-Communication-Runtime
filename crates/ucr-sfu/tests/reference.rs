@@ -493,6 +493,52 @@ fn encrypted_group_frame_fans_out_bit_exactly_to_current_call_recipients() {
 }
 
 #[test]
+fn validated_source_frame_is_independent_from_recipient_authorization() {
+    let fixture = build_fixture();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&DenyReceive, &fixture.store, &e2ee, &sfu);
+
+    let validated = runtime
+        .validate_source_frame(&fixture.alice, &fixture.alice_device, &fixture.envelope)
+        .expect("validated source frame");
+    assert_eq!(validated.envelope(), &fixture.envelope);
+
+    let sink = CaptureSink::default();
+    assert!(matches!(
+        runtime.forward(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+            &sink,
+        ),
+        Err(SfuError::Authorization(error))
+            if error.code == CanonicalErrorCode::PermissionDenied
+    ));
+    assert!(sink.forwarded().is_empty());
+}
+
+#[test]
+fn validated_source_frame_rejects_spoofed_device_and_tampered_ciphertext() {
+    let fixture = build_fixture();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&AllowAll, &fixture.store, &e2ee, &sfu);
+
+    assert_eq!(
+        runtime.validate_source_frame(&fixture.alice, &device("bob"), &fixture.envelope,),
+        Err(SfuError::SourceMismatch)
+    );
+
+    let mut tampered = fixture.envelope.clone();
+    tampered.frame.ciphertext[0] ^= 0x01;
+    assert!(matches!(
+        runtime.validate_source_frame(&fixture.alice, &fixture.alice_device, &tampered,),
+        Err(SfuError::MediaE2ee(_))
+    ));
+}
+
+#[test]
 fn screen_share_source_kind_is_authenticated_before_sfu_fan_out() {
     let fixture = build_fixture();
     let context = group_media_context(&fixture.group, &fixture.call);

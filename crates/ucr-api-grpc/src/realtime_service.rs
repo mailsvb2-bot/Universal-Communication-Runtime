@@ -43,7 +43,7 @@ use ucr_realtime::{
 };
 use ucr_sfu::{
     PreparedSfuCapabilities, SfuForwardOutcome, SfuForwardSink, SfuForwardSinkError,
-    SfuValidatedForwardBatch,
+    SfuValidatedForwardBatch, SfuValidatedSourceFrame,
 };
 use ucr_webrtc::{
     PreparedWebRtcProvider, WebRtcProvider, WebRtcProviderError, WebRtcSessionConfigFactory,
@@ -152,6 +152,23 @@ impl fmt::Debug for RealtimeWebRtcDependencies {
     }
 }
 
+/// Observer for one canonical source-authenticated encrypted media frame.
+///
+/// The observer runs after Conference/SFU source validation and before subscriber fan-out. It
+/// receives ciphertext only and is intentionally independent from recipient selection so recording
+/// or composition infrastructure cannot silently miss frames when there are no live subscribers.
+pub trait RealtimeValidatedMediaObserver: fmt::Debug + Send + Sync {
+    /// Observes one validated source frame without mutating its authenticated fields.
+    ///
+    /// # Errors
+    /// Returns a canonical infrastructure/policy error. Failure prevents routing the frame so a
+    /// configured mandatory observer cannot silently lose media while live delivery continues.
+    fn observe_validated_media(
+        &self,
+        frame: &SfuValidatedSourceFrame,
+    ) -> Result<(), CanonicalError>;
+}
+
 #[tonic::async_trait]
 pub trait RealtimeSfuMediaRouter: fmt::Debug + Send + Sync {
     /// Forwards one already-canonicalized encrypted SFU batch through the configured horizontal
@@ -196,6 +213,7 @@ pub struct GrpcRealtimeService<C, A, S> {
     webrtc_config: Arc<WebRtcSessionConfigFactory>,
     sfu_placement_lifecycle: Option<Arc<dyn RealtimeSfuPlacementLifecycle>>,
     sfu_media_router: Option<Arc<dyn RealtimeSfuMediaRouter>>,
+    validated_media_observer: Option<Arc<dyn RealtimeValidatedMediaObserver>>,
     sfu_placement_transition: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -241,6 +259,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             webrtc_config: webrtc.config,
             sfu_placement_lifecycle: None,
             sfu_media_router: None,
+            validated_media_observer: None,
             sfu_placement_transition: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -263,6 +282,15 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
     #[must_use]
     pub fn has_sfu_media_router(&self) -> bool {
         self.sfu_media_router.is_some()
+    }
+
+    #[must_use]
+    pub fn with_validated_media_observer(
+        mut self,
+        observer: Arc<dyn RealtimeValidatedMediaObserver>,
+    ) -> Self {
+        self.validated_media_observer = Some(observer);
+        self
     }
 
     async fn sfu_placement_transition_guard(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
@@ -412,6 +440,7 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             webrtc_config: Arc::clone(&self.webrtc_config),
             sfu_placement_lifecycle: self.sfu_placement_lifecycle.clone(),
             sfu_media_router: self.sfu_media_router.clone(),
+            validated_media_observer: self.validated_media_observer.clone(),
             sfu_placement_transition: Arc::clone(&self.sfu_placement_transition),
         }
     }
@@ -1526,6 +1555,21 @@ where
         + ConferenceJoinGrantStore
         + ServiceQuotaStore,
 {
+    fn observe_validated_media_if_configured(
+        &self,
+        claims: &RealtimeSessionClaims,
+        device_id: &DeviceId,
+        envelope: &SfuForwardEnvelope,
+    ) -> Result<(), CanonicalError> {
+        let Some(observer) = self.validated_media_observer.as_ref() else {
+            return Ok(());
+        };
+        let validated = conference_runtime(self)
+            .validate_source_frame(&actor_for(claims), device_id, envelope)
+            .map_err(|error| map_conference_error(&error))?;
+        observer.observe_validated_media(&validated)
+    }
+
     /// Routes one already-encrypted endpoint media envelope through the exact canonical
     /// Conference/SFU path after revalidating long-lived session control and publish policy.
     ///
@@ -1593,6 +1637,7 @@ where
                 )
                 .map_err(map_registry_error)?;
         }
+        self.observe_validated_media_if_configured(claims, device_id, envelope)?;
 
         let Some(batch) = conference_runtime(self)
             .prepare_forward(&actor_for(claims), device_id, envelope)
@@ -1655,19 +1700,33 @@ where
         )?;
         self.claim_universal_publisher_quota(claims)?;
         let bandwidth_quota = self.universal_bandwidth_quota(claims)?;
-        let outcome = if let Some((owner, max_aggregate_bandwidth_bps)) = bandwidth_quota {
-            let now_unix_ms = self.now()?;
-            let wire_bytes = encode_sfu_forward_envelope(envelope)
-                .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?
-                .len();
+        let encoded_wire_bytes = if bandwidth_quota.is_some() {
+            Some(
+                encode_sfu_forward_envelope(envelope)
+                    .map_err(|_| CanonicalError::new(CanonicalErrorCode::InvalidArgument))?
+                    .len(),
+            )
+        } else {
+            None
+        };
+        let now_unix_ms = self.now()?;
+        if let (Some((owner, max_aggregate_bandwidth_bps)), Some(wire_bytes)) =
+            (&bandwidth_quota, encoded_wire_bytes)
+        {
             self.registry
                 .charge_aggregate_bandwidth(
-                    &owner,
-                    max_aggregate_bandwidth_bps,
+                    owner,
+                    *max_aggregate_bandwidth_bps,
                     wire_bytes,
                     now_unix_ms,
                 )
                 .map_err(map_registry_error)?;
+        }
+        self.observe_validated_media_if_configured(claims, device_id, envelope)?;
+
+        let outcome = if let (Some((owner, max_aggregate_bandwidth_bps)), Some(wire_bytes)) =
+            (bandwidth_quota, encoded_wire_bytes)
+        {
             let quota_sink = BandwidthQuotaSink {
                 inner: sink,
                 registry: &self.registry,
