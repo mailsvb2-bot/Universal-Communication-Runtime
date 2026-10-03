@@ -6,7 +6,7 @@ Conference, Recording, TLS policy, webhook delivery, or media-crypto state owner
 
 The canonical handle consists of an opaque secret identifier plus an explicit purpose. Supported
 purposes cover Service/Join signing integration, webhook signing, TLS certificate/private key,
-media crypto, and TURN credentials. Secret material is bounded, redacted from Debug output, and
+media crypto, Recording at-rest encryption, and TURN credentials. Secret material is bounded, redacted from Debug output, and
 zeroized on drop in the Rust reference implementation.
 
 Rotation is overlap-safe. One handle exposes a current version and at most one previous version.
@@ -190,6 +190,23 @@ provider-backed TURN resolves the current root for each short-lived credential i
 Webhook signing resolves the current root immediately before each delivery attempt. Provider
 unavailability never falls back to the stale static compatibility secret.
 
+## RecordingAtRest scope
+
+The concrete local Recording archive uses the dedicated `RecordingAtRest` purpose. This purpose is
+not interchangeable with `MediaCrypto`: endpoint media E2EE remains owned by authenticated session
+or MLS-derived keys, while Recording at-rest encryption is a second storage layer applied only after
+the canonical realtime source frame has already been authenticated.
+
+`EncryptedArchiveRecordingProvider` requires exactly 32-byte current at-rest material and accepts
+at most one previous version for overlap verification of existing objects. New archive objects are
+always sealed with current. The provider persists the bounded version identifier in the encrypted
+object envelope but never persists the key bytes in Recording state, SQLite, filenames, logs, or
+diagnostics. Temporary key copies are zeroized after AEAD use.
+
+The shipped provider can consume any `SecretProvider` implementation with this purpose. Runtime CLI
+wiring to the file-reload adapter is a separate deployment step; an external KMS/Vault/HSM adapter
+can implement the same contract without changing Recording lifecycle ownership.
+
 ## MediaCrypto scope
 
 `MediaCrypto` must not be wired into direct-call or group endpoint E2EE merely to satisfy a
@@ -199,11 +216,11 @@ one deployment-wide root into either path would create a second media-crypto aut
 existing trust model.
 
 The `MediaCrypto` purpose is therefore reserved for concrete deployment/provider-owned media roots
-that actually require secret management (for example a future server-side recording, composition, or
-broadcast encryption provider). No such provider may advertise Production capability until it wires
-this purpose through the shared provider boundary and proves rotation/recovery semantics. The absence
-of such a concrete consumer is an explicit non-claim, not permission to alter endpoint E2EE key
-derivation.
+that actually require secret management (for example a future composition or broadcast encryption
+provider). Recording storage uses the narrower `RecordingAtRest` purpose instead. No MediaCrypto
+consumer may advertise Production capability until it wires this purpose through the shared provider
+boundary and proves rotation/recovery semantics. The absence of such a MediaCrypto consumer is an
+explicit non-claim, not permission to alter endpoint E2EE key derivation.
 
 
 ## coturn dynamic secret reconciliation

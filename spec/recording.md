@@ -121,10 +121,36 @@ changed payload reuse for the same complete identity conflicts. The provider rec
 source-authenticated encrypted frame and never receives endpoint/MLS exporter key material from this
 path.
 
-This is still infrastructure rather than a Production recorder. The default capture method fails
-closed, no concrete encrypted-at-rest object/storage implementation is shipped here, export/access
-authorization and deletion proof remain outstanding, and `ucr.conference.recording` remains
-unavailable.
+A concrete local encrypted-at-rest archive provider now exists in `ucr-recording`. It is still
+infrastructure rather than a Production recorder: the trait default remains fail-closed, runtime
+configuration does not automatically advertise Recording, and export/access authorization plus
+end-to-end deletion/recovery evidence remain outstanding. `ucr.conference.recording` therefore
+remains unavailable by default.
+
+### Encrypted local archive provider
+
+`EncryptedArchiveRecordingProvider` stores only already source-authenticated encrypted media frames
+and provider-operation receipts. It applies a second, independent XChaCha20-Poly1305 at-rest layer
+using the shared `SecretProvider` with the dedicated `RecordingAtRest` purpose. The archive
+envelope carries only the bounded secret version identifier, nonce and ciphertext; associated data
+binds the object to a domain-separated hashed provider identity.
+
+Provider-owned directory and object names are SHA-256-derived and do not contain raw tenant,
+namespace, Recording, Call, participant or stream identifiers. Unix provider-owned directories are
+private and archive files are created privately; symlinks and unexpected filesystem object types are
+rejected. New objects use no-clobber creation, exact retries decrypt and compare the existing
+authenticated record, and changed payload reuse of one canonical provider/capture identity fails
+with `Conflict`.
+
+Key rotation is overlap-safe: new objects use the current at-rest key version, while an exact retry
+may authenticate an existing object with the bounded previous version supplied by the same shared
+secret owner. At-rest keys are exactly 32 bytes, are never persisted by the recording provider, and
+copied key material is zeroized after AEAD use.
+
+A provider `Delete` writes/verifies its encrypted idempotency receipt before deleting controlled
+recording frame objects. This makes retry after an interrupted delete deterministic without retaining
+raw media. It does not claim erasure of copies exported to another system and does not yet provide
+the authorized export/read surface required for Production Recording.
 
 ### Durable provider-operation outbox
 
@@ -165,8 +191,8 @@ after the durable worker lease is acquired and is removed when the worker exits.
 worker-holder IDs, Recording IDs, Call IDs and media/key material are not copied into health details.
 This health wiring does not change the public recording capability flag.
 
-This outbox, worker and validated capture path are infrastructure for a concrete recorder, not the
-recorder itself. The shipped runtime still has no configured concrete provider by default and
-`ucr.conference.recording` remains unavailable until a real encrypted-at-rest media/storage
-implementation, finalization behavior, access/export authorization, deletion proof and
-recovery/conformance evidence are present.
+This outbox, worker, validated capture path and encrypted archive provider are still not a complete
+Production recorder. The shipped runtime has no configured provider by default and
+`ucr.conference.recording` remains unavailable until operational provider wiring, finalization
+behavior, access/export authorization, recording-ready delivery, deletion/recovery conformance and
+the remaining Production evidence are present.
