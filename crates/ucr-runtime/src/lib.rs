@@ -4470,12 +4470,10 @@ mod tests {
         ));
         ProductionRuntime::initialize_database(&path).expect("initialize store");
         let runtime = Arc::new(ProductionRuntime::open_existing(&path).expect("open runtime"));
-        let task = tokio::spawn(
-            Arc::clone(&runtime).run_recording_provider_worker(
-                Arc::new(RecordingWorkerTestProvider),
-                DEFAULT_RECORDING_PROVIDER_POLL_INTERVAL,
-            ),
-        );
+        let task = tokio::spawn(Arc::clone(&runtime).run_recording_provider_worker(
+            Arc::new(RecordingWorkerTestProvider),
+            DEFAULT_RECORDING_PROVIDER_POLL_INTERVAL,
+        ));
 
         let mut ready = false;
         for _ in 0..200 {
