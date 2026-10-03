@@ -161,10 +161,11 @@ fn runtime_recording_capture_reuses_active_recording_and_provider_lease_owners()
     assert!(runtime.contains("active_recordings_for_call("));
     assert!(runtime.contains("MAX_ACTIVE_RECORDINGS_PER_CALL"));
     assert!(runtime.contains("recording.expires_at_unix_ms <= now_unix_ms"));
-    assert!(runtime.contains(".recording_provider_operation(&start)"));
-    assert!(runtime.contains("Some(RecordingProviderOperationState::Applied)"));
-    assert!(runtime.contains("Some(RecordingProviderOperationState::Pending)"));
-    assert!(runtime.contains("Some(RecordingProviderOperationState::Failed) | None"));
+    assert!(runtime.contains(".latest_recording_provider_operation("));
+    assert!(runtime.contains("record.state == RecordingProviderOperationState::Applied"));
+    assert!(runtime.contains("record.state == RecordingProviderOperationState::Pending"));
+    assert!(runtime.contains("Some(_) | None"));
+    assert!(runtime.contains("for_session_with_lifecycle_revision("));
     assert!(runtime.contains("runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND)"));
     assert!(runtime.contains("lease.holder_id != holder_id"));
     assert!(runtime.contains("provider.health() == RecordingProviderHealth::Unavailable"));
