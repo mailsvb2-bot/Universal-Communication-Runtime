@@ -100,7 +100,7 @@ fn recording_ready_is_atomic_recoverable_and_not_lifecycle_ready() {
     let spec = read("spec/recording.md");
 
     assert!(proto.contains("message RecordingReadyEvent"));
-    assert!(proto.contains("bool recovered_after_upgrade = 7;"));
+    assert!(proto.contains("bool recovered_after_upgrade = 6;"));
     assert!(core.contains("commit_recording_provider_stop_ready_event"));
     assert!(core.contains("recover_recording_provider_ready_events_once"));
     assert!(sqlite.contains("ready_event_emitted"));
