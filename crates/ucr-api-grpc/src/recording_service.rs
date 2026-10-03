@@ -991,45 +991,40 @@ fn recording_lifecycle_event(
 ///
 /// This Event is distinct from `RecordingState::Ready`: lifecycle Ready means consent gates are
 /// satisfied before Start, while `ucr.recording.ready` means the provider has finalized the
-/// stopped recording artifact.
+/// stopped recording artifact. The Event is provider-neutral because legacy applied Stop rows do
+/// not durably record which provider implementation performed finalization.
 ///
 /// # Errors
-/// Rejects mismatched lifecycle/provider context or invalid identifiers.
+/// Rejects mismatched lifecycle context or invalid identifiers.
 pub fn recording_provider_ready_event(
     recording: &RecordingSession,
     request: &RecordingProviderRequest,
-    provider_id: &'static str,
     ready_at_unix_ms: i64,
     recovered_after_upgrade: bool,
 ) -> Result<EventEnvelope, CanonicalError> {
     if recording.scope != request.scope
         || recording.recording_id != request.recording_id
         || recording.call_id != request.call_id
-        || recording.revision != request.lifecycle_revision
-        || recording.state != RecordingState::Stopped
+        || recording.revision < request.lifecycle_revision
+        || !matches!(
+            recording.state,
+            RecordingState::Stopped | RecordingState::Expired | RecordingState::Deleted
+        )
         || request.operation != ucr_core::RecordingProviderOperation::Stop
-        || provider_id.is_empty()
-        || provider_id.len() > 128
         || ready_at_unix_ms < 0
     {
         return Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument));
     }
 
-    let event_id = EventId::from_opaque(derived_recording_ready_id("event", request, provider_id)?);
-    let actor_id = ActorId::from_opaque(derived_recording_ready_id("actor", request, provider_id)?);
-    let device_id =
-        DeviceId::from_opaque(derived_recording_ready_id("device", request, provider_id)?);
-    let identity_id = IdentityId::from_opaque(derived_recording_ready_id(
-        "identity",
-        request,
-        provider_id,
-    )?);
+    let event_id = EventId::from_opaque(derived_recording_ready_id("event", request)?);
+    let actor_id = ActorId::from_opaque(derived_recording_ready_id("actor", request)?);
+    let device_id = DeviceId::from_opaque(derived_recording_ready_id("device", request)?);
+    let identity_id = IdentityId::from_opaque(derived_recording_ready_id("identity", request)?);
     let payload = pb::RecordingReadyEvent {
         scope: Some(pb_scope(&request.scope)),
         recording_id: Some(pb_opaque(request.recording_id.as_opaque())),
         call_id: Some(pb_opaque(request.call_id.as_opaque())),
         lifecycle_revision: request.lifecycle_revision,
-        provider_id: provider_id.to_owned(),
         ready_at_unix_ms,
         recovered_after_upgrade,
     }
@@ -1065,7 +1060,6 @@ pub fn recording_provider_ready_event(
 fn derived_recording_ready_id(
     label: &str,
     request: &RecordingProviderRequest,
-    provider_id: &str,
 ) -> Result<OpaqueId, CanonicalError> {
     let mut hash = Sha256::new();
     hash.update(b"ucr.recording.ready.v1");
@@ -1085,8 +1079,6 @@ fn derived_recording_ready_id(
     hash.update([0]);
     hash.update(request.call_id.as_opaque().as_wire_bytes());
     hash.update(request.lifecycle_revision.to_be_bytes());
-    hash.update([0]);
-    hash.update(provider_id.as_bytes());
 
     let digest = hash.finalize();
     let mut hex = String::with_capacity(64);
@@ -1200,7 +1192,7 @@ mod provider_ready_event_tests {
         let request =
             RecordingProviderRequest::for_session(&recording, RecordingProviderOperation::Stop);
         let first =
-            recording_provider_ready_event(&recording, &request, "encrypted-archive-v1", 40, false)
+            recording_provider_ready_event(&recording, &request, 40, false)
                 .expect("ready event");
         let retry =
             recording_provider_ready_event(&recording, &request, "encrypted-archive-v1", 40, false)
@@ -1216,9 +1208,23 @@ mod provider_ready_event_tests {
         let payload =
             pb::RecordingReadyEvent::decode(first.payload.as_slice()).expect("ready payload");
         assert_eq!(payload.lifecycle_revision, recording.revision);
-        assert_eq!(payload.provider_id, "encrypted-archive-v1");
         assert_eq!(payload.ready_at_unix_ms, 40);
         assert!(!payload.recovered_after_upgrade);
+    }
+
+    #[test]
+    fn provider_ready_event_survives_later_terminal_lifecycle_revision() {
+        let stopped = stopped_recording();
+        let request =
+            RecordingProviderRequest::for_session(&stopped, RecordingProviderOperation::Stop);
+        let mut deleted = stopped.clone();
+        deleted.state = RecordingState::Deleted;
+        deleted.revision = stopped.revision + 1;
+
+        let event = recording_provider_ready_event(&deleted, &request, 50, true)
+            .expect("ready event after later lifecycle transition");
+        assert_eq!(event.event_type, "ucr.recording.ready");
+        assert_eq!(event.logical_order, request.lifecycle_revision);
     }
 
     #[test]
@@ -1230,7 +1236,7 @@ mod provider_ready_event_tests {
             recording_provider_ready_event(&recording, &request, "encrypted-archive-v1", 40, false)
                 .expect("normal event");
         let recovered =
-            recording_provider_ready_event(&recording, &request, "encrypted-archive-v1", 50, true)
+            recording_provider_ready_event(&recording, &request, 50, true)
                 .expect("recovered event");
         assert_eq!(normal.event_id, recovered.event_id);
         assert_eq!(normal.actor.actor_id, recovered.actor.actor_id);
