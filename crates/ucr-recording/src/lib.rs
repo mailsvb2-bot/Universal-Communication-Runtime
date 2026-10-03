@@ -114,10 +114,7 @@ impl EncryptedArchiveRecordingProvider {
         Ok(())
     }
 
-    fn recording_digest(
-        scope: &TenantScope,
-        recording_id: &ucr_model::RecordingId,
-    ) -> [u8; 32] {
+    fn recording_digest(scope: &TenantScope, recording_id: &ucr_model::RecordingId) -> [u8; 32] {
         let mut encoded = CanonicalWriter::new(RECORDING_PATH_DOMAIN);
         encoded.scope(scope);
         encoded.bytes(recording_id.as_opaque().as_wire_bytes());
@@ -1048,7 +1045,10 @@ mod tests {
         provider.apply(&start).expect("retry can read previous key");
         assert_eq!(
             provider
-                .open(&old_object, &EncryptedArchiveRecordingProvider::operation_binding(&start))
+                .open(
+                    &old_object,
+                    &EncryptedArchiveRecordingProvider::operation_binding(&start),
+                )
                 .expect("old object decrypts through overlap"),
             EncryptedArchiveRecordingProvider::encode_operation(&start).expect("operation")
         );
