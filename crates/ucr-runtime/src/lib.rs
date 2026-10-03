@@ -790,6 +790,47 @@ impl Drop for RecordingProviderRegistration {
     }
 }
 
+struct RecordingProviderWorkerLeaseGuard {
+    store: Arc<SqliteLocalStore>,
+    holder_id: String,
+    released: bool,
+}
+
+impl RecordingProviderWorkerLeaseGuard {
+    fn new(store: Arc<SqliteLocalStore>, holder_id: String) -> Self {
+        Self {
+            store,
+            holder_id,
+            released: false,
+        }
+    }
+
+    fn release(&mut self) -> Result<(), String> {
+        if self.released {
+            return Ok(());
+        }
+        let released = self
+            .store
+            .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &self.holder_id)
+            .map_err(|error| format!("release recording provider worker lease: {error:?}"))?;
+        if !released {
+            return Err("recording provider worker durable lease was lost or expired".to_owned());
+        }
+        self.released = true;
+        Ok(())
+    }
+}
+
+impl Drop for RecordingProviderWorkerLeaseGuard {
+    fn drop(&mut self) {
+        if !self.released {
+            let _ = self
+                .store
+                .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &self.holder_id);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct RuntimeRecordingMediaObserver {
     store: Arc<SqliteLocalStore>,
@@ -1721,16 +1762,11 @@ impl ProductionRuntime {
         if !acquired {
             return Err("another recording provider worker holds the durable lease".to_owned());
         }
-        let _provider_registration =
-            match self.register_recording_provider(Arc::clone(&provider), &holder_id) {
-                Ok(registration) => registration,
-                Err(error) => {
-                    let _ = self
-                        .store
-                        .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id);
-                    return Err(error);
-                }
-            };
+
+        let mut lease_guard =
+            RecordingProviderWorkerLeaseGuard::new(Arc::clone(&self.store), holder_id.clone());
+        let provider_registration =
+            self.register_recording_provider(Arc::clone(&provider), &holder_id)?;
 
         println!(
             "UCR_RECORDING_PROVIDER_WORKER_READY provider={} poll_interval_ms={}",
@@ -1739,35 +1775,15 @@ impl ProductionRuntime {
         );
 
         loop {
-            if let Err(error) = self.renew_recording_provider_worker_lease(&holder_id) {
-                let _ = self
-                    .store
-                    .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id);
-                return Err(error);
-            }
-            let now_unix_ms = match runtime_now_unix_ms() {
-                Ok(now_unix_ms) => now_unix_ms,
-                Err(error) => {
-                    let _ = self
-                        .store
-                        .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id);
-                    return Err(error);
-                }
-            };
-            let sweep = match dispatch_recording_provider_operations_once(
+            self.renew_recording_provider_worker_lease(&holder_id)?;
+            let now_unix_ms = runtime_now_unix_ms()?;
+            let sweep = dispatch_recording_provider_operations_once(
                 self.store.as_ref(),
                 provider.as_ref(),
                 now_unix_ms,
                 MAX_RECORDING_PROVIDER_OPERATION_BATCH,
-            ) {
-                Ok(sweep) => sweep,
-                Err(error) => {
-                    let _ = self
-                        .store
-                        .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id);
-                    return Err(format!("dispatch recording provider operations: {error:?}"));
-                }
-            };
+            )
+            .map_err(|error| format!("dispatch recording provider operations: {error:?}"))?;
             if sweep.examined > 0 {
                 println!(
                     "UCR_RECORDING_PROVIDER_SWEEP examined={} applied={} retried={} failed={}",
@@ -1777,16 +1793,9 @@ impl ProductionRuntime {
 
             tokio::select! {
                 result = tokio::signal::ctrl_c() => {
-                    if let Err(error) = result {
-                        let _ = self.store.release_runtime_worker_lease(
-                            RECORDING_PROVIDER_WORKER_KIND,
-                            &holder_id,
-                        );
-                        return Err(format!("recording provider shutdown signal: {error}"));
-                    }
-                    self.store
-                        .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id)
-                        .map_err(|error| format!("release recording provider worker lease: {error:?}"))?;
+                    result.map_err(|error| format!("recording provider shutdown signal: {error}"))?;
+                    drop(provider_registration);
+                    lease_guard.release()?;
                     println!("UCR_RECORDING_PROVIDER_WORKER_STOPPED");
                     return Ok(());
                 }
