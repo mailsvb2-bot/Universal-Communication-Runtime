@@ -95,9 +95,33 @@ Call/Group/Device/MLS/signature/send authorization is not repeated on the frame-
 media path. A configured observer failure is fail-closed: the frame is not routed live after the
 observer rejects it, preventing silent recording/composition loss while delivery continues.
 
-This seam is infrastructure only. No concrete recording capture/storage provider is shipped by
-this change, `ucr.conference.recording` remains unavailable, and the observer itself is not
-Production recording evidence.
+Production runtime now binds this seam to the same registered `RecordingMediaProvider` used by
+the durable lifecycle worker. For every validated frame it performs a bounded
+`active_recordings_for_call` lookup. With no ACTIVE Recording it returns immediately and Conference
+remains independent from any recorder. An ACTIVE row whose `expires_at_unix_ms` has already passed
+is excluded on the media hot path even if the retention worker has not swept it yet. Every remaining
+Recording must also have its exact provider `Start` operation in durable `Applied` state; a Pending
+Start fails temporarily closed, while a missing or terminally Failed Start is treated as an internal
+invariant failure. Only then does runtime require the exact registered provider holder to still own
+an unexpired durable worker lease, reject an Unavailable provider, and invoke
+`capture_encrypted_frame` once for each capturable Recording using
+`RecordingProviderCaptureContext`. Capture failure is fail-closed before live recipient fan-out so
+the system cannot silently advertise a continuous recording while dropping media.
+
+`RecordingProviderCaptureContext::capture_identity` builds the complete provider idempotency key
+from Recording identity plus the authenticated media dimensions: scope, recording ID, Call ID,
+lifecycle revision, Group, source principal/device, media kind, video source kind, stream ID,
+negotiation reference/generation, crypto epoch/state and sequence. Media kind and negotiation
+binding are explicit because valid audio/video streams can share a stream/sequence pair and a fresh
+negotiation may restart sequence state. Exact retries must be idempotent at the provider boundary;
+changed payload reuse for the same complete identity conflicts. The provider receives the already
+source-authenticated encrypted frame and never receives endpoint/MLS exporter key material from this
+path.
+
+This is still infrastructure rather than a Production recorder. The default capture method fails
+closed, no concrete encrypted-at-rest object/storage implementation is shipped here, export/access
+authorization and deletion proof remain outstanding, and `ucr.conference.recording` remains
+unavailable.
 
 ### Durable provider-operation outbox
 
@@ -138,7 +162,8 @@ after the durable worker lease is acquired and is removed when the worker exits.
 worker-holder IDs, Recording IDs, Call IDs and media/key material are not copied into health details.
 This health wiring does not change the public recording capability flag.
 
-This outbox and worker are infrastructure for a concrete recorder, not the recorder itself. The
-shipped runtime still reports recorder NotConfigured and `ucr.conference.recording` remains
-unavailable until a real encrypted media provider, provider health wiring, capture/finalization
-behavior, access/export authorization, deletion proof and recovery/conformance evidence are present.
+This outbox, worker and validated capture path are infrastructure for a concrete recorder, not the
+recorder itself. The shipped runtime still has no configured concrete provider by default and
+`ucr.conference.recording` remains unavailable until a real encrypted-at-rest media/storage
+implementation, finalization behavior, access/export authorization, deletion proof and
+recovery/conformance evidence are present.

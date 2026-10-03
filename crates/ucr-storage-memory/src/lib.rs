@@ -9421,6 +9421,19 @@ impl RecordingProviderOperationStore for MemoryLocalStore {
         Ok(rows)
     }
 
+    fn recording_provider_operation(
+        &self,
+        request: &RecordingProviderRequest,
+    ) -> Result<Option<RecordingProviderOperationRecord>, DurableStoreError> {
+        let key = recording_provider_operation_key(request);
+        let state = self.state.lock().map_err(|_| DurableStoreError::Internal)?;
+        match state.recording_provider_operations.get(&key) {
+            Some(record) if record.request == *request => Ok(Some(record.clone())),
+            Some(_) => Err(DurableStoreError::Conflict),
+            None => Ok(None),
+        }
+    }
+
     fn mark_recording_provider_operation_applied(
         &self,
         request: &RecordingProviderRequest,

@@ -16,6 +16,8 @@ fn recording_provider_is_a_side_effect_boundary_not_a_second_lifecycle_owner() {
 
     assert!(core.contains("pub trait RecordingMediaProvider"));
     assert!(core.contains("pub struct RecordingProviderRequest"));
+    assert!(core.contains("pub struct RecordingProviderCaptureContext"));
+    assert!(core.contains("capture_encrypted_frame"));
     assert!(core.contains("pub enum RecordingProviderOperation"));
     assert!(core.contains("pub enum RecordingProviderHealth"));
     assert!(core.contains("pub enum RecordingProviderError"));
@@ -139,4 +141,41 @@ fn recording_media_observer_uses_canonical_source_validation_not_recipient_fanou
     assert!(spec.contains("is not repeated on the frame-rate-sensitive"));
     assert!(spec.contains("contains ciphertext plus authenticated routing metadata"));
     assert!(spec.contains("`ucr.conference.recording` remains unavailable"));
+}
+
+#[test]
+fn runtime_recording_capture_reuses_active_recording_and_provider_lease_owners() {
+    let core = read("crates/ucr-core/src/recording.rs");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let spec = read("spec/recording.md");
+
+    assert!(core.contains("pub struct RecordingProviderCaptureContext"));
+    assert!(core.contains("pub struct RecordingProviderCaptureIdentity"));
+    assert!(core.contains("pub fn capture_identity("));
+    assert!(core.contains("media_kind: frame.header.media_kind"));
+    assert!(core.contains("negotiation_ref: frame.header.negotiation_ref.clone()"));
+    assert!(core.contains("negotiation_generation: frame.header.negotiation_generation"));
+    assert!(core.contains("fn capture_encrypted_frame("));
+    assert!(core.contains("EncryptedGroupMediaFrame"));
+    assert!(runtime.contains("struct RuntimeRecordingMediaObserver"));
+    assert!(runtime.contains("active_recordings_for_call("));
+    assert!(runtime.contains("MAX_ACTIVE_RECORDINGS_PER_CALL"));
+    assert!(runtime.contains("recording.expires_at_unix_ms <= now_unix_ms"));
+    assert!(runtime.contains(".recording_provider_operation(&start)"));
+    assert!(runtime.contains("Some(RecordingProviderOperationState::Applied)"));
+    assert!(runtime.contains("Some(RecordingProviderOperationState::Pending)"));
+    assert!(runtime.contains("Some(RecordingProviderOperationState::Failed) | None"));
+    assert!(runtime.contains("runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND)"));
+    assert!(runtime.contains("lease.holder_id != holder_id"));
+    assert!(runtime.contains("provider.health() == RecordingProviderHealth::Unavailable"));
+    assert!(runtime.contains(".capture_encrypted_frame(&context, frame)"));
+    assert!(runtime.contains("with_validated_media_observer(recording_media_observer)"));
+    assert!(runtime.contains("recording: false"));
+    assert!(spec.contains("With no ACTIVE Recording it returns immediately"));
+    assert!(spec.contains("has already passed"));
+    assert!(spec.contains("provider `Start` operation in durable `Applied` state"));
+    assert!(spec.contains("Media kind and negotiation"));
+    assert!(spec.contains("Capture failure is fail-closed before live recipient fan-out"));
+    assert!(spec.contains("no concrete encrypted-at-rest object/storage implementation"));
+    assert!(spec.contains("ucr.conference.recording"));
 }

@@ -24,35 +24,39 @@ use ucr_api_grpc::{
     GrpcUniversalConferenceService, MachineAuthDiscovery, MachineTokenVerificationKeyProvider,
     OperatorRuntimeHealthSource, OperatorSfuClusterControl, OperatorSfuClusterError,
     OperatorSfuNodeHeartbeat, PlacementAwareSfuNodeRouter, RealtimeSfuMediaRouter,
-    RealtimeSfuPlacementLifecycle, RealtimeWebRtcDependencies, SfuNodeMediaClientTlsConfig,
-    SfuPlacementRoutingPolicy, UniversalConferenceRuntimeCapabilities, attachment_service_server,
-    call_service_server, conference_service_server, device_service_server, event_service_server,
-    expire_due_recordings_once, group_service_server, integration_service_server,
-    machine_auth_service_server, operator_runtime_service_server, pb, realtime_service_server,
-    recording_service_server, sfu_node_media_service_server, sfu_placement_service_server,
-    store_forward_service_server, sync_service_server, universal_conference_service_server,
+    RealtimeSfuPlacementLifecycle, RealtimeValidatedMediaObserver, RealtimeWebRtcDependencies,
+    SfuNodeMediaClientTlsConfig, SfuPlacementRoutingPolicy, UniversalConferenceRuntimeCapabilities,
+    attachment_service_server, call_service_server, conference_service_server,
+    device_service_server, event_service_server, expire_due_recordings_once, group_service_server,
+    integration_service_server, machine_auth_service_server, operator_runtime_service_server, pb,
+    realtime_service_server, recording_service_server, sfu_node_media_service_server,
+    sfu_placement_service_server, store_forward_service_server, sync_service_server,
+    universal_conference_service_server,
 };
 use ucr_conference::ConferenceRuntimeState;
 use ucr_core::{
-    DurableStoreError, EventWebhookDispatcher, MAX_RECORDING_PROVIDER_OPERATION_BATCH,
-    MAX_RECORDING_RETENTION_BATCH, RecordingMediaProvider, RecordingProviderDispatchSweep,
-    RecordingProviderHealth, StorageHealth, StorageProvider, SystemEventDeliveryClock,
-    SystemServiceQuotaClock, WebhookDispatchOutcome, dispatch_recording_provider_operations_once,
-    generate_opaque_id,
+    DurableStoreError, EventWebhookDispatcher, MAX_ACTIVE_RECORDINGS_PER_CALL,
+    MAX_RECORDING_PROVIDER_OPERATION_BATCH, MAX_RECORDING_RETENTION_BATCH, RecordingMediaProvider,
+    RecordingProviderCaptureContext, RecordingProviderDispatchSweep, RecordingProviderError,
+    RecordingProviderHealth, RecordingProviderOperation, RecordingProviderOperationState,
+    RecordingProviderOperationStore, RecordingProviderRequest, RecordingStore, StorageHealth,
+    StorageProvider, SystemEventDeliveryClock, SystemServiceQuotaClock, WebhookDispatchOutcome,
+    dispatch_recording_provider_operations_once, generate_opaque_id,
 };
 use ucr_crypto::{
     MAX_MACHINE_TOKEN_TTL_SECONDS, MachineTokenPolicy, MachineTokenPublicKeySet,
     MachineTokenSigningKey,
 };
 use ucr_model::{
-    EventSubscriptionId, IceTransportPolicy, KeyId, NamespaceId, OpaqueId, SfuForwardEnvelope,
-    TenantId, TenantScope,
+    EncryptedGroupMediaFrame, EventSubscriptionId, IceTransportPolicy, KeyId, NamespaceId,
+    OpaqueId, SfuForwardEnvelope, TenantId, TenantScope,
 };
+use ucr_protocol::{CanonicalError, CanonicalErrorCode};
 use ucr_realtime::{JoinTokenIssuer, JoinTokenKey, RealtimeSessionRegistry};
 use ucr_secrets::{MAX_SECRET_BYTES, SecretHandle, SecretProvider, SecretPurpose};
 use ucr_sfu::{
     SfuClusterDirectory, SfuForwardSink, SfuForwardSinkError, SfuNodeCapacitySnapshot,
-    SfuNodeDescriptor, SfuPlacementError, SfuPlacementPolicy,
+    SfuNodeDescriptor, SfuPlacementError, SfuPlacementPolicy, SfuValidatedSourceFrame,
 };
 use ucr_storage_sqlite::{
     RECORDING_PROVIDER_WORKER_KIND, RECORDING_RETENTION_WORKER_KIND, SqliteLocalStore,
@@ -784,6 +788,136 @@ impl Drop for RecordingProviderRegistration {
             *slot = None;
         }
     }
+}
+
+#[derive(Debug)]
+struct RuntimeRecordingMediaObserver {
+    store: Arc<SqliteLocalStore>,
+    recording_provider: RecordingProviderRegistry,
+}
+
+impl RuntimeRecordingMediaObserver {
+    fn capture_encrypted_frame(
+        &self,
+        frame: &EncryptedGroupMediaFrame,
+    ) -> Result<(), CanonicalError> {
+        let active = self
+            .store
+            .active_recordings_for_call(
+                &frame.header.scope,
+                &frame.header.call_id,
+                MAX_ACTIVE_RECORDINGS_PER_CALL,
+            )
+            .map_err(map_recording_capture_store_error)?;
+        if active.is_empty() {
+            return Ok(());
+        }
+
+        let now_unix_ms = runtime_now_unix_ms()
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+        let mut capturable = Vec::with_capacity(active.len());
+        for recording in active {
+            if recording.expires_at_unix_ms <= now_unix_ms {
+                continue;
+            }
+            let start = RecordingProviderRequest::for_session(
+                &recording,
+                RecordingProviderOperation::Start,
+            );
+            let start_state = self
+                .store
+                .recording_provider_operation(&start)
+                .map_err(map_recording_capture_store_error)?
+                .map(|record| record.state);
+            match start_state {
+                Some(RecordingProviderOperationState::Applied) => capturable.push(recording),
+                Some(RecordingProviderOperationState::Pending) => {
+                    return Err(CanonicalError::new(
+                        CanonicalErrorCode::TemporarilyUnavailable,
+                    ));
+                }
+                Some(RecordingProviderOperationState::Failed) | None => {
+                    return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+                }
+            }
+        }
+        if capturable.is_empty() {
+            return Ok(());
+        }
+
+        let (holder_id, provider) = {
+            let registry = self
+                .recording_provider
+                .lock()
+                .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+            let registration = registry
+                .as_ref()
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+            (
+                registration.holder_id.clone(),
+                Arc::clone(&registration.provider),
+            )
+        };
+
+        let lease = self
+            .store
+            .runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND)
+            .map_err(map_recording_capture_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+        if lease.holder_id != holder_id || lease.lease_expires_unix_ms <= now_unix_ms {
+            return Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable,
+            ));
+        }
+        if provider.health() == RecordingProviderHealth::Unavailable {
+            return Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable,
+            ));
+        }
+
+        for recording in capturable {
+            let context = RecordingProviderCaptureContext::for_session(&recording);
+            provider
+                .capture_encrypted_frame(&context, frame)
+                .map_err(map_recording_capture_provider_error)?;
+        }
+        Ok(())
+    }
+}
+
+impl RealtimeValidatedMediaObserver for RuntimeRecordingMediaObserver {
+    fn observe_validated_media(
+        &self,
+        frame: &SfuValidatedSourceFrame,
+    ) -> Result<(), CanonicalError> {
+        self.capture_encrypted_frame(&frame.envelope().frame)
+    }
+}
+
+const fn map_recording_capture_store_error(error: DurableStoreError) -> CanonicalError {
+    CanonicalError::new(match error {
+        DurableStoreError::InvalidRecord => CanonicalErrorCode::InvalidArgument,
+        DurableStoreError::Conflict => CanonicalErrorCode::Conflict,
+        DurableStoreError::Full => CanonicalErrorCode::ResourceExhausted,
+        DurableStoreError::Unavailable => CanonicalErrorCode::TemporarilyUnavailable,
+        DurableStoreError::PermissionDenied => CanonicalErrorCode::PermissionDenied,
+        DurableStoreError::Corrupt
+        | DurableStoreError::UnsupportedSchemaVersion
+        | DurableStoreError::ForeignStore
+        | DurableStoreError::Internal => CanonicalErrorCode::Internal,
+    })
+}
+
+const fn map_recording_capture_provider_error(error: RecordingProviderError) -> CanonicalError {
+    CanonicalError::new(match error {
+        RecordingProviderError::Conflict => CanonicalErrorCode::Conflict,
+        RecordingProviderError::CapacityExceeded => CanonicalErrorCode::ResourceExhausted,
+        RecordingProviderError::TemporarilyUnavailable => {
+            CanonicalErrorCode::TemporarilyUnavailable
+        }
+        RecordingProviderError::PolicyDenied => CanonicalErrorCode::PolicyDenied,
+        RecordingProviderError::Internal => CanonicalErrorCode::Internal,
+    })
 }
 
 #[derive(Debug)]
@@ -2265,6 +2399,11 @@ impl ProductionRuntime {
         } else {
             GrpcSfuPlacementService::new(Arc::clone(&clock), Arc::clone(&sfu_cluster))
         };
+        let recording_media_observer: Arc<dyn RealtimeValidatedMediaObserver> =
+            Arc::new(RuntimeRecordingMediaObserver {
+                store: Arc::clone(&store),
+                recording_provider: Arc::clone(&self.recording_provider),
+            });
         let realtime_service = GrpcRealtimeService::with_webrtc(
             Arc::clone(&clock),
             Arc::clone(&authorization),
@@ -2273,7 +2412,8 @@ impl ProductionRuntime {
             Arc::clone(&registry),
             Arc::clone(&conference_state),
             dependencies.webrtc,
-        );
+        )
+        .with_validated_media_observer(recording_media_observer);
         let (realtime_service, sfu_expiry_task) = configure_sfu_placement_lifecycle(
             realtime_service,
             &sfu_placement_service,
@@ -3466,6 +3606,262 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RecordingCaptureTestProvider {
+        health: RecordingProviderHealth,
+        captures: Mutex<Vec<(String, u64, u64)>>,
+    }
+
+    impl RecordingCaptureTestProvider {
+        fn new(health: RecordingProviderHealth) -> Self {
+            Self {
+                health,
+                captures: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn captures(&self) -> Vec<(String, u64, u64)> {
+            self.captures.lock().expect("capture lock").clone()
+        }
+    }
+
+    impl ucr_core::RecordingMediaProvider for RecordingCaptureTestProvider {
+        fn provider_id(&self) -> &'static str {
+            "test.recording-capture"
+        }
+
+        fn health(&self) -> RecordingProviderHealth {
+            self.health
+        }
+
+        fn apply(
+            &self,
+            _request: &ucr_core::RecordingProviderRequest,
+        ) -> Result<(), ucr_core::RecordingProviderError> {
+            Ok(())
+        }
+
+        fn capture_encrypted_frame(
+            &self,
+            context: &ucr_core::RecordingProviderCaptureContext,
+            frame: &ucr_model::EncryptedGroupMediaFrame,
+        ) -> Result<(), ucr_core::RecordingProviderError> {
+            self.captures.lock().expect("capture lock").push((
+                context.recording_id.as_opaque().as_str().to_owned(),
+                context.lifecycle_revision,
+                frame.header.sequence,
+            ));
+            Ok(())
+        }
+    }
+
+    fn recording_capture_scope() -> TenantScope {
+        TenantScope {
+            tenant_id: TenantId::from_opaque(
+                OpaqueId::new("recording-capture-tenant").expect("id"),
+            ),
+            namespace_id: None,
+        }
+    }
+
+    fn recording_capture_call_id() -> ucr_model::CallId {
+        ucr_model::CallId::from_opaque(OpaqueId::new("recording-capture-call").expect("id"))
+    }
+
+    fn recording_capture_host() -> ucr_model::ScopedPrincipal {
+        ucr_model::ScopedPrincipal {
+            scope: recording_capture_scope(),
+            principal: ucr_model::PrincipalRef {
+                principal_id: ucr_model::PrincipalId::from_opaque(
+                    OpaqueId::new("recording-capture-host").expect("id"),
+                ),
+                kind: ucr_model::PrincipalKind::Person,
+            },
+        }
+    }
+
+    fn install_recording_capture_call(store: &SqliteLocalStore) {
+        let host = recording_capture_host();
+        let conversation = ucr_model::ConversationRecord {
+            scope: recording_capture_scope(),
+            conversation: ucr_model::ConversationRef {
+                conversation_id: ucr_model::ConversationId::from_opaque(
+                    OpaqueId::new("recording-capture-conversation").expect("id"),
+                ),
+                kind: ucr_model::ConversationKind::Direct,
+            },
+            parent_conversation_id: None,
+        };
+        ucr_core::ConversationStore::persist_conversation(store, &conversation)
+            .expect("persist recording capture conversation");
+        let call = ucr_model::CallSession {
+            scope: recording_capture_scope(),
+            call_id: recording_capture_call_id(),
+            conversation: conversation.conversation,
+            initiated_by: host.principal.clone(),
+            participants: vec![
+                ucr_model::CallParticipant {
+                    principal: host.principal.clone(),
+                    state: ucr_model::CallParticipantState::Accepted,
+                    joined_revision: 0,
+                    left_revision: None,
+                },
+                ucr_model::CallParticipant {
+                    principal: ucr_model::PrincipalRef {
+                        principal_id: ucr_model::PrincipalId::from_opaque(
+                            OpaqueId::new("recording-capture-guest").expect("id"),
+                        ),
+                        kind: ucr_model::PrincipalKind::Person,
+                    },
+                    state: ucr_model::CallParticipantState::Invited,
+                    joined_revision: 0,
+                    left_revision: None,
+                },
+            ],
+            signalling_state: ucr_model::CallSignallingState::Inviting,
+            reconnecting_participant: None,
+            media_negotiation_ref: None,
+            media_negotiation_generation: 0,
+            replication_generation: 0,
+            revision: 0,
+            termination_reason: None,
+        };
+        ucr_core::CallStore::create_call(store, &host, &call)
+            .expect("persist recording capture call");
+    }
+
+    fn recording_capture_ready_session(requested_at_unix_ms: i64) -> ucr_model::RecordingSession {
+        let host = recording_capture_host();
+        ucr_model::RecordingSession {
+            scope: recording_capture_scope(),
+            recording_id: ucr_model::RecordingId::from_opaque(
+                OpaqueId::new("recording-capture-id").expect("id"),
+            ),
+            call_id: recording_capture_call_id(),
+            requested_by: host.principal,
+            policy: ucr_model::RecordingPolicy {
+                require_all_participant_consent: false,
+                notify_all_participants: true,
+                retention_seconds: 3_600,
+                policy_reference: None,
+            },
+            state: ucr_model::RecordingState::Ready,
+            consents: Vec::new(),
+            requested_at_unix_ms,
+            started_at_unix_ms: None,
+            stopped_at_unix_ms: None,
+            expires_at_unix_ms: requested_at_unix_ms + 3_600_000,
+            revision: 1,
+        }
+    }
+
+    fn recording_capture_start_event(
+        ready: &ucr_model::RecordingSession,
+        now_unix_ms: i64,
+    ) -> ucr_model::EventEnvelope {
+        ucr_model::EventEnvelope {
+            event_id: ucr_model::EventId::from_opaque(
+                OpaqueId::new("recording-capture-start-event").expect("id"),
+            ),
+            scope: ready.scope.clone(),
+            event_type: "ucr.recording.started".to_owned(),
+            payload: vec![1],
+            actor: ucr_model::ActorRef {
+                actor_id: ucr_model::ActorId::from_opaque(
+                    OpaqueId::new("recording-capture-actor").expect("id"),
+                ),
+                kind: ucr_model::ActorKind::System,
+                on_behalf_of: Some(ready.requested_by.principal_id.clone()),
+            },
+            source_device: ucr_model::DeviceRef {
+                device_id: ucr_model::DeviceId::from_opaque(
+                    OpaqueId::new("recording-capture-event-device").expect("id"),
+                ),
+                identity_id: ucr_model::IdentityId::from_opaque(
+                    OpaqueId::new("recording-capture-event-identity").expect("id"),
+                ),
+            },
+            wall_time_unix_ms: now_unix_ms,
+            logical_order: ready.revision + 1,
+            correlation: ucr_model::CorrelationContext {
+                correlation_id: OpaqueId::new("recording-capture-correlation").expect("id"),
+                causation_id: None,
+                idempotency_key: Some("recording-capture-start".to_owned()),
+            },
+            schema_version: ucr_model::ProtocolVersion::new(1, 0),
+            integrity_metadata: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    fn install_active_recording_at(
+        store: &SqliteLocalStore,
+        requested_at_unix_ms: i64,
+    ) -> ucr_model::RecordingSession {
+        install_recording_capture_call(store);
+        let ready = recording_capture_ready_session(requested_at_unix_ms);
+        store
+            .persist_recording(&ready)
+            .expect("persist ready recording");
+        let start_at_unix_ms = requested_at_unix_ms + 100;
+        let event = recording_capture_start_event(&ready, start_at_unix_ms);
+        store
+            .start_recording_with_event_and_provider_operation(
+                &ready.scope,
+                &ready.recording_id,
+                ready.revision,
+                start_at_unix_ms,
+                &event,
+            )
+            .expect("start recording with provider operation")
+    }
+
+    fn install_active_recording(store: &SqliteLocalStore) -> ucr_model::RecordingSession {
+        let now_unix_ms = runtime_now_unix_ms().expect("clock");
+        install_active_recording_at(store, now_unix_ms.saturating_sub(1_000))
+    }
+
+    fn recording_capture_frame(sequence: u64) -> EncryptedGroupMediaFrame {
+        EncryptedGroupMediaFrame {
+            header: ucr_model::GroupMediaFrameHeader {
+                scope: recording_capture_scope(),
+                call_id: recording_capture_call_id(),
+                group_id: ucr_model::GroupId::from_opaque(
+                    OpaqueId::new("recording-capture-group").expect("id"),
+                ),
+                stream_id: OpaqueId::new("recording-capture-stream").expect("id"),
+                source: ucr_model::PrincipalRef {
+                    principal_id: ucr_model::PrincipalId::from_opaque(
+                        OpaqueId::new("recording-capture-source").expect("id"),
+                    ),
+                    kind: ucr_model::PrincipalKind::Person,
+                },
+                source_device_id: ucr_model::DeviceId::from_opaque(
+                    OpaqueId::new("recording-capture-device").expect("id"),
+                ),
+                negotiation_ref: OpaqueId::new("recording-capture-negotiation").expect("id"),
+                negotiation_generation: 1,
+                crypto_epoch: 2,
+                crypto_state_ref: OpaqueId::new("recording-capture-crypto").expect("id"),
+                crypto_suite: ucr_model::CryptoSuite::UcrV1,
+                header_version: ucr_protocol::GROUP_MEDIA_FRAME_HEADER_V1,
+                media_kind: ucr_model::MediaKind::Audio,
+                video_source_kind: None,
+                sequence,
+                media_timestamp: sequence,
+                keyframe: false,
+            },
+            nonce: [7_u8; 24],
+            ciphertext: vec![1, 2, 3, 4],
+            source_signature: ucr_model::GroupMediaSourceSignature {
+                key_id: KeyId::from_opaque(OpaqueId::new("recording-capture-key").expect("id")),
+                algorithm_id: "test.signature".to_owned(),
+                algorithm_version: 1,
+                signature: vec![9],
+            },
+        }
+    }
+
     fn recording_health_runtime(label: &str) -> (std::path::PathBuf, ProductionRuntime) {
         let path = std::env::temp_dir().join(format!(
             "ucr-recording-provider-health-{label}-{}-{}.sqlite",
@@ -3475,6 +3871,216 @@ mod tests {
         ProductionRuntime::initialize_database(&path).expect("initialize store");
         let runtime = ProductionRuntime::open_existing(&path).expect("open runtime");
         (path, runtime)
+    }
+
+    #[test]
+    fn recording_capture_is_optional_without_active_recording_and_required_when_active() {
+        let (path, runtime) = recording_health_runtime("capture-optional");
+        let observer = RuntimeRecordingMediaObserver {
+            store: Arc::clone(&runtime.store),
+            recording_provider: Arc::clone(&runtime.recording_provider),
+        };
+        let frame = recording_capture_frame(41);
+        assert_eq!(observer.capture_encrypted_frame(&frame), Ok(()));
+
+        let active = install_active_recording(runtime.store.as_ref());
+        assert_eq!(active.state, ucr_model::RecordingState::Active);
+        assert_eq!(
+            observer.capture_encrypted_frame(&frame),
+            Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable
+            ))
+        );
+
+        let stopped = runtime
+            .store
+            .stop_recording(
+                &active.scope,
+                &active.recording_id,
+                active.revision,
+                runtime_now_unix_ms().expect("clock"),
+            )
+            .expect("stop recording");
+        assert_eq!(stopped.state, ucr_model::RecordingState::Stopped);
+        assert_eq!(
+            observer.capture_encrypted_frame(&recording_capture_frame(42)),
+            Ok(())
+        );
+
+        drop(runtime);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn recording_capture_stops_at_expiry_without_waiting_for_retention_sweep() {
+        let (path, runtime) = recording_health_runtime("capture-expired");
+        let active = install_active_recording_at(runtime.store.as_ref(), 1_000);
+        assert_eq!(active.state, ucr_model::RecordingState::Active);
+        assert!(
+            runtime_now_unix_ms().expect("clock") >= active.expires_at_unix_ms,
+            "test fixture must already be past the recording expiry"
+        );
+        assert_eq!(
+            runtime
+                .store
+                .active_recordings_for_call(
+                    &active.scope,
+                    &active.call_id,
+                    MAX_ACTIVE_RECORDINGS_PER_CALL,
+                )
+                .expect("active lookup")
+                .len(),
+            1,
+            "retention sweep has intentionally not transitioned the ACTIVE row yet"
+        );
+
+        let observer = RuntimeRecordingMediaObserver {
+            store: Arc::clone(&runtime.store),
+            recording_provider: Arc::clone(&runtime.recording_provider),
+        };
+        assert_eq!(
+            observer.capture_encrypted_frame(&recording_capture_frame(45)),
+            Ok(())
+        );
+
+        drop(runtime);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn recording_capture_reaches_live_provider_and_fails_closed_after_lease_takeover() {
+        let (path, runtime) = recording_health_runtime("capture-live-provider");
+        let active = install_active_recording(runtime.store.as_ref());
+        assert_eq!(active.state, ucr_model::RecordingState::Active);
+        let observer = RuntimeRecordingMediaObserver {
+            store: Arc::clone(&runtime.store),
+            recording_provider: Arc::clone(&runtime.recording_provider),
+        };
+
+        let now = runtime_now_unix_ms().expect("clock");
+        let holder_id = "recording-capture-holder";
+        assert!(
+            runtime
+                .store
+                .try_acquire_runtime_worker_lease(
+                    RECORDING_PROVIDER_WORKER_KIND,
+                    holder_id,
+                    now,
+                    RECORDING_PROVIDER_WORKER_LEASE_DURATION_MS,
+                )
+                .expect("acquire provider lease")
+        );
+        let provider = Arc::new(RecordingCaptureTestProvider::new(
+            RecordingProviderHealth::Healthy,
+        ));
+        let registration = runtime
+            .register_recording_provider(provider.clone(), holder_id)
+            .expect("register capture provider");
+
+        let frame = recording_capture_frame(42);
+        assert_eq!(
+            observer.capture_encrypted_frame(&frame),
+            Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable
+            ))
+        );
+        let sweep = runtime
+            .dispatch_recording_provider_once(provider.as_ref())
+            .expect("dispatch provider start");
+        assert_eq!(sweep.applied, 1);
+        assert_eq!(observer.capture_encrypted_frame(&frame), Ok(()));
+        assert_eq!(
+            provider.captures(),
+            vec![("recording-capture-id".to_owned(), 2, 42)]
+        );
+
+        assert!(
+            runtime
+                .store
+                .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, holder_id)
+                .expect("release original lease")
+        );
+        let replacement_holder = "recording-capture-replacement";
+        assert!(
+            runtime
+                .store
+                .try_acquire_runtime_worker_lease(
+                    RECORDING_PROVIDER_WORKER_KIND,
+                    replacement_holder,
+                    now,
+                    RECORDING_PROVIDER_WORKER_LEASE_DURATION_MS,
+                )
+                .expect("acquire replacement lease")
+        );
+        assert_eq!(
+            observer.capture_encrypted_frame(&recording_capture_frame(43)),
+            Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable
+            ))
+        );
+        assert_eq!(provider.captures().len(), 1);
+
+        drop(registration);
+        assert!(
+            runtime
+                .store
+                .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, replacement_holder,)
+                .expect("release replacement lease")
+        );
+        drop(runtime);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn recording_capture_rejects_unavailable_provider_before_side_effect() {
+        let (path, runtime) = recording_health_runtime("capture-unavailable");
+        let active = install_active_recording(runtime.store.as_ref());
+        assert_eq!(active.state, ucr_model::RecordingState::Active);
+        let observer = RuntimeRecordingMediaObserver {
+            store: Arc::clone(&runtime.store),
+            recording_provider: Arc::clone(&runtime.recording_provider),
+        };
+        let now = runtime_now_unix_ms().expect("clock");
+        let holder_id = "recording-capture-unavailable";
+        assert!(
+            runtime
+                .store
+                .try_acquire_runtime_worker_lease(
+                    RECORDING_PROVIDER_WORKER_KIND,
+                    holder_id,
+                    now,
+                    RECORDING_PROVIDER_WORKER_LEASE_DURATION_MS,
+                )
+                .expect("acquire provider lease")
+        );
+        let provider = Arc::new(RecordingCaptureTestProvider::new(
+            RecordingProviderHealth::Unavailable,
+        ));
+        let registration = runtime
+            .register_recording_provider(provider.clone(), holder_id)
+            .expect("register unavailable provider");
+        let sweep = runtime
+            .dispatch_recording_provider_once(provider.as_ref())
+            .expect("dispatch provider start");
+        assert_eq!(sweep.applied, 1);
+
+        assert_eq!(
+            observer.capture_encrypted_frame(&recording_capture_frame(44)),
+            Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable
+            ))
+        );
+        assert!(provider.captures().is_empty());
+
+        drop(registration);
+        assert!(
+            runtime
+                .store
+                .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, holder_id)
+                .expect("release provider lease")
+        );
+        drop(runtime);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
