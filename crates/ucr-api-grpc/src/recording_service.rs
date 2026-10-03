@@ -10,9 +10,8 @@ use ucr_core::{
     AuthorizationEvaluator, CallStore, CommandAcceptanceStore, ConferenceJoinGrantStore,
     DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventJournalStore,
     PrincipalIdentityBindingStore, RecordingConsentProviderStopRequest, RecordingProviderRequest,
-    RecordingStore,
-    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
-    generate_opaque_id,
+    RecordingStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock,
+    ServiceQuotaStore, generate_opaque_id,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet};
 use ucr_model::{
@@ -1016,21 +1015,10 @@ pub fn recording_provider_ready_event(
         return Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument));
     }
 
-    let event_id = EventId::from_opaque(derived_recording_ready_id(
-        "event",
-        request,
-        provider_id,
-    )?);
-    let actor_id = ActorId::from_opaque(derived_recording_ready_id(
-        "actor",
-        request,
-        provider_id,
-    )?);
-    let device_id = DeviceId::from_opaque(derived_recording_ready_id(
-        "device",
-        request,
-        provider_id,
-    )?);
+    let event_id = EventId::from_opaque(derived_recording_ready_id("event", request, provider_id)?);
+    let actor_id = ActorId::from_opaque(derived_recording_ready_id("actor", request, provider_id)?);
+    let device_id =
+        DeviceId::from_opaque(derived_recording_ready_id("device", request, provider_id)?);
     let identity_id = IdentityId::from_opaque(derived_recording_ready_id(
         "identity",
         request,
@@ -1066,10 +1054,7 @@ pub fn recording_provider_ready_event(
         correlation: CorrelationContext {
             correlation_id: event_id.as_opaque().clone(),
             causation_id: None,
-            idempotency_key: Some(format!(
-                "recording-ready:{}",
-                request.lifecycle_revision
-            )),
+            idempotency_key: Some(format!("recording-ready:{}", request.lifecycle_revision)),
         },
         schema_version: ProtocolVersion::new(1, 0),
         integrity_metadata: Vec::new(),
@@ -1214,22 +1199,12 @@ mod provider_ready_event_tests {
         let recording = stopped_recording();
         let request =
             RecordingProviderRequest::for_session(&recording, RecordingProviderOperation::Stop);
-        let first = recording_provider_ready_event(
-            &recording,
-            &request,
-            "encrypted-archive-v1",
-            40,
-            false,
-        )
-        .expect("ready event");
-        let retry = recording_provider_ready_event(
-            &recording,
-            &request,
-            "encrypted-archive-v1",
-            40,
-            false,
-        )
-        .expect("ready retry");
+        let first =
+            recording_provider_ready_event(&recording, &request, "encrypted-archive-v1", 40, false)
+                .expect("ready event");
+        let retry =
+            recording_provider_ready_event(&recording, &request, "encrypted-archive-v1", 40, false)
+                .expect("ready retry");
         assert_eq!(first, retry);
         assert_eq!(first.event_type, "ucr.recording.ready");
         assert_eq!(first.logical_order, recording.revision);
@@ -1251,22 +1226,12 @@ mod provider_ready_event_tests {
         let recording = stopped_recording();
         let request =
             RecordingProviderRequest::for_session(&recording, RecordingProviderOperation::Stop);
-        let normal = recording_provider_ready_event(
-            &recording,
-            &request,
-            "encrypted-archive-v1",
-            40,
-            false,
-        )
-        .expect("normal event");
-        let recovered = recording_provider_ready_event(
-            &recording,
-            &request,
-            "encrypted-archive-v1",
-            50,
-            true,
-        )
-        .expect("recovered event");
+        let normal =
+            recording_provider_ready_event(&recording, &request, "encrypted-archive-v1", 40, false)
+                .expect("normal event");
+        let recovered =
+            recording_provider_ready_event(&recording, &request, "encrypted-archive-v1", 50, true)
+                .expect("recovered event");
         assert_eq!(normal.event_id, recovered.event_id);
         assert_eq!(normal.actor.actor_id, recovered.actor.actor_id);
         assert_eq!(
