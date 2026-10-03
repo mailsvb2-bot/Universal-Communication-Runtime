@@ -820,23 +820,29 @@ impl RuntimeRecordingMediaObserver {
             if recording.expires_at_unix_ms <= now_unix_ms {
                 continue;
             }
-            let start = RecordingProviderRequest::for_session(
-                &recording,
-                RecordingProviderOperation::Start,
-            );
-            let start_state = self
+            let start = self
                 .store
-                .recording_provider_operation(&start)
+                .latest_recording_provider_operation(
+                    &recording.scope,
+                    &recording.recording_id,
+                    RecordingProviderOperation::Start,
+                    recording.revision,
+                )
                 .map_err(map_recording_capture_store_error)?
-                .map(|record| record.state);
-            match start_state {
-                Some(RecordingProviderOperationState::Applied) => capturable.push(recording),
-                Some(RecordingProviderOperationState::Pending) => {
+                .filter(|record| {
+                    record.request.call_id == recording.call_id
+                        && record.request.expires_at_unix_ms == recording.expires_at_unix_ms
+                });
+            match start {
+                Some(record) if record.state == RecordingProviderOperationState::Applied => {
+                    capturable.push((recording, record.request.lifecycle_revision));
+                }
+                Some(record) if record.state == RecordingProviderOperationState::Pending => {
                     return Err(CanonicalError::new(
                         CanonicalErrorCode::TemporarilyUnavailable,
                     ));
                 }
-                Some(RecordingProviderOperationState::Failed) | None => {
+                Some(_) | None => {
                     return Err(CanonicalError::new(CanonicalErrorCode::Internal));
                 }
             }
@@ -875,8 +881,11 @@ impl RuntimeRecordingMediaObserver {
             ));
         }
 
-        for recording in capturable {
-            let context = RecordingProviderCaptureContext::for_session(&recording);
+        for (recording, provider_start_revision) in capturable {
+            let context = RecordingProviderCaptureContext::for_session_with_lifecycle_revision(
+                &recording,
+                provider_start_revision,
+            );
             provider
                 .capture_encrypted_frame(&context, frame)
                 .map_err(map_recording_capture_provider_error)?;
