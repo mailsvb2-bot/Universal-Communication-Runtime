@@ -802,6 +802,7 @@ mod tests {
             .expect("recordings table");
         {
             let transaction = connection.unchecked_transaction().expect("transaction");
+            event_journal::create_v8_objects(&transaction).expect("event journal");
             create_v47_objects(&transaction).expect("v47 objects");
             create_v48_objects(&transaction).expect("v48 objects");
             transaction.commit().expect("commit schema");
