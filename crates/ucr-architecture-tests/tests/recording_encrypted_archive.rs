@@ -84,8 +84,8 @@ fn encrypted_archive_runtime_wiring_is_opt_in_same_runtime_and_cancellation_safe
     assert!(main.contains("biased;"));
     assert!(runtime.contains("struct RecordingProviderWorkerLeaseGuard"));
     assert!(runtime.contains("impl Drop for RecordingProviderWorkerLeaseGuard"));
-    assert!(runtime.contains(
-        "recording_provider_worker_cancellation_releases_lease_and_registration"
-    ));
+    assert!(
+        runtime.contains("recording_provider_worker_cancellation_releases_lease_and_registration")
+    );
     assert!(runtime.contains("recording: false"));
 }
