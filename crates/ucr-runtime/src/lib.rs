@@ -760,16 +760,27 @@ impl RuntimeDiagnostics {
     }
 }
 
-type RecordingProviderRegistry = Arc<Mutex<Option<Arc<dyn RecordingMediaProvider>>>>;
+#[derive(Debug)]
+struct RecordingProviderRegistrationState {
+    holder_id: String,
+    provider: Arc<dyn RecordingMediaProvider>,
+}
+
+type RecordingProviderRegistry = Arc<Mutex<Option<RecordingProviderRegistrationState>>>;
 
 #[derive(Debug)]
 struct RecordingProviderRegistration {
     registry: RecordingProviderRegistry,
+    holder_id: String,
 }
 
 impl Drop for RecordingProviderRegistration {
     fn drop(&mut self) {
-        if let Ok(mut slot) = self.registry.lock() {
+        if let Ok(mut slot) = self.registry.lock()
+            && slot
+                .as_ref()
+                .is_some_and(|registration| registration.holder_id == self.holder_id)
+        {
             *slot = None;
         }
     }
@@ -858,7 +869,10 @@ impl OperatorRuntimeHealthSource for ProductionOperatorHealthSource {
             turn: Some(realtime.turn),
             storage: Some(operator_storage_health(self.store.as_ref())),
             webhook_worker: Some(operator_webhook_worker_health(self.store.as_ref())),
-            recorder: Some(operator_recording_provider_health(&self.recording_provider)),
+            recorder: Some(operator_recording_provider_health(
+                self.store.as_ref(),
+                &self.recording_provider,
+            )),
             capacity: Some(realtime.capacity),
         }
     }
@@ -989,21 +1003,63 @@ fn operator_webhook_worker_health_at(
 }
 
 fn operator_recording_provider_health(
+    store: &SqliteLocalStore,
     registry: &RecordingProviderRegistry,
 ) -> pb::OperatorComponentHealth {
-    let Ok(provider) = registry.lock() else {
+    let Ok(now_unix_ms) = runtime_now_unix_ms() else {
+        return operator_component(
+            pb::OperatorComponentStatus::Unavailable,
+            "recording provider health clock is unavailable",
+        );
+    };
+    operator_recording_provider_health_at(store, registry, now_unix_ms)
+}
+
+fn operator_recording_provider_health_at(
+    store: &SqliteLocalStore,
+    registry: &RecordingProviderRegistry,
+    now_unix_ms: i64,
+) -> pb::OperatorComponentHealth {
+    let Ok(registration) = registry.lock() else {
         return operator_component(
             pb::OperatorComponentStatus::Unavailable,
             "recording provider health registry is unavailable",
         );
     };
-    let Some(provider) = provider.as_ref() else {
+    let Some(registration) = registration.as_ref() else {
         return operator_component(
             pb::OperatorComponentStatus::NotConfigured,
             "recording provider is not configured",
         );
     };
-    match provider.health() {
+    let lease = match store.runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND) {
+        Ok(Some(lease))
+            if lease.holder_id == registration.holder_id
+                && lease.lease_expires_unix_ms > now_unix_ms =>
+        {
+            lease
+        }
+        Ok(Some(_)) => {
+            return operator_component(
+                pb::OperatorComponentStatus::Unavailable,
+                "recording provider durable worker lease is not owned by this runtime",
+            );
+        }
+        Ok(None) => {
+            return operator_component(
+                pb::OperatorComponentStatus::Unavailable,
+                "recording provider durable worker lease is missing",
+            );
+        }
+        Err(_) => {
+            return operator_component(
+                pb::OperatorComponentStatus::Unavailable,
+                "recording provider durable worker lease health check failed",
+            );
+        }
+    };
+    debug_assert!(lease.lease_expires_unix_ms > now_unix_ms);
+    match registration.provider.health() {
         RecordingProviderHealth::Healthy => operator_component(
             pb::OperatorComponentStatus::Healthy,
             "recording provider reports healthy",
@@ -1437,6 +1493,7 @@ impl ProductionRuntime {
     fn register_recording_provider(
         &self,
         provider: Arc<dyn RecordingMediaProvider>,
+        holder_id: &str,
     ) -> Result<RecordingProviderRegistration, String> {
         let mut slot = self
             .recording_provider
@@ -1447,9 +1504,13 @@ impl ProductionRuntime {
                 "recording provider health registry already has an active provider".to_owned(),
             );
         }
-        *slot = Some(provider);
+        *slot = Some(RecordingProviderRegistrationState {
+            holder_id: holder_id.to_owned(),
+            provider,
+        });
         Ok(RecordingProviderRegistration {
             registry: Arc::clone(&self.recording_provider),
+            holder_id: holder_id.to_owned(),
         })
     }
 
@@ -1517,15 +1578,16 @@ impl ProductionRuntime {
         if !acquired {
             return Err("another recording provider worker holds the durable lease".to_owned());
         }
-        let _provider_registration = match self.register_recording_provider(Arc::clone(&provider)) {
-            Ok(registration) => registration,
-            Err(error) => {
-                let _ = self
-                    .store
-                    .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id);
-                return Err(error);
-            }
-        };
+        let _provider_registration =
+            match self.register_recording_provider(Arc::clone(&provider), &holder_id) {
+                Ok(registration) => registration,
+                Err(error) => {
+                    let _ = self
+                        .store
+                        .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id);
+                    return Err(error);
+                }
+            };
 
         println!(
             "UCR_RECORDING_PROVIDER_WORKER_READY provider={} poll_interval_ms={}",
@@ -3404,27 +3466,31 @@ mod tests {
         }
     }
 
-    #[test]
-    fn recording_provider_health_tracks_runtime_registration_and_clears_on_drop() {
+    fn recording_health_runtime(label: &str) -> (std::path::PathBuf, ProductionRuntime) {
         let path = std::env::temp_dir().join(format!(
-            "ucr-recording-provider-health-{}-{}.sqlite",
+            "ucr-recording-provider-health-{label}-{}-{}.sqlite",
             std::process::id(),
             runtime_now_unix_ms().expect("clock")
         ));
         ProductionRuntime::initialize_database(&path).expect("initialize store");
         let runtime = ProductionRuntime::open_existing(&path).expect("open runtime");
-        let source = ProductionOperatorHealthSource::basic(
-            Arc::clone(&runtime.store),
-            Arc::clone(&runtime.recording_provider),
-        );
+        (path, runtime)
+    }
 
-        let not_configured = source.snapshot().recorder.expect("recorder health");
+    #[test]
+    fn recording_provider_health_maps_provider_state_only_with_live_matching_lease() {
+        let (path, runtime) = recording_health_runtime("mapping");
+        let not_configured = operator_recording_provider_health_at(
+            runtime.store.as_ref(),
+            &runtime.recording_provider,
+            1_000,
+        );
         assert_eq!(
             not_configured.status,
             pb::OperatorComponentStatus::NotConfigured as i32
         );
 
-        for (health, expected) in [
+        for (index, (health, expected)) in [
             (
                 RecordingProviderHealth::Healthy,
                 pb::OperatorComponentStatus::Healthy,
@@ -3437,21 +3503,131 @@ mod tests {
                 RecordingProviderHealth::Unavailable,
                 pb::OperatorComponentStatus::Unavailable,
             ),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let now = 10_000 + i64::try_from(index).expect("test index") * 10_000;
+            let holder_id = format!("recording-health-holder-{index}");
+            assert!(
+                runtime
+                    .store
+                    .try_acquire_runtime_worker_lease(
+                        RECORDING_PROVIDER_WORKER_KIND,
+                        &holder_id,
+                        now,
+                        1_000,
+                    )
+                    .expect("acquire provider lease")
+            );
             let registration = runtime
-                .register_recording_provider(Arc::new(RecordingHealthTestProvider(health)))
+                .register_recording_provider(
+                    Arc::new(RecordingHealthTestProvider(health)),
+                    &holder_id,
+                )
                 .expect("register provider");
-            let recorder = source.snapshot().recorder.expect("recorder health");
+            let recorder = operator_recording_provider_health_at(
+                runtime.store.as_ref(),
+                &runtime.recording_provider,
+                now + 500,
+            );
             assert_eq!(recorder.status, expected as i32);
             assert!(!recorder.detail.contains("test.recording-health"));
+            assert!(!recorder.detail.contains(&holder_id));
             drop(registration);
-            let cleared = source.snapshot().recorder.expect("cleared recorder health");
-            assert_eq!(
-                cleared.status,
-                pb::OperatorComponentStatus::NotConfigured as i32
+            assert!(
+                runtime
+                    .store
+                    .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, &holder_id)
+                    .expect("release provider lease")
             );
         }
 
+        drop(runtime);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn recording_provider_health_fails_closed_after_lease_expiry_or_takeover() {
+        let (path, runtime) = recording_health_runtime("lease");
+        let holder_id = "recording-health-original";
+        assert!(
+            runtime
+                .store
+                .try_acquire_runtime_worker_lease(
+                    RECORDING_PROVIDER_WORKER_KIND,
+                    holder_id,
+                    10_000,
+                    1_000,
+                )
+                .expect("acquire provider lease")
+        );
+        let registration = runtime
+            .register_recording_provider(
+                Arc::new(RecordingHealthTestProvider(
+                    RecordingProviderHealth::Healthy,
+                )),
+                holder_id,
+            )
+            .expect("register provider");
+
+        let healthy = operator_recording_provider_health_at(
+            runtime.store.as_ref(),
+            &runtime.recording_provider,
+            10_500,
+        );
+        assert_eq!(healthy.status, pb::OperatorComponentStatus::Healthy as i32);
+
+        let expired = operator_recording_provider_health_at(
+            runtime.store.as_ref(),
+            &runtime.recording_provider,
+            11_000,
+        );
+        assert_eq!(
+            expired.status,
+            pb::OperatorComponentStatus::Unavailable as i32
+        );
+
+        let replacement_holder = "recording-health-replacement";
+        assert!(
+            runtime
+                .store
+                .try_acquire_runtime_worker_lease(
+                    RECORDING_PROVIDER_WORKER_KIND,
+                    replacement_holder,
+                    11_000,
+                    1_000,
+                )
+                .expect("replace expired provider lease")
+        );
+        let stale = operator_recording_provider_health_at(
+            runtime.store.as_ref(),
+            &runtime.recording_provider,
+            11_100,
+        );
+        assert_eq!(
+            stale.status,
+            pb::OperatorComponentStatus::Unavailable as i32
+        );
+        assert!(!stale.detail.contains(holder_id));
+        assert!(!stale.detail.contains(replacement_holder));
+
+        drop(registration);
+        let cleared = operator_recording_provider_health_at(
+            runtime.store.as_ref(),
+            &runtime.recording_provider,
+            11_100,
+        );
+        assert_eq!(
+            cleared.status,
+            pb::OperatorComponentStatus::NotConfigured as i32
+        );
+        assert!(
+            runtime
+                .store
+                .release_runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND, replacement_holder)
+                .expect("release replacement lease")
+        );
         drop(runtime);
         let _ = std::fs::remove_file(path);
     }

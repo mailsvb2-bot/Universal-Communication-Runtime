@@ -89,8 +89,12 @@ fn recording_provider_outbox_has_restart_safe_single_owner_runtime_worker() {
     assert!(runtime.contains("RecordingProviderHealth::Healthy"));
     assert!(runtime.contains("RecordingProviderHealth::Degraded"));
     assert!(runtime.contains("RecordingProviderHealth::Unavailable"));
+    assert!(runtime.contains("runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND)"));
+    assert!(runtime.contains("lease.holder_id == registration.holder_id"));
+    assert!(runtime.contains("lease.lease_expires_unix_ms > now_unix_ms"));
     assert!(runtime.contains("recording: false"));
-    assert!(spec.contains("Registration occurs only after the durable worker lease is acquired"));
+    assert!(spec.contains("every health snapshot revalidates the"));
+    assert!(spec.contains("exact registered holder plus an unexpired"));
     assert!(spec.contains("does not change the public recording capability flag"));
     let worker_start = runtime
         .find("pub async fn run_recording_provider_worker(")
