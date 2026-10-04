@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   installUcrEndpointE2eeAdapter,
@@ -64,5 +65,9 @@ assert.throws(
     }),
   /already installed/,
 );
+
+const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
+assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
+assert.match(browser, /Unsupported endpoint E2EE adapter contract version/);
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
