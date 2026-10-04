@@ -3,8 +3,8 @@
 use wasm_bindgen::prelude::*;
 
 use ucr_crypto::{
-    GroupMediaEpochSecret, SigningKeyMaterial, VerifyingKeyBytes,
-    open_endpoint_group_media_wire, seal_endpoint_group_media_wire,
+    GroupMediaEpochSecret, SigningKeyMaterial, VerifyingKeyBytes, open_endpoint_group_media_wire,
+    seal_endpoint_group_media_wire,
 };
 use ucr_model::{
     CallId, CryptoSuite, DeviceId, GroupId, GroupMediaE2eeContext, GroupMediaFrameHeader, KeyId,
@@ -60,7 +60,10 @@ impl EndpointGroupMediaBridge {
             },
         };
         let source = PrincipalRef {
-            principal_id: PrincipalId::from_opaque(opaque(source_principal_id, "source_principal_id")?),
+            principal_id: PrincipalId::from_opaque(opaque(
+                source_principal_id,
+                "source_principal_id",
+            )?),
             kind: principal_kind(source_principal_kind)?,
         };
         let source_device_id = DeviceId::from_opaque(opaque(source_device_id, "source_device_id")?);
@@ -127,11 +130,7 @@ impl EndpointGroupMediaBridge {
         .map_err(debug_error)
     }
 
-    pub fn open_wire(
-        &self,
-        wire: &[u8],
-        source_verifying_key: &[u8],
-    ) -> Result<Vec<u8>, JsValue> {
+    pub fn open_wire(&self, wire: &[u8], source_verifying_key: &[u8]) -> Result<Vec<u8>, JsValue> {
         let source_verifying_key = fixed_32(source_verifying_key, "source_verifying_key")?;
         open_endpoint_group_media_wire(
             &self.epoch_secret,
