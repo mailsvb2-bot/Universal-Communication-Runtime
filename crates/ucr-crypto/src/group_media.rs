@@ -164,7 +164,6 @@ impl From<SfuForwardWireError> for EndpointGroupMediaWireError {
     }
 }
 
-
 /// Seals one endpoint-owned group-media payload using the canonical UCR MLS-derived crypto
 /// contract without requiring server-side stores or authorization state.
 ///
@@ -258,7 +257,6 @@ pub fn open_endpoint_group_media_payload(
         &aad,
     )?)
 }
-
 
 /// Seals one endpoint payload and immediately emits the canonical transport-neutral SFU wire.
 ///
@@ -404,14 +402,13 @@ mod endpoint_tests {
         .expect("seal wire");
 
         let envelope = decode_sfu_forward_envelope(&wire).expect("canonical wire");
-        assert_eq!(envelope.frame.header.header_version, SFU_FORWARD_WIRE_VERSION);
-        let plaintext = open_endpoint_group_media_wire(
-            &epoch_secret,
-            &context,
-            &wire,
-            signer.verifying_key(),
-        )
-        .expect("open wire");
+        assert_eq!(
+            envelope.frame.header.header_version,
+            SFU_FORWARD_WIRE_VERSION
+        );
+        let plaintext =
+            open_endpoint_group_media_wire(&epoch_secret, &context, &wire, signer.verifying_key())
+                .expect("open wire");
         assert_eq!(plaintext, b"wire endpoint frame");
     }
 
