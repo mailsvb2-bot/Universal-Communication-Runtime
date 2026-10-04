@@ -397,8 +397,6 @@ impl RecordingProviderOperationStore for SqliteLocalStore {
             return Err(DurableStoreError::InvalidRecord);
         }
 
-        let namespace = namespace_storage_key(&request.scope);
-        let revision = request.lifecycle_revision.to_be_bytes();
         let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -414,82 +412,8 @@ impl RecordingProviderOperationStore for SqliteLocalStore {
         if record.request != *request {
             return Err(DurableStoreError::Conflict);
         }
-        let marker: i64 = transaction
-            .query_row(
-                "SELECT ready_event_emitted
-                 FROM recording_provider_operations
-                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
-                   AND recording_id=?4 AND lifecycle_revision=?5 AND operation='stop'",
-                params![
-                    request.scope.tenant_id.as_opaque().as_str(),
-                    namespace.present,
-                    namespace.value,
-                    request.recording_id.as_opaque().as_str(),
-                    revision.as_slice(),
-                ],
-                |row| row.get(0),
-            )
-            .map_err(|error| map_sqlite_error(&error))?;
 
-        match record.state {
-            RecordingProviderOperationState::Pending => {
-                if marker != 0 {
-                    return Err(DurableStoreError::Corrupt);
-                }
-                let changed = transaction
-                    .execute(
-                        "UPDATE recording_provider_operations
-                         SET state='applied', attempts=attempts+1, ready_event_emitted=1
-                         WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
-                           AND recording_id=?4 AND lifecycle_revision=?5 AND operation='stop'
-                           AND state='pending' AND ready_event_emitted=0
-                           AND call_id=?6 AND expires_at_unix_ms=?7",
-                        params![
-                            request.scope.tenant_id.as_opaque().as_str(),
-                            namespace.present,
-                            namespace.value,
-                            request.recording_id.as_opaque().as_str(),
-                            revision.as_slice(),
-                            request.call_id.as_opaque().as_str(),
-                            request.expires_at_unix_ms,
-                        ],
-                    )
-                    .map_err(|error| map_sqlite_error(&error))?;
-                if changed != 1 {
-                    return Err(DurableStoreError::Conflict);
-                }
-            }
-            RecordingProviderOperationState::Applied => {
-                if marker == 0 {
-                    let changed = transaction
-                        .execute(
-                            "UPDATE recording_provider_operations
-                             SET ready_event_emitted=1
-                             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
-                               AND recording_id=?4 AND lifecycle_revision=?5 AND operation='stop'
-                               AND state='applied' AND ready_event_emitted=0
-                               AND call_id=?6 AND expires_at_unix_ms=?7",
-                            params![
-                                request.scope.tenant_id.as_opaque().as_str(),
-                                namespace.present,
-                                namespace.value,
-                                request.recording_id.as_opaque().as_str(),
-                                revision.as_slice(),
-                                request.call_id.as_opaque().as_str(),
-                                request.expires_at_unix_ms,
-                            ],
-                        )
-                        .map_err(|error| map_sqlite_error(&error))?;
-                    if changed != 1 {
-                        return Err(DurableStoreError::Conflict);
-                    }
-                } else if marker != 1 {
-                    return Err(DurableStoreError::Corrupt);
-                }
-            }
-            RecordingProviderOperationState::Failed => return Err(DurableStoreError::Conflict),
-        }
-
+        commit_stop_ready_marker_in_transaction(&transaction, request, record.state)?;
         let _ = event_journal::append_event_in_transaction(&transaction, event)?;
         transaction
             .commit()
@@ -625,6 +549,81 @@ impl RecordingProviderOperationStore for SqliteLocalStore {
                 _ => Err(DurableStoreError::Conflict),
             }
         }
+    }
+}
+
+fn commit_stop_ready_marker_in_transaction(
+    transaction: &Transaction<'_>,
+    request: &RecordingProviderRequest,
+    state: RecordingProviderOperationState,
+) -> Result<(), DurableStoreError> {
+    let namespace = namespace_storage_key(&request.scope);
+    let revision = request.lifecycle_revision.to_be_bytes();
+    let marker: i64 = transaction
+        .query_row(
+            "SELECT ready_event_emitted
+             FROM recording_provider_operations
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+               AND recording_id=?4 AND lifecycle_revision=?5 AND operation='stop'",
+            params![
+                request.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                request.recording_id.as_opaque().as_str(),
+                revision.as_slice(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+
+    let (state_predicate, update) = match state {
+        RecordingProviderOperationState::Pending => {
+            if marker != 0 {
+                return Err(DurableStoreError::Corrupt);
+            }
+            (
+                "pending",
+                "state='applied', attempts=attempts+1, ready_event_emitted=1",
+            )
+        }
+        RecordingProviderOperationState::Applied => {
+            if marker == 1 {
+                return Ok(());
+            }
+            if marker != 0 {
+                return Err(DurableStoreError::Corrupt);
+            }
+            ("applied", "ready_event_emitted=1")
+        }
+        RecordingProviderOperationState::Failed => return Err(DurableStoreError::Conflict),
+    };
+
+    let sql = format!(
+        "UPDATE recording_provider_operations
+         SET {update}
+         WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+           AND recording_id=?4 AND lifecycle_revision=?5 AND operation='stop'
+           AND state='{state_predicate}' AND ready_event_emitted=0
+           AND call_id=?6 AND expires_at_unix_ms=?7"
+    );
+    let changed = transaction
+        .execute(
+            &sql,
+            params![
+                request.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                request.recording_id.as_opaque().as_str(),
+                revision.as_slice(),
+                request.call_id.as_opaque().as_str(),
+                request.expires_at_unix_ms,
+            ],
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(DurableStoreError::Conflict)
     }
 }
 
