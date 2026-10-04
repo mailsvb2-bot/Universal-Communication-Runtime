@@ -1236,6 +1236,67 @@ mod tests {
     }
 
     #[test]
+    fn export_rejects_tampered_archive_object() {
+        let root = temp_root("export-tamper");
+        let (provider, _, _) = provider(&root);
+        provider
+            .apply(&request(RecordingProviderOperation::Start, 2))
+            .expect("start");
+        let context = context();
+        let frame = frame(22, 10);
+        provider
+            .capture_encrypted_frame(&context, &frame)
+            .expect("capture");
+        let path = provider.frame_path(&context, &frame);
+        let mut stored = fs::read(&path).expect("stored");
+        let last = stored.len() - 1;
+        stored[last] ^= 0x40;
+        fs::write(&path, stored).expect("tamper");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("permissions");
+        }
+
+        assert_eq!(
+            provider.export_encrypted_recording(&context.scope, &context.recording_id),
+            Err(RecordingProviderError::Internal)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_rejects_symlink_archive_entries() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("export-symlink");
+        let (provider, _, _) = provider(&root);
+        provider
+            .apply(&request(RecordingProviderOperation::Start, 2))
+            .expect("start");
+        let context = context();
+        let frame = frame(23, 11);
+        provider
+            .capture_encrypted_frame(&context, &frame)
+            .expect("capture");
+        let directory = provider.recording_dir(&context.scope, &context.recording_id);
+        let target = provider.frame_path(&context, &frame);
+        let link = directory.join(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.uar",
+        );
+        symlink(&target, &link).expect("symlink");
+
+        assert_eq!(
+            provider.export_encrypted_recording(&context.scope, &context.recording_id),
+            Err(RecordingProviderError::PolicyDenied)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn delete_removes_recording_objects_but_keeps_encrypted_operation_receipt() {
         let root = temp_root("delete");
         let (provider, _, _) = provider(&root);
