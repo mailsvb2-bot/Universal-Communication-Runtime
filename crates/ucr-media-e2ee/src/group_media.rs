@@ -14,9 +14,9 @@ use ucr_crypto::{
 use ucr_model::{
     AuthorizationRequest, CallParticipantState, CallSession, CallSignallingState,
     CapabilityDescriptor, CapabilityMaturity, ConversationKind, DeviceDescriptor, DeviceId,
-    EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader, GroupMemberState, KeyId,
-    KeyPurpose, MediaKind, OpaqueId,
-    PrincipalKind, PrincipalRef, ScopedPrincipal, VideoSourceKind,
+    EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader, GroupMemberState,
+    KeyId, KeyPurpose, MediaKind, OpaqueId, PrincipalKind, PrincipalRef, ScopedPrincipal,
+    VideoSourceKind,
 };
 use ucr_protocol::{
     AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CanonicalError, CryptoContractError,
@@ -447,8 +447,7 @@ where
             &frame.header.source,
             &frame.header.source_device_id,
         )?;
-        let source_verifying_key =
-            resolve_source_verifying_key(self.store, &source_device, frame)?;
+        let source_verifying_key = resolve_source_verifying_key(self.store, &source_device, frame)?;
         let key_id = GroupStreamCursorKey {
             source: frame.header.source.clone(),
             source_device_id: frame.header.source_device_id.clone(),
@@ -675,12 +674,8 @@ where
         .map_err(|_| GroupMediaE2eeError::SourceSignatureInvalid)?;
     let binding =
         group_media_source_signing_binding(&frame.header, &frame.nonce, &frame.ciphertext)?;
-    verify_group_media_binding_signature(
-        public_key,
-        &binding,
-        SignatureBytes(signature_bytes),
-    )
-    .map_err(|_| GroupMediaE2eeError::SourceSignatureInvalid)
+    verify_group_media_binding_signature(public_key, &binding, SignatureBytes(signature_bytes))
+        .map_err(|_| GroupMediaE2eeError::SourceSignatureInvalid)
 }
 
 fn map_endpoint_seal_error(error: EndpointGroupMediaCryptoError) -> GroupMediaE2eeError {
@@ -700,7 +695,8 @@ fn map_endpoint_open_error(error: EndpointGroupMediaCryptoError) -> GroupMediaE2
         EndpointGroupMediaCryptoError::Protocol(error) => GroupMediaE2eeError::Protocol(error),
         EndpointGroupMediaCryptoError::Key(error) => GroupMediaE2eeError::Key(error),
         EndpointGroupMediaCryptoError::Aead(error) => GroupMediaE2eeError::Crypto(error),
-        EndpointGroupMediaCryptoError::Signature(_) | EndpointGroupMediaCryptoError::InvalidSignatureBytes => {
+        EndpointGroupMediaCryptoError::Signature(_)
+        | EndpointGroupMediaCryptoError::InvalidSignatureBytes => {
             GroupMediaE2eeError::SourceSignatureInvalid
         }
     }
