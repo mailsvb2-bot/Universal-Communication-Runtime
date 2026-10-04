@@ -99,6 +99,7 @@ let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=nu
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
 let reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
+const E2EE_ENDPOINT_CONTRACT_VERSION="ucr.endpoint-e2ee.v1";
 const E2EE_CHUNK_MAGIC="UCRCHK01";
 const E2EE_CHUNK_HEADER_BYTES=24;
 const E2EE_DATA_MESSAGE_BYTES=16000;
@@ -230,6 +231,13 @@ async function api(path,payload,signal,keepalive=false){
 function e2eeAdapter(){
   const adapter=window.ucrE2eeEndpoint;
   return adapter&&typeof adapter==="object"?adapter:null;
+}
+function requireCompatibleE2eeAdapter(adapter){
+  if(!adapter)return null;
+  if(adapter.contractVersion!==undefined&&adapter.contractVersion!==E2EE_ENDPOINT_CONTRACT_VERSION){
+    throw new Error("Unsupported endpoint E2EE adapter contract version");
+  }
+  return adapter;
 }
 function closeE2eeTransport(){
   ui.screenToggle.disabled=true;
@@ -387,7 +395,7 @@ async function startScreenShare(){
   }
 }
 async function activateE2eeAdapter(){
-  const adapter=e2eeAdapter();
+  const adapter=requireCompatibleE2eeAdapter(e2eeAdapter());
   if(!adapter||typeof adapter.start!=="function"||typeof adapter.onEnvelope!=="function"){
     ui.status.textContent="WebRTC transport connected. Encrypted endpoint media adapter is required before camera/microphone/screen media can be published.";
     return;
@@ -404,7 +412,7 @@ function attachE2eeDataChannel(channel){
     try{
       const wire=receiveE2eeChunk(event.data);if(!wire)return;
       packetCount++;ui.packets.textContent=String(packetCount);
-      const adapter=e2eeAdapter();if(!adapter||typeof adapter.onEnvelope!=="function")return;
+      const adapter=requireCompatibleE2eeAdapter(e2eeAdapter());if(!adapter||typeof adapter.onEnvelope!=="function")return;
       Promise.resolve(adapter.onEnvelope(wire)).catch(e=>{ui.status.textContent="Encrypted media open failed: "+e.message;});
     }catch(e){e2eePending=null;ui.status.textContent="Encrypted media transport rejected data: "+e.message;}
   };

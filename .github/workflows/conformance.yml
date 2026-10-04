@@ -38,6 +38,7 @@ jobs:
             typescript)
               node --experimental-strip-types sdk/typescript/phase41_conformance.ts
               node --experimental-strip-types sdk/typescript/sfu_forward_wire_conformance.ts
+              node --experimental-strip-types sdk/typescript/endpoint_e2ee_conformance.ts
               node --experimental-strip-types sdk/typescript/conference_embed_conformance.ts
               node --experimental-strip-types sdk/typescript/conference_client_conformance.ts
               ;;

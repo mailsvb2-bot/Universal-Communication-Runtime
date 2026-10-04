@@ -45,6 +45,12 @@ Conference policy or SFU routing.
 Applications connect it to their endpoint crypto adapter and keep all group-media key material on
 the endpoint.
 
+`src/endpoint_e2ee.ts` defines the stable browser adapter contract
+`ucr.endpoint-e2ee.v1`. A v1 adapter must expose `start`, `onEnvelope` and `stop`, may expose
+`updateSources`, and is installed under `window.ucrE2eeEndpoint`. The resolver rejects unknown
+future version strings rather than silently guessing semantics. Unversioned adapters remain
+accepted as a backwards-compatibility bridge, but callers may opt into strict v1-only validation.
+
 The reference browser keeps camera/microphone and display capture endpoint-only. An adapter started
 by `window.ucrE2eeEndpoint.start(...)` receives `stream` (the backwards-compatible camera/mic
 stream), `cameraStream`, optional `screenStream`, and `sendEnvelope`. Live screen-share
