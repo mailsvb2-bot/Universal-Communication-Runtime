@@ -151,6 +151,16 @@ pub enum RecordingProviderError {
     Internal,
 }
 
+
+pub const MAX_RECORDING_PROVIDER_EXPORT_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordingProviderExport {
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+
 /// Pluggable encoded-media/storage boundary for Conference recording.
 ///
 /// Implementations may represent an in-process recorder, S3-compatible encrypted object pipeline,
@@ -180,6 +190,22 @@ pub trait RecordingMediaProvider: fmt::Debug + Send + Sync {
         frame: &EncryptedGroupMediaFrame,
     ) -> Result<(), RecordingProviderError> {
         let _ = (context, frame);
+        Err(RecordingProviderError::TemporarilyUnavailable)
+    }
+
+
+    /// Exports one provider-owned Recording artifact after caller-side authorization and lifecycle
+    /// checks. The returned artifact may still contain endpoint-E2EE ciphertext; this boundary never
+    /// receives or exports MLS key material.
+    ///
+    /// # Errors
+    /// Defaults fail-closed until a concrete provider implements bounded export.
+    fn export_encrypted_recording(
+        &self,
+        scope: &TenantScope,
+        recording_id: &RecordingId,
+    ) -> Result<RecordingProviderExport, RecordingProviderError> {
+        let _ = (scope, recording_id);
         Err(RecordingProviderError::TemporarilyUnavailable)
     }
 }
