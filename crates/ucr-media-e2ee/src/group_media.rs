@@ -14,18 +14,18 @@ use ucr_crypto::{
 use ucr_model::{
     AuthorizationRequest, CallParticipantState, CallSession, CallSignallingState,
     CapabilityDescriptor, CapabilityMaturity, ConversationKind, DeviceDescriptor, DeviceId,
-    EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, GroupMemberState, KeyId, KeyPurpose, MediaKind, OpaqueId,
+    EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader, GroupMemberState, KeyId,
+    KeyPurpose, MediaKind, OpaqueId,
     PrincipalKind, PrincipalRef, ScopedPrincipal, VideoSourceKind,
 };
 use ucr_protocol::{
-    ALGORITHM_VERSION, AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CanonicalError,
-    CryptoContractError, GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MEDIA_FRAME_HEADER_V1,
-    GROUP_MEDIA_FRAME_HEADER_V2, GROUP_MLS_CAPABILITY, GroupMediaE2eeProtocolError,
-    MAX_MEDIA_STREAMS_PER_EPOCH, SIGNATURE_ALGORITHM_ID, ScreenShareV2Negotiation,
-    VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, canonical_group_media_e2ee_context,
-    device_allows_protected_access, group_media_frame_aad, group_media_source_signing_binding,
-    validate_encrypted_group_media_frame, validate_public_key_descriptor,
+    AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CanonicalError, CryptoContractError,
+    GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
+    GROUP_MLS_CAPABILITY, GroupMediaE2eeProtocolError, MAX_MEDIA_STREAMS_PER_EPOCH,
+    ScreenShareV2Negotiation, VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
+    canonical_group_media_e2ee_context, device_allows_protected_access,
+    group_media_source_signing_binding, validate_encrypted_group_media_frame,
+    validate_public_key_descriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -683,7 +683,7 @@ where
     .map_err(|_| GroupMediaE2eeError::SourceSignatureInvalid)
 }
 
-const fn map_endpoint_seal_error(error: EndpointGroupMediaCryptoError) -> GroupMediaE2eeError {
+fn map_endpoint_seal_error(error: EndpointGroupMediaCryptoError) -> GroupMediaE2eeError {
     match error {
         EndpointGroupMediaCryptoError::Protocol(error) => GroupMediaE2eeError::Protocol(error),
         EndpointGroupMediaCryptoError::Key(error) => GroupMediaE2eeError::Key(error),
@@ -695,7 +695,7 @@ const fn map_endpoint_seal_error(error: EndpointGroupMediaCryptoError) -> GroupM
     }
 }
 
-const fn map_endpoint_open_error(error: EndpointGroupMediaCryptoError) -> GroupMediaE2eeError {
+fn map_endpoint_open_error(error: EndpointGroupMediaCryptoError) -> GroupMediaE2eeError {
     match error {
         EndpointGroupMediaCryptoError::Protocol(error) => GroupMediaE2eeError::Protocol(error),
         EndpointGroupMediaCryptoError::Key(error) => GroupMediaE2eeError::Key(error),
