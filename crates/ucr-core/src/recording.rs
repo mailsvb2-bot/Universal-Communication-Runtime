@@ -151,7 +151,6 @@ pub enum RecordingProviderError {
     Internal,
 }
 
-
 pub const MAX_RECORDING_PROVIDER_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,7 +158,6 @@ pub struct RecordingProviderExport {
     pub media_type: String,
     pub bytes: Vec<u8>,
 }
-
 
 /// Pluggable encoded-media/storage boundary for Conference recording.
 ///
