@@ -6,25 +6,26 @@ use ucr_core::{
     PrincipalIdentityBindingStore,
 };
 use ucr_crypto::{
-    AeadError, Ciphertext, GroupMediaEpochSecret, GroupMediaKeyError, GroupMediaSigningKeyHandle,
-    SignatureBytes, SignatureError, TrustedKeyResolutionError, TrustedSigningKeyResolver,
-    VerifyingKeyBytes, derive_group_media_traffic_key, verify_group_media_binding_signature,
+    AeadError, EndpointGroupMediaCryptoError, GroupMediaEpochSecret, GroupMediaKeyError,
+    GroupMediaSigningKeyHandle, SignatureBytes, SignatureError, TrustedKeyResolutionError,
+    TrustedSigningKeyResolver, VerifyingKeyBytes, open_endpoint_group_media_payload,
+    seal_endpoint_group_media_payload, verify_group_media_binding_signature,
 };
 use ucr_model::{
     AuthorizationRequest, CallParticipantState, CallSession, CallSignallingState,
     CapabilityDescriptor, CapabilityMaturity, ConversationKind, DeviceDescriptor, DeviceId,
-    EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, GroupMemberState, KeyId, KeyPurpose, MediaKind, OpaqueId,
-    PrincipalKind, PrincipalRef, ScopedPrincipal, VideoSourceKind,
+    EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader, GroupMemberState,
+    KeyId, KeyPurpose, MediaKind, OpaqueId, PrincipalKind, PrincipalRef, ScopedPrincipal,
+    VideoSourceKind,
 };
 use ucr_protocol::{
-    ALGORITHM_VERSION, AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CanonicalError,
-    CryptoContractError, GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MEDIA_FRAME_HEADER_V1,
-    GROUP_MEDIA_FRAME_HEADER_V2, GROUP_MLS_CAPABILITY, GroupMediaE2eeProtocolError,
-    MAX_MEDIA_STREAMS_PER_EPOCH, SIGNATURE_ALGORITHM_ID, ScreenShareV2Negotiation,
-    VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION, canonical_group_media_e2ee_context,
-    device_allows_protected_access, group_media_frame_aad, group_media_source_signing_binding,
-    validate_encrypted_group_media_frame, validate_public_key_descriptor,
+    AUDIO_RECEIVE_PERMISSION, AUDIO_SEND_PERMISSION, CanonicalError, CryptoContractError,
+    GROUP_MEDIA_E2EE_CAPABILITY, GROUP_MEDIA_FRAME_HEADER_V1, GROUP_MEDIA_FRAME_HEADER_V2,
+    GROUP_MLS_CAPABILITY, GroupMediaE2eeProtocolError, MAX_MEDIA_STREAMS_PER_EPOCH,
+    ScreenShareV2Negotiation, VIDEO_RECEIVE_PERMISSION, VIDEO_SEND_PERMISSION,
+    canonical_group_media_e2ee_context, device_allows_protected_access,
+    group_media_source_signing_binding, validate_encrypted_group_media_frame,
+    validate_public_key_descriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,18 +375,6 @@ where
             media_timestamp,
             keyframe,
         };
-        let traffic_key = derive_group_media_traffic_key(
-            &self.epoch_secret,
-            &self.context,
-            &header.source,
-            &header.source_device_id,
-            &header.stream_id,
-            header.media_kind,
-        )?;
-        let aad = group_media_frame_aad(&header)?;
-        let encrypted = traffic_key.encrypt(plaintext, &aad)?;
-        let signing_binding =
-            group_media_source_signing_binding(&header, &encrypted.nonce, &encrypted.bytes)?;
         let trusted = self
             .store
             .resolve_active_signing_key(
@@ -402,21 +391,15 @@ where
         {
             return Err(GroupMediaE2eeError::SigningKeyMismatch);
         }
-        let signature = signer
-            .sign_group_media_binding(&signing_binding)
-            .map_err(GroupMediaE2eeError::Signing)?;
-        let frame = EncryptedGroupMediaFrame {
+        let frame = seal_endpoint_group_media_payload(
+            &self.epoch_secret,
+            &self.context,
             header,
-            nonce: encrypted.nonce,
-            ciphertext: encrypted.bytes,
-            source_signature: GroupMediaSourceSignature {
-                key_id: signing_key_id.clone(),
-                algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
-                algorithm_version: ALGORITHM_VERSION,
-                signature: signature.0.to_vec(),
-            },
-        };
-        validate_encrypted_group_media_frame(&self.context, &frame)?;
+            plaintext,
+            signing_key_id.clone(),
+            signer,
+        )
+        .map_err(map_endpoint_seal_error)?;
         self.outbound_sequences.insert(key_id, sequence);
         Ok(frame)
     }
@@ -464,7 +447,7 @@ where
             &frame.header.source,
             &frame.header.source_device_id,
         )?;
-        verify_source_signature(self.store, &source_device, frame)?;
+        let source_verifying_key = resolve_source_verifying_key(self.store, &source_device, frame)?;
         let key_id = GroupStreamCursorKey {
             source: frame.header.source.clone(),
             source_device_id: frame.header.source_device_id.clone(),
@@ -479,22 +462,13 @@ where
         {
             return Err(GroupMediaE2eeError::Replay);
         }
-        let traffic_key = derive_group_media_traffic_key(
+        let plaintext = open_endpoint_group_media_payload(
             &self.epoch_secret,
             &self.context,
-            &frame.header.source,
-            &frame.header.source_device_id,
-            &frame.header.stream_id,
-            frame.header.media_kind,
-        )?;
-        let aad = group_media_frame_aad(&frame.header)?;
-        let plaintext = traffic_key.decrypt(
-            &Ciphertext {
-                nonce: frame.nonce,
-                bytes: frame.ciphertext.clone(),
-            },
-            &aad,
-        )?;
+            frame,
+            source_verifying_key,
+        )
+        .map_err(map_endpoint_open_error)?;
         self.inbound_sequences.insert(key_id, frame.header.sequence);
         Ok(plaintext)
     }
@@ -650,11 +624,11 @@ where
     Ok(device)
 }
 
-fn verify_source_signature<S>(
+fn resolve_source_verifying_key<S>(
     store: &S,
     source_device: &DeviceDescriptor,
     frame: &EncryptedGroupMediaFrame,
-) -> Result<(), GroupMediaE2eeError>
+) -> Result<VerifyingKeyBytes, GroupMediaE2eeError>
 where
     S: TrustedSigningKeyResolver,
 {
@@ -680,19 +654,52 @@ where
         .as_slice()
         .try_into()
         .map_err(|_| GroupMediaE2eeError::SourceSignatureInvalid)?;
-    let signature_bytes: [u8; 64] = signature
+    Ok(VerifyingKeyBytes(public_key))
+}
+
+fn verify_source_signature<S>(
+    store: &S,
+    source_device: &DeviceDescriptor,
+    frame: &EncryptedGroupMediaFrame,
+) -> Result<(), GroupMediaE2eeError>
+where
+    S: TrustedSigningKeyResolver,
+{
+    let public_key = resolve_source_verifying_key(store, source_device, frame)?;
+    let signature_bytes: [u8; 64] = frame
+        .source_signature
         .signature
         .as_slice()
         .try_into()
         .map_err(|_| GroupMediaE2eeError::SourceSignatureInvalid)?;
     let binding =
         group_media_source_signing_binding(&frame.header, &frame.nonce, &frame.ciphertext)?;
-    verify_group_media_binding_signature(
-        VerifyingKeyBytes(public_key),
-        &binding,
-        SignatureBytes(signature_bytes),
-    )
-    .map_err(|_| GroupMediaE2eeError::SourceSignatureInvalid)
+    verify_group_media_binding_signature(public_key, &binding, SignatureBytes(signature_bytes))
+        .map_err(|_| GroupMediaE2eeError::SourceSignatureInvalid)
+}
+
+fn map_endpoint_seal_error(error: EndpointGroupMediaCryptoError) -> GroupMediaE2eeError {
+    match error {
+        EndpointGroupMediaCryptoError::Protocol(error) => GroupMediaE2eeError::Protocol(error),
+        EndpointGroupMediaCryptoError::Key(error) => GroupMediaE2eeError::Key(error),
+        EndpointGroupMediaCryptoError::Aead(error) => GroupMediaE2eeError::Crypto(error),
+        EndpointGroupMediaCryptoError::Signature(error) => GroupMediaE2eeError::Signing(error),
+        EndpointGroupMediaCryptoError::InvalidSignatureBytes => {
+            GroupMediaE2eeError::SourceSignatureInvalid
+        }
+    }
+}
+
+fn map_endpoint_open_error(error: EndpointGroupMediaCryptoError) -> GroupMediaE2eeError {
+    match error {
+        EndpointGroupMediaCryptoError::Protocol(error) => GroupMediaE2eeError::Protocol(error),
+        EndpointGroupMediaCryptoError::Key(error) => GroupMediaE2eeError::Key(error),
+        EndpointGroupMediaCryptoError::Aead(error) => GroupMediaE2eeError::Crypto(error),
+        EndpointGroupMediaCryptoError::Signature(_)
+        | EndpointGroupMediaCryptoError::InvalidSignatureBytes => {
+            GroupMediaE2eeError::SourceSignatureInvalid
+        }
+    }
 }
 
 fn require_group_media_capability<C: GroupMediaE2eeCapabilityProvider>(
