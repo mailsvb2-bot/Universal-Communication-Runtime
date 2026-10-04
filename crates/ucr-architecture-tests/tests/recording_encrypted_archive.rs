@@ -107,9 +107,7 @@ fn recording_ready_is_atomic_recoverable_and_not_lifecycle_ready() {
     assert!(sqlite.contains("recording_provider_stops_needing_ready_event"));
     assert!(sqlite.contains("event_journal::append_event_in_transaction"));
     assert!(api.contains("event_type: \"ucr.recording.ready\""));
-    assert!(
-        api.contains("recording_provider_ready_event_is_deterministic_and_not_lifecycle_ready")
-    );
+    assert!(api.contains("provider_ready_event_is_deterministic_and_not_lifecycle_ready"));
     assert!(runtime.contains("recording_provider_stop_commits_ready_event_atomically"));
     assert!(runtime.contains("recording_provider_ready_recovery_does_not_repeat_provider_stop"));
     assert!(runtime.contains("recording: false"));
