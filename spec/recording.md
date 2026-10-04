@@ -148,9 +148,12 @@ secret owner. At-rest keys are exactly 32 bytes, are never persisted by the reco
 copied key material is zeroized after AEAD use.
 
 A provider `Delete` writes/verifies its encrypted idempotency receipt before deleting controlled
-recording frame objects. This makes retry after an interrupted delete deterministic without retaining
-raw media. It does not claim erasure of copies exported to another system and does not yet provide
-the authorized export/read surface required for Production Recording.
+recording frame objects. Provider conformance now includes the crash boundary after that durable
+receipt but before object cleanup: a fresh provider instance over the same archive and key owner
+replays the exact Delete, removes the remaining controlled objects, retains the encrypted receipt,
+and keeps subsequent retries idempotent. This proves restart-safe controlled-object deletion for the
+local encrypted archive. It does not claim erasure of copies exported to another system and does not
+yet provide the authorized export/read surface required for Production Recording.
 
 
 ### Opt-in realtime runtime wiring
@@ -174,8 +177,8 @@ failure or coordinated shutdown.
 
 This wiring is opt-in infrastructure only. No provider is configured by default and the public
 `ucr.conference.recording` capability remains false. Provider finalization/readiness is now
-durable and Event-backed, but access-controlled export/download, deletion/recovery conformance and
-the remaining Production evidence are still required before the capability may be advertised.
+durable and Event-backed, but access-controlled export/download and the remaining Production evidence are still required before
+the capability may be advertised.
 
 ### Durable provider-operation outbox
 
@@ -255,5 +258,4 @@ media bytes, storage paths, encryption keys or export URLs are placed in this Ev
 This outbox, worker, validated capture path, encrypted archive provider, opt-in runtime wiring and
 durable provider-ready Event are still not a complete Production recorder. The shipped runtime has
 no configured provider by default and `ucr.conference.recording` remains unavailable until
-access/export authorization, deletion/recovery conformance and the remaining Production evidence
-are present.
+access/export authorization and the remaining Production evidence are present.
