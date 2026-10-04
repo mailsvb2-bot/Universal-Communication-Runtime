@@ -1,0 +1,11 @@
+[package]
+name = "ucr-crypto-wasm-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ucr-crypto = { path = "../../crates/ucr-crypto" }
+getrandom = { version = "=0.4.3", features = ["wasm_js"] }
+
+[workspace]
