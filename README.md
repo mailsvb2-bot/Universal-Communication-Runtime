@@ -22,6 +22,10 @@ Applications / Platforms
 Optional Infrastructure
 ```
 
+## Operational safety boundary
+
+**No server access is authorized by default.** Contributors and automation must not connect to, inspect, modify, deploy to, or otherwise interact with any server or remote host unless the project owner explicitly identifies that exact server for UCR in a future instruction. Servers known from other projects or prior context must never be inferred as UCR infrastructure. See [AGENTS.md](AGENTS.md).
+
 ## Fundamental laws
 
 1. Intent outlives Transport.
