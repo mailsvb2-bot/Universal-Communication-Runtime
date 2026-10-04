@@ -2,12 +2,20 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use ucr_model::{DeviceId, GroupMediaE2eeContext, MediaKind, OpaqueId, PrincipalRef};
+use ucr_model::{
+    DeviceId, EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader,
+    GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalRef,
+};
 use ucr_protocol::{
-    GroupMediaE2eeProtocolError, group_media_context_binding, group_media_key_context,
+    ALGORITHM_VERSION, SIGNATURE_ALGORITHM_ID, GroupMediaE2eeProtocolError,
+    group_media_context_binding, group_media_frame_aad, group_media_key_context,
+    group_media_source_signing_binding, validate_encrypted_group_media_frame,
 };
 
-use crate::{SignatureBytes, SignatureError, SigningKeyMaterial, TrafficKey, VerifyingKeyBytes};
+use crate::{
+    AeadError, SignatureBytes, SignatureError, SigningKeyMaterial, TrafficKey, VerifyingKeyBytes,
+    verify_group_media_binding_signature,
+};
 use ucr_protocol::GroupMediaSigningBinding;
 
 const GROUP_MEDIA_TRAFFIC_KDF_V1_DOMAIN: &[u8] = b"UCR-GROUP-MEDIA-TRAFFIC-KDF-V1\0";
@@ -101,4 +109,132 @@ pub fn derive_group_media_traffic_key(
     hkdf.expand(&info, output.as_mut())
         .map_err(|_| GroupMediaKeyError::ExpandFailed)?;
     Ok(TrafficKey::from_bytes(output))
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointGroupMediaCryptoError {
+    Protocol(GroupMediaE2eeProtocolError),
+    Key(GroupMediaKeyError),
+    Aead(AeadError),
+    Signature(SignatureError),
+    InvalidSignatureBytes,
+}
+
+impl From<GroupMediaE2eeProtocolError> for EndpointGroupMediaCryptoError {
+    fn from(error: GroupMediaE2eeProtocolError) -> Self {
+        Self::Protocol(error)
+    }
+}
+
+impl From<GroupMediaKeyError> for EndpointGroupMediaCryptoError {
+    fn from(error: GroupMediaKeyError) -> Self {
+        Self::Key(error)
+    }
+}
+
+impl From<AeadError> for EndpointGroupMediaCryptoError {
+    fn from(error: AeadError) -> Self {
+        Self::Aead(error)
+    }
+}
+
+impl From<SignatureError> for EndpointGroupMediaCryptoError {
+    fn from(error: SignatureError) -> Self {
+        Self::Signature(error)
+    }
+}
+
+/// Seals one endpoint-owned group-media payload using the canonical UCR MLS-derived crypto
+/// contract without requiring server-side stores or authorization state.
+///
+/// The caller must provide a header already derived from its current canonical endpoint state.
+/// This function validates that header against the exact group-media context, derives the same
+/// per-source/stream traffic key used by the runtime, encrypts the payload, and signs the exact
+/// canonical frame binding with the endpoint-held Device signing key.
+///
+/// # Errors
+/// Rejects context/header drift, key-derivation failures, AEAD failures, or signing failures.
+pub fn seal_endpoint_group_media_payload(
+    epoch_secret: &GroupMediaEpochSecret,
+    context: &GroupMediaE2eeContext,
+    header: GroupMediaFrameHeader,
+    plaintext: &[u8],
+    signing_key_id: KeyId,
+    signer: &impl GroupMediaSigningKeyHandle,
+) -> Result<EncryptedGroupMediaFrame, EndpointGroupMediaCryptoError> {
+    let traffic_key = derive_group_media_traffic_key(
+        epoch_secret,
+        context,
+        &header.source,
+        &header.source_device_id,
+        &header.stream_id,
+        header.media_kind,
+    )?;
+    let aad = group_media_frame_aad(&header)?;
+    let encrypted = traffic_key.encrypt(plaintext, &aad)?;
+    let signing_binding =
+        group_media_source_signing_binding(&header, &encrypted.nonce, &encrypted.bytes)?;
+    let signature = signer.sign_group_media_binding(&signing_binding)?;
+    let frame = EncryptedGroupMediaFrame {
+        header,
+        nonce: encrypted.nonce,
+        ciphertext: encrypted.bytes,
+        source_signature: GroupMediaSourceSignature {
+            key_id: signing_key_id,
+            algorithm_id: SIGNATURE_ALGORITHM_ID.to_owned(),
+            algorithm_version: ALGORITHM_VERSION,
+            signature: signature.0.to_vec(),
+        },
+    };
+    validate_encrypted_group_media_frame(context, &frame)?;
+    Ok(frame)
+}
+
+/// Opens one canonical endpoint-encrypted group-media frame using endpoint-held MLS exporter
+/// material and the trusted source Device Ed25519 verification key.
+///
+/// This function intentionally owns no membership lookup or authorization policy. Those remain in
+/// the caller's canonical endpoint state. It validates the exact frame/context binding and source
+/// signature before decrypting.
+///
+/// # Errors
+/// Rejects malformed/cross-context frames, malformed signatures, signature forgery, key-derivation
+/// failures, or AEAD integrity failures.
+pub fn open_endpoint_group_media_payload(
+    epoch_secret: &GroupMediaEpochSecret,
+    context: &GroupMediaE2eeContext,
+    frame: &EncryptedGroupMediaFrame,
+    source_verifying_key: VerifyingKeyBytes,
+) -> Result<Vec<u8>, EndpointGroupMediaCryptoError> {
+    validate_encrypted_group_media_frame(context, frame)?;
+    let signature_bytes: [u8; 64] = frame
+        .source_signature
+        .signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| EndpointGroupMediaCryptoError::InvalidSignatureBytes)?;
+    let signing_binding =
+        group_media_source_signing_binding(&frame.header, &frame.nonce, &frame.ciphertext)?;
+    verify_group_media_binding_signature(
+        source_verifying_key,
+        &signing_binding,
+        SignatureBytes(signature_bytes),
+    )?;
+    let traffic_key = derive_group_media_traffic_key(
+        epoch_secret,
+        context,
+        &frame.header.source,
+        &frame.header.source_device_id,
+        &frame.header.stream_id,
+        frame.header.media_kind,
+    )?;
+    let aad = group_media_frame_aad(&frame.header)?;
+    Ok(traffic_key.decrypt(
+        &crate::Ciphertext {
+            nonce: frame.nonce,
+            bytes: frame.ciphertext.clone(),
+        },
+        &aad,
+    )?)
 }
