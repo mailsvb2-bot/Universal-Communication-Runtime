@@ -14,8 +14,9 @@ use chacha20poly1305::{
 };
 use sha2::{Digest, Sha256};
 use ucr_core::{
-    RecordingMediaProvider, RecordingProviderCaptureContext, RecordingProviderError,
-    RecordingProviderHealth, RecordingProviderOperation, RecordingProviderRequest,
+    MAX_RECORDING_PROVIDER_EXPORT_BYTES, RecordingMediaProvider, RecordingProviderCaptureContext,
+    RecordingProviderError, RecordingProviderExport, RecordingProviderHealth,
+    RecordingProviderOperation, RecordingProviderRequest,
 };
 use ucr_model::{
     CryptoSuite, EncryptedGroupMediaFrame, MediaKind, PrincipalKind, PrincipalRef, TenantScope,
@@ -27,6 +28,8 @@ use zeroize::Zeroizing;
 const ARCHIVE_FORMAT_MAGIC: &[u8; 8] = b"UCRRAE01";
 const OPERATION_RECORD_MAGIC: &[u8] = b"ucr.recording.operation.v1";
 const FRAME_RECORD_MAGIC: &[u8] = b"ucr.recording.frame.v1";
+const EXPORT_FORMAT_MAGIC: &[u8; 8] = b"UCRREX01";
+const EXPORT_MEDIA_TYPE: &str = "application/vnd.ucr.recording-encrypted-archive.v1";
 const ARCHIVE_AAD_DOMAIN: &[u8] = b"ucr.recording.archive.at-rest.v1";
 const RECORDING_PATH_DOMAIN: &[u8] = b"ucr.recording.archive.path.v1";
 const OPERATION_PATH_DOMAIN: &[u8] = b"ucr.recording.archive.operation.path.v1";
@@ -367,6 +370,67 @@ impl EncryptedArchiveRecordingProvider {
         sync_directory(&self.objects_dir());
         Ok(())
     }
+
+    fn export_recording_objects(
+        &self,
+        scope: &TenantScope,
+        recording_id: &ucr_model::RecordingId,
+    ) -> Result<RecordingProviderExport, RecordingProviderError> {
+        self.ensure_layout()?;
+        let directory = self.require_started_recording_dir(scope, recording_id)?;
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(&directory)
+            .map_err(|_| RecordingProviderError::TemporarilyUnavailable)?
+        {
+            let entry = entry.map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
+            let metadata = entry
+                .metadata()
+                .map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(RecordingProviderError::PolicyDenied);
+            }
+            require_private_file_permissions(&metadata)?;
+            let file_name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| RecordingProviderError::PolicyDenied)?;
+            let binding = binding_from_frame_file_name(&file_name)?;
+            entries.push((file_name, entry.path(), binding));
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let count =
+            u32::try_from(entries.len()).map_err(|_| RecordingProviderError::CapacityExceeded)?;
+        let mut bytes = Vec::with_capacity(1024);
+        bytes.extend_from_slice(EXPORT_FORMAT_MAGIC);
+        bytes.extend_from_slice(&count.to_be_bytes());
+
+        for (_, path, binding) in entries {
+            let sealed = read_regular_file_if_present(&path)?
+                .ok_or(RecordingProviderError::TemporarilyUnavailable)?;
+            let plaintext = self.open(&sealed, &binding)?;
+            let plaintext_len =
+                u32::try_from(plaintext.len()).map_err(|_| RecordingProviderError::CapacityExceeded)?;
+            let next_len = bytes
+                .len()
+                .checked_add(binding.len())
+                .and_then(|value| value.checked_add(4))
+                .and_then(|value| value.checked_add(plaintext.len()))
+                .ok_or(RecordingProviderError::CapacityExceeded)?;
+            if next_len > MAX_RECORDING_PROVIDER_EXPORT_BYTES {
+                return Err(RecordingProviderError::CapacityExceeded);
+            }
+            bytes.extend_from_slice(&binding);
+            bytes.extend_from_slice(&plaintext_len.to_be_bytes());
+            bytes.extend_from_slice(&plaintext);
+        }
+
+        Ok(RecordingProviderExport {
+            media_type: EXPORT_MEDIA_TYPE.to_owned(),
+            bytes,
+        })
+    }
+
 }
 
 impl RecordingMediaProvider for EncryptedArchiveRecordingProvider {
@@ -419,6 +483,15 @@ impl RecordingMediaProvider for EncryptedArchiveRecordingProvider {
         let plaintext = Self::encode_frame(context, frame)?;
         let binding = Self::frame_binding(context, frame);
         self.write_idempotent(&self.frame_path(context, frame), &plaintext, &binding)
+    }
+
+
+    fn export_encrypted_recording(
+        &self,
+        scope: &TenantScope,
+        recording_id: &ucr_model::RecordingId,
+    ) -> Result<RecordingProviderExport, RecordingProviderError> {
+        self.export_recording_objects(scope, recording_id)
     }
 }
 
@@ -688,6 +761,31 @@ fn read_regular_file_if_present(path: &Path) -> Result<Option<Vec<u8>>, Recordin
         return Err(RecordingProviderError::CapacityExceeded);
     }
     Ok(Some(bytes))
+}
+
+fn binding_from_frame_file_name(file_name: &str) -> Result<[u8; 32], RecordingProviderError> {
+    let hex = file_name
+        .strip_suffix(".uar")
+        .ok_or(RecordingProviderError::PolicyDenied)?;
+    if hex.len() != 64 {
+        return Err(RecordingProviderError::PolicyDenied);
+    }
+    let mut binding = [0_u8; 32];
+    let bytes = hex.as_bytes();
+    for (index, output) in binding.iter_mut().enumerate() {
+        let high = hex_nibble(bytes[index * 2]).ok_or(RecordingProviderError::PolicyDenied)?;
+        let low = hex_nibble(bytes[index * 2 + 1]).ok_or(RecordingProviderError::PolicyDenied)?;
+        *output = (high << 4) | low;
+    }
+    Ok(binding)
+}
+
+const fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
 }
 
 fn create_private_temporary_file(parent: &Path) -> Result<(PathBuf, File), RecordingProviderError> {
