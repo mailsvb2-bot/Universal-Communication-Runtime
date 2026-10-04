@@ -379,8 +379,8 @@ impl EncryptedArchiveRecordingProvider {
         self.ensure_layout()?;
         let directory = self.require_started_recording_dir(scope, recording_id)?;
         let mut entries = Vec::new();
-        for entry in fs::read_dir(&directory)
-            .map_err(|_| RecordingProviderError::TemporarilyUnavailable)?
+        for entry in
+            fs::read_dir(&directory).map_err(|_| RecordingProviderError::TemporarilyUnavailable)?
         {
             let entry = entry.map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
             let metadata = fs::symlink_metadata(entry.path())
@@ -408,8 +408,8 @@ impl EncryptedArchiveRecordingProvider {
             let sealed = read_regular_file_if_present(&path)?
                 .ok_or(RecordingProviderError::TemporarilyUnavailable)?;
             let plaintext = self.open(&sealed, &binding)?;
-            let plaintext_len =
-                u32::try_from(plaintext.len()).map_err(|_| RecordingProviderError::CapacityExceeded)?;
+            let plaintext_len = u32::try_from(plaintext.len())
+                .map_err(|_| RecordingProviderError::CapacityExceeded)?;
             let next_len = bytes
                 .len()
                 .checked_add(binding.len())
@@ -429,7 +429,6 @@ impl EncryptedArchiveRecordingProvider {
             bytes,
         })
     }
-
 }
 
 impl RecordingMediaProvider for EncryptedArchiveRecordingProvider {
@@ -483,7 +482,6 @@ impl RecordingMediaProvider for EncryptedArchiveRecordingProvider {
         let binding = Self::frame_binding(context, frame);
         self.write_idempotent(&self.frame_path(context, frame), &plaintext, &binding)
     }
-
 
     fn export_encrypted_recording(
         &self,
