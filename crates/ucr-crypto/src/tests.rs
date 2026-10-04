@@ -25,6 +25,19 @@ use crate::{
 };
 
 #[test]
+fn imported_signing_seed_is_stable_and_uses_canonical_signing() {
+    let seed = [0x5a; 32];
+    let first = SigningKeyMaterial::from_seed(seed);
+    let second = SigningKeyMaterial::from_seed(seed);
+    assert_eq!(first.verifying_key(), second.verifying_key());
+
+    let binding = test_binding(b"imported-seed");
+    let signature = first.sign_transcript(&binding);
+    verify_transcript_signature(first.verifying_key(), &binding, signature)
+        .expect("imported key must verify through the canonical signing path");
+}
+
+#[test]
 fn generated_signing_key_authenticates_transcript() {
     let key = SigningKeyMaterial::generate().expect("OS randomness");
     let binding = test_binding(b"result");
