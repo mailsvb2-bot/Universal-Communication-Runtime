@@ -4,12 +4,14 @@ use zeroize::Zeroizing;
 
 use ucr_model::{
     DeviceId, EncryptedGroupMediaFrame, GroupMediaE2eeContext, GroupMediaFrameHeader,
-    GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalRef,
+    GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalRef, SfuForwardEnvelope,
 };
 use ucr_protocol::{
-    ALGORITHM_VERSION, GroupMediaE2eeProtocolError, SIGNATURE_ALGORITHM_ID,
-    group_media_context_binding, group_media_frame_aad, group_media_key_context,
-    group_media_source_signing_binding, validate_encrypted_group_media_frame,
+    ALGORITHM_VERSION, GroupMediaE2eeProtocolError, SFU_FORWARD_WIRE_VERSION,
+    SIGNATURE_ALGORITHM_ID, SfuForwardWireError, decode_sfu_forward_envelope,
+    encode_sfu_forward_envelope, group_media_context_binding, group_media_frame_aad,
+    group_media_key_context, group_media_source_signing_binding,
+    validate_encrypted_group_media_frame,
 };
 
 use crate::{
@@ -144,6 +146,24 @@ impl From<SignatureError> for EndpointGroupMediaCryptoError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointGroupMediaWireError {
+    Crypto(EndpointGroupMediaCryptoError),
+    Wire(SfuForwardWireError),
+}
+
+impl From<EndpointGroupMediaCryptoError> for EndpointGroupMediaWireError {
+    fn from(error: EndpointGroupMediaCryptoError) -> Self {
+        Self::Crypto(error)
+    }
+}
+
+impl From<SfuForwardWireError> for EndpointGroupMediaWireError {
+    fn from(error: SfuForwardWireError) -> Self {
+        Self::Wire(error)
+    }
+}
+
 /// Seals one endpoint-owned group-media payload using the canonical UCR MLS-derived crypto
 /// contract without requiring server-side stores or authorization state.
 ///
@@ -238,6 +258,56 @@ pub fn open_endpoint_group_media_payload(
     )?)
 }
 
+/// Seals one endpoint payload and immediately emits the canonical transport-neutral SFU wire.
+///
+/// This is a composition helper only: encryption/signing remain owned by the canonical endpoint
+/// crypto core and serialization remains owned by ucr-protocol.
+///
+/// # Errors
+/// Returns canonical crypto failures plus SFU wire validation/encoding failures.
+pub fn seal_endpoint_group_media_wire(
+    epoch_secret: &GroupMediaEpochSecret,
+    context: &GroupMediaE2eeContext,
+    mut header: GroupMediaFrameHeader,
+    plaintext: &[u8],
+    signing_key_id: KeyId,
+    signer: &impl GroupMediaSigningKeyHandle,
+) -> Result<Vec<u8>, EndpointGroupMediaWireError> {
+    header.header_version = SFU_FORWARD_WIRE_VERSION;
+    let frame = seal_endpoint_group_media_payload(
+        epoch_secret,
+        context,
+        header,
+        plaintext,
+        signing_key_id,
+        signer,
+    )?;
+    Ok(encode_sfu_forward_envelope(&SfuForwardEnvelope { frame })?)
+}
+
+/// Opens one canonical transport-neutral SFU wire envelope with endpoint-held key material.
+///
+/// The wire is decoded and canonical-validated by ucr-protocol before the endpoint crypto core
+/// verifies the source signature and decrypts the payload.
+///
+/// # Errors
+/// Rejects malformed/non-canonical wire, cross-context frames, invalid source signatures, key
+/// derivation failures, or AEAD integrity failures.
+pub fn open_endpoint_group_media_wire(
+    epoch_secret: &GroupMediaEpochSecret,
+    context: &GroupMediaE2eeContext,
+    wire: &[u8],
+    source_verifying_key: VerifyingKeyBytes,
+) -> Result<Vec<u8>, EndpointGroupMediaWireError> {
+    let envelope = decode_sfu_forward_envelope(wire)?;
+    Ok(open_endpoint_group_media_payload(
+        epoch_secret,
+        context,
+        &envelope.frame,
+        source_verifying_key,
+    )?)
+}
+
 #[cfg(test)]
 mod endpoint_tests {
     use super::*;
@@ -314,6 +384,32 @@ mod endpoint_tests {
         )
         .expect("open");
         assert_eq!(plaintext, b"endpoint frame");
+    }
+
+    #[test]
+    fn endpoint_group_media_wire_round_trips_through_canonical_sfu_codec() {
+        let context = context();
+        let epoch_secret = GroupMediaEpochSecret::from_exporter_bytes([11; 32]);
+        let signer = SigningKeyMaterial::from_seed([12; 32]);
+        let wire = seal_endpoint_group_media_wire(
+            &epoch_secret,
+            &context,
+            header(&context),
+            b"wire endpoint frame",
+            KeyId::from_opaque(oid("wire-signing-key")),
+            &signer,
+        )
+        .expect("seal wire");
+
+        let envelope = decode_sfu_forward_envelope(&wire).expect("canonical wire");
+        assert_eq!(
+            envelope.frame.header.header_version,
+            SFU_FORWARD_WIRE_VERSION
+        );
+        let plaintext =
+            open_endpoint_group_media_wire(&epoch_secret, &context, &wire, signer.verifying_key())
+                .expect("open wire");
+        assert_eq!(plaintext, b"wire endpoint frame");
     }
 
     #[test]

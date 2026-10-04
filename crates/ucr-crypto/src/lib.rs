@@ -20,9 +20,10 @@ pub use aead::{AeadError, Ciphertext, TrafficKey};
 pub use agreement::{AgreementError, AgreementKeyPair, AgreementPublicKey};
 pub use confirmation::{ConfirmationError, ConfirmationKey, ConfirmationTag};
 pub use group_media::{
-    EndpointGroupMediaCryptoError, GroupMediaEpochSecret, GroupMediaKeyError,
-    GroupMediaSigningKeyHandle, derive_group_media_traffic_key, open_endpoint_group_media_payload,
-    seal_endpoint_group_media_payload,
+    EndpointGroupMediaCryptoError, EndpointGroupMediaWireError, GroupMediaEpochSecret,
+    GroupMediaKeyError, GroupMediaSigningKeyHandle, derive_group_media_traffic_key,
+    open_endpoint_group_media_payload, open_endpoint_group_media_wire,
+    seal_endpoint_group_media_payload, seal_endpoint_group_media_wire,
 };
 pub use kdf::DerivationError;
 pub use key_provider::SigningKeyHandle;
