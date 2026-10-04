@@ -238,3 +238,134 @@ pub fn open_endpoint_group_media_payload(
         &aad,
     )?)
 }
+
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    use ucr_model::{
+        CallId, CryptoSuite, GroupId, PrincipalId, PrincipalKind, TenantId, TenantScope,
+        VideoSourceKind,
+    };
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("opaque id")
+    }
+
+    fn context() -> GroupMediaE2eeContext {
+        GroupMediaE2eeContext {
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(oid("tenant")),
+                namespace_id: None,
+            },
+            call_id: CallId::from_opaque(oid("call")),
+            group_id: GroupId::from_opaque(oid("group")),
+            negotiation_ref: oid("negotiation"),
+            negotiation_generation: 1,
+            crypto_epoch: 7,
+            crypto_state_ref: oid("crypto-state"),
+            crypto_suite: CryptoSuite::UcrV1,
+        }
+    }
+
+    fn header(context: &GroupMediaE2eeContext) -> GroupMediaFrameHeader {
+        GroupMediaFrameHeader {
+            scope: context.scope.clone(),
+            call_id: context.call_id.clone(),
+            group_id: context.group_id.clone(),
+            stream_id: oid("camera"),
+            source: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("alice")),
+                kind: PrincipalKind::Person,
+            },
+            source_device_id: DeviceId::from_opaque(oid("alice-device")),
+            negotiation_ref: context.negotiation_ref.clone(),
+            negotiation_generation: context.negotiation_generation,
+            crypto_epoch: context.crypto_epoch,
+            crypto_state_ref: context.crypto_state_ref.clone(),
+            crypto_suite: context.crypto_suite,
+            header_version: 2,
+            media_kind: MediaKind::Video,
+            video_source_kind: Some(VideoSourceKind::Camera),
+            sequence: 1,
+            media_timestamp: 90_000,
+            keyframe: true,
+        }
+    }
+
+    #[test]
+    fn endpoint_group_media_core_round_trips_and_verifies_source_signature() {
+        let context = context();
+        let epoch_secret = GroupMediaEpochSecret::from_exporter_bytes([7; 32]);
+        let signer = SigningKeyMaterial::generate().expect("signer");
+        let frame = seal_endpoint_group_media_payload(
+            &epoch_secret,
+            &context,
+            header(&context),
+            b"endpoint frame",
+            KeyId::from_opaque(oid("signing-key")),
+            &signer,
+        )
+        .expect("seal");
+
+        let plaintext = open_endpoint_group_media_payload(
+            &epoch_secret,
+            &context,
+            &frame,
+            signer.verifying_key(),
+        )
+        .expect("open");
+        assert_eq!(plaintext, b"endpoint frame");
+    }
+
+    #[test]
+    fn endpoint_group_media_core_rejects_signature_and_context_tampering() {
+        let context = context();
+        let epoch_secret = GroupMediaEpochSecret::from_exporter_bytes([9; 32]);
+        let signer = SigningKeyMaterial::generate().expect("signer");
+        let mut frame = seal_endpoint_group_media_payload(
+            &epoch_secret,
+            &context,
+            header(&context),
+            b"protected",
+            KeyId::from_opaque(oid("signing-key")),
+            &signer,
+        )
+        .expect("seal");
+
+        frame.source_signature.signature[0] ^= 1;
+        assert!(matches!(
+            open_endpoint_group_media_payload(
+                &epoch_secret,
+                &context,
+                &frame,
+                signer.verifying_key(),
+            ),
+            Err(EndpointGroupMediaCryptoError::Signature(
+                SignatureError::InvalidSignature
+            ))
+        ));
+
+        let mut wrong_context = context.clone();
+        wrong_context.crypto_epoch += 1;
+        assert!(matches!(
+            open_endpoint_group_media_payload(
+                &epoch_secret,
+                &wrong_context,
+                &seal_endpoint_group_media_payload(
+                    &epoch_secret,
+                    &context,
+                    header(&context),
+                    b"protected",
+                    KeyId::from_opaque(oid("signing-key-2")),
+                    &signer,
+                )
+                .expect("seal"),
+                signer.verifying_key(),
+            ),
+            Err(EndpointGroupMediaCryptoError::Protocol(
+                GroupMediaE2eeProtocolError::ContextMismatch
+            ))
+        ));
+    }
+}
