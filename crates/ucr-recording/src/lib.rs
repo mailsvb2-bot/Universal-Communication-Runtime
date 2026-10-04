@@ -1119,9 +1119,8 @@ mod tests {
         drop(provider);
 
         let secret_provider: Arc<dyn SecretProvider> = secrets;
-        let restarted =
-            EncryptedArchiveRecordingProvider::new(&root, secret_provider, handle)
-                .expect("restart provider");
+        let restarted = EncryptedArchiveRecordingProvider::new(&root, secret_provider, handle)
+            .expect("restart provider");
         restarted
             .apply(&delete)
             .expect("restart retry completes controlled deletion");
