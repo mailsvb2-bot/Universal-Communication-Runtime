@@ -23,11 +23,3 @@ ucr-protocol = { path = "../ucr-protocol" }
 
 [lints]
 workspace = true
-
-
-
-[features]
-default = []
-# Explicit browser-only entropy backend. Kept opt-in so native/default consumers and standalone
-# lockfiles do not silently acquire browser-specific wasm-bindgen/js-sys dependencies.
-browser-wasm = ["getrandom/wasm_js"]
