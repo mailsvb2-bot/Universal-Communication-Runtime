@@ -84,7 +84,7 @@ fn recording_provider_outbox_has_restart_safe_single_owner_runtime_worker() {
     assert!(runtime.contains("run_recording_provider_worker"));
     assert!(runtime.contains("try_acquire_runtime_worker_lease"));
     assert!(runtime.contains("renew_recording_provider_worker_lease"));
-    assert!(runtime.contains("dispatch_recording_provider_operations_once"));
+    assert!(runtime.contains("dispatch_recording_provider_operations_with_ready_once"));
     assert!(runtime.contains("UCR_RECORDING_PROVIDER_SWEEP"));
     assert!(spec.contains("durable single-owner provider dispatcher worker"));
     assert!(spec.contains("does not make Recording capability available"));
