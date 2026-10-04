@@ -25,7 +25,9 @@ ucr-protocol = { path = "../ucr-protocol" }
 workspace = true
 
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-# Browser entropy must be explicit on wasm32-unknown-unknown. Keep this target-scoped so native
-# builds retain the existing getrandom backend and the browser path uses Web Crypto through wasm_js.
-getrandom = { version = "=0.4.3", features = ["wasm_js"] }
+
+[features]
+default = []
+# Explicit browser-only entropy backend. Kept opt-in so native/default consumers and standalone
+# lockfiles do not silently acquire browser-specific wasm-bindgen/js-sys dependencies.
+browser-wasm = ["getrandom/wasm_js"]
