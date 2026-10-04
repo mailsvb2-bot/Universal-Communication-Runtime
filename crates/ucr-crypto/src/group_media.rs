@@ -7,7 +7,7 @@ use ucr_model::{
     GroupMediaSourceSignature, KeyId, MediaKind, OpaqueId, PrincipalRef,
 };
 use ucr_protocol::{
-    ALGORITHM_VERSION, SIGNATURE_ALGORITHM_ID, GroupMediaE2eeProtocolError,
+    ALGORITHM_VERSION, GroupMediaE2eeProtocolError, SIGNATURE_ALGORITHM_ID,
     group_media_context_binding, group_media_frame_aad, group_media_key_context,
     group_media_source_signing_binding, validate_encrypted_group_media_frame,
 };
@@ -110,7 +110,6 @@ pub fn derive_group_media_traffic_key(
         .map_err(|_| GroupMediaKeyError::ExpandFailed)?;
     Ok(TrafficKey::from_bytes(output))
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointGroupMediaCryptoError {
@@ -238,7 +237,6 @@ pub fn open_endpoint_group_media_payload(
         &aad,
     )?)
 }
-
 
 #[cfg(test)]
 mod endpoint_tests {
