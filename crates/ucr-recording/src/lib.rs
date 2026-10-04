@@ -383,8 +383,7 @@ impl EncryptedArchiveRecordingProvider {
             .map_err(|_| RecordingProviderError::TemporarilyUnavailable)?
         {
             let entry = entry.map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
-            let metadata = entry
-                .metadata()
+            let metadata = fs::symlink_metadata(entry.path())
                 .map_err(|_| RecordingProviderError::TemporarilyUnavailable)?;
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 return Err(RecordingProviderError::PolicyDenied);
@@ -1158,6 +1157,82 @@ mod tests {
         let new_object = fs::read(provider.frame_path(&context, &frame)).expect("v2 object");
         let envelope = SealedEnvelope::parse(&new_object).expect("envelope");
         assert_eq!(envelope.version_id, b"key-v2");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_removes_only_at_rest_layer_and_is_deterministic() {
+        let root = temp_root("export");
+        let (provider, _, _) = provider(&root);
+        provider
+            .apply(&request(RecordingProviderOperation::Start, 2))
+            .expect("start");
+        let context = context();
+        let first = frame(20, 8);
+        let second = frame(21, 9);
+        provider
+            .capture_encrypted_frame(&context, &second)
+            .expect("capture second");
+        provider
+            .capture_encrypted_frame(&context, &first)
+            .expect("capture first");
+
+        let export = provider
+            .export_encrypted_recording(&context.scope, &context.recording_id)
+            .expect("export");
+        assert_eq!(export.media_type, EXPORT_MEDIA_TYPE);
+        assert!(export.bytes.starts_with(EXPORT_FORMAT_MAGIC));
+        assert!(
+            !export
+                .bytes
+                .windows(ARCHIVE_FORMAT_MAGIC.len())
+                .any(|window| window == ARCHIVE_FORMAT_MAGIC),
+            "provider at-rest envelope must not leak into the exported artifact"
+        );
+
+        let repeat = provider
+            .export_encrypted_recording(&context.scope, &context.recording_id)
+            .expect("repeat export");
+        assert_eq!(repeat, export);
+
+        let first_record = EncryptedArchiveRecordingProvider::encode_frame(&context, &first)
+            .expect("first frame record");
+        let second_record = EncryptedArchiveRecordingProvider::encode_frame(&context, &second)
+            .expect("second frame record");
+        assert!(
+            export
+                .bytes
+                .windows(first_record.len())
+                .any(|window| window == first_record)
+        );
+        assert!(
+            export
+                .bytes
+                .windows(second_record.len())
+                .any(|window| window == second_record)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_rejects_unexpected_archive_entry_names() {
+        let root = temp_root("export-unexpected-entry");
+        let (provider, _, _) = provider(&root);
+        provider
+            .apply(&request(RecordingProviderOperation::Start, 2))
+            .expect("start");
+        let context = context();
+        let directory = provider.recording_dir(&context.scope, &context.recording_id);
+        let unexpected = directory.join("not-a-frame.uar");
+        fs::write(&unexpected, b"invalid").expect("unexpected entry");
+        set_private_file_permissions(&unexpected).expect("permissions");
+
+        assert_eq!(
+            provider.export_encrypted_recording(&context.scope, &context.recording_id),
+            Err(RecordingProviderError::PolicyDenied)
+        );
 
         let _ = fs::remove_dir_all(root);
     }
