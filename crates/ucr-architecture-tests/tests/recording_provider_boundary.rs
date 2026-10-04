@@ -23,7 +23,9 @@ fn recording_provider_is_a_side_effect_boundary_not_a_second_lifecycle_owner() {
     assert!(core.contains("pub enum RecordingProviderError"));
     assert!(exports.contains("RecordingMediaProvider"));
     assert!(core.contains("pub trait RecordingProviderOperationStore"));
-    assert!(core.contains("dispatch_recording_provider_operations_once"));
+    assert!(core.contains("dispatch_recording_provider_operations_with_ready_once"));
+    assert!(core.contains("recover_recording_provider_ready_events_once"));
+    assert!(core.contains("commit_recording_provider_stop_ready_event"));
     assert!(exports.contains("RecordingProviderOperationStore"));
     let sqlite = read("crates/ucr-storage-sqlite/src/recording_provider_store.rs");
     assert!(sqlite.contains("recording_provider_operations"));
