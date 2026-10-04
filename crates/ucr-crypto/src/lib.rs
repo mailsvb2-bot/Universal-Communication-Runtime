@@ -21,8 +21,8 @@ pub use agreement::{AgreementError, AgreementKeyPair, AgreementPublicKey};
 pub use confirmation::{ConfirmationError, ConfirmationKey, ConfirmationTag};
 pub use group_media::{
     EndpointGroupMediaCryptoError, GroupMediaEpochSecret, GroupMediaKeyError,
-    GroupMediaSigningKeyHandle, derive_group_media_traffic_key,
-    open_endpoint_group_media_payload, seal_endpoint_group_media_payload,
+    GroupMediaSigningKeyHandle, derive_group_media_traffic_key, open_endpoint_group_media_payload,
+    seal_endpoint_group_media_payload,
 };
 pub use kdf::DerivationError;
 pub use key_provider::SigningKeyHandle;
