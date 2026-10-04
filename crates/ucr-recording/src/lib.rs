@@ -1104,8 +1104,8 @@ mod tests {
             .expect("capture");
 
         let delete = request(RecordingProviderOperation::Delete, 4);
-        let receipt = EncryptedArchiveRecordingProvider::encode_operation(&delete)
-            .expect("delete receipt");
+        let receipt =
+            EncryptedArchiveRecordingProvider::encode_operation(&delete).expect("delete receipt");
         let binding = EncryptedArchiveRecordingProvider::operation_binding(&delete);
         provider
             .write_idempotent(&provider.operation_path(&delete), &receipt, &binding)
