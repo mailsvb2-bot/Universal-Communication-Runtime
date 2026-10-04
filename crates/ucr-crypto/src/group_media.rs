@@ -119,7 +119,6 @@ pub enum EndpointGroupMediaCryptoError {
     Key(GroupMediaKeyError),
     Aead(AeadError),
     Signature(SignatureError),
-    Wire(SfuForwardWireError),
     InvalidSignatureBytes,
 }
 
@@ -147,7 +146,19 @@ impl From<SignatureError> for EndpointGroupMediaCryptoError {
     }
 }
 
-impl From<SfuForwardWireError> for EndpointGroupMediaCryptoError {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointGroupMediaWireError {
+    Crypto(EndpointGroupMediaCryptoError),
+    Wire(SfuForwardWireError),
+}
+
+impl From<EndpointGroupMediaCryptoError> for EndpointGroupMediaWireError {
+    fn from(error: EndpointGroupMediaCryptoError) -> Self {
+        Self::Crypto(error)
+    }
+}
+
+impl From<SfuForwardWireError> for EndpointGroupMediaWireError {
     fn from(error: SfuForwardWireError) -> Self {
         Self::Wire(error)
     }
@@ -263,7 +274,7 @@ pub fn seal_endpoint_group_media_wire(
     plaintext: &[u8],
     signing_key_id: KeyId,
     signer: &impl GroupMediaSigningKeyHandle,
-) -> Result<Vec<u8>, EndpointGroupMediaCryptoError> {
+) -> Result<Vec<u8>, EndpointGroupMediaWireError> {
     header.header_version = SFU_FORWARD_WIRE_VERSION;
     let frame = seal_endpoint_group_media_payload(
         epoch_secret,
@@ -289,14 +300,14 @@ pub fn open_endpoint_group_media_wire(
     context: &GroupMediaE2eeContext,
     wire: &[u8],
     source_verifying_key: VerifyingKeyBytes,
-) -> Result<Vec<u8>, EndpointGroupMediaCryptoError> {
+) -> Result<Vec<u8>, EndpointGroupMediaWireError> {
     let envelope = decode_sfu_forward_envelope(wire)?;
-    open_endpoint_group_media_payload(
+    Ok(open_endpoint_group_media_payload(
         epoch_secret,
         context,
         &envelope.frame,
         source_verifying_key,
-    )
+    )?)
 }
 
 #[cfg(test)]
