@@ -33,6 +33,17 @@ pub struct VerifyingKeyBytes(pub [u8; 32]);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignatureBytes(pub [u8; 64]);
 impl SigningKeyMaterial {
+    /// Imports an existing endpoint-held Ed25519 seed without exposing an export path.
+    ///
+    /// The owned seed is immediately wrapped in a zeroizing guard before constructing the key.
+    /// This supports stable endpoint identity for browser/native adapters while keeping signing
+    /// operations behind the canonical UCR signing handle.
+    #[must_use]
+    pub fn from_seed(seed: [u8; 32]) -> Self {
+        let seed = Zeroizing::new(seed);
+        Self(SigningKey::from_bytes(&seed))
+    }
+
     /// Generates a signing key from the operating-system CSPRNG.
     ///
     /// # Errors
