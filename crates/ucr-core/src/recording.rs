@@ -191,7 +191,6 @@ pub trait RecordingMediaProvider: fmt::Debug + Send + Sync {
         Err(RecordingProviderError::TemporarilyUnavailable)
     }
 
-
     /// Exports one provider-owned Recording artifact after caller-side authorization and lifecycle
     /// checks. The returned artifact may still contain endpoint-E2EE ciphertext; this boundary never
     /// receives or exports MLS key material.
