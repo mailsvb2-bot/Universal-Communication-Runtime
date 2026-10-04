@@ -1091,6 +1091,57 @@ mod tests {
     }
 
     #[test]
+    fn delete_recovers_after_restart_when_receipt_was_committed_before_object_cleanup() {
+        let root = temp_root("delete-restart-recovery");
+        let (provider, secrets, handle) = provider(&root);
+        provider
+            .apply(&request(RecordingProviderOperation::Start, 2))
+            .expect("start");
+        let context = context();
+        let frame = frame(15, 7);
+        provider
+            .capture_encrypted_frame(&context, &frame)
+            .expect("capture");
+
+        let delete = request(RecordingProviderOperation::Delete, 4);
+        let receipt =
+            EncryptedArchiveRecordingProvider::encode_operation(&delete).expect("delete receipt");
+        let binding = EncryptedArchiveRecordingProvider::operation_binding(&delete);
+        provider
+            .write_idempotent(&provider.operation_path(&delete), &receipt, &binding)
+            .expect("commit delete receipt before simulated crash");
+        assert!(
+            provider
+                .recording_dir(&delete.scope, &delete.recording_id)
+                .is_dir(),
+            "media objects must still exist at the simulated crash point"
+        );
+        drop(provider);
+
+        let secret_provider: Arc<dyn SecretProvider> = secrets;
+        let restarted = EncryptedArchiveRecordingProvider::new(&root, secret_provider, handle)
+            .expect("restart provider");
+        restarted
+            .apply(&delete)
+            .expect("restart retry completes controlled deletion");
+        assert!(
+            !restarted
+                .recording_dir(&delete.scope, &delete.recording_id)
+                .exists(),
+            "restart retry must remove the controlled recording objects"
+        );
+        assert!(
+            restarted.operation_path(&delete).is_file(),
+            "encrypted delete receipt must survive media cleanup for exact retry evidence"
+        );
+        restarted
+            .apply(&delete)
+            .expect("post-recovery exact retry remains idempotent");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn tampered_archive_fails_closed() {
         let root = temp_root("tamper");
         let (provider, _, _) = provider(&root);

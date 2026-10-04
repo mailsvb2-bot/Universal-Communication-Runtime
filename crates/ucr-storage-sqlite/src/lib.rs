@@ -102,7 +102,8 @@ const SQLITE_SCHEMA_V43: u32 = 43;
 const SQLITE_SCHEMA_V44: u32 = 44;
 const SQLITE_SCHEMA_V45: u32 = 45;
 const SQLITE_SCHEMA_V46: u32 = 46;
-pub const SQLITE_SCHEMA_VERSION: u32 = 47;
+const SQLITE_SCHEMA_V47: u32 = 47;
+pub const SQLITE_SCHEMA_VERSION: u32 = 48;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -674,7 +675,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v47(connection);
+        return verify_schema_v48(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -731,11 +732,27 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V44 => migrate_v44_to_v45(connection)?,
             SQLITE_SCHEMA_V45 => migrate_v45_to_v46(connection)?,
             SQLITE_SCHEMA_V46 => migrate_v46_to_v47(connection)?,
+            SQLITE_SCHEMA_V47 => migrate_v47_to_v48(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v47(connection)
+    verify_schema_v48(connection)
+}
+
+fn migrate_v47_to_v48(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v47(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    recording_provider_store::create_v48_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v48(connection)
 }
 
 fn migrate_v46_to_v47(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -745,12 +762,17 @@ fn migrate_v46_to_v47(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     recording_provider_store::create_v47_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V47)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v47(connection)
+}
+
+fn verify_schema_v48(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v46(connection)?;
+    recording_provider_store::verify_v48_objects(connection)
 }
 
 fn verify_schema_v47(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -893,6 +915,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     attachment_store::create_v45_objects(&transaction)?;
     universal_conference_store::create_v46_objects(&transaction)?;
     recording_provider_store::create_v47_objects(&transaction)?;
+    recording_provider_store::create_v48_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1880,7 +1903,53 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v48_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    let provider_table_exists: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_schema
+            WHERE type='table' AND name='recording_provider_operations'
+        )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !provider_table_exists {
+        return Ok(());
+    }
+
+    let mut statement = connection.prepare("PRAGMA table_info(recording_provider_operations)")?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    let mut has_ready_marker = false;
+    for column in columns {
+        if column? == "ready_event_emitted" {
+            has_ready_marker = true;
+            break;
+        }
+    }
+    drop(statement);
+
+    if has_ready_marker {
+        connection.execute_batch(
+            "DROP INDEX IF EXISTS recording_provider_ready_recovery;
+             ALTER TABLE recording_provider_operations DROP COLUMN ready_event_emitted;",
+        )?;
+    } else {
+        connection.execute_batch("DROP INDEX IF EXISTS recording_provider_ready_recovery;")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn test_remove_v47_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v48_objects(connection)?;
+    connection.execute_batch(
+        "DROP INDEX IF EXISTS recording_provider_operations_due;
+         DROP TABLE IF EXISTS recording_provider_operations;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v46_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v47_objects(connection)?;
     connection.execute_batch("DROP TABLE IF EXISTS universal_conference_metadata;")
 }
 
@@ -2806,7 +2875,7 @@ mod tests {
     }
 
     #[test]
-    fn v46_partial_v47_outbox_recovers_idempotently() {
+    fn v47_store_migrates_ready_marker_to_v48_and_reopens_cleanly() {
         let db = TestDbPath::new();
         {
             let store = SqliteLocalStore::open(db.path()).expect("create current store");
@@ -2815,11 +2884,58 @@ mod tests {
         {
             let connection = rusqlite::Connection::open(db.path()).expect("open current store");
             connection
-                .pragma_update(None, "user_version", SQLITE_SCHEMA_V46)
-                .expect("simulate committed objects before version bump");
+                .pragma_update(None, "user_version", super::SQLITE_SCHEMA_V47)
+                .expect("simulate committed v48 objects before version bump");
         }
 
-        let recovered = SqliteLocalStore::open(db.path()).expect("recover partial v47 migration");
+        // Restore the exact committed v47 table shape by removing the v48-only marker through a
+        // table rebuild, then prove the normal v47 -> v48 migration and reopen path.
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open partial store");
+            connection
+                .execute_batch(
+                    "DROP INDEX IF EXISTS recording_provider_ready_recovery;
+                     DROP INDEX IF EXISTS recording_provider_operations_due;
+                     ALTER TABLE recording_provider_operations RENAME TO recording_provider_operations_v48;
+                     CREATE TABLE recording_provider_operations (
+                         tenant_id TEXT NOT NULL,
+                         namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+                         namespace_id TEXT NOT NULL,
+                         recording_id TEXT NOT NULL,
+                         lifecycle_revision BLOB NOT NULL CHECK(length(lifecycle_revision) = 8),
+                         operation TEXT NOT NULL CHECK(operation IN ('start','stop','delete')),
+                         call_id TEXT NOT NULL,
+                         expires_at_unix_ms INTEGER NOT NULL,
+                         state TEXT NOT NULL CHECK(state IN ('pending','applied','failed')),
+                         attempts INTEGER NOT NULL CHECK(attempts BETWEEN 0 AND 4294967295),
+                         available_at_unix_ms INTEGER NOT NULL,
+                         PRIMARY KEY(
+                             tenant_id, namespace_present, namespace_id, recording_id,
+                             lifecycle_revision, operation
+                         ),
+                         FOREIGN KEY(tenant_id, namespace_present, namespace_id, recording_id)
+                             REFERENCES recordings(tenant_id, namespace_present, namespace_id, recording_id)
+                             ON DELETE CASCADE,
+                         CHECK((namespace_present = 0 AND namespace_id = '') OR
+                               (namespace_present = 1 AND namespace_id <> ''))
+                     ) WITHOUT ROWID;
+                     INSERT INTO recording_provider_operations (
+                         tenant_id, namespace_present, namespace_id, recording_id,
+                         lifecycle_revision, operation, call_id, expires_at_unix_ms,
+                         state, attempts, available_at_unix_ms
+                     )
+                     SELECT tenant_id, namespace_present, namespace_id, recording_id,
+                            lifecycle_revision, operation, call_id, expires_at_unix_ms,
+                            state, attempts, available_at_unix_ms
+                     FROM recording_provider_operations_v48;
+                     DROP TABLE recording_provider_operations_v48;
+                     CREATE INDEX recording_provider_operations_due
+                         ON recording_provider_operations(state, available_at_unix_ms);",
+                )
+                .expect("rebuild exact v47 provider table");
+        }
+
+        let recovered = SqliteLocalStore::open(db.path()).expect("migrate v47 to v48");
         assert_eq!(recovered.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
         drop(recovered);
 

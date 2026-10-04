@@ -67,6 +67,17 @@ message RecordingLifecycleEvent {
   int64 occurred_at_unix_ms = 7;
 }
 
+// Provider finalization fact emitted only after the durable provider Stop has completed.
+// This is intentionally distinct from RECORDING_STATE_READY, which means "ready to start".
+message RecordingReadyEvent {
+  TenantScope scope = 1;
+  OpaqueId recording_id = 2;
+  OpaqueId call_id = 3;
+  uint64 lifecycle_revision = 4;
+  int64 ready_at_unix_ms = 5;
+  bool recovered_after_upgrade = 6;
+}
+
 message RecordingRequest {
   TenantScope scope = 1;
   OpaqueId recording_id = 2;

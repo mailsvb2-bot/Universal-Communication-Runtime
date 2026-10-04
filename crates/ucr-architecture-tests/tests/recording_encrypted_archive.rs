@@ -37,7 +37,7 @@ fn recording_at_rest_uses_the_shared_secret_owner_and_remains_opt_in() {
     assert!(spec.contains("second, independent XChaCha20-Poly1305 at-rest layer"));
     assert!(spec.contains("does not automatically advertise Recording"));
     assert!(spec.contains("access/export authorization"));
-    assert!(spec.contains("recording-ready delivery"));
+    assert!(spec.contains("ucr.recording.ready"));
 }
 
 #[test]
@@ -88,4 +88,28 @@ fn encrypted_archive_runtime_wiring_is_opt_in_same_runtime_and_cancellation_safe
         runtime.contains("recording_provider_worker_cancellation_releases_lease_and_registration")
     );
     assert!(runtime.contains("recording: false"));
+}
+
+#[test]
+fn recording_ready_is_atomic_recoverable_and_not_lifecycle_ready() {
+    let proto = read("proto/ucr/v1/recording.proto");
+    let core = read("crates/ucr-core/src/recording.rs");
+    let sqlite = read("crates/ucr-storage-sqlite/src/recording_provider_store.rs");
+    let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let api = read("crates/ucr-api-grpc/src/recording_service.rs");
+    let spec = read("spec/recording.md");
+
+    assert!(proto.contains("message RecordingReadyEvent"));
+    assert!(proto.contains("bool recovered_after_upgrade = 6;"));
+    assert!(core.contains("commit_recording_provider_stop_ready_event"));
+    assert!(core.contains("recover_recording_provider_ready_events_once"));
+    assert!(sqlite.contains("ready_event_emitted"));
+    assert!(sqlite.contains("recording_provider_stops_needing_ready_event"));
+    assert!(sqlite.contains("event_journal::append_event_in_transaction"));
+    assert!(api.contains("event_type: \"ucr.recording.ready\""));
+    assert!(api.contains("provider_ready_event_is_deterministic_and_not_lifecycle_ready"));
+    assert!(runtime.contains("recording_provider_stop_commits_ready_event_atomically"));
+    assert!(runtime.contains("recording_provider_ready_recovery_does_not_repeat_provider_stop"));
+    assert!(runtime.contains("recording: false"));
+    assert!(spec.contains("SQLite schema v48"));
 }

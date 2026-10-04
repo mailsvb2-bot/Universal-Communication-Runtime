@@ -128,6 +128,9 @@ fn sqlite_v44_migrates_to_v45_without_inventing_attachment_state() {
         connection
             .execute_batch(
                 "PRAGMA foreign_keys=OFF;
+                 DROP INDEX IF EXISTS recording_provider_ready_recovery;
+                 DROP INDEX IF EXISTS recording_provider_operations_due;
+                 DROP TABLE IF EXISTS recording_provider_operations;
                  DROP TABLE IF EXISTS universal_conference_metadata;
                  DROP TABLE IF EXISTS attachment_chunks;
                  DROP TABLE IF EXISTS attachments;

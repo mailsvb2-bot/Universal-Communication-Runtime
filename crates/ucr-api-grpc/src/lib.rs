@@ -83,7 +83,7 @@ pub use realtime_service::{
 mod recording_service;
 pub use recording_service::{
     GrpcRecordingService, RecordingRetentionSweep, expire_due_recordings_once,
-    recording_service_server,
+    recording_provider_ready_event, recording_service_server,
 };
 
 mod universal_conference_service;

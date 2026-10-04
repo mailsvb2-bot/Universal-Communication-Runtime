@@ -271,6 +271,37 @@ pub trait RecordingProviderOperationStore: StorageProvider {
         request: &RecordingProviderRequest,
     ) -> Result<(), DurableStoreError>;
 
+    /// Returns already-applied Stop operations whose provider-ready Event has not been durably
+    /// committed yet. This recovery view exists so upgrades from pre-ready-event schemas can
+    /// backfill readiness without re-running provider finalization.
+    ///
+    /// # Errors
+    /// Rejects zero/oversized limits and explicit storage/corruption failures.
+    fn recording_provider_stops_needing_ready_event(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RecordingProviderOperationRecord>, DurableStoreError> {
+        let _ = limit;
+        Err(DurableStoreError::Unavailable)
+    }
+
+    /// Atomically commits provider Stop completion and the canonical `ucr.recording.ready` Event.
+    ///
+    /// Implementations must accept either the original Pending Stop or an already-Applied legacy
+    /// Stop that still lacks its ready-event marker. Event append and marker/state update must be
+    /// one durable transaction so a crash cannot leave an Applied Stop with a lost Event.
+    ///
+    /// # Errors
+    /// Rejects non-Stop requests, mismatched Events, stale/conflicting state and store failures.
+    fn commit_recording_provider_stop_ready_event(
+        &self,
+        request: &RecordingProviderRequest,
+        event: &EventEnvelope,
+    ) -> Result<(), DurableStoreError> {
+        let _ = (request, event);
+        Err(DurableStoreError::Unavailable)
+    }
+
     /// Records a retry for one exact pending operation and moves its next-attempt deadline.
     ///
     /// # Errors
@@ -351,6 +382,101 @@ where
     }
 
     Ok(sweep)
+}
+
+/// Applies one bounded provider batch while atomically publishing `ucr.recording.ready` after a
+/// successful Stop finalization.
+///
+/// Provider side effects happen before the local durable transaction by necessity. Exact provider
+/// requests are idempotent, so a crash after provider success but before Event commit safely retries
+/// the same Stop. Start/Delete retain the existing applied-state path.
+///
+/// # Errors
+/// Returns durable-store failures or ready-event factory failures without marking the affected Stop
+/// applied. Provider retry semantics remain authoritative for provider-side failures.
+pub fn dispatch_recording_provider_operations_with_ready_once<S, P, F>(
+    store: &S,
+    provider: &P,
+    now_unix_ms: i64,
+    limit: usize,
+    mut ready_event: F,
+) -> Result<RecordingProviderDispatchSweep, DurableStoreError>
+where
+    S: RecordingProviderOperationStore,
+    P: RecordingMediaProvider + ?Sized,
+    F: FnMut(&RecordingProviderRequest, i64, bool) -> Result<EventEnvelope, DurableStoreError>,
+{
+    let pending = store.pending_recording_provider_operations(now_unix_ms, limit)?;
+    let mut sweep = RecordingProviderDispatchSweep::default();
+
+    for record in pending {
+        sweep.examined = sweep.examined.saturating_add(1);
+        match provider.apply(&record.request) {
+            Ok(()) => {
+                if record.request.operation == RecordingProviderOperation::Stop {
+                    let event = ready_event(&record.request, now_unix_ms, false)?;
+                    store.commit_recording_provider_stop_ready_event(&record.request, &event)?;
+                } else {
+                    store.mark_recording_provider_operation_applied(&record.request)?;
+                }
+                sweep.applied = sweep.applied.saturating_add(1);
+            }
+            Err(RecordingProviderError::Conflict | RecordingProviderError::PolicyDenied) => {
+                store.mark_recording_provider_operation_failed(&record.request)?;
+                sweep.failed = sweep.failed.saturating_add(1);
+            }
+            Err(
+                RecordingProviderError::CapacityExceeded
+                | RecordingProviderError::TemporarilyUnavailable
+                | RecordingProviderError::Internal,
+            ) => {
+                if record.attempts.saturating_add(1) >= MAX_RECORDING_PROVIDER_ATTEMPTS {
+                    store.mark_recording_provider_operation_failed(&record.request)?;
+                    sweep.failed = sweep.failed.saturating_add(1);
+                } else {
+                    let next_attempt = now_unix_ms
+                        .checked_add(recording_provider_retry_delay_ms(record.attempts))
+                        .ok_or(DurableStoreError::InvalidRecord)?;
+                    store.retry_recording_provider_operation(&record.request, next_attempt)?;
+                    sweep.retried = sweep.retried.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    Ok(sweep)
+}
+
+/// Backfills missing ready Events for Stop operations that were already Applied by an older binary.
+///
+/// This never calls the provider again: an Applied Stop is durable proof that finalization already
+/// succeeded. The store atomically appends the Event and flips its ready marker.
+///
+/// # Errors
+/// Returns validation or durable-store failures.
+pub fn recover_recording_provider_ready_events_once<S, F>(
+    store: &S,
+    now_unix_ms: i64,
+    limit: usize,
+    mut ready_event: F,
+) -> Result<usize, DurableStoreError>
+where
+    S: RecordingProviderOperationStore,
+    F: FnMut(&RecordingProviderRequest, i64, bool) -> Result<EventEnvelope, DurableStoreError>,
+{
+    let candidates = store.recording_provider_stops_needing_ready_event(limit)?;
+    let mut recovered = 0_usize;
+    for record in candidates {
+        if record.request.operation != RecordingProviderOperation::Stop
+            || record.state != RecordingProviderOperationState::Applied
+        {
+            return Err(DurableStoreError::Corrupt);
+        }
+        let event = ready_event(&record.request, now_unix_ms, true)?;
+        store.commit_recording_provider_stop_ready_event(&record.request, &event)?;
+        recovered = recovered.saturating_add(1);
+    }
+    Ok(recovered)
 }
 
 #[must_use]

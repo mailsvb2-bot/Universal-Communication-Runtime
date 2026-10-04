@@ -23,7 +23,9 @@ fn recording_provider_is_a_side_effect_boundary_not_a_second_lifecycle_owner() {
     assert!(core.contains("pub enum RecordingProviderError"));
     assert!(exports.contains("RecordingMediaProvider"));
     assert!(core.contains("pub trait RecordingProviderOperationStore"));
-    assert!(core.contains("dispatch_recording_provider_operations_once"));
+    assert!(core.contains("dispatch_recording_provider_operations_with_ready_once"));
+    assert!(core.contains("recover_recording_provider_ready_events_once"));
+    assert!(core.contains("commit_recording_provider_stop_ready_event"));
     assert!(exports.contains("RecordingProviderOperationStore"));
     let sqlite = read("crates/ucr-storage-sqlite/src/recording_provider_store.rs");
     assert!(sqlite.contains("recording_provider_operations"));
@@ -82,7 +84,7 @@ fn recording_provider_outbox_has_restart_safe_single_owner_runtime_worker() {
     assert!(runtime.contains("run_recording_provider_worker"));
     assert!(runtime.contains("try_acquire_runtime_worker_lease"));
     assert!(runtime.contains("renew_recording_provider_worker_lease"));
-    assert!(runtime.contains("dispatch_recording_provider_operations_once"));
+    assert!(runtime.contains("dispatch_recording_provider_operations_with_ready_once"));
     assert!(runtime.contains("UCR_RECORDING_PROVIDER_SWEEP"));
     assert!(spec.contains("durable single-owner provider dispatcher worker"));
     assert!(spec.contains("does not make Recording capability available"));

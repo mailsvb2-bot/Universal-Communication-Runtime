@@ -4,11 +4,11 @@ use ucr_core::{
     RecordingProviderOperation, RecordingProviderOperationRecord, RecordingProviderOperationState,
     RecordingProviderOperationStore, RecordingProviderRequest,
 };
-use ucr_model::{CallId, NamespaceId, OpaqueId, RecordingId, TenantId, TenantScope};
+use ucr_model::{CallId, EventEnvelope, NamespaceId, OpaqueId, RecordingId, TenantId, TenantScope};
 
 use super::{
-    SqliteLocalStore, map_schema_change_error, map_sqlite_error, namespace_storage_key,
-    verify_table_columns,
+    SqliteLocalStore, event_journal, map_schema_change_error, map_sqlite_error,
+    namespace_storage_key, verify_table_columns,
 };
 
 pub(super) const V47_OBJECTS_SQL: &str = r"
@@ -63,6 +63,67 @@ pub(super) fn verify_v47_objects(connection: &Connection) -> Result<(), DurableS
             ("available_at_unix_ms", "INTEGER", 1, 0),
         ],
     )?;
+    let mut foreign_key_check = connection
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(|error| map_sqlite_error(&error))?;
+    if foreign_key_check
+        .query([])
+        .map_err(|error| map_sqlite_error(&error))?
+        .next()
+        .map_err(|error| map_sqlite_error(&error))?
+        .is_some()
+    {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
+}
+
+pub(super) fn create_v48_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(
+            "ALTER TABLE recording_provider_operations
+                 ADD COLUMN ready_event_emitted INTEGER NOT NULL DEFAULT 0
+                 CHECK(ready_event_emitted IN (0,1));
+             CREATE INDEX IF NOT EXISTS recording_provider_ready_recovery
+                 ON recording_provider_operations(
+                     state, operation, ready_event_emitted, tenant_id, namespace_present,
+                     namespace_id, recording_id, lifecycle_revision
+                 );",
+        )
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn verify_v48_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_table_columns(
+        connection,
+        "recording_provider_operations",
+        &[
+            ("tenant_id", "TEXT", 1, 1),
+            ("namespace_present", "INTEGER", 1, 2),
+            ("namespace_id", "TEXT", 1, 3),
+            ("recording_id", "TEXT", 1, 4),
+            ("lifecycle_revision", "BLOB", 1, 5),
+            ("operation", "TEXT", 1, 6),
+            ("call_id", "TEXT", 1, 0),
+            ("expires_at_unix_ms", "INTEGER", 1, 0),
+            ("state", "TEXT", 1, 0),
+            ("attempts", "INTEGER", 1, 0),
+            ("available_at_unix_ms", "INTEGER", 1, 0),
+            ("ready_event_emitted", "INTEGER", 1, 0),
+        ],
+    )?;
+    let invalid_marker: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM recording_provider_operations
+             WHERE ready_event_emitted NOT IN (0,1)
+                OR (ready_event_emitted=1 AND (operation<>'stop' OR state<>'applied'))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if invalid_marker != 0 {
+        return Err(DurableStoreError::Corrupt);
+    }
     let mut foreign_key_check = connection
         .prepare("PRAGMA foreign_key_check")
         .map_err(|error| map_sqlite_error(&error))?;
@@ -263,6 +324,102 @@ impl RecordingProviderOperationStore for SqliteLocalStore {
             .ok_or(DurableStoreError::Corrupt)
     }
 
+    fn recording_provider_stops_needing_ready_event(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RecordingProviderOperationRecord>, DurableStoreError> {
+        if limit == 0 || limit > MAX_RECORDING_PROVIDER_OPERATION_BATCH {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT tenant_id, namespace_present, namespace_id, recording_id,
+                        lifecycle_revision
+                 FROM recording_provider_operations
+                 WHERE state='applied' AND operation='stop' AND ready_event_emitted=0
+                 ORDER BY tenant_id, namespace_present, namespace_id, recording_id,
+                          lifecycle_revision
+                 LIMIT ?1",
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let rows = statement
+            .query_map(
+                params![i64::try_from(limit).map_err(|_| DurableStoreError::InvalidRecord)?],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                    ))
+                },
+            )
+            .map_err(|error| map_sqlite_error(&error))?;
+        let mut keys = Vec::with_capacity(limit);
+        for row in rows {
+            keys.push(row.map_err(|error| map_sqlite_error(&error))?);
+        }
+        drop(statement);
+
+        keys.into_iter()
+            .map(|(tenant, present, namespace, recording, revision)| {
+                let scope = parse_scope(&tenant, present, &namespace)?;
+                let revision = decode_u64(&revision)?;
+                let record = load_operation(
+                    &connection,
+                    &scope,
+                    &RecordingId::from_opaque(parse_id(&recording)?),
+                    revision,
+                    RecordingProviderOperation::Stop,
+                )?
+                .ok_or(DurableStoreError::Corrupt)?;
+                if record.state != RecordingProviderOperationState::Applied {
+                    return Err(DurableStoreError::Corrupt);
+                }
+                Ok(record)
+            })
+            .collect()
+    }
+
+    fn commit_recording_provider_stop_ready_event(
+        &self,
+        request: &RecordingProviderRequest,
+        event: &EventEnvelope,
+    ) -> Result<(), DurableStoreError> {
+        if request.operation != RecordingProviderOperation::Stop
+            || event.scope != request.scope
+            || event.event_type != "ucr.recording.ready"
+            || event.logical_order != request.lifecycle_revision
+            || event.wall_time_unix_ms < 0
+        {
+            return Err(DurableStoreError::InvalidRecord);
+        }
+
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        let record = load_operation(
+            &transaction,
+            &request.scope,
+            &request.recording_id,
+            request.lifecycle_revision,
+            RecordingProviderOperation::Stop,
+        )?
+        .ok_or(DurableStoreError::Conflict)?;
+        if record.request != *request {
+            return Err(DurableStoreError::Conflict);
+        }
+
+        commit_stop_ready_marker_in_transaction(&transaction, request, record.state)?;
+        let _ = event_journal::append_event_in_transaction(&transaction, event)?;
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))
+    }
+
     fn mark_recording_provider_operation_applied(
         &self,
         request: &RecordingProviderRequest,
@@ -392,6 +549,81 @@ impl RecordingProviderOperationStore for SqliteLocalStore {
                 _ => Err(DurableStoreError::Conflict),
             }
         }
+    }
+}
+
+fn commit_stop_ready_marker_in_transaction(
+    transaction: &Transaction<'_>,
+    request: &RecordingProviderRequest,
+    state: RecordingProviderOperationState,
+) -> Result<(), DurableStoreError> {
+    let namespace = namespace_storage_key(&request.scope);
+    let revision = request.lifecycle_revision.to_be_bytes();
+    let marker: i64 = transaction
+        .query_row(
+            "SELECT ready_event_emitted
+             FROM recording_provider_operations
+             WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+               AND recording_id=?4 AND lifecycle_revision=?5 AND operation='stop'",
+            params![
+                request.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                request.recording_id.as_opaque().as_str(),
+                revision.as_slice(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+
+    let (state_predicate, update) = match state {
+        RecordingProviderOperationState::Pending => {
+            if marker != 0 {
+                return Err(DurableStoreError::Corrupt);
+            }
+            (
+                "pending",
+                "state='applied', attempts=attempts+1, ready_event_emitted=1",
+            )
+        }
+        RecordingProviderOperationState::Applied => {
+            if marker == 1 {
+                return Ok(());
+            }
+            if marker != 0 {
+                return Err(DurableStoreError::Corrupt);
+            }
+            ("applied", "ready_event_emitted=1")
+        }
+        RecordingProviderOperationState::Failed => return Err(DurableStoreError::Conflict),
+    };
+
+    let sql = format!(
+        "UPDATE recording_provider_operations
+         SET {update}
+         WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+           AND recording_id=?4 AND lifecycle_revision=?5 AND operation='stop'
+           AND state='{state_predicate}' AND ready_event_emitted=0
+           AND call_id=?6 AND expires_at_unix_ms=?7"
+    );
+    let changed = transaction
+        .execute(
+            &sql,
+            params![
+                request.scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                request.recording_id.as_opaque().as_str(),
+                revision.as_slice(),
+                request.call_id.as_opaque().as_str(),
+                request.expires_at_unix_ms,
+            ],
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(DurableStoreError::Conflict)
     }
 }
 
@@ -562,12 +794,39 @@ mod tests {
                     namespace_id TEXT NOT NULL,
                     recording_id TEXT NOT NULL,
                     PRIMARY KEY(tenant_id, namespace_present, namespace_id, recording_id)
-                ) WITHOUT ROWID;",
+                ) WITHOUT ROWID;
+                 CREATE TABLE events (
+                    journal_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id TEXT NOT NULL,
+                    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+                    namespace_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload BLOB NOT NULL,
+                    actor_id TEXT NOT NULL,
+                    actor_kind TEXT NOT NULL,
+                    on_behalf_of TEXT,
+                    source_device_id TEXT NOT NULL,
+                    source_identity_id TEXT NOT NULL,
+                    wall_time_unix_ms INTEGER NOT NULL,
+                    logical_order BLOB NOT NULL CHECK(length(logical_order) = 8),
+                    correlation_id TEXT NOT NULL,
+                    causation_id TEXT,
+                    idempotency_key TEXT,
+                    schema_major INTEGER NOT NULL,
+                    schema_minor INTEGER NOT NULL,
+                    integrity_metadata BLOB NOT NULL,
+                    UNIQUE(tenant_id, namespace_present, namespace_id, event_id),
+                    CHECK((namespace_present = 0 AND namespace_id = '') OR
+                          (namespace_present = 1 AND namespace_id <> ''))
+                 );",
             )
-            .expect("recordings table");
+            .expect("recordings and event journal base tables");
         {
             let transaction = connection.unchecked_transaction().expect("transaction");
+            event_journal::create_v8_objects(&transaction).expect("event journal");
             create_v47_objects(&transaction).expect("v47 objects");
+            create_v48_objects(&transaction).expect("v48 objects");
             transaction.commit().expect("commit schema");
         }
         connection
@@ -661,6 +920,147 @@ mod tests {
             .expect("applied operation");
         assert_eq!(applied.state, RecordingProviderOperationState::Applied);
         assert_eq!(applied.request, record.request);
+    }
+
+    fn ready_event(request: &RecordingProviderRequest, payload: &[u8]) -> EventEnvelope {
+        use ucr_model::{
+            ActorId, ActorKind, ActorRef, CorrelationContext, DeviceId, DeviceRef, EventId,
+            IdentityId, PrincipalId, ProtocolVersion,
+        };
+
+        EventEnvelope {
+            event_id: EventId::from_opaque(
+                OpaqueId::new(format!("ready-event-{}", request.lifecycle_revision))
+                    .expect("event id"),
+            ),
+            scope: request.scope.clone(),
+            event_type: "ucr.recording.ready".to_owned(),
+            payload: payload.to_vec(),
+            actor: ActorRef {
+                actor_id: ActorId::from_opaque(OpaqueId::new("ready-actor").expect("actor")),
+                kind: ActorKind::System,
+                on_behalf_of: Some(PrincipalId::from_opaque(
+                    OpaqueId::new("ready-requester").expect("requester"),
+                )),
+            },
+            source_device: DeviceRef {
+                device_id: DeviceId::from_opaque(OpaqueId::new("ready-device").expect("device")),
+                identity_id: IdentityId::from_opaque(
+                    OpaqueId::new("ready-identity").expect("identity"),
+                ),
+            },
+            wall_time_unix_ms: 200,
+            logical_order: request.lifecycle_revision,
+            correlation: CorrelationContext {
+                correlation_id: OpaqueId::new("ready-correlation").expect("correlation"),
+                causation_id: None,
+                idempotency_key: Some("ready".to_owned()),
+            },
+            schema_version: ProtocolVersion::new(1, 0),
+            integrity_metadata: Vec::new(),
+            extensions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn stop_ready_event_commit_is_atomic_and_idempotent() {
+        let store = store();
+        let record = RecordingProviderOperationRecord {
+            request: request(3, RecordingProviderOperation::Stop),
+            state: RecordingProviderOperationState::Pending,
+            attempts: 0,
+            available_at_unix_ms: 100,
+        };
+        store
+            .prepare_recording_provider_operation(&record)
+            .expect("prepare stop");
+        let event = ready_event(&record.request, b"ready");
+        store
+            .commit_recording_provider_stop_ready_event(&record.request, &event)
+            .expect("commit ready event");
+        store
+            .commit_recording_provider_stop_ready_event(&record.request, &event)
+            .expect("exact ready retry");
+
+        let applied = store
+            .recording_provider_operation(&record.request)
+            .expect("load stop")
+            .expect("stop");
+        assert_eq!(applied.state, RecordingProviderOperationState::Applied);
+        assert_eq!(applied.attempts, 1);
+        assert!(
+            store
+                .recording_provider_stops_needing_ready_event(10)
+                .expect("recovery view")
+                .is_empty()
+        );
+        let persisted = ucr_core::EventJournalStore::event(&store, &event.scope, &event.event_id)
+            .expect("event lookup")
+            .expect("ready event");
+        assert_eq!(persisted, event);
+    }
+
+    #[test]
+    fn conflicting_ready_event_rolls_back_stop_application() {
+        let store = store();
+        let record = RecordingProviderOperationRecord {
+            request: request(3, RecordingProviderOperation::Stop),
+            state: RecordingProviderOperationState::Pending,
+            attempts: 0,
+            available_at_unix_ms: 100,
+        };
+        store
+            .prepare_recording_provider_operation(&record)
+            .expect("prepare stop");
+        let expected = ready_event(&record.request, b"expected");
+        let mut conflicting = expected.clone();
+        conflicting.payload = b"conflict".to_vec();
+        ucr_core::EventJournalStore::append_event(&store, &conflicting).expect("seed conflict");
+
+        assert_eq!(
+            store.commit_recording_provider_stop_ready_event(&record.request, &expected),
+            Err(DurableStoreError::Conflict)
+        );
+        let pending = store
+            .recording_provider_operation(&record.request)
+            .expect("load stop")
+            .expect("stop");
+        assert_eq!(pending.state, RecordingProviderOperationState::Pending);
+        assert_eq!(pending.attempts, 0);
+    }
+
+    #[test]
+    fn legacy_applied_stop_is_discovered_for_ready_recovery() {
+        let store = store();
+        let record = RecordingProviderOperationRecord {
+            request: request(3, RecordingProviderOperation::Stop),
+            state: RecordingProviderOperationState::Pending,
+            attempts: 0,
+            available_at_unix_ms: 100,
+        };
+        store
+            .prepare_recording_provider_operation(&record)
+            .expect("prepare stop");
+        store
+            .mark_recording_provider_operation_applied(&record.request)
+            .expect("legacy applied stop");
+
+        let due = store
+            .recording_provider_stops_needing_ready_event(10)
+            .expect("recovery candidates");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].request, record.request);
+
+        let event = ready_event(&record.request, b"recovered");
+        store
+            .commit_recording_provider_stop_ready_event(&record.request, &event)
+            .expect("backfill event");
+        assert!(
+            store
+                .recording_provider_stops_needing_ready_event(10)
+                .expect("recovery candidates after backfill")
+                .is_empty()
+        );
     }
 
     #[test]

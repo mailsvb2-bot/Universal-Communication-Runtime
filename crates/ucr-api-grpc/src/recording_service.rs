@@ -1,13 +1,17 @@
-use std::{fmt, sync::Arc};
+use std::{
+    fmt::{self, Write as _},
+    sync::Arc,
+};
 
 use prost::Message;
+use sha2::{Digest, Sha256};
 use tonic::{Request, Response, Status};
 use ucr_core::{
     AuthorizationEvaluator, CallStore, CommandAcceptanceStore, ConferenceJoinGrantStore,
     DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventJournalStore,
-    PrincipalIdentityBindingStore, RecordingConsentProviderStopRequest, RecordingStore,
-    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
-    generate_opaque_id,
+    PrincipalIdentityBindingStore, RecordingConsentProviderStopRequest, RecordingProviderRequest,
+    RecordingStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock,
+    ServiceQuotaStore, generate_opaque_id,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet};
 use ucr_model::{
@@ -983,6 +987,108 @@ fn recording_lifecycle_event(
     })
 }
 
+/// Builds the deterministic canonical Event published after provider Stop finalization.
+///
+/// This Event is distinct from `RecordingState::Ready`: lifecycle Ready means consent gates are
+/// satisfied before Start, while `ucr.recording.ready` means the provider has finalized the
+/// stopped recording artifact. The Event is provider-neutral because legacy applied Stop rows do
+/// not durably record which provider implementation performed finalization.
+///
+/// # Errors
+/// Rejects mismatched lifecycle context or invalid identifiers.
+pub fn recording_provider_ready_event(
+    recording: &RecordingSession,
+    request: &RecordingProviderRequest,
+    ready_at_unix_ms: i64,
+    recovered_after_upgrade: bool,
+) -> Result<EventEnvelope, CanonicalError> {
+    if recording.scope != request.scope
+        || recording.recording_id != request.recording_id
+        || recording.call_id != request.call_id
+        || recording.revision < request.lifecycle_revision
+        || !matches!(
+            recording.state,
+            RecordingState::Stopped | RecordingState::Expired | RecordingState::Deleted
+        )
+        || request.operation != ucr_core::RecordingProviderOperation::Stop
+        || ready_at_unix_ms < 0
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument));
+    }
+
+    let event_id = EventId::from_opaque(derived_recording_ready_id("event", request)?);
+    let actor_id = ActorId::from_opaque(derived_recording_ready_id("actor", request)?);
+    let device_id = DeviceId::from_opaque(derived_recording_ready_id("device", request)?);
+    let identity_id = IdentityId::from_opaque(derived_recording_ready_id("identity", request)?);
+    let payload = pb::RecordingReadyEvent {
+        scope: Some(pb_scope(&request.scope)),
+        recording_id: Some(pb_opaque(request.recording_id.as_opaque())),
+        call_id: Some(pb_opaque(request.call_id.as_opaque())),
+        lifecycle_revision: request.lifecycle_revision,
+        ready_at_unix_ms,
+        recovered_after_upgrade,
+    }
+    .encode_to_vec();
+
+    Ok(EventEnvelope {
+        event_id: event_id.clone(),
+        scope: request.scope.clone(),
+        event_type: "ucr.recording.ready".to_owned(),
+        payload,
+        actor: ActorRef {
+            actor_id,
+            kind: ActorKind::System,
+            on_behalf_of: Some(recording.requested_by.principal_id.clone()),
+        },
+        source_device: DeviceRef {
+            device_id,
+            identity_id,
+        },
+        wall_time_unix_ms: ready_at_unix_ms,
+        logical_order: request.lifecycle_revision,
+        correlation: CorrelationContext {
+            correlation_id: event_id.as_opaque().clone(),
+            causation_id: None,
+            idempotency_key: Some(format!("recording-ready:{}", request.lifecycle_revision)),
+        },
+        schema_version: ProtocolVersion::new(1, 0),
+        integrity_metadata: Vec::new(),
+        extensions: Vec::new(),
+    })
+}
+
+fn derived_recording_ready_id(
+    label: &str,
+    request: &RecordingProviderRequest,
+) -> Result<OpaqueId, CanonicalError> {
+    let mut hash = Sha256::new();
+    hash.update(b"ucr.recording.ready.v1");
+    hash.update([0]);
+    hash.update(label.as_bytes());
+    hash.update([0]);
+    hash.update(request.scope.tenant_id.as_opaque().as_wire_bytes());
+    hash.update([0]);
+    if let Some(namespace) = &request.scope.namespace_id {
+        hash.update([1]);
+        hash.update(namespace.as_opaque().as_wire_bytes());
+    } else {
+        hash.update([0]);
+    }
+    hash.update([0]);
+    hash.update(request.recording_id.as_opaque().as_wire_bytes());
+    hash.update([0]);
+    hash.update(request.call_id.as_opaque().as_wire_bytes());
+    hash.update(request.lifecycle_revision.to_be_bytes());
+
+    let digest = hash.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    OpaqueId::new(format!("recording-ready-{label}-{hex}"))
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))
+}
+
 fn pb_recording(value: &RecordingSession) -> pb::RecordingSession {
     pb::RecordingSession {
         scope: Some(pb_scope(&value.scope)),
@@ -1035,6 +1141,111 @@ const fn map_store_error(error: DurableStoreError) -> CanonicalError {
         | DurableStoreError::Internal => CanonicalErrorCode::Internal,
     };
     CanonicalError::new(code)
+}
+
+#[cfg(test)]
+mod provider_ready_event_tests {
+    use prost::Message as _;
+    use ucr_core::{RecordingProviderOperation, RecordingProviderRequest};
+    use ucr_model::{
+        CallId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingId, RecordingPolicy,
+        RecordingSession, RecordingState, TenantId, TenantScope,
+    };
+
+    use super::{pb, recording_provider_ready_event};
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("id")
+    }
+
+    fn stopped_recording() -> RecordingSession {
+        RecordingSession {
+            scope: TenantScope {
+                tenant_id: TenantId::from_opaque(oid("ready-tenant")),
+                namespace_id: None,
+            },
+            recording_id: RecordingId::from_opaque(oid("ready-recording")),
+            call_id: CallId::from_opaque(oid("ready-call")),
+            requested_by: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("ready-requester")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+            policy: RecordingPolicy {
+                require_all_participant_consent: false,
+                notify_all_participants: true,
+                retention_seconds: 3_600,
+                policy_reference: None,
+            },
+            state: RecordingState::Stopped,
+            consents: Vec::new(),
+            requested_at_unix_ms: 10,
+            started_at_unix_ms: Some(20),
+            stopped_at_unix_ms: Some(30),
+            expires_at_unix_ms: 3_600_010,
+            revision: 3,
+        }
+    }
+
+    #[test]
+    fn provider_ready_event_is_deterministic_and_not_lifecycle_ready() {
+        let recording = stopped_recording();
+        let request =
+            RecordingProviderRequest::for_session(&recording, RecordingProviderOperation::Stop);
+        let first =
+            recording_provider_ready_event(&recording, &request, 40, false).expect("ready event");
+        let retry =
+            recording_provider_ready_event(&recording, &request, 40, false).expect("ready retry");
+        assert_eq!(first, retry);
+        assert_eq!(first.event_type, "ucr.recording.ready");
+        assert_eq!(first.logical_order, recording.revision);
+        assert_eq!(
+            first.actor.on_behalf_of,
+            Some(recording.requested_by.principal_id.clone())
+        );
+
+        let payload =
+            pb::RecordingReadyEvent::decode(first.payload.as_slice()).expect("ready payload");
+        assert_eq!(payload.lifecycle_revision, recording.revision);
+        assert_eq!(payload.ready_at_unix_ms, 40);
+        assert!(!payload.recovered_after_upgrade);
+    }
+
+    #[test]
+    fn provider_ready_event_survives_later_terminal_lifecycle_revision() {
+        let stopped = stopped_recording();
+        let request =
+            RecordingProviderRequest::for_session(&stopped, RecordingProviderOperation::Stop);
+        let mut deleted = stopped.clone();
+        deleted.state = RecordingState::Deleted;
+        deleted.revision = stopped.revision + 1;
+
+        let event = recording_provider_ready_event(&deleted, &request, 50, true)
+            .expect("ready event after later lifecycle transition");
+        assert_eq!(event.event_type, "ucr.recording.ready");
+        assert_eq!(event.logical_order, request.lifecycle_revision);
+    }
+
+    #[test]
+    fn provider_ready_event_marks_upgrade_recovery_without_changing_identity() {
+        let recording = stopped_recording();
+        let request =
+            RecordingProviderRequest::for_session(&recording, RecordingProviderOperation::Stop);
+        let normal =
+            recording_provider_ready_event(&recording, &request, 40, false).expect("normal event");
+        let recovered = recording_provider_ready_event(&recording, &request, 50, true)
+            .expect("recovered event");
+        assert_eq!(normal.event_id, recovered.event_id);
+        assert_eq!(normal.actor.actor_id, recovered.actor.actor_id);
+        assert_eq!(
+            normal.source_device.device_id,
+            recovered.source_device.device_id
+        );
+
+        let payload =
+            pb::RecordingReadyEvent::decode(recovered.payload.as_slice()).expect("payload");
+        assert!(payload.recovered_after_upgrade);
+        assert_eq!(payload.ready_at_unix_ms, 50);
+    }
 }
 
 #[cfg(test)]
