@@ -155,6 +155,32 @@ and keeps subsequent retries idempotent. This proves restart-safe controlled-obj
 local encrypted archive. It does not claim erasure of copies exported to another system and does not
 yet provide the authorized export/read surface required for Production Recording.
 
+### Provider export artifact
+
+The provider export seam returns one bounded opaque artifact plus an explicit media type. Export is
+read-only with respect to canonical Recording lifecycle and remains unavailable by default for
+providers that do not implement it. Authorization and lifecycle eligibility are enforced above this
+provider seam; the provider itself must still fail closed on unavailable, corrupt, unsafe, or
+oversized storage.
+
+For `EncryptedArchiveRecordingProvider`, the media type is
+`application/vnd.ucr.recording-encrypted-archive.v1`. The binary artifact is versioned by the
+eight-byte magic `UCRREX01`, followed by a big-endian `u32` frame count. Each frame entry is encoded
+as the 32-byte canonical frame binding, a big-endian `u32` record length, and the canonical
+`ucr.recording.frame.v1` record bytes.
+
+The export removes only the provider-owned at-rest envelope. The contained media ciphertext and
+source signature remain endpoint-E2EE material exactly as captured; the provider never receives MLS
+exporter keys and therefore cannot turn this artifact into playable plaintext. Entries are sorted by
+their deterministic frame-object name so exact repeated exports are byte-for-byte stable. Export is
+bounded by `MAX_RECORDING_PROVIDER_EXPORT_BYTES` and rejects symlinks, non-private files, malformed
+object names, tampered at-rest ciphertext, and size overflow.
+
+This format intentionally reuses the existing SHA-256 frame-binding filename as authenticated-data
+input, so archives produced before the export feature require no migration. Public download,
+least-privilege read authorization, download audit, and any later composition/transcoding format are
+separate layers.
+
 
 ### Opt-in realtime runtime wiring
 
