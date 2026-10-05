@@ -275,6 +275,78 @@ return {
 
         if not isinstance(probe, dict):
             raise RuntimeError(f"browser probe returned invalid payload: {probe!r}")
+        legacy_key = f"ucr-browser-legacy-{args.browser}"
+        legacy_bytes = [11, 22, 33, 44, 55]
+        legacy_upgrade = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+const key = arguments[0];
+const expected = arguments[1];
+Promise.resolve()
+  .then(() => new Promise((resolve, reject) => {
+    const request = indexedDB.deleteDatabase("ucr-endpoint-state-v1");
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error || new Error("legacy database delete failed"));
+    request.onblocked = () => reject(new Error("legacy database delete blocked"));
+  }))
+  .then(() => new Promise((resolve, reject) => {
+    const request = indexedDB.open("ucr-endpoint-state-v1", 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("sealed-snapshots")) {
+        db.createObjectStore("sealed-snapshots");
+      }
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction("sealed-snapshots", "readwrite");
+      tx.objectStore("sealed-snapshots").put(Array.from(expected), key);
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error || new Error("legacy write failed")); };
+      tx.onabort = () => { db.close(); reject(tx.error || new Error("legacy write aborted")); };
+    };
+    request.onerror = () => reject(request.error || new Error("legacy database open failed"));
+  }))
+  .then(() => window.ucrEndpointStateStore.load(key))
+  .then(async value => {
+    const bytes = ArrayBuffer.isView(value) &&
+      Object.prototype.toString.call(value) === "[object Uint8Array]"
+      ? Array.from(value)
+      : null;
+    const same = Array.isArray(bytes) &&
+      bytes.length === expected.length &&
+      expected.every((byte, index) => bytes[index] === byte);
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open("ucr-endpoint-state-v1");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("upgraded database open failed"));
+    });
+    const version = db.version;
+    const stores = Array.from(db.objectStoreNames);
+    db.close();
+    done({
+      ok: same &&
+        version === 2 &&
+        stores.includes("sealed-snapshots") &&
+        stores.includes("wrapping-key-vault"),
+      same,
+      version,
+      stores,
+      bytes
+    });
+  })
+  .catch(error => done({ok: false, error: String(error)}));
+""",
+            [legacy_key, legacy_bytes],
+        )
+        legacy_upgrade_verified = (
+            isinstance(legacy_upgrade, dict)
+            and legacy_upgrade.get("ok") is True
+        )
+        if not legacy_upgrade_verified:
+            raise RuntimeError(f"IndexedDB v1-to-v2 migration failed: {legacy_upgrade!r}")
+
         persistence_key = f"ucr-browser-probe-{args.browser}"
         persistence_bytes = [1, 7, 3, 9, 255]
         persistence_write = execute_async(
@@ -636,6 +708,8 @@ Promise.resolve()
         failures.extend(branding_failures)
         if probe.get("endpointStateStoreContract") != "ucr.endpoint-state-store.v1":
             failures.append("endpointStateStoreContract")
+        if not legacy_upgrade_verified:
+            failures.append(f"indexedDbV1ToV2Migration:{legacy_upgrade!r}")
         if probe.get("endpointWrappingKeyVaultContract") != "ucr.endpoint-wrapping-key.v1":
             failures.append("endpointWrappingKeyVaultContract")
         if not persistence_reload_round_trip:
@@ -657,6 +731,12 @@ Promise.resolve()
             "platform_name": reported.get("platformName"),
             "evidence_kind": "real-desktop-browser-webdriver-smoke",
             "probe": probe,
+            "endpoint_state_schema_migration": {
+                "from_version": 1,
+                "to_version": 2,
+                "legacy_snapshot_preserved": legacy_upgrade_verified,
+                "probe": legacy_upgrade,
+            },
             "endpoint_wrapping_key_vault": {
                 "contract": probe.get("endpointWrappingKeyVaultContract"),
                 "storage": "IndexedDB structured-clone CryptoKey plus AES-GCM wrapped DEK",
