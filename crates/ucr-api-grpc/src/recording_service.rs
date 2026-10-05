@@ -33,8 +33,8 @@ use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_opaque,
     decode_principal_ref, decode_scope,
     machine_api_auth::{
-        MachineApiAuthentication, MachineBearerConfig, admit_machine_api,
-        admit_machine_api_for_operation, decode_machine_api_authentication,
+        MachineApiAuthentication, MachineApiOperationAdmission, MachineBearerConfig,
+        admit_machine_api, admit_machine_api_for_operation, decode_machine_api_authentication,
     },
     mutation_idempotency::accept_mutation_receipt,
     pb, pb_acknowledgement, pb_error, pb_opaque, pb_principal_ref, pb_scope,
@@ -43,8 +43,13 @@ use super::{
 use ucr_protocol::acknowledgement_for;
 
 pub trait RecordingMediaProviderResolver: fmt::Debug + Send + Sync {
-    fn current_recording_provider(&self)
-    -> Result<Arc<dyn RecordingMediaProvider>, CanonicalError>;
+    /// Resolves the provider currently authorized to serve Recording media operations.
+    ///
+    /// # Errors
+    /// Returns a canonical fail-closed error when no healthy/current provider can be resolved.
+    fn current_recording_provider(
+        &self,
+    ) -> Result<Arc<dyn RecordingMediaProvider>, CanonicalError>;
 }
 
 pub struct GrpcRecordingService<C, A, S> {
@@ -285,10 +290,12 @@ where
                         &*self.authorization,
                         &*self.store,
                         self.machine_bearer.as_deref(),
-                        &scope,
-                        authentication,
-                        CONFERENCE_RECORDING_READ_PERMISSION,
-                        &operation,
+                        MachineApiOperationAdmission {
+                            scope: &scope,
+                            authentication,
+                            permission: CONFERENCE_RECORDING_READ_PERMISSION,
+                            operation: &operation,
+                        },
                     )?;
 
                     let recording = self
@@ -1079,15 +1086,6 @@ fn recording_lifecycle_event(
     })
 }
 
-/// Builds the deterministic canonical Event published after provider Stop finalization.
-///
-/// This Event is distinct from `RecordingState::Ready`: lifecycle Ready means consent gates are
-/// satisfied before Start, while `ucr.recording.ready` means the provider has finalized the
-/// stopped recording artifact. The Event is provider-neutral because legacy applied Stop rows do
-/// not durably record which provider implementation performed finalization.
-///
-/// # Errors
-/// Rejects mismatched lifecycle context or invalid identifiers.
 /// Builds the success-only canonical Event proving one export artifact was issued.
 ///
 /// Authorization is audited separately by the Service Principal request gate. This Event is
@@ -1149,6 +1147,15 @@ pub fn recording_export_issued_event(
     })
 }
 
+/// Builds the deterministic canonical Event published after provider Stop finalization.
+///
+/// This Event is distinct from `RecordingState::Ready`: lifecycle Ready means consent gates are
+/// satisfied before Start, while `ucr.recording.ready` means the provider has finalized the
+/// stopped recording artifact. The Event is provider-neutral because legacy applied Stop rows do
+/// not durably record which provider implementation performed finalization.
+///
+/// # Errors
+/// Rejects mismatched lifecycle context or invalid identifiers.
 pub fn recording_provider_ready_event(
     recording: &RecordingSession,
     request: &RecordingProviderRequest,
