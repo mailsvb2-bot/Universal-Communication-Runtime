@@ -41,13 +41,19 @@ use super::{
 };
 use ucr_protocol::acknowledgement_for;
 
+pub trait RecordingMediaProviderResolver: fmt::Debug + Send + Sync {
+    fn current_recording_provider(
+        &self,
+    ) -> Result<Arc<dyn RecordingMediaProvider>, CanonicalError>;
+}
+
 pub struct GrpcRecordingService<C, A, S> {
     clock: Arc<C>,
     authorization: Arc<A>,
     store: Arc<S>,
     join_issuer: Arc<JoinTokenIssuer>,
     machine_bearer: Option<Arc<MachineBearerConfig>>,
-    recording_provider: Option<Arc<dyn RecordingMediaProvider>>,
+    recording_provider_resolver: Option<Arc<dyn RecordingMediaProviderResolver>>,
     recording_available: bool,
 }
 
@@ -66,14 +72,17 @@ impl<C, A, S> GrpcRecordingService<C, A, S> {
             store,
             join_issuer,
             machine_bearer: None,
-            recording_provider: None,
+            recording_provider_resolver: None,
             recording_available,
         }
     }
 
     #[must_use]
-    pub fn with_recording_provider(mut self, provider: Arc<dyn RecordingMediaProvider>) -> Self {
-        self.recording_provider = Some(provider);
+    pub fn with_recording_provider_resolver(
+        mut self,
+        resolver: Arc<dyn RecordingMediaProviderResolver>,
+    ) -> Self {
+        self.recording_provider_resolver = Some(resolver);
         self
     }
 
@@ -109,7 +118,7 @@ impl<C, A, S> Clone for GrpcRecordingService<C, A, S> {
             store: Arc::clone(&self.store),
             join_issuer: Arc::clone(&self.join_issuer),
             machine_bearer: self.machine_bearer.as_ref().map(Arc::clone),
-            recording_provider: self.recording_provider.as_ref().map(Arc::clone),
+            recording_provider_resolver: self.recording_provider_resolver.as_ref().map(Arc::clone),
             recording_available: self.recording_available,
         }
     }
@@ -120,7 +129,10 @@ impl<C, A, S> fmt::Debug for GrpcRecordingService<C, A, S> {
         formatter
             .debug_struct("GrpcRecordingService")
             .field("recording_available", &self.recording_available)
-            .field("recording_provider_configured", &self.recording_provider.is_some())
+            .field(
+                "recording_provider_resolver_configured",
+                &self.recording_provider_resolver.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -289,11 +301,12 @@ where
                         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
                     }
                     let provider = self
-                        .recording_provider
+                        .recording_provider_resolver
                         .as_ref()
                         .ok_or_else(|| {
                             CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
-                        })?;
+                        })?
+                        .current_recording_provider()?;
                     let artifact = provider
                         .export_encrypted_recording(&scope, &recording_id)
                         .map_err(map_provider_error)?;
