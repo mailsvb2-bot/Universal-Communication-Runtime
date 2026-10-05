@@ -47,9 +47,8 @@ pub trait RecordingMediaProviderResolver: fmt::Debug + Send + Sync {
     ///
     /// # Errors
     /// Returns a canonical fail-closed error when no healthy/current provider can be resolved.
-    fn current_recording_provider(
-        &self,
-    ) -> Result<Arc<dyn RecordingMediaProvider>, CanonicalError>;
+    fn current_recording_provider(&self)
+    -> Result<Arc<dyn RecordingMediaProvider>, CanonicalError>;
 }
 
 pub struct GrpcRecordingService<C, A, S> {
