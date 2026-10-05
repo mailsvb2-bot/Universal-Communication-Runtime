@@ -253,6 +253,10 @@ return {
     typeof window.ucrEndpointStateStore.load === "function" &&
     typeof window.ucrEndpointStateStore.remove === "function",
   endpointStateStoreContract: window.ucrEndpointStateStore?.contractVersion || null,
+  endpointWrappingKeyVault: !!window.ucrEndpointWrappingKeyVault &&
+    typeof window.ucrEndpointWrappingKeyVault.createProvider === "function" &&
+    typeof window.ucrEndpointWrappingKeyVault.getWrappingKey === "function",
+  endpointWrappingKeyVaultContract: window.ucrEndpointWrappingKeyVault?.contractVersion || null,
   endpointPersistenceFunction: typeof endpointPersistence === "function",
   endpointPersistenceKeyFunction: typeof endpointPersistenceStorageKey === "function",
   restoreEndpointPersistedStateFunction: typeof restoreEndpointPersistedState === "function",
@@ -489,6 +493,104 @@ Promise.resolve()
             and lifecycle_restore.get("ok") is True
         )
 
+        vault_identity = {
+            "tenant_id": "vault-tenant",
+            "namespace_id": "vault-namespace",
+            "call_id": "vault-call",
+            "participant_kind": 1,
+            "participant_id": "vault-participant",
+            "device_id": f"vault-device-{args.browser}",
+            "session_id": "vault-session",
+        }
+        vault_before = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+const identity = arguments[0];
+Promise.resolve()
+  .then(async () => {
+    const storageKey = endpointPersistenceStorageKey(identity);
+    const provider = window.ucrEndpointWrappingKeyVault.createProvider(identity);
+    const wrappingKey = await provider.getWrappingKey();
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", wrappingKey)));
+    const record = await readEndpointWrappingKeyRecord(storageKey);
+    let exportRejected = false;
+    try {
+      await crypto.subtle.exportKey("raw", record.kek);
+    } catch (_) {
+      exportRejected = true;
+    }
+    const rawKey = Array.from(wrappingKey);
+    wrappingKey.fill(0);
+    done({
+      ok: !!record &&
+        record.kek.extractable === false &&
+        exportRejected === true &&
+        rawKey.length === 32 &&
+        rawKey.some(value => value !== 0),
+      storageKey,
+      digest,
+      kekExtractable: record ? record.kek.extractable : null,
+      exportRejected,
+      ivLength: record ? record.iv.length : null,
+      wrappedLength: record ? record.wrapped.length : null,
+      wrappedEqualsRaw: record
+        ? record.wrapped.length === rawKey.length &&
+          record.wrapped.every((value, index) => value === rawKey[index])
+        : null
+    });
+  })
+  .catch(error => done({ok: false, error: String(error)}));
+""",
+            [vault_identity],
+        )
+        if not isinstance(vault_before, dict) or vault_before.get("ok") is not True:
+            raise RuntimeError(f"wrapping-key vault setup failed: {vault_before!r}")
+
+        request_json("POST", f"{base}/refresh", {})
+        time.sleep(0.5)
+
+        vault_after = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+const identity = arguments[0];
+const expectedDigest = arguments[1];
+Promise.resolve()
+  .then(async () => {
+    const storageKey = endpointPersistenceStorageKey(identity);
+    const provider = window.ucrEndpointWrappingKeyVault.createProvider(identity);
+    const wrappingKey = await provider.getWrappingKey();
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", wrappingKey)));
+    const record = await readEndpointWrappingKeyRecord(storageKey);
+    let exportRejected = false;
+    try {
+      await crypto.subtle.exportKey("raw", record.kek);
+    } catch (_) {
+      exportRejected = true;
+    }
+    const same = digest.length === expectedDigest.length &&
+      expectedDigest.every((value, index) => digest[index] === value);
+    wrappingKey.fill(0);
+    done({
+      ok: same && !!record && record.kek.extractable === false && exportRejected === true,
+      same,
+      digest,
+      kekExtractable: record ? record.kek.extractable : null,
+      exportRejected,
+      ivLength: record ? record.iv.length : null,
+      wrappedLength: record ? record.wrapped.length : null
+    });
+  })
+  .catch(error => done({ok: false, error: String(error)}));
+""",
+            [vault_identity, vault_before.get("digest")],
+        )
+        vault_reload_verified = (
+            isinstance(vault_after, dict)
+            and vault_after.get("ok") is True
+        )
+
         branding_failures = []
         if probe.get("brandName") != "UCR Browser Probe":
             branding_failures.append("brandName")
@@ -518,6 +620,7 @@ Promise.resolve()
             "secureContext",
             "indexedDb",
             "endpointStateStore",
+            "endpointWrappingKeyVault",
             "endpointPersistenceFunction",
             "endpointPersistenceKeyFunction",
             "restoreEndpointPersistedStateFunction",
@@ -533,6 +636,8 @@ Promise.resolve()
         failures.extend(branding_failures)
         if probe.get("endpointStateStoreContract") != "ucr.endpoint-state-store.v1":
             failures.append("endpointStateStoreContract")
+        if probe.get("endpointWrappingKeyVaultContract") != "ucr.endpoint-wrapping-key.v1":
+            failures.append("endpointWrappingKeyVaultContract")
         if not persistence_reload_round_trip:
             failures.append(
                 f"indexedDbReloadRoundTrip:read={persistence_read!r}:"
@@ -542,6 +647,8 @@ Promise.resolve()
             failures.append("indexedDbDelete")
         if not lifecycle_restore_verified:
             failures.append(f"endpointPersistenceLifecycle:{lifecycle_restore!r}")
+        if not vault_reload_verified:
+            failures.append(f"endpointWrappingKeyVault:{vault_after!r}")
         evidence = {
             "schema": "ucr.browser-compatibility.v1",
             "browser_requested": args.browser,
@@ -550,6 +657,16 @@ Promise.resolve()
             "platform_name": reported.get("platformName"),
             "evidence_kind": "real-desktop-browser-webdriver-smoke",
             "probe": probe,
+            "endpoint_wrapping_key_vault": {
+                "contract": probe.get("endpointWrappingKeyVaultContract"),
+                "storage": "IndexedDB structured-clone CryptoKey plus AES-GCM wrapped DEK",
+                "non_extractable_kek": vault_before.get("kekExtractable") is False and vault_after.get("kekExtractable") is False,
+                "raw_export_rejected": vault_before.get("exportRejected") is True and vault_after.get("exportRejected") is True,
+                "wrapped_not_raw": vault_before.get("wrappedEqualsRaw") is False,
+                "reload_same_dek": vault_reload_verified,
+                "before_refresh": vault_before,
+                "after_refresh": vault_after,
+            },
             "endpoint_state_persistence": {
                 "contract": probe.get("endpointStateStoreContract"),
                 "storage": "IndexedDB",
