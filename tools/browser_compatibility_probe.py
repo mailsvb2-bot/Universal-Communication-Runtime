@@ -410,7 +410,7 @@ Promise.resolve()
             """
 const done = arguments[arguments.length - 1];
 const expected = arguments[0];
-claims = {
+const identity = {
   tenant_id: "probe-tenant",
   namespace_id: "probe-namespace",
   call_id: "probe-call",
@@ -430,8 +430,8 @@ const adapter = {
   }
 };
 Promise.resolve()
-  .then(() => persistEndpointState(adapter))
-  .then(saved => done({ok: saved === true, key: endpointPersistenceStorageKey()}))
+  .then(() => persistEndpointState(adapter, identity))
+  .then(saved => done({ok: saved === true, key: endpointPersistenceStorageKey(identity)}))
   .catch(error => done({ok: false, error: String(error)}));
 """,
             [lifecycle_bytes],
@@ -447,7 +447,7 @@ Promise.resolve()
             """
 const done = arguments[arguments.length - 1];
 const expected = arguments[0];
-claims = {
+const identity = {
   tenant_id: "probe-tenant",
   namespace_id: "probe-namespace",
   call_id: "probe-call",
@@ -471,9 +471,9 @@ const adapter = {
   }
 };
 Promise.resolve()
-  .then(() => restoreEndpointPersistedState(adapter))
+  .then(() => restoreEndpointPersistedState(adapter, identity))
   .then(async state => {
-    const key = endpointPersistenceStorageKey();
+    const key = endpointPersistenceStorageKey(identity);
     const same = Array.isArray(restored) &&
       restored.length === expected.length &&
       expected.every((byte, index) => restored[index] === byte);
