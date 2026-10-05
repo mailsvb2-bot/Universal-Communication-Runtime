@@ -3,6 +3,7 @@
 mod aead;
 mod agreement;
 mod confirmation;
+mod endpoint_state;
 mod group_media;
 mod kdf;
 mod key_provider;
@@ -19,6 +20,11 @@ mod trusted_key;
 pub use aead::{AeadError, Ciphertext, TrafficKey};
 pub use agreement::{AgreementError, AgreementKeyPair, AgreementPublicKey};
 pub use confirmation::{ConfirmationError, ConfirmationKey, ConfirmationTag};
+pub use endpoint_state::{
+    ENDPOINT_STATE_KEY_LEN, ENDPOINT_STATE_NONCE_LEN, EndpointStateError,
+    EndpointStateWrappingKey, MAX_ENDPOINT_STATE_PLAINTEXT_LEN, SealedEndpointState,
+    open_endpoint_state, seal_endpoint_state,
+};
 pub use group_media::{
     EndpointGroupMediaCryptoError, EndpointGroupMediaWireError, GroupMediaEpochSecret,
     GroupMediaKeyError, GroupMediaSigningKeyHandle, derive_group_media_traffic_key,
