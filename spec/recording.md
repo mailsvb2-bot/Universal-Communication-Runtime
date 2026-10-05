@@ -46,10 +46,16 @@ The binding is fail-closed when recording runtime capability is unavailable. Mer
 serving this lifecycle contract is not permission to advertise Production recording.
 
 Authorized export uses a separate least-privilege `ucr.conference.recording.read` permission and
-`recording:read` machine scope. `ExportRecording` binds its tamper-evident Service audit operation
-to `ucr.recording.export` with `operation_id = recording_id`, then resolves the currently active
-provider through the runtime registry. The provider registration must still own the durable
-recording-worker lease; stale or unavailable owners fail closed.
+`recording:read` machine scope. `ExportRecording` binds its tamper-evident Service authorization
+audit operation to `ucr.recording.export` with `operation_id = recording_id`, then resolves the
+currently active provider through the runtime registry. The provider registration must still own the
+durable recording-worker lease; stale or unavailable owners fail closed.
+
+Authorization evidence is not treated as proof of delivery. After a provider export has succeeded and
+passed the public bounds, but before bytes are returned, UCR appends the metadata-only canonical Event
+`ucr.recording.export.issued`. Its payload records scope, Recording/Call IDs, exact Service Account
+recipient, media type, byte count and issuance time, but never recording bytes or MLS key material.
+If this success-only Event cannot be persisted, the export response fails closed.
 
 Export is allowed only while the durable lifecycle is `STOPPED`. `EXPIRED` is not downloadable:
 retention expiry means the authorized storage lifetime has ended and controlled provider deletion
