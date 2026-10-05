@@ -2,14 +2,15 @@
 
 use wasm_bindgen::prelude::*;
 
-use openmls_rust_crypto::OpenMlsRustCrypto;
 use ucr_crypto::{
-    GroupMediaEpochSecret, SigningKeyMaterial, VerifyingKeyBytes, open_endpoint_group_media_wire,
-    seal_endpoint_group_media_wire,
+    ENDPOINT_STATE_NONCE_LEN, EndpointStateWrappingKey, GroupMediaEpochSecret, SealedEndpointState,
+    SigningKeyMaterial, VerifyingKeyBytes, open_endpoint_group_media_wire, open_endpoint_state,
+    seal_endpoint_group_media_wire, seal_endpoint_state,
 };
 use ucr_group_mls::{
-    MlsGroupState, create_device_key_package, export_group_media_secret, join_from_welcome,
-    process_commit,
+    BrowserMlsProvider, MlsGroupState, browser_memory_provider, create_device_key_package,
+    current_crypto_state, export_browser_memory_snapshot, export_group_media_secret,
+    import_browser_memory_snapshot, join_from_welcome, load_group, own_device_id, process_commit,
 };
 use ucr_model::{
     CallId, CryptoSuite, DeviceId, GroupCryptoState, GroupId, GroupMediaE2eeContext,
@@ -19,6 +20,9 @@ use ucr_model::{
 use ucr_protocol::{GROUP_MLS_CAPABILITY, SFU_FORWARD_WIRE_VERSION};
 
 const ENDPOINT_WASM_CONTRACT_VERSION: &str = "ucr.endpoint-wasm.v1";
+const ENDPOINT_SNAPSHOT_AAD_DOMAIN: &[u8] = b"UCR-ENDPOINT-MLS-SNAPSHOT-AAD-V1\0";
+const ENDPOINT_SNAPSHOT_PLAINTEXT_MAGIC: &[u8] = b"UCR-ENDPOINT-MLS-SNAPSHOT-V1\0";
+const ENDPOINT_SNAPSHOT_SEALED_MAGIC: &[u8] = b"UCR-ENDPOINT-MLS-SEALED-V1\0";
 
 #[wasm_bindgen]
 pub fn endpoint_wasm_contract_version() -> String {
@@ -32,7 +36,7 @@ pub fn endpoint_wasm_contract_version() -> String {
 /// No MLS exporter secret crosses the public UCR/server boundary.
 #[wasm_bindgen]
 pub struct EndpointMlsState {
-    provider: OpenMlsRustCrypto,
+    provider: BrowserMlsProvider,
     scope: TenantScope,
     group_id: GroupId,
     device_id: DeviceId,
@@ -53,7 +57,7 @@ impl EndpointMlsState {
         let scope = tenant_scope(tenant_id, namespace_id)?;
         let group_id = GroupId::from_opaque(opaque(group_id, "group_id")?);
         let device_id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
-        let provider = OpenMlsRustCrypto::default();
+        let provider = browser_memory_provider();
         let key_package = create_device_key_package(&provider, &scope, &device_id)
             .map_err(debug_error)?
             .bytes;
@@ -72,6 +76,74 @@ impl EndpointMlsState {
     /// Public RFC 9420 KeyPackage to submit through the canonical UCR admission flow.
     pub fn key_package(&self) -> Vec<u8> {
         self.key_package.clone()
+    }
+
+    /// Encrypts the complete endpoint-local OpenMLS state for durable browser persistence.
+    pub fn seal_snapshot(&self, wrapping_key: &[u8]) -> Result<Vec<u8>, JsValue> {
+        let state = self
+            .state
+            .as_ref()
+            .ok_or_else(|| js_error("mls_state: group not joined"))?;
+        let wrapping_key = EndpointStateWrappingKey::import(fixed_32(
+            wrapping_key,
+            "wrapping_key",
+        )?)
+        .map_err(debug_error)?;
+        let storage = export_browser_memory_snapshot(&self.provider).map_err(debug_error)?;
+        let plaintext = encode_snapshot_plaintext(&self.key_package, &storage)?;
+        let aad = endpoint_snapshot_aad(&self.scope, &self.group_id, &self.device_id, state)?;
+        let sealed = seal_endpoint_state(&wrapping_key, &aad, &plaintext).map_err(debug_error)?;
+        encode_sealed_snapshot(&sealed)
+    }
+
+    /// Restores one encrypted endpoint snapshot and verifies it against current canonical state.
+    #[wasm_bindgen(js_name = restore)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore(
+        tenant_id: String,
+        namespace_id: Option<String>,
+        group_id: String,
+        device_id: String,
+        wrapping_key: &[u8],
+        snapshot: &[u8],
+        crypto_epoch: u64,
+        crypto_state_ref: String,
+    ) -> Result<EndpointMlsState, JsValue> {
+        let scope = tenant_scope(tenant_id, namespace_id)?;
+        let group_id = GroupId::from_opaque(opaque(group_id, "group_id")?);
+        let device_id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
+        let expected = group_crypto_state(crypto_epoch, crypto_state_ref)?;
+        let wrapping_key = EndpointStateWrappingKey::import(fixed_32(
+            wrapping_key,
+            "wrapping_key",
+        )?)
+        .map_err(debug_error)?;
+        let sealed = decode_sealed_snapshot(snapshot)?;
+        let aad = endpoint_snapshot_aad(&scope, &group_id, &device_id, &expected)?;
+        let plaintext = open_endpoint_state(&wrapping_key, &aad, &sealed).map_err(debug_error)?;
+        let (key_package, storage_snapshot) = decode_snapshot_plaintext(plaintext.as_slice())?;
+        let provider = import_browser_memory_snapshot(storage_snapshot).map_err(debug_error)?;
+        let group = load_group(&provider, &scope, &group_id)
+            .map_err(debug_error)?
+            .ok_or_else(|| js_error("mls_state: persisted group missing"))?;
+        let actual = current_crypto_state(&scope, &group_id, &group).map_err(debug_error)?;
+        if actual != expected {
+            return Err(js_error("mls_state: persisted canonical state mismatch"));
+        }
+        let own_device = own_device_id(&group, &scope).map_err(debug_error)?;
+        if own_device != device_id {
+            return Err(js_error("mls_state: persisted device mismatch"));
+        }
+
+        Ok(Self {
+            provider,
+            scope,
+            group_id,
+            device_id,
+            key_package: key_package.to_vec(),
+            group: Some(group),
+            state: Some(expected),
+        })
     }
 
     /// Join an already-authorized group from a Welcome message.
@@ -308,6 +380,118 @@ impl EndpointGroupMediaBridge {
     pub fn local_verifying_key(&self) -> Vec<u8> {
         self.signer.verifying_key().0.to_vec()
     }
+}
+
+
+fn endpoint_snapshot_aad(
+    scope: &TenantScope,
+    group_id: &GroupId,
+    device_id: &DeviceId,
+    state: &GroupCryptoState,
+) -> Result<Vec<u8>, JsValue> {
+    let mut aad = Vec::new();
+    aad.extend_from_slice(ENDPOINT_SNAPSHOT_AAD_DOMAIN);
+    push_snapshot_bytes(&mut aad, scope.tenant_id.as_opaque().as_wire_bytes())?;
+    match &scope.namespace_id {
+        Some(namespace) => {
+            aad.push(1);
+            push_snapshot_bytes(&mut aad, namespace.as_opaque().as_wire_bytes())?;
+        }
+        None => aad.push(0),
+    }
+    push_snapshot_bytes(&mut aad, group_id.as_opaque().as_wire_bytes())?;
+    push_snapshot_bytes(&mut aad, device_id.as_opaque().as_wire_bytes())?;
+    aad.extend_from_slice(&state.epoch.to_be_bytes());
+    let state_ref = state
+        .state_ref
+        .as_ref()
+        .ok_or_else(|| js_error("mls_state: missing crypto state reference"))?;
+    push_snapshot_bytes(&mut aad, state_ref.as_wire_bytes())?;
+    Ok(aad)
+}
+
+fn encode_snapshot_plaintext(key_package: &[u8], storage: &[u8]) -> Result<Vec<u8>, JsValue> {
+    if key_package.is_empty() || storage.is_empty() {
+        return Err(js_error("mls_state: empty persistence material"));
+    }
+    let mut output = Vec::new();
+    output.extend_from_slice(ENDPOINT_SNAPSHOT_PLAINTEXT_MAGIC);
+    push_snapshot_bytes(&mut output, key_package)?;
+    push_snapshot_bytes(&mut output, storage)?;
+    Ok(output)
+}
+
+fn decode_snapshot_plaintext(bytes: &[u8]) -> Result<(&[u8], &[u8]), JsValue> {
+    let mut cursor = bytes;
+    if !cursor.starts_with(ENDPOINT_SNAPSHOT_PLAINTEXT_MAGIC) {
+        return Err(js_error("mls_state: invalid snapshot plaintext"));
+    }
+    cursor = &cursor[ENDPOINT_SNAPSHOT_PLAINTEXT_MAGIC.len()..];
+    let key_package = take_snapshot_bytes(&mut cursor)?;
+    let storage = take_snapshot_bytes(&mut cursor)?;
+    if key_package.is_empty() || storage.is_empty() || !cursor.is_empty() {
+        return Err(js_error("mls_state: invalid snapshot plaintext"));
+    }
+    Ok((key_package, storage))
+}
+
+fn encode_sealed_snapshot(sealed: &SealedEndpointState) -> Result<Vec<u8>, JsValue> {
+    let mut output = Vec::new();
+    output.extend_from_slice(ENDPOINT_SNAPSHOT_SEALED_MAGIC);
+    output.extend_from_slice(&sealed.nonce);
+    push_snapshot_bytes(&mut output, &sealed.ciphertext)?;
+    Ok(output)
+}
+
+fn decode_sealed_snapshot(bytes: &[u8]) -> Result<SealedEndpointState, JsValue> {
+    let mut cursor = bytes;
+    if !cursor.starts_with(ENDPOINT_SNAPSHOT_SEALED_MAGIC) {
+        return Err(js_error("mls_state: invalid sealed snapshot"));
+    }
+    cursor = &cursor[ENDPOINT_SNAPSHOT_SEALED_MAGIC.len()..];
+    let nonce: [u8; ENDPOINT_STATE_NONCE_LEN] = cursor
+        .get(..ENDPOINT_STATE_NONCE_LEN)
+        .ok_or_else(|| js_error("mls_state: truncated sealed snapshot"))?
+        .try_into()
+        .map_err(|_| js_error("mls_state: invalid sealed snapshot nonce"))?;
+    cursor = cursor
+        .get(ENDPOINT_STATE_NONCE_LEN..)
+        .ok_or_else(|| js_error("mls_state: truncated sealed snapshot"))?;
+    let ciphertext = take_snapshot_bytes(&mut cursor)?;
+    if ciphertext.is_empty() || !cursor.is_empty() {
+        return Err(js_error("mls_state: invalid sealed snapshot"));
+    }
+    Ok(SealedEndpointState {
+        nonce,
+        ciphertext: ciphertext.to_vec(),
+    })
+}
+
+fn push_snapshot_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), JsValue> {
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| js_error("mls_state: snapshot component too large"))?;
+    output.extend_from_slice(&len.to_be_bytes());
+    output.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn take_snapshot_bytes<'a>(cursor: &mut &'a [u8]) -> Result<&'a [u8], JsValue> {
+    let len_bytes: [u8; 4] = cursor
+        .get(..4)
+        .ok_or_else(|| js_error("mls_state: truncated snapshot"))?
+        .try_into()
+        .map_err(|_| js_error("mls_state: invalid snapshot length"))?;
+    let len = u32::from_be_bytes(len_bytes) as usize;
+    *cursor = cursor
+        .get(4..)
+        .ok_or_else(|| js_error("mls_state: truncated snapshot"))?;
+    let value = cursor
+        .get(..len)
+        .ok_or_else(|| js_error("mls_state: truncated snapshot"))?;
+    *cursor = cursor
+        .get(len..)
+        .ok_or_else(|| js_error("mls_state: truncated snapshot"))?;
+    Ok(value)
 }
 
 fn tenant_scope(tenant_id: String, namespace_id: Option<String>) -> Result<TenantScope, JsValue> {
