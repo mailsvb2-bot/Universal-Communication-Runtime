@@ -67,7 +67,10 @@ The Endpoint WASM persistence bridge erases that buffer after each seal/restore 
 
 The real desktop Browser Compatibility matrix verifies that the KEK remains non-extractable, raw
 export is rejected, the ciphertext is not the plaintext wrapping key, and the same wrapping key can
-be recovered after a page reload in Chrome, Edge, Firefox and Safari.
+be recovered after a page reload in Chrome, Edge, Firefox and Safari. It also exercises the database
+upgrade path by creating a real version-1 endpoint-state database containing a legacy sealed snapshot,
+opening it through the version-2 client, and verifying that the legacy snapshot is preserved while the
+new wrapping-key vault object store is added.
 
 This is still not proof of full MLS restore interoperability: the production browser integration must
 instantiate the real WASM/OpenMLS adapter with this wrapping-key provider and then prove live
