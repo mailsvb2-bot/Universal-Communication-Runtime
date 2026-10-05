@@ -25,7 +25,8 @@ use ucr_api_grpc::{
     OperatorRuntimeHealthSource, OperatorSfuClusterControl, OperatorSfuClusterError,
     OperatorSfuNodeHeartbeat, PlacementAwareSfuNodeRouter, RealtimeSfuMediaRouter,
     RealtimeSfuPlacementLifecycle, RealtimeValidatedMediaObserver, RealtimeWebRtcDependencies,
-    SfuNodeMediaClientTlsConfig, SfuPlacementRoutingPolicy, UniversalConferenceRuntimeCapabilities,
+    RecordingMediaProviderResolver, SfuNodeMediaClientTlsConfig, SfuPlacementRoutingPolicy,
+    UniversalConferenceRuntimeCapabilities,
     attachment_service_server, call_service_server, conference_service_server,
     device_service_server, event_service_server, expire_due_recordings_once, group_service_server,
     integration_service_server, machine_auth_service_server, operator_runtime_service_server, pb,
@@ -772,6 +773,50 @@ struct RecordingProviderRegistrationState {
 }
 
 type RecordingProviderRegistry = Arc<Mutex<Option<RecordingProviderRegistrationState>>>;
+
+#[derive(Debug, Clone)]
+struct RuntimeRecordingProviderResolver {
+    store: Arc<SqliteLocalStore>,
+    registry: RecordingProviderRegistry,
+}
+
+impl RecordingMediaProviderResolver for RuntimeRecordingProviderResolver {
+    fn current_recording_provider(
+        &self,
+    ) -> Result<Arc<dyn RecordingMediaProvider>, CanonicalError> {
+        let (holder_id, provider) = {
+            let registry = self
+                .registry
+                .lock()
+                .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+            let registration = registry
+                .as_ref()
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+            (
+                registration.holder_id.clone(),
+                Arc::clone(&registration.provider),
+            )
+        };
+        let now_unix_ms = runtime_now_unix_ms()
+            .map_err(|_| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+        let lease = self
+            .store
+            .runtime_worker_lease(RECORDING_PROVIDER_WORKER_KIND)
+            .map_err(map_recording_capture_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable))?;
+        if lease.holder_id != holder_id || lease.lease_expires_unix_ms <= now_unix_ms {
+            return Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable,
+            ));
+        }
+        if provider.health() == RecordingProviderHealth::Unavailable {
+            return Err(CanonicalError::new(
+                CanonicalErrorCode::TemporarilyUnavailable,
+            ));
+        }
+        Ok(provider)
+    }
+}
 
 #[derive(Debug)]
 struct RecordingProviderRegistration {
@@ -2376,6 +2421,11 @@ impl ProductionRuntime {
             join_issuer,
         } = self.prepare_realtime_runtime(config, resolved_operator_endpoint)?;
 
+        let recording_provider_resolver: Arc<dyn RecordingMediaProviderResolver> =
+            Arc::new(RuntimeRecordingProviderResolver {
+                store: Arc::clone(&store),
+                registry: Arc::clone(&self.recording_provider),
+            });
         let services = RealtimeServerServices {
             clock,
             event_clock,
@@ -2385,6 +2435,7 @@ impl ProductionRuntime {
             runtime_capabilities,
             join_issuer,
             machine_bearer,
+            recording_provider_resolver,
             realtime_service,
         };
         let public_server = serve_realtime_services(services, incoming);
@@ -2654,6 +2705,7 @@ struct RealtimeServerServices {
     runtime_capabilities: UniversalConferenceRuntimeCapabilities,
     join_issuer: Arc<JoinTokenIssuer>,
     machine_bearer: Option<MachineBearerRuntimeConfig>,
+    recording_provider_resolver: Arc<dyn RecordingMediaProviderResolver>,
     realtime_service:
         GrpcRealtimeService<SystemServiceQuotaClock, SqliteLocalStore, SqliteLocalStore>,
 }
@@ -2671,6 +2723,7 @@ async fn serve_realtime_services(
         runtime_capabilities,
         join_issuer,
         machine_bearer,
+        recording_provider_resolver,
         realtime_service,
     } = services;
     let mut universal_service =
@@ -2688,7 +2741,8 @@ async fn serve_realtime_services(
         Arc::clone(&store),
         Arc::clone(&join_issuer),
         runtime_capabilities.recording,
-    );
+    )
+    .with_recording_provider_resolver(recording_provider_resolver);
     let attachment_service =
         configured_attachment_service(&clock, &authorization, &store, machine_bearer.as_ref());
     (universal_service, recording_service) =
