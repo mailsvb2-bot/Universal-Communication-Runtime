@@ -10,12 +10,18 @@ export interface UcrEndpointE2eeStartInput extends UcrEndpointMediaSources {
   readonly sendEnvelope: (wireEnvelope: Uint8Array) => void;
 }
 
+export interface UcrEndpointE2eePersistenceV1 {
+  restoreSealedState(snapshot: Uint8Array): boolean | void | Promise<boolean | void>;
+  sealState(): Uint8Array | null | Promise<Uint8Array | null>;
+}
+
 export interface UcrEndpointE2eeAdapterV1 {
   readonly contractVersion: typeof UCR_ENDPOINT_E2EE_CONTRACT_VERSION;
   start(input: UcrEndpointE2eeStartInput): void | Promise<void>;
   onEnvelope(wireEnvelope: Uint8Array): void | Promise<void>;
   stop(): void | Promise<void>;
   updateSources?(sources: UcrEndpointMediaSources): void | Promise<void>;
+  readonly persistence?: UcrEndpointE2eePersistenceV1;
 }
 
 export interface LegacyUcrEndpointE2eeAdapter {
@@ -54,6 +60,17 @@ export function resolveUcrEndpointE2eeAdapter(
   if (version === UCR_ENDPOINT_E2EE_CONTRACT_VERSION) {
     if (typeof value.stop !== "function") {
       throw new Error("ucr.endpoint-e2ee.v1 requires a stop hook");
+    }
+    if (value.persistence !== undefined) {
+      if (
+        !isObject(value.persistence) ||
+        typeof value.persistence.restoreSealedState !== "function" ||
+        typeof value.persistence.sealState !== "function"
+      ) {
+        throw new Error(
+          "ucr.endpoint-e2ee.v1 persistence requires restoreSealedState and sealState hooks",
+        );
+      }
     }
     return {
       adapter: value as unknown as UcrEndpointE2eeAdapterV1,
