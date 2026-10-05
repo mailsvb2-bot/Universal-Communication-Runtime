@@ -152,6 +152,7 @@ pub enum RecordingProviderError {
 }
 
 pub const MAX_RECORDING_PROVIDER_EXPORT_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingProviderExport {
