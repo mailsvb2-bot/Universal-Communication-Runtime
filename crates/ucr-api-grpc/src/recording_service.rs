@@ -12,8 +12,8 @@ use ucr_core::{
     MAX_RECORDING_PROVIDER_EXPORT_BYTES, MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES,
     PrincipalIdentityBindingStore, RecordingConsentProviderStopRequest, RecordingMediaProvider,
     RecordingProviderError, RecordingProviderExport, RecordingProviderRequest, RecordingStore,
-    ServiceAuditStore,
-    ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore, generate_opaque_id,
+    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
+    generate_opaque_id,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet};
 use ucr_model::{
