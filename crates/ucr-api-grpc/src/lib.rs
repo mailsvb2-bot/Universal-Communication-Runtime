@@ -8,8 +8,9 @@ use ucr_core::{
     CommandAcceptanceStore, CommunicationIntentStore, ConversationStore, DeviceLifecycleStore,
     EventApiIngress, EventAppendStatus, EventCursorRejection, EventDeliveryClock,
     EventSubscriptionStore, ExternalIdentityBindingLookup, ExternalIdentityBindingStore,
-    GroupMessageStore, IdentityStore, IntegrationIngress, MessageStore, RouteCandidate,
-    ServiceAuditStore, ServiceCredentialSecret, ServiceCredentialStore,
+    GroupMessageStore, IdentityStore, IntegrationIngress, MAX_RECORDING_PROVIDER_EXPORT_BYTES,
+    MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES, MessageStore, RouteCandidate, ServiceAuditStore,
+    ServiceCredentialSecret, ServiceCredentialStore,
     ServicePrincipalRequestGate, ServiceQuotaClock, ServiceQuotaStore, StoreForwardStore,
     SyncStore, SyncTransition, TransportFailureDisposition, TransportProvider,
 };
@@ -322,11 +323,21 @@ const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= INTEGRATION_MESSAGE_REQU
 const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= INTEGRATION_INTENT_REQUEST_WIRE_MAX_BYTES);
 const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= EVENT_PUBLISH_REQUEST_WIRE_MAX_BYTES);
 
+const RECORDING_EXPORT_ARTIFACT_WIRE_MAX_BYTES: usize =
+    2 * (PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES)
+        + MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES
+        + MAX_RECORDING_PROVIDER_EXPORT_BYTES;
+const RECORDING_EXPORT_RESPONSE_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + RECORDING_EXPORT_ARTIFACT_WIRE_MAX_BYTES;
+
 /// Finite send budget for public responses. The Phase-14 Event poll batch is the largest
 /// response shape because aggregate semantic Event bytes are bounded independently of item count.
 pub const GRPC_MAX_ENCODING_MESSAGE_SIZE: usize = EVENT_POLL_RESPONSE_WIRE_MAX_BYTES;
 const _: () = assert!(GRPC_MAX_ENCODING_MESSAGE_SIZE >= MESSAGE_ENVELOPE_WIRE_MAX_BYTES);
 const _: () = assert!(GRPC_MAX_ENCODING_MESSAGE_SIZE >= COMMUNICATION_INTENT_WIRE_MAX_BYTES);
+const _: () = assert!(
+    GRPC_MAX_ENCODING_MESSAGE_SIZE >= RECORDING_EXPORT_RESPONSE_WIRE_MAX_BYTES
+);
 
 /// Thin Phase-13 gRPC adapter over the canonical Integration ingress.
 pub struct GrpcIntegrationService<C, A, S> {
