@@ -90,3 +90,19 @@ signal. A custom domain is supplied by the deployment's trusted HTTPS edge/DNS/T
 the SDK does not rewrite hosts or bypass the origin policy.
 
 The high-level client also covers conference resolution, participant removal/listing, raised-hand listing and capability discovery, so integrations do not need to drop down to internal identifiers or a second transport surface.
+
+
+## Endpoint WASM persistence bridge
+
+`src/endpoint_wasm_persistence.ts` adapts the browser-owned `EndpointMlsState`
+persistence API to the optional `ucr.endpoint-e2ee.v1` persistence hooks.
+
+The bridge:
+- calls the real `EndpointMlsState.seal_snapshot()` / static `restore()` API shape;
+- binds restore to tenant, namespace, group, device and canonical crypto state;
+- obtains the 32-byte wrapping key from an injected provider only for the duration of each WASM call;
+- erases the mutable key buffer after seal/restore;
+- rejects empty, all-zero or incorrectly-sized key material.
+
+The wrapping-key provider is intentionally separate from this module. Browser secure-key
+storage and lifecycle are owned by the browser integration layer rather than the MLS/WASM core.

@@ -7,6 +7,7 @@ import {
   UCR_ENDPOINT_E2EE_CONTRACT_VERSION,
   type UcrEndpointE2eeAdapterV1,
 } from "./src/endpoint_e2ee.ts";
+import { createUcrEndpointWasmPersistence } from "./src/endpoint_wasm_persistence.ts";
 
 const v1 = {
   contractVersion: UCR_ENDPOINT_E2EE_CONTRACT_VERSION,
@@ -89,6 +90,88 @@ assert.throws(
     }),
   /already installed/,
 );
+
+class FakeMlsState {
+  readonly sealed = new Uint8Array([4, 5, 6]);
+
+  seal_snapshot(key: Uint8Array): Uint8Array {
+    assert.equal(key.length, 32);
+    assert.equal(key[0], 7);
+    return this.sealed.slice();
+  }
+}
+
+const restoredState = new FakeMlsState();
+let restoreArgs: unknown[] | null = null;
+const fakeStatic = {
+  restore(...args: unknown[]) {
+    restoreArgs = args;
+    return restoredState;
+  },
+};
+const holder = { current: new FakeMlsState() };
+let issuedKey: Uint8Array | null = null;
+const keyProvider = {
+  getWrappingKey() {
+    issuedKey = new Uint8Array(32);
+    issuedKey.fill(7);
+    return issuedKey;
+  },
+};
+const persistence = createUcrEndpointWasmPersistence(
+  holder,
+  fakeStatic,
+  {
+    tenantId: "tenant-1",
+    namespaceId: "namespace-1",
+    groupId: "group-1",
+    deviceId: "device-1",
+  },
+  () => ({ cryptoEpoch: 12n, cryptoStateRef: "state-12" }),
+  keyProvider,
+);
+
+const sealed = await persistence.sealState();
+assert.deepEqual([...sealed], [4, 5, 6]);
+assert.ok(issuedKey);
+assert.ok(issuedKey.every((value) => value === 0));
+
+const restored = await persistence.restoreSealedState(new Uint8Array([8, 9, 10]));
+assert.equal(restored, true);
+assert.equal(holder.current, restoredState);
+assert.ok(restoreArgs);
+assert.equal(restoreArgs[0], "tenant-1");
+assert.equal(restoreArgs[1], "namespace-1");
+assert.equal(restoreArgs[2], "group-1");
+assert.equal(restoreArgs[3], "device-1");
+assert.deepEqual([...restoreArgs[5] as Uint8Array], [8, 9, 10]);
+assert.equal(restoreArgs[6], 12n);
+assert.equal(restoreArgs[7], "state-12");
+assert.ok(issuedKey);
+assert.ok(issuedKey.every((value) => value === 0));
+
+const rejecting = createUcrEndpointWasmPersistence(
+  holder,
+  { restore() { throw new Error("invalid snapshot"); } },
+  { tenantId: "tenant-1", groupId: "group-1", deviceId: "device-1" },
+  () => ({ cryptoEpoch: 13, cryptoStateRef: "state-13" }),
+  keyProvider,
+);
+assert.equal(
+  await rejecting.restoreSealedState(new Uint8Array([1])),
+  false,
+);
+assert.ok(issuedKey);
+assert.ok(issuedKey.every((value) => value === 0));
+
+const zeroKeyPersistence = createUcrEndpointWasmPersistence(
+  holder,
+  fakeStatic,
+  { tenantId: "tenant-1", groupId: "group-1", deviceId: "device-1" },
+  () => ({ cryptoEpoch: 1, cryptoStateRef: "state-1" }),
+  { getWrappingKey: () => new Uint8Array(32) },
+);
+await assert.rejects(() => zeroKeyPersistence.sealState(), /must not be all-zero/);
 
 const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
 assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
