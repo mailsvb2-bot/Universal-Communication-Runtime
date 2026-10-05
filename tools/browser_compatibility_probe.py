@@ -296,9 +296,11 @@ Promise.resolve()
     const databases = typeof indexedDB.databases === "function"
       ? await indexedDB.databases()
       : [];
+    const isBytes = ArrayBuffer.isView(value) &&
+      Object.prototype.toString.call(value) === "[object Uint8Array]";
     done({
-      found: value instanceof Uint8Array,
-      length: value instanceof Uint8Array ? value.length : null,
+      found: isBytes,
+      length: isBytes ? value.length : null,
       databases: databases.map(item => ({name: item.name || null, version: item.version || null})),
       origin: location.origin,
       href: location.href
@@ -321,7 +323,9 @@ const expected = arguments[1];
 Promise.resolve()
   .then(() => window.ucrEndpointStateStore.load(key))
   .then(value => {
-    const bytes = value instanceof Uint8Array ? value : null;
+    const isBytes = ArrayBuffer.isView(value) &&
+      Object.prototype.toString.call(value) === "[object Uint8Array]";
+    const bytes = isBytes ? value : null;
     const same = !!bytes &&
       bytes.length === expected.length &&
       expected.every((byte, index) => bytes[index] === byte);
