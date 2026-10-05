@@ -9,8 +9,10 @@ use tonic::{Request, Response, Status};
 use ucr_core::{
     AuthorizationEvaluator, CallStore, CommandAcceptanceStore, ConferenceJoinGrantStore,
     DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventJournalStore,
+    MAX_RECORDING_PROVIDER_EXPORT_BYTES, MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES,
     PrincipalIdentityBindingStore, RecordingConsentProviderStopRequest, RecordingMediaProvider,
-    RecordingProviderError, RecordingProviderRequest, RecordingStore, ServiceAuditStore,
+    RecordingProviderError, RecordingProviderExport, RecordingProviderRequest, RecordingStore,
+    ServiceAuditStore,
     ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore, generate_opaque_id,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet};
@@ -309,7 +311,8 @@ where
                         .current_recording_provider()?;
                     let artifact = provider
                         .export_encrypted_recording(&scope, &recording_id)
-                        .map_err(map_provider_error)?;
+                        .map_err(map_provider_error)
+                        .and_then(validate_provider_export)?;
                     Ok(pb::RecordingExportArtifact {
                         media_type: artifact.media_type,
                         payload: artifact.bytes,
@@ -1212,6 +1215,21 @@ fn invalid_argument() -> CanonicalError {
     CanonicalError::new(CanonicalErrorCode::InvalidArgument)
 }
 
+fn validate_provider_export(
+    artifact: RecordingProviderExport,
+) -> Result<RecordingProviderExport, CanonicalError> {
+    if artifact.bytes.len() > MAX_RECORDING_PROVIDER_EXPORT_BYTES {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    if artifact.media_type.is_empty()
+        || artifact.media_type.len() > MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES
+        || artifact.media_type.chars().any(char::is_control)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+    }
+    Ok(artifact)
+}
+
 const fn map_provider_error(error: RecordingProviderError) -> CanonicalError {
     CanonicalError::new(match error {
         RecordingProviderError::Conflict => CanonicalErrorCode::Conflict,
@@ -1237,6 +1255,58 @@ const fn map_store_error(error: DurableStoreError) -> CanonicalError {
         | DurableStoreError::Internal => CanonicalErrorCode::Internal,
     };
     CanonicalError::new(code)
+}
+
+#[cfg(test)]
+mod provider_export_boundary_tests {
+    use ucr_core::{
+        MAX_RECORDING_PROVIDER_EXPORT_BYTES, MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES,
+        RecordingProviderExport,
+    };
+    use ucr_protocol::CanonicalErrorCode;
+
+    use super::validate_provider_export;
+
+    #[test]
+    fn provider_export_boundary_rejects_oversized_payload_and_media_type() {
+        let oversized_payload = RecordingProviderExport {
+            media_type: "application/octet-stream".to_owned(),
+            bytes: vec![0; MAX_RECORDING_PROVIDER_EXPORT_BYTES + 1],
+        };
+        assert_eq!(
+            validate_provider_export(oversized_payload)
+                .expect_err("oversized payload")
+                .code,
+            CanonicalErrorCode::ResourceExhausted
+        );
+
+        let oversized_media_type = RecordingProviderExport {
+            media_type: "x".repeat(MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES + 1),
+            bytes: Vec::new(),
+        };
+        assert_eq!(
+            validate_provider_export(oversized_media_type)
+                .expect_err("oversized media type")
+                .code,
+            CanonicalErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn provider_export_boundary_rejects_empty_or_control_media_type() {
+        for media_type in ["", "application/octet-stream\n"] {
+            let artifact = RecordingProviderExport {
+                media_type: media_type.to_owned(),
+                bytes: Vec::new(),
+            };
+            assert_eq!(
+                validate_provider_export(artifact)
+                    .expect_err("invalid media type")
+                    .code,
+                CanonicalErrorCode::Internal
+            );
+        }
+    }
 }
 
 #[cfg(test)]
