@@ -1283,9 +1283,8 @@ mod tests {
             .expect("capture");
         let directory = provider.recording_dir(&context.scope, &context.recording_id);
         let target = provider.frame_path(&context, &frame);
-        let link = directory.join(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.uar",
-        );
+        let link =
+            directory.join("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.uar");
         symlink(&target, &link).expect("symlink");
 
         assert_eq!(
