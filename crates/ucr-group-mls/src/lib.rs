@@ -9,7 +9,7 @@ use openmls::prelude::{
     tls_codec::{Deserialize as _, Serialize as _},
 };
 use openmls_basic_credential::SignatureKeyPair;
-use openmls_rust_crypto::RustCrypto;
+use openmls_rust_crypto::{MemoryStorage, RustCrypto};
 #[cfg(feature = "sqlite-storage")]
 use openmls_sqlite_storage::{Codec as OpenMlsSqliteCodec, SqliteStorageProvider};
 use openmls_traits::{
@@ -91,6 +91,116 @@ pub type SqliteMlsProvider<'a> = UcrOpenMlsProvider<SqliteMlsStorage<'a>>;
 /// Opaque RFC 9420 group state used by internal durable adapters without a direct `OpenMLS` dependency.
 pub type MlsGroupState = MlsGroup;
 
+/// Browser-safe provider backed by `OpenMLS`'s official in-memory storage.
+pub type BrowserMlsStorage = MemoryStorage;
+pub type BrowserMlsProvider = UcrOpenMlsProvider<BrowserMlsStorage>;
+
+const BROWSER_MLS_SNAPSHOT_MAGIC: &[u8] = b"UCR-MLS-MEMORY-SNAPSHOT-V1\0";
+const MAX_BROWSER_MLS_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_BROWSER_MLS_SNAPSHOT_ENTRIES: usize = 65_536;
+
+#[must_use]
+pub fn browser_memory_provider() -> BrowserMlsProvider {
+    UcrOpenMlsProvider::new(MemoryStorage::default())
+}
+
+/// Serializes the exact `OpenMLS` memory-storage key/value state into a bounded opaque snapshot.
+///
+/// The snapshot is intentionally not encrypted here. Callers must seal it before persistence.
+///
+/// # Errors
+/// Fails closed for poisoned storage, excessive entry count, oversized keys/values, or total size.
+pub fn export_browser_memory_snapshot(
+    provider: &BrowserMlsProvider,
+) -> Result<Vec<u8>, GroupMlsError> {
+    let values = provider
+        .storage()
+        .values
+        .read()
+        .map_err(|_| GroupMlsError::StorageSnapshot)?;
+    if values.len() > MAX_BROWSER_MLS_SNAPSHOT_ENTRIES {
+        return Err(GroupMlsError::SnapshotTooLarge);
+    }
+
+    let mut entries: Vec<_> = values.iter().collect();
+    entries.sort_by_key(|(left, _)| *left);
+
+    let mut output = Vec::new();
+    output.extend_from_slice(BROWSER_MLS_SNAPSHOT_MAGIC);
+    push_snapshot_u32(&mut output, entries.len())?;
+    for (key, value) in entries {
+        push_snapshot_u32(&mut output, key.len())?;
+        push_snapshot_u32(&mut output, value.len())?;
+        output.extend_from_slice(key);
+        output.extend_from_slice(value);
+        if output.len() > MAX_BROWSER_MLS_SNAPSHOT_BYTES {
+            return Err(GroupMlsError::SnapshotTooLarge);
+        }
+    }
+    Ok(output)
+}
+
+/// Restores one bounded `OpenMLS` memory-storage snapshot.
+///
+/// # Errors
+/// Malformed, duplicate-key, trailing-byte, or oversized snapshots are rejected fail closed.
+pub fn import_browser_memory_snapshot(
+    snapshot: &[u8],
+) -> Result<BrowserMlsProvider, GroupMlsError> {
+    if snapshot.len() > MAX_BROWSER_MLS_SNAPSHOT_BYTES {
+        return Err(GroupMlsError::SnapshotTooLarge);
+    }
+    let mut cursor = snapshot;
+    if !cursor.starts_with(BROWSER_MLS_SNAPSHOT_MAGIC) {
+        return Err(GroupMlsError::InvalidSnapshot);
+    }
+    cursor = &cursor[BROWSER_MLS_SNAPSHOT_MAGIC.len()..];
+
+    let count = take_snapshot_u32(&mut cursor)?;
+    if count > MAX_BROWSER_MLS_SNAPSHOT_ENTRIES {
+        return Err(GroupMlsError::SnapshotTooLarge);
+    }
+    let mut values = std::collections::HashMap::with_capacity(count);
+    for _ in 0..count {
+        let key_len = take_snapshot_u32(&mut cursor)?;
+        let value_len = take_snapshot_u32(&mut cursor)?;
+        let key = take_snapshot_bytes(&mut cursor, key_len)?.to_vec();
+        let value = take_snapshot_bytes(&mut cursor, value_len)?.to_vec();
+        if values.insert(key, value).is_some() {
+            return Err(GroupMlsError::InvalidSnapshot);
+        }
+    }
+    if !cursor.is_empty() {
+        return Err(GroupMlsError::InvalidSnapshot);
+    }
+
+    Ok(UcrOpenMlsProvider::new(MemoryStorage {
+        values: std::sync::RwLock::new(values),
+    }))
+}
+
+fn push_snapshot_u32(output: &mut Vec<u8>, value: usize) -> Result<(), GroupMlsError> {
+    let value = u32::try_from(value).map_err(|_| GroupMlsError::SnapshotTooLarge)?;
+    output.extend_from_slice(&value.to_be_bytes());
+    Ok(())
+}
+
+fn take_snapshot_u32(cursor: &mut &[u8]) -> Result<usize, GroupMlsError> {
+    let bytes: [u8; 4] = cursor
+        .get(..4)
+        .ok_or(GroupMlsError::InvalidSnapshot)?
+        .try_into()
+        .map_err(|_| GroupMlsError::InvalidSnapshot)?;
+    *cursor = cursor.get(4..).ok_or(GroupMlsError::InvalidSnapshot)?;
+    Ok(u32::from_be_bytes(bytes) as usize)
+}
+
+fn take_snapshot_bytes<'a>(cursor: &mut &'a [u8], len: usize) -> Result<&'a [u8], GroupMlsError> {
+    let value = cursor.get(..len).ok_or(GroupMlsError::InvalidSnapshot)?;
+    *cursor = cursor.get(len..).ok_or(GroupMlsError::InvalidSnapshot)?;
+    Ok(value)
+}
+
 /// Installs/updates the official `OpenMLS` `SQLite` schema in the same database used by UCR.
 ///
 /// `OpenMLS` owns only its `openmls_*` tables and its namespaced migration ledger. It does not
@@ -162,6 +272,9 @@ pub enum GroupMlsError {
     ExportSecret,
     InvalidStateReference,
     StorageSchema,
+    StorageSnapshot,
+    InvalidSnapshot,
+    SnapshotTooLarge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1228,6 +1341,41 @@ mod tests {
             old_charlie_key
                 .decrypt(&ciphertext, b"epoch-after")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn browser_memory_snapshot_round_trip_restores_exact_group_state() {
+        let scope = scope();
+        let group_id = GroupId::from_opaque(oid("browser-group"));
+        let device_id = device("browser-device");
+        let provider = browser_memory_provider();
+        let package = create_device_key_package(&provider, &scope, &device_id).unwrap();
+        let (_group, expected) = create_group(
+            &provider,
+            &scope,
+            &group_id,
+            &device_id,
+            &package.signer_public_key,
+        )
+        .unwrap();
+
+        let snapshot = export_browser_memory_snapshot(&provider).unwrap();
+        let restored = import_browser_memory_snapshot(&snapshot).unwrap();
+        let loaded = load_group(&restored, &scope, &group_id)
+            .unwrap()
+            .expect("restored group");
+        assert_eq!(
+            current_crypto_state(&scope, &group_id, &loaded).unwrap(),
+            expected
+        );
+        assert_eq!(own_device_id(&loaded, &scope).unwrap(), device_id);
+
+        let mut corrupted = snapshot;
+        corrupted.push(1);
+        assert_eq!(
+            import_browser_memory_snapshot(&corrupted).unwrap_err(),
+            GroupMlsError::InvalidSnapshot
         );
     }
 
