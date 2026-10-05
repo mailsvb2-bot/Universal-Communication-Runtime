@@ -45,6 +45,23 @@ recording consent subject.
 The binding is fail-closed when recording runtime capability is unavailable. Merely compiling or
 serving this lifecycle contract is not permission to advertise Production recording.
 
+Authorized export uses a separate least-privilege `ucr.conference.recording.read` permission and
+`recording:read` machine scope. `ExportRecording` binds its tamper-evident Service audit operation
+to `ucr.recording.export` with `operation_id = recording_id`, then resolves the currently active
+provider through the runtime registry. The provider registration must still own the durable
+recording-worker lease; stale or unavailable owners fail closed.
+
+Export is allowed only while the durable lifecycle is `STOPPED`. `EXPIRED` is not downloadable:
+retention expiry means the authorized storage lifetime has ended and controlled provider deletion
+has been scheduled, so residual bytes cannot be exposed during deletion lag. `ACTIVE`,
+`WAITING_FOR_CONSENT`, `READY`, and `DELETED` also fail closed.
+
+The public response revalidates provider output against the canonical export/media-type bounds
+before protobuf encoding, and a compile-time transport-budget assertion proves the maximum bounded
+artifact fits the configured public gRPC response ceiling. The exported artifact still contains
+endpoint-E2EE media ciphertext; this API does not receive MLS exporter keys or claim playable
+composition/transcoding.
+
 ## Pluggable provider boundary
 
 Concrete recording side effects use one pluggable `RecordingMediaProvider` boundary. The provider receives only bounded canonical context: scope, Recording ID, Call ID, lifecycle revision, operation and retention expiry. It does not receive a second Conference/Call/Recording model, join credentials, media crypto keys or arbitrary integration metadata through this control contract.
