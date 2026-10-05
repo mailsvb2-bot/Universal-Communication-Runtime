@@ -149,6 +149,23 @@ message RecordingStopResponse {
   }
 }
 
+message RecordingExportRequest {
+  TenantScope scope = 1;
+  OpaqueId recording_id = 2;
+}
+
+message RecordingExportArtifact {
+  string media_type = 1;
+  bytes payload = 2;
+}
+
+message RecordingExportResponse {
+  oneof result {
+    RecordingExportArtifact artifact = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 message RecordingDeleteRequest {
   TenantScope scope = 1;
   OpaqueId recording_id = 2;
@@ -169,6 +186,7 @@ message RecordingDeleteResponse {
 service RecordingService {
   rpc RequestRecording(RecordingRequest) returns (RecordingRequestResponse);
   rpc GetRecording(RecordingGetRequest) returns (RecordingGetResponse);
+  rpc ExportRecording(RecordingExportRequest) returns (RecordingExportResponse);
   rpc SetRecordingConsent(RecordingSetConsentRequest) returns (RecordingSetConsentResponse);
   rpc StartRecording(RecordingStartRequest) returns (RecordingStartResponse);
   rpc StopRecording(RecordingStopRequest) returns (RecordingStopResponse);
