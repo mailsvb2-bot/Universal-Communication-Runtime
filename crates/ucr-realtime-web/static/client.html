@@ -215,13 +215,13 @@ function readGrant(raw){
   const id=()=>{if(p+2>b.length)throw new Error("Malformed grant");const n=(b[p]<<8)|b[p+1];p+=2;if(p+n>b.length)throw new Error("Malformed grant");const v=new TextDecoder().decode(b.slice(p,p+n));p+=n;return v;};
   const version=u8();if(version!==1&&version!==2)throw new Error("Unsupported join token version");
   const tenant_id=id();const hasNs=u8();const namespace_id=hasNs===1?id():null;
-  const call_id=id();const participant_kind=u8();const participant_id=id();const hasDevice=u8();if(hasDevice===1)id();
+  const call_id=id();const participant_kind=u8();const participant_id=id();const hasDevice=u8();const device_id=hasDevice===1?id():null;
   const session_id=id();const remaining=b.length-p;
   if((version===1&&remaining!==16)||(version===2&&remaining!==25))throw new Error("Malformed grant");
   const view=new DataView(b.buffer,b.byteOffset+p,remaining);
   const issued=Number(view.getBigInt64(0,false));const expires=Number(view.getBigInt64(8,false));
   const not_before=version===2?Number(view.getBigInt64(16,false)):issued;
-  return {tenant_id,namespace_id,call_id,participant_kind,participant_id,session_id,issued,not_before,expires};
+  return {tenant_id,namespace_id,call_id,participant_kind,participant_id,device_id,session_id,issued,not_before,expires};
 }
 function body(){return {tenant_id:claims.tenant_id,namespace_id:claims.namespace_id,call_id:claims.call_id,session_id:claims.session_id};}
 async function api(path,payload,signal,keepalive=false){
@@ -305,6 +305,46 @@ window.ucrEndpointStateStore=Object.freeze({
   load:loadEndpointState,
   remove:removeEndpointState
 });
+function endpointPersistence(adapter){
+  if(!adapter||adapter.contractVersion!==E2EE_ENDPOINT_CONTRACT_VERSION||adapter.persistence===undefined)return null;
+  const persistence=adapter.persistence;
+  if(!persistence||typeof persistence!=="object"||typeof persistence.restoreSealedState!=="function"||typeof persistence.sealState!=="function"){
+    throw new Error("Endpoint E2EE persistence requires restoreSealedState and sealState hooks");
+  }
+  return persistence;
+}
+function endpointPersistenceStorageKey(){
+  if(!claims||!claims.device_id)return null;
+  const key="ucr-e2ee-state:"+JSON.stringify([
+    claims.tenant_id,
+    claims.namespace_id,
+    claims.call_id,
+    claims.participant_kind,
+    claims.participant_id,
+    claims.device_id
+  ]);
+  return key.length>0&&key.length<=ENDPOINT_STATE_KEY_MAX?key:null;
+}
+async function restoreEndpointPersistedState(adapter){
+  const persistence=endpointPersistence(adapter),key=endpointPersistenceStorageKey();
+  if(!persistence||!key)return "unavailable";
+  const snapshot=await loadEndpointState(key);
+  if(snapshot===null)return "empty";
+  const accepted=await persistence.restoreSealedState(snapshot);
+  if(accepted===false){
+    await removeEndpointState(key);
+    return "rejected";
+  }
+  return "restored";
+}
+async function persistEndpointState(adapter){
+  const persistence=endpointPersistence(adapter),key=endpointPersistenceStorageKey();
+  if(!persistence||!key)return false;
+  const snapshot=await persistence.sealState();
+  if(snapshot===null||snapshot===undefined)return false;
+  await saveEndpointState(key,endpointStateBytes(snapshot));
+  return true;
+}
 function e2eeAdapter(){
   const adapter=window.ucrE2eeEndpoint;
   return adapter&&typeof adapter==="object"?adapter:null;
@@ -314,6 +354,7 @@ function requireCompatibleE2eeAdapter(adapter){
   if(adapter.contractVersion!==undefined&&adapter.contractVersion!==E2EE_ENDPOINT_CONTRACT_VERSION){
     throw new Error("Unsupported endpoint E2EE adapter contract version");
   }
+  endpointPersistence(adapter);
   return adapter;
 }
 function closeE2eeTransport(){
@@ -477,9 +518,15 @@ async function activateE2eeAdapter(){
     ui.status.textContent="WebRTC transport connected. Encrypted endpoint media adapter is required before camera/microphone/screen media can be published.";
     return;
   }
+  const restoreState=await restoreEndpointPersistedState(adapter);
   await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
+  const persisted=await persistEndpointState(adapter);
   refreshScreenShareControl();
-  ui.status.textContent="Endpoint E2EE media transport active. Media keys remain on this endpoint.";
+  ui.status.textContent=restoreState==="restored"
+    ?"Endpoint E2EE media transport restored from sealed local state. Media keys remain on this endpoint."
+    :persisted
+      ?"Endpoint E2EE media transport active and sealed state persisted locally. Media keys remain on this endpoint."
+      :"Endpoint E2EE media transport active. Media keys remain on this endpoint.";
 }
 function attachE2eeDataChannel(channel){
   if(channel.label!==E2EE_CHANNEL_LABEL){channel.close();return;}
@@ -490,7 +537,9 @@ function attachE2eeDataChannel(channel){
       const wire=receiveE2eeChunk(event.data);if(!wire)return;
       packetCount++;ui.packets.textContent=String(packetCount);
       const adapter=requireCompatibleE2eeAdapter(e2eeAdapter());if(!adapter||typeof adapter.onEnvelope!=="function")return;
-      Promise.resolve(adapter.onEnvelope(wire)).catch(e=>{ui.status.textContent="Encrypted media open failed: "+e.message;});
+      Promise.resolve(adapter.onEnvelope(wire))
+        .then(()=>persistEndpointState(adapter))
+        .catch(e=>{ui.status.textContent="Encrypted media open/persist failed: "+e.message;});
     }catch(e){e2eePending=null;ui.status.textContent="Encrypted media transport rejected data: "+e.message;}
   };
   channel.onerror=()=>{ui.status.textContent="Encrypted media DataChannel failed.";};
