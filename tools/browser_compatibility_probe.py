@@ -285,7 +285,7 @@ Promise.resolve()
         if not isinstance(persistence_write, dict) or persistence_write.get("ok") is not True:
             raise RuntimeError(f"IndexedDB persistence write failed: {persistence_write!r}")
 
-        request_json("POST", f"{base}/url", {"url": page_url})
+        request_json("POST", f"{base}/refresh", {})
         time.sleep(0.5)
 
         persistence_read = execute_async(
