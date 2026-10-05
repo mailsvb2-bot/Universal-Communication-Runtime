@@ -33,6 +33,12 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
       - name: Endpoint crypto WASM compile gate
         run: cargo check --manifest-path tools/ucr-crypto-wasm-check/Cargo.toml --target wasm32-unknown-unknown
+      - name: Group MLS core WASM format
+        run: cargo fmt --manifest-path tools/ucr-group-mls-wasm-check/Cargo.toml -- --check
+      - name: Group MLS core WASM compile gate
+        run: cargo check --manifest-path tools/ucr-group-mls-wasm-check/Cargo.toml --target wasm32-unknown-unknown
+      - name: Group MLS core WASM clippy gate
+        run: cargo clippy --manifest-path tools/ucr-group-mls-wasm-check/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
       - name: Endpoint WASM bridge format
         run: cargo fmt --manifest-path crates/ucr-endpoint-wasm/Cargo.toml -- --check
       - name: Endpoint WASM bridge compile gate
