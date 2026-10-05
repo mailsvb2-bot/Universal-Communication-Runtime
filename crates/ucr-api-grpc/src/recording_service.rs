@@ -11,8 +11,7 @@ use ucr_core::{
     DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventJournalStore,
     PrincipalIdentityBindingStore, RecordingConsentProviderStopRequest, RecordingMediaProvider,
     RecordingProviderError, RecordingProviderRequest, RecordingStore, ServiceAuditStore,
-    ServiceCredentialStore, ServiceQuotaClock,
-    ServiceQuotaStore, generate_opaque_id,
+    ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore, generate_opaque_id,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet};
 use ucr_model::{
@@ -42,9 +41,8 @@ use super::{
 use ucr_protocol::acknowledgement_for;
 
 pub trait RecordingMediaProviderResolver: fmt::Debug + Send + Sync {
-    fn current_recording_provider(
-        &self,
-    ) -> Result<Arc<dyn RecordingMediaProvider>, CanonicalError>;
+    fn current_recording_provider(&self)
+    -> Result<Arc<dyn RecordingMediaProvider>, CanonicalError>;
 }
 
 pub struct GrpcRecordingService<C, A, S> {
@@ -296,8 +294,10 @@ where
                         .recording(&scope, &recording_id)
                         .map_err(map_store_error)?
                         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
-                    if !matches!(recording.state, RecordingState::Stopped | RecordingState::Expired)
-                    {
+                    if !matches!(
+                        recording.state,
+                        RecordingState::Stopped | RecordingState::Expired
+                    ) {
                         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
                     }
                     let provider = self
@@ -320,9 +320,7 @@ where
         };
         Ok(Response::new(pb::RecordingExportResponse {
             result: Some(match result {
-                Ok(artifact) => {
-                    pb::recording_export_response::Result::Artifact(artifact)
-                }
+                Ok(artifact) => pb::recording_export_response::Result::Artifact(artifact),
                 Err(error) => pb::recording_export_response::Result::Error(pb_error(error)),
             }),
         }))
