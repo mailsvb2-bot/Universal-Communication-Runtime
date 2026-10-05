@@ -364,13 +364,14 @@ mod tests {
 
     #[test]
     fn machine_auth_discovery_exposes_only_bounded_public_scopes() {
-        assert_eq!(SUPPORTED_MACHINE_SCOPES.len(), 6);
+        assert_eq!(SUPPORTED_MACHINE_SCOPES.len(), 7);
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"conference:create"));
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"conference:manage"));
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"conference:join:issue"));
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"conference:read"));
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"attendance:read"));
         assert!(SUPPORTED_MACHINE_SCOPES.contains(&"recording:manage"));
+        assert!(SUPPORTED_MACHINE_SCOPES.contains(&"recording:read"));
     }
 
     #[test]

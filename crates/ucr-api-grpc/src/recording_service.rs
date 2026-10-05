@@ -9,20 +9,23 @@ use tonic::{Request, Response, Status};
 use ucr_core::{
     AuthorizationEvaluator, CallStore, CommandAcceptanceStore, ConferenceJoinGrantStore,
     DeviceLifecycleStore, DurableRecordStatus, DurableStoreError, EventJournalStore,
-    PrincipalIdentityBindingStore, RecordingConsentProviderStopRequest, RecordingProviderRequest,
-    RecordingStore, ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock,
-    ServiceQuotaStore, generate_opaque_id,
+    MAX_RECORDING_PROVIDER_EXPORT_BYTES, MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES,
+    PrincipalIdentityBindingStore, RecordingConsentProviderStopRequest, RecordingMediaProvider,
+    RecordingProviderError, RecordingProviderExport, RecordingProviderRequest, RecordingStore,
+    ServiceAuditStore, ServiceCredentialStore, ServiceQuotaClock, ServiceQuotaStore,
+    generate_opaque_id,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet};
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CallParticipantState, CallSignallingState, CommandId,
     CorrelationContext, DeviceId, DeviceRef, EventEnvelope, EventId, IdentityId, OpaqueId,
     PrincipalId, PrincipalRef, ProtocolVersion, RecordingConsent, RecordingConsentState,
-    RecordingId, RecordingPolicy, RecordingSession, RecordingState, ScopedPrincipal, TenantScope,
+    RecordingId, RecordingPolicy, RecordingSession, RecordingState, ScopedPrincipal,
+    ServiceAuditOperationRef, TenantScope,
 };
 use ucr_protocol::{
-    CONFERENCE_RECORDING_MANAGE_PERMISSION, CanonicalError, CanonicalErrorCode,
-    MAX_RECORDING_CONSENTS,
+    CONFERENCE_RECORDING_MANAGE_PERMISSION, CONFERENCE_RECORDING_READ_PERMISSION, CanonicalError,
+    CanonicalErrorCode, MAX_RECORDING_CONSENTS, SERVICE_AUDIT_RECORDING_EXPORT_OPERATION_KIND,
 };
 use ucr_realtime::JoinTokenIssuer;
 
@@ -30,8 +33,8 @@ use super::{
     GRPC_MAX_DECODING_MESSAGE_SIZE, GRPC_MAX_ENCODING_MESSAGE_SIZE, decode_opaque,
     decode_principal_ref, decode_scope,
     machine_api_auth::{
-        MachineApiAuthentication, MachineBearerConfig, admit_machine_api,
-        decode_machine_api_authentication,
+        MachineApiAuthentication, MachineApiOperationAdmission, MachineBearerConfig,
+        admit_machine_api, admit_machine_api_for_operation, decode_machine_api_authentication,
     },
     mutation_idempotency::accept_mutation_receipt,
     pb, pb_acknowledgement, pb_error, pb_opaque, pb_principal_ref, pb_scope,
@@ -39,12 +42,22 @@ use super::{
 };
 use ucr_protocol::acknowledgement_for;
 
+pub trait RecordingMediaProviderResolver: fmt::Debug + Send + Sync {
+    /// Resolves the provider currently authorized to serve Recording media operations.
+    ///
+    /// # Errors
+    /// Returns a canonical fail-closed error when no healthy/current provider can be resolved.
+    fn current_recording_provider(&self)
+    -> Result<Arc<dyn RecordingMediaProvider>, CanonicalError>;
+}
+
 pub struct GrpcRecordingService<C, A, S> {
     clock: Arc<C>,
     authorization: Arc<A>,
     store: Arc<S>,
     join_issuer: Arc<JoinTokenIssuer>,
     machine_bearer: Option<Arc<MachineBearerConfig>>,
+    recording_provider_resolver: Option<Arc<dyn RecordingMediaProviderResolver>>,
     recording_available: bool,
 }
 
@@ -63,8 +76,18 @@ impl<C, A, S> GrpcRecordingService<C, A, S> {
             store,
             join_issuer,
             machine_bearer: None,
+            recording_provider_resolver: None,
             recording_available,
         }
+    }
+
+    #[must_use]
+    pub fn with_recording_provider_resolver(
+        mut self,
+        resolver: Arc<dyn RecordingMediaProviderResolver>,
+    ) -> Self {
+        self.recording_provider_resolver = Some(resolver);
+        self
     }
 
     #[must_use]
@@ -99,6 +122,7 @@ impl<C, A, S> Clone for GrpcRecordingService<C, A, S> {
             store: Arc::clone(&self.store),
             join_issuer: Arc::clone(&self.join_issuer),
             machine_bearer: self.machine_bearer.as_ref().map(Arc::clone),
+            recording_provider_resolver: self.recording_provider_resolver.as_ref().map(Arc::clone),
             recording_available: self.recording_available,
         }
     }
@@ -109,6 +133,10 @@ impl<C, A, S> fmt::Debug for GrpcRecordingService<C, A, S> {
         formatter
             .debug_struct("GrpcRecordingService")
             .field("recording_available", &self.recording_available)
+            .field(
+                "recording_provider_resolver_configured",
+                &self.recording_provider_resolver.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -238,6 +266,76 @@ where
                     pb::recording_get_response::Result::Recording(pb_recording(&recording))
                 }
                 Err(error) => pb::recording_get_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn export_recording(
+        &self,
+        request: Request<pb::RecordingExportRequest>,
+    ) -> Result<Response<pb::RecordingExportResponse>, Status> {
+        let authentication = decode_machine_api_authentication(request.metadata());
+        let body = request.into_inner();
+        let decoded = decode_recording_lookup(body.scope, body.recording_id);
+        let result = match (authentication, decoded) {
+            (Ok(authentication), Ok((scope, recording_id))) => {
+                self.require_available().and_then(|()| {
+                    let operation = ServiceAuditOperationRef {
+                        operation_kind: SERVICE_AUDIT_RECORDING_EXPORT_OPERATION_KIND.to_owned(),
+                        operation_id: recording_id.as_opaque().clone(),
+                    };
+                    let actor = admit_machine_api_for_operation(
+                        &*self.clock,
+                        &*self.authorization,
+                        &*self.store,
+                        self.machine_bearer.as_deref(),
+                        MachineApiOperationAdmission {
+                            scope: &scope,
+                            authentication,
+                            permission: CONFERENCE_RECORDING_READ_PERMISSION,
+                            operation: &operation,
+                        },
+                    )?;
+
+                    let recording = self
+                        .store
+                        .recording(&scope, &recording_id)
+                        .map_err(map_store_error)?
+                        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+                    if !recording_allows_export(recording.state) {
+                        return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+                    }
+                    let provider = self
+                        .recording_provider_resolver
+                        .as_ref()
+                        .ok_or_else(|| {
+                            CanonicalError::new(CanonicalErrorCode::TemporarilyUnavailable)
+                        })?
+                        .current_recording_provider()?;
+                    let artifact = provider
+                        .export_encrypted_recording(&scope, &recording_id)
+                        .map_err(map_provider_error)?;
+                    validate_provider_export(&artifact)?;
+                    let issued_at_unix_ms = self.now()?;
+                    let issued = recording_export_issued_event(
+                        &recording,
+                        &actor,
+                        &artifact,
+                        issued_at_unix_ms,
+                    )?;
+                    self.store.append_event(&issued).map_err(map_store_error)?;
+                    Ok(pb::RecordingExportArtifact {
+                        media_type: artifact.media_type,
+                        payload: artifact.bytes,
+                    })
+                })
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RecordingExportResponse {
+            result: Some(match result {
+                Ok(artifact) => pb::recording_export_response::Result::Artifact(artifact),
+                Err(error) => pb::recording_export_response::Result::Error(pb_error(error)),
             }),
         }))
     }
@@ -987,6 +1085,67 @@ fn recording_lifecycle_event(
     })
 }
 
+/// Builds the success-only canonical Event proving one export artifact was issued.
+///
+/// Authorization is audited separately by the Service Principal request gate. This Event is
+/// appended only after the provider export succeeds and before bytes are returned to the caller.
+///
+/// # Errors
+/// Rejects scope/state/bound violations or invalid generated identifiers.
+pub fn recording_export_issued_event(
+    recording: &RecordingSession,
+    issued_to: &ScopedPrincipal,
+    artifact: &RecordingProviderExport,
+    issued_at_unix_ms: i64,
+) -> Result<EventEnvelope, CanonicalError> {
+    if recording.state != RecordingState::Stopped
+        || recording.scope != issued_to.scope
+        || issued_at_unix_ms < 0
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument));
+    }
+    validate_provider_export(artifact)?;
+    let byte_len = u64::try_from(artifact.bytes.len())
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::ResourceExhausted))?;
+    let event_id = fresh_event_id()?;
+    let payload = pb::RecordingExportIssuedEvent {
+        scope: Some(pb_scope(&recording.scope)),
+        recording_id: Some(pb_opaque(recording.recording_id.as_opaque())),
+        call_id: Some(pb_opaque(recording.call_id.as_opaque())),
+        issued_to: Some(pb_principal_ref(&issued_to.principal)),
+        media_type: artifact.media_type.clone(),
+        byte_len,
+        issued_at_unix_ms,
+    }
+    .encode_to_vec();
+
+    Ok(EventEnvelope {
+        event_id: event_id.clone(),
+        scope: recording.scope.clone(),
+        event_type: "ucr.recording.export.issued".to_owned(),
+        payload,
+        actor: ActorRef {
+            actor_id: fresh_actor_id()?,
+            kind: ActorKind::System,
+            on_behalf_of: Some(issued_to.principal.principal_id.clone()),
+        },
+        source_device: DeviceRef {
+            device_id: fresh_device_id()?,
+            identity_id: fresh_identity_id()?,
+        },
+        wall_time_unix_ms: issued_at_unix_ms,
+        logical_order: recording.revision,
+        correlation: CorrelationContext {
+            correlation_id: event_id.as_opaque().clone(),
+            causation_id: None,
+            idempotency_key: None,
+        },
+        schema_version: ProtocolVersion::new(1, 0),
+        integrity_metadata: Vec::new(),
+        extensions: Vec::new(),
+    })
+}
+
 /// Builds the deterministic canonical Event published after provider Stop finalization.
 ///
 /// This Event is distinct from `RecordingState::Ready`: lifecycle Ready means consent gates are
@@ -1128,6 +1287,35 @@ fn invalid_argument() -> CanonicalError {
     CanonicalError::new(CanonicalErrorCode::InvalidArgument)
 }
 
+const fn recording_allows_export(state: RecordingState) -> bool {
+    matches!(state, RecordingState::Stopped)
+}
+
+fn validate_provider_export(artifact: &RecordingProviderExport) -> Result<(), CanonicalError> {
+    if artifact.bytes.len() > MAX_RECORDING_PROVIDER_EXPORT_BYTES {
+        return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
+    }
+    if artifact.media_type.is_empty()
+        || artifact.media_type.len() > MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES
+        || artifact.media_type.chars().any(char::is_control)
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::Internal));
+    }
+    Ok(())
+}
+
+const fn map_provider_error(error: RecordingProviderError) -> CanonicalError {
+    CanonicalError::new(match error {
+        RecordingProviderError::Conflict => CanonicalErrorCode::Conflict,
+        RecordingProviderError::CapacityExceeded => CanonicalErrorCode::ResourceExhausted,
+        RecordingProviderError::TemporarilyUnavailable => {
+            CanonicalErrorCode::TemporarilyUnavailable
+        }
+        RecordingProviderError::PolicyDenied => CanonicalErrorCode::PolicyDenied,
+        RecordingProviderError::Internal => CanonicalErrorCode::Internal,
+    })
+}
+
 const fn map_store_error(error: DurableStoreError) -> CanonicalError {
     let code = match error {
         DurableStoreError::InvalidRecord => CanonicalErrorCode::InvalidArgument,
@@ -1141,6 +1329,162 @@ const fn map_store_error(error: DurableStoreError) -> CanonicalError {
         | DurableStoreError::Internal => CanonicalErrorCode::Internal,
     };
     CanonicalError::new(code)
+}
+
+#[cfg(test)]
+mod recording_export_issued_event_tests {
+    use prost::Message as _;
+    use ucr_core::RecordingProviderExport;
+    use ucr_model::{
+        CallId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingId,
+        RecordingPolicy, RecordingSession, RecordingState, ScopedPrincipal, TenantId, TenantScope,
+    };
+
+    use super::{pb, recording_export_issued_event};
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("id")
+    }
+
+    #[test]
+    fn export_issued_event_contains_metadata_only_and_exact_recipient() {
+        let scope = TenantScope {
+            tenant_id: TenantId::from_opaque(oid("export-tenant")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("export-ns"))),
+        };
+        let issued_to = ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("export-service")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
+        let recording = RecordingSession {
+            scope: scope.clone(),
+            recording_id: RecordingId::from_opaque(oid("export-recording")),
+            call_id: CallId::from_opaque(oid("export-call")),
+            requested_by: issued_to.principal.clone(),
+            policy: RecordingPolicy {
+                require_all_participant_consent: false,
+                notify_all_participants: true,
+                retention_seconds: 3600,
+                policy_reference: None,
+            },
+            state: RecordingState::Stopped,
+            consents: Vec::new(),
+            requested_at_unix_ms: 10,
+            started_at_unix_ms: Some(20),
+            stopped_at_unix_ms: Some(30),
+            expires_at_unix_ms: 3_600_010,
+            revision: 3,
+        };
+        let artifact = RecordingProviderExport {
+            media_type: "application/vnd.ucr.recording-encrypted-archive.v1".to_owned(),
+            bytes: vec![7; 17],
+        };
+
+        let event =
+            recording_export_issued_event(&recording, &issued_to, &artifact, 40).expect("event");
+        assert_eq!(event.event_type, "ucr.recording.export.issued");
+        assert_eq!(
+            event.actor.on_behalf_of,
+            Some(issued_to.principal.principal_id)
+        );
+        assert!(
+            !event
+                .payload
+                .windows(artifact.bytes.len())
+                .any(|window| window == artifact.bytes)
+        );
+
+        let payload =
+            pb::RecordingExportIssuedEvent::decode(event.payload.as_slice()).expect("payload");
+        assert_eq!(payload.media_type, artifact.media_type);
+        assert_eq!(payload.byte_len, 17);
+        assert_eq!(payload.issued_at_unix_ms, 40);
+        assert_eq!(
+            payload
+                .issued_to
+                .expect("issued to")
+                .principal_id
+                .expect("principal id")
+                .value,
+            b"export-service"
+        );
+    }
+}
+
+#[cfg(test)]
+mod recording_export_state_tests {
+    use ucr_model::RecordingState;
+
+    use super::recording_allows_export;
+
+    #[test]
+    fn only_stopped_recordings_are_exportable() {
+        assert!(recording_allows_export(RecordingState::Stopped));
+        for state in [
+            RecordingState::WaitingForConsent,
+            RecordingState::Ready,
+            RecordingState::Active,
+            RecordingState::Expired,
+            RecordingState::Deleted,
+        ] {
+            assert!(!recording_allows_export(state));
+        }
+    }
+}
+
+#[cfg(test)]
+mod provider_export_boundary_tests {
+    use ucr_core::{
+        MAX_RECORDING_PROVIDER_EXPORT_BYTES, MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES,
+        RecordingProviderExport,
+    };
+    use ucr_protocol::CanonicalErrorCode;
+
+    use super::validate_provider_export;
+
+    #[test]
+    fn provider_export_boundary_rejects_oversized_payload_and_media_type() {
+        let oversized_payload = RecordingProviderExport {
+            media_type: "application/octet-stream".to_owned(),
+            bytes: vec![0; MAX_RECORDING_PROVIDER_EXPORT_BYTES + 1],
+        };
+        assert_eq!(
+            validate_provider_export(&oversized_payload)
+                .expect_err("oversized payload")
+                .code,
+            CanonicalErrorCode::ResourceExhausted
+        );
+
+        let oversized_media_type = RecordingProviderExport {
+            media_type: "x".repeat(MAX_RECORDING_PROVIDER_MEDIA_TYPE_BYTES + 1),
+            bytes: Vec::new(),
+        };
+        assert_eq!(
+            validate_provider_export(&oversized_media_type)
+                .expect_err("oversized media type")
+                .code,
+            CanonicalErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn provider_export_boundary_rejects_empty_or_control_media_type() {
+        for media_type in ["", "application/octet-stream\n"] {
+            let artifact = RecordingProviderExport {
+                media_type: media_type.to_owned(),
+                bytes: Vec::new(),
+            };
+            assert_eq!(
+                validate_provider_export(&artifact)
+                    .expect_err("invalid media type")
+                    .code,
+                CanonicalErrorCode::Internal
+            );
+        }
+    }
 }
 
 #[cfg(test)]

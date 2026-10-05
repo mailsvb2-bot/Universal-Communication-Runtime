@@ -57,6 +57,7 @@ pub const CONFERENCE_PARTICIPANT_MANAGE_PERMISSION: &str = "ucr.conference.parti
 pub const CONFERENCE_JOIN_ISSUE_PERMISSION: &str = "ucr.conference.join.issue";
 pub const CONFERENCE_ATTENDANCE_READ_PERMISSION: &str = "ucr.conference.attendance.read";
 pub const CONFERENCE_RECORDING_MANAGE_PERMISSION: &str = "ucr.conference.recording.manage";
+pub const CONFERENCE_RECORDING_READ_PERMISSION: &str = "ucr.conference.recording.read";
 pub const AUDIO_SEND_PERMISSION: &str = "ucr.call.audio.send";
 pub const AUDIO_RECEIVE_PERMISSION: &str = "ucr.call.audio.receive";
 pub const VIDEO_SEND_PERMISSION: &str = "ucr.call.video.send";
@@ -150,6 +151,7 @@ pub const RUNTIME_PERMISSION_IDS: &[&str] = &[
     CONFERENCE_JOIN_ISSUE_PERMISSION,
     CONFERENCE_ATTENDANCE_READ_PERMISSION,
     CONFERENCE_RECORDING_MANAGE_PERMISSION,
+    CONFERENCE_RECORDING_READ_PERMISSION,
     AUDIO_SEND_PERMISSION,
     AUDIO_RECEIVE_PERMISSION,
     VIDEO_SEND_PERMISSION,

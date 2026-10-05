@@ -25,8 +25,8 @@ use ucr_model::{
 use ucr_protocol::{
     CONFERENCE_ATTENDANCE_READ_PERMISSION, CONFERENCE_CREATE_PERMISSION,
     CONFERENCE_JOIN_ISSUE_PERMISSION, CONFERENCE_MANAGE_PERMISSION, CONFERENCE_READ_PERMISSION,
-    CONFERENCE_RECORDING_MANAGE_PERMISSION, CanonicalError, CanonicalErrorCode,
-    MACHINE_TOKEN_ISSUE_PERMISSION,
+    CONFERENCE_RECORDING_MANAGE_PERMISSION, CONFERENCE_RECORDING_READ_PERMISSION, CanonicalError,
+    CanonicalErrorCode, MACHINE_TOKEN_ISSUE_PERMISSION,
 };
 
 pub const MACHINE_SCOPE_CONFERENCE_CREATE: &str = "conference:create";
@@ -35,14 +35,16 @@ pub const MACHINE_SCOPE_CONFERENCE_JOIN_ISSUE: &str = "conference:join:issue";
 pub const MACHINE_SCOPE_CONFERENCE_READ: &str = "conference:read";
 pub const MACHINE_SCOPE_ATTENDANCE_READ: &str = "attendance:read";
 pub const MACHINE_SCOPE_RECORDING_MANAGE: &str = "recording:manage";
+pub const MACHINE_SCOPE_RECORDING_READ: &str = "recording:read";
 
-pub const SUPPORTED_MACHINE_SCOPES: [&str; 6] = [
+pub const SUPPORTED_MACHINE_SCOPES: [&str; 7] = [
     MACHINE_SCOPE_CONFERENCE_CREATE,
     MACHINE_SCOPE_CONFERENCE_MANAGE,
     MACHINE_SCOPE_CONFERENCE_JOIN_ISSUE,
     MACHINE_SCOPE_CONFERENCE_READ,
     MACHINE_SCOPE_ATTENDANCE_READ,
     MACHINE_SCOPE_RECORDING_MANAGE,
+    MACHINE_SCOPE_RECORDING_READ,
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -239,6 +241,7 @@ pub const fn machine_scope_for_permission(permission: &str) -> Option<&'static s
         b"ucr.conference.read" => Some(MACHINE_SCOPE_CONFERENCE_READ),
         b"ucr.conference.attendance.read" => Some(MACHINE_SCOPE_ATTENDANCE_READ),
         b"ucr.conference.recording.manage" => Some(MACHINE_SCOPE_RECORDING_MANAGE),
+        b"ucr.conference.recording.read" => Some(MACHINE_SCOPE_RECORDING_READ),
         _ => None,
     }
 }
@@ -251,6 +254,7 @@ const fn canonical_permission_for_scope(scope: &str) -> Option<&'static str> {
         b"conference:read" => Some(CONFERENCE_READ_PERMISSION),
         b"attendance:read" => Some(CONFERENCE_ATTENDANCE_READ_PERMISSION),
         b"recording:manage" => Some(CONFERENCE_RECORDING_MANAGE_PERMISSION),
+        b"recording:read" => Some(CONFERENCE_RECORDING_READ_PERMISSION),
         _ => None,
     }
 }
@@ -335,6 +339,10 @@ mod tests {
         assert_eq!(
             machine_scope_for_permission(CONFERENCE_RECORDING_MANAGE_PERMISSION),
             Some(MACHINE_SCOPE_RECORDING_MANAGE)
+        );
+        assert_eq!(
+            machine_scope_for_permission(CONFERENCE_RECORDING_READ_PERMISSION),
+            Some(MACHINE_SCOPE_RECORDING_READ)
         );
         assert_eq!(machine_scope_for_permission("ucr.message.send"), None);
     }
@@ -444,6 +452,10 @@ mod tests {
         assert_eq!(
             canonical_permission_for_scope(MACHINE_SCOPE_RECORDING_MANAGE),
             Some(CONFERENCE_RECORDING_MANAGE_PERMISSION)
+        );
+        assert_eq!(
+            canonical_permission_for_scope(MACHINE_SCOPE_RECORDING_READ),
+            Some(CONFERENCE_RECORDING_READ_PERMISSION)
         );
         assert_eq!(canonical_permission_for_scope("admin:all"), None);
     }

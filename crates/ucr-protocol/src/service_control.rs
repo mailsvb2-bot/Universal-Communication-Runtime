@@ -64,6 +64,7 @@ pub const SERVICE_AUDIT_RECOVERY_PLAN_REVOKE_OPERATION_KIND: &str = "ucr.recover
 pub const SERVICE_AUDIT_RECOVERY_PLAN_READ_OPERATION_KIND: &str = "ucr.recovery.plan.read";
 pub const SERVICE_AUDIT_RECOVERY_STAGE_OPERATION_KIND: &str = "ucr.recovery.stage";
 pub const SERVICE_AUDIT_RECOVERY_ACTIVATE_OPERATION_KIND: &str = "ucr.recovery.activate";
+pub const SERVICE_AUDIT_RECORDING_EXPORT_OPERATION_KIND: &str = "ucr.recording.export";
 pub const MAX_SERVICE_AUDIT_OPERATION_KIND_LEN: usize = 256;
 pub const MAX_SERVICE_AUDIT_READ_ITEMS: usize = 1024;
 pub const MAX_SERVICE_REQUEST_PERMISSION_LEN: usize = 256;

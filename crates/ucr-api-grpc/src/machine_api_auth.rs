@@ -7,7 +7,10 @@ use ucr_core::{
 };
 use ucr_crypto::{MAX_MACHINE_TOKEN_BYTES, MachineTokenPolicy, MachineTokenPublicKeySet};
 use ucr_machine_auth::MachineBearerRequestGate;
-use ucr_model::{AuthorizationRequest, ScopedPrincipal, ServiceCredentialId, TenantScope};
+use ucr_model::{
+    AuthorizationRequest, ScopedPrincipal, ServiceAuditOperationRef, ServiceCredentialId,
+    TenantScope,
+};
 use ucr_protocol::{CanonicalError, CanonicalErrorCode};
 
 use super::{
@@ -180,6 +183,86 @@ where
                 &config.policy,
             );
             let admission = gate.authenticate_permission_request(&encoded, permission, scope)?;
+            let actor = admission.subject().clone();
+            admission.authorize(&AuthorizationRequest {
+                subject: actor.clone(),
+                permission: permission.to_owned(),
+                resource_scope: scope.clone(),
+            })?;
+            actor
+        }
+    };
+    if actor.principal.kind != ucr_model::PrincipalKind::ServiceAccount {
+        return Err(CanonicalError::new(CanonicalErrorCode::PermissionDenied));
+    }
+    Ok(actor)
+}
+
+pub(crate) struct MachineApiOperationAdmission<'a> {
+    pub(crate) scope: &'a TenantScope,
+    pub(crate) authentication: MachineApiAuthentication,
+    pub(crate) permission: &'a str,
+    pub(crate) operation: &'a ServiceAuditOperationRef,
+}
+
+pub(crate) fn admit_machine_api_for_operation<C, A, S>(
+    clock: &C,
+    authorization: &A,
+    store: &S,
+    machine_bearer: Option<&MachineBearerConfig>,
+    request: MachineApiOperationAdmission<'_>,
+) -> Result<ScopedPrincipal, CanonicalError>
+where
+    C: ServiceQuotaClock,
+    A: AuthorizationEvaluator,
+    S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore,
+{
+    let MachineApiOperationAdmission {
+        scope,
+        authentication,
+        permission,
+        operation,
+    } = request;
+    let actor = match authentication {
+        MachineApiAuthentication::ServiceCredential {
+            credential_id,
+            secret,
+        } => {
+            let gate = ServicePrincipalRequestGate::new(clock, authorization, store);
+            let admission = gate.authenticate_request_for_operation(
+                scope,
+                &credential_id,
+                &secret,
+                permission,
+                scope,
+                operation,
+            )?;
+            let actor = admission.subject().clone();
+            admission.authorize(&AuthorizationRequest {
+                subject: actor.clone(),
+                permission: permission.to_owned(),
+                resource_scope: scope.clone(),
+            })?;
+            actor
+        }
+        MachineApiAuthentication::MachineBearer(encoded) => {
+            let config = machine_bearer.ok_or_else(unauthenticated)?;
+            let verification_keys = config.current_verification_keys()?;
+            let gate = MachineBearerRequestGate::new(
+                clock,
+                authorization,
+                store,
+                &verification_keys,
+                &config.policy,
+            );
+            let required_scope = ucr_machine_auth::machine_scope_for_permission(permission)
+                .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+            let admission = gate.authenticate_request_for_operation(
+                &encoded,
+                required_scope,
+                scope,
+                operation,
+            )?;
             let actor = admission.subject().clone();
             admission.authorize(&AuthorizationRequest {
                 subject: actor.clone(),
