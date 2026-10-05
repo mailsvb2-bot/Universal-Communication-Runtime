@@ -285,6 +285,30 @@ Promise.resolve()
         if not isinstance(persistence_write, dict) or persistence_write.get("ok") is not True:
             raise RuntimeError(f"IndexedDB persistence write failed: {persistence_write!r}")
 
+        persistence_before_refresh = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+const key = arguments[0];
+Promise.resolve()
+  .then(async () => {
+    const value = await window.ucrEndpointStateStore.load(key);
+    const databases = typeof indexedDB.databases === "function"
+      ? await indexedDB.databases()
+      : [];
+    done({
+      found: value instanceof Uint8Array,
+      length: value instanceof Uint8Array ? value.length : null,
+      databases: databases.map(item => ({name: item.name || null, version: item.version || null})),
+      origin: location.origin,
+      href: location.href
+    });
+  })
+  .catch(error => done({error: String(error), origin: location.origin, href: location.href}));
+""",
+            [persistence_key],
+        )
+
         request_json("POST", f"{base}/refresh", {})
         time.sleep(0.5)
 
@@ -315,6 +339,43 @@ Promise.resolve()
         persistence_reload_round_trip = (
             isinstance(persistence_read, dict)
             and persistence_read.get("ok") is True
+        )
+
+        persistence_after_refresh = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+Promise.resolve()
+  .then(async () => {
+    const databases = typeof indexedDB.databases === "function"
+      ? await indexedDB.databases()
+      : [];
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open("ucr-endpoint-state-v1", 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("open failed"));
+    });
+    let keys = [];
+    let stores = Array.from(db.objectStoreNames);
+    if (stores.includes("sealed-snapshots")) {
+      keys = await new Promise((resolve, reject) => {
+        const tx = db.transaction("sealed-snapshots", "readonly");
+        const request = tx.objectStore("sealed-snapshots").getAllKeys();
+        request.onsuccess = () => resolve(request.result.map(String));
+        request.onerror = () => reject(request.error || new Error("getAllKeys failed"));
+      });
+    }
+    db.close();
+    done({
+      databases: databases.map(item => ({name: item.name || null, version: item.version || null})),
+      stores,
+      keys,
+      origin: location.origin,
+      href: location.href
+    });
+  })
+  .catch(error => done({error: String(error), origin: location.origin, href: location.href}));
+"""
         )
 
         persistence_remove = execute_async(
@@ -376,7 +437,10 @@ Promise.resolve()
         if probe.get("endpointStateStoreContract") != "ucr.endpoint-state-store.v1":
             failures.append("endpointStateStoreContract")
         if not persistence_reload_round_trip:
-            failures.append(f"indexedDbReloadRoundTrip:{persistence_read!r}")
+            failures.append(
+                f"indexedDbReloadRoundTrip:read={persistence_read!r}:"
+                f"before={persistence_before_refresh!r}:after={persistence_after_refresh!r}"
+            )
         if not persistence_delete_verified:
             failures.append("indexedDbDelete")
         evidence = {
@@ -393,6 +457,8 @@ Promise.resolve()
                 "sealed_bytes_only": True,
                 "reload_round_trip": persistence_reload_round_trip,
                 "reload_probe": persistence_read,
+                "before_refresh": persistence_before_refresh,
+                "after_refresh": persistence_after_refresh,
                 "delete_verified": persistence_delete_verified,
             },
             "required_checks": required,
