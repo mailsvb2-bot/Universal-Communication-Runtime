@@ -296,7 +296,7 @@ where
                         .recording(&scope, &recording_id)
                         .map_err(map_store_error)?
                         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
-                    if recording.state != RecordingState::Stopped {
+                    if !recording_allows_export(recording.state) {
                         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
                     }
                     let provider = self
@@ -1212,6 +1212,10 @@ fn invalid_argument() -> CanonicalError {
     CanonicalError::new(CanonicalErrorCode::InvalidArgument)
 }
 
+const fn recording_allows_export(state: RecordingState) -> bool {
+    matches!(state, RecordingState::Stopped)
+}
+
 fn validate_provider_export(
     artifact: RecordingProviderExport,
 ) -> Result<RecordingProviderExport, CanonicalError> {
@@ -1252,6 +1256,27 @@ const fn map_store_error(error: DurableStoreError) -> CanonicalError {
         | DurableStoreError::Internal => CanonicalErrorCode::Internal,
     };
     CanonicalError::new(code)
+}
+
+#[cfg(test)]
+mod recording_export_state_tests {
+    use ucr_model::RecordingState;
+
+    use super::recording_allows_export;
+
+    #[test]
+    fn only_stopped_recordings_are_exportable() {
+        assert!(recording_allows_export(RecordingState::Stopped));
+        for state in [
+            RecordingState::WaitingForConsent,
+            RecordingState::Ready,
+            RecordingState::Active,
+            RecordingState::Expired,
+            RecordingState::Deleted,
+        ] {
+            assert!(!recording_allows_export(state));
+        }
+    }
 }
 
 #[cfg(test)]
