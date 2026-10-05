@@ -153,14 +153,9 @@ impl EndpointMlsState {
             .group
             .as_ref()
             .ok_or_else(|| js_error("mls_state: group not joined"))?;
-        let epoch_secret = export_group_media_secret(
-            &self.provider,
-            group,
-            &self.scope,
-            &self.group_id,
-            state,
-        )
-        .map_err(debug_error)?;
+        let epoch_secret =
+            export_group_media_secret(&self.provider, group, &self.scope, &self.group_id, state)
+                .map_err(debug_error)?;
         let signing_seed = fixed_32(signing_seed, "signing_seed")?;
         let source = PrincipalRef {
             principal_id: PrincipalId::from_opaque(opaque(
@@ -315,10 +310,7 @@ impl EndpointGroupMediaBridge {
     }
 }
 
-fn tenant_scope(
-    tenant_id: String,
-    namespace_id: Option<String>,
-) -> Result<TenantScope, JsValue> {
+fn tenant_scope(tenant_id: String, namespace_id: Option<String>) -> Result<TenantScope, JsValue> {
     Ok(TenantScope {
         tenant_id: TenantId::from_opaque(opaque(tenant_id, "tenant_id")?),
         namespace_id: match namespace_id {
