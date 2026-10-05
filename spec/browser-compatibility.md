@@ -52,10 +52,17 @@ bytes back from IndexedDB, deletes them, and verifies deletion in real Chrome, E
 This is executable evidence that durable browser storage survives a page reload without exposing raw
 MLS private material to the page-level persistence contract.
 
-This is still not proof of full MLS restore interoperability: the endpoint E2EE adapter must next bind
-its persistence key, wrapping-key lifecycle, seal/restore calls and current canonical MLS state to this
-vault, followed by live reload/interoperability runs. A public UCR server must not expose an MLS exporter
-secret as a shortcut for browser initialization.
+The versioned endpoint E2EE adapter contract now has optional persistence hooks. The reference browser
+derives a stable persistence key from tenant, namespace, call, participant and device identity, restores
+a sealed snapshot before endpoint start, persists a fresh sealed snapshot after start, and persists again
+after successful incoming encrypted-envelope processing. The real desktop Browser Compatibility matrix
+proves that a versioned adapter can seal state, reload the page, and receive the same sealed snapshot
+through restoreSealedState on Chrome, Edge, Firefox and Safari.
+
+This is still not proof of full MLS restore interoperability: the production WASM/OpenMLS adapter must
+bind its wrapping-key lifecycle and canonical current MLS state to these hooks, followed by live
+multi-endpoint reload/interoperability runs. A public UCR server must not expose an MLS exporter secret
+as a shortcut for browser initialization.
 
 ## Scope
 
