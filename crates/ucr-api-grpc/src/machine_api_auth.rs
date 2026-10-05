@@ -198,7 +198,6 @@ where
     Ok(actor)
 }
 
-
 pub(crate) fn admit_machine_api_for_operation<C, A, S>(
     clock: &C,
     authorization: &A,
