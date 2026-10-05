@@ -253,6 +253,10 @@ return {
     typeof window.ucrEndpointStateStore.load === "function" &&
     typeof window.ucrEndpointStateStore.remove === "function",
   endpointStateStoreContract: window.ucrEndpointStateStore?.contractVersion || null,
+  endpointPersistenceFunction: typeof endpointPersistence === "function",
+  endpointPersistenceKeyFunction: typeof endpointPersistenceStorageKey === "function",
+  restoreEndpointPersistedStateFunction: typeof restoreEndpointPersistedState === "function",
+  persistEndpointStateFunction: typeof persistEndpointState === "function",
   joinControl: !!document.getElementById("join"),
   microphoneControl: !!document.getElementById("mic-toggle"),
   cameraControl: !!document.getElementById("camera-toggle"),
@@ -400,6 +404,91 @@ Promise.resolve()
             and persistence_remove.get("ok") is True
         )
 
+        lifecycle_bytes = [9, 8, 7, 6, 5]
+        lifecycle_write = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+const expected = arguments[0];
+claims = {
+  tenant_id: "probe-tenant",
+  namespace_id: "probe-namespace",
+  call_id: "probe-call",
+  participant_kind: 1,
+  participant_id: "probe-participant",
+  device_id: "probe-device",
+  session_id: "probe-session"
+};
+const adapter = {
+  contractVersion: "ucr.endpoint-e2ee.v1",
+  start() {},
+  onEnvelope() {},
+  stop() {},
+  persistence: {
+    restoreSealedState() { return true; },
+    sealState() { return new Uint8Array(expected); }
+  }
+};
+Promise.resolve()
+  .then(() => persistEndpointState(adapter))
+  .then(saved => done({ok: saved === true, key: endpointPersistenceStorageKey()}))
+  .catch(error => done({ok: false, error: String(error)}));
+""",
+            [lifecycle_bytes],
+        )
+        if not isinstance(lifecycle_write, dict) or lifecycle_write.get("ok") is not True:
+            raise RuntimeError(f"endpoint persistence lifecycle write failed: {lifecycle_write!r}")
+
+        request_json("POST", f"{base}/refresh", {})
+        time.sleep(0.5)
+
+        lifecycle_restore = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+const expected = arguments[0];
+claims = {
+  tenant_id: "probe-tenant",
+  namespace_id: "probe-namespace",
+  call_id: "probe-call",
+  participant_kind: 1,
+  participant_id: "probe-participant",
+  device_id: "probe-device",
+  session_id: "probe-session"
+};
+let restored = null;
+const adapter = {
+  contractVersion: "ucr.endpoint-e2ee.v1",
+  start() {},
+  onEnvelope() {},
+  stop() {},
+  persistence: {
+    restoreSealedState(snapshot) {
+      restored = Array.from(snapshot);
+      return true;
+    },
+    sealState() { return null; }
+  }
+};
+Promise.resolve()
+  .then(() => restoreEndpointPersistedState(adapter))
+  .then(async state => {
+    const key = endpointPersistenceStorageKey();
+    const same = Array.isArray(restored) &&
+      restored.length === expected.length &&
+      expected.every((byte, index) => restored[index] === byte);
+    if (key) await window.ucrEndpointStateStore.remove(key);
+    done({ok: state === "restored" && same, state, restored, key});
+  })
+  .catch(error => done({ok: false, error: String(error)}));
+""",
+            [lifecycle_bytes],
+        )
+        lifecycle_restore_verified = (
+            isinstance(lifecycle_restore, dict)
+            and lifecycle_restore.get("ok") is True
+        )
+
         branding_failures = []
         if probe.get("brandName") != "UCR Browser Probe":
             branding_failures.append("brandName")
@@ -429,6 +518,10 @@ Promise.resolve()
             "secureContext",
             "indexedDb",
             "endpointStateStore",
+            "endpointPersistenceFunction",
+            "endpointPersistenceKeyFunction",
+            "restoreEndpointPersistedStateFunction",
+            "persistEndpointStateFunction",
             "joinControl",
             "microphoneControl",
             "cameraControl",
@@ -447,6 +540,8 @@ Promise.resolve()
             )
         if not persistence_delete_verified:
             failures.append("indexedDbDelete")
+        if not lifecycle_restore_verified:
+            failures.append(f"endpointPersistenceLifecycle:{lifecycle_restore!r}")
         evidence = {
             "schema": "ucr.browser-compatibility.v1",
             "browser_requested": args.browser,
@@ -464,6 +559,8 @@ Promise.resolve()
                 "before_refresh": persistence_before_refresh,
                 "after_refresh": persistence_after_refresh,
                 "delete_verified": persistence_delete_verified,
+                "adapter_lifecycle_restore": lifecycle_restore_verified,
+                "adapter_lifecycle_probe": lifecycle_restore,
             },
             "required_checks": required,
             "failures": failures,
