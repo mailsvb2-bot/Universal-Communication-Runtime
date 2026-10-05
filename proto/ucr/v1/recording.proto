@@ -78,6 +78,18 @@ message RecordingReadyEvent {
   bool recovered_after_upgrade = 6;
 }
 
+// Success-only audit fact emitted after an authorized provider export has been materialized and
+// before the artifact is returned to the caller. It contains metadata only, never recording bytes.
+message RecordingExportIssuedEvent {
+  TenantScope scope = 1;
+  OpaqueId recording_id = 2;
+  OpaqueId call_id = 3;
+  PrincipalRef issued_to = 4;
+  string media_type = 5;
+  uint64 byte_len = 6;
+  int64 issued_at_unix_ms = 7;
+}
+
 message RecordingRequest {
   TenantScope scope = 1;
   OpaqueId recording_id = 2;
