@@ -10,8 +10,7 @@ const ENDPOINT_STATE_AAD_MAX_LEN: usize = 64 * 1024;
 pub const ENDPOINT_STATE_KEY_LEN: usize = 32;
 pub const ENDPOINT_STATE_NONCE_LEN: usize = 24;
 const AEAD_TAG_LEN: usize = 16;
-pub const MAX_ENDPOINT_STATE_PLAINTEXT_LEN: usize =
-    DEFAULT_MAX_PAYLOAD_LEN as usize - AEAD_TAG_LEN;
+pub const MAX_ENDPOINT_STATE_PLAINTEXT_LEN: usize = DEFAULT_MAX_PAYLOAD_LEN as usize - AEAD_TAG_LEN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointStateError {
