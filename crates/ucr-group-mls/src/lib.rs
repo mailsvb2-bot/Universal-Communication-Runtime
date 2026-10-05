@@ -195,10 +195,7 @@ fn take_snapshot_u32(cursor: &mut &[u8]) -> Result<usize, GroupMlsError> {
     Ok(u32::from_be_bytes(bytes) as usize)
 }
 
-fn take_snapshot_bytes<'a>(
-    cursor: &mut &'a [u8],
-    len: usize,
-) -> Result<&'a [u8], GroupMlsError> {
+fn take_snapshot_bytes<'a>(cursor: &mut &'a [u8], len: usize) -> Result<&'a [u8], GroupMlsError> {
     let value = cursor.get(..len).ok_or(GroupMlsError::InvalidSnapshot)?;
     *cursor = cursor.get(len..).ok_or(GroupMlsError::InvalidSnapshot)?;
     Ok(value)
