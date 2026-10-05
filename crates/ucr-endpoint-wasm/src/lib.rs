@@ -84,11 +84,9 @@ impl EndpointMlsState {
             .state
             .as_ref()
             .ok_or_else(|| js_error("mls_state: group not joined"))?;
-        let wrapping_key = EndpointStateWrappingKey::import(fixed_32(
-            wrapping_key,
-            "wrapping_key",
-        )?)
-        .map_err(debug_error)?;
+        let wrapping_key =
+            EndpointStateWrappingKey::import(fixed_32(wrapping_key, "wrapping_key")?)
+                .map_err(debug_error)?;
         let storage = export_browser_memory_snapshot(&self.provider).map_err(debug_error)?;
         let plaintext = encode_snapshot_plaintext(&self.key_package, &storage)?;
         let aad = endpoint_snapshot_aad(&self.scope, &self.group_id, &self.device_id, state)?;
@@ -113,11 +111,9 @@ impl EndpointMlsState {
         let group_id = GroupId::from_opaque(opaque(group_id, "group_id")?);
         let device_id = DeviceId::from_opaque(opaque(device_id, "device_id")?);
         let expected = group_crypto_state(crypto_epoch, crypto_state_ref)?;
-        let wrapping_key = EndpointStateWrappingKey::import(fixed_32(
-            wrapping_key,
-            "wrapping_key",
-        )?)
-        .map_err(debug_error)?;
+        let wrapping_key =
+            EndpointStateWrappingKey::import(fixed_32(wrapping_key, "wrapping_key")?)
+                .map_err(debug_error)?;
         let sealed = decode_sealed_snapshot(snapshot)?;
         let aad = endpoint_snapshot_aad(&scope, &group_id, &device_id, &expected)?;
         let plaintext = open_endpoint_state(&wrapping_key, &aad, &sealed).map_err(debug_error)?;
@@ -381,7 +377,6 @@ impl EndpointGroupMediaBridge {
         self.signer.verifying_key().0.to_vec()
     }
 }
-
 
 fn endpoint_snapshot_aad(
     scope: &TenantScope,
