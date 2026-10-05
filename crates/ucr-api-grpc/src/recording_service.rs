@@ -308,8 +308,8 @@ where
                         .current_recording_provider()?;
                     let artifact = provider
                         .export_encrypted_recording(&scope, &recording_id)
-                        .map_err(map_provider_error)
-                        .and_then(validate_provider_export)?;
+                        .map_err(map_provider_error)?;
+                    validate_provider_export(&artifact)?;
                     let issued_at_unix_ms = self.now()?;
                     let issued = recording_export_issued_event(
                         &recording,
@@ -1107,7 +1107,7 @@ pub fn recording_export_issued_event(
     {
         return Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument));
     }
-    validate_provider_export(artifact.clone())?;
+    validate_provider_export(artifact)?;
     let byte_len = u64::try_from(artifact.bytes.len())
         .map_err(|_| CanonicalError::new(CanonicalErrorCode::ResourceExhausted))?;
     let event_id = fresh_event_id()?;
@@ -1285,9 +1285,7 @@ const fn recording_allows_export(state: RecordingState) -> bool {
     matches!(state, RecordingState::Stopped)
 }
 
-fn validate_provider_export(
-    artifact: RecordingProviderExport,
-) -> Result<RecordingProviderExport, CanonicalError> {
+fn validate_provider_export(artifact: &RecordingProviderExport) -> Result<(), CanonicalError> {
     if artifact.bytes.len() > MAX_RECORDING_PROVIDER_EXPORT_BYTES {
         return Err(CanonicalError::new(CanonicalErrorCode::ResourceExhausted));
     }
@@ -1297,7 +1295,7 @@ fn validate_provider_export(
     {
         return Err(CanonicalError::new(CanonicalErrorCode::Internal));
     }
-    Ok(artifact)
+    Ok(())
 }
 
 const fn map_provider_error(error: RecordingProviderError) -> CanonicalError {
@@ -1445,7 +1443,7 @@ mod provider_export_boundary_tests {
             bytes: vec![0; MAX_RECORDING_PROVIDER_EXPORT_BYTES + 1],
         };
         assert_eq!(
-            validate_provider_export(oversized_payload)
+            validate_provider_export(&oversized_payload)
                 .expect_err("oversized payload")
                 .code,
             CanonicalErrorCode::ResourceExhausted
@@ -1456,7 +1454,7 @@ mod provider_export_boundary_tests {
             bytes: Vec::new(),
         };
         assert_eq!(
-            validate_provider_export(oversized_media_type)
+            validate_provider_export(&oversized_media_type)
                 .expect_err("oversized media type")
                 .code,
             CanonicalErrorCode::Internal
@@ -1471,7 +1469,7 @@ mod provider_export_boundary_tests {
                 bytes: Vec::new(),
             };
             assert_eq!(
-                validate_provider_export(artifact)
+                validate_provider_export(&artifact)
                     .expect_err("invalid media type")
                     .code,
                 CanonicalErrorCode::Internal
