@@ -280,7 +280,7 @@ where
                         operation_kind: SERVICE_AUDIT_RECORDING_EXPORT_OPERATION_KIND.to_owned(),
                         operation_id: recording_id.as_opaque().clone(),
                     };
-                    admit_machine_api_for_operation(
+                    let actor = admit_machine_api_for_operation(
                         &*self.clock,
                         &*self.authorization,
                         &*self.store,
@@ -310,6 +310,14 @@ where
                         .export_encrypted_recording(&scope, &recording_id)
                         .map_err(map_provider_error)
                         .and_then(validate_provider_export)?;
+                    let issued_at_unix_ms = self.now()?;
+                    let issued = recording_export_issued_event(
+                        &recording,
+                        &actor,
+                        &artifact,
+                        issued_at_unix_ms,
+                    )?;
+                    self.store.append_event(&issued).map_err(map_store_error)?;
                     Ok(pb::RecordingExportArtifact {
                         media_type: artifact.media_type,
                         payload: artifact.bytes,
@@ -1080,6 +1088,67 @@ fn recording_lifecycle_event(
 ///
 /// # Errors
 /// Rejects mismatched lifecycle context or invalid identifiers.
+/// Builds the success-only canonical Event proving one export artifact was issued.
+///
+/// Authorization is audited separately by the Service Principal request gate. This Event is
+/// appended only after the provider export succeeds and before bytes are returned to the caller.
+///
+/// # Errors
+/// Rejects scope/state/bound violations or invalid generated identifiers.
+pub fn recording_export_issued_event(
+    recording: &RecordingSession,
+    issued_to: &ScopedPrincipal,
+    artifact: &RecordingProviderExport,
+    issued_at_unix_ms: i64,
+) -> Result<EventEnvelope, CanonicalError> {
+    if recording.state != RecordingState::Stopped
+        || recording.scope != issued_to.scope
+        || issued_at_unix_ms < 0
+    {
+        return Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument));
+    }
+    validate_provider_export(artifact.clone())?;
+    let byte_len = u64::try_from(artifact.bytes.len())
+        .map_err(|_| CanonicalError::new(CanonicalErrorCode::ResourceExhausted))?;
+    let event_id = fresh_event_id()?;
+    let payload = pb::RecordingExportIssuedEvent {
+        scope: Some(pb_scope(&recording.scope)),
+        recording_id: Some(pb_opaque(recording.recording_id.as_opaque())),
+        call_id: Some(pb_opaque(recording.call_id.as_opaque())),
+        issued_to: Some(pb_principal_ref(&issued_to.principal)),
+        media_type: artifact.media_type.clone(),
+        byte_len,
+        issued_at_unix_ms,
+    }
+    .encode_to_vec();
+
+    Ok(EventEnvelope {
+        event_id: event_id.clone(),
+        scope: recording.scope.clone(),
+        event_type: "ucr.recording.export.issued".to_owned(),
+        payload,
+        actor: ActorRef {
+            actor_id: fresh_actor_id()?,
+            kind: ActorKind::System,
+            on_behalf_of: Some(issued_to.principal.principal_id.clone()),
+        },
+        source_device: DeviceRef {
+            device_id: fresh_device_id()?,
+            identity_id: fresh_identity_id()?,
+        },
+        wall_time_unix_ms: issued_at_unix_ms,
+        logical_order: recording.revision,
+        correlation: CorrelationContext {
+            correlation_id: event_id.as_opaque().clone(),
+            causation_id: None,
+            idempotency_key: None,
+        },
+        schema_version: ProtocolVersion::new(1, 0),
+        integrity_metadata: Vec::new(),
+        extensions: Vec::new(),
+    })
+}
+
 pub fn recording_provider_ready_event(
     recording: &RecordingSession,
     request: &RecordingProviderRequest,
@@ -1256,6 +1325,86 @@ const fn map_store_error(error: DurableStoreError) -> CanonicalError {
         | DurableStoreError::Internal => CanonicalErrorCode::Internal,
     };
     CanonicalError::new(code)
+}
+
+#[cfg(test)]
+mod recording_export_issued_event_tests {
+    use prost::Message as _;
+    use ucr_core::RecordingProviderExport;
+    use ucr_model::{
+        CallId, NamespaceId, OpaqueId, PrincipalId, PrincipalKind, PrincipalRef, RecordingId,
+        RecordingPolicy, RecordingSession, RecordingState, ScopedPrincipal, TenantId, TenantScope,
+    };
+
+    use super::{pb, recording_export_issued_event};
+
+    fn oid(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("id")
+    }
+
+    #[test]
+    fn export_issued_event_contains_metadata_only_and_exact_recipient() {
+        let scope = TenantScope {
+            tenant_id: TenantId::from_opaque(oid("export-tenant")),
+            namespace_id: Some(NamespaceId::from_opaque(oid("export-ns"))),
+        };
+        let issued_to = ScopedPrincipal {
+            scope: scope.clone(),
+            principal: PrincipalRef {
+                principal_id: PrincipalId::from_opaque(oid("export-service")),
+                kind: PrincipalKind::ServiceAccount,
+            },
+        };
+        let recording = RecordingSession {
+            scope: scope.clone(),
+            recording_id: RecordingId::from_opaque(oid("export-recording")),
+            call_id: CallId::from_opaque(oid("export-call")),
+            requested_by: issued_to.principal.clone(),
+            policy: RecordingPolicy {
+                require_all_participant_consent: false,
+                notify_all_participants: true,
+                retention_seconds: 3600,
+                policy_reference: None,
+            },
+            state: RecordingState::Stopped,
+            consents: Vec::new(),
+            requested_at_unix_ms: 10,
+            started_at_unix_ms: Some(20),
+            stopped_at_unix_ms: Some(30),
+            expires_at_unix_ms: 3_600_010,
+            revision: 3,
+        };
+        let artifact = RecordingProviderExport {
+            media_type: "application/vnd.ucr.recording-encrypted-archive.v1".to_owned(),
+            bytes: vec![7; 17],
+        };
+
+        let event =
+            recording_export_issued_event(&recording, &issued_to, &artifact, 40).expect("event");
+        assert_eq!(event.event_type, "ucr.recording.export.issued");
+        assert_eq!(event.actor.on_behalf_of, Some(issued_to.principal.principal_id));
+        assert!(
+            !event
+                .payload
+                .windows(artifact.bytes.len())
+                .any(|window| window == artifact.bytes)
+        );
+
+        let payload =
+            pb::RecordingExportIssuedEvent::decode(event.payload.as_slice()).expect("payload");
+        assert_eq!(payload.media_type, artifact.media_type);
+        assert_eq!(payload.byte_len, 17);
+        assert_eq!(payload.issued_at_unix_ms, 40);
+        assert_eq!(
+            payload
+                .issued_to
+                .expect("issued to")
+                .principal_id
+                .expect("principal id")
+                .value,
+            "export-service"
+        );
+    }
 }
 
 #[cfg(test)]
