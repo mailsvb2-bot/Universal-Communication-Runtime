@@ -1403,7 +1403,7 @@ mod recording_export_issued_event_tests {
                 .principal_id
                 .expect("principal id")
                 .value,
-            "export-service"
+            b"export-service"
         );
     }
 }
