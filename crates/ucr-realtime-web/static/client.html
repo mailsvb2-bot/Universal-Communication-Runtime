@@ -101,9 +101,15 @@ let reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_ENDPOINT_CONTRACT_VERSION="ucr.endpoint-e2ee.v1";
 const ENDPOINT_STATE_STORE_CONTRACT_VERSION="ucr.endpoint-state-store.v1";
+const ENDPOINT_WRAPPING_KEY_STORE_CONTRACT_VERSION="ucr.endpoint-wrapping-key.v1";
 const ENDPOINT_STATE_DB_NAME="ucr-endpoint-state-v1";
-const ENDPOINT_STATE_DB_VERSION=1;
+const ENDPOINT_STATE_DB_VERSION=2;
 const ENDPOINT_STATE_OBJECT_STORE="sealed-snapshots";
+const ENDPOINT_WRAPPING_KEY_OBJECT_STORE="wrapping-key-vault";
+const ENDPOINT_WRAPPING_KEY_BYTES=32;
+const ENDPOINT_WRAPPING_KEY_IV_BYTES=12;
+const ENDPOINT_WRAPPING_KEY_RECORD_VERSION=1;
+const ENDPOINT_WRAPPING_KEY_AAD_DOMAIN="UCR-ENDPOINT-WRAPPING-KEY-V1\0";
 const ENDPOINT_STATE_KEY_MAX=512;
 const ENDPOINT_STATE_SNAPSHOT_MAX=4*1024*1024;
 const E2EE_CHUNK_MAGIC="UCRCHK01";
@@ -250,6 +256,7 @@ function openEndpointStateDb(){
     request.onupgradeneeded=()=>{
       const db=request.result;
       if(!db.objectStoreNames.contains(ENDPOINT_STATE_OBJECT_STORE))db.createObjectStore(ENDPOINT_STATE_OBJECT_STORE);
+      if(!db.objectStoreNames.contains(ENDPOINT_WRAPPING_KEY_OBJECT_STORE))db.createObjectStore(ENDPOINT_WRAPPING_KEY_OBJECT_STORE);
     };
     request.onsuccess=()=>resolve(request.result);
     request.onerror=()=>reject(request.error||new Error("IndexedDB open failed"));
@@ -304,6 +311,103 @@ window.ucrEndpointStateStore=Object.freeze({
   save:saveEndpointState,
   load:loadEndpointState,
   remove:removeEndpointState
+});
+function endpointWrappingKeyAad(key){
+  return new TextEncoder().encode(ENDPOINT_WRAPPING_KEY_AAD_DOMAIN+endpointStateKey(key));
+}
+function endpointWrappingKeyBytes(value){
+  const bytes=value instanceof Uint8Array?value:new Uint8Array(value);
+  if(bytes.length!==ENDPOINT_WRAPPING_KEY_BYTES)throw new Error("Invalid endpoint wrapping key size");
+  if(bytes.every(byte=>byte===0))throw new Error("Invalid all-zero endpoint wrapping key");
+  return bytes;
+}
+function endpointWrappingKeyRecord(record){
+  if(!record||typeof record!=="object"||record.version!==ENDPOINT_WRAPPING_KEY_RECORD_VERSION)throw new Error("Invalid endpoint wrapping-key record");
+  const key=record.kek;
+  if(!key||key.type!=="secret"||key.extractable!==false||!key.algorithm||key.algorithm.name!=="AES-GCM")throw new Error("Invalid endpoint wrapping KEK");
+  const iv=record.iv instanceof Uint8Array?record.iv:new Uint8Array(record.iv);
+  const wrapped=record.wrapped instanceof Uint8Array?record.wrapped:new Uint8Array(record.wrapped);
+  if(iv.length!==ENDPOINT_WRAPPING_KEY_IV_BYTES||wrapped.length<=ENDPOINT_WRAPPING_KEY_BYTES)throw new Error("Invalid wrapped endpoint key material");
+  return {version:record.version,kek:key,iv,wrapped};
+}
+async function readEndpointWrappingKeyRecord(key){
+  key=endpointStateKey(key);const db=await openEndpointStateDb();
+  try{
+    return await new Promise((resolve,reject)=>{
+      const tx=db.transaction(ENDPOINT_WRAPPING_KEY_OBJECT_STORE,"readonly");
+      const request=tx.objectStore(ENDPOINT_WRAPPING_KEY_OBJECT_STORE).get(key);
+      request.onsuccess=()=>{
+        if(request.result===undefined){resolve(null);return;}
+        try{resolve(endpointWrappingKeyRecord(request.result));}catch(error){reject(error);}
+      };
+      request.onerror=()=>reject(request.error||new Error("IndexedDB wrapping-key read failed"));
+      tx.onabort=()=>reject(tx.error||new Error("IndexedDB wrapping-key read aborted"));
+    });
+  }finally{db.close();}
+}
+async function writeEndpointWrappingKeyRecord(key,record){
+  key=endpointStateKey(key);record=endpointWrappingKeyRecord(record);const db=await openEndpointStateDb();
+  try{
+    await new Promise((resolve,reject)=>{
+      const tx=db.transaction(ENDPOINT_WRAPPING_KEY_OBJECT_STORE,"readwrite");
+      tx.objectStore(ENDPOINT_WRAPPING_KEY_OBJECT_STORE).put({
+        version:record.version,
+        kek:record.kek,
+        iv:Array.from(record.iv),
+        wrapped:Array.from(record.wrapped)
+      },key);
+      tx.oncomplete=()=>resolve();
+      tx.onerror=()=>reject(tx.error||new Error("IndexedDB wrapping-key write failed"));
+      tx.onabort=()=>reject(tx.error||new Error("IndexedDB wrapping-key write aborted"));
+    });
+  }finally{db.close();}
+}
+async function createEndpointWrappingKeyRecord(key){
+  if(!globalThis.crypto||!crypto.subtle||typeof crypto.getRandomValues!=="function")throw new Error("WebCrypto is unavailable");
+  key=endpointStateKey(key);
+  const kek=await crypto.subtle.generateKey({name:"AES-GCM",length:256},false,["encrypt","decrypt"]);
+  const wrappingKey=crypto.getRandomValues(new Uint8Array(ENDPOINT_WRAPPING_KEY_BYTES));
+  endpointWrappingKeyBytes(wrappingKey);
+  const iv=crypto.getRandomValues(new Uint8Array(ENDPOINT_WRAPPING_KEY_IV_BYTES));
+  try{
+    const wrapped=new Uint8Array(await crypto.subtle.encrypt(
+      {name:"AES-GCM",iv,additionalData:endpointWrappingKeyAad(key)},
+      kek,
+      wrappingKey
+    ));
+    const record={version:ENDPOINT_WRAPPING_KEY_RECORD_VERSION,kek,iv,wrapped};
+    await writeEndpointWrappingKeyRecord(key,record);
+    return {record:endpointWrappingKeyRecord(record),wrappingKey};
+  }catch(error){
+    wrappingKey.fill(0);
+    throw error;
+  }
+}
+async function getEndpointWrappingKey(key){
+  key=endpointStateKey(key);
+  let record=await readEndpointWrappingKeyRecord(key);
+  if(record===null){
+    const created=await createEndpointWrappingKeyRecord(key);
+    return endpointWrappingKeyBytes(created.wrappingKey);
+  }
+  const plaintext=new Uint8Array(await crypto.subtle.decrypt(
+    {name:"AES-GCM",iv:record.iv,additionalData:endpointWrappingKeyAad(key)},
+    record.kek,
+    record.wrapped
+  ));
+  return endpointWrappingKeyBytes(plaintext);
+}
+function createEndpointWrappingKeyProvider(identity=claims){
+  const key=endpointPersistenceStorageKey(identity);
+  if(!key)throw new Error("Endpoint wrapping-key identity requires a device");
+  return Object.freeze({
+    getWrappingKey:()=>getEndpointWrappingKey(key)
+  });
+}
+window.ucrEndpointWrappingKeyVault=Object.freeze({
+  contractVersion:ENDPOINT_WRAPPING_KEY_STORE_CONTRACT_VERSION,
+  createProvider:createEndpointWrappingKeyProvider,
+  getWrappingKey:getEndpointWrappingKey
 });
 function endpointPersistence(adapter){
   if(!adapter||adapter.contractVersion!==E2EE_ENDPOINT_CONTRACT_VERSION||adapter.persistence===undefined)return null;
