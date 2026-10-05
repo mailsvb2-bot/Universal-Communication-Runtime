@@ -15,6 +15,7 @@ sqlite-storage = [
     "dep:serde",
     "dep:serde_json",
 ]
+browser-js = ["openmls/js"]
 
 [dependencies]
 ucr-core = { path = "../ucr-core" }
