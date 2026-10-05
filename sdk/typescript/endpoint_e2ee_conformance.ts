@@ -13,6 +13,14 @@ const v1 = {
   start() {},
   onEnvelope() {},
   stop() {},
+  persistence: {
+    restoreSealedState() {
+      return true;
+    },
+    sealState() {
+      return new Uint8Array([1, 2, 3]);
+    },
+  },
 } satisfies UcrEndpointE2eeAdapterV1;
 
 const resolved = resolveUcrEndpointE2eeAdapter(v1, { allowLegacy: false });
@@ -50,6 +58,22 @@ assert.throws(
   /requires a stop hook/,
 );
 
+assert.throws(
+  () =>
+    resolveUcrEndpointE2eeAdapter({
+      contractVersion: UCR_ENDPOINT_E2EE_CONTRACT_VERSION,
+      start() {},
+      onEnvelope() {},
+      stop() {},
+      persistence: {
+        sealState() {
+          return new Uint8Array([1]);
+        },
+      },
+    }),
+  /persistence requires restoreSealedState and sealState hooks/,
+);
+
 const target: Record<string, unknown> = {};
 installUcrEndpointE2eeAdapter(target, v1);
 assert.equal(target.ucrE2eeEndpoint, v1);
@@ -69,5 +93,7 @@ assert.throws(
 const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
 assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
 assert.match(browser, /Unsupported endpoint E2EE adapter contract version/);
+assert.match(browser, /restoreSealedState/);
+assert.match(browser, /sealState/);
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
