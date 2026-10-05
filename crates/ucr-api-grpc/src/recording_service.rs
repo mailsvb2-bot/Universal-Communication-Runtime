@@ -296,10 +296,7 @@ where
                         .recording(&scope, &recording_id)
                         .map_err(map_store_error)?
                         .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
-                    if !matches!(
-                        recording.state,
-                        RecordingState::Stopped | RecordingState::Expired
-                    ) {
+                    if recording.state != RecordingState::Stopped {
                         return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
                     }
                     let provider = self
