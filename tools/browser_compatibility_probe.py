@@ -293,20 +293,28 @@ Promise.resolve()
             """
 const done = arguments[arguments.length - 1];
 const key = arguments[0];
+const expected = arguments[1];
 Promise.resolve()
   .then(() => window.ucrEndpointStateStore.load(key))
-  .then(value => done({
-    ok: value instanceof Uint8Array,
-    bytes: value instanceof Uint8Array ? Array.from(value) : null
-  }))
+  .then(value => {
+    const bytes = value instanceof Uint8Array ? value : null;
+    const same = !!bytes &&
+      bytes.length === expected.length &&
+      expected.every((byte, index) => bytes[index] === byte);
+    done({
+      ok: same,
+      isUint8Array: !!bytes,
+      length: bytes ? bytes.length : null,
+      expectedLength: expected.length
+    });
+  })
   .catch(error => done({ok: false, error: String(error)}));
 """,
-            [persistence_key],
+            [persistence_key, persistence_bytes],
         )
         persistence_reload_round_trip = (
             isinstance(persistence_read, dict)
             and persistence_read.get("ok") is True
-            and persistence_read.get("bytes") == persistence_bytes
         )
 
         persistence_remove = execute_async(
@@ -368,7 +376,7 @@ Promise.resolve()
         if probe.get("endpointStateStoreContract") != "ucr.endpoint-state-store.v1":
             failures.append("endpointStateStoreContract")
         if not persistence_reload_round_trip:
-            failures.append("indexedDbReloadRoundTrip")
+            failures.append(f"indexedDbReloadRoundTrip:{persistence_read!r}")
         if not persistence_delete_verified:
             failures.append("indexedDbDelete")
         evidence = {
@@ -384,6 +392,7 @@ Promise.resolve()
                 "storage": "IndexedDB",
                 "sealed_bytes_only": True,
                 "reload_round_trip": persistence_reload_round_trip,
+                "reload_probe": persistence_read,
                 "delete_verified": persistence_delete_verified,
             },
             "required_checks": required,
