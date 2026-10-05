@@ -40,11 +40,16 @@ the RFC 9420/OpenMLS core can be compiled without that adapter. CI separately co
 MLS implementation is not structurally tied to native SQLite and can be reused by a browser endpoint;
 it does not introduce a second MLS implementation.
 
-This compile gate is not proof of durable browser MLS state or live endpoint interoperability.
-Browser endpoint work must still own local KeyPackage/private state, process Welcome/commit material,
-persist/recover the endpoint group state across restart, and derive the current media epoch secret
-locally through the same OpenMLS core. A public UCR server must not expose an MLS exporter secret as
-a shortcut for browser initialization.
+The browser endpoint now owns local KeyPackage/private state, processes Welcome/commit material,
+derives the current media epoch secret locally through the same OpenMLS core, and can seal/restore
+the exact OpenMLS in-memory storage as a bounded encrypted snapshot. Snapshot AEAD is bound to the
+tenant/namespace, group, device, epoch and canonical state reference. Restore reloads the group through
+OpenMLS storage and rejects state/device mismatches, so stale or cross-device snapshots fail closed.
+
+This is executable restart-state machinery, but it is not yet proof of production browser persistence
+or live endpoint interoperability. The embedding browser still needs a durable storage adapter
+(for example IndexedDB) and secure lifecycle for the wrapping key, plus real reload/interoperability
+runs. A public UCR server must not expose an MLS exporter secret as a shortcut for browser initialization.
 
 ## Scope
 
