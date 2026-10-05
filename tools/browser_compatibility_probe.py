@@ -363,7 +363,7 @@ Promise.resolve()
       ? await indexedDB.databases()
       : [];
     const db = await new Promise((resolve, reject) => {
-      const request = indexedDB.open("ucr-endpoint-state-v1", 1);
+      const request = indexedDB.open("ucr-endpoint-state-v1");
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error || new Error("open failed"));
     });
