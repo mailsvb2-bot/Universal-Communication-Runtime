@@ -91,7 +91,7 @@ pub type SqliteMlsProvider<'a> = UcrOpenMlsProvider<SqliteMlsStorage<'a>>;
 /// Opaque RFC 9420 group state used by internal durable adapters without a direct `OpenMLS` dependency.
 pub type MlsGroupState = MlsGroup;
 
-/// Browser-safe provider backed by OpenMLS's official in-memory storage.
+/// Browser-safe provider backed by `OpenMLS`'s official in-memory storage.
 pub type BrowserMlsStorage = MemoryStorage;
 pub type BrowserMlsProvider = UcrOpenMlsProvider<BrowserMlsStorage>;
 
@@ -104,7 +104,7 @@ pub fn browser_memory_provider() -> BrowserMlsProvider {
     UcrOpenMlsProvider::new(MemoryStorage::default())
 }
 
-/// Serializes the exact OpenMLS memory-storage key/value state into a bounded opaque snapshot.
+/// Serializes the exact `OpenMLS` memory-storage key/value state into a bounded opaque snapshot.
 ///
 /// The snapshot is intentionally not encrypted here. Callers must seal it before persistence.
 ///
@@ -123,7 +123,7 @@ pub fn export_browser_memory_snapshot(
     }
 
     let mut entries: Vec<_> = values.iter().collect();
-    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    entries.sort_by_key(|(left, _)| *left);
 
     let mut output = Vec::new();
     output.extend_from_slice(BROWSER_MLS_SNAPSHOT_MAGIC);
@@ -140,7 +140,7 @@ pub fn export_browser_memory_snapshot(
     Ok(output)
 }
 
-/// Restores one bounded OpenMLS memory-storage snapshot.
+/// Restores one bounded `OpenMLS` memory-storage snapshot.
 ///
 /// # Errors
 /// Malformed, duplicate-key, trailing-byte, or oversized snapshots are rejected fail closed.
