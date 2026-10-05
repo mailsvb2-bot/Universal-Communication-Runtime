@@ -7,5 +7,6 @@ publish = false
 [dependencies]
 ucr-group-mls = { path = "../../crates/ucr-group-mls", default-features = false }
 getrandom = { version = "=0.4.3", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "=0.2.17", features = ["js"] }
 
 [workspace]
