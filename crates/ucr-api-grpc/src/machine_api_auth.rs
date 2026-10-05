@@ -198,21 +198,31 @@ where
     Ok(actor)
 }
 
+pub(crate) struct MachineApiOperationAdmission<'a> {
+    pub(crate) scope: &'a TenantScope,
+    pub(crate) authentication: MachineApiAuthentication,
+    pub(crate) permission: &'a str,
+    pub(crate) operation: &'a ServiceAuditOperationRef,
+}
+
 pub(crate) fn admit_machine_api_for_operation<C, A, S>(
     clock: &C,
     authorization: &A,
     store: &S,
     machine_bearer: Option<&MachineBearerConfig>,
-    scope: &TenantScope,
-    authentication: MachineApiAuthentication,
-    permission: &str,
-    operation: &ServiceAuditOperationRef,
+    request: MachineApiOperationAdmission<'_>,
 ) -> Result<ScopedPrincipal, CanonicalError>
 where
     C: ServiceQuotaClock,
     A: AuthorizationEvaluator,
     S: ServiceCredentialStore + ServiceQuotaStore + ServiceAuditStore,
 {
+    let MachineApiOperationAdmission {
+        scope,
+        authentication,
+        permission,
+        operation,
+    } = request;
     let actor = match authentication {
         MachineApiAuthentication::ServiceCredential {
             credential_id,
