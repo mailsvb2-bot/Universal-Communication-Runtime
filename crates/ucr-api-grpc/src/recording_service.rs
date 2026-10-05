@@ -1380,7 +1380,10 @@ mod recording_export_issued_event_tests {
         let event =
             recording_export_issued_event(&recording, &issued_to, &artifact, 40).expect("event");
         assert_eq!(event.event_type, "ucr.recording.export.issued");
-        assert_eq!(event.actor.on_behalf_of, Some(issued_to.principal.principal_id));
+        assert_eq!(
+            event.actor.on_behalf_of,
+            Some(issued_to.principal.principal_id)
+        );
         assert!(
             !event
                 .payload
