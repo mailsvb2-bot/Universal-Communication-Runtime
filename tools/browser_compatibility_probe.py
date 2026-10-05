@@ -55,6 +55,16 @@ def request_json(
     return parsed
 
 
+def execute_async(base: str, script: str, args: list[object] | None = None) -> object:
+    response = request_json(
+        "POST",
+        f"{base}/execute/async",
+        {"script": script, "args": args or []},
+        timeout_seconds=30,
+    )
+    return response.get("value")
+
+
 def driver_executable(browser: str) -> str:
     env_and_names = {
         "chrome": ("CHROMEWEBDRIVER", ["chromedriver", "chromedriver.exe"]),
@@ -198,10 +208,11 @@ def main() -> int:
                 )
             }
         )
+        page_url = f"http://localhost:{server.server_port}/client.html#{branding_fragment}"
         request_json(
             "POST",
             f"{base}/url",
-            {"url": f"http://localhost:{server.server_port}/client.html#{branding_fragment}"},
+            {"url": page_url},
         )
         time.sleep(0.5)
         probe = request_json(
@@ -236,6 +247,12 @@ return {
   urlSearchParams: typeof URLSearchParams === "function",
   cryptoSubtle: !!globalThis.crypto && !!globalThis.crypto.subtle,
   secureContext: globalThis.isSecureContext === true,
+  indexedDb: !!globalThis.indexedDB,
+  endpointStateStore: !!window.ucrEndpointStateStore &&
+    typeof window.ucrEndpointStateStore.save === "function" &&
+    typeof window.ucrEndpointStateStore.load === "function" &&
+    typeof window.ucrEndpointStateStore.remove === "function",
+  endpointStateStoreContract: window.ucrEndpointStateStore?.contractVersion || null,
   joinControl: !!document.getElementById("join"),
   microphoneControl: !!document.getElementById("mic-toggle"),
   cameraControl: !!document.getElementById("camera-toggle"),
@@ -250,6 +267,139 @@ return {
 
         if not isinstance(probe, dict):
             raise RuntimeError(f"browser probe returned invalid payload: {probe!r}")
+        persistence_key = f"ucr-browser-probe-{args.browser}"
+        persistence_bytes = [1, 7, 3, 9, 255]
+        persistence_write = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+const key = arguments[0];
+const bytes = new Uint8Array(arguments[1]);
+Promise.resolve()
+  .then(() => window.ucrEndpointStateStore.save(key, bytes))
+  .then(() => done({ok: true}))
+  .catch(error => done({ok: false, error: String(error)}));
+""",
+            [persistence_key, persistence_bytes],
+        )
+        if not isinstance(persistence_write, dict) or persistence_write.get("ok") is not True:
+            raise RuntimeError(f"IndexedDB persistence write failed: {persistence_write!r}")
+
+        persistence_before_refresh = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+const key = arguments[0];
+Promise.resolve()
+  .then(async () => {
+    const value = await window.ucrEndpointStateStore.load(key);
+    const databases = typeof indexedDB.databases === "function"
+      ? await indexedDB.databases()
+      : [];
+    const isBytes = ArrayBuffer.isView(value) &&
+      Object.prototype.toString.call(value) === "[object Uint8Array]";
+    done({
+      found: isBytes,
+      length: isBytes ? value.length : null,
+      databases: databases.map(item => ({name: item.name || null, version: item.version || null})),
+      origin: location.origin,
+      href: location.href
+    });
+  })
+  .catch(error => done({error: String(error), origin: location.origin, href: location.href}));
+""",
+            [persistence_key],
+        )
+
+        request_json("POST", f"{base}/refresh", {})
+        time.sleep(0.5)
+
+        persistence_read = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+const key = arguments[0];
+const expected = arguments[1];
+Promise.resolve()
+  .then(() => window.ucrEndpointStateStore.load(key))
+  .then(value => {
+    const isBytes = ArrayBuffer.isView(value) &&
+      Object.prototype.toString.call(value) === "[object Uint8Array]";
+    const bytes = isBytes ? value : null;
+    const same = !!bytes &&
+      bytes.length === expected.length &&
+      expected.every((byte, index) => bytes[index] === byte);
+    done({
+      ok: same,
+      isUint8Array: !!bytes,
+      length: bytes ? bytes.length : null,
+      expectedLength: expected.length
+    });
+  })
+  .catch(error => done({ok: false, error: String(error)}));
+""",
+            [persistence_key, persistence_bytes],
+        )
+        persistence_reload_round_trip = (
+            isinstance(persistence_read, dict)
+            and persistence_read.get("ok") is True
+        )
+
+        persistence_after_refresh = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+Promise.resolve()
+  .then(async () => {
+    const databases = typeof indexedDB.databases === "function"
+      ? await indexedDB.databases()
+      : [];
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open("ucr-endpoint-state-v1", 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("open failed"));
+    });
+    let keys = [];
+    let stores = Array.from(db.objectStoreNames);
+    if (stores.includes("sealed-snapshots")) {
+      keys = await new Promise((resolve, reject) => {
+        const tx = db.transaction("sealed-snapshots", "readonly");
+        const request = tx.objectStore("sealed-snapshots").getAllKeys();
+        request.onsuccess = () => resolve(request.result.map(String));
+        request.onerror = () => reject(request.error || new Error("getAllKeys failed"));
+      });
+    }
+    db.close();
+    done({
+      databases: databases.map(item => ({name: item.name || null, version: item.version || null})),
+      stores,
+      keys,
+      origin: location.origin,
+      href: location.href
+    });
+  })
+  .catch(error => done({error: String(error), origin: location.origin, href: location.href}));
+"""
+        )
+
+        persistence_remove = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+const key = arguments[0];
+Promise.resolve()
+  .then(() => window.ucrEndpointStateStore.remove(key))
+  .then(() => window.ucrEndpointStateStore.load(key))
+  .then(value => done({ok: value === null}))
+  .catch(error => done({ok: false, error: String(error)}));
+""",
+            [persistence_key],
+        )
+        persistence_delete_verified = (
+            isinstance(persistence_remove, dict)
+            and persistence_remove.get("ok") is True
+        )
+
         branding_failures = []
         if probe.get("brandName") != "UCR Browser Probe":
             branding_failures.append("brandName")
@@ -277,6 +427,8 @@ return {
             "urlSearchParams",
             "cryptoSubtle",
             "secureContext",
+            "indexedDb",
+            "endpointStateStore",
             "joinControl",
             "microphoneControl",
             "cameraControl",
@@ -286,6 +438,15 @@ return {
         ]
         failures = [name for name in required if probe.get(name) is not True]
         failures.extend(branding_failures)
+        if probe.get("endpointStateStoreContract") != "ucr.endpoint-state-store.v1":
+            failures.append("endpointStateStoreContract")
+        if not persistence_reload_round_trip:
+            failures.append(
+                f"indexedDbReloadRoundTrip:read={persistence_read!r}:"
+                f"before={persistence_before_refresh!r}:after={persistence_after_refresh!r}"
+            )
+        if not persistence_delete_verified:
+            failures.append("indexedDbDelete")
         evidence = {
             "schema": "ucr.browser-compatibility.v1",
             "browser_requested": args.browser,
@@ -294,6 +455,16 @@ return {
             "platform_name": reported.get("platformName"),
             "evidence_kind": "real-desktop-browser-webdriver-smoke",
             "probe": probe,
+            "endpoint_state_persistence": {
+                "contract": probe.get("endpointStateStoreContract"),
+                "storage": "IndexedDB",
+                "sealed_bytes_only": True,
+                "reload_round_trip": persistence_reload_round_trip,
+                "reload_probe": persistence_read,
+                "before_refresh": persistence_before_refresh,
+                "after_refresh": persistence_after_refresh,
+                "delete_verified": persistence_delete_verified,
+            },
             "required_checks": required,
             "failures": failures,
             "passed": not failures,
@@ -301,6 +472,7 @@ return {
                 "display_capture_api_observed": bool(probe.get("getDisplayMedia")),
                 "media_permissions_exercised": False,
                 "conference_network_join_exercised": False,
+                "endpoint_state_reload_exercised": True,
             },
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)

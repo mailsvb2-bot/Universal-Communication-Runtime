@@ -46,10 +46,16 @@ the exact OpenMLS in-memory storage as a bounded encrypted snapshot. Snapshot AE
 tenant/namespace, group, device, epoch and canonical state reference. Restore reloads the group through
 OpenMLS storage and rejects state/device mismatches, so stale or cross-device snapshots fail closed.
 
-This is executable restart-state machinery, but it is not yet proof of production browser persistence
-or live endpoint interoperability. The embedding browser still needs a durable storage adapter
-(for example IndexedDB) and secure lifecycle for the wrapping key, plus real reload/interoperability
-runs. A public UCR server must not expose an MLS exporter secret as a shortcut for browser initialization.
+The reference browser now includes an IndexedDB vault that accepts only sealed endpoint-state bytes.
+The desktop Browser Compatibility matrix writes a sealed-byte probe, reloads the page, reads the same
+bytes back from IndexedDB, deletes them, and verifies deletion in real Chrome, Edge, Firefox and Safari.
+This is executable evidence that durable browser storage survives a page reload without exposing raw
+MLS private material to the page-level persistence contract.
+
+This is still not proof of full MLS restore interoperability: the endpoint E2EE adapter must next bind
+its persistence key, wrapping-key lifecycle, seal/restore calls and current canonical MLS state to this
+vault, followed by live reload/interoperability runs. A public UCR server must not expose an MLS exporter
+secret as a shortcut for browser initialization.
 
 ## Scope
 
