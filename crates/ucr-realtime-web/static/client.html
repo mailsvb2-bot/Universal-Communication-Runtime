@@ -313,20 +313,20 @@ function endpointPersistence(adapter){
   }
   return persistence;
 }
-function endpointPersistenceStorageKey(){
-  if(!claims||!claims.device_id)return null;
+function endpointPersistenceStorageKey(identity=claims){
+  if(!identity||!identity.device_id)return null;
   const key="ucr-e2ee-state:"+JSON.stringify([
-    claims.tenant_id,
-    claims.namespace_id,
-    claims.call_id,
-    claims.participant_kind,
-    claims.participant_id,
-    claims.device_id
+    identity.tenant_id,
+    identity.namespace_id,
+    identity.call_id,
+    identity.participant_kind,
+    identity.participant_id,
+    identity.device_id
   ]);
   return key.length>0&&key.length<=ENDPOINT_STATE_KEY_MAX?key:null;
 }
-async function restoreEndpointPersistedState(adapter){
-  const persistence=endpointPersistence(adapter),key=endpointPersistenceStorageKey();
+async function restoreEndpointPersistedState(adapter,identity=claims){
+  const persistence=endpointPersistence(adapter),key=endpointPersistenceStorageKey(identity);
   if(!persistence||!key)return "unavailable";
   const snapshot=await loadEndpointState(key);
   if(snapshot===null)return "empty";
@@ -337,8 +337,8 @@ async function restoreEndpointPersistedState(adapter){
   }
   return "restored";
 }
-async function persistEndpointState(adapter){
-  const persistence=endpointPersistence(adapter),key=endpointPersistenceStorageKey();
+async function persistEndpointState(adapter,identity=claims){
+  const persistence=endpointPersistence(adapter),key=endpointPersistenceStorageKey(identity);
   if(!persistence||!key)return false;
   const snapshot=await persistence.sealState();
   if(snapshot===null||snapshot===undefined)return false;
