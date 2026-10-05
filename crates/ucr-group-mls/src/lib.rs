@@ -10,12 +10,15 @@ use openmls::prelude::{
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::RustCrypto;
+#[cfg(feature = "sqlite-storage")]
 use openmls_sqlite_storage::{Codec as OpenMlsSqliteCodec, SqliteStorageProvider};
 use openmls_traits::{
     OpenMlsProvider,
     storage::{CURRENT_VERSION, StorageProvider as OpenMlsStorageProvider},
 };
+#[cfg(feature = "sqlite-storage")]
 use rusqlite::{Connection, OptionalExtension};
+#[cfg(feature = "sqlite-storage")]
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use ucr_core::{DurableRecordStatus, DurableStoreError};
@@ -63,9 +66,11 @@ where
     }
 }
 
+#[cfg(feature = "sqlite-storage")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct JsonCodec;
 
+#[cfg(feature = "sqlite-storage")]
 impl OpenMlsSqliteCodec for JsonCodec {
     type Error = serde_json::Error;
 
@@ -78,7 +83,9 @@ impl OpenMlsSqliteCodec for JsonCodec {
     }
 }
 
+#[cfg(feature = "sqlite-storage")]
 pub type SqliteMlsStorage<'a> = SqliteStorageProvider<JsonCodec, &'a Connection>;
+#[cfg(feature = "sqlite-storage")]
 pub type SqliteMlsProvider<'a> = UcrOpenMlsProvider<SqliteMlsStorage<'a>>;
 
 /// Opaque RFC 9420 group state used by internal durable adapters without a direct `OpenMLS` dependency.
@@ -91,6 +98,7 @@ pub type MlsGroupState = MlsGroup;
 ///
 /// # Errors
 /// Returns an explicit MLS storage error if official migrations cannot be applied.
+#[cfg(feature = "sqlite-storage")]
 pub fn initialize_sqlite_storage(connection: &mut Connection) -> Result<(), GroupMlsError> {
     let mut storage = SqliteStorageProvider::<JsonCodec, &mut Connection>::new(connection);
     storage
@@ -102,6 +110,7 @@ pub fn initialize_sqlite_storage(connection: &mut Connection) -> Result<(), Grou
 ///
 /// # Errors
 /// Returns `StorageSchema` for missing or unreadable `OpenMLS` storage.
+#[cfg(feature = "sqlite-storage")]
 pub fn verify_sqlite_storage(connection: &Connection) -> Result<(), GroupMlsError> {
     for name in [
         "openmls_group_data",
@@ -125,6 +134,7 @@ pub fn verify_sqlite_storage(connection: &Connection) -> Result<(), GroupMlsErro
     Ok(())
 }
 
+#[cfg(feature = "sqlite-storage")]
 #[must_use]
 pub fn sqlite_provider(connection: &Connection) -> SqliteMlsProvider<'_> {
     UcrOpenMlsProvider::new(SqliteStorageProvider::<JsonCodec, &Connection>::new(
