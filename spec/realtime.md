@@ -31,7 +31,10 @@ Bootstrap history is bounded to `MAX_MLS_BOOTSTRAP_COMMITS = 64` and an aggregat
 explicitly instead of producing an unbounded response. The projection contains no MLS exporter,
 traffic secret, private signing key, or endpoint wrapping key. Production runtime wires this read
 path to the same `SqliteLocalStore` that owns the canonical MLS transition log; there is no second
-MLS database or browser-specific server owner.
+MLS database or browser-specific server owner. The reference browser gateway exposes the same
+authenticated projection at `POST /v1/realtime/mls-bootstrap`, forwards the existing bearer and
+scope/call/session tuple unchanged, and returns Welcome/commit bytes as Base64 with `Cache-Control:
+no-store`. It does not accept a Device ID or any endpoint secret from browser JSON.
 
 Pre-v49 transitions remain preserved but are not backfilled with guessed Device mappings because the
 historic target Device cannot be reconstructed safely from Welcome bytes alone. Such endpoints must
