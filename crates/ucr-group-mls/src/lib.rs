@@ -24,8 +24,8 @@ use sha2::{Digest, Sha256};
 use ucr_core::{DurableRecordStatus, DurableStoreError};
 use ucr_crypto::GroupMediaEpochSecret;
 use ucr_model::{
-    ConversationRecord, DeviceId, GroupChange, GroupCryptoState, GroupId, GroupRecord, OpaqueId,
-    ScopedPrincipal, TenantScope,
+    ConversationRecord, DeviceId, EventId, GroupChange, GroupCryptoState, GroupId, GroupRecord,
+    OpaqueId, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{GROUP_MLS_CAPABILITY, group_change_fingerprint};
 
