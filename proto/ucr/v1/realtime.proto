@@ -79,6 +79,40 @@ message RealtimeLeaveResponse {
   }
 }
 
+// Device-bound MLS bootstrap is a read-only projection over canonical Group MLS transitions.
+// The target Device is never caller supplied: the server derives it from authenticated realtime
+// session claims and returns only the Welcome recorded for that exact Device.
+message RealtimeGetMlsBootstrapRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+}
+
+message RealtimeMlsCryptoState {
+  uint64 crypto_epoch = 1;
+  OpaqueId crypto_state_ref = 2;
+}
+
+message RealtimeMlsBootstrapCommit {
+  bytes commit = 1;
+  RealtimeMlsCryptoState next_crypto_state = 2;
+}
+
+message RealtimeMlsBootstrap {
+  OpaqueId group_id = 1;
+  bytes welcome = 2;
+  RealtimeMlsCryptoState welcome_crypto_state = 3;
+  repeated RealtimeMlsBootstrapCommit subsequent_commits = 4;
+  RealtimeMlsCryptoState current_crypto_state = 5;
+}
+
+message RealtimeGetMlsBootstrapResponse {
+  oneof result {
+    RealtimeMlsBootstrap bootstrap = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 // The source Principal/Device is taken from authenticated session state and revalidated against
 // the encrypted frame header plus canonical Call/Group/MLS state before any SFU sink side effect.
 message RealtimePublishMediaRequest {
@@ -392,6 +426,7 @@ service RealtimeService {
   rpc JoinRealtime(RealtimeJoinRequest) returns (RealtimeJoinResponse);
   rpc HeartbeatRealtime(RealtimeHeartbeatRequest) returns (RealtimeHeartbeatResponse);
   rpc LeaveRealtime(RealtimeLeaveRequest) returns (RealtimeLeaveResponse);
+  rpc GetMlsBootstrap(RealtimeGetMlsBootstrapRequest) returns (RealtimeGetMlsBootstrapResponse);
   rpc SetSubscriptions(RealtimeSetSubscriptionsRequest) returns (RealtimeSetSubscriptionsResponse);
   rpc SetRaisedHand(RealtimeSetRaisedHandRequest) returns (RealtimeSetRaisedHandResponse);
   rpc PublishReaction(RealtimePublishReactionRequest) returns (RealtimePublishReactionResponse);
