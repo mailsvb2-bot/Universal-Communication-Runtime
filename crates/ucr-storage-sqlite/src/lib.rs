@@ -2907,6 +2907,44 @@ mod tests {
     }
 
     #[test]
+    fn v48_store_migrates_device_bound_mls_admission_index_to_v49_and_reopens_cleanly() {
+        let db = TestDbPath::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create current store");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open current store");
+            super::test_remove_v49_objects(&connection).expect("remove v49 objects");
+            connection
+                .pragma_update(None, "user_version", super::SQLITE_SCHEMA_V48)
+                .expect("mark exact v48");
+        }
+
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v48 to v49");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        drop(migrated);
+
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("inspect migrated store");
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_schema
+                        WHERE type='table' AND name='group_mls_transition_admissions'
+                    )",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("admission table existence");
+            assert!(exists);
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen migrated v49 store");
+        assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+    }
+
+    #[test]
     fn v47_store_migrates_ready_marker_to_v48_and_reopens_cleanly() {
         let db = TestDbPath::new();
         {
@@ -2915,6 +2953,7 @@ mod tests {
         }
         {
             let connection = rusqlite::Connection::open(db.path()).expect("open current store");
+            super::test_remove_v49_objects(&connection).expect("remove v49 objects");
             connection
                 .pragma_update(None, "user_version", super::SQLITE_SCHEMA_V47)
                 .expect("simulate committed v48 objects before version bump");
@@ -2984,6 +3023,7 @@ mod tests {
         }
         {
             let connection = rusqlite::Connection::open(db.path()).expect("open raw v47 store");
+            super::test_remove_v49_objects(&connection).expect("remove v49 objects");
             connection
                 .execute_batch(
                     "DROP INDEX recording_provider_operations_due;
