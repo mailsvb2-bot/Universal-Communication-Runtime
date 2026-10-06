@@ -734,33 +734,32 @@ fn decode_mls_bootstrap(
             "realtime upstream returned a non-text MLS Group ID",
         )
     })?;
-    let welcome_crypto_state = decode_mls_crypto_state(
-        bootstrap.welcome_crypto_state.ok_or_else(|| {
+    let welcome_crypto_state =
+        decode_mls_crypto_state(bootstrap.welcome_crypto_state.ok_or_else(|| {
             GatewayFailure::new(
                 StatusCode::BAD_GATEWAY,
                 "invalid_mls_bootstrap",
                 "realtime upstream returned an MLS bootstrap without Welcome state",
             )
-        })?,
-    )?;
-    let current_crypto_state = decode_mls_crypto_state(
-        bootstrap.current_crypto_state.ok_or_else(|| {
+        })?)?;
+    let current_crypto_state =
+        decode_mls_crypto_state(bootstrap.current_crypto_state.ok_or_else(|| {
             GatewayFailure::new(
                 StatusCode::BAD_GATEWAY,
                 "invalid_mls_bootstrap",
                 "realtime upstream returned an MLS bootstrap without current state",
             )
-        })?,
-    )?;
+        })?)?;
     let mut subsequent_commits = Vec::with_capacity(bootstrap.subsequent_commits.len());
     for commit in bootstrap.subsequent_commits {
-        let next_crypto_state = decode_mls_crypto_state(commit.next_crypto_state.ok_or_else(|| {
-            GatewayFailure::new(
-                StatusCode::BAD_GATEWAY,
-                "invalid_mls_bootstrap",
-                "realtime upstream returned an MLS commit without next state",
-            )
-        })?)?;
+        let next_crypto_state =
+            decode_mls_crypto_state(commit.next_crypto_state.ok_or_else(|| {
+                GatewayFailure::new(
+                    StatusCode::BAD_GATEWAY,
+                    "invalid_mls_bootstrap",
+                    "realtime upstream returned an MLS commit without next state",
+                )
+            })?)?;
         subsequent_commits.push(MlsBootstrapCommitResponse {
             commit_base64: STANDARD.encode(commit.commit),
             next_crypto_state,
@@ -776,11 +775,7 @@ fn decode_mls_bootstrap(
     })
 }
 
-async fn get_mls_bootstrap(
-    state: &AppState,
-    token: &str,
-    input: SessionRequest,
-) -> HttpResponse {
+async fn get_mls_bootstrap(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeGetMlsBootstrapRequest {
         scope: Some(pb_scope(&input)),
