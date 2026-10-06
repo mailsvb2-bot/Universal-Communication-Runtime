@@ -296,6 +296,27 @@ pub struct MlsDeviceAdmission {
     pub key_package: Vec<u8>,
 }
 
+/// One post-Welcome MLS commit required to advance a joining Device to canonical current state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MlsBootstrapCommit {
+    pub commit: Vec<u8>,
+    pub next_crypto_state: GroupCryptoState,
+}
+
+/// Device-bound read projection for endpoint-local MLS bootstrap.
+///
+/// The Welcome is returned only for the exact Device admitted by that transition. Subsequent
+/// commits contain no exporter/traffic secret and advance the endpoint from the Welcome epoch to
+/// the canonical current Group crypto state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MlsDeviceBootstrap {
+    pub group_id: GroupId,
+    pub welcome: Vec<u8>,
+    pub welcome_crypto_state: GroupCryptoState,
+    pub subsequent_commits: Vec<MlsBootstrapCommit>,
+    pub current_crypto_state: GroupCryptoState,
+}
+
 /// Canonically authorized Device-level input for one RFC 9420 epoch transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MlsTransitionInput {
@@ -394,6 +415,26 @@ pub fn mls_change_request_fingerprint(
 /// Implementations must use one durable transaction for the canonical Group mutation and all
 /// `OpenMLS` writes that stage/merge the corresponding epoch transition. This trait does not make
 /// MLS a second Group owner: membership/roles remain canonical Group state.
+/// Read-only Device-bound projection over the canonical MLS transition log.
+///
+/// Implementations must not return a Welcome for a different Device and must verify that the
+/// returned transition chain ends at the current canonical Group crypto state.
+pub trait GroupMlsBootstrapStore {
+    /// Returns the latest bootstrap chain for one exact Device in one exact Group.
+    ///
+    /// A missing record means no recoverable admission mapping exists for this Device. This is
+    /// intentionally distinct from returning another Device's Welcome.
+    ///
+    /// # Errors
+    /// Returns explicit storage/corruption errors when the durable transition chain is inconsistent.
+    fn mls_bootstrap_for_device(
+        &self,
+        scope: &TenantScope,
+        group_id: &GroupId,
+        device_id: &DeviceId,
+    ) -> Result<Option<MlsDeviceBootstrap>, GroupMlsStoreError>;
+}
+
 pub trait GroupMlsAtomicStore {
     /// Creates endpoint-local public `KeyPackage` material for one already Active canonical Device.
     /// Private MLS signing/HPKE material remains in the implementation-owned protected store.

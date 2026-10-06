@@ -103,7 +103,8 @@ const SQLITE_SCHEMA_V44: u32 = 44;
 const SQLITE_SCHEMA_V45: u32 = 45;
 const SQLITE_SCHEMA_V46: u32 = 46;
 const SQLITE_SCHEMA_V47: u32 = 47;
-pub const SQLITE_SCHEMA_VERSION: u32 = 48;
+const SQLITE_SCHEMA_V48: u32 = 48;
+pub const SQLITE_SCHEMA_VERSION: u32 = 49;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -675,7 +676,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v48(connection);
+        return verify_schema_v49(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -733,11 +734,27 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V45 => migrate_v45_to_v46(connection)?,
             SQLITE_SCHEMA_V46 => migrate_v46_to_v47(connection)?,
             SQLITE_SCHEMA_V47 => migrate_v47_to_v48(connection)?,
+            SQLITE_SCHEMA_V48 => migrate_v48_to_v49(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v48(connection)
+    verify_schema_v49(connection)
+}
+
+fn migrate_v48_to_v49(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v48(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    group_mls_store::create_v49_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v49(connection)
 }
 
 fn migrate_v47_to_v48(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -747,7 +764,7 @@ fn migrate_v47_to_v48(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     recording_provider_store::create_v48_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V48)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
@@ -768,6 +785,11 @@ fn migrate_v46_to_v47(connection: &mut Connection) -> Result<(), DurableStoreErr
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v47(connection)
+}
+
+fn verify_schema_v49(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v48(connection)?;
+    group_mls_store::verify_v49_objects(connection)
 }
 
 fn verify_schema_v48(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -916,6 +938,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     universal_conference_store::create_v46_objects(&transaction)?;
     recording_provider_store::create_v47_objects(&transaction)?;
     recording_provider_store::create_v48_objects(&transaction)?;
+    group_mls_store::create_v49_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1903,7 +1926,16 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_remove_v49_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "DROP INDEX IF EXISTS group_mls_transition_admissions_device;
+         DROP TABLE IF EXISTS group_mls_transition_admissions;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v48_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_remove_v49_objects(connection)?;
     let provider_table_exists: bool = connection.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM sqlite_schema
@@ -2875,6 +2907,44 @@ mod tests {
     }
 
     #[test]
+    fn v48_store_migrates_device_bound_mls_admission_index_to_v49_and_reopens_cleanly() {
+        let db = TestDbPath::new();
+        {
+            let store = SqliteLocalStore::open(db.path()).expect("create current store");
+            assert_eq!(store.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        }
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("open current store");
+            super::test_remove_v49_objects(&connection).expect("remove v49 objects");
+            connection
+                .pragma_update(None, "user_version", super::SQLITE_SCHEMA_V48)
+                .expect("mark exact v48");
+        }
+
+        let migrated = SqliteLocalStore::open(db.path()).expect("migrate v48 to v49");
+        assert_eq!(migrated.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+        drop(migrated);
+
+        {
+            let connection = rusqlite::Connection::open(db.path()).expect("inspect migrated store");
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_schema
+                        WHERE type='table' AND name='group_mls_transition_admissions'
+                    )",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("admission table existence");
+            assert!(exists);
+        }
+
+        let reopened = SqliteLocalStore::open(db.path()).expect("reopen migrated v49 store");
+        assert_eq!(reopened.schema_version(), Ok(SQLITE_SCHEMA_VERSION));
+    }
+
+    #[test]
     fn v47_store_migrates_ready_marker_to_v48_and_reopens_cleanly() {
         let db = TestDbPath::new();
         {
@@ -2883,6 +2953,7 @@ mod tests {
         }
         {
             let connection = rusqlite::Connection::open(db.path()).expect("open current store");
+            super::test_remove_v49_objects(&connection).expect("remove v49 objects");
             connection
                 .pragma_update(None, "user_version", super::SQLITE_SCHEMA_V47)
                 .expect("simulate committed v48 objects before version bump");
@@ -2952,6 +3023,7 @@ mod tests {
         }
         {
             let connection = rusqlite::Connection::open(db.path()).expect("open raw v47 store");
+            super::test_remove_v49_objects(&connection).expect("remove v49 objects");
             connection
                 .execute_batch(
                     "DROP INDEX recording_provider_operations_due;
