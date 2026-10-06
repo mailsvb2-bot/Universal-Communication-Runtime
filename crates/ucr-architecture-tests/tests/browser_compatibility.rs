@@ -61,7 +61,9 @@ fn browser_compatibility_matrix_runs_real_desktop_browsers_and_keeps_mobile_trut
     assert!(client.contains("/v1/realtime/mls-key-package"));
     assert!(client.contains("endpoint_state_mode"));
     assert!(client.contains("legacy_server_owned"));
-    assert!(client.contains("Endpoint-owned MLS state is already admitted but its sealed local snapshot is missing"));
+    assert!(client.contains(
+        "Endpoint-owned MLS state is already admitted but its sealed local snapshot is missing"
+    ));
     assert!(client.contains("state.join_from_welcome("));
     assert!(client.contains("module.EndpointMlsState.restore("));
     assert!(client.contains("endpointApplyBootstrapCommits(restored,bootstrap,index)"));
