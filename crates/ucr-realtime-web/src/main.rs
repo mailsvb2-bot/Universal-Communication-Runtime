@@ -774,7 +774,7 @@ async fn register_mls_key_package(
     input: MlsKeyPackageRequest,
 ) -> HttpResponse {
     let key_package = match STANDARD.decode(input.key_package_base64.as_bytes()) {
-        Ok(bytes) if !bytes.is_empty() && bytes.len() <= ucr_group_mls::MAX_MLS_KEY_PACKAGE_BYTES => bytes,
+        Ok(bytes) if !bytes.is_empty() && bytes.len() <= ucr_api_grpc::REALTIME_MLS_KEY_PACKAGE_MAX_BYTES => bytes,
         _ => {
             return GatewayFailure::new(
                 StatusCode::BAD_REQUEST,
