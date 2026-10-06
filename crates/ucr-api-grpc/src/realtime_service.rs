@@ -18,6 +18,9 @@ use ucr_core::{
     recording_allows_realtime_participant,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
+use ucr_group_mls::{
+    GroupMlsBootstrapStore, GroupMlsStoreError, MlsDeviceBootstrap,
+};
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage,
@@ -214,6 +217,7 @@ pub struct GrpcRealtimeService<C, A, S> {
     sfu_placement_lifecycle: Option<Arc<dyn RealtimeSfuPlacementLifecycle>>,
     sfu_media_router: Option<Arc<dyn RealtimeSfuMediaRouter>>,
     validated_media_observer: Option<Arc<dyn RealtimeValidatedMediaObserver>>,
+    mls_bootstrap_store: Option<Arc<dyn GroupMlsBootstrapStore + Send + Sync>>,
     sfu_placement_transition: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -260,6 +264,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             sfu_placement_lifecycle: None,
             sfu_media_router: None,
             validated_media_observer: None,
+            mls_bootstrap_store: None,
             sfu_placement_transition: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -290,6 +295,15 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         observer: Arc<dyn RealtimeValidatedMediaObserver>,
     ) -> Self {
         self.validated_media_observer = Some(observer);
+        self
+    }
+
+    #[must_use]
+    pub fn with_mls_bootstrap_store<B>(mut self, store: Arc<B>) -> Self
+    where
+        B: GroupMlsBootstrapStore + Send + Sync + 'static,
+    {
+        self.mls_bootstrap_store = Some(store);
         self
     }
 
@@ -441,6 +455,7 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             sfu_placement_lifecycle: self.sfu_placement_lifecycle.clone(),
             sfu_media_router: self.sfu_media_router.clone(),
             validated_media_observer: self.validated_media_observer.clone(),
+            mls_bootstrap_store: self.mls_bootstrap_store.clone(),
             sfu_placement_transition: Arc::clone(&self.sfu_placement_transition),
         }
     }
@@ -648,6 +663,37 @@ where
                     pb::realtime_leave_response::Result::Acknowledgement(acknowledgement)
                 }
                 Err(error) => pb::realtime_leave_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn get_mls_bootstrap(
+        &self,
+        request: Request<pb::RealtimeGetMlsBootstrapRequest>,
+    ) -> Result<Response<pb::RealtimeGetMlsBootstrapResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    self.registry
+                        .heartbeat(&claims, self.now()?)
+                        .map_err(map_registry_error)?;
+                    let bootstrap = self.device_bound_mls_bootstrap(&claims)?;
+                    pb_mls_bootstrap(bootstrap)
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeGetMlsBootstrapResponse {
+            result: Some(match result {
+                Ok(bootstrap) => {
+                    pb::realtime_get_mls_bootstrap_response::Result::Bootstrap(bootstrap)
+                }
+                Err(error) => {
+                    pb::realtime_get_mls_bootstrap_response::Result::Error(pb_error(error))
+                }
             }),
         }))
     }
@@ -1994,6 +2040,41 @@ where
         })
     }
 
+    fn device_bound_mls_bootstrap(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<MlsDeviceBootstrap, CanonicalError> {
+        self.require_live_universal_conference(claims)?;
+        let device_id = claims
+            .device_id
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
+        let actor = actor_for(claims);
+        let snapshot = conference_runtime(self)
+            .snapshot(&actor, &claims.scope, &claims.call_id)
+            .map_err(|error| map_conference_error(&error))?;
+        let store = self
+            .mls_bootstrap_store
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+        let bootstrap = store
+            .mls_bootstrap_for_device(&claims.scope, &snapshot.group_id, device_id)
+            .map_err(map_group_mls_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+        let current_ref = bootstrap
+            .current_crypto_state
+            .state_ref
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
+        if bootstrap.group_id != snapshot.group_id
+            || bootstrap.current_crypto_state.epoch != snapshot.group_crypto_epoch
+            || current_ref != &snapshot.group_crypto_state_ref
+        {
+            return Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure));
+        }
+        Ok(bootstrap)
+    }
+
     fn require_live_universal_conference(
         &self,
         claims: &RealtimeSessionClaims,
@@ -2729,6 +2810,43 @@ fn pb_realtime_media_policy(policy: EffectiveRealtimeMediaPolicy) -> pb::Realtim
     }
 }
 
+fn pb_mls_crypto_state(
+    state: &ucr_model::GroupCryptoState,
+) -> Result<pb::RealtimeMlsCryptoState, CanonicalError> {
+    let state_ref = state
+        .state_ref
+        .as_ref()
+        .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::IntegrityFailure))?;
+    Ok(pb::RealtimeMlsCryptoState {
+        crypto_epoch: state.epoch,
+        crypto_state_ref: Some(pb_opaque(state_ref)),
+    })
+}
+
+fn pb_mls_bootstrap(
+    bootstrap: MlsDeviceBootstrap,
+) -> Result<pb::RealtimeMlsBootstrap, CanonicalError> {
+    let welcome_crypto_state = pb_mls_crypto_state(&bootstrap.welcome_crypto_state)?;
+    let current_crypto_state = pb_mls_crypto_state(&bootstrap.current_crypto_state)?;
+    let subsequent_commits = bootstrap
+        .subsequent_commits
+        .into_iter()
+        .map(|commit| {
+            Ok(pb::RealtimeMlsBootstrapCommit {
+                commit: commit.commit,
+                next_crypto_state: Some(pb_mls_crypto_state(&commit.next_crypto_state)?),
+            })
+        })
+        .collect::<Result<Vec<_>, CanonicalError>>()?;
+    Ok(pb::RealtimeMlsBootstrap {
+        group_id: Some(pb_opaque(bootstrap.group_id.as_opaque())),
+        welcome: bootstrap.welcome,
+        welcome_crypto_state: Some(welcome_crypto_state),
+        subsequent_commits,
+        current_crypto_state: Some(current_crypto_state),
+    })
+}
+
 fn pb_realtime_session(
     claims: &RealtimeSessionClaims,
     admission: pb::RealtimeAdmissionState,
@@ -3197,6 +3315,22 @@ where
         Ok(())
     } else {
         Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
+    }
+}
+
+fn map_group_mls_store_error(error: GroupMlsStoreError) -> CanonicalError {
+    match error {
+        GroupMlsStoreError::Durable(error) => map_store_error(error),
+        GroupMlsStoreError::BootstrapTooLarge => {
+            CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
+        }
+        GroupMlsStoreError::ActorDeviceMismatch | GroupMlsStoreError::TargetDeviceMismatch => {
+            CanonicalError::new(CanonicalErrorCode::PermissionDenied)
+        }
+        GroupMlsStoreError::InvalidBootstrap | GroupMlsStoreError::InvalidChangeMaterial => {
+            CanonicalError::new(CanonicalErrorCode::InvalidArgument)
+        }
+        GroupMlsStoreError::Mls(_) => CanonicalError::new(CanonicalErrorCode::Internal),
     }
 }
 
