@@ -428,7 +428,8 @@ pub fn mls_device_admission_fingerprint(
     admission: &MlsDeviceAdmission,
 ) -> Result<[u8; 32], GroupMlsStoreError> {
     fn push(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), GroupMlsStoreError> {
-        let len = u32::try_from(bytes.len()).map_err(|_| GroupMlsStoreError::InvalidChangeMaterial)?;
+        let len =
+            u32::try_from(bytes.len()).map_err(|_| GroupMlsStoreError::InvalidChangeMaterial)?;
         hasher.update(len.to_be_bytes());
         hasher.update(bytes);
         Ok(())
