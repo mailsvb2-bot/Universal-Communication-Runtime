@@ -64,6 +64,11 @@ pub(super) fn verify_v49_objects(connection: &Connection) -> Result<(), DurableS
 }
 
 const V50_OBJECTS_SQL: &str = r"
+DROP TRIGGER IF EXISTS event_id_owner_group_mls_transitions;
+DROP TRIGGER IF EXISTS event_id_owner_events;
+DROP TRIGGER IF EXISTS event_id_owner_group_changes;
+DROP TRIGGER IF EXISTS event_id_owner_call_signals;
+
 CREATE TABLE group_mls_transitions_v50 (
     tenant_id TEXT NOT NULL,
     namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
@@ -123,10 +128,6 @@ CREATE INDEX group_mls_transition_admissions_device
 ON group_mls_transition_admissions(
     tenant_id, namespace_present, namespace_id, device_id, event_id
 );
-
-DROP TRIGGER event_id_owner_events;
-DROP TRIGGER event_id_owner_group_changes;
-DROP TRIGGER event_id_owner_call_signals;
 
 CREATE TRIGGER event_id_owner_events BEFORE INSERT ON events
 WHEN EXISTS(SELECT 1 FROM group_changes WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
