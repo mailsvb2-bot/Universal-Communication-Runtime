@@ -839,6 +839,10 @@ impl GroupMlsBootstrapStore for SqliteLocalStore {
 
         Ok(Some(MlsDeviceBootstrap {
             group_id: group_id.clone(),
+            admission_event_id: EventId::from_opaque(
+                OpaqueId::new(admission_event_id)
+                    .map_err(|_| GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?,
+            ),
             welcome,
             welcome_crypto_state,
             subsequent_commits,
