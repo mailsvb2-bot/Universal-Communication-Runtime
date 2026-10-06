@@ -154,6 +154,7 @@ def main() -> None:
     realtime_proto = read("proto/ucr/v1/realtime.proto")
     grpc_lib = read("crates/ucr-api-grpc/src/lib.rs")
     runtime_lib = read("crates/ucr-runtime/src/lib.rs")
+    realtime_web = read("crates/ucr-realtime-web/src/main.rs")
     group_mls = read("crates/ucr-group-mls/src/lib.rs")
     sqlite_group_mls = read("crates/ucr-storage-sqlite/src/group_mls_store.rs")
     rate_limit_spec = read("spec/service-principal-rate-limits.md")
@@ -399,6 +400,12 @@ def main() -> None:
     require(
         ".with_mls_bootstrap_store(Arc::clone(&store))" in runtime_lib,
         "production runtime does not wire canonical SQLite MLS bootstrap store",
+    )
+    require(
+        '"/v1/realtime/mls-bootstrap"' in realtime_web
+        and "client.get_mls_bootstrap(request).await" in realtime_web
+        and "welcome_base64: STANDARD.encode(bootstrap.welcome)" in realtime_web,
+        "reference browser gateway does not expose authenticated MLS bootstrap projection",
     )
     require(
         "REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES" in grpc_lib
