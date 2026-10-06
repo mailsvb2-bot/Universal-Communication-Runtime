@@ -4,9 +4,9 @@ use ucr_group_mls::{
     AtomicMlsGroupChangeResult, DeviceKeyPackage, GroupMlsAtomicStore, GroupMlsBootstrapStore,
     GroupMlsStoreError, MlsBootstrapCommit, MlsCommitArtifacts, MlsDeviceAdmission,
     MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput, MAX_MLS_BOOTSTRAP_BYTES,
-    MAX_MLS_BOOTSTRAP_COMMITS, create_device_key_package, create_group,
-    current_crypto_state, decode_key_package, load_group, member_device_ids,
-    mls_change_request_fingerprint, own_device_id, sqlite_provider, stage_transition,
+    MAX_MLS_BOOTSTRAP_COMMITS, create_device_key_package, create_group, current_crypto_state,
+    decode_key_package, load_group, member_device_ids, mls_change_request_fingerprint,
+    own_device_id, sqlite_provider, stage_transition,
 };
 use ucr_model::{
     ConversationRecord, DeviceId, GroupChange, GroupChangeKind, GroupCryptoState, GroupId,
@@ -817,10 +817,13 @@ impl GroupMlsBootstrapStore for SqliteLocalStore {
         };
         let subsequent_commits =
             load_commits_after_epoch(&connection, scope, group_id, welcome_crypto_state.epoch)?;
-        let total_bytes = subsequent_commits.iter().try_fold(welcome.len(), |total, item| {
-            total.checked_add(item.commit.len())
-                .ok_or(GroupMlsStoreError::BootstrapTooLarge)
-        })?;
+        let total_bytes = subsequent_commits
+            .iter()
+            .try_fold(welcome.len(), |total, item| {
+                total
+                    .checked_add(item.commit.len())
+                    .ok_or(GroupMlsStoreError::BootstrapTooLarge)
+            })?;
         if total_bytes > MAX_MLS_BOOTSTRAP_BYTES {
             return Err(GroupMlsStoreError::BootstrapTooLarge);
         }
