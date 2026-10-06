@@ -2057,7 +2057,7 @@ where
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
         let bootstrap = store
             .mls_bootstrap_for_device(&claims.scope, &snapshot.group_id, device_id)
-            .map_err(map_group_mls_store_error)?
+            .map_err(|error| map_group_mls_store_error(&error))?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
         let current_ref = bootstrap
             .current_crypto_state
@@ -3316,7 +3316,7 @@ where
     }
 }
 
-fn map_group_mls_store_error(error: GroupMlsStoreError) -> CanonicalError {
+fn map_group_mls_store_error(error: &GroupMlsStoreError) -> CanonicalError {
     match error {
         GroupMlsStoreError::Durable(error) => map_store_error(error),
         GroupMlsStoreError::BootstrapTooLarge => {
@@ -3498,7 +3498,7 @@ mod mls_bootstrap_projection_tests {
     #[test]
     fn oversized_bootstrap_maps_to_resource_exhausted() {
         assert_eq!(
-            map_group_mls_store_error(GroupMlsStoreError::BootstrapTooLarge),
+            map_group_mls_store_error(&GroupMlsStoreError::BootstrapTooLarge),
             CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
         );
     }
