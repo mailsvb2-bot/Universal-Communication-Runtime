@@ -2165,24 +2165,21 @@ where
         let membership = store
             .group_membership(&claims.scope, &snapshot.group_id, &claims.participant)
             .map_err(map_store_error)?;
-        let mode = if membership.is_none() {
-            pb::RealtimeMlsEndpointStateMode::Register
-        } else {
-            match store
-                .mls_bootstrap_for_device(&claims.scope, &snapshot.group_id, device_id)
-                .map_err(|error| map_group_mls_store_error(&error))?
+        let bootstrap = store
+            .mls_bootstrap_for_device(&claims.scope, &snapshot.group_id, device_id)
+            .map_err(|error| map_group_mls_store_error(&error))?;
+        let mode = match (membership, bootstrap) {
+            (None, _) | (Some(_), None) => pb::RealtimeMlsEndpointStateMode::Register,
+            (Some(_), Some(bootstrap))
+                if bootstrap
+                    .admission_event_id
+                    .as_opaque()
+                    .as_str()
+                    .starts_with("rkp-") =>
             {
-                Some(bootstrap)
-                    if bootstrap
-                        .admission_event_id
-                        .as_opaque()
-                        .as_str()
-                        .starts_with("rkp-") =>
-                {
-                    pb::RealtimeMlsEndpointStateMode::Restore
-                }
-                _ => pb::RealtimeMlsEndpointStateMode::LegacyServerOwned,
+                pb::RealtimeMlsEndpointStateMode::Restore
             }
+            (Some(_), Some(_)) => pb::RealtimeMlsEndpointStateMode::LegacyServerOwned,
         };
         Ok((snapshot.group_id, mode))
     }
@@ -2216,12 +2213,12 @@ where
             return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
         }
 
-        if store
+        let membership = store
             .group_membership(&claims.scope, &group_id, &claims.participant)
             .map_err(map_store_error)?
-            .is_some()
-        {
-            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+        if membership.state != ucr_model::GroupMemberState::Active {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
         }
 
         let group = store
@@ -2250,26 +2247,17 @@ where
             OpaqueId::new(format!("rkp-{}", claims.session_id.as_opaque().as_str()))
                 .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
         );
-        let change = GroupChange {
-            event_id,
-            scope: claims.scope.clone(),
-            group_id,
-            expected_revision: group.revision,
-            kind: GroupChangeKind::AddMember {
-                member: claims.participant.clone(),
-                role: realtime_group_role(participant.role),
-            },
-            next_crypto_state: None,
-        };
         store
-            .apply_mls_backed_group_change(
+            .admit_mls_device(
                 &owner,
                 &owner_device.device_id,
-                &change,
-                &[MlsDeviceAdmission {
+                &group_id,
+                &claims.participant,
+                &event_id,
+                &MlsDeviceAdmission {
                     device_id: device_id.clone(),
                     key_package,
-                }],
+                },
             )
             .map_err(|error| map_group_mls_store_error(&error))?;
         Ok(())
