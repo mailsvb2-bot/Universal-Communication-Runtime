@@ -2788,35 +2788,11 @@ where
             }
             continue;
         }
-        let group = store
-            .group(&owner.scope, &initial_group.group_id)
-            .map_err(map_store_error)?
-            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-        let key_package = store
-            .create_mls_device_key_package(&owner.scope, &participant.device_id)
-            .map_err(|error| map_group_mls_error(&error))?;
-        let change = GroupChange {
-            event_id: runtime_event_id("gm", group.revision, &participant.profile.participant)?,
-            scope: owner.scope.clone(),
-            group_id: group.group_id.clone(),
-            expected_revision: group.revision,
-            kind: GroupChangeKind::AddMember {
-                member: participant.profile.participant.clone(),
-                role: desired_role,
-            },
-            next_crypto_state: None,
-        };
-        store
-            .apply_mls_backed_group_change(
-                owner,
-                owner_device_id,
-                &change,
-                &[MlsDeviceAdmission {
-                    device_id: participant.device_id.clone(),
-                    key_package: key_package.bytes,
-                }],
-            )
-            .map_err(|error| map_group_mls_error(&error))?;
+        // New endpoint Devices are admitted to the MLS Group only after the endpoint itself
+        // submits its RFC 9420 KeyPackage through the authenticated realtime path. Creating a
+        // server-side KeyPackage here would bind the Welcome to server-owned private state and make
+        // endpoint-local OpenMLS join impossible.
+        continue;
     }
     Ok(())
 }
