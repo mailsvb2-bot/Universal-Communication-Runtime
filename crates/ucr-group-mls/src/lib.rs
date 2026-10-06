@@ -260,6 +260,7 @@ const MLS_DEVICE_IDENTITY_V1_DOMAIN: &[u8] = b"UCR-GROUP-MLS-DEVICE-V1\0";
 const MLS_CHANGE_REQUEST_V1_DOMAIN: &[u8] = b"UCR-GROUP-MLS-CHANGE-REQUEST-V1\0";
 const MAX_MLS_WIRE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_MLS_BOOTSTRAP_COMMITS: usize = 64;
+pub const MAX_MLS_BOOTSTRAP_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupMlsError {
