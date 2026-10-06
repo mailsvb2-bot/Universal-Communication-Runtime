@@ -678,6 +678,121 @@ fn load_transition(
     }))
 }
 
+fn decode_crypto_state(
+    epoch: Vec<u8>,
+    state_ref: String,
+) -> Result<GroupCryptoState, GroupMlsStoreError> {
+    let epoch: [u8; 8] = epoch
+        .try_into()
+        .map_err(|_| GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?;
+    Ok(GroupCryptoState {
+        capability_id: Some(GROUP_MLS_CAPABILITY.to_owned()),
+        epoch: u64::from_be_bytes(epoch),
+        state_ref: Some(
+            OpaqueId::new(state_ref)
+                .map_err(|_| GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?,
+        ),
+    })
+}
+
+fn load_device_admission(
+    connection: &Connection,
+    scope: &TenantScope,
+    group_id: &GroupId,
+    device_id: &DeviceId,
+) -> Result<Option<(Vec<u8>, GroupCryptoState)>, GroupMlsStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let admission = connection
+        .query_row(
+            "SELECT t.welcome_bytes, t.crypto_epoch, t.crypto_state_ref
+             FROM group_mls_transition_admissions a
+             JOIN group_mls_transitions t
+               ON t.tenant_id=a.tenant_id
+              AND t.namespace_present=a.namespace_present
+              AND t.namespace_id=a.namespace_id
+              AND t.event_id=a.event_id
+             WHERE a.tenant_id=?1
+               AND a.namespace_present=?2
+               AND a.namespace_id=?3
+               AND a.device_id=?4
+               AND t.group_id=?5
+             ORDER BY t.crypto_epoch DESC
+             LIMIT 1",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                device_id.as_opaque().as_str(),
+                group_id.as_opaque().as_str(),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Option<Vec<u8>>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(&error))?;
+    admission
+        .map(|(welcome, epoch, state_ref)| {
+            Ok((
+                welcome.ok_or(GroupMlsStoreError::InvalidChangeMaterial)?,
+                decode_crypto_state(epoch, state_ref)?,
+            ))
+        })
+        .transpose()
+}
+
+fn load_commits_after_epoch(
+    connection: &Connection,
+    scope: &TenantScope,
+    group_id: &GroupId,
+    admitted_epoch: u64,
+) -> Result<Vec<MlsBootstrapCommit>, GroupMlsStoreError> {
+    let namespace = namespace_storage_key(scope);
+    let mut statement = connection
+        .prepare(
+            "SELECT commit_bytes, crypto_epoch, crypto_state_ref
+             FROM group_mls_transitions
+             WHERE tenant_id=?1
+               AND namespace_present=?2
+               AND namespace_id=?3
+               AND group_id=?4
+               AND crypto_epoch>?5
+             ORDER BY crypto_epoch ASC",
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map(
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                group_id.as_opaque().as_str(),
+                admitted_epoch.to_be_bytes().as_slice(),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut commits = Vec::new();
+    for row in rows {
+        let (commit, epoch, state_ref) = row.map_err(|error| map_sqlite_error(&error))?;
+        commits.push(MlsBootstrapCommit {
+            commit,
+            next_crypto_state: decode_crypto_state(epoch, state_ref)?,
+        });
+    }
+    Ok(commits)
+}
+
 impl GroupMlsBootstrapStore for SqliteLocalStore {
     fn mls_bootstrap_for_device(
         &self,
@@ -687,114 +802,19 @@ impl GroupMlsBootstrapStore for SqliteLocalStore {
     ) -> Result<Option<MlsDeviceBootstrap>, GroupMlsStoreError> {
         let connection = self.lock_connection()?;
         require_active_device(&connection, scope, device_id)?;
-        let namespace = namespace_storage_key(scope);
-        let admission = connection
-            .query_row(
-                "SELECT t.welcome_bytes, t.crypto_epoch, t.crypto_state_ref
-                 FROM group_mls_transition_admissions a
-                 JOIN group_mls_transitions t
-                   ON t.tenant_id=a.tenant_id
-                  AND t.namespace_present=a.namespace_present
-                  AND t.namespace_id=a.namespace_id
-                  AND t.event_id=a.event_id
-                 WHERE a.tenant_id=?1
-                   AND a.namespace_present=?2
-                   AND a.namespace_id=?3
-                   AND a.device_id=?4
-                   AND t.group_id=?5
-                 ORDER BY t.crypto_epoch DESC
-                 LIMIT 1",
-                params![
-                    scope.tenant_id.as_opaque().as_str(),
-                    namespace.present,
-                    namespace.value,
-                    device_id.as_opaque().as_str(),
-                    group_id.as_opaque().as_str(),
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<Vec<u8>>>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| map_sqlite_error(&error))?;
-        let Some((welcome, admitted_epoch, admitted_state_ref)) = admission else {
+        let Some((welcome, welcome_crypto_state)) =
+            load_device_admission(&connection, scope, group_id, device_id)?
+        else {
             return Ok(None);
         };
-        let welcome = welcome.ok_or(GroupMlsStoreError::InvalidChangeMaterial)?;
-        let admitted_epoch: [u8; 8] = admitted_epoch
-            .try_into()
-            .map_err(|_| GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?;
-        let admitted_epoch = u64::from_be_bytes(admitted_epoch);
-        let welcome_crypto_state = GroupCryptoState {
-            capability_id: Some(GROUP_MLS_CAPABILITY.to_owned()),
-            epoch: admitted_epoch,
-            state_ref: Some(
-                OpaqueId::new(admitted_state_ref)
-                    .map_err(|_| GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?,
-            ),
-        };
-
-        let mut statement = connection
-            .prepare(
-                "SELECT commit_bytes, crypto_epoch, crypto_state_ref
-                 FROM group_mls_transitions
-                 WHERE tenant_id=?1
-                   AND namespace_present=?2
-                   AND namespace_id=?3
-                   AND group_id=?4
-                   AND crypto_epoch>?5
-                 ORDER BY crypto_epoch ASC",
-            )
-            .map_err(|error| map_sqlite_error(&error))?;
-        let rows = statement
-            .query_map(
-                params![
-                    scope.tenant_id.as_opaque().as_str(),
-                    namespace.present,
-                    namespace.value,
-                    group_id.as_opaque().as_str(),
-                    admitted_epoch.to_be_bytes().as_slice(),
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, Vec<u8>>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .map_err(|error| map_sqlite_error(&error))?;
-        let mut subsequent_commits = Vec::new();
-        for row in rows {
-            let (commit, epoch, state_ref) = row.map_err(|error| map_sqlite_error(&error))?;
-            let epoch: [u8; 8] = epoch
-                .try_into()
-                .map_err(|_| GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?;
-            subsequent_commits.push(MlsBootstrapCommit {
-                commit,
-                next_crypto_state: GroupCryptoState {
-                    capability_id: Some(GROUP_MLS_CAPABILITY.to_owned()),
-                    epoch: u64::from_be_bytes(epoch),
-                    state_ref: Some(
-                        OpaqueId::new(state_ref)
-                            .map_err(|_| GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?,
-                    ),
-                },
-            });
-        }
-        drop(statement);
-
+        let subsequent_commits =
+            load_commits_after_epoch(&connection, scope, group_id, welcome_crypto_state.epoch)?;
         let canonical_group = group_store::load_group_from(&connection, scope, group_id)?
             .ok_or(GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?;
         let current_crypto_state = canonical_group.crypto_state;
         let projected_current = subsequent_commits
             .last()
-            .map(|commit| &commit.next_crypto_state)
-            .unwrap_or(&welcome_crypto_state);
+            .map_or(&welcome_crypto_state, |commit| &commit.next_crypto_state);
         if *projected_current != current_crypto_state {
             return Err(GroupMlsStoreError::Durable(DurableStoreError::Corrupt));
         }
