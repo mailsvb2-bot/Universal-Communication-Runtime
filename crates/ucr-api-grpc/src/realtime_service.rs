@@ -29,9 +29,9 @@ use ucr_model::{
     CallSignallingState, ConferenceJoinGrantRecord, ConferenceJoinGrantUsePolicy,
     ConferenceMediaSubscription, ConferenceParticipantRole, ConferenceSubscriptionSet,
     CorrelationContext, CryptoSuite, DeferredMediaFallback, DeliveryState, DeviceId,
-    DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupChange,
-    GroupChangeKind, GroupId, GroupMediaFrameHeader, GroupMediaSourceSignature, GroupOwnership,
-    GroupRole, IceServerConfig, KeyId, MediaKind, MediaThermalState, MessageEnvelope, MessageId,
+    DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId,
+    GroupMediaFrameHeader, GroupMediaSourceSignature, GroupOwnership, IceServerConfig, KeyId,
+    MediaKind, MediaThermalState, MessageEnvelope, MessageId,
     OpaqueId, OriginRef, PrincipalId, PrincipalKind, ScopedPrincipal, SessionId,
     SfuForwardEnvelope, SfuForwardTarget, TenantScope, UniversalConferenceLifecycle,
     VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType, WebRtcSessionDescription,
@@ -3538,16 +3538,6 @@ where
         Ok(())
     } else {
         Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
-    }
-}
-
-const fn realtime_group_role(role: ConferenceParticipantRole) -> GroupRole {
-    match role {
-        ConferenceParticipantRole::Owner => GroupRole::Owner,
-        ConferenceParticipantRole::Host | ConferenceParticipantRole::Moderator => GroupRole::Admin,
-        ConferenceParticipantRole::Speaker | ConferenceParticipantRole::Attendee => {
-            GroupRole::Member
-        }
     }
 }
 
