@@ -1540,6 +1540,18 @@ mod phase29_atomic_mls_tests {
             ),
             Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict))
         );
+
+        let colliding_group_change = role_change(
+            &group,
+            "rkp-phase29-endpoint-admission",
+            &bob,
+            1,
+            GroupRole::Admin,
+        );
+        assert_eq!(
+            store.apply_group_change(&owner, &colliding_group_change),
+            Err(DurableStoreError::Conflict)
+        );
     }
 
     #[test]
