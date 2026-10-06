@@ -102,6 +102,9 @@ const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_ENDPOINT_CONTRACT_VERSION="ucr.endpoint-e2ee.v1";
 const ENDPOINT_STATE_STORE_CONTRACT_VERSION="ucr.endpoint-state-store.v1";
 const ENDPOINT_WRAPPING_KEY_STORE_CONTRACT_VERSION="ucr.endpoint-wrapping-key.v1";
+const ENDPOINT_WASM_CONTRACT_VERSION="ucr.endpoint-wasm.v1";
+const ENDPOINT_WASM_MODULE_URL="./endpoint-wasm/ucr_endpoint_wasm.js";
+let endpointWasmModulePromise=null;
 const ENDPOINT_STATE_DB_NAME="ucr-endpoint-state-v1";
 const ENDPOINT_STATE_DB_VERSION=2;
 const ENDPOINT_STATE_OBJECT_STORE="sealed-snapshots";
@@ -408,6 +411,29 @@ window.ucrEndpointWrappingKeyVault=Object.freeze({
   contractVersion:ENDPOINT_WRAPPING_KEY_STORE_CONTRACT_VERSION,
   createProvider:createEndpointWrappingKeyProvider,
   getWrappingKey:getEndpointWrappingKey
+});
+async function loadEndpointWasmModule(){
+  if(endpointWasmModulePromise)return endpointWasmModulePromise;
+  endpointWasmModulePromise=(async()=>{
+    const module=await import(ENDPOINT_WASM_MODULE_URL);
+    if(!module||typeof module.default!=="function"||typeof module.endpoint_wasm_contract_version!=="function"||typeof module.EndpointMlsState!=="function"){
+      throw new Error("Invalid endpoint WASM package");
+    }
+    await module.default();
+    const contract=module.endpoint_wasm_contract_version();
+    if(contract!==ENDPOINT_WASM_CONTRACT_VERSION){
+      throw new Error("Unsupported endpoint WASM contract version");
+    }
+    return module;
+  })().catch(error=>{
+    endpointWasmModulePromise=null;
+    throw error;
+  });
+  return endpointWasmModulePromise;
+}
+window.ucrEndpointWasm=Object.freeze({
+  contractVersion:ENDPOINT_WASM_CONTRACT_VERSION,
+  load:loadEndpointWasmModule
 });
 function endpointPersistence(adapter){
   if(!adapter||adapter.contractVersion!==E2EE_ENDPOINT_CONTRACT_VERSION||adapter.persistence===undefined)return null;
