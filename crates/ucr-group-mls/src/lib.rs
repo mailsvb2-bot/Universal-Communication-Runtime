@@ -25,7 +25,7 @@ use ucr_core::{DurableRecordStatus, DurableStoreError};
 use ucr_crypto::GroupMediaEpochSecret;
 use ucr_model::{
     ConversationRecord, DeviceId, EventId, GroupChange, GroupCryptoState, GroupId, GroupRecord,
-    OpaqueId, ScopedPrincipal, TenantScope,
+    OpaqueId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{GROUP_MLS_CAPABILITY, group_change_fingerprint};
 
@@ -415,6 +415,58 @@ pub fn mls_change_request_fingerprint(
     Ok(hasher.finalize().into())
 }
 
+/// Stable fingerprint for one endpoint-owned Device admission into an existing canonical member.
+///
+/// The fingerprint is independent of Group revision because Device admission is a crypto-only
+/// transition. Exact retries therefore remain idempotent across unrelated principal-level changes.
+pub fn mls_device_admission_fingerprint(
+    scope: &TenantScope,
+    group_id: &GroupId,
+    actor_device_id: &DeviceId,
+    member: &PrincipalRef,
+    event_id: &EventId,
+    admission: &MlsDeviceAdmission,
+) -> Result<[u8; 32], GroupMlsStoreError> {
+    fn push(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), GroupMlsStoreError> {
+        let len = u32::try_from(bytes.len()).map_err(|_| GroupMlsStoreError::InvalidChangeMaterial)?;
+        hasher.update(len.to_be_bytes());
+        hasher.update(bytes);
+        Ok(())
+    }
+    fn principal_kind_code(kind: PrincipalKind) -> u8 {
+        match kind {
+            PrincipalKind::Person => 1,
+            PrincipalKind::Device => 2,
+            PrincipalKind::ServiceAccount => 3,
+            PrincipalKind::AiAgent => 4,
+            PrincipalKind::Bot => 5,
+            PrincipalKind::Organization => 6,
+            PrincipalKind::Automation => 7,
+            PrincipalKind::ExternalPlatform => 8,
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"UCR-MLS-DEVICE-ADMISSION-V1\0");
+    push(&mut hasher, scope.tenant_id.as_opaque().as_wire_bytes())?;
+    match scope.namespace_id.as_ref() {
+        Some(namespace) => {
+            hasher.update([1]);
+            push(&mut hasher, namespace.as_opaque().as_wire_bytes())?;
+        }
+        None => hasher.update([0]),
+    }
+    push(&mut hasher, group_id.as_opaque().as_wire_bytes())?;
+    push(&mut hasher, actor_device_id.as_opaque().as_wire_bytes())?;
+    push(&mut hasher, member.principal_id.as_opaque().as_wire_bytes())?;
+    hasher.update([principal_kind_code(member.kind)]);
+    push(&mut hasher, event_id.as_opaque().as_wire_bytes())?;
+    push(&mut hasher, admission.device_id.as_opaque().as_wire_bytes())?;
+    let package_digest = Sha256::digest(&admission.key_package);
+    push(&mut hasher, package_digest.as_slice())?;
+    Ok(hasher.finalize().into())
+}
+
 /// Durable atomic bridge between canonical Group state and endpoint-local RFC 9420 state.
 ///
 /// Implementations must use one durable transaction for the canonical Group mutation and all
@@ -481,6 +533,24 @@ pub trait GroupMlsAtomicStore {
         requested_change: &GroupChange,
         added_devices: &[MlsDeviceAdmission],
     ) -> Result<AtomicMlsGroupChangeResult, GroupMlsStoreError>;
+
+    /// Admits one endpoint-owned Device leaf for an already-active canonical Group member.
+    ///
+    /// This advances only MLS crypto state; it does not create or mutate principal membership.
+    /// The endpoint supplies the public KeyPackage while its private signing/HPKE state remains local.
+    ///
+    /// # Errors
+    /// Rejects inactive/mismatched principals or Devices, stale/corrupt MLS state, changed retries,
+    /// and storage/provider failures.
+    fn admit_mls_device(
+        &self,
+        actor: &ScopedPrincipal,
+        actor_device_id: &DeviceId,
+        group_id: &GroupId,
+        member: &PrincipalRef,
+        event_id: &EventId,
+        admission: &MlsDeviceAdmission,
+    ) -> Result<DurableRecordStatus, GroupMlsStoreError>;
 }
 
 /// Creates endpoint-local MLS credential/key-package material bound to one canonical UCR Device.
