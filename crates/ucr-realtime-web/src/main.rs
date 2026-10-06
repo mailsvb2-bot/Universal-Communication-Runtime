@@ -268,6 +268,7 @@ struct MlsKeyPackageRequest {
 struct MlsAdmissionContextResponse {
     ok: bool,
     group_id: String,
+    endpoint_state_mode: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -742,10 +743,31 @@ async fn get_mls_admission_context(
                     )
                     .into_response();
                 };
+                let mode = match pb::RealtimeMlsEndpointStateMode::try_from(
+                    context.endpoint_state_mode,
+                ) {
+                    Ok(pb::RealtimeMlsEndpointStateMode::Register) => "register",
+                    Ok(pb::RealtimeMlsEndpointStateMode::Restore) => "restore",
+                    Ok(pb::RealtimeMlsEndpointStateMode::LegacyServerOwned) => {
+                        "legacy_server_owned"
+                    }
+                    _ => {
+                        return GatewayFailure::new(
+                            StatusCode::BAD_GATEWAY,
+                            "invalid_mls_context",
+                            "realtime upstream returned an unspecified MLS endpoint state mode",
+                        )
+                        .into_response();
+                    }
+                };
                 match String::from_utf8(group_id.value) {
                     Ok(group_id) => json_response(
                         StatusCode::OK,
-                        &MlsAdmissionContextResponse { ok: true, group_id },
+                        &MlsAdmissionContextResponse {
+                            ok: true,
+                            group_id,
+                            endpoint_state_mode: mode,
+                        },
                     ),
                     Err(_) => GatewayFailure::new(
                         StatusCode::BAD_GATEWAY,
