@@ -26,8 +26,12 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
     assert!(service.contains("self.registry\n                        .heartbeat(&claims"));
     assert!(service.contains("self.device_bound_mls_bootstrap(&claims)"));
     assert!(service.contains(".device_id\n            .as_ref()"));
-    assert!(service.contains("mls_bootstrap_for_device(&claims.scope, &snapshot.group_id, device_id)"));
-    assert!(service.contains("bootstrap.current_crypto_state.epoch != snapshot.group_crypto_epoch"));
+    assert!(
+        service.contains("mls_bootstrap_for_device(&claims.scope, &snapshot.group_id, device_id)")
+    );
+    assert!(
+        service.contains("bootstrap.current_crypto_state.epoch != snapshot.group_crypto_epoch")
+    );
     assert!(service.contains("current_ref != &snapshot.group_crypto_state_ref"));
 
     assert!(group_mls.contains("pub const MAX_MLS_BOOTSTRAP_COMMITS: usize = 64;"));
@@ -43,5 +47,7 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
     assert!(browser_gateway.contains("client.get_mls_bootstrap(request).await"));
     assert!(browser_gateway.contains("welcome_base64: STANDARD.encode(bootstrap.welcome)"));
     assert!(grpc.contains("REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES"));
-    assert!(grpc.contains("GRPC_MAX_ENCODING_MESSAGE_SIZE >= REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES"));
+    assert!(grpc.contains(
+        "GRPC_MAX_ENCODING_MESSAGE_SIZE >= REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES"
+    ));
 }
