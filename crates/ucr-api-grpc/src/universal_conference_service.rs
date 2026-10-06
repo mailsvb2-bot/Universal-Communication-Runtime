@@ -2797,11 +2797,7 @@ where
             .map_err(map_store_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
         let change = GroupChange {
-            event_id: runtime_event_id(
-                "ga",
-                group.revision,
-                &participant.profile.participant,
-            )?,
+            event_id: runtime_event_id("ga", group.revision, &participant.profile.participant)?,
             scope: owner.scope.clone(),
             group_id: group.group_id.clone(),
             expected_revision: group.revision,
