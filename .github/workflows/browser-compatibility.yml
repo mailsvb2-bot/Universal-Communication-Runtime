@@ -29,9 +29,25 @@ jobs:
           - runner: macos-15
             browser: safari
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Install browser WASM target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install pinned wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+      - name: Build endpoint WASM browser package
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/ucr-endpoint-wasm-target"
+          cargo build             --manifest-path crates/ucr-endpoint-wasm/Cargo.toml             --target wasm32-unknown-unknown             --release
+          mkdir -p crates/ucr-realtime-web/static/endpoint-wasm
+          wasm-bindgen             "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/ucr_endpoint_wasm.wasm"             --target web             --out-dir crates/ucr-realtime-web/static/endpoint-wasm             --out-name ucr_endpoint_wasm
+          test -s crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm.js
+          test -s crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm_bg.wasm
       - name: Enable Safari WebDriver
         if: matrix.browser == 'safari'
         run: sudo safaridriver --enable
