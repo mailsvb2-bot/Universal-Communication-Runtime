@@ -388,12 +388,16 @@ def main() -> None:
         "rpc GetMlsAdmissionContext(RealtimeGetMlsAdmissionContextRequest)",
         "rpc RegisterMlsKeyPackage(RealtimeRegisterMlsKeyPackageRequest)",
         "message RealtimeRegisterMlsKeyPackageRequest",
+        "RealtimeMlsEndpointStateMode",
+        "REALTIME_MLS_ENDPOINT_STATE_MODE_REGISTER",
+        "REALTIME_MLS_ENDPOINT_STATE_MODE_RESTORE",
+        "REALTIME_MLS_ENDPOINT_STATE_MODE_LEGACY_SERVER_OWNED",
     ):
         require(marker in realtime_proto, f"endpoint-owned MLS admission public contract missing: {marker}")
     for marker in (
         "RealtimeMlsAdmissionStore",
         "with_mls_admission_store",
-        "mls_admission_group_id",
+        "mls_admission_context",
         "register_endpoint_mls_key_package",
         "MAX_MLS_KEY_PACKAGE_BYTES",
     ):
@@ -406,7 +410,8 @@ def main() -> None:
         '"/v1/realtime/mls-context"' in realtime_web
         and '"/v1/realtime/mls-key-package"' in realtime_web
         and "client.get_mls_admission_context(request).await" in realtime_web
-        and "client.register_mls_key_package(request).await" in realtime_web,
+        and "client.register_mls_key_package(request).await" in realtime_web
+        and "legacy_server_owned" in realtime_web,
         "reference browser gateway does not expose endpoint-owned MLS admission handshake",
     )
     require(
