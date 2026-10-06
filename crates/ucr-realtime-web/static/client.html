@@ -453,6 +453,7 @@ async function fetchEndpointMlsContext(){
   const response=await api("/v1/realtime/mls-context",body());
   const context=await response.json();
   if(!context||context.ok!==true||typeof context.group_id!=="string"||context.group_id.length===0)throw new Error("Invalid MLS admission context");
+  if(!["register","restore","legacy_server_owned"].includes(context.endpoint_state_mode))throw new Error("Invalid MLS endpoint state mode");
   return context;
 }
 async function fetchEndpointMlsBootstrap(){
@@ -522,18 +523,31 @@ async function sealEndpointMlsSnapshot(state){
 }
 async function ensureEndpointMlsReady(){
   if(endpointMlsState)return endpointMlsState;
+  if(window.ucrEndpointMlsSession?.mode==="legacy_server_owned")return null;
   if(!claims||!claims.device_id)throw new Error("Endpoint-owned MLS requires a Device-bound join grant");
-  const module=await loadEndpointWasmModule();
   const context=await fetchEndpointMlsContext();
   endpointMlsGroupId=context.group_id;
+  if(context.endpoint_state_mode==="legacy_server_owned"){
+    window.ucrEndpointMlsSession=Object.freeze({
+      contractVersion:ENDPOINT_WASM_CONTRACT_VERSION,
+      groupId:context.group_id,
+      mode:"legacy_server_owned",
+      state:null
+    });
+    return null;
+  }
+  const module=await loadEndpointWasmModule();
   const persistenceKey=endpointPersistenceStorageKey();
-  const sealed=persistenceKey?await loadEndpointState(persistenceKey):null;
+  if(!persistenceKey)throw new Error("Endpoint MLS persistence requires a Device-bound identity");
+  const sealed=await loadEndpointState(persistenceKey);
   let bootstrap,state;
-  if(sealed!==null){
+  if(context.endpoint_state_mode==="restore"){
+    if(sealed===null)throw new Error("Endpoint-owned MLS state is already admitted but its sealed local snapshot is missing");
     bootstrap=await fetchEndpointMlsBootstrap();
     if(bootstrap.group_id!==context.group_id)throw new Error("MLS bootstrap Group does not match admission context");
     state=await restoreEndpointMlsSnapshot(module,context.group_id,sealed,bootstrap);
-  }else{
+  }else if(context.endpoint_state_mode==="register"){
+    if(sealed!==null)throw new Error("Unexpected sealed endpoint MLS state exists before canonical admission");
     state=new module.EndpointMlsState(
       claims.tenant_id,
       claims.namespace_id??undefined,
@@ -558,6 +572,8 @@ async function ensureEndpointMlsReady(){
       if(typeof state.free==="function")state.free();
       throw error;
     }
+  }else{
+    throw new Error("Unsupported MLS endpoint state mode");
   }
   if(BigInt(state.crypto_epoch())!==BigInt(bootstrap.current_crypto_state.crypto_epoch)){
     if(typeof state.free==="function")state.free();
@@ -568,6 +584,7 @@ async function ensureEndpointMlsReady(){
   window.ucrEndpointMlsSession=Object.freeze({
     contractVersion:ENDPOINT_WASM_CONTRACT_VERSION,
     groupId:context.group_id,
+    mode:context.endpoint_state_mode,
     state
   });
   return state;
