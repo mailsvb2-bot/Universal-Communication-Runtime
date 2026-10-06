@@ -14,7 +14,9 @@ use ucr_core::{
     ServiceQuotaClock, ServiceQuotaStore, StoreForwardStore, SyncStore, SyncTransition,
     TransportFailureDisposition, TransportProvider,
 };
-use ucr_group_mls::{MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS};
+use ucr_group_mls::{
+    MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS, MAX_MLS_KEY_PACKAGE_BYTES,
+};
 use ucr_model::{
     ActorId, ActorKind, AttachmentId, AuthorizationRequest, CallId, CallParticipant,
     CallParticipantState, CallParticipantUpdateKind, CallReconnectPhase, CallSession, CallSignal,
@@ -348,6 +350,8 @@ const REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES: usize =
 
 /// Finite send budget for public responses. Event delivery and device-bound MLS bootstrap are
 /// independently bounded semantic payloads; the transport ceiling covers the larger wire shape.
+pub const REALTIME_MLS_KEY_PACKAGE_MAX_BYTES: usize = MAX_MLS_KEY_PACKAGE_BYTES;
+
 pub const GRPC_MAX_ENCODING_MESSAGE_SIZE: usize = max4(
     EVENT_POLL_RESPONSE_WIRE_MAX_BYTES,
     MESSAGE_ENVELOPE_WIRE_MAX_BYTES,
