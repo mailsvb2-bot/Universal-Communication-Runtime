@@ -714,7 +714,12 @@ where
         let result = match (token, lookup) {
             (Ok(token), Ok((scope, call_id, session_id))) => self
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
-                .and_then(|claims| self.mls_admission_group_id(&claims)),
+                .and_then(|claims| {
+                    self.registry
+                        .heartbeat(&claims, self.now()?)
+                        .map_err(map_registry_error)?;
+                    self.mls_admission_group_id(&claims)
+                }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RealtimeGetMlsAdmissionContextResponse {
@@ -2177,18 +2182,11 @@ where
             return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
         }
 
-        if let Some(membership) = store
+        if store
             .group_membership(&claims.scope, &group_id, &claims.participant)
             .map_err(map_store_error)?
+            .is_some()
         {
-            if membership.state == ucr_model::GroupMemberState::Active
-                && store
-                    .mls_bootstrap_for_device(&claims.scope, &group_id, device_id)
-                    .map_err(|error| map_group_mls_store_error(&error))?
-                    .is_some()
-            {
-                return Ok(());
-            }
             return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
         }
 
