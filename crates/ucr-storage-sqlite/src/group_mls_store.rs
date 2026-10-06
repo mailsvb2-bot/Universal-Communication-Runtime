@@ -237,11 +237,9 @@ impl GroupMlsAtomicStore for SqliteLocalStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
 
-        if let Some(stored) = load_transition(
-            &transaction,
-            &actor.scope,
-            event_id.as_opaque().as_str(),
-        )? {
+        if let Some(stored) =
+            load_transition(&transaction, &actor.scope, event_id.as_opaque().as_str())?
+        {
             let admitted = transition_admits_device(
                 &transaction,
                 &actor.scope,
@@ -266,12 +264,8 @@ impl GroupMlsAtomicStore for SqliteLocalStore {
             event_id.as_opaque().as_str(),
         )?
         .is_some()
-            || super::event_journal::load_event_by_id(
-                &transaction,
-                &actor.scope,
-                event_id,
-            )?
-            .is_some()
+            || super::event_journal::load_event_by_id(&transaction, &actor.scope, event_id)?
+                .is_some()
             || super::call_store::call_signal_reserves_event_id(
                 &transaction,
                 &actor.scope,
@@ -281,24 +275,22 @@ impl GroupMlsAtomicStore for SqliteLocalStore {
             return Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict));
         }
 
-        let mut canonical_group = group_store::load_group_from(
-            &transaction,
-            &actor.scope,
-            group_id,
-        )?
-        .ok_or(GroupMlsStoreError::Durable(DurableStoreError::InvalidRecord))?;
+        let mut canonical_group =
+            group_store::load_group_from(&transaction, &actor.scope, group_id)?.ok_or(
+                GroupMlsStoreError::Durable(DurableStoreError::InvalidRecord),
+            )?;
         if canonical_group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY) {
             return Err(GroupMlsStoreError::InvalidChangeMaterial);
         }
-        let membership = group_store::load_membership_from(
-            &transaction,
-            &actor.scope,
-            group_id,
-            member,
-        )?
-        .ok_or(GroupMlsStoreError::Durable(DurableStoreError::PermissionDenied))?;
+        let membership =
+            group_store::load_membership_from(&transaction, &actor.scope, group_id, member)?
+                .ok_or(GroupMlsStoreError::Durable(
+                    DurableStoreError::PermissionDenied,
+                ))?;
         if membership.state != GroupMemberState::Active {
-            return Err(GroupMlsStoreError::Durable(DurableStoreError::PermissionDenied));
+            return Err(GroupMlsStoreError::Durable(
+                DurableStoreError::PermissionDenied,
+            ));
         }
         require_device_for_principal(
             &transaction,
