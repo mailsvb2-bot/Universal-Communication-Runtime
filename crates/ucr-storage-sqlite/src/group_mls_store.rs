@@ -2,10 +2,11 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use ucr_core::{DurableRecordStatus, DurableStoreError};
 use ucr_group_mls::{
     AtomicMlsGroupChangeResult, DeviceKeyPackage, GroupMlsAtomicStore, GroupMlsBootstrapStore,
-    GroupMlsStoreError, MlsBootstrapCommit, MlsCommitArtifacts, MlsDeviceAdmission,
-    MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput, create_device_key_package, create_group,
-    current_crypto_state, decode_key_package, load_group, member_device_ids,
-    mls_change_request_fingerprint, own_device_id, sqlite_provider, stage_transition,
+    GroupMlsStoreError, MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS, MlsBootstrapCommit,
+    MlsCommitArtifacts, MlsDeviceAdmission, MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput,
+    create_device_key_package, create_group, current_crypto_state, decode_key_package, load_group,
+    member_device_ids, mls_change_request_fingerprint, own_device_id, sqlite_provider,
+    stage_transition,
 };
 use ucr_model::{
     ConversationRecord, DeviceId, GroupChange, GroupChangeKind, GroupCryptoState, GroupId,
@@ -752,6 +753,8 @@ fn load_commits_after_epoch(
     admitted_epoch: u64,
 ) -> Result<Vec<MlsBootstrapCommit>, GroupMlsStoreError> {
     let namespace = namespace_storage_key(scope);
+    let limit = i64::try_from(MAX_MLS_BOOTSTRAP_COMMITS + 1)
+        .map_err(|_| GroupMlsStoreError::InvalidChangeMaterial)?;
     let mut statement = connection
         .prepare(
             "SELECT commit_bytes, crypto_epoch, crypto_state_ref
@@ -761,7 +764,8 @@ fn load_commits_after_epoch(
                AND namespace_id=?3
                AND group_id=?4
                AND crypto_epoch>?5
-             ORDER BY crypto_epoch ASC",
+             ORDER BY crypto_epoch ASC
+             LIMIT ?6",
         )
         .map_err(|error| map_sqlite_error(&error))?;
     let rows = statement
@@ -772,6 +776,7 @@ fn load_commits_after_epoch(
                 namespace.value,
                 group_id.as_opaque().as_str(),
                 admitted_epoch.to_be_bytes().as_slice(),
+                limit,
             ],
             |row| {
                 Ok((
@@ -789,6 +794,9 @@ fn load_commits_after_epoch(
             commit,
             next_crypto_state: decode_crypto_state(epoch, state_ref)?,
         });
+    }
+    if commits.len() > MAX_MLS_BOOTSTRAP_COMMITS {
+        return Err(GroupMlsStoreError::BootstrapTooLarge);
     }
     Ok(commits)
 }
@@ -809,6 +817,16 @@ impl GroupMlsBootstrapStore for SqliteLocalStore {
         };
         let subsequent_commits =
             load_commits_after_epoch(&connection, scope, group_id, welcome_crypto_state.epoch)?;
+        let total_bytes = subsequent_commits
+            .iter()
+            .try_fold(welcome.len(), |total, item| {
+                total
+                    .checked_add(item.commit.len())
+                    .ok_or(GroupMlsStoreError::BootstrapTooLarge)
+            })?;
+        if total_bytes > MAX_MLS_BOOTSTRAP_BYTES {
+            return Err(GroupMlsStoreError::BootstrapTooLarge);
+        }
         let canonical_group = group_store::load_group_from(&connection, scope, group_id)?
             .ok_or(GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?;
         let current_crypto_state = canonical_group.crypto_state;

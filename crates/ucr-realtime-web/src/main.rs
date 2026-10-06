@@ -256,6 +256,28 @@ struct WebRtcIceCandidateRequest {
 }
 
 #[derive(Debug, Serialize)]
+struct MlsCryptoStateResponse {
+    crypto_epoch: u64,
+    crypto_state_ref: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MlsBootstrapCommitResponse {
+    commit_base64: String,
+    next_crypto_state: MlsCryptoStateResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct MlsBootstrapResponse {
+    ok: bool,
+    group_id: String,
+    welcome_base64: String,
+    welcome_crypto_state: MlsCryptoStateResponse,
+    subsequent_commits: Vec<MlsBootstrapCommitResponse>,
+    current_crypto_state: MlsCryptoStateResponse,
+}
+
+#[derive(Debug, Serialize)]
 struct WebRtcIceServerResponse {
     urls: Vec<String>,
     username: Option<String>,
@@ -428,6 +450,10 @@ async fn handle_post_route(state: &AppState, token: &str, path: &str, body: &[u8
         },
         "/v1/realtime/leave" => match decode_json::<SessionRequest>(body) {
             Ok(input) => leave(state, token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/mls-bootstrap" => match decode_json::<SessionRequest>(body) {
+            Ok(input) => get_mls_bootstrap(state, token, input).await,
             Err(error) => error.into_response(),
         },
         "/v1/realtime/raised-hand" => match decode_json::<RaisedHandRequest>(body) {
@@ -664,6 +690,119 @@ async fn heartbeat(state: &AppState, token: &str, input: HeartbeatRequest) -> Ht
                 ),
             }
         }
+        Err(status) => grpc_error(&status),
+    }
+}
+
+fn decode_mls_crypto_state(
+    state: pb::RealtimeMlsCryptoState,
+) -> Result<MlsCryptoStateResponse, GatewayFailure> {
+    let state_ref = state.crypto_state_ref.ok_or_else(|| {
+        GatewayFailure::new(
+            StatusCode::BAD_GATEWAY,
+            "invalid_mls_bootstrap",
+            "realtime upstream returned an invalid MLS crypto state",
+        )
+    })?;
+    let crypto_state_ref = String::from_utf8(state_ref.value).map_err(|_| {
+        GatewayFailure::new(
+            StatusCode::BAD_GATEWAY,
+            "invalid_mls_bootstrap",
+            "realtime upstream returned a non-text MLS state reference",
+        )
+    })?;
+    Ok(MlsCryptoStateResponse {
+        crypto_epoch: state.crypto_epoch,
+        crypto_state_ref,
+    })
+}
+
+fn decode_mls_bootstrap(
+    bootstrap: pb::RealtimeMlsBootstrap,
+) -> Result<MlsBootstrapResponse, GatewayFailure> {
+    let group_id = bootstrap.group_id.ok_or_else(|| {
+        GatewayFailure::new(
+            StatusCode::BAD_GATEWAY,
+            "invalid_mls_bootstrap",
+            "realtime upstream returned an MLS bootstrap without a Group ID",
+        )
+    })?;
+    let group_id = String::from_utf8(group_id.value).map_err(|_| {
+        GatewayFailure::new(
+            StatusCode::BAD_GATEWAY,
+            "invalid_mls_bootstrap",
+            "realtime upstream returned a non-text MLS Group ID",
+        )
+    })?;
+    let welcome_crypto_state =
+        decode_mls_crypto_state(bootstrap.welcome_crypto_state.ok_or_else(|| {
+            GatewayFailure::new(
+                StatusCode::BAD_GATEWAY,
+                "invalid_mls_bootstrap",
+                "realtime upstream returned an MLS bootstrap without Welcome state",
+            )
+        })?)?;
+    let current_crypto_state =
+        decode_mls_crypto_state(bootstrap.current_crypto_state.ok_or_else(|| {
+            GatewayFailure::new(
+                StatusCode::BAD_GATEWAY,
+                "invalid_mls_bootstrap",
+                "realtime upstream returned an MLS bootstrap without current state",
+            )
+        })?)?;
+    let mut subsequent_commits = Vec::with_capacity(bootstrap.subsequent_commits.len());
+    for commit in bootstrap.subsequent_commits {
+        let next_crypto_state =
+            decode_mls_crypto_state(commit.next_crypto_state.ok_or_else(|| {
+                GatewayFailure::new(
+                    StatusCode::BAD_GATEWAY,
+                    "invalid_mls_bootstrap",
+                    "realtime upstream returned an MLS commit without next state",
+                )
+            })?)?;
+        subsequent_commits.push(MlsBootstrapCommitResponse {
+            commit_base64: STANDARD.encode(commit.commit),
+            next_crypto_state,
+        });
+    }
+    Ok(MlsBootstrapResponse {
+        ok: true,
+        group_id,
+        welcome_base64: STANDARD.encode(bootstrap.welcome),
+        welcome_crypto_state,
+        subsequent_commits,
+        current_crypto_state,
+    })
+}
+
+async fn get_mls_bootstrap(state: &AppState, token: &str, input: SessionRequest) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeGetMlsBootstrapRequest {
+        scope: Some(pb_scope(&input)),
+        call_id: Some(pb_id(&input.call)),
+        session_id: Some(pb_id(&input.session)),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+
+    match client.get_mls_bootstrap(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_get_mls_bootstrap_response::Result::Bootstrap(bootstrap)) => {
+                match decode_mls_bootstrap(bootstrap) {
+                    Ok(bootstrap) => json_response(StatusCode::OK, &bootstrap),
+                    Err(error) => error.into_response(),
+                }
+            }
+            Some(pb::realtime_get_mls_bootstrap_response::Result::Error(error)) => {
+                canonical_error_response(
+                    &error,
+                    "mls_bootstrap_rejected",
+                    "device-bound MLS bootstrap rejected",
+                )
+            }
+            None => empty_upstream(),
+        },
         Err(status) => grpc_error(&status),
     }
 }
@@ -1701,7 +1840,7 @@ fn webrtc_offer_response(
     )
 }
 
-fn webrtc_error(
+fn canonical_error_response(
     error: &pb::ErrorEnvelope,
     code: &'static str,
     message: &'static str,
@@ -1733,6 +1872,14 @@ fn webrtc_error(
         | Err(_) => StatusCode::BAD_GATEWAY,
     };
     api_error(status, code, message)
+}
+
+fn webrtc_error(
+    error: &pb::ErrorEnvelope,
+    code: &'static str,
+    message: &'static str,
+) -> HttpResponse {
+    canonical_error_response(error, code, message)
 }
 
 fn grpc_error(status: &tonic::Status) -> HttpResponse {

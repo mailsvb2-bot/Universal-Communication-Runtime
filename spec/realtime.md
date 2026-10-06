@@ -12,6 +12,35 @@ A grant is bound to exact TenantScope, Call ID, participant, **active canonical 
 
 When a valid grant has a future `not_before`, the reference browser client enters a waiting-room state instead of treating the grant as an error. It keeps the bearer in the fragment, does not call realtime APIs early, and automatically attempts admission when the signed window opens. Universal grant issuance is intentionally separate from the operator `entry_open` gate: a personalized attendee grant may be created while entry is closed. At realtime admission, active Attendees receive a retryable temporary-unavailable result until `entry_open=true`; Owner/Host/Moderator/Speaker roles are not held by the attendee gate so they can enter and operate the room. The browser maps that retryable result to `waiting_room` and retries at a bounded interval without redeeming a single-use grant before admission succeeds. Expiry, removal, revocation and other policy failures still fail closed.
 
+## Device-bound MLS bootstrap
+
+After realtime admission, an authenticated endpoint may call `GetMlsBootstrap` using only its
+existing scope/call/session coordinates. The request does not accept a Device ID. The server derives
+the exact active Device from signed realtime claims, revalidates the live realtime session and
+Conference admission, resolves the canonical Group from the Conference snapshot, and reads bootstrap
+material only through the canonical `GroupMlsBootstrapStore`.
+
+The response contains the Welcome recorded for that exact admitted Device, followed by only the
+subsequent MLS commits needed to reach the current canonical Group crypto state. Before returning the
+projection, RealtimeService verifies that its final epoch and state reference exactly match the same
+Conference snapshot that authorized the session. A missing exact-device admission mapping returns no
+bootstrap rather than guessing from another Device or historic Welcome.
+
+Bootstrap history is bounded to `MAX_MLS_BOOTSTRAP_COMMITS = 64` and an aggregate
+`MAX_MLS_BOOTSTRAP_BYTES = 8 MiB` for Welcome plus commits; exceeding either bound fails
+explicitly instead of producing an unbounded response. The projection contains no MLS exporter,
+traffic secret, private signing key, or endpoint wrapping key. Production runtime wires this read
+path to the same `SqliteLocalStore` that owns the canonical MLS transition log; there is no second
+MLS database or browser-specific server owner. The reference browser gateway exposes the same
+authenticated projection at `POST /v1/realtime/mls-bootstrap`, forwards the existing bearer and
+scope/call/session tuple unchanged, and returns Welcome/commit bytes as Base64 with `Cache-Control:
+no-store`. It does not accept a Device ID or any endpoint secret from browser JSON.
+
+Pre-v49 transitions remain preserved but are not backfilled with guessed Device mappings because the
+historic target Device cannot be reconstructed safely from Welcome bytes alone. Such endpoints must
+be re-admitted through a new canonical MLS transition before the device-bound bootstrap projection is
+available.
+
 ## Media path
 
 `PublishMedia` accepts only `SfuForwardEnvelope`, whose payload is already endpoint-encrypted and source-signed. The runtime revalidates the authenticated session Principal/Device against the frame header and canonical Call/Group/MLS state before delegating to `SfuRuntime`.

@@ -2969,6 +2969,9 @@ fn map_group_mls_error(error: &GroupMlsStoreError) -> CanonicalError {
         GroupMlsStoreError::InvalidBootstrap | GroupMlsStoreError::InvalidChangeMaterial => {
             CanonicalError::new(CanonicalErrorCode::Conflict)
         }
+        GroupMlsStoreError::BootstrapTooLarge => {
+            CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
+        }
         GroupMlsStoreError::Mls(_) => CanonicalError::new(CanonicalErrorCode::Internal),
     }
 }

@@ -151,6 +151,12 @@ def main() -> None:
     sqlite_group_mls = read("crates/ucr-storage-sqlite/src/group_mls_store.rs")
     realtime_registry = read("crates/ucr-realtime/src/lib.rs")
     realtime_service = read("crates/ucr-api-grpc/src/realtime_service.rs")
+    realtime_proto = read("proto/ucr/v1/realtime.proto")
+    grpc_lib = read("crates/ucr-api-grpc/src/lib.rs")
+    runtime_lib = read("crates/ucr-runtime/src/lib.rs")
+    realtime_web = read("crates/ucr-realtime-web/src/main.rs")
+    group_mls = read("crates/ucr-group-mls/src/lib.rs")
+    sqlite_group_mls = read("crates/ucr-storage-sqlite/src/group_mls_store.rs")
     rate_limit_spec = read("spec/service-principal-rate-limits.md")
     resource_quota_spec = read("spec/service-resource-quotas.md")
 
@@ -377,6 +383,45 @@ def main() -> None:
         "charge_aggregate_bandwidth",
     ):
         require(marker in realtime_service, f"bandwidth quota fanout anchor missing: {marker}")
+    for marker in (
+        "rpc GetMlsBootstrap(RealtimeGetMlsBootstrapRequest)",
+        "message RealtimeMlsBootstrap",
+        "message RealtimeMlsBootstrapCommit",
+    ):
+        require(marker in realtime_proto, f"realtime MLS bootstrap public contract missing: {marker}")
+    for marker in (
+        "with_mls_bootstrap_store",
+        "device_bound_mls_bootstrap",
+        "mls_bootstrap_for_device(&claims.scope, &snapshot.group_id, device_id)",
+        "bootstrap.current_crypto_state.epoch != snapshot.group_crypto_epoch",
+        "current_ref != &snapshot.group_crypto_state_ref",
+    ):
+        require(marker in realtime_service, f"realtime MLS bootstrap ingress anchor missing: {marker}")
+    require(
+        ".with_mls_bootstrap_store(Arc::clone(&store))" in runtime_lib,
+        "production runtime does not wire canonical SQLite MLS bootstrap store",
+    )
+    require(
+        '"/v1/realtime/mls-bootstrap"' in realtime_web
+        and "client.get_mls_bootstrap(request).await" in realtime_web
+        and "welcome_base64: STANDARD.encode(bootstrap.welcome)" in realtime_web,
+        "reference browser gateway does not expose authenticated MLS bootstrap projection",
+    )
+    require(
+        "REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES" in grpc_lib
+        and "GRPC_MAX_ENCODING_MESSAGE_SIZE >= REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES" in grpc_lib,
+        "gRPC send budget does not cover bounded MLS bootstrap response",
+    )
+    require(
+        "MAX_MLS_BOOTSTRAP_COMMITS: usize = 64" in group_mls
+        and "MAX_MLS_BOOTSTRAP_BYTES: usize = 8 * 1024 * 1024" in group_mls
+        and "BootstrapTooLarge" in group_mls
+        and "group_mls_transition_admissions" in sqlite_group_mls
+        and "commits.len() > MAX_MLS_BOOTSTRAP_COMMITS" in sqlite_group_mls
+        and "total_bytes > MAX_MLS_BOOTSTRAP_BYTES" in sqlite_group_mls,
+        "bounded exact-device MLS bootstrap storage anchors missing",
+    )
+
     for marker in (
         "management",
         "join_issuance",
