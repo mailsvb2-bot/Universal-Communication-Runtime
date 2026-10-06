@@ -18,9 +18,7 @@ use ucr_core::{
     recording_allows_realtime_participant,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
-use ucr_group_mls::{
-    GroupMlsBootstrapStore, GroupMlsStoreError, MlsDeviceBootstrap,
-};
+use ucr_group_mls::{GroupMlsBootstrapStore, GroupMlsStoreError, MlsDeviceBootstrap};
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage,
@@ -3459,7 +3457,7 @@ mod mls_bootstrap_projection_tests {
         let projected = pb_mls_bootstrap(bootstrap).expect("project bootstrap");
         assert_eq!(
             projected.group_id.expect("group id").value,
-            "bootstrap-group"
+            b"bootstrap-group"
         );
         assert_eq!(projected.welcome, vec![1, 2, 3]);
         assert_eq!(
