@@ -151,6 +151,7 @@ def main() -> None:
     sqlite_group_mls = read("crates/ucr-storage-sqlite/src/group_mls_store.rs")
     realtime_registry = read("crates/ucr-realtime/src/lib.rs")
     realtime_service = read("crates/ucr-api-grpc/src/realtime_service.rs")
+    universal_conference_service = read("crates/ucr-api-grpc/src/universal_conference_service.rs")
     realtime_proto = read("proto/ucr/v1/realtime.proto")
     grpc_lib = read("crates/ucr-api-grpc/src/lib.rs")
     runtime_lib = read("crates/ucr-runtime/src/lib.rs")
@@ -383,6 +384,42 @@ def main() -> None:
         "charge_aggregate_bandwidth",
     ):
         require(marker in realtime_service, f"bandwidth quota fanout anchor missing: {marker}")
+    for marker in (
+        "rpc GetMlsAdmissionContext(RealtimeGetMlsAdmissionContextRequest)",
+        "rpc RegisterMlsKeyPackage(RealtimeRegisterMlsKeyPackageRequest)",
+        "message RealtimeRegisterMlsKeyPackageRequest",
+    ):
+        require(marker in realtime_proto, f"endpoint-owned MLS admission public contract missing: {marker}")
+    for marker in (
+        "RealtimeMlsAdmissionStore",
+        "with_mls_admission_store",
+        "mls_admission_group_id",
+        "register_endpoint_mls_key_package",
+        "MAX_MLS_KEY_PACKAGE_BYTES",
+    ):
+        require(marker in realtime_service, f"endpoint-owned MLS admission core missing: {marker}")
+    require(
+        ".with_mls_admission_store(Arc::clone(&store))" in runtime_lib,
+        "production runtime does not wire canonical endpoint MLS admission store",
+    )
+    require(
+        '"/v1/realtime/mls-context"' in realtime_web
+        and '"/v1/realtime/mls-key-package"' in realtime_web
+        and "client.get_mls_admission_context(request).await" in realtime_web
+        and "client.register_mls_key_package(request).await" in realtime_web,
+        "reference browser gateway does not expose endpoint-owned MLS admission handshake",
+    )
+    require(
+        "create_mls_device_key_package(&owner.scope, &participant.device_id)"
+        not in universal_conference_service,
+        "Universal Conference still creates participant MLS KeyPackages server-side",
+    )
+    require(
+        "REALTIME_MLS_KEY_PACKAGE_REQUEST_WIRE_MAX_BYTES" in grpc_lib
+        and "GRPC_MAX_DECODING_MESSAGE_SIZE >= REALTIME_MLS_KEY_PACKAGE_REQUEST_WIRE_MAX_BYTES" in grpc_lib,
+        "gRPC receive budget does not cover endpoint MLS KeyPackage registration",
+    )
+
     for marker in (
         "rpc GetMlsBootstrap(RealtimeGetMlsBootstrapRequest)",
         "message RealtimeMlsBootstrap",
