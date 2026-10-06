@@ -59,9 +59,22 @@ after successful incoming encrypted-envelope processing. The real desktop Browse
 proves that a versioned adapter can seal state, reload the page, and receive the same sealed snapshot
 through restoreSealedState on Chrome, Edge, Firefox and Safari.
 
-This is still not proof of full MLS restore interoperability: the production WASM/OpenMLS adapter must
-bind its wrapping-key lifecycle and canonical current MLS state to these hooks, followed by live
-multi-endpoint reload/interoperability runs. A public UCR server must not expose an MLS exporter secret
+The browser wrapping-key vault stores a non-extractable AES-GCM KEK as a structured-cloned CryptoKey
+in IndexedDB. A random 32-byte endpoint wrapping key is encrypted with that KEK using per-record AES-GCM
+IV and identity-bound additional authenticated data. Durable storage contains the non-extractable KEK,
+IV and ciphertext only; the plaintext 32-byte wrapping key exists only in a transient mutable buffer.
+The Endpoint WASM persistence bridge erases that buffer after each seal/restore operation.
+
+The real desktop Browser Compatibility matrix verifies that the KEK remains non-extractable, raw
+export is rejected, the ciphertext is not the plaintext wrapping key, and the same wrapping key can
+be recovered after a page reload in Chrome, Edge, Firefox and Safari. It also exercises the database
+upgrade path by creating a real version-1 endpoint-state database containing a legacy sealed snapshot,
+opening it through the version-2 client, and verifying that the legacy snapshot is preserved while the
+new wrapping-key vault object store is added.
+
+This is still not proof of full MLS restore interoperability: the production browser integration must
+instantiate the real WASM/OpenMLS adapter with this wrapping-key provider and then prove live
+multi-endpoint MLS reload/interoperability. A public UCR server must not expose an MLS exporter secret
 as a shortcut for browser initialization.
 
 ## Scope
