@@ -704,6 +704,68 @@ where
         }))
     }
 
+    async fn get_mls_admission_context(
+        &self,
+        request: Request<pb::RealtimeGetMlsAdmissionContextRequest>,
+    ) -> Result<Response<pb::RealtimeGetMlsAdmissionContextResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| self.mls_admission_group_id(&claims)),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeGetMlsAdmissionContextResponse {
+            result: Some(match result {
+                Ok(group_id) => pb::realtime_get_mls_admission_context_response::Result::Context(
+                    pb::RealtimeMlsAdmissionContext {
+                        group_id: Some(pb_opaque(group_id.as_opaque())),
+                    },
+                ),
+                Err(error) => {
+                    pb::realtime_get_mls_admission_context_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
+    async fn register_mls_key_package(
+        &self,
+        request: Request<pb::RealtimeRegisterMlsKeyPackageRequest>,
+    ) -> Result<Response<pb::RealtimeRegisterMlsKeyPackageResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    self.registry
+                        .heartbeat(&claims, self.now()?)
+                        .map_err(map_registry_error)?;
+                    self.register_endpoint_mls_key_package(&claims, body.key_package)?;
+                    Ok(pb_acknowledgement(acknowledgement_for(
+                        claims.session_id.as_opaque().clone(),
+                    )))
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeRegisterMlsKeyPackageResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::realtime_register_mls_key_package_response::Result::Acknowledgement(
+                        acknowledgement,
+                    )
+                }
+                Err(error) => {
+                    pb::realtime_register_mls_key_package_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
     async fn get_mls_bootstrap(
         &self,
         request: Request<pb::RealtimeGetMlsBootstrapRequest>,
