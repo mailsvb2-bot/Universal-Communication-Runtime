@@ -495,6 +495,11 @@ impl CallStore for SqliteLocalStore {
                 &signal.scope,
                 signal.event_id.as_opaque().as_str(),
             )?
+            || super::group_mls_store::mls_transition_reserves_event_id(
+                &transaction,
+                &signal.scope,
+                signal.event_id.as_opaque().as_str(),
+            )?
         {
             return Err(DurableStoreError::Conflict);
         }
