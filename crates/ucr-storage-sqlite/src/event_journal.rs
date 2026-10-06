@@ -376,6 +376,11 @@ pub(super) fn append_event_in_transaction(
             &event.scope,
             event.event_id.as_opaque().as_str(),
         )?
+        || super::group_mls_store::mls_transition_reserves_event_id(
+            transaction,
+            &event.scope,
+            event.event_id.as_opaque().as_str(),
+        )?
     {
         return Err(DurableStoreError::Conflict);
     }
