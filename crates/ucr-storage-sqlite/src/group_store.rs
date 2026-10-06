@@ -572,6 +572,11 @@ pub fn apply_group_change_in_transaction(
             &change.scope,
             change.event_id.as_opaque().as_str(),
         )?
+        || super::group_mls_store::mls_transition_reserves_event_id(
+            transaction,
+            &change.scope,
+            change.event_id.as_opaque().as_str(),
+        )?
     {
         return Err(DurableStoreError::Conflict);
     }
