@@ -815,7 +815,9 @@ mod phase29_atomic_mls_tests {
     use ucr_core::{
         DeviceLifecycleStore, GroupStore, IdentityStore, PrincipalIdentityBindingStore,
     };
-    use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
+    use ucr_group_mls::{
+        GroupMlsAtomicStore, GroupMlsBootstrapStore, GroupMlsStoreError, MlsDeviceAdmission,
+    };
     use ucr_model::*;
 
     use super::*;
@@ -937,6 +939,26 @@ mod phase29_atomic_mls_tests {
             expected_revision: revision,
             kind: GroupChangeKind::RemoveMember {
                 member: member.principal.clone(),
+            },
+            next_crypto_state: None,
+        }
+    }
+
+    fn role_change(
+        group: &GroupRecord,
+        event: &str,
+        member: &ScopedPrincipal,
+        revision: u64,
+        role: GroupRole,
+    ) -> GroupChange {
+        GroupChange {
+            event_id: EventId::from_opaque(oid(event)),
+            scope: scope(),
+            group_id: group.group_id.clone(),
+            expected_revision: revision,
+            kind: GroupChangeKind::ChangeRole {
+                member: member.principal.clone(),
+                role,
             },
             next_crypto_state: None,
         }
@@ -1092,6 +1114,72 @@ mod phase29_atomic_mls_tests {
             Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict))
         );
         assert_eq!(mls_snapshot(&store, &group).0, first_state);
+    }
+
+    #[test]
+    fn device_bound_bootstrap_returns_only_exact_admission_and_advances_to_current_state() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).unwrap();
+        let (group, owner, bob) = bootstrap(&store);
+        let admitted_device = device("phase29-bob-device-1");
+        let other_device = device("phase29-bob-device-2");
+        let add = add_change(&group, "phase29-bootstrap-add", &bob, 0);
+        let added = store
+            .apply_mls_backed_group_change(
+                &owner,
+                &device("phase29-owner-device"),
+                &add,
+                &[admission(&store, "phase29-bob-device-1")],
+            )
+            .unwrap();
+        let admitted_state = added.applied_change.next_crypto_state.unwrap();
+        assert_eq!(admitted_state.epoch, 1);
+
+        let initial = store
+            .mls_bootstrap_for_device(&scope(), &group.group_id, &admitted_device)
+            .unwrap()
+            .expect("device bootstrap");
+        assert!(!initial.welcome.is_empty());
+        assert_eq!(initial.welcome_crypto_state, admitted_state);
+        assert!(initial.subsequent_commits.is_empty());
+        assert_eq!(initial.current_crypto_state, admitted_state);
+        assert!(
+            store
+                .mls_bootstrap_for_device(&scope(), &group.group_id, &other_device)
+                .unwrap()
+                .is_none()
+        );
+
+        let rekey = role_change(
+            &group,
+            "phase29-bootstrap-rekey",
+            &bob,
+            1,
+            GroupRole::Admin,
+        );
+        let rekeyed = store
+            .apply_mls_backed_group_change(
+                &owner,
+                &device("phase29-owner-device"),
+                &rekey,
+                &[],
+            )
+            .unwrap();
+        let current_state = rekeyed.applied_change.next_crypto_state.unwrap();
+        assert_eq!(current_state.epoch, 2);
+
+        let advanced = store
+            .mls_bootstrap_for_device(&scope(), &group.group_id, &admitted_device)
+            .unwrap()
+            .expect("advanced bootstrap");
+        assert_eq!(advanced.welcome_crypto_state, admitted_state);
+        assert_eq!(advanced.subsequent_commits.len(), 1);
+        assert!(!advanced.subsequent_commits[0].commit.is_empty());
+        assert_eq!(
+            advanced.subsequent_commits[0].next_crypto_state,
+            current_state
+        );
+        assert_eq!(advanced.current_crypto_state, current_state);
     }
 
     #[test]
