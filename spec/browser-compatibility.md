@@ -72,10 +72,19 @@ upgrade path by creating a real version-1 endpoint-state database containing a l
 opening it through the version-2 client, and verifying that the legacy snapshot is preserved while the
 new wrapping-key vault object store is added.
 
+The Browser Compatibility workflow now also builds the actual `ucr-endpoint-wasm` crate for
+`wasm32-unknown-unknown`, runs pinned `wasm-bindgen-cli 0.2.128` with the web target, serves the
+generated JavaScript/WASM package beside the exact reference client, dynamically imports it in the
+browser, checks `ucr.endpoint-wasm.v1`, instantiates a real `EndpointMlsState`, generates a non-empty
+RFC 9420 KeyPackage through OpenMLS, and verifies that reading a crypto epoch before Welcome join fails
+closed. This is real generated-WASM/OpenMLS execution evidence in Chrome, Edge, Firefox and Safari,
+not merely a Rust wasm32 compile check.
+
 This is still not proof of full MLS restore interoperability: the production browser integration must
-instantiate the real WASM/OpenMLS adapter with this wrapping-key provider and then prove live
-multi-endpoint MLS reload/interoperability. A public UCR server must not expose an MLS exporter secret
-as a shortcut for browser initialization.
+bind that real `EndpointMlsState` to the authenticated `GetMlsBootstrap` response and wrapping-key
+provider, then prove Welcome/commit application, sealed reload/restore and live multi-endpoint media
+interoperability. A public UCR server must not expose an MLS exporter secret as a shortcut for browser
+initialization.
 
 ## Scope
 
