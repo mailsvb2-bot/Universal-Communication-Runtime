@@ -9,7 +9,7 @@ use ucr_group_mls::{
     stage_transition,
 };
 use ucr_model::{
-    ConversationRecord, DeviceId, GroupChange, GroupChangeKind, GroupCryptoState, GroupId,
+    ConversationRecord, DeviceId, EventId, GroupChange, GroupChangeKind, GroupCryptoState, GroupId,
     GroupRecord, OpaqueId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantScope,
 };
 use ucr_protocol::{
@@ -701,11 +701,11 @@ fn load_device_admission(
     scope: &TenantScope,
     group_id: &GroupId,
     device_id: &DeviceId,
-) -> Result<Option<(Vec<u8>, GroupCryptoState)>, GroupMlsStoreError> {
+) -> Result<Option<(EventId, Vec<u8>, GroupCryptoState)>, GroupMlsStoreError> {
     let namespace = namespace_storage_key(scope);
     let admission = connection
         .query_row(
-            "SELECT t.welcome_bytes, t.crypto_epoch, t.crypto_state_ref
+            "SELECT a.event_id, t.welcome_bytes, t.crypto_epoch, t.crypto_state_ref
              FROM group_mls_transition_admissions a
              JOIN group_mls_transitions t
                ON t.tenant_id=a.tenant_id
@@ -728,17 +728,22 @@ fn load_device_admission(
             ],
             |row| {
                 Ok((
-                    row.get::<_, Option<Vec<u8>>>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| map_sqlite_error(&error))?;
     admission
-        .map(|(welcome, epoch, state_ref)| {
+        .map(|(event_id, welcome, epoch, state_ref)| {
             Ok((
+                EventId::from_opaque(
+                    OpaqueId::new(event_id)
+                        .map_err(|_| GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?,
+                ),
                 welcome.ok_or(GroupMlsStoreError::InvalidChangeMaterial)?,
                 decode_crypto_state(epoch, state_ref)?,
             ))
@@ -810,7 +815,7 @@ impl GroupMlsBootstrapStore for SqliteLocalStore {
     ) -> Result<Option<MlsDeviceBootstrap>, GroupMlsStoreError> {
         let connection = self.lock_connection()?;
         require_active_device(&connection, scope, device_id)?;
-        let Some((welcome, welcome_crypto_state)) =
+        let Some((admission_event_id, welcome, welcome_crypto_state)) =
             load_device_admission(&connection, scope, group_id, device_id)?
         else {
             return Ok(None);
@@ -839,10 +844,7 @@ impl GroupMlsBootstrapStore for SqliteLocalStore {
 
         Ok(Some(MlsDeviceBootstrap {
             group_id: group_id.clone(),
-            admission_event_id: EventId::from_opaque(
-                OpaqueId::new(admission_event_id)
-                    .map_err(|_| GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?,
-            ),
+            admission_event_id,
             welcome,
             welcome_crypto_state,
             subsequent_commits,
