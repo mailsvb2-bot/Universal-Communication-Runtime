@@ -386,7 +386,7 @@ fn existing_transition_outcome(
     if let Some(stored) = load_transition(
         transaction,
         &requested_change.scope,
-        requested_event_id.as_opaque().as_str(),
+        requested_change.event_id.as_opaque().as_str(),
     )? {
         return duplicate_transition(
             transaction,
@@ -401,7 +401,7 @@ fn existing_transition_outcome(
     if group_store::load_change_record(
         transaction,
         &requested_change.scope,
-        requested_event_id.as_opaque().as_str(),
+        requested_change.event_id.as_opaque().as_str(),
     )?
     .is_some()
     {
@@ -639,7 +639,7 @@ fn duplicate_transition(
     let (recorded_actor, recorded_fingerprint) = group_store::load_change_record(
         transaction,
         &requested_change.scope,
-        requested_event_id.as_opaque().as_str(),
+        requested_change.event_id.as_opaque().as_str(),
     )?
     .ok_or(GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?;
     if recorded_actor != actor.principal {
