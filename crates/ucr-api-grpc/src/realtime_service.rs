@@ -716,17 +716,20 @@ where
                     self.registry
                         .heartbeat(&claims, self.now()?)
                         .map_err(map_registry_error)?;
-                    self.mls_admission_group_id(&claims)
+                    self.mls_admission_context(&claims)
                 }),
             (Err(error), _) | (_, Err(error)) => Err(error),
         };
         Ok(Response::new(pb::RealtimeGetMlsAdmissionContextResponse {
             result: Some(match result {
-                Ok(group_id) => pb::realtime_get_mls_admission_context_response::Result::Context(
-                    pb::RealtimeMlsAdmissionContext {
-                        group_id: Some(pb_opaque(group_id.as_opaque())),
-                    },
-                ),
+                Ok((group_id, mode)) => {
+                    pb::realtime_get_mls_admission_context_response::Result::Context(
+                        pb::RealtimeMlsAdmissionContext {
+                            group_id: Some(pb_opaque(group_id.as_opaque())),
+                            endpoint_state_mode: mode as i32,
+                        },
+                    )
+                }
                 Err(error) => {
                     pb::realtime_get_mls_admission_context_response::Result::Error(pb_error(error))
                 }
@@ -2142,16 +2145,46 @@ where
         })
     }
 
-    fn mls_admission_group_id(
+    fn mls_admission_context(
         &self,
         claims: &RealtimeSessionClaims,
-    ) -> Result<GroupId, CanonicalError> {
+    ) -> Result<(GroupId, pb::RealtimeMlsEndpointStateMode), CanonicalError> {
         let actor = actor_for(claims);
         let snapshot = conference_runtime(self)
             .snapshot(&actor, &claims.scope, &claims.call_id)
             .map_err(|error| map_conference_error(&error))?;
         self.require_active_universal_participant(claims, &snapshot.group_id)?;
-        Ok(snapshot.group_id)
+        let device_id = claims
+            .device_id
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
+        let store = self
+            .mls_admission_store
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+        let membership = store
+            .group_membership(&claims.scope, &snapshot.group_id, &claims.participant)
+            .map_err(map_store_error)?;
+        let mode = if membership.is_none() {
+            pb::RealtimeMlsEndpointStateMode::Register
+        } else {
+            match store
+                .mls_bootstrap_for_device(&claims.scope, &snapshot.group_id, device_id)
+                .map_err(|error| map_group_mls_store_error(&error))?
+            {
+                Some(bootstrap)
+                    if bootstrap
+                        .admission_event_id
+                        .as_opaque()
+                        .as_str()
+                        .starts_with("rkp-") =>
+                {
+                    pb::RealtimeMlsEndpointStateMode::Restore
+                }
+                _ => pb::RealtimeMlsEndpointStateMode::LegacyServerOwned,
+            }
+        };
+        Ok((snapshot.group_id, mode))
     }
 
     fn register_endpoint_mls_key_package(
@@ -2166,7 +2199,10 @@ where
             .device_id
             .as_ref()
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
-        let group_id = self.mls_admission_group_id(claims)?;
+        let (group_id, mode) = self.mls_admission_context(claims)?;
+        if mode != pb::RealtimeMlsEndpointStateMode::Register {
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        }
         let store = self
             .mls_admission_store
             .as_ref()
