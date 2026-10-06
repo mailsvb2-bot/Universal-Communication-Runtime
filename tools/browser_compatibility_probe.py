@@ -257,6 +257,9 @@ return {
     typeof window.ucrEndpointWrappingKeyVault.createProvider === "function" &&
     typeof window.ucrEndpointWrappingKeyVault.getWrappingKey === "function",
   endpointWrappingKeyVaultContract: window.ucrEndpointWrappingKeyVault?.contractVersion || null,
+  endpointWasmLoader: !!window.ucrEndpointWasm &&
+    typeof window.ucrEndpointWasm.load === "function",
+  endpointWasmContract: window.ucrEndpointWasm?.contractVersion || null,
   endpointPersistenceFunction: typeof endpointPersistence === "function",
   endpointPersistenceKeyFunction: typeof endpointPersistenceStorageKey === "function",
   restoreEndpointPersistedStateFunction: typeof restoreEndpointPersistedState === "function",
@@ -275,6 +278,57 @@ return {
 
         if not isinstance(probe, dict):
             raise RuntimeError(f"browser probe returned invalid payload: {probe!r}")
+        endpoint_wasm_execution = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+const browser = arguments[0];
+Promise.resolve()
+  .then(async () => {
+    const module = await window.ucrEndpointWasm.load();
+    const contract = module.endpoint_wasm_contract_version();
+    const state = new module.EndpointMlsState(
+      "wasm-probe-tenant",
+      "wasm-probe-namespace",
+      "wasm-probe-group",
+      "wasm-probe-device-" + browser
+    );
+    try {
+      const keyPackage = state.key_package();
+      const isBytes = ArrayBuffer.isView(keyPackage) &&
+        Object.prototype.toString.call(keyPackage) === "[object Uint8Array]";
+      let preJoinEpochRejected = false;
+      try {
+        state.crypto_epoch();
+      } catch (_) {
+        preJoinEpochRejected = true;
+      }
+      done({
+        ok: contract === "ucr.endpoint-wasm.v1" &&
+          isBytes &&
+          keyPackage.length > 0 &&
+          preJoinEpochRejected,
+        contract,
+        keyPackageBytes: isBytes ? keyPackage.length : null,
+        preJoinEpochRejected,
+        endpointMlsStateConstructor: typeof module.EndpointMlsState === "function"
+      });
+    } finally {
+      if (typeof state.free === "function") state.free();
+    }
+  })
+  .catch(error => done({ok: false, error: String(error)}));
+""",
+            [args.browser],
+        )
+        endpoint_wasm_execution_verified = (
+            isinstance(endpoint_wasm_execution, dict)
+            and endpoint_wasm_execution.get("ok") is True
+        )
+        if not endpoint_wasm_execution_verified:
+            raise RuntimeError(
+                f"endpoint WASM browser execution failed: {endpoint_wasm_execution!r}"
+            )
         legacy_key = f"ucr-browser-legacy-{args.browser}"
         legacy_bytes = [11, 22, 33, 44, 55]
         legacy_upgrade = execute_async(
@@ -693,6 +747,7 @@ Promise.resolve()
             "indexedDb",
             "endpointStateStore",
             "endpointWrappingKeyVault",
+            "endpointWasmLoader",
             "endpointPersistenceFunction",
             "endpointPersistenceKeyFunction",
             "restoreEndpointPersistedStateFunction",
@@ -712,6 +767,10 @@ Promise.resolve()
             failures.append(f"indexedDbV1ToV2Migration:{legacy_upgrade!r}")
         if probe.get("endpointWrappingKeyVaultContract") != "ucr.endpoint-wrapping-key.v1":
             failures.append("endpointWrappingKeyVaultContract")
+        if probe.get("endpointWasmContract") != "ucr.endpoint-wasm.v1":
+            failures.append("endpointWasmContract")
+        if not endpoint_wasm_execution_verified:
+            failures.append(f"endpointWasmExecution:{endpoint_wasm_execution!r}")
         if not persistence_reload_round_trip:
             failures.append(
                 f"indexedDbReloadRoundTrip:read={persistence_read!r}:"
@@ -731,6 +790,13 @@ Promise.resolve()
             "platform_name": reported.get("platformName"),
             "evidence_kind": "real-desktop-browser-webdriver-smoke",
             "probe": probe,
+            "endpoint_wasm_execution": {
+                "contract": probe.get("endpointWasmContract"),
+                "generated_package_loaded": endpoint_wasm_execution_verified,
+                "openmls_key_package_generated": endpoint_wasm_execution.get("keyPackageBytes", 0) > 0,
+                "pre_join_epoch_fail_closed": endpoint_wasm_execution.get("preJoinEpochRejected") is True,
+                "probe": endpoint_wasm_execution,
+            },
             "endpoint_state_schema_migration": {
                 "from_version": 1,
                 "to_version": 2,
@@ -767,6 +833,8 @@ Promise.resolve()
                 "media_permissions_exercised": False,
                 "conference_network_join_exercised": False,
                 "endpoint_state_reload_exercised": True,
+                "generated_endpoint_wasm_exercised": True,
+                "openmls_key_package_generation_exercised": True,
             },
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)
