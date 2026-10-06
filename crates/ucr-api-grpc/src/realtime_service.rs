@@ -3427,6 +3427,86 @@ fn status_from_canonical(error: CanonicalError) -> Status {
 }
 
 #[cfg(test)]
+mod mls_bootstrap_projection_tests {
+    use super::*;
+    use ucr_group_mls::{MlsBootstrapCommit, MlsDeviceBootstrap};
+
+    fn id(value: &str) -> OpaqueId {
+        OpaqueId::new(value).expect("valid id")
+    }
+
+    fn crypto(epoch: u64, state_ref: &str) -> ucr_model::GroupCryptoState {
+        ucr_model::GroupCryptoState {
+            capability_id: Some(ucr_protocol::GROUP_MLS_CAPABILITY.to_owned()),
+            epoch,
+            state_ref: Some(id(state_ref)),
+        }
+    }
+
+    #[test]
+    fn protobuf_projection_preserves_exact_bootstrap_chain() {
+        let bootstrap = MlsDeviceBootstrap {
+            group_id: GroupId::from_opaque(id("bootstrap-group")),
+            welcome: vec![1, 2, 3],
+            welcome_crypto_state: crypto(7, "state-7"),
+            subsequent_commits: vec![MlsBootstrapCommit {
+                commit: vec![4, 5, 6],
+                next_crypto_state: crypto(8, "state-8"),
+            }],
+            current_crypto_state: crypto(8, "state-8"),
+        };
+
+        let projected = pb_mls_bootstrap(bootstrap).expect("project bootstrap");
+        assert_eq!(
+            projected.group_id.expect("group id").value,
+            "bootstrap-group"
+        );
+        assert_eq!(projected.welcome, vec![1, 2, 3]);
+        assert_eq!(
+            projected
+                .welcome_crypto_state
+                .expect("welcome state")
+                .crypto_epoch,
+            7
+        );
+        assert_eq!(projected.subsequent_commits.len(), 1);
+        assert_eq!(projected.subsequent_commits[0].commit, vec![4, 5, 6]);
+        assert_eq!(
+            projected
+                .current_crypto_state
+                .expect("current state")
+                .crypto_epoch,
+            8
+        );
+    }
+
+    #[test]
+    fn protobuf_projection_rejects_missing_state_reference() {
+        let mut current = crypto(8, "state-8");
+        current.state_ref = None;
+        let bootstrap = MlsDeviceBootstrap {
+            group_id: GroupId::from_opaque(id("bootstrap-group")),
+            welcome: vec![1],
+            welcome_crypto_state: crypto(7, "state-7"),
+            subsequent_commits: Vec::new(),
+            current_crypto_state: current,
+        };
+        assert_eq!(
+            pb_mls_bootstrap(bootstrap),
+            Err(CanonicalError::new(CanonicalErrorCode::IntegrityFailure))
+        );
+    }
+
+    #[test]
+    fn oversized_bootstrap_maps_to_resource_exhausted() {
+        assert_eq!(
+            map_group_mls_store_error(GroupMlsStoreError::BootstrapTooLarge),
+            CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
+        );
+    }
+}
+
+#[cfg(test)]
 mod sfu_placement_lifecycle_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
