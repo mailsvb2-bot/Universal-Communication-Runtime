@@ -29,10 +29,12 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
     assert!(service.contains("current_ref != &snapshot.group_crypto_state_ref"));
 
     assert!(group_mls.contains("pub const MAX_MLS_BOOTSTRAP_COMMITS: usize = 64;"));
+    assert!(group_mls.contains("pub const MAX_MLS_BOOTSTRAP_BYTES: usize = 8 * 1024 * 1024;"));
     assert!(group_mls.contains("BootstrapTooLarge"));
     assert!(sqlite.contains("group_mls_transition_admissions"));
     assert!(sqlite.contains("LIMIT ?6"));
     assert!(sqlite.contains("commits.len() > MAX_MLS_BOOTSTRAP_COMMITS"));
+    assert!(sqlite.contains("total_bytes > MAX_MLS_BOOTSTRAP_BYTES"));
 
     assert!(runtime.contains(".with_mls_bootstrap_store(Arc::clone(&store))"));
 }
