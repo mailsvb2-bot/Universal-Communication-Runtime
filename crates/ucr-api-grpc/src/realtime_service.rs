@@ -3692,6 +3692,7 @@ mod mls_bootstrap_projection_tests {
     fn protobuf_projection_preserves_exact_bootstrap_chain() {
         let bootstrap = MlsDeviceBootstrap {
             group_id: GroupId::from_opaque(id("bootstrap-group")),
+            admission_event_id: EventId::from_opaque(id("rkp-bootstrap-session")),
             welcome: vec![1, 2, 3],
             welcome_crypto_state: crypto(7, "state-7"),
             subsequent_commits: vec![MlsBootstrapCommit {
@@ -3731,6 +3732,7 @@ mod mls_bootstrap_projection_tests {
         current.state_ref = None;
         let bootstrap = MlsDeviceBootstrap {
             group_id: GroupId::from_opaque(id("bootstrap-group")),
+            admission_event_id: EventId::from_opaque(id("rkp-bootstrap-session")),
             welcome: vec![1],
             welcome_crypto_state: crypto(7, "state-7"),
             subsequent_commits: Vec::new(),
