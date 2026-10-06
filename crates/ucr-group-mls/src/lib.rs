@@ -314,6 +314,7 @@ pub struct MlsBootstrapCommit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MlsDeviceBootstrap {
     pub group_id: GroupId,
+    pub admission_event_id: EventId,
     pub welcome: Vec<u8>,
     pub welcome_crypto_state: GroupCryptoState,
     pub subsequent_commits: Vec<MlsBootstrapCommit>,
