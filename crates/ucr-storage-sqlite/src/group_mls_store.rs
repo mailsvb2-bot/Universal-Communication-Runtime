@@ -264,7 +264,13 @@ fn verify_foreign_key_columns(
     actual.sort();
     let mut expected = expected_columns
         .iter()
-        .map(|(from, to)| (expected_target.to_owned(), (*from).to_owned(), (*to).to_owned()))
+        .map(|(from, to)| {
+            (
+                expected_target.to_owned(),
+                (*from).to_owned(),
+                (*to).to_owned(),
+            )
+        })
         .collect::<Vec<_>>();
     expected.sort();
     if actual == expected {
