@@ -875,7 +875,7 @@ fn insert_group(
     Ok(())
 }
 
-fn update_group(
+pub(super) fn update_group(
     transaction: &Transaction<'_>,
     group: &GroupRecord,
 ) -> Result<(), DurableStoreError> {
