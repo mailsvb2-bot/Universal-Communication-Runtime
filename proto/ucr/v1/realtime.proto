@@ -88,8 +88,16 @@ message RealtimeGetMlsAdmissionContextRequest {
   OpaqueId session_id = 3;
 }
 
+enum RealtimeMlsEndpointStateMode {
+  REALTIME_MLS_ENDPOINT_STATE_MODE_UNSPECIFIED = 0;
+  REALTIME_MLS_ENDPOINT_STATE_MODE_REGISTER = 1;
+  REALTIME_MLS_ENDPOINT_STATE_MODE_RESTORE = 2;
+  REALTIME_MLS_ENDPOINT_STATE_MODE_LEGACY_SERVER_OWNED = 3;
+}
+
 message RealtimeMlsAdmissionContext {
   OpaqueId group_id = 1;
+  RealtimeMlsEndpointStateMode endpoint_state_mode = 2;
 }
 
 message RealtimeGetMlsAdmissionContextResponse {
