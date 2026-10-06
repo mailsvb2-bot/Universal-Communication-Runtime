@@ -14,6 +14,7 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
     let service = read("crates/ucr-api-grpc/src/realtime_service.rs");
     let grpc = read("crates/ucr-api-grpc/src/lib.rs");
     let runtime = read("crates/ucr-runtime/src/lib.rs");
+    let browser_gateway = read("crates/ucr-realtime-web/src/main.rs");
     let group_mls = read("crates/ucr-group-mls/src/lib.rs");
     let sqlite = read("crates/ucr-storage-sqlite/src/group_mls_store.rs");
 
@@ -38,6 +39,9 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
     assert!(sqlite.contains("total_bytes > MAX_MLS_BOOTSTRAP_BYTES"));
 
     assert!(runtime.contains(".with_mls_bootstrap_store(Arc::clone(&store))"));
+    assert!(browser_gateway.contains("\"/v1/realtime/mls-bootstrap\""));
+    assert!(browser_gateway.contains("client.get_mls_bootstrap(request).await"));
+    assert!(browser_gateway.contains("welcome_base64: STANDARD.encode(bootstrap.welcome)"));
     assert!(grpc.contains("REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES"));
     assert!(grpc.contains("GRPC_MAX_ENCODING_MESSAGE_SIZE >= REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES"));
 }
