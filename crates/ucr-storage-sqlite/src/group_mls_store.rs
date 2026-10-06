@@ -1469,11 +1469,7 @@ mod phase29_atomic_mls_tests {
                 .contains(&device("phase29-bob-device-1"))
         );
         let bootstrap = store
-            .mls_bootstrap_for_device(
-                &scope(),
-                &group.group_id,
-                &device("phase29-bob-device-1"),
-            )
+            .mls_bootstrap_for_device(&scope(), &group.group_id, &device("phase29-bob-device-1"))
             .unwrap()
             .expect("endpoint bootstrap");
         assert_eq!(bootstrap.admission_event_id, event_id);
