@@ -303,7 +303,8 @@ def main() -> None:
         and "SQLITE_SCHEMA_V46: u32 = 46" in sqlite_store
         and "SQLITE_SCHEMA_V47: u32 = 47" in sqlite_store
         and "SQLITE_SCHEMA_V48: u32 = 48" in sqlite_store
-        and "SQLITE_SCHEMA_VERSION: u32 = 49" in sqlite_store
+        and "SQLITE_SCHEMA_V49: u32 = 49" in sqlite_store
+        and "SQLITE_SCHEMA_VERSION: u32 = 50" in sqlite_store
         and "migrate_v38_to_v39" in sqlite_store
         and "migrate_v39_to_v40" in sqlite_store
         and "migrate_v40_to_v41" in sqlite_store
@@ -315,6 +316,7 @@ def main() -> None:
         and "migrate_v46_to_v47" in sqlite_store
         and "migrate_v47_to_v48" in sqlite_store
         and "migrate_v48_to_v49" in sqlite_store
+        and "migrate_v49_to_v50" in sqlite_store
         and "create_v46_objects" in sqlite_universal_conferences
         and "verify_v46_objects" in sqlite_universal_conferences
         and "create_v47_objects" in sqlite_recording_provider
@@ -323,10 +325,13 @@ def main() -> None:
         and "verify_v48_objects" in sqlite_recording_provider
         and "create_v49_objects" in sqlite_group_mls
         and "verify_v49_objects" in sqlite_group_mls
+        and "create_v50_objects" in sqlite_group_mls
+        and "verify_v50_objects" in sqlite_group_mls
+        and "event_id_owner_group_mls_transitions" in sqlite_group_mls
         and "group_mls_transition_admissions" in sqlite_group_mls
         and "service_audit_authentication" in sqlite_service_control
         and "verify_v44_objects" in sqlite_service_control,
-        "resource quota v42, runtime worker lease v43, typed audit v44, attachment v45, conference metadata v46, recording provider outbox v47, ready marker v48, and device-bound MLS bootstrap v49 migration chain missing",
+        "resource quota v42, runtime worker lease v43, typed audit v44, attachment v45, conference metadata v46, recording provider outbox v47, ready marker v48, device-bound MLS bootstrap v49, and standalone MLS transition v50 migration chain missing",
     )
     for marker in (
         "ServiceResourceQuotaPolicy",
