@@ -3,10 +3,9 @@ use ucr_core::{DurableRecordStatus, DurableStoreError};
 use ucr_group_mls::{
     AtomicMlsGroupChangeResult, DeviceKeyPackage, GroupMlsAtomicStore, GroupMlsBootstrapStore,
     GroupMlsStoreError, MlsBootstrapCommit, MlsCommitArtifacts, MlsDeviceAdmission,
-    MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput,
-    create_device_key_package, create_group, current_crypto_state, decode_key_package, load_group,
-    member_device_ids, mls_change_request_fingerprint, own_device_id, sqlite_provider,
-    stage_transition,
+    MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput, create_device_key_package, create_group,
+    current_crypto_state, decode_key_package, load_group, member_device_ids,
+    mls_change_request_fingerprint, own_device_id, sqlite_provider, stage_transition,
 };
 use ucr_model::{
     ConversationRecord, DeviceId, GroupChange, GroupChangeKind, GroupCryptoState, GroupId,
@@ -17,8 +16,8 @@ use ucr_protocol::{
 };
 
 use super::{
-    SqliteLocalStore, group_store, map_schema_change_error, map_sqlite_error, namespace_storage_key,
-    principal_identity_binding_store, verify_table_columns,
+    SqliteLocalStore, group_store, map_schema_change_error, map_sqlite_error,
+    namespace_storage_key, principal_identity_binding_store, verify_table_columns,
 };
 
 const V49_OBJECTS_SQL: &str = r"
@@ -1150,20 +1149,9 @@ mod phase29_atomic_mls_tests {
                 .is_none()
         );
 
-        let rekey = role_change(
-            &group,
-            "phase29-bootstrap-rekey",
-            &bob,
-            1,
-            GroupRole::Admin,
-        );
+        let rekey = role_change(&group, "phase29-bootstrap-rekey", &bob, 1, GroupRole::Admin);
         let rekeyed = store
-            .apply_mls_backed_group_change(
-                &owner,
-                &device("phase29-owner-device"),
-                &rekey,
-                &[],
-            )
+            .apply_mls_backed_group_change(&owner, &device("phase29-owner-device"), &rekey, &[])
             .unwrap();
         let current_state = rekeyed.applied_change.next_crypto_state.unwrap();
         assert_eq!(current_state.epoch, 2);
