@@ -1406,6 +1406,114 @@ mod phase29_atomic_mls_tests {
     }
 
     #[test]
+    fn principal_admission_precedes_endpoint_owned_device_leaf_and_retry_is_durable() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).unwrap();
+        let (group, owner, bob) = bootstrap(&store);
+
+        let principal_add = add_change(&group, "phase29-principal-only-add", &bob, 0);
+        let added = store
+            .apply_mls_backed_group_change(
+                &owner,
+                &device("phase29-owner-device"),
+                &principal_add,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(added.status, DurableRecordStatus::Persisted);
+        let principal_state = added.applied_change.next_crypto_state.unwrap();
+        assert_eq!(principal_state.epoch, 1);
+        let membership = store
+            .group_membership(&scope(), &group.group_id, &bob.principal)
+            .unwrap()
+            .expect("principal membership");
+        assert_eq!(membership.state, GroupMemberState::Active);
+        assert!(
+            !mls_snapshot(&store, &group)
+                .1
+                .contains(&device("phase29-bob-device-1"))
+        );
+        assert!(
+            store
+                .mls_bootstrap_for_device(
+                    &scope(),
+                    &group.group_id,
+                    &device("phase29-bob-device-1")
+                )
+                .unwrap()
+                .is_none()
+        );
+
+        let endpoint_admission = admission(&store, "phase29-bob-device-1");
+        let event_id = EventId::from_opaque(oid("rkp-phase29-endpoint-admission"));
+        let persisted = store
+            .admit_mls_device(
+                &owner,
+                &device("phase29-owner-device"),
+                &group.group_id,
+                &bob.principal,
+                &event_id,
+                &endpoint_admission,
+            )
+            .unwrap();
+        assert_eq!(persisted, DurableRecordStatus::Persisted);
+        let after_admission = store
+            .group(&scope(), &group.group_id)
+            .unwrap()
+            .expect("group after endpoint admission");
+        assert_eq!(after_admission.revision, 1);
+        assert_eq!(after_admission.crypto_state.epoch, 2);
+        assert!(
+            mls_snapshot(&store, &group)
+                .1
+                .contains(&device("phase29-bob-device-1"))
+        );
+        let bootstrap = store
+            .mls_bootstrap_for_device(
+                &scope(),
+                &group.group_id,
+                &device("phase29-bob-device-1"),
+            )
+            .unwrap()
+            .expect("endpoint bootstrap");
+        assert_eq!(bootstrap.admission_event_id, event_id);
+        assert_eq!(bootstrap.current_crypto_state, after_admission.crypto_state);
+
+        let duplicate = store
+            .admit_mls_device(
+                &owner,
+                &device("phase29-owner-device"),
+                &group.group_id,
+                &bob.principal,
+                &event_id,
+                &endpoint_admission,
+            )
+            .unwrap();
+        assert_eq!(duplicate, DurableRecordStatus::Duplicate);
+        assert_eq!(
+            store
+                .group(&scope(), &group.group_id)
+                .unwrap()
+                .expect("group after exact retry")
+                .crypto_state,
+            after_admission.crypto_state
+        );
+
+        let changed = admission(&store, "phase29-bob-device-2");
+        assert_eq!(
+            store.admit_mls_device(
+                &owner,
+                &device("phase29-owner-device"),
+                &group.group_id,
+                &bob.principal,
+                &event_id,
+                &changed,
+            ),
+            Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict))
+        );
+    }
+
+    #[test]
     fn removing_principal_removes_all_admitted_devices_in_one_epoch_and_survives_restart() {
         let db = TestDb::new();
         let (group, owner, bob, removed_state) = {
