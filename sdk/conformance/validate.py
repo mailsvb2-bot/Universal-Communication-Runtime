@@ -401,9 +401,11 @@ def main() -> None:
     )
     require(
         "MAX_MLS_BOOTSTRAP_COMMITS: usize = 64" in group_mls
+        and "MAX_MLS_BOOTSTRAP_BYTES: usize = 8 * 1024 * 1024" in group_mls
         and "BootstrapTooLarge" in group_mls
         and "group_mls_transition_admissions" in sqlite_group_mls
-        and "commits.len() > MAX_MLS_BOOTSTRAP_COMMITS" in sqlite_group_mls,
+        and "commits.len() > MAX_MLS_BOOTSTRAP_COMMITS" in sqlite_group_mls
+        and "total_bytes > MAX_MLS_BOOTSTRAP_BYTES" in sqlite_group_mls,
         "bounded exact-device MLS bootstrap storage anchors missing",
     )
 
