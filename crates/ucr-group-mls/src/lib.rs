@@ -419,6 +419,9 @@ pub fn mls_change_request_fingerprint(
 ///
 /// The fingerprint is independent of Group revision because Device admission is a crypto-only
 /// transition. Exact retries therefore remain idempotent across unrelated principal-level changes.
+///
+/// # Errors
+/// Returns `InvalidChangeMaterial` when any canonical identifier cannot be length-framed safely.
 pub fn mls_device_admission_fingerprint(
     scope: &TenantScope,
     group_id: &GroupId,
@@ -538,7 +541,7 @@ pub trait GroupMlsAtomicStore {
     /// Admits one endpoint-owned Device leaf for an already-active canonical Group member.
     ///
     /// This advances only MLS crypto state; it does not create or mutate principal membership.
-    /// The endpoint supplies the public KeyPackage while its private signing/HPKE state remains local.
+    /// The endpoint supplies the public `KeyPackage` while its private signing/HPKE state remains local.
     ///
     /// # Errors
     /// Rejects inactive/mismatched principals or Devices, stale/corrupt MLS state, changed retries,
