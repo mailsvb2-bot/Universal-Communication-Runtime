@@ -161,7 +161,9 @@ fn v29_migration_adds_empty_personal_node_state_without_inference() {
         let connection = rusqlite::Connection::open(&path).expect("open raw sqlite");
         connection
             .execute_batch(
-                "DROP INDEX IF EXISTS recording_provider_ready_recovery;
+                "DROP INDEX IF EXISTS group_mls_transition_admissions_device;
+                 DROP TABLE IF EXISTS group_mls_transition_admissions;
+                 DROP INDEX IF EXISTS recording_provider_ready_recovery;
                  DROP INDEX IF EXISTS recording_provider_operations_due;
                  DROP TABLE IF EXISTS recording_provider_operations;
                  DROP TABLE IF EXISTS universal_conference_metadata;
