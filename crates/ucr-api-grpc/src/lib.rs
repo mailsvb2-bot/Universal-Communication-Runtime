@@ -316,12 +316,11 @@ const fn max4(left: usize, middle: usize, right: usize, fourth: usize) -> usize 
 /// Each upper bound is derived from canonical field/count limits plus protobuf tag/varint bounds;
 /// smaller Identity, binding, Conversation, subscription, cursor, and lookup requests fit beneath
 /// the same ceiling.
-const REALTIME_MLS_KEY_PACKAGE_REQUEST_WIRE_MAX_BYTES: usize =
-    TENANT_SCOPE_FIELD_WIRE_MAX_BYTES
-        + 2 * OPAQUE_ID_FIELD_WIRE_MAX_BYTES
-        + PROTOBUF_TAG_MAX_BYTES
-        + PROTOBUF_LEN_PREFIX_MAX_BYTES
-        + MAX_MLS_KEY_PACKAGE_BYTES;
+const REALTIME_MLS_KEY_PACKAGE_REQUEST_WIRE_MAX_BYTES: usize = TENANT_SCOPE_FIELD_WIRE_MAX_BYTES
+    + 2 * OPAQUE_ID_FIELD_WIRE_MAX_BYTES
+    + PROTOBUF_TAG_MAX_BYTES
+    + PROTOBUF_LEN_PREFIX_MAX_BYTES
+    + MAX_MLS_KEY_PACKAGE_BYTES;
 
 pub const GRPC_MAX_DECODING_MESSAGE_SIZE: usize = max4(
     INTEGRATION_COMMAND_REQUEST_WIRE_MAX_BYTES,
