@@ -14,6 +14,7 @@ use ucr_core::{
     ServiceQuotaClock, ServiceQuotaStore, StoreForwardStore, SyncStore, SyncTransition,
     TransportFailureDisposition, TransportProvider,
 };
+use ucr_group_mls::{MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS};
 use ucr_model::{
     ActorId, ActorKind, AttachmentId, AuthorizationRequest, CallId, CallParticipant,
     CallParticipantState, CallParticipantUpdateKind, CallReconnectPhase, CallSession, CallSignal,
@@ -332,12 +333,32 @@ const RECORDING_EXPORT_RESPONSE_WIRE_MAX_BYTES: usize = PROTOBUF_TAG_MAX_BYTES
     + PROTOBUF_LEN_PREFIX_MAX_BYTES
     + RECORDING_EXPORT_ARTIFACT_WIRE_MAX_BYTES;
 
-/// Finite send budget for public responses. The Phase-14 Event poll batch is the largest
-/// response shape because aggregate semantic Event bytes are bounded independently of item count.
-pub const GRPC_MAX_ENCODING_MESSAGE_SIZE: usize = EVENT_POLL_RESPONSE_WIRE_MAX_BYTES;
+const REALTIME_MLS_CRYPTO_STATE_WIRE_MAX_BYTES: usize =
+    U64_FIELD_WIRE_MAX_BYTES + OPAQUE_ID_FIELD_WIRE_MAX_BYTES;
+const REALTIME_MLS_BOOTSTRAP_COMMIT_OVERHEAD_MAX_BYTES: usize =
+    3 * (PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES)
+        + REALTIME_MLS_CRYPTO_STATE_WIRE_MAX_BYTES;
+const REALTIME_MLS_BOOTSTRAP_WIRE_MAX_BYTES: usize = OPAQUE_ID_FIELD_WIRE_MAX_BYTES
+    + MAX_MLS_BOOTSTRAP_BYTES
+    + 3 * (PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES)
+    + 2 * REALTIME_MLS_CRYPTO_STATE_WIRE_MAX_BYTES
+    + MAX_MLS_BOOTSTRAP_COMMITS * REALTIME_MLS_BOOTSTRAP_COMMIT_OVERHEAD_MAX_BYTES;
+const REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES: usize =
+    PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES + REALTIME_MLS_BOOTSTRAP_WIRE_MAX_BYTES;
+
+/// Finite send budget for public responses. Event delivery and device-bound MLS bootstrap are
+/// independently bounded semantic payloads; the transport ceiling covers the larger wire shape.
+pub const GRPC_MAX_ENCODING_MESSAGE_SIZE: usize = max4(
+    EVENT_POLL_RESPONSE_WIRE_MAX_BYTES,
+    MESSAGE_ENVELOPE_WIRE_MAX_BYTES,
+    RECORDING_EXPORT_RESPONSE_WIRE_MAX_BYTES,
+    REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES,
+);
 const _: () = assert!(GRPC_MAX_ENCODING_MESSAGE_SIZE >= MESSAGE_ENVELOPE_WIRE_MAX_BYTES);
 const _: () = assert!(GRPC_MAX_ENCODING_MESSAGE_SIZE >= COMMUNICATION_INTENT_WIRE_MAX_BYTES);
 const _: () = assert!(GRPC_MAX_ENCODING_MESSAGE_SIZE >= RECORDING_EXPORT_RESPONSE_WIRE_MAX_BYTES);
+const _: () =
+    assert!(GRPC_MAX_ENCODING_MESSAGE_SIZE >= REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES);
 
 /// Thin Phase-13 gRPC adapter over the canonical Integration ingress.
 pub struct GrpcIntegrationService<C, A, S> {
