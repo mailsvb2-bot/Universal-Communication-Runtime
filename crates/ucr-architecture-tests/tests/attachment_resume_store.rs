@@ -25,12 +25,14 @@ fn attachment_resume_reuses_canonical_storage_provider_and_sqlite_owner() {
     assert!(sqlite.contains("const SQLITE_SCHEMA_V45: u32 = 45;"));
     assert!(sqlite.contains("const SQLITE_SCHEMA_V46: u32 = 46;"));
     assert!(sqlite.contains("const SQLITE_SCHEMA_V47: u32 = 47;"));
-    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 48;"));
+    assert!(sqlite.contains("const SQLITE_SCHEMA_V48: u32 = 48;"));
+    assert!(sqlite.contains("pub const SQLITE_SCHEMA_VERSION: u32 = 49;"));
     assert!(sqlite.contains("attachment_store::create_v45_objects"));
     assert!(sqlite.contains("migrate_v44_to_v45"));
     assert!(sqlite.contains("migrate_v45_to_v46"));
     assert!(sqlite.contains("migrate_v46_to_v47"));
     assert!(sqlite.contains("migrate_v47_to_v48"));
+    assert!(sqlite.contains("migrate_v48_to_v49"));
     assert!(sqlite_store.contains("impl AttachmentStore for SqliteLocalStore"));
     assert!(sqlite_store.contains("verify_attachment_chunk(&descriptor, chunk)"));
     assert!(sqlite_store.contains("ON DELETE CASCADE"));
