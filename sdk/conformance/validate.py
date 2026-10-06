@@ -152,6 +152,7 @@ def main() -> None:
     realtime_registry = read("crates/ucr-realtime/src/lib.rs")
     realtime_service = read("crates/ucr-api-grpc/src/realtime_service.rs")
     realtime_proto = read("proto/ucr/v1/realtime.proto")
+    grpc_lib = read("crates/ucr-api-grpc/src/lib.rs")
     runtime_lib = read("crates/ucr-runtime/src/lib.rs")
     group_mls = read("crates/ucr-group-mls/src/lib.rs")
     sqlite_group_mls = read("crates/ucr-storage-sqlite/src/group_mls_store.rs")
@@ -398,6 +399,11 @@ def main() -> None:
     require(
         ".with_mls_bootstrap_store(Arc::clone(&store))" in runtime_lib,
         "production runtime does not wire canonical SQLite MLS bootstrap store",
+    )
+    require(
+        "REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES" in grpc_lib
+        and "GRPC_MAX_ENCODING_MESSAGE_SIZE >= REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES" in grpc_lib,
+        "gRPC send budget does not cover bounded MLS bootstrap response",
     )
     require(
         "MAX_MLS_BOOTSTRAP_COMMITS: usize = 64" in group_mls
