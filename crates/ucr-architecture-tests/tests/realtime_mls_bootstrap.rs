@@ -12,6 +12,7 @@ fn read(path: &str) -> String {
 fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
     let proto = read("proto/ucr/v1/realtime.proto");
     let service = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let grpc = read("crates/ucr-api-grpc/src/lib.rs");
     let runtime = read("crates/ucr-runtime/src/lib.rs");
     let group_mls = read("crates/ucr-group-mls/src/lib.rs");
     let sqlite = read("crates/ucr-storage-sqlite/src/group_mls_store.rs");
@@ -37,4 +38,6 @@ fn realtime_mls_bootstrap_is_exact_device_and_uses_canonical_sqlite_owner() {
     assert!(sqlite.contains("total_bytes > MAX_MLS_BOOTSTRAP_BYTES"));
 
     assert!(runtime.contains(".with_mls_bootstrap_store(Arc::clone(&store))"));
+    assert!(grpc.contains("REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES"));
+    assert!(grpc.contains("GRPC_MAX_ENCODING_MESSAGE_SIZE >= REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES"));
 }
