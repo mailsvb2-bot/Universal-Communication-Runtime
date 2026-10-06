@@ -86,6 +86,27 @@ provider, then prove Welcome/commit application, sealed reload/restore and live 
 interoperability. A public UCR server must not expose an MLS exporter secret as a shortcut for browser
 initialization.
 
+## Endpoint-owned MLS admission and reload
+
+For non-owner participant Devices, Universal Conference runtime no longer creates a server-side MLS
+KeyPackage. After realtime session admission, the reference browser resolves the canonical Group
+through the authenticated realtime context endpoint, creates an `EndpointMlsState` locally, submits
+only its public RFC 9420 KeyPackage, and receives the Welcome produced by the canonical MLS Add for
+that exact Device. The server still revalidates KeyPackage credential identity against scope/device
+inside OpenMLS before the canonical Group mutation is committed.
+
+On reload, the browser does not generate a replacement KeyPackage for an already-admitted Device.
+It loads the sealed snapshot from IndexedDB, obtains the canonical device-bound bootstrap chain,
+tries restore against the finite set of canonical epoch/state references from current back to the
+Welcome state, and accepts only the AAD-matching snapshot. It then applies only commits after the
+restored state and seals the resulting current state again with the WebCrypto wrapping-key vault.
+A missing or non-matching snapshot fails closed rather than silently replacing endpoint identity.
+
+Waiting-room sessions do not consume a KeyPackage before media admission becomes live.
+
+The initial Universal Conference owner/creator MLS state is still server-owned and remains a separate
+migration boundary; this section does not claim complete endpoint-owned MLS for every role yet.
+
 ## Scope
 
 This matrix proves browser execution compatibility of the reference client. It does not by itself prove TURN reachability, adverse-network recovery, 1000-browser load, camera/microphone permission UX on every OS, or production endpoint-held E2EE interoperability. Those remain separate evidence gates.
