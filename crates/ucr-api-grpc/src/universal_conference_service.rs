@@ -2788,11 +2788,32 @@ where
             }
             continue;
         }
-        // New endpoint Devices are admitted to the MLS Group only after the endpoint itself
-        // submits its RFC 9420 KeyPackage through the authenticated realtime path. Creating a
-        // server-side KeyPackage here would bind the Welcome to server-owned private state and make
-        // endpoint-local OpenMLS join impossible.
-        continue;
+        // Principal-level admission must exist before the canonical Call can invite this
+        // participant. Do not manufacture an endpoint KeyPackage here: an MLS Rekey advances the
+        // existing Group epoch while the browser Device leaf is admitted later from its own
+        // authenticated KeyPackage.
+        let group = store
+            .group(&owner.scope, &initial_group.group_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
+        let change = GroupChange {
+            event_id: runtime_event_id(
+                "ga",
+                group.revision,
+                &participant.profile.participant,
+            )?,
+            scope: owner.scope.clone(),
+            group_id: group.group_id.clone(),
+            expected_revision: group.revision,
+            kind: GroupChangeKind::AddMember {
+                member: participant.profile.participant.clone(),
+                role: desired_role,
+            },
+            next_crypto_state: None,
+        };
+        store
+            .apply_mls_backed_group_change(owner, owner_device_id, &change, &[])
+            .map_err(|error| map_group_mls_error(&error))?;
     }
     Ok(())
 }
