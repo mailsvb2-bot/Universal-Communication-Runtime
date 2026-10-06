@@ -26,7 +26,7 @@ use ucr_core::{
     UniversalConferenceStore,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet, TrustedSigningKeyResolver};
-use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
+use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError};
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipant, CallParticipantState,
     CallParticipantUpdateKind, CallSession, CallSignal, CallSignalKind, CallSignallingState,
