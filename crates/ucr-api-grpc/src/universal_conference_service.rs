@@ -4791,7 +4791,7 @@ mod universal_runtime_tests {
     }
 
     #[test]
-    fn prepare_runtime_materializes_real_sqlite_mls_group_and_single_call() {
+    fn prepare_runtime_defers_non_owner_mls_membership_until_endpoint_admission() {
         let db = TestDb::new();
         let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
         store
@@ -4841,13 +4841,18 @@ mod universal_runtime_tests {
         );
         assert!(group.crypto_state.state_ref.is_some());
 
-        for expected in [&owner, &attendee] {
-            let membership = store
-                .group_membership(&scope(), &conference().conference_id, expected)
-                .expect("membership read")
-                .expect("membership");
-            assert_eq!(membership.state, GroupMemberState::Active);
-        }
+        let owner_membership = store
+            .group_membership(&scope(), &conference().conference_id, &owner)
+            .expect("owner membership read")
+            .expect("owner membership");
+        assert_eq!(owner_membership.state, GroupMemberState::Active);
+        assert!(
+            store
+                .group_membership(&scope(), &conference().conference_id, &attendee)
+                .expect("attendee membership read")
+                .is_none(),
+            "non-owner MLS membership must wait for endpoint-owned KeyPackage admission"
+        );
 
         let calls = store
             .calls_for_group(&scope(), &conference().conference_id, 8)
