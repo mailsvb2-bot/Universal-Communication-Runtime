@@ -26,7 +26,8 @@ projection, RealtimeService verifies that its final epoch and state reference ex
 Conference snapshot that authorized the session. A missing exact-device admission mapping returns no
 bootstrap rather than guessing from another Device or historic Welcome.
 
-Bootstrap history is bounded to `MAX_MLS_BOOTSTRAP_COMMITS = 64`; exceeding that bound fails
+Bootstrap history is bounded to `MAX_MLS_BOOTSTRAP_COMMITS = 64` and an aggregate
+`MAX_MLS_BOOTSTRAP_BYTES = 8 MiB` for Welcome plus commits; exceeding either bound fails
 explicitly instead of producing an unbounded response. The projection contains no MLS exporter,
 traffic secret, private signing key, or endpoint wrapping key. Production runtime wires this read
 path to the same `SqliteLocalStore` that owns the canonical MLS transition log; there is no second
