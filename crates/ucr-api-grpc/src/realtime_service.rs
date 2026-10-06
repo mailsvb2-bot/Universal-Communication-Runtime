@@ -3318,7 +3318,7 @@ where
 
 fn map_group_mls_store_error(error: &GroupMlsStoreError) -> CanonicalError {
     match error {
-        GroupMlsStoreError::Durable(error) => map_store_error(error),
+        GroupMlsStoreError::Durable(error) => map_store_error(*error),
         GroupMlsStoreError::BootstrapTooLarge => {
             CanonicalError::new(CanonicalErrorCode::ResourceExhausted)
         }
