@@ -540,6 +540,13 @@ pub fn apply_group_change_in_transaction(
             Err(DurableStoreError::Conflict)
         };
     }
+    if super::group_mls_store::mls_transition_reserves_event_id(
+        transaction,
+        &change.scope,
+        change.event_id.as_opaque().as_str(),
+    )? {
+        return Err(DurableStoreError::Conflict);
+    }
     if let ucr_model::GroupChangeKind::AddBridgeMapping { mapping } = &change.kind {
         let registration = super::bridge_store::load_registration_from(
             transaction,
