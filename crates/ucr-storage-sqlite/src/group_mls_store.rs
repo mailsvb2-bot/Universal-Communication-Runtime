@@ -3,7 +3,8 @@ use ucr_core::{DurableRecordStatus, DurableStoreError};
 use ucr_group_mls::{
     AtomicMlsGroupChangeResult, DeviceKeyPackage, GroupMlsAtomicStore, GroupMlsBootstrapStore,
     GroupMlsStoreError, MlsBootstrapCommit, MlsCommitArtifacts, MlsDeviceAdmission,
-    MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput, create_device_key_package, create_group,
+    MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput, MAX_MLS_BOOTSTRAP_COMMITS,
+    create_device_key_package, create_group,
     current_crypto_state, decode_key_package, load_group, member_device_ids,
     mls_change_request_fingerprint, own_device_id, sqlite_provider, stage_transition,
 };
@@ -761,7 +762,8 @@ fn load_commits_after_epoch(
                AND namespace_id=?3
                AND group_id=?4
                AND crypto_epoch>?5
-             ORDER BY crypto_epoch ASC",
+             ORDER BY crypto_epoch ASC
+             LIMIT ?6",
         )
         .map_err(|error| map_sqlite_error(&error))?;
     let rows = statement
@@ -772,6 +774,8 @@ fn load_commits_after_epoch(
                 namespace.value,
                 group_id.as_opaque().as_str(),
                 admitted_epoch.to_be_bytes().as_slice(),
+                i64::try_from(MAX_MLS_BOOTSTRAP_COMMITS + 1)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
             ],
             |row| {
                 Ok((
@@ -789,6 +793,9 @@ fn load_commits_after_epoch(
             commit,
             next_crypto_state: decode_crypto_state(epoch, state_ref)?,
         });
+    }
+    if commits.len() > MAX_MLS_BOOTSTRAP_COMMITS {
+        return Err(GroupMlsStoreError::BootstrapTooLarge);
     }
     Ok(commits)
 }
