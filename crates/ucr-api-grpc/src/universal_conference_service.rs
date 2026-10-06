@@ -4167,6 +4167,7 @@ mod universal_runtime_tests {
         GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore, IdentityStore,
         PrincipalIdentityBindingStore, UniversalConferenceStore,
     };
+    use ucr_group_mls::GroupMlsBootstrapStore;
     use ucr_model::{
         CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
         CallSignallingState, CallTerminationReason, CommandEnvelope, CommandId,
@@ -4812,7 +4813,7 @@ mod universal_runtime_tests {
     }
 
     #[test]
-    fn prepare_runtime_defers_non_owner_mls_membership_until_endpoint_admission() {
+    fn prepare_runtime_admits_principal_but_defers_endpoint_mls_device_leaf() {
         let db = TestDb::new();
         let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
         store
@@ -4867,12 +4868,21 @@ mod universal_runtime_tests {
             .expect("owner membership read")
             .expect("owner membership");
         assert_eq!(owner_membership.state, GroupMemberState::Active);
+        let attendee_membership = store
+            .group_membership(&scope(), &conference().conference_id, &attendee)
+            .expect("attendee membership read")
+            .expect("attendee principal membership");
+        assert_eq!(attendee_membership.state, GroupMemberState::Active);
         assert!(
             store
-                .group_membership(&scope(), &conference().conference_id, &attendee)
-                .expect("attendee membership read")
+                .mls_bootstrap_for_device(
+                    &scope(),
+                    &conference().conference_id,
+                    &ucr_model::DeviceId::from_opaque(oid("device-attendee-runtime")),
+                )
+                .expect("attendee MLS bootstrap read")
                 .is_none(),
-            "non-owner MLS membership must wait for endpoint-owned KeyPackage admission"
+            "principal admission must not create server-owned endpoint MLS bootstrap material"
         );
 
         let calls = store
