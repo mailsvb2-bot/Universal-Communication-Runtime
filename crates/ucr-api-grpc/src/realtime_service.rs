@@ -13,12 +13,16 @@ use ucr_conference::{
 };
 use ucr_core::{
     AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
-    DurableStoreError, EventJournalStore, GroupMessageStore, MAX_ACTIVE_RECORDINGS_PER_CALL,
-    PrincipalIdentityBindingStore, RecordingStore, ServiceQuotaStore, UniversalConferenceStore,
+    DurableStoreError, EventJournalStore, GroupMessageStore, GroupStore, IdentityDeviceLookupStore,
+    MAX_ACTIVE_RECORDINGS_PER_CALL, PrincipalIdentityBindingStore, RecordingStore, ServiceQuotaStore,
+    UniversalConferenceStore,
     recording_allows_realtime_participant,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
-use ucr_group_mls::{GroupMlsBootstrapStore, GroupMlsStoreError, MlsDeviceBootstrap};
+use ucr_group_mls::{
+    GroupMlsAtomicStore, GroupMlsBootstrapStore, GroupMlsStoreError, MAX_MLS_KEY_PACKAGE_BYTES,
+    MlsDeviceAdmission, MlsDeviceBootstrap,
+};
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage,
@@ -27,8 +31,9 @@ use ucr_model::{
     ConferenceMediaSubscription, ConferenceParticipantRole, ConferenceSubscriptionSet,
     CorrelationContext, CryptoSuite, DeferredMediaFallback, DeliveryState, DeviceId,
     DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId,
-    GroupMediaFrameHeader, GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind,
-    MediaThermalState, MessageEnvelope, MessageId, OpaqueId, OriginRef, PrincipalId, PrincipalKind,
+    GroupChange, GroupChangeKind, GroupMediaFrameHeader, GroupMediaSourceSignature, GroupOwnership,
+    GroupRole, IceServerConfig, KeyId, MediaKind, MediaThermalState, MessageEnvelope, MessageId,
+    OpaqueId, OriginRef, PrincipalId, PrincipalKind,
     ScopedPrincipal, SessionId, SfuForwardEnvelope, SfuForwardTarget, TenantScope,
     UniversalConferenceLifecycle, VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
     WebRtcSessionDescription,
@@ -170,6 +175,28 @@ pub trait RealtimeValidatedMediaObserver: fmt::Debug + Send + Sync {
     ) -> Result<(), CanonicalError>;
 }
 
+pub trait RealtimeMlsAdmissionStore:
+    GroupStore
+    + GroupMlsAtomicStore
+    + GroupMlsBootstrapStore
+    + PrincipalIdentityBindingStore
+    + IdentityDeviceLookupStore
+    + Send
+    + Sync
+{
+}
+
+impl<T> RealtimeMlsAdmissionStore for T where
+    T: GroupStore
+        + GroupMlsAtomicStore
+        + GroupMlsBootstrapStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + Send
+        + Sync
+{
+}
+
 #[tonic::async_trait]
 pub trait RealtimeSfuMediaRouter: fmt::Debug + Send + Sync {
     /// Forwards one already-canonicalized encrypted SFU batch through the configured horizontal
@@ -216,6 +243,7 @@ pub struct GrpcRealtimeService<C, A, S> {
     sfu_media_router: Option<Arc<dyn RealtimeSfuMediaRouter>>,
     validated_media_observer: Option<Arc<dyn RealtimeValidatedMediaObserver>>,
     mls_bootstrap_store: Option<Arc<dyn GroupMlsBootstrapStore + Send + Sync>>,
+    mls_admission_store: Option<Arc<dyn RealtimeMlsAdmissionStore>>,
     sfu_placement_transition: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -263,6 +291,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             sfu_media_router: None,
             validated_media_observer: None,
             mls_bootstrap_store: None,
+            mls_admission_store: None,
             sfu_placement_transition: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -302,6 +331,15 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         B: GroupMlsBootstrapStore + Send + Sync + 'static,
     {
         self.mls_bootstrap_store = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn with_mls_admission_store<B>(mut self, store: Arc<B>) -> Self
+    where
+        B: RealtimeMlsAdmissionStore + 'static,
+    {
+        self.mls_admission_store = Some(store);
         self
     }
 
@@ -454,6 +492,7 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             sfu_media_router: self.sfu_media_router.clone(),
             validated_media_observer: self.validated_media_observer.clone(),
             mls_bootstrap_store: self.mls_bootstrap_store.clone(),
+            mls_admission_store: self.mls_admission_store.clone(),
             sfu_placement_transition: Arc::clone(&self.sfu_placement_transition),
         }
     }
@@ -2038,6 +2077,110 @@ where
         })
     }
 
+    fn mls_admission_group_id(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<GroupId, CanonicalError> {
+        let actor = actor_for(claims);
+        let snapshot = conference_runtime(self)
+            .snapshot(&actor, &claims.scope, &claims.call_id)
+            .map_err(|error| map_conference_error(&error))?;
+        self.require_active_universal_participant(claims, &snapshot.group_id)?;
+        Ok(snapshot.group_id)
+    }
+
+    fn register_endpoint_mls_key_package(
+        &self,
+        claims: &RealtimeSessionClaims,
+        key_package: Vec<u8>,
+    ) -> Result<(), CanonicalError> {
+        if key_package.is_empty() || key_package.len() > MAX_MLS_KEY_PACKAGE_BYTES {
+            return Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument));
+        }
+        let device_id = claims
+            .device_id
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
+        let group_id = self.mls_admission_group_id(claims)?;
+        let store = self
+            .mls_admission_store
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+        let participant = self
+            .store
+            .universal_conference_participant(&claims.scope, &group_id, &claims.participant)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+        if !participant.active {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        }
+
+        if let Some(membership) = store
+            .group_membership(&claims.scope, &group_id, &claims.participant)
+            .map_err(map_store_error)?
+        {
+            if membership.state == ucr_model::GroupMemberState::Active
+                && store
+                    .mls_bootstrap_for_device(&claims.scope, &group_id, device_id)
+                    .map_err(|error| map_group_mls_store_error(&error))?
+                    .is_some()
+            {
+                return Ok(());
+            }
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        }
+
+        let group = store
+            .group(&claims.scope, &group_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+        let owner_principal = match &group.ownership {
+            GroupOwnership::PersonOwned(owner) => owner.clone(),
+            _ => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+        };
+        let owner_binding = store
+            .principal_identity_binding(&claims.scope, &owner_principal)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
+        let owner_devices = store
+            .active_devices_for_identity(&claims.scope, &owner_binding.identity_id, 2)
+            .map_err(map_store_error)?;
+        let [owner_device] = owner_devices.as_slice() else {
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        };
+        let owner = ScopedPrincipal {
+            scope: claims.scope.clone(),
+            principal: owner_principal,
+        };
+        let event_id = EventId::from_opaque(
+            OpaqueId::new(format!("rkp-{}", claims.session_id.as_opaque().as_str()))
+                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+        );
+        let change = GroupChange {
+            event_id,
+            scope: claims.scope.clone(),
+            group_id,
+            expected_revision: group.revision,
+            kind: GroupChangeKind::AddMember {
+                member: claims.participant.clone(),
+                role: realtime_group_role(participant.role),
+            },
+            next_crypto_state: None,
+        };
+        store
+            .apply_mls_backed_group_change(
+                &owner,
+                &owner_device.device_id,
+                &change,
+                &[MlsDeviceAdmission {
+                    device_id: device_id.clone(),
+                    key_package,
+                }],
+            )
+            .map_err(|error| map_group_mls_store_error(&error))?;
+        Ok(())
+    }
+
     fn device_bound_mls_bootstrap(
         &self,
         claims: &RealtimeSessionClaims,
@@ -3313,6 +3456,16 @@ where
         Ok(())
     } else {
         Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied))
+    }
+}
+
+const fn realtime_group_role(role: ConferenceParticipantRole) -> GroupRole {
+    match role {
+        ConferenceParticipantRole::Owner => GroupRole::Owner,
+        ConferenceParticipantRole::Host | ConferenceParticipantRole::Moderator => GroupRole::Admin,
+        ConferenceParticipantRole::Speaker | ConferenceParticipantRole::Attendee => {
+            GroupRole::Member
+        }
     }
 }
 
