@@ -1181,6 +1181,10 @@ mod phase29_atomic_mls_tests {
             .unwrap()
             .expect("device bootstrap");
         assert!(!initial.welcome.is_empty());
+        assert_eq!(
+            initial.admission_event_id.as_opaque().as_str(),
+            "phase29-bootstrap-add"
+        );
         assert_eq!(initial.welcome_crypto_state, admitted_state);
         assert!(initial.subsequent_commits.is_empty());
         assert_eq!(initial.current_crypto_state, admitted_state);
@@ -1202,6 +1206,10 @@ mod phase29_atomic_mls_tests {
             .mls_bootstrap_for_device(&scope(), &group.group_id, &admitted_device)
             .unwrap()
             .expect("advanced bootstrap");
+        assert_eq!(
+            advanced.admission_event_id.as_opaque().as_str(),
+            "phase29-bootstrap-add"
+        );
         assert_eq!(advanced.welcome_crypto_state, admitted_state);
         assert_eq!(advanced.subsequent_commits.len(), 1);
         assert!(!advanced.subsequent_commits[0].commit.is_empty());
