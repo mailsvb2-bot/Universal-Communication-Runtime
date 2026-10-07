@@ -275,8 +275,24 @@ jobs:
             fi
             sleep 1
           done
-          xcrun simctl openurl "$IOS_UDID" \
-            'http://127.0.0.1:8765/client.html?ucr_mobile_probe=ios-safari'
+          MOBILE_URL='http://127.0.0.1:8765/client.html?ucr_mobile_probe=ios-safari'
+          open -a Simulator --args -CurrentDeviceUDID "$IOS_UDID" >/dev/null 2>&1 || true
+          xcrun simctl launch "$IOS_UDID" com.apple.mobilesafari >/dev/null 2>&1 || true
+          sleep 3
+          opened=false
+          for attempt in 1 2 3; do
+            if xcrun simctl openurl "$IOS_UDID" "$MOBILE_URL"; then
+              opened=true
+              break
+            fi
+            xcrun simctl terminate "$IOS_UDID" com.apple.mobilesafari >/dev/null 2>&1 || true
+            xcrun simctl launch "$IOS_UDID" com.apple.mobilesafari >/dev/null 2>&1 || true
+            sleep 3
+          done
+          if [ "$opened" != true ]; then
+            kill "$PROBE_PID" 2>/dev/null || true
+            exit 1
+          fi
           wait "$PROBE_PID"
       - name: Upload iOS Safari evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
