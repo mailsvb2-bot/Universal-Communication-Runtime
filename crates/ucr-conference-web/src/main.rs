@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tonic::{Request as GrpcRequest, metadata::MetadataValue, transport::Channel};
-use ucr_api_grpc::pb;
+use ucr_api_grpc::{GRPC_MAX_ENCODING_MESSAGE_SIZE, pb};
 
 const DEFAULT_BIND: &str = "127.0.0.1:8082";
 const DEFAULT_UPSTREAM: &str = "http://127.0.0.1:50051";
@@ -251,8 +251,10 @@ async fn dispatch_recording_post(
         )
         .into_response();
     };
-    let mut client =
-        pb::recording_service_client::RecordingServiceClient::new(recording_upstream.clone());
+    let mut client = pb::recording_service_client::RecordingServiceClient::new(
+        recording_upstream.clone(),
+    )
+    .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
     match path {
         "/v1/recordings" => forward_request_recording(&mut client, body, authorization).await,
         "/v1/recordings/get" => forward_get_recording(&mut client, body, authorization).await,
