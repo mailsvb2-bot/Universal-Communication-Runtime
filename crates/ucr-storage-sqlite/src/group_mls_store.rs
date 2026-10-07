@@ -475,7 +475,7 @@ impl GroupMlsAtomicStore for SqliteLocalStore {
         group_store::update_group(&transaction, &canonical_group)?;
         insert_transition(
             &transaction,
-            TransitionInsert {
+            &TransitionInsert {
                 scope: &actor.scope,
                 group_id,
                 event_id,
@@ -712,7 +712,7 @@ fn apply_new_transition_in_transaction(
     }
     insert_transition(
         transaction,
-        TransitionInsert {
+        &TransitionInsert {
             scope: &applied_change.scope,
             group_id: &applied_change.group_id,
             event_id: &applied_change.event_id,
@@ -1045,7 +1045,7 @@ struct TransitionInsert<'a> {
 
 fn insert_transition(
     transaction: &Transaction<'_>,
-    insert: TransitionInsert<'_>,
+    insert: &TransitionInsert<'_>,
 ) -> Result<(), GroupMlsStoreError> {
     let namespace = namespace_storage_key(insert.scope);
     let state_ref = insert
