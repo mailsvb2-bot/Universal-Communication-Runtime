@@ -20,6 +20,20 @@ const fakeFetch = async (url, init) => {
       revision: 1,
     }}), { status: 200, headers: { "content-type": "application/json" } });
   }
+  if (path === "/v1/conferences/metadata") {
+    return new Response(JSON.stringify({ conference: {
+      scope: { tenant_id: "tenant" },
+      conference_id: "conference-1",
+      integration_id: "integration",
+      external_conference_id_b64: "ZXZlbnQtMQ==",
+      mode: "webinar",
+      lifecycle: "scheduled",
+      schedule: { starts_at_unix_ms: 1000 },
+      metadata: [{ key: "com.example.crm.customer_id", value_b64: "ODQ=" }],
+      entry_open: true,
+      revision: 2,
+    }}), { status: 200, headers: { "content-type": "application/json" } });
+  }
   if (path === "/v1/conferences/resolve") {
     return new Response(JSON.stringify({ conference: {
       scope: { tenant_id: "tenant" },
@@ -118,6 +132,10 @@ const conference = await client.createConference({
   idempotencyKey: "create-1",
   mode: "webinar",
   schedule: { starts_at_unix_ms: 1000 },
+  metadata: [{
+    key: "com.example.crm.customer_id",
+    value: new TextEncoder().encode("42"),
+  }],
 });
 if (conference.conference_id !== "conference-1") throw new Error("createConference response drift");
 
@@ -126,6 +144,13 @@ const context = {
   integrationId: "integration",
   conferenceId: "conference-1",
 };
+const metadataConference = await client.setConferenceMetadata(
+  context,
+  [{ key: "com.example.crm.customer_id", value: new TextEncoder().encode("84") }],
+  "metadata-1",
+);
+if (metadataConference.revision !== 2) throw new Error("setConferenceMetadata response drift");
+
 await client.ensureParticipant({
   ...context,
   externalUserId: "user-1",
@@ -153,13 +178,17 @@ const capabilities = await client.getCapabilities({ tenant_id: "tenant" }, "inte
 if (!capabilities.browser_realtime_gateway || capabilities.production_webrtc) throw new Error("capability truth drift");
 await client.removeParticipant(context, "user-1", "remove-1");
 
-if (calls.length !== 9) throw new Error("client performed hidden retries");
+if (calls.length !== 10) throw new Error("client performed hidden retries");
 for (const call of calls) {
   if (call.init.headers.authorization !== "Bearer machine-token") throw new Error("Bearer admission drift");
 }
 const createBody = JSON.parse(calls[0].init.body);
 if (createBody.external_conference_id_b64 !== "ZXZlbnQtMQ==") throw new Error("external reference encoding drift");
-const participantBody = JSON.parse(calls[1].init.body);
+if (createBody.metadata[0].value_b64 !== "NDI=") throw new Error("create metadata byte encoding drift");
+const metadataBody = JSON.parse(calls[1].init.body);
+if (metadataBody.metadata[0].value_b64 !== "ODQ=") throw new Error("metadata update byte encoding drift");
+if (metadataBody.idempotency_key !== "metadata-1") throw new Error("metadata idempotency drift");
+const participantBody = JSON.parse(calls[2].init.body);
 if (participantBody.external_user_id_b64 !== "dXNlci0x") throw new Error("external user encoding drift");
 
 let denied = false;
@@ -172,15 +201,15 @@ try {
   denied = true;
 }
 if (!denied) throw new Error("canonical error was converted to success");
-if (calls.length !== 10) throw new Error("error path performed hidden retries");
+if (calls.length !== 11) throw new Error("error path performed hidden retries");
 
-const resolveBody = JSON.parse(calls[4].init.body);
+const resolveBody = JSON.parse(calls[5].init.body);
 if (resolveBody.external_conference_id_b64 !== "ZXZlbnQtMQ==") throw new Error("resolve external ID encoding drift");
-const listBody = JSON.parse(calls[5].init.body);
+const listBody = JSON.parse(calls[6].init.body);
 if (listBody.max_items !== 25) throw new Error("participant list bound drift");
-const raisedHandsBody = JSON.parse(calls[6].init.body);
+const raisedHandsBody = JSON.parse(calls[7].init.body);
 if (raisedHandsBody.max_items !== 25) throw new Error("raised-hands bound drift");
-const removeBody = JSON.parse(calls[8].init.body);
+const removeBody = JSON.parse(calls[9].init.body);
 if (removeBody.external_user_id_b64 !== "dXNlci0x") throw new Error("remove participant encoding drift");
 
 let rejectedInsecure = false;
