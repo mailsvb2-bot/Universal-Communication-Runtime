@@ -274,7 +274,16 @@ jobs:
     runs-on: ${{ matrix.runner }}
     continue-on-error: true
     timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     steps:
+      - name: Verify pinned Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun --find simctl
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Install pinned Rust toolchain
         run: rustup show
