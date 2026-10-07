@@ -23,14 +23,16 @@ Display-capture API presence is recorded separately rather than used to falsify 
 
 The product requirement also includes Android Chrome and iOS Safari. Desktop user-agent or viewport emulation is **not** accepted as production evidence for those rows.
 
-Until a real-device or simulator-backed mobile browser lab is wired into CI, the truthful status is:
+The `Browser Compatibility` workflow now runs the exact reference `client.html` inside simulator/emulator-backed mobile browsers:
 
-| Browser | Automated source/behavior coverage | Production compatibility evidence |
+| Browser | Runner / mobile runtime | Evidence |
 | --- | --- | --- |
-| Android Chrome | responsive reference UI + missing-display-capture fallback | pending real mobile browser run |
-| iOS Safari | responsive reference UI + missing-display-capture fallback | pending real iOS Safari run |
+| Android Chrome | Ubuntu 24.04 + Android 14 Google Play emulator | actual `com.android.chrome` package, loopback through `adb reverse`, self-probe JSON |
+| iOS Safari | macOS 15 + available iPhone Simulator | Mobile Safari opened by `simctl openurl`, self-probe JSON |
 
-This distinction is intentional. UCR must not promote mobile compatibility merely because Chromium or WebKit desktop passed.
+The mobile self-probe is inert during ordinary product use and activates only with the CI probe query parameter. Inside the mobile browser it verifies the committed Conference controls, WebRTC/ICE-restart API surface, media-device API presence, secure-context WebCrypto, IndexedDB, the generated Endpoint WASM/OpenMLS package, non-empty KeyPackage generation, pre-join epoch fail-closed behavior, and an IndexedDB save/reload/delete round trip. The host accepts only the expected mobile-browser row and uploads the bounded JSON artifact.
+
+This is simulator/emulator-backed browser evidence, not a claim about physical-device camera quality, microphone permission UX, hardware codec behavior, radio handoff, battery behavior, or every OEM/browser build. Those require device-lab evidence. It is nevertheless materially stronger than desktop UA/viewport spoofing because the page executes inside the actual Android Chrome or iOS Safari runtime.
 
 ## Browser MLS core boundary
 
