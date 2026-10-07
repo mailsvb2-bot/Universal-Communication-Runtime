@@ -53,10 +53,34 @@ def current_activity() -> str:
 
 
 def ui_tree() -> ET.Element:
-    remote = "/sdcard/ucr-chrome-first-run.xml"
-    adb("shell", "uiautomator", "dump", remote, timeout=20)
-    xml = adb("exec-out", "cat", remote, timeout=15)
-    return ET.fromstring(xml)
+    remote = "/data/local/tmp/ucr-chrome-first-run.xml"
+    last_error = "UI tree was not produced"
+    for attempt in range(1, 11):
+        dump = adb(
+            "shell",
+            "uiautomator",
+            "dump",
+            "--compressed",
+            remote,
+            timeout=20,
+            check=False,
+        )
+        xml = adb("exec-out", "cat", remote, timeout=15, check=False)
+        start = xml.find("<")
+        end = xml.rfind(">")
+        if start >= 0 and end >= start:
+            candidate = xml[start : end + 1]
+            try:
+                return ET.fromstring(candidate)
+            except ET.ParseError as error:
+                last_error = f"attempt {attempt}: {error}; dump={dump!r}"
+        else:
+            last_error = (
+                f"attempt {attempt}: no XML document; "
+                f"dump={dump!r}; payload={xml[:500]!r}"
+            )
+        time.sleep(1)
+    raise RuntimeError(f"could not obtain Android UI hierarchy: {last_error}")
 
 
 def center(bounds: str) -> tuple[int, int]:
