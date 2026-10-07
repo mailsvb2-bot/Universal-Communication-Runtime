@@ -37,7 +37,18 @@ jobs:
       - name: Install browser WASM target
         run: rustup target add wasm32-unknown-unknown
       - name: Install pinned wasm-bindgen CLI
-        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if CARGO_NET_RETRY=5 cargo install wasm-bindgen-cli --version 0.2.128 --locked; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
       - name: Build endpoint WASM browser package
         shell: bash
         run: |
@@ -75,3 +86,311 @@ jobs:
           path: dist/browser-compatibility/${{ matrix.browser }}.json
           if-no-files-found: error
           retention-days: 14
+
+
+  android-chrome:
+    name: mobile-android-chrome
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Install browser WASM target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install pinned wasm-bindgen CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if CARGO_NET_RETRY=5 cargo install wasm-bindgen-cli --version 0.2.128 --locked; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+      - name: Build endpoint WASM browser package
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/ucr-endpoint-wasm-target"
+          cargo build \
+            --manifest-path crates/ucr-endpoint-wasm/Cargo.toml \
+            --target wasm32-unknown-unknown \
+            --release
+          mkdir -p crates/ucr-realtime-web/static/endpoint-wasm
+          wasm-bindgen \
+            "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/ucr_endpoint_wasm.wasm" \
+            --target web \
+            --out-dir crates/ucr-realtime-web/static/endpoint-wasm \
+            --out-name ucr_endpoint_wasm
+          test -s crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm.js
+          test -s crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm_bg.wasm
+      - name: Boot Android emulator with Google Chrome
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then SDKMANAGER="$(command -v sdkmanager)"; fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "emulator" \
+            "system-images;android-34;google_apis_playstore;x86_64"
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/adbkey" ]; then
+            adb keygen "$HOME/.android/adbkey" >/dev/null
+          fi
+          export ADB_VENDOR_KEYS="$HOME/.android"
+          echo "ADB_VENDOR_KEYS=$HOME/.android" >> "$GITHUB_ENV"
+          adb kill-server >/dev/null 2>&1 || true
+          adb start-server
+
+          AVD_DIR="$HOME/.android/avd/ucr-mobile.avd"
+          mkdir -p "$AVD_DIR"
+          cat >"$HOME/.android/avd/ucr-mobile.ini" <<EOF
+          avd.ini.encoding=UTF-8
+          path=$AVD_DIR
+          path.rel=avd/ucr-mobile.avd
+          target=android-34
+          EOF
+          cat >"$AVD_DIR/config.ini" <<'EOF'
+          AvdId=ucr-mobile
+          PlayStore.enabled=true
+          abi.type=x86_64
+          avd.ini.displayname=UCR Mobile
+          disk.dataPartition.size=4G
+          fastboot.forceColdBoot=yes
+          hw.audioInput=no
+          hw.camera.back=none
+          hw.camera.front=none
+          hw.cpu.arch=x86_64
+          hw.cpu.ncore=2
+          hw.gpu.enabled=yes
+          hw.gpu.mode=swiftshader_indirect
+          hw.keyboard=yes
+          hw.lcd.density=420
+          hw.lcd.height=2400
+          hw.lcd.width=1080
+          hw.ramSize=2048
+          image.sysdir.1=system-images/android-34/google_apis_playstore/x86_64/
+          runtime.network.latency=none
+          runtime.network.speed=full
+          tag.display=Google Play
+          tag.id=google_apis_playstore
+          vm.heapSize=384
+          EOF
+
+          sudo chmod 666 /dev/kvm
+          nohup "$ANDROID_HOME/emulator/emulator" \
+            -avd ucr-mobile \
+            -no-window \
+            -noaudio \
+            -no-boot-anim \
+            -no-snapshot \
+            -no-metrics \
+            -gpu swiftshader_indirect \
+            >"$RUNNER_TEMP/ucr-android-emulator.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/ucr-android-emulator.pid"
+
+          if ! timeout 180s adb wait-for-device; then
+            cat "$RUNNER_TEMP/ucr-android-emulator.log" >&2
+            exit 1
+          fi
+          booted=false
+          for attempt in $(seq 1 120); do
+            if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+              booted=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$booted" != true ]; then
+            cat "$RUNNER_TEMP/ucr-android-emulator.log" >&2
+            exit 1
+          fi
+
+          adb shell settings put global device_provisioned 1
+          adb shell settings put secure user_setup_complete 1
+          adb shell pm enable com.android.chrome >/dev/null 2>&1 || true
+          adb shell pm path com.android.chrome
+          adb shell 'echo "chrome --disable-fre --no-default-browser-check --no-first-run" > /data/local/tmp/chrome-command-line'
+          adb reverse tcp:8765 tcp:8765
+      - name: Probe Android Chrome on emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/mobile_browser_compatibility_probe.py \
+            --browser android-chrome \
+            --port 8765 \
+            --output dist/browser-compatibility/android-chrome.json &
+          PROBE_PID=$!
+          for attempt in $(seq 1 60); do
+            if curl -fsS --connect-timeout 1 --max-time 2 http://127.0.0.1:8765/client.html >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              kill "$PROBE_PID" 2>/dev/null || true
+              exit 1
+            fi
+            sleep 1
+          done
+          adb shell am force-stop com.android.chrome
+          adb shell am start -W \
+            -n com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity \
+            -a android.intent.action.VIEW \
+            -d 'about:blank'
+          python3 tools/android_chrome_first_run.py --timeout-seconds 120
+          adb shell am force-stop com.android.chrome
+          adb shell am start -W \
+            -n com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity \
+            -a android.intent.action.VIEW \
+            -d 'http://127.0.0.1:8765/client.html?ucr_mobile_probe=android-chrome'
+          wait "$PROBE_PID"
+      - name: Upload Android Chrome evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ucr-browser-compatibility-android-chrome-${{ github.sha }}
+          path: dist/browser-compatibility/android-chrome.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Stop Android emulator
+        if: always()
+        shell: bash
+        run: adb emu kill >/dev/null 2>&1 || true
+
+  ios-safari:
+    name: mobile-ios-safari
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Install browser WASM target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Install pinned wasm-bindgen CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if CARGO_NET_RETRY=5 cargo install wasm-bindgen-cli --version 0.2.128 --locked; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+      - name: Build endpoint WASM browser package
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/ucr-endpoint-wasm-target"
+          cargo build \
+            --manifest-path crates/ucr-endpoint-wasm/Cargo.toml \
+            --target wasm32-unknown-unknown \
+            --release
+          mkdir -p crates/ucr-realtime-web/static/endpoint-wasm
+          wasm-bindgen \
+            "$CARGO_TARGET_DIR/wasm32-unknown-unknown/release/ucr_endpoint_wasm.wasm" \
+            --target web \
+            --out-dir crates/ucr-realtime-web/static/endpoint-wasm \
+            --out-name ucr_endpoint_wasm
+          test -s crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm.js
+          test -s crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm_bg.wasm
+      - name: Boot iOS Simulator
+        id: ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          IOS_UDID="$(python3 - <<'PY'
+          import json
+          import re
+          import subprocess
+
+          data = json.loads(
+              subprocess.check_output(
+                  ["xcrun", "simctl", "list", "devices", "available", "-j"],
+                  text=True,
+              )
+          )
+          candidates = []
+          for runtime, devices in data.get("devices", {}).items():
+              if ".iOS-" not in runtime:
+                  continue
+              match = re.search(r"iOS-(\d+)(?:-(\d+))?", runtime)
+              version = (int(match.group(1)), int(match.group(2) or 0)) if match else (0, 0)
+              for device in devices:
+                  if device.get("isAvailable") and str(device.get("name", "")).startswith("iPhone"):
+                      candidates.append((version, device["name"], device["udid"]))
+          if not candidates:
+              raise SystemExit("no available iPhone simulator")
+          candidates.sort()
+          print(candidates[-1][2])
+          PY
+          )"
+          echo "udid=$IOS_UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$IOS_UDID" 2>/dev/null || true
+          xcrun simctl bootstatus "$IOS_UDID" -b
+      - name: Probe iOS Safari on Simulator
+        shell: bash
+        env:
+          IOS_UDID: ${{ steps.ios.outputs.udid }}
+        run: |
+          set -euo pipefail
+          python3 tools/mobile_browser_compatibility_probe.py \
+            --browser ios-safari \
+            --port 8765 \
+            --output dist/browser-compatibility/ios-safari.json &
+          PROBE_PID=$!
+          sleep 1
+          if ! kill -0 "$PROBE_PID" 2>/dev/null; then
+            wait "$PROBE_PID"
+          fi
+          MOBILE_URL='http://127.0.0.1:8765/client.html?ucr_mobile_probe=ios-safari'
+          open -a Simulator --args -CurrentDeviceUDID "$IOS_UDID" >/dev/null 2>&1 || true
+          xcrun simctl launch "$IOS_UDID" com.apple.mobilesafari >/dev/null 2>&1 || true
+          evidence=false
+          for attempt in 1 2 3 4 5 6; do
+            xcrun simctl openurl "$IOS_UDID" "$MOBILE_URL" || true
+            for second in $(seq 1 20); do
+              if [ -s dist/browser-compatibility/ios-safari.json ]; then
+                evidence=true
+                break 2
+              fi
+              if ! kill -0 "$PROBE_PID" 2>/dev/null; then
+                wait "$PROBE_PID"
+              fi
+              sleep 1
+            done
+            xcrun simctl terminate "$IOS_UDID" com.apple.mobilesafari >/dev/null 2>&1 || true
+            xcrun simctl launch "$IOS_UDID" com.apple.mobilesafari >/dev/null 2>&1 || true
+            sleep 2
+          done
+          if [ "$evidence" != true ]; then
+            wait "$PROBE_PID"
+          fi
+          wait "$PROBE_PID"
+      - name: Upload iOS Safari evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ucr-browser-compatibility-ios-safari-${{ github.sha }}
+          path: dist/browser-compatibility/ios-safari.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Stop iOS Simulator
+        if: always()
+        shell: bash
+        env:
+          IOS_UDID: ${{ steps.ios.outputs.udid }}
+        run: |
+          if [ -n "${IOS_UDID:-}" ]; then
+            xcrun simctl shutdown "$IOS_UDID" 2>/dev/null || true
+          fi
