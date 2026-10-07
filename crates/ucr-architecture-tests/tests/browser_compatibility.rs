@@ -32,6 +32,7 @@ fn assert_browser_workflow(workflow: &str) {
         "name: mobile-ios-safari",
         "xcrun simctl openurl",
         "mobile_browser_compatibility_probe.py",
+        "android_chrome_first_run.py",
     ] {
         assert!(
             workflow.contains(invariant),
@@ -134,6 +135,7 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
     let workflow = read(".github/workflows/browser-compatibility.yml");
     let probe = read("tools/browser_compatibility_probe.py");
     let mobile_probe = read("tools/mobile_browser_compatibility_probe.py");
+    let android_first_run = read("tools/android_chrome_first_run.py");
     let mobile_probe_js = read("crates/ucr-realtime-web/static/mobile-browser-probe.js");
     let client = read("crates/ucr-realtime-web/static/client.html");
     let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
@@ -143,6 +145,22 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
     assert_browser_workflow(&workflow);
     assert_desktop_probe(&probe);
     assert_mobile_probe(&mobile_probe, &mobile_probe_js);
+    for invariant in [
+        "FirstRunActivity",
+        "uiautomator",
+        "Use without an account",
+        "Accept & continue",
+        "com.android.chrome",
+    ] {
+        assert!(
+            android_first_run.contains(invariant),
+            "missing Android Chrome first-run invariant {invariant}"
+        );
+    }
+    assert!(
+        !workflow.contains("skip_first_run_experience"),
+        "mobile evidence must not rely on the removed Chrome FRE shortcut"
+    );
     assert_endpoint_mls_binding(&client, &realtime, &universal);
 
     assert!(spec.contains("Android Chrome"));
