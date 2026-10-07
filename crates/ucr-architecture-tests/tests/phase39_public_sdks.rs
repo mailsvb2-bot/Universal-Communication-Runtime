@@ -73,6 +73,22 @@ fn phase39_rust_sdk_is_a_client_only_public_contract_binding() {
 }
 
 #[test]
+fn phase39_rust_sdk_covers_recording_management_without_participant_impersonation() {
+    let sdk = read("crates/ucr-sdk/src/lib.rs");
+    for method in [
+        "request_recording",
+        "get_recording",
+        "export_recording",
+        "start_recording",
+        "stop_recording",
+        "delete_recording",
+    ] {
+        assert!(sdk.contains(&format!("pub async fn {method}")));
+    }
+    assert!(!sdk.contains("pub async fn set_recording_consent"));
+}
+
+#[test]
 fn phase39_high_level_http_clients_cover_bounded_conference_metadata() {
     let typescript = read("sdk/typescript/src/conference.ts");
     let python = read("sdk/python/ucr_sdk/conference.py");
