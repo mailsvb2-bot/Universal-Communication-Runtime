@@ -145,10 +145,11 @@ source-authenticated encrypted frame and never receives endpoint/MLS exporter ke
 path.
 
 A concrete local encrypted-at-rest archive provider now exists in `ucr-recording`. It is still
-infrastructure rather than a Production recorder: the trait default remains fail-closed, runtime
-configuration does not automatically advertise Recording, and export/access authorization plus
-end-to-end deletion/recovery evidence remain outstanding. `ucr.conference.recording` therefore
-remains unavailable by default.
+infrastructure rather than a Production recorder: the trait default remains fail-closed and runtime
+configuration does not automatically advertise Recording. Authorized bounded export now exists
+through canonical `RecordingService.ExportRecording` and the thin `/v1/recordings/export` JSON
+adapter, but exact production deployment/capture/restart/load evidence is still required.
+`ucr.conference.recording` therefore remains unavailable by default.
 
 ### Encrypted local archive provider
 
@@ -175,8 +176,9 @@ recording frame objects. Provider conformance now includes the crash boundary af
 receipt but before object cleanup: a fresh provider instance over the same archive and key owner
 replays the exact Delete, removes the remaining controlled objects, retains the encrypted receipt,
 and keeps subsequent retries idempotent. This proves restart-safe controlled-object deletion for the
-local encrypted archive. It does not claim erasure of copies exported to another system and does not
-yet provide the authorized export/read surface required for Production Recording.
+local encrypted archive. It does not claim erasure of copies exported to another system. Authorized read/export is enforced
+above the provider seam by `RecordingService.ExportRecording`; this provider remains intentionally
+unaware of Service credentials, audit policy and HTTP transport.
 
 ### Provider export artifact
 
@@ -200,9 +202,11 @@ bounded by `MAX_RECORDING_PROVIDER_EXPORT_BYTES` and rejects symlinks, non-priva
 object names, tampered at-rest ciphertext, and size overflow.
 
 This format intentionally reuses the existing SHA-256 frame-binding filename as authenticated-data
-input, so archives produced before the export feature require no migration. Public download,
-least-privilege read authorization, download audit, and any later composition/transcoding format are
-separate layers.
+input, so archives produced before the export feature require no migration. Public export/download is
+a separate canonical service layer: gRPC returns the bounded artifact directly and the `/v1` JSON
+adapter returns the same bytes as `payload_b64`; least-privilege read authorization and the
+success-only export audit Event remain owned by `RecordingService`. Any later
+composition/transcoding format remains a separate provider layer.
 
 
 ### Opt-in realtime runtime wiring
@@ -225,9 +229,10 @@ durable worker lease when the worker future is dropped, avoiding a stale lease a
 failure or coordinated shutdown.
 
 This wiring is opt-in infrastructure only. No provider is configured by default and the public
-`ucr.conference.recording` capability remains false. Provider finalization/readiness is now
-durable and Event-backed, but access-controlled export/download and the remaining Production evidence are still required before
-the capability may be advertised.
+`ucr.conference.recording` capability remains false. Provider finalization/readiness and
+access-controlled export/download are now durable/public-contract-backed, but the remaining
+Production deployment and interoperability evidence is still required before the capability may be
+advertised.
 
 ### Durable provider-operation outbox
 
@@ -304,7 +309,8 @@ Because `recording.ready` is in the same canonical Event journal, existing durab
 Webhook subscriptions can receive it through the normal Event delivery machinery. No recording
 media bytes, storage paths, encryption keys or export URLs are placed in this Event.
 
-This outbox, worker, validated capture path, encrypted archive provider, opt-in runtime wiring and
-durable provider-ready Event are still not a complete Production recorder. The shipped runtime has
-no configured provider by default and `ucr.conference.recording` remains unavailable until
-access/export authorization and the remaining Production evidence are present.
+This outbox, worker, validated capture path, encrypted archive provider, opt-in runtime wiring,
+durable provider-ready Event and authorized export path are still not by themselves a Production
+recording claim. The shipped runtime has no configured provider by default and
+`ucr.conference.recording` remains unavailable until the remaining production deployment,
+restart/interoperability and protected-release evidence is present.
