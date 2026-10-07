@@ -30,7 +30,7 @@ fn assert_browser_workflow(workflow: &str) {
         "pm path com.android.chrome",
         "adb reverse tcp:8765 tcp:8765",
         "name: mobile-ios-safari",
-        "xcrun simctl openurl",
+        "ios_safari_probe_runner.py",
         "mobile_browser_compatibility_probe.py",
         "android_chrome_first_run.py",
     ] {
@@ -135,6 +135,7 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
     let workflow = read(".github/workflows/browser-compatibility.yml");
     let probe = read("tools/browser_compatibility_probe.py");
     let mobile_probe = read("tools/mobile_browser_compatibility_probe.py");
+    let ios_safari_runner = read("tools/ios_safari_probe_runner.py");
     let android_first_run = read("tools/android_chrome_first_run.py");
     let mobile_probe_js = read("crates/ucr-realtime-web/static/mobile-browser-probe.js");
     let client = read("crates/ucr-realtime-web/static/client.html");
@@ -145,6 +146,25 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
     assert_browser_workflow(&workflow);
     assert_desktop_probe(&probe);
     assert_mobile_probe(&mobile_probe, &mobile_probe_js);
+    for invariant in [
+        "xcrun",
+        "simctl",
+        "openurl",
+        "timeout=openurl_timeout",
+        "mobile_browser_compatibility_probe.py",
+        "com.apple.mobilesafari",
+        "bootstatus",
+        "shutdown",
+        "erase",
+        "com.apple.CoreSimulator.CoreSimulatorService",
+        "best_effort",
+        "max-simulators",
+    ] {
+        assert!(
+            ios_safari_runner.contains(invariant),
+            "missing iOS Safari recovery invariant {invariant}"
+        );
+    }
     for invariant in [
         "FirstRunActivity",
         "uiautomator",
