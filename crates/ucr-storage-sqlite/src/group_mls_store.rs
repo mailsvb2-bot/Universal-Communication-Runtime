@@ -1712,6 +1712,61 @@ mod phase29_atomic_mls_tests {
         assert_eq!(advanced.current_crypto_state, current_state);
     }
 
+    fn assert_endpoint_admission_retry_and_collision_guards(
+        store: &SqliteLocalStore,
+        group: &GroupRecord,
+        owner: &ScopedPrincipal,
+        member: &ScopedPrincipal,
+        event_id: &EventId,
+        endpoint_admission: &MlsDeviceAdmission,
+        expected_crypto_state: &GroupCryptoState,
+    ) {
+        let duplicate = store
+            .admit_mls_device(
+                owner,
+                &device("phase29-owner-device"),
+                &group.group_id,
+                &member.principal,
+                event_id,
+                endpoint_admission,
+            )
+            .unwrap();
+        assert_eq!(duplicate, DurableRecordStatus::Duplicate);
+        assert_eq!(
+            store
+                .group(&scope(), &group.group_id)
+                .unwrap()
+                .expect("group after exact retry")
+                .crypto_state,
+            *expected_crypto_state
+        );
+
+        let changed = admission(store, "phase29-bob-device-2");
+        assert_eq!(
+            store.admit_mls_device(
+                owner,
+                &device("phase29-owner-device"),
+                &group.group_id,
+                &member.principal,
+                event_id,
+                &changed,
+            ),
+            Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict))
+        );
+
+        let colliding_group_change = role_change(
+            group,
+            event_id.as_opaque().as_str(),
+            member,
+            1,
+            GroupRole::Admin,
+        );
+        assert_eq!(
+            store.apply_group_change(owner, &colliding_group_change),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
     #[test]
     fn principal_admission_precedes_endpoint_owned_device_leaf_and_retry_is_durable() {
         let db = TestDb::new();
@@ -1782,49 +1837,14 @@ mod phase29_atomic_mls_tests {
         assert_eq!(bootstrap.admission_event_id, event_id);
         assert_eq!(bootstrap.current_crypto_state, after_admission.crypto_state);
 
-        let duplicate = store
-            .admit_mls_device(
-                &owner,
-                &device("phase29-owner-device"),
-                &group.group_id,
-                &bob.principal,
-                &event_id,
-                &endpoint_admission,
-            )
-            .unwrap();
-        assert_eq!(duplicate, DurableRecordStatus::Duplicate);
-        assert_eq!(
-            store
-                .group(&scope(), &group.group_id)
-                .unwrap()
-                .expect("group after exact retry")
-                .crypto_state,
-            after_admission.crypto_state
-        );
-
-        let changed = admission(&store, "phase29-bob-device-2");
-        assert_eq!(
-            store.admit_mls_device(
-                &owner,
-                &device("phase29-owner-device"),
-                &group.group_id,
-                &bob.principal,
-                &event_id,
-                &changed,
-            ),
-            Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict))
-        );
-
-        let colliding_group_change = role_change(
+        assert_endpoint_admission_retry_and_collision_guards(
+            &store,
             &group,
-            "rkp-phase29-endpoint-admission",
+            &owner,
             &bob,
-            1,
-            GroupRole::Admin,
-        );
-        assert_eq!(
-            store.apply_group_change(&owner, &colliding_group_change),
-            Err(DurableStoreError::Conflict)
+            &event_id,
+            &endpoint_admission,
+            &after_admission.crypto_state,
         );
     }
 
