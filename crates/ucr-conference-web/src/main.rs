@@ -251,10 +251,9 @@ async fn dispatch_recording_post(
         )
         .into_response();
     };
-    let mut client = pb::recording_service_client::RecordingServiceClient::new(
-        recording_upstream.clone(),
-    )
-    .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
+    let mut client =
+        pb::recording_service_client::RecordingServiceClient::new(recording_upstream.clone())
+            .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
     match path {
         "/v1/recordings" => forward_request_recording(&mut client, body, authorization).await,
         "/v1/recordings/get" => forward_get_recording(&mut client, body, authorization).await,
