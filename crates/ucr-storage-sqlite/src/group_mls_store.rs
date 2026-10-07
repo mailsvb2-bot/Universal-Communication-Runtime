@@ -609,9 +609,7 @@ fn stage_device_admission(
     {
         return Err(GroupMlsStoreError::Durable(DurableStoreError::Corrupt));
     }
-    if member_device_ids(&mls_group, &request.actor.scope)?
-        .contains(&request.admission.device_id)
-    {
+    if member_device_ids(&mls_group, &request.actor.scope)?.contains(&request.admission.device_id) {
         return Err(GroupMlsStoreError::TargetDeviceMismatch);
     }
     let artifacts = stage_transition(
@@ -1073,7 +1071,12 @@ fn insert_transition(
                 insert.request_fingerprint.as_slice(),
                 insert.artifacts.commit.as_slice(),
                 insert.artifacts.welcome.as_deref(),
-                insert.artifacts.next_crypto_state.epoch.to_be_bytes().as_slice(),
+                insert
+                    .artifacts
+                    .next_crypto_state
+                    .epoch
+                    .to_be_bytes()
+                    .as_slice(),
                 state_ref.as_str(),
             ],
         )
