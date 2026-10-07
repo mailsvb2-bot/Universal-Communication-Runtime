@@ -212,7 +212,7 @@ jobs:
           done
           adb shell am force-stop com.android.chrome
           adb shell am start -W \
-            -n com.android.chrome/com.google.android.apps.chrome.Main \
+            -n com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity \
             -a android.intent.action.VIEW \
             --ez skip_first_run_experience true \
             -d 'http://127.0.0.1:8765/client.html?ucr_mobile_probe=android-chrome'
