@@ -998,6 +998,22 @@ impl UcrSdkClient {
             .into_inner())
     }
 
+    /// Lists bounded raised-hand state without exposing internal participant identifiers.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn list_raised_hands(
+        &mut self,
+        message: pb::UniversalListRaisedHandsRequest,
+    ) -> Result<pb::UniversalListRaisedHandsResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .list_raised_hands(request)
+            .await?
+            .into_inner())
+    }
+
     /// Replaces one participant's bounded receive-subscription preference.
     ///
     /// # Errors
