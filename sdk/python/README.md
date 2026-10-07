@@ -7,7 +7,7 @@ Use `ucr_sdk.auth.ServiceCredential.metadata()` as call metadata for generated `
 
 The high-level client also covers conference resolution, participant removal/listing, raised-hand listing and capability discovery through the same canonical `/v1` boundary.
 
-`ucr_sdk.UniversalConferenceClient` is a thin REST facade over the same canonical `/v1` Universal Conference contract. It covers conference lifecycle, participant/device enrollment, host participant controls through the canonical participant update path, runtime preparation, join-grant issuance/revocation, media subscriptions and attendance.
+`ucr_sdk.UniversalConferenceClient` is a thin REST facade over the same canonical `/v1` Universal Conference contract. It covers conference lifecycle, bounded conference metadata create/replacement, participant/device enrollment, host participant controls through the canonical participant update path, runtime preparation, join-grant issuance/revocation, media subscriptions and attendance. Metadata values are supplied as bytes-like values and the SDK only performs the Base64 REST encoding; canonical namespacing, limits and idempotency remain server-owned.
 
 The client:
 - accepts integration-owned external references rather than internal UCR Principal/Device/Call/Group IDs;
