@@ -110,7 +110,23 @@ jobs:
         run: rustup show
 
       - name: Install native release prerequisites
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake build-essential gnupg
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v cmake >/dev/null &&
+             command -v cc >/dev/null &&
+             command -v c++ >/dev/null &&
+             command -v make >/dev/null &&
+             command -v gpg >/dev/null; then
+            echo "production release prerequisites already present"
+          else
+            bash tools/ci_install_apt_packages.sh cmake build-essential gnupg
+          fi
+          cmake --version
+          cc --version
+          c++ --version
+          make --version
+          gpg --version
 
       - name: Prove all required exact-main workflows are green
         env:

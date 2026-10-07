@@ -119,7 +119,21 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show
       - name: Install native build dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake build-essential
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v cmake >/dev/null &&
+             command -v cc >/dev/null &&
+             command -v c++ >/dev/null &&
+             command -v make >/dev/null; then
+            echo "native build dependencies already present"
+          else
+            bash tools/ci_install_apt_packages.sh cmake build-essential
+          fi
+          cmake --version
+          cc --version
+          c++ --version
+          make --version
       - name: Universal integration runtime-binding conformance
         run: cargo run --locked -p ucr-dev -- dev --check
 
@@ -146,6 +160,12 @@ jobs:
       - name: Validate Phase-41 matrix
         run: python3 sdk/conformance/validate.py
       - name: Install protobuf compiler
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends protobuf-compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v protoc >/dev/null; then
+            bash tools/ci_install_apt_packages.sh protobuf-compiler
+          fi
+          protoc --version
       - name: Compile canonical public contract
         run: protoc --proto_path=proto --descriptor_set_out=/tmp/ucr-phase41.pb proto/ucr/v1/*.proto

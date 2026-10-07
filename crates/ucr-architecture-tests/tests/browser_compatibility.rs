@@ -18,6 +18,7 @@ fn assert_browser_workflow(workflow: &str) {
     for invariant in [
         "ubuntu-24.04",
         "macos-15",
+        "macos-15-intel",
         "safaridriver --enable",
         "browser_compatibility_probe.py",
         "wasm-bindgen-cli --version 0.2.128 --locked",
@@ -30,6 +31,11 @@ fn assert_browser_workflow(workflow: &str) {
         "pm path com.android.chrome",
         "adb reverse tcp:8765 tcp:8765",
         "name: mobile-ios-safari",
+        "ios-safari-attempts",
+        "macos-15-intel",
+        "download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "real-ios-simulator-safari-self-probe",
+        "no successful real iOS Safari simulator evidence",
         "ios_safari_probe_runner.py",
         "mobile_browser_compatibility_probe.py",
         "android_chrome_first_run.py",
@@ -157,6 +163,9 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
         "shutdown",
         "erase",
         "com.apple.CoreSimulator.CoreSimulatorService",
+        "restart_coresimulator_control_plane",
+        "CoreSimulator discovery failed; recycling control plane",
+        "could not enumerate available iPhone simulators after recovery",
         "best_effort",
         "max-simulators",
     ] {
@@ -188,4 +197,52 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
     assert!(spec.contains("simulator/emulator-backed mobile browsers"));
     assert!(spec.contains("**not** accepted as production evidence"));
     assert!(spec.contains("does not by itself prove TURN reachability"));
+}
+
+#[test]
+fn ci_runner_bootstrap_prefers_preinstalled_tools_and_bounds_apt_network_calls() {
+    let workflows = [
+        read(".github/workflows/ci.yml"),
+        read(".github/workflows/conformance.yml"),
+        read(".github/workflows/phase44-supply-chain.yml"),
+        read(".github/workflows/phase45-production-hardening.yml"),
+        read(".github/workflows/production-release-linux.yml"),
+    ];
+    let combined = workflows.join("\n");
+    let apt_installer = read("tools/ci_install_apt_packages.sh");
+
+    for invariant in [
+        "command -v cmake",
+        "command -v cc",
+        "command -v c++",
+        "command -v make",
+        "command -v protoc",
+        "bash tools/ci_install_apt_packages.sh cmake build-essential",
+        "bash tools/ci_install_apt_packages.sh protobuf-compiler",
+    ] {
+        assert!(
+            combined.contains(invariant),
+            "missing CI bootstrap invariant {invariant}"
+        );
+    }
+
+    assert!(
+        !combined
+            .contains("sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends"),
+        "CI workflows must not depend on an unbounded apt update/install chain"
+    );
+
+    for invariant in [
+        "Acquire::Retries=3",
+        "Acquire::http::Timeout=20",
+        "Acquire::https::Timeout=20",
+        "timeout 120s",
+        "timeout 180s",
+        "apt install attempt",
+    ] {
+        assert!(
+            apt_installer.contains(invariant),
+            "missing bounded apt installer invariant {invariant}"
+        );
+    }
 }
