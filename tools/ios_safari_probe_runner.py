@@ -56,7 +56,7 @@ def available_iphones() -> list[tuple[tuple[int, int], str, str]]:
         try:
             candidate = run(
                 ["xcrun", "simctl", "list", "devices", "available", "-j"],
-                timeout=20,
+                timeout=120,
                 check=False,
             )
             if candidate.returncode == 0:
@@ -67,7 +67,7 @@ def available_iphones() -> list[tuple[tuple[int, int], str, str]]:
                 f"output={candidate.stdout[-2000:]!r}"
             )
         except subprocess.TimeoutExpired:
-            failures.append(f"attempt {attempt}: simctl list timed out after 20s")
+            failures.append(f"attempt {attempt}: simctl list timed out after 120s")
 
         print(
             f"CoreSimulator discovery failed; recycling control plane: "
@@ -148,7 +148,7 @@ def boot_simulator(udid: str) -> None:
     run(["xcrun", "simctl", "boot", udid], timeout=30, check=False)
     status = run(
         ["xcrun", "simctl", "bootstatus", udid, "-b"],
-        timeout=180,
+        timeout=300,
         check=False,
     )
     if status.returncode != 0:
@@ -186,13 +186,6 @@ def probe_device(
     output.unlink(missing_ok=True)
     simulator_cleanup(udid)
     boot_simulator(udid)
-
-    run(
-        ["open", "-a", "Simulator", "--args", "-CurrentDeviceUDID", udid],
-        timeout=15,
-        check=False,
-    )
-    time.sleep(3)
 
     command = [
         sys.executable,
