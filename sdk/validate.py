@@ -129,7 +129,7 @@ def main() -> None:
     require("pb::universal_conference_service_client::UniversalConferenceServiceClient<Channel>" in rust_sdk, "Rust SDK missing UniversalConferenceService client")
     require("pb::recording_service_client::RecordingServiceClient<Channel>" in rust_sdk, "Rust SDK missing RecordingService client")
     require("pub async fn connect_with_recording_endpoint" in rust_sdk, "Rust SDK missing explicit RecordingService endpoint support")
-    for method in ("create_conference", "resolve_conference", "get_conference", "transition_conference", "set_entry_open", "ensure_participant", "ensure_participant_device", "update_participant", "remove_participant", "list_participants", "set_subscriptions", "prepare_conference_runtime", "issue_join_grant", "revoke_join_grant", "get_participant_attendance", "get_conference_capabilities"):
+    for method in ("create_conference", "resolve_conference", "get_conference", "transition_conference", "set_entry_open", "set_conference_metadata", "ensure_participant", "ensure_participant_device", "update_participant", "remove_participant", "list_participants", "list_raised_hands", "set_subscriptions", "prepare_conference_runtime", "issue_join_grant", "revoke_join_grant", "get_participant_attendance", "get_conference_capabilities"):
         require(f"pub async fn {method}" in rust_sdk, f"Rust SDK missing UniversalConferenceService method: {method}")
     for method in ("request_recording", "get_recording", "start_recording", "stop_recording", "delete_recording"):
         require(f"pub async fn {method}" in rust_sdk, f"Rust SDK missing RecordingService management method: {method}")
