@@ -9,9 +9,11 @@ fn read(path: &str) -> String {
 }
 
 #[test]
-fn browser_compatibility_matrix_runs_real_desktop_browsers_and_keeps_mobile_truthful() {
+fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_browsers() {
     let workflow = read(".github/workflows/browser-compatibility.yml");
     let probe = read("tools/browser_compatibility_probe.py");
+    let mobile_probe = read("tools/mobile_browser_compatibility_probe.py");
+    let mobile_probe_js = read("crates/ucr-realtime-web/static/mobile-browser-probe.js");
     let client = read("crates/ucr-realtime-web/static/client.html");
     let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
     let universal = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
@@ -32,6 +34,13 @@ fn browser_compatibility_matrix_runs_real_desktop_browsers_and_keeps_mobile_trut
     assert!(workflow.contains("--target web"));
     assert!(workflow.contains("--out-name ucr_endpoint_wasm"));
     assert!(workflow.contains("upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"));
+    assert!(workflow.contains("name: mobile-android-chrome"));
+    assert!(workflow.contains("google_apis_playstore;x86_64"));
+    assert!(workflow.contains("pm path com.android.chrome"));
+    assert!(workflow.contains("adb reverse tcp:8765 tcp:8765"));
+    assert!(workflow.contains("name: mobile-ios-safari"));
+    assert!(workflow.contains("xcrun simctl openurl"));
+    assert!(workflow.contains("mobile_browser_compatibility_probe.py"));
 
     for invariant in [
         "real-desktop-browser-webdriver-smoke",
@@ -54,6 +63,7 @@ fn browser_compatibility_matrix_runs_real_desktop_browsers_and_keeps_mobile_trut
     }
 
     assert!(client.contains("ENDPOINT_WASM_CONTRACT_VERSION=\"ucr.endpoint-wasm.v1\""));
+    assert!(client.contains("mobile-browser-probe.js"));
     assert!(client.contains("import(ENDPOINT_WASM_MODULE_URL)"));
     assert!(client.contains("module.endpoint_wasm_contract_version()"));
     assert!(client.contains("typeof module.EndpointMlsState!==\"function\""));
@@ -78,9 +88,34 @@ fn browser_compatibility_matrix_runs_real_desktop_browsers_and_keeps_mobile_trut
         "Universal Conference must not create participant MLS KeyPackages server-side"
     );
 
+    for invariant in [
+        "android-chrome",
+        "ios-safari",
+        "real-android-emulator-chrome-self-probe",
+        "real-ios-simulator-safari-self-probe",
+        "desktop_user_agent_emulation",
+    ] {
+        assert!(
+            mobile_probe.contains(invariant),
+            "missing mobile host probe invariant {invariant}"
+        );
+    }
+    for invariant in [
+        "ucr.mobile-browser-probe.v1",
+        "browserIdentityMatches",
+        "endpointWasmExecution",
+        "endpointStatePersistence",
+        "touchCapable",
+    ] {
+        assert!(
+            mobile_probe_js.contains(invariant),
+            "missing mobile browser self-probe invariant {invariant}"
+        );
+    }
+
     assert!(spec.contains("Android Chrome"));
     assert!(spec.contains("iOS Safari"));
-    assert!(spec.contains("pending real mobile browser run"));
+    assert!(spec.contains("simulator/emulator-backed mobile browsers"));
     assert!(spec.contains("**not** accepted as production evidence"));
     assert!(spec.contains("does not by itself prove TURN reachability"));
 }
