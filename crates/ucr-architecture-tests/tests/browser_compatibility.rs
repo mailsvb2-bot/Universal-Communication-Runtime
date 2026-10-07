@@ -156,6 +156,8 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
         "bootstatus",
         "shutdown",
         "erase",
+        "com.apple.CoreSimulator.CoreSimulatorService",
+        "best_effort",
         "max-simulators",
     ] {
         assert!(
