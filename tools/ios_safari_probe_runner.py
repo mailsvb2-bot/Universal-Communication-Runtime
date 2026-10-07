@@ -76,13 +76,48 @@ def stop_process(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=10)
 
 
+def best_effort(args: Sequence[str], *, timeout: int) -> None:
+    try:
+        result = run(args, timeout=timeout, check=False)
+        if result.returncode != 0:
+            print(
+                f"best-effort command rc={result.returncode}: "
+                f"{' '.join(args)}: {result.stdout[-1000:]!r}",
+                flush=True,
+            )
+    except subprocess.TimeoutExpired:
+        print(
+            f"best-effort command timed out after {timeout}s: {' '.join(args)}",
+            flush=True,
+        )
+
+
 def simulator_cleanup(udid: str) -> None:
-    run(
+    best_effort(
         ["xcrun", "simctl", "terminate", udid, SAFARI_BUNDLE_ID],
-        timeout=15,
+        timeout=8,
+    )
+    best_effort(["xcrun", "simctl", "shutdown", udid], timeout=20)
+
+
+def recover_coresimulator() -> None:
+    best_effort(["xcrun", "simctl", "shutdown", "all"], timeout=20)
+    best_effort(["killall", "-9", "Simulator"], timeout=5)
+    best_effort(
+        ["killall", "-9", "com.apple.CoreSimulator.CoreSimulatorService"],
+        timeout=5,
+    )
+    time.sleep(3)
+    # Force CoreSimulator.framework to relaunch before the next boot attempt.
+    result = run(
+        ["xcrun", "simctl", "list", "devices", "available", "-j"],
+        timeout=30,
         check=False,
     )
-    run(["xcrun", "simctl", "shutdown", udid], timeout=30, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"CoreSimulator did not recover: {result.stdout[-4000:]}"
+        )
 
 
 def boot_simulator(udid: str) -> None:
@@ -131,11 +166,6 @@ def probe_device(
     run(
         ["open", "-a", "Simulator", "--args", "-CurrentDeviceUDID", udid],
         timeout=15,
-        check=False,
-    )
-    run(
-        ["xcrun", "simctl", "launch", udid, SAFARI_BUNDLE_ID],
-        timeout=20,
         check=False,
     )
     time.sleep(3)
@@ -194,16 +224,9 @@ def probe_device(
                     raise RuntimeError(f"mobile probe returned {code}")
                 return True
 
-            run(
+            best_effort(
                 ["xcrun", "simctl", "terminate", udid, SAFARI_BUNDLE_ID],
-                timeout=15,
-                check=False,
-            )
-            time.sleep(1)
-            run(
-                ["xcrun", "simctl", "launch", udid, SAFARI_BUNDLE_ID],
-                timeout=20,
-                check=False,
+                timeout=8,
             )
             time.sleep(2)
 
@@ -245,17 +268,25 @@ def main() -> int:
         )
         try:
             if index > 1:
+                recover_coresimulator()
                 simulator_cleanup(udid)
-                erased = run(
-                    ["xcrun", "simctl", "erase", udid],
-                    timeout=120,
-                    check=False,
-                )
-                print(
-                    f"Simulator recycle erase rc={erased.returncode}: "
-                    f"{erased.stdout[-1000:]!r}",
-                    flush=True,
-                )
+                try:
+                    erased = run(
+                        ["xcrun", "simctl", "erase", udid],
+                        timeout=120,
+                        check=False,
+                    )
+                    print(
+                        f"Simulator recycle erase rc={erased.returncode}: "
+                        f"{erased.stdout[-1000:]!r}",
+                        flush=True,
+                    )
+                except subprocess.TimeoutExpired:
+                    print(
+                        f"Simulator erase timed out for {name} ({udid}); "
+                        "continuing with a cold boot",
+                        flush=True,
+                    )
             if probe_device(
                 udid=udid,
                 name=name,
