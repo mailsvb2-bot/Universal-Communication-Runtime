@@ -54,6 +54,7 @@ fn phase39_rust_sdk_is_a_client_only_public_contract_binding() {
         "get_conference",
         "transition_conference",
         "set_entry_open",
+        "set_conference_metadata",
         "ensure_participant",
         "ensure_participant_device",
         "update_participant",
@@ -70,6 +71,19 @@ fn phase39_rust_sdk_is_a_client_only_public_contract_binding() {
     }
 }
 #[test]
+#[test]
+fn phase39_high_level_http_clients_cover_bounded_conference_metadata() {
+    let typescript = read("sdk/typescript/src/conference.ts");
+    let python = read("sdk/python/ucr_sdk/conference.py");
+
+    assert!(typescript.contains("async setConferenceMetadata("));
+    assert!(typescript.contains("metadata: metadataJson(input.metadata)"));
+    assert!(typescript.contains("value_b64: base64Bytes(entry.value)"));
+    assert!(python.contains("def set_conference_metadata("));
+    assert!(python.contains("\"metadata\": _metadata_json(metadata)"));
+    assert!(python.contains("\"value_b64\": base64.b64encode(bytes(value)).decode(\"ascii\")"));
+}
+
 fn phase39_all_required_languages_share_one_auth_and_semantic_manifest() {
     let manifest = read("sdk/contract.json");
     let helpers = [
