@@ -71,7 +71,7 @@ fn phase39_rust_sdk_is_a_client_only_public_contract_binding() {
         assert!(sdk.contains(&format!("pub async fn {method}")));
     }
 }
-#[test]
+
 #[test]
 fn phase39_high_level_http_clients_cover_bounded_conference_metadata() {
     let typescript = read("sdk/typescript/src/conference.ts");
@@ -85,6 +85,7 @@ fn phase39_high_level_http_clients_cover_bounded_conference_metadata() {
     assert!(python.contains("\"value_b64\": base64.b64encode(bytes(value)).decode(\"ascii\")"));
 }
 
+#[test]
 fn phase39_all_required_languages_share_one_auth_and_semantic_manifest() {
     let manifest = read("sdk/contract.json");
     let helpers = [
