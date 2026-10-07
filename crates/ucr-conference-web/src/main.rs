@@ -2539,30 +2539,32 @@ mod tests {
         });
 
         let body = br#"{"scope":{"tenant_id":"tenant-a"},"recording_id":"recording-a"}"#;
-        let mut request = format!(
-            "POST /v1/recordings/get HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        )
-        .into_bytes();
-        request.extend_from_slice(body);
-        let mut stream = tokio::net::TcpStream::connect(http_address)
-            .await
-            .expect("connect http");
-        stream.write_all(&request).await.expect("write request");
-        let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .await
-            .expect("read response");
-        let response = String::from_utf8(response).expect("utf-8 response");
-        assert!(
-            response.starts_with("HTTP/1.1 503"),
-            "recording route must fail closed without its realtime upstream: {response}"
-        );
-        assert!(
-            response.contains("recording gRPC upstream is not configured"),
-            "misconfiguration must be explicit: {response}"
-        );
+        for path in ["/v1/recordings/get", "/v1/recordings/export"] {
+            let mut request = format!(
+                "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            request.extend_from_slice(body);
+            let mut stream = tokio::net::TcpStream::connect(http_address)
+                .await
+                .expect("connect http");
+            stream.write_all(&request).await.expect("write request");
+            let mut response = Vec::new();
+            stream
+                .read_to_end(&mut response)
+                .await
+                .expect("read response");
+            let response = String::from_utf8(response).expect("utf-8 response");
+            assert!(
+                response.starts_with("HTTP/1.1 503"),
+                "recording route must fail closed without its realtime upstream: {response}"
+            );
+            assert!(
+                response.contains("recording gRPC upstream is not configured"),
+                "misconfiguration must be explicit: {response}"
+            );
+        }
     }
 
     #[tokio::test]
