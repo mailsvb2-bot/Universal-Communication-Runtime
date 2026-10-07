@@ -442,124 +442,48 @@ impl GroupMlsAtomicStore for SqliteLocalStore {
         if admission.key_package.is_empty() {
             return Err(GroupMlsStoreError::InvalidChangeMaterial);
         }
-        let request_fingerprint = mls_device_admission_fingerprint(
-            &actor.scope,
-            group_id,
+        let request = DeviceAdmissionRequest {
+            actor,
             actor_device_id,
+            group_id,
             member,
             event_id,
             admission,
-        )?;
+            request_fingerprint: mls_device_admission_fingerprint(
+                &actor.scope,
+                group_id,
+                actor_device_id,
+                member,
+                event_id,
+                admission,
+            )?,
+        };
         let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| map_sqlite_error(&error))?;
-
-        if let Some(stored) =
-            load_transition(&transaction, &actor.scope, event_id.as_opaque().as_str())?
-        {
-            let admitted = transition_admits_device(
-                &transaction,
-                &actor.scope,
-                event_id,
-                &admission.device_id,
-            )?;
-            if stored.group_id != *group_id
-                || stored.actor_device_id != *actor_device_id
-                || stored.request_fingerprint != request_fingerprint
-                || !admitted
-            {
-                return Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict));
-            }
+        if let Some(status) = existing_device_admission_status(&transaction, &request)? {
             transaction
                 .commit()
                 .map_err(|error| map_sqlite_error(&error))?;
-            return Ok(DurableRecordStatus::Duplicate);
-        }
-        if group_store::load_change_record(
-            &transaction,
-            &actor.scope,
-            event_id.as_opaque().as_str(),
-        )?
-        .is_some()
-            || super::event_journal::load_event_by_id(&transaction, &actor.scope, event_id)?
-                .is_some()
-            || super::call_store::call_signal_reserves_event_id(
-                &transaction,
-                &actor.scope,
-                event_id.as_opaque().as_str(),
-            )?
-        {
-            return Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict));
+            return Ok(status);
         }
 
-        let mut canonical_group =
-            group_store::load_group_from(&transaction, &actor.scope, group_id)?.ok_or(
-                GroupMlsStoreError::Durable(DurableStoreError::InvalidRecord),
-            )?;
-        if canonical_group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY) {
-            return Err(GroupMlsStoreError::InvalidChangeMaterial);
-        }
-        let membership =
-            group_store::load_membership_from(&transaction, &actor.scope, group_id, member)?
-                .ok_or(GroupMlsStoreError::Durable(
-                    DurableStoreError::PermissionDenied,
-                ))?;
-        if membership.state != GroupMemberState::Active {
-            return Err(GroupMlsStoreError::Durable(
-                DurableStoreError::PermissionDenied,
-            ));
-        }
-        require_device_for_principal(
-            &transaction,
-            &actor.scope,
-            &actor.principal,
-            actor_device_id,
-            true,
-        )?;
-        require_device_for_principal(
-            &transaction,
-            &actor.scope,
-            member,
-            &admission.device_id,
-            true,
-        )?;
-
-        let (artifacts, mut mls_group) = {
-            let provider = sqlite_provider(&transaction);
-            let mut mls_group = load_group(&provider, &actor.scope, group_id)?
-                .ok_or(GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?;
-            if current_crypto_state(&actor.scope, group_id, &mls_group)?
-                != canonical_group.crypto_state
-                || own_device_id(&mls_group, &actor.scope)? != *actor_device_id
-            {
-                return Err(GroupMlsStoreError::Durable(DurableStoreError::Corrupt));
-            }
-            let current_devices = member_device_ids(&mls_group, &actor.scope)?;
-            if current_devices.contains(&admission.device_id) {
-                return Err(GroupMlsStoreError::TargetDeviceMismatch);
-            }
-            let artifacts = stage_transition(
-                &provider,
-                &mut mls_group,
-                &actor.scope,
-                group_id,
-                &MlsTransitionInput::Add(vec![admission.clone()]),
-            )?;
-            (artifacts, mls_group)
-        };
-
+        let (mut canonical_group, artifacts, mut mls_group) =
+            stage_device_admission(&transaction, &request)?;
         canonical_group.crypto_state = artifacts.next_crypto_state.clone();
         group_store::update_group(&transaction, &canonical_group)?;
         insert_transition(
             &transaction,
-            &actor.scope,
-            group_id,
-            event_id,
-            actor_device_id,
-            &request_fingerprint,
-            &artifacts,
-            std::slice::from_ref(admission),
+            TransitionInsert {
+                scope: &actor.scope,
+                group_id,
+                event_id,
+                actor_device_id,
+                request_fingerprint: &request.request_fingerprint,
+                artifacts: &artifacts,
+                added_devices: std::slice::from_ref(admission),
+            },
         )?;
         {
             let provider = sqlite_provider(&transaction);
@@ -576,6 +500,128 @@ impl GroupMlsAtomicStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         Ok(DurableRecordStatus::Persisted)
     }
+}
+
+struct DeviceAdmissionRequest<'a> {
+    actor: &'a ScopedPrincipal,
+    actor_device_id: &'a DeviceId,
+    group_id: &'a GroupId,
+    member: &'a PrincipalRef,
+    event_id: &'a EventId,
+    admission: &'a MlsDeviceAdmission,
+    request_fingerprint: [u8; 32],
+}
+
+fn existing_device_admission_status(
+    transaction: &Transaction<'_>,
+    request: &DeviceAdmissionRequest<'_>,
+) -> Result<Option<DurableRecordStatus>, GroupMlsStoreError> {
+    if let Some(stored) = load_transition(
+        transaction,
+        &request.actor.scope,
+        request.insert.event_id.as_opaque().as_str(),
+    )? {
+        let admitted = transition_admits_device(
+            transaction,
+            &request.actor.scope,
+            request.event_id,
+            &request.admission.device_id,
+        )?;
+        if stored.group_id != *request.group_id
+            || stored.actor_device_id != *request.actor_device_id
+            || stored.request_fingerprint != request.request_fingerprint
+            || !admitted
+        {
+            return Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict));
+        }
+        return Ok(Some(DurableRecordStatus::Duplicate));
+    }
+
+    if group_store::load_change_record(
+        transaction,
+        &request.actor.scope,
+        request.event_id.as_opaque().as_str(),
+    )?
+    .is_some()
+        || super::event_journal::load_event_by_id(
+            transaction,
+            &request.actor.scope,
+            request.event_id,
+        )?
+        .is_some()
+        || super::call_store::call_signal_reserves_event_id(
+            transaction,
+            &request.actor.scope,
+            request.event_id.as_opaque().as_str(),
+        )?
+    {
+        return Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict));
+    }
+    Ok(None)
+}
+
+fn stage_device_admission(
+    transaction: &Transaction<'_>,
+    request: &DeviceAdmissionRequest<'_>,
+) -> Result<(GroupRecord, MlsCommitArtifacts, MlsGroupState), GroupMlsStoreError> {
+    let canonical_group =
+        group_store::load_group_from(transaction, &request.actor.scope, request.group_id)?.ok_or(
+            GroupMlsStoreError::Durable(DurableStoreError::InvalidRecord),
+        )?;
+    if canonical_group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY) {
+        return Err(GroupMlsStoreError::InvalidChangeMaterial);
+    }
+    let membership = group_store::load_membership_from(
+        transaction,
+        &request.actor.scope,
+        request.group_id,
+        request.member,
+    )?
+    .ok_or(GroupMlsStoreError::Durable(
+        DurableStoreError::PermissionDenied,
+    ))?;
+    if membership.state != GroupMemberState::Active {
+        return Err(GroupMlsStoreError::Durable(
+            DurableStoreError::PermissionDenied,
+        ));
+    }
+    require_device_for_principal(
+        transaction,
+        &request.actor.scope,
+        &request.actor.principal,
+        request.actor_device_id,
+        true,
+    )?;
+    require_device_for_principal(
+        transaction,
+        &request.actor.scope,
+        request.member,
+        &request.admission.device_id,
+        true,
+    )?;
+
+    let provider = sqlite_provider(transaction);
+    let mut mls_group = load_group(&provider, &request.actor.scope, request.group_id)?
+        .ok_or(GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?;
+    if current_crypto_state(&request.actor.scope, request.group_id, &mls_group)?
+        != canonical_group.crypto_state
+        || own_device_id(&mls_group, &request.actor.scope)? != *request.actor_device_id
+    {
+        return Err(GroupMlsStoreError::Durable(DurableStoreError::Corrupt));
+    }
+    if member_device_ids(&mls_group, &request.actor.scope)?
+        .contains(&request.admission.device_id)
+    {
+        return Err(GroupMlsStoreError::TargetDeviceMismatch);
+    }
+    let artifacts = stage_transition(
+        &provider,
+        &mut mls_group,
+        &request.actor.scope,
+        request.group_id,
+        &MlsTransitionInput::Add(vec![request.admission.clone()]),
+    )?;
+    Ok((canonical_group, artifacts, mls_group))
 }
 
 #[derive(Debug)]
@@ -668,13 +714,15 @@ fn apply_new_transition_in_transaction(
     }
     insert_transition(
         transaction,
-        &applied_change.scope,
-        &applied_change.group_id,
-        &applied_change.event_id,
-        actor_device_id,
-        request_fingerprint,
-        &artifacts,
-        added_devices,
+        TransitionInsert {
+            scope: &applied_change.scope,
+            group_id: &applied_change.group_id,
+            event_id: &applied_change.event_id,
+            actor_device_id,
+            request_fingerprint,
+            artifacts: &artifacts,
+            added_devices,
+        },
     )?;
     {
         let provider = sqlite_provider(transaction);
@@ -726,7 +774,7 @@ fn prepare_transition_input(
                 // leaf is admitted later by `admit_mls_device`.
                 return Ok(MlsTransitionInput::Rekey);
             }
-            for admission in added_devices {
+            for admission in insert.added_devices {
                 if current_devices.contains(&admission.device_id) {
                     return Err(GroupMlsStoreError::TargetDeviceMismatch);
                 }
@@ -950,7 +998,7 @@ pub(super) fn mls_transition_reserves_event_id(
                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND event_id=?4
              )",
             params![
-                scope.tenant_id.as_opaque().as_str(),
+                insert.scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
                 namespace.value,
                 event_id,
@@ -987,18 +1035,23 @@ fn transition_admits_device(
         .map_err(Into::into)
 }
 
+struct TransitionInsert<'a> {
+    scope: &'a TenantScope,
+    group_id: &'a GroupId,
+    event_id: &'a EventId,
+    actor_device_id: &'a DeviceId,
+    request_fingerprint: &'a [u8; 32],
+    artifacts: &'a MlsCommitArtifacts,
+    added_devices: &'a [MlsDeviceAdmission],
+}
+
 fn insert_transition(
     transaction: &Transaction<'_>,
-    scope: &TenantScope,
-    group_id: &GroupId,
-    event_id: &EventId,
-    actor_device_id: &DeviceId,
-    request_fingerprint: &[u8; 32],
-    artifacts: &MlsCommitArtifacts,
-    added_devices: &[MlsDeviceAdmission],
+    insert: TransitionInsert<'_>,
 ) -> Result<(), GroupMlsStoreError> {
-    let namespace = namespace_storage_key(scope);
-    let state_ref = artifacts
+    let namespace = namespace_storage_key(insert.scope);
+    let state_ref = insert
+        .artifacts
         .next_crypto_state
         .state_ref
         .as_ref()
@@ -1015,17 +1068,17 @@ fn insert_transition(
                 namespace.present,
                 namespace.value,
                 event_id.as_opaque().as_str(),
-                group_id.as_opaque().as_str(),
-                actor_device_id.as_opaque().as_str(),
-                request_fingerprint.as_slice(),
-                artifacts.commit.as_slice(),
-                artifacts.welcome.as_deref(),
-                artifacts.next_crypto_state.epoch.to_be_bytes().as_slice(),
+                insert.group_id.as_opaque().as_str(),
+                insert.actor_device_id.as_opaque().as_str(),
+                insert.request_fingerprint.as_slice(),
+                insert.artifacts.commit.as_slice(),
+                insert.artifacts.welcome.as_deref(),
+                insert.artifacts.next_crypto_state.epoch.to_be_bytes().as_slice(),
                 state_ref.as_str(),
             ],
         )
         .map_err(|error| map_sqlite_error(&error))?;
-    if artifacts.welcome.is_none() && !added_devices.is_empty() {
+    if insert.artifacts.welcome.is_none() && !insert.added_devices.is_empty() {
         return Err(GroupMlsStoreError::InvalidChangeMaterial);
     }
     for admission in added_devices {
