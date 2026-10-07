@@ -223,7 +223,12 @@ jobs:
           adb shell am start -W \
             -n com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity \
             -a android.intent.action.VIEW \
-            --ez skip_first_run_experience true \
+            -d 'about:blank'
+          python3 tools/android_chrome_first_run.py --timeout-seconds 120
+          adb shell am force-stop com.android.chrome
+          adb shell am start -W \
+            -n com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity \
+            -a android.intent.action.VIEW \
             -d 'http://127.0.0.1:8765/client.html?ucr_mobile_probe=android-chrome'
           wait "$PROBE_PID"
       - name: Upload Android Chrome evidence
