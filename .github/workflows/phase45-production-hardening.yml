@@ -22,7 +22,23 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show
       - name: Install native and contract build prerequisites
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake build-essential protobuf-compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v cmake >/dev/null &&
+             command -v cc >/dev/null &&
+             command -v c++ >/dev/null &&
+             command -v make >/dev/null &&
+             command -v protoc >/dev/null; then
+            echo "production hardening prerequisites already present"
+          else
+            bash tools/ci_install_apt_packages.sh cmake build-essential protobuf-compiler
+          fi
+          cmake --version
+          cc --version
+          c++ --version
+          make --version
+          protoc --version
 
       - name: Readiness verifier adversarial self-test
         run: python3 tools/production_readiness.py self-test
