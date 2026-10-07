@@ -15,6 +15,22 @@ def _b64_utf8(value: str) -> str:
     return base64.b64encode(value.encode("utf-8")).decode("ascii")
 
 
+def _metadata_json(metadata: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    encoded: list[dict[str, str]] = []
+    for entry in metadata:
+        key = entry.get("key")
+        value = entry.get("value")
+        if not isinstance(key, str):
+            raise ValueError("conference metadata key must be a string")
+        if not isinstance(value, (bytes, bytearray, memoryview)):
+            raise ValueError("conference metadata value must be bytes-like")
+        encoded.append({
+            "key": key,
+            "value_b64": base64.b64encode(bytes(value)).decode("ascii"),
+        })
+    return encoded
+
+
 def _validated_base_url(value: str) -> str:
     trimmed = value.strip().rstrip("/")
     parsed = urllib.parse.urlsplit(trimmed)
@@ -127,6 +143,7 @@ class UniversalConferenceClient:
         idempotency_key: str,
         mode: str,
         schedule: Mapping[str, Any],
+        metadata: Sequence[Mapping[str, Any]] = (),
     ) -> Mapping[str, Any]:
         value = self._post("/v1/conferences", {
             "scope": dict(scope),
@@ -135,6 +152,7 @@ class UniversalConferenceClient:
             "idempotency_key": idempotency_key,
             "mode": mode,
             "schedule": dict(schedule),
+            "metadata": _metadata_json(metadata),
         })
         return value["conference"]
 
@@ -167,6 +185,19 @@ class UniversalConferenceClient:
         body = self._context_body(context)
         body.update({"entry_open": entry_open, "idempotency_key": idempotency_key})
         return self._post("/v1/conferences/entry", body)["conference"]
+
+    def set_conference_metadata(
+        self,
+        context: Mapping[str, Any],
+        metadata: Sequence[Mapping[str, Any]],
+        idempotency_key: str,
+    ) -> Mapping[str, Any]:
+        body = self._context_body(context)
+        body.update({
+            "metadata": _metadata_json(metadata),
+            "idempotency_key": idempotency_key,
+        })
+        return self._post("/v1/conferences/metadata", body)["conference"]
 
     def ensure_participant(
         self,
