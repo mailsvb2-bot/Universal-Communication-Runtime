@@ -40,11 +40,48 @@ def run(
     )
 
 
-def available_iphones() -> list[tuple[tuple[int, int], str, str]]:
-    result = run(
-        ["xcrun", "simctl", "list", "devices", "available", "-j"],
-        timeout=30,
+def restart_coresimulator_control_plane() -> None:
+    best_effort(["killall", "-9", "Simulator"], timeout=5)
+    best_effort(
+        ["killall", "-9", "com.apple.CoreSimulator.CoreSimulatorService"],
+        timeout=5,
     )
+    time.sleep(3)
+
+
+def available_iphones() -> list[tuple[tuple[int, int], str, str]]:
+    result: subprocess.CompletedProcess[str] | None = None
+    failures: list[str] = []
+    for attempt in range(1, 4):
+        try:
+            candidate = run(
+                ["xcrun", "simctl", "list", "devices", "available", "-j"],
+                timeout=20,
+                check=False,
+            )
+            if candidate.returncode == 0:
+                result = candidate
+                break
+            failures.append(
+                f"attempt {attempt}: rc={candidate.returncode} "
+                f"output={candidate.stdout[-2000:]!r}"
+            )
+        except subprocess.TimeoutExpired:
+            failures.append(f"attempt {attempt}: simctl list timed out after 20s")
+
+        print(
+            f"CoreSimulator discovery failed; recycling control plane: "
+            f"{failures[-1]}",
+            flush=True,
+        )
+        restart_coresimulator_control_plane()
+
+    if result is None:
+        raise RuntimeError(
+            "could not enumerate available iPhone simulators after recovery: "
+            + " | ".join(failures)
+        )
+
     data = json.loads(result.stdout)
     candidates: list[tuple[tuple[int, int], str, str]] = []
     for runtime, devices in data.get("devices", {}).items():
@@ -102,22 +139,9 @@ def simulator_cleanup(udid: str) -> None:
 
 def recover_coresimulator() -> None:
     best_effort(["xcrun", "simctl", "shutdown", "all"], timeout=20)
-    best_effort(["killall", "-9", "Simulator"], timeout=5)
-    best_effort(
-        ["killall", "-9", "com.apple.CoreSimulator.CoreSimulatorService"],
-        timeout=5,
-    )
-    time.sleep(3)
-    # Force CoreSimulator.framework to relaunch before the next boot attempt.
-    result = run(
-        ["xcrun", "simctl", "list", "devices", "available", "-j"],
-        timeout=30,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"CoreSimulator did not recover: {result.stdout[-4000:]}"
-        )
+    restart_coresimulator_control_plane()
+    # Force CoreSimulator.framework to relaunch and prove the control plane is responsive.
+    available_iphones()
 
 
 def boot_simulator(udid: str) -> None:
