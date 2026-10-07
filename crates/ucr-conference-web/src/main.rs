@@ -8,7 +8,7 @@ use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use hyper::{
     Method, Request, Response, StatusCode,
     body::Incoming,
-    header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, PRAGMA},
+    header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, PRAGMA, HeaderValue},
     service::service_fn,
 };
 use hyper_util::{
@@ -988,15 +988,9 @@ async fn forward_export_recording(
     };
     call(client.export_recording(request), |response| {
         match response.result {
-            Some(pb::recording_export_response::Result::Artifact(artifact)) => json_response(
-                StatusCode::OK,
-                &json!({
-                    "artifact": {
-                        "media_type": artifact.media_type,
-                        "payload_b64": STANDARD.encode(&artifact.payload),
-                    }
-                }),
-            ),
+            Some(pb::recording_export_response::Result::Artifact(artifact)) => {
+                binary_response(&artifact.media_type, artifact.payload)
+            }
             Some(pb::recording_export_response::Result::Error(error)) => error_response(&error),
             None => empty_upstream(),
         }
@@ -2301,6 +2295,26 @@ fn json_response(status: StatusCode, payload: &Value) -> HttpResponse {
         .header(CACHE_CONTROL, "no-store")
         .header(PRAGMA, "no-cache")
         .body(Full::new(Bytes::from(bytes)).boxed_unsync())
+        .unwrap_or_else(|_| Response::new(Full::new(Bytes::new()).boxed_unsync()))
+}
+
+fn binary_response(media_type: &str, payload: Vec<u8>) -> HttpResponse {
+    let content_type = match HeaderValue::from_str(media_type) {
+        Ok(value) => value,
+        Err(_) => {
+            return TransportError::new(
+                StatusCode::BAD_GATEWAY,
+                "recording export media type is not HTTP-safe",
+            )
+            .into_response();
+        }
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, content_type)
+        .header(CACHE_CONTROL, "no-store")
+        .header(PRAGMA, "no-cache")
+        .body(Full::new(Bytes::from(payload)).boxed_unsync())
         .unwrap_or_else(|_| Response::new(Full::new(Bytes::new()).boxed_unsync()))
 }
 
