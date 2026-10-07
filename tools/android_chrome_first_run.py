@@ -133,6 +133,7 @@ def main() -> int:
 
     deadline = time.monotonic() + args.timeout_seconds
     last_activity = ""
+    last_visible: list[dict[str, str]] = []
     while time.monotonic() < deadline:
         last_activity = current_activity()
         if not any(marker in last_activity for marker in FIRST_RUN_MARKERS):
@@ -142,7 +143,7 @@ def main() -> int:
         root = ui_tree()
         target = choose_target(root)
         if target is None:
-            visible = [
+            last_visible = [
                 {
                     "text": node.attrib.get("text", ""),
                     "content_desc": node.attrib.get("content-desc", ""),
@@ -156,10 +157,16 @@ def main() -> int:
                     or node.attrib.get("resource-id")
                 )
             ]
-            raise RuntimeError(
-                "Chrome first-run screen has no recognized safe action: "
-                + repr(visible[-80:])
+            loading = any(
+                item["resource_id"].endswith(
+                    "fre_native_and_policy_load_progress_spinner"
+                )
+                for item in last_visible
             )
+            state = "loading native/policy state" if loading else "waiting for safe action"
+            print(f"Chrome first-run {state}: {last_visible[-20:]!r}")
+            time.sleep(2)
+            continue
 
         x, y = center(target.attrib["bounds"])
         label = (
@@ -171,7 +178,10 @@ def main() -> int:
         adb("shell", "input", "tap", str(x), str(y))
         time.sleep(2)
 
-    raise RuntimeError(f"Chrome first-run gate did not clear: {last_activity}")
+    raise RuntimeError(
+        "Chrome first-run gate did not clear before timeout; "
+        f"activity={last_activity!r}; visible={last_visible[-80:]!r}"
+    )
 
 
 if __name__ == "__main__":
