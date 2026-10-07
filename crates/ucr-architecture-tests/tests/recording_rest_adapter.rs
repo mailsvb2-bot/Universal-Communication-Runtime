@@ -21,6 +21,7 @@ fn recording_rest_routes_remain_thin_grpc_adapters() {
     for (route, rpc) in [
         ("/v1/recordings", "request_recording"),
         ("/v1/recordings/get", "get_recording"),
+        ("/v1/recordings/export", "export_recording"),
         ("/v1/recordings/consent", "set_recording_consent"),
         ("/v1/recordings/start", "start_recording"),
         ("/v1/recordings/stop", "stop_recording"),
