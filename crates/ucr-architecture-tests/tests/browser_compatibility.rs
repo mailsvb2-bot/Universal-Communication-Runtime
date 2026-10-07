@@ -18,6 +18,7 @@ fn assert_browser_workflow(workflow: &str) {
     for invariant in [
         "ubuntu-24.04",
         "macos-15",
+        "macos-15-intel",
         "safaridriver --enable",
         "browser_compatibility_probe.py",
         "wasm-bindgen-cli --version 0.2.128 --locked",
@@ -193,10 +194,16 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
     assert!(spec.contains("does not by itself prove TURN reachability"));
 }
 
-
 #[test]
 fn ci_runner_bootstrap_prefers_preinstalled_tools_and_bounds_apt_network_calls() {
-    let workflow = read(".github/workflows/ci.yml");
+    let workflows = [
+        read(".github/workflows/ci.yml"),
+        read(".github/workflows/conformance.yml"),
+        read(".github/workflows/phase44-supply-chain.yml"),
+        read(".github/workflows/phase45-production-hardening.yml"),
+        read(".github/workflows/production-release-linux.yml"),
+    ];
+    let combined = workflows.join("\n");
     let apt_installer = read("tools/ci_install_apt_packages.sh");
 
     for invariant in [
@@ -209,16 +216,16 @@ fn ci_runner_bootstrap_prefers_preinstalled_tools_and_bounds_apt_network_calls()
         "bash tools/ci_install_apt_packages.sh protobuf-compiler",
     ] {
         assert!(
-            workflow.contains(invariant),
+            combined.contains(invariant),
             "missing CI bootstrap invariant {invariant}"
         );
     }
 
     assert!(
-        !workflow.contains(
+        !combined.contains(
             "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends"
         ),
-        "CI must not depend on an unbounded apt update/install chain"
+        "CI workflows must not depend on an unbounded apt update/install chain"
     );
 
     for invariant in [
