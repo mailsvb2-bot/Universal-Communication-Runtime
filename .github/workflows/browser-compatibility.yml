@@ -37,7 +37,18 @@ jobs:
       - name: Install browser WASM target
         run: rustup target add wasm32-unknown-unknown
       - name: Install pinned wasm-bindgen CLI
-        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if CARGO_NET_RETRY=5 cargo install wasm-bindgen-cli --version 0.2.128 --locked; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
       - name: Build endpoint WASM browser package
         shell: bash
         run: |
@@ -88,7 +99,18 @@ jobs:
       - name: Install browser WASM target
         run: rustup target add wasm32-unknown-unknown
       - name: Install pinned wasm-bindgen CLI
-        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if CARGO_NET_RETRY=5 cargo install wasm-bindgen-cli --version 0.2.128 --locked; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
       - name: Build endpoint WASM browser package
         shell: bash
         run: |
@@ -254,7 +276,18 @@ jobs:
       - name: Install browser WASM target
         run: rustup target add wasm32-unknown-unknown
       - name: Install pinned wasm-bindgen CLI
-        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if CARGO_NET_RETRY=5 cargo install wasm-bindgen-cli --version 0.2.128 --locked; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
       - name: Build endpoint WASM browser package
         shell: bash
         run: |
