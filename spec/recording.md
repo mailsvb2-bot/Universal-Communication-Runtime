@@ -203,10 +203,11 @@ object names, tampered at-rest ciphertext, and size overflow.
 
 This format intentionally reuses the existing SHA-256 frame-binding filename as authenticated-data
 input, so archives produced before the export feature require no migration. Public export/download is
-a separate canonical service layer: gRPC returns the bounded artifact directly and the `/v1` JSON
-adapter returns the same bytes as `payload_b64`; least-privilege read authorization and the
-success-only export audit Event remain owned by `RecordingService`. Any later
-composition/transcoding format remains a separate provider layer.
+a separate canonical service layer: gRPC returns the bounded artifact directly and the thin
+`/v1/recordings/export` adapter returns the same bytes as a no-store binary response using the
+provider's validated media type. This avoids Base64 expansion for the bounded 64 MiB provider
+artifact; least-privilege read authorization and the success-only export audit Event remain owned by
+`RecordingService`. Any later composition/transcoding format remains a separate provider layer.
 
 
 ### Opt-in realtime runtime wiring
