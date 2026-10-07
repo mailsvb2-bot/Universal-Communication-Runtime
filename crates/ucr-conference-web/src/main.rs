@@ -2300,15 +2300,12 @@ fn json_response(status: StatusCode, payload: &Value) -> HttpResponse {
 }
 
 fn binary_response(media_type: &str, payload: Vec<u8>) -> HttpResponse {
-    let content_type = match HeaderValue::from_str(media_type) {
-        Ok(value) => value,
-        Err(_) => {
-            return TransportError::new(
-                StatusCode::BAD_GATEWAY,
-                "recording export media type is not HTTP-safe",
-            )
-            .into_response();
-        }
+    let Ok(content_type) = HeaderValue::from_str(media_type) else {
+        return TransportError::new(
+            StatusCode::BAD_GATEWAY,
+            "recording export media type is not HTTP-safe",
+        )
+        .into_response();
     };
     Response::builder()
         .status(StatusCode::OK)
