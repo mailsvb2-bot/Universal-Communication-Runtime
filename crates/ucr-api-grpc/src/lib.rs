@@ -14,7 +14,9 @@ use ucr_core::{
     ServiceQuotaClock, ServiceQuotaStore, StoreForwardStore, SyncStore, SyncTransition,
     TransportFailureDisposition, TransportProvider,
 };
-use ucr_group_mls::{MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS};
+use ucr_group_mls::{
+    MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS, MAX_MLS_KEY_PACKAGE_BYTES,
+};
 use ucr_model::{
     ActorId, ActorKind, AttachmentId, AuthorizationRequest, CallId, CallParticipant,
     CallParticipantState, CallParticipantUpdateKind, CallReconnectPhase, CallSession, CallSignal,
@@ -314,16 +316,28 @@ const fn max4(left: usize, middle: usize, right: usize, fourth: usize) -> usize 
 /// Each upper bound is derived from canonical field/count limits plus protobuf tag/varint bounds;
 /// smaller Identity, binding, Conversation, subscription, cursor, and lookup requests fit beneath
 /// the same ceiling.
+const REALTIME_MLS_KEY_PACKAGE_REQUEST_WIRE_MAX_BYTES: usize = TENANT_SCOPE_FIELD_WIRE_MAX_BYTES
+    + 2 * OPAQUE_ID_FIELD_WIRE_MAX_BYTES
+    + PROTOBUF_TAG_MAX_BYTES
+    + PROTOBUF_LEN_PREFIX_MAX_BYTES
+    + MAX_MLS_KEY_PACKAGE_BYTES;
+
 pub const GRPC_MAX_DECODING_MESSAGE_SIZE: usize = max4(
     INTEGRATION_COMMAND_REQUEST_WIRE_MAX_BYTES,
     INTEGRATION_MESSAGE_REQUEST_WIRE_MAX_BYTES,
     INTEGRATION_INTENT_REQUEST_WIRE_MAX_BYTES,
-    EVENT_PUBLISH_REQUEST_WIRE_MAX_BYTES,
+    if EVENT_PUBLISH_REQUEST_WIRE_MAX_BYTES > REALTIME_MLS_KEY_PACKAGE_REQUEST_WIRE_MAX_BYTES {
+        EVENT_PUBLISH_REQUEST_WIRE_MAX_BYTES
+    } else {
+        REALTIME_MLS_KEY_PACKAGE_REQUEST_WIRE_MAX_BYTES
+    },
 );
 const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= INTEGRATION_COMMAND_REQUEST_WIRE_MAX_BYTES);
 const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= INTEGRATION_MESSAGE_REQUEST_WIRE_MAX_BYTES);
 const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= INTEGRATION_INTENT_REQUEST_WIRE_MAX_BYTES);
 const _: () = assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= EVENT_PUBLISH_REQUEST_WIRE_MAX_BYTES);
+const _: () =
+    assert!(GRPC_MAX_DECODING_MESSAGE_SIZE >= REALTIME_MLS_KEY_PACKAGE_REQUEST_WIRE_MAX_BYTES);
 
 const RECORDING_EXPORT_ARTIFACT_WIRE_MAX_BYTES: usize = 2
     * (PROTOBUF_TAG_MAX_BYTES + PROTOBUF_LEN_PREFIX_MAX_BYTES)
@@ -348,6 +362,8 @@ const REALTIME_MLS_BOOTSTRAP_RESPONSE_WIRE_MAX_BYTES: usize =
 
 /// Finite send budget for public responses. Event delivery and device-bound MLS bootstrap are
 /// independently bounded semantic payloads; the transport ceiling covers the larger wire shape.
+pub const REALTIME_MLS_KEY_PACKAGE_MAX_BYTES: usize = MAX_MLS_KEY_PACKAGE_BYTES;
+
 pub const GRPC_MAX_ENCODING_MESSAGE_SIZE: usize = max4(
     EVENT_POLL_RESPONSE_WIRE_MAX_BYTES,
     MESSAGE_ENVELOPE_WIRE_MAX_BYTES,

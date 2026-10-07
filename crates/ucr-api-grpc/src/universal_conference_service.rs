@@ -26,7 +26,7 @@ use ucr_core::{
     UniversalConferenceStore,
 };
 use ucr_crypto::{MachineTokenPolicy, MachineTokenPublicKeySet, TrustedSigningKeyResolver};
-use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError, MlsDeviceAdmission};
+use ucr_group_mls::{GroupMlsAtomicStore, GroupMlsStoreError};
 use ucr_model::{
     ActorId, ActorKind, ActorRef, CallId, CallParticipant, CallParticipantState,
     CallParticipantUpdateKind, CallSession, CallSignal, CallSignalKind, CallSignallingState,
@@ -2788,15 +2788,16 @@ where
             }
             continue;
         }
+        // Principal-level admission must exist before the canonical Call can invite this
+        // participant. Do not manufacture an endpoint KeyPackage here: an MLS Rekey advances the
+        // existing Group epoch while the browser Device leaf is admitted later from its own
+        // authenticated KeyPackage.
         let group = store
             .group(&owner.scope, &initial_group.group_id)
             .map_err(map_store_error)?
             .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Internal))?;
-        let key_package = store
-            .create_mls_device_key_package(&owner.scope, &participant.device_id)
-            .map_err(|error| map_group_mls_error(&error))?;
         let change = GroupChange {
-            event_id: runtime_event_id("gm", group.revision, &participant.profile.participant)?,
+            event_id: runtime_event_id("ga", group.revision, &participant.profile.participant)?,
             scope: owner.scope.clone(),
             group_id: group.group_id.clone(),
             expected_revision: group.revision,
@@ -2807,15 +2808,7 @@ where
             next_crypto_state: None,
         };
         store
-            .apply_mls_backed_group_change(
-                owner,
-                owner_device_id,
-                &change,
-                &[MlsDeviceAdmission {
-                    device_id: participant.device_id.clone(),
-                    key_package: key_package.bytes,
-                }],
-            )
+            .apply_mls_backed_group_change(owner, owner_device_id, &change, &[])
             .map_err(|error| map_group_mls_error(&error))?;
     }
     Ok(())
@@ -4170,6 +4163,7 @@ mod universal_runtime_tests {
         GroupCallLookupStore, GroupStore, IdentityDeviceLookupStore, IdentityStore,
         PrincipalIdentityBindingStore, UniversalConferenceStore,
     };
+    use ucr_group_mls::GroupMlsBootstrapStore;
     use ucr_model::{
         CallId, CallParticipant, CallParticipantState, CallSession, CallSignal, CallSignalKind,
         CallSignallingState, CallTerminationReason, CommandEnvelope, CommandId,
@@ -4815,7 +4809,7 @@ mod universal_runtime_tests {
     }
 
     #[test]
-    fn prepare_runtime_materializes_real_sqlite_mls_group_and_single_call() {
+    fn prepare_runtime_admits_principal_but_defers_endpoint_mls_device_leaf() {
         let db = TestDb::new();
         let store = SqliteLocalStore::open(&db.0).expect("open sqlite store");
         store
@@ -4865,13 +4859,27 @@ mod universal_runtime_tests {
         );
         assert!(group.crypto_state.state_ref.is_some());
 
-        for expected in [&owner, &attendee] {
-            let membership = store
-                .group_membership(&scope(), &conference().conference_id, expected)
-                .expect("membership read")
-                .expect("membership");
-            assert_eq!(membership.state, GroupMemberState::Active);
-        }
+        let owner_membership = store
+            .group_membership(&scope(), &conference().conference_id, &owner)
+            .expect("owner membership read")
+            .expect("owner membership");
+        assert_eq!(owner_membership.state, GroupMemberState::Active);
+        let attendee_membership = store
+            .group_membership(&scope(), &conference().conference_id, &attendee)
+            .expect("attendee membership read")
+            .expect("attendee principal membership");
+        assert_eq!(attendee_membership.state, GroupMemberState::Active);
+        assert!(
+            store
+                .mls_bootstrap_for_device(
+                    &scope(),
+                    &conference().conference_id,
+                    &ucr_model::DeviceId::from_opaque(oid("device-attendee-runtime")),
+                )
+                .expect("attendee MLS bootstrap read")
+                .is_none(),
+            "principal admission must not create server-owned endpoint MLS bootstrap material"
+        );
 
         let calls = store
             .calls_for_group(&scope(), &conference().conference_id, 8)

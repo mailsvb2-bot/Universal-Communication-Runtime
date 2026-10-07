@@ -13,12 +13,15 @@ use ucr_conference::{
 };
 use ucr_core::{
     AuthorizationEvaluator, CallStore, ConferenceJoinGrantStore, DeviceLifecycleStore,
-    DurableStoreError, EventJournalStore, GroupMessageStore, MAX_ACTIVE_RECORDINGS_PER_CALL,
-    PrincipalIdentityBindingStore, RecordingStore, ServiceQuotaStore, UniversalConferenceStore,
-    recording_allows_realtime_participant,
+    DurableStoreError, EventJournalStore, GroupMessageStore, GroupStore, IdentityDeviceLookupStore,
+    MAX_ACTIVE_RECORDINGS_PER_CALL, PrincipalIdentityBindingStore, RecordingStore,
+    ServiceQuotaStore, UniversalConferenceStore, recording_allows_realtime_participant,
 };
 use ucr_crypto::TrustedSigningKeyResolver;
-use ucr_group_mls::{GroupMlsBootstrapStore, GroupMlsStoreError, MlsDeviceBootstrap};
+use ucr_group_mls::{
+    GroupMlsAtomicStore, GroupMlsBootstrapStore, GroupMlsStoreError, MAX_MLS_KEY_PACKAGE_BYTES,
+    MlsDeviceAdmission, MlsDeviceBootstrap,
+};
 use ucr_media_e2ee::PreparedGroupMediaE2eeCapabilities;
 use ucr_model::{
     ActorId, ActorKind, ActorRef, AdaptiveMediaDecision, AdaptiveMediaPressure, AdaptiveMediaStage,
@@ -27,9 +30,9 @@ use ucr_model::{
     ConferenceMediaSubscription, ConferenceParticipantRole, ConferenceSubscriptionSet,
     CorrelationContext, CryptoSuite, DeferredMediaFallback, DeliveryState, DeviceId,
     DeviceLifecycleState, DeviceRef, EncryptedGroupMediaFrame, EventEnvelope, EventId, GroupId,
-    GroupMediaFrameHeader, GroupMediaSourceSignature, IceServerConfig, KeyId, MediaKind,
-    MediaThermalState, MessageEnvelope, MessageId, OpaqueId, OriginRef, PrincipalId, PrincipalKind,
-    ScopedPrincipal, SessionId, SfuForwardEnvelope, SfuForwardTarget, TenantScope,
+    GroupMediaFrameHeader, GroupMediaSourceSignature, GroupOwnership, IceServerConfig, KeyId,
+    MediaKind, MediaThermalState, MessageEnvelope, MessageId, OpaqueId, OriginRef, PrincipalId,
+    PrincipalKind, ScopedPrincipal, SessionId, SfuForwardEnvelope, SfuForwardTarget, TenantScope,
     UniversalConferenceLifecycle, VideoSourceKind, WebRtcIceCandidate, WebRtcSdpType,
     WebRtcSessionDescription,
 };
@@ -170,6 +173,28 @@ pub trait RealtimeValidatedMediaObserver: fmt::Debug + Send + Sync {
     ) -> Result<(), CanonicalError>;
 }
 
+pub trait RealtimeMlsAdmissionStore:
+    GroupStore
+    + GroupMlsAtomicStore
+    + GroupMlsBootstrapStore
+    + PrincipalIdentityBindingStore
+    + IdentityDeviceLookupStore
+    + Send
+    + Sync
+{
+}
+
+impl<T> RealtimeMlsAdmissionStore for T where
+    T: GroupStore
+        + GroupMlsAtomicStore
+        + GroupMlsBootstrapStore
+        + PrincipalIdentityBindingStore
+        + IdentityDeviceLookupStore
+        + Send
+        + Sync
+{
+}
+
 #[tonic::async_trait]
 pub trait RealtimeSfuMediaRouter: fmt::Debug + Send + Sync {
     /// Forwards one already-canonicalized encrypted SFU batch through the configured horizontal
@@ -216,6 +241,7 @@ pub struct GrpcRealtimeService<C, A, S> {
     sfu_media_router: Option<Arc<dyn RealtimeSfuMediaRouter>>,
     validated_media_observer: Option<Arc<dyn RealtimeValidatedMediaObserver>>,
     mls_bootstrap_store: Option<Arc<dyn GroupMlsBootstrapStore + Send + Sync>>,
+    mls_admission_store: Option<Arc<dyn RealtimeMlsAdmissionStore>>,
     sfu_placement_transition: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -263,6 +289,7 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
             sfu_media_router: None,
             validated_media_observer: None,
             mls_bootstrap_store: None,
+            mls_admission_store: None,
             sfu_placement_transition: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -302,6 +329,15 @@ impl<C, A, S> GrpcRealtimeService<C, A, S> {
         B: GroupMlsBootstrapStore + Send + Sync + 'static,
     {
         self.mls_bootstrap_store = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn with_mls_admission_store<B>(mut self, store: Arc<B>) -> Self
+    where
+        B: RealtimeMlsAdmissionStore + 'static,
+    {
+        self.mls_admission_store = Some(store);
         self
     }
 
@@ -454,6 +490,7 @@ impl<C, A, S> Clone for GrpcRealtimeService<C, A, S> {
             sfu_media_router: self.sfu_media_router.clone(),
             validated_media_observer: self.validated_media_observer.clone(),
             mls_bootstrap_store: self.mls_bootstrap_store.clone(),
+            mls_admission_store: self.mls_admission_store.clone(),
             sfu_placement_transition: Arc::clone(&self.sfu_placement_transition),
         }
     }
@@ -661,6 +698,76 @@ where
                     pb::realtime_leave_response::Result::Acknowledgement(acknowledgement)
                 }
                 Err(error) => pb::realtime_leave_response::Result::Error(pb_error(error)),
+            }),
+        }))
+    }
+
+    async fn get_mls_admission_context(
+        &self,
+        request: Request<pb::RealtimeGetMlsAdmissionContextRequest>,
+    ) -> Result<Response<pb::RealtimeGetMlsAdmissionContextResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    self.registry
+                        .heartbeat(&claims, self.now()?)
+                        .map_err(map_registry_error)?;
+                    self.mls_admission_context(&claims)
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeGetMlsAdmissionContextResponse {
+            result: Some(match result {
+                Ok((group_id, mode)) => {
+                    pb::realtime_get_mls_admission_context_response::Result::Context(
+                        pb::RealtimeMlsAdmissionContext {
+                            group_id: Some(pb_opaque(group_id.as_opaque())),
+                            endpoint_state_mode: mode as i32,
+                        },
+                    )
+                }
+                Err(error) => {
+                    pb::realtime_get_mls_admission_context_response::Result::Error(pb_error(error))
+                }
+            }),
+        }))
+    }
+
+    async fn register_mls_key_package(
+        &self,
+        request: Request<pb::RealtimeRegisterMlsKeyPackageRequest>,
+    ) -> Result<Response<pb::RealtimeRegisterMlsKeyPackageResponse>, Status> {
+        let token = decode_bearer_token(request.metadata());
+        let body = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(body.scope, body.call_id, body.session_id);
+        let result = match (token, lookup) {
+            (Ok(token), Ok((scope, call_id, session_id))) => self
+                .authenticated_claims(&token, &scope, &call_id, &session_id)
+                .and_then(|claims| {
+                    self.registry
+                        .heartbeat(&claims, self.now()?)
+                        .map_err(map_registry_error)?;
+                    self.register_endpoint_mls_key_package(&claims, body.key_package)?;
+                    Ok(pb_acknowledgement(acknowledgement_for(
+                        claims.session_id.as_opaque().clone(),
+                    )))
+                }),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(pb::RealtimeRegisterMlsKeyPackageResponse {
+            result: Some(match result {
+                Ok(acknowledgement) => {
+                    pb::realtime_register_mls_key_package_response::Result::Acknowledgement(
+                        acknowledgement,
+                    )
+                }
+                Err(error) => {
+                    pb::realtime_register_mls_key_package_response::Result::Error(pb_error(error))
+                }
             }),
         }))
     }
@@ -2036,6 +2143,124 @@ where
             | UniversalConferenceLifecycle::Ending
             | UniversalConferenceLifecycle::Ended => pb::RealtimeAdmissionState::Closed,
         })
+    }
+
+    fn mls_admission_context(
+        &self,
+        claims: &RealtimeSessionClaims,
+    ) -> Result<(GroupId, pb::RealtimeMlsEndpointStateMode), CanonicalError> {
+        let actor = actor_for(claims);
+        let snapshot = conference_runtime(self)
+            .snapshot(&actor, &claims.scope, &claims.call_id)
+            .map_err(|error| map_conference_error(&error))?;
+        self.require_active_universal_participant(claims, &snapshot.group_id)?;
+        let device_id = claims
+            .device_id
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
+        let store = self
+            .mls_admission_store
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+        let membership = store
+            .group_membership(&claims.scope, &snapshot.group_id, &claims.participant)
+            .map_err(map_store_error)?;
+        let bootstrap = store
+            .mls_bootstrap_for_device(&claims.scope, &snapshot.group_id, device_id)
+            .map_err(|error| map_group_mls_store_error(&error))?;
+        let mode = match (membership, bootstrap) {
+            (None, _) | (Some(_), None) => pb::RealtimeMlsEndpointStateMode::Register,
+            (Some(_), Some(bootstrap))
+                if bootstrap
+                    .admission_event_id
+                    .as_opaque()
+                    .as_str()
+                    .starts_with("rkp-") =>
+            {
+                pb::RealtimeMlsEndpointStateMode::Restore
+            }
+            (Some(_), Some(_)) => pb::RealtimeMlsEndpointStateMode::LegacyServerOwned,
+        };
+        Ok((snapshot.group_id, mode))
+    }
+
+    fn register_endpoint_mls_key_package(
+        &self,
+        claims: &RealtimeSessionClaims,
+        key_package: Vec<u8>,
+    ) -> Result<(), CanonicalError> {
+        if key_package.is_empty() || key_package.len() > MAX_MLS_KEY_PACKAGE_BYTES {
+            return Err(CanonicalError::new(CanonicalErrorCode::InvalidArgument));
+        }
+        let device_id = claims
+            .device_id
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Unauthenticated))?;
+        let (group_id, mode) = self.mls_admission_context(claims)?;
+        if mode != pb::RealtimeMlsEndpointStateMode::Register {
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        }
+        let store = self
+            .mls_admission_store
+            .as_ref()
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::CapabilityMismatch))?;
+        let participant = self
+            .store
+            .universal_conference_participant(&claims.scope, &group_id, &claims.participant)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+        if !participant.active {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        }
+
+        let membership = store
+            .group_membership(&claims.scope, &group_id, &claims.participant)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::PolicyDenied))?;
+        if membership.state != ucr_model::GroupMemberState::Active {
+            return Err(CanonicalError::new(CanonicalErrorCode::PolicyDenied));
+        }
+
+        let group = store
+            .group(&claims.scope, &group_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::NotFound))?;
+        let owner_principal = match &group.ownership {
+            GroupOwnership::PersonOwned(owner) => owner.clone(),
+            _ => return Err(CanonicalError::new(CanonicalErrorCode::Conflict)),
+        };
+        let owner_binding = store
+            .principal_identity_binding(&claims.scope, &owner_principal)
+            .map_err(map_store_error)?
+            .ok_or_else(|| CanonicalError::new(CanonicalErrorCode::Conflict))?;
+        let owner_devices = store
+            .active_devices_for_identity(&claims.scope, &owner_binding.identity_id, 2)
+            .map_err(map_store_error)?;
+        let [owner_device] = owner_devices.as_slice() else {
+            return Err(CanonicalError::new(CanonicalErrorCode::Conflict));
+        };
+        let owner = ScopedPrincipal {
+            scope: claims.scope.clone(),
+            principal: owner_principal,
+        };
+        let event_id = EventId::from_opaque(
+            OpaqueId::new(format!("rkp-{}", claims.session_id.as_opaque().as_str()))
+                .map_err(|_| CanonicalError::new(CanonicalErrorCode::Internal))?,
+        );
+        store
+            .admit_mls_device(
+                &owner,
+                &owner_device.device_id,
+                &group_id,
+                &claims.participant,
+                &event_id,
+                &MlsDeviceAdmission {
+                    device_id: device_id.clone(),
+                    key_package,
+                },
+            )
+            .map_err(|error| map_group_mls_store_error(&error))?;
+        Ok(())
     }
 
     fn device_bound_mls_bootstrap(
@@ -3445,6 +3670,7 @@ mod mls_bootstrap_projection_tests {
     fn protobuf_projection_preserves_exact_bootstrap_chain() {
         let bootstrap = MlsDeviceBootstrap {
             group_id: GroupId::from_opaque(id("bootstrap-group")),
+            admission_event_id: EventId::from_opaque(id("rkp-bootstrap-session")),
             welcome: vec![1, 2, 3],
             welcome_crypto_state: crypto(7, "state-7"),
             subsequent_commits: vec![MlsBootstrapCommit {
@@ -3484,6 +3710,7 @@ mod mls_bootstrap_projection_tests {
         current.state_ref = None;
         let bootstrap = MlsDeviceBootstrap {
             group_id: GroupId::from_opaque(id("bootstrap-group")),
+            admission_event_id: EventId::from_opaque(id("rkp-bootstrap-session")),
             welcome: vec![1],
             welcome_crypto_state: crypto(7, "state-7"),
             subsequent_commits: Vec::new(),

@@ -13,6 +13,8 @@ fn browser_compatibility_matrix_runs_real_desktop_browsers_and_keeps_mobile_trut
     let workflow = read(".github/workflows/browser-compatibility.yml");
     let probe = read("tools/browser_compatibility_probe.py");
     let client = read("crates/ucr-realtime-web/static/client.html");
+    let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
+    let universal = read("crates/ucr-api-grpc/src/universal_conference_service.rs");
     let spec = read("spec/browser-compatibility.md");
 
     for browser in ["chrome", "edge", "firefox", "safari"] {
@@ -55,6 +57,26 @@ fn browser_compatibility_matrix_runs_real_desktop_browsers_and_keeps_mobile_trut
     assert!(client.contains("import(ENDPOINT_WASM_MODULE_URL)"));
     assert!(client.contains("module.endpoint_wasm_contract_version()"));
     assert!(client.contains("typeof module.EndpointMlsState!==\"function\""));
+    assert!(client.contains("/v1/realtime/mls-context"));
+    assert!(client.contains("/v1/realtime/mls-key-package"));
+    assert!(client.contains("endpoint_state_mode"));
+    assert!(client.contains("legacy_server_owned"));
+    assert!(client.contains(
+        "Endpoint-owned MLS state is already admitted but its sealed local snapshot is missing"
+    ));
+    assert!(client.contains("state.join_from_welcome("));
+    assert!(client.contains("module.EndpointMlsState.restore("));
+    assert!(client.contains("endpointApplyBootstrapCommits(restored,bootstrap,index)"));
+    assert!(realtime.contains("register_endpoint_mls_key_package"));
+    assert!(realtime.contains("mls_admission_context"));
+    assert!(realtime.contains("with_mls_admission_store"));
+    assert!(realtime.contains("RealtimeMlsEndpointStateMode::Register"));
+    assert!(realtime.contains("RealtimeMlsEndpointStateMode::Restore"));
+    assert!(realtime.contains("RealtimeMlsEndpointStateMode::LegacyServerOwned"));
+    assert!(
+        !universal.contains("create_mls_device_key_package(&owner.scope, &participant.device_id)"),
+        "Universal Conference must not create participant MLS KeyPackages server-side"
+    );
 
     assert!(spec.contains("Android Chrome"));
     assert!(spec.contains("iOS Safari"));

@@ -104,7 +104,8 @@ const SQLITE_SCHEMA_V45: u32 = 45;
 const SQLITE_SCHEMA_V46: u32 = 46;
 const SQLITE_SCHEMA_V47: u32 = 47;
 const SQLITE_SCHEMA_V48: u32 = 48;
-pub const SQLITE_SCHEMA_VERSION: u32 = 49;
+const SQLITE_SCHEMA_V49: u32 = 49;
+pub const SQLITE_SCHEMA_VERSION: u32 = 50;
 pub const UCR_SQLITE_APPLICATION_ID: u32 = 0x5543_5231;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_OBJECTS_SQL: &str = "
@@ -676,7 +677,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Dura
         return Err(DurableStoreError::UnsupportedSchemaVersion);
     }
     if version == SQLITE_SCHEMA_VERSION {
-        return verify_schema_v49(connection);
+        return verify_schema_v50(connection);
     }
     migrate_known_schema_to_current(connection, version)
 }
@@ -735,11 +736,27 @@ fn migrate_known_schema_to_current(
             SQLITE_SCHEMA_V46 => migrate_v46_to_v47(connection)?,
             SQLITE_SCHEMA_V47 => migrate_v47_to_v48(connection)?,
             SQLITE_SCHEMA_V48 => migrate_v48_to_v49(connection)?,
+            SQLITE_SCHEMA_V49 => migrate_v49_to_v50(connection)?,
             _ => return Err(DurableStoreError::UnsupportedSchemaVersion),
         }
         version += 1;
     }
-    verify_schema_v49(connection)
+    verify_schema_v50(connection)
+}
+
+fn migrate_v49_to_v50(connection: &mut Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v49(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| map_sqlite_error(&error))?;
+    group_mls_store::create_v50_objects(&transaction)?;
+    transaction
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .map_err(|error| map_sqlite_error(&error))?;
+    transaction
+        .commit()
+        .map_err(|error| map_sqlite_error(&error))?;
+    verify_schema_v50(connection)
 }
 
 fn migrate_v48_to_v49(connection: &mut Connection) -> Result<(), DurableStoreError> {
@@ -749,7 +766,7 @@ fn migrate_v48_to_v49(connection: &mut Connection) -> Result<(), DurableStoreErr
         .map_err(|error| map_sqlite_error(&error))?;
     group_mls_store::create_v49_objects(&transaction)?;
     transaction
-        .pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", SQLITE_SCHEMA_V49)
         .map_err(|error| map_sqlite_error(&error))?;
     transaction
         .commit()
@@ -785,6 +802,11 @@ fn migrate_v46_to_v47(connection: &mut Connection) -> Result<(), DurableStoreErr
         .commit()
         .map_err(|error| map_sqlite_error(&error))?;
     verify_schema_v47(connection)
+}
+
+fn verify_schema_v50(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_schema_v49(connection)?;
+    group_mls_store::verify_v50_objects(connection)
 }
 
 fn verify_schema_v49(connection: &Connection) -> Result<(), DurableStoreError> {
@@ -939,6 +961,7 @@ fn initialize_schema_v23(connection: &mut Connection) -> Result<(), DurableStore
     recording_provider_store::create_v47_objects(&transaction)?;
     recording_provider_store::create_v48_objects(&transaction)?;
     group_mls_store::create_v49_objects(&transaction)?;
+    group_mls_store::create_v50_objects(&transaction)?;
     transaction
         .pragma_update(None, "application_id", UCR_SQLITE_APPLICATION_ID)
         .map_err(|error| map_sqlite_error(&error))?;
@@ -1926,7 +1949,103 @@ fn map_io_error(error: &std::io::Error) -> DurableStoreError {
 }
 
 #[cfg(test)]
+fn test_restore_v49_mls_transition_shape(connection: &Connection) -> Result<(), rusqlite::Error> {
+    connection.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+
+         DROP TRIGGER IF EXISTS event_id_owner_group_mls_transitions;
+         DROP TRIGGER IF EXISTS event_id_owner_events;
+         DROP TRIGGER IF EXISTS event_id_owner_group_changes;
+         DROP TRIGGER IF EXISTS event_id_owner_call_signals;
+
+         CREATE TABLE group_mls_transition_admissions_v49_backup AS
+         SELECT tenant_id, namespace_present, namespace_id, event_id, device_id
+         FROM group_mls_transition_admissions;
+
+         CREATE TABLE group_mls_transitions_v49 (
+             tenant_id TEXT NOT NULL,
+             namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+             namespace_id TEXT NOT NULL,
+             event_id TEXT NOT NULL,
+             group_id TEXT NOT NULL,
+             actor_device_id TEXT NOT NULL,
+             request_fingerprint BLOB NOT NULL CHECK(length(request_fingerprint)=32),
+             commit_bytes BLOB NOT NULL CHECK(length(commit_bytes) BETWEEN 1 AND 2097152),
+             welcome_bytes BLOB CHECK(welcome_bytes IS NULL OR length(welcome_bytes) BETWEEN 1 AND 2097152),
+             crypto_epoch BLOB NOT NULL CHECK(length(crypto_epoch)=8),
+             crypto_state_ref TEXT NOT NULL,
+             PRIMARY KEY(tenant_id, namespace_present, namespace_id, event_id),
+             FOREIGN KEY(tenant_id, namespace_present, namespace_id, event_id)
+               REFERENCES group_changes(tenant_id, namespace_present, namespace_id, event_id)
+               ON DELETE CASCADE,
+             CHECK((namespace_present = 0 AND namespace_id = '') OR
+                   (namespace_present = 1 AND namespace_id <> ''))
+         ) WITHOUT ROWID;
+
+         INSERT INTO group_mls_transitions_v49 (
+             tenant_id, namespace_present, namespace_id, event_id, group_id,
+             actor_device_id, request_fingerprint, commit_bytes, welcome_bytes,
+             crypto_epoch, crypto_state_ref
+         )
+         SELECT tenant_id, namespace_present, namespace_id, event_id, group_id,
+                actor_device_id, request_fingerprint, commit_bytes, welcome_bytes,
+                crypto_epoch, crypto_state_ref
+         FROM group_mls_transitions;
+
+         DROP INDEX IF EXISTS group_mls_transition_admissions_device;
+         DROP TABLE group_mls_transition_admissions;
+         DROP TABLE group_mls_transitions;
+         ALTER TABLE group_mls_transitions_v49 RENAME TO group_mls_transitions;
+
+         CREATE TABLE group_mls_transition_admissions (
+             tenant_id TEXT NOT NULL,
+             namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+             namespace_id TEXT NOT NULL,
+             event_id TEXT NOT NULL,
+             device_id TEXT NOT NULL,
+             PRIMARY KEY(tenant_id, namespace_present, namespace_id, event_id, device_id),
+             FOREIGN KEY(tenant_id, namespace_present, namespace_id, event_id)
+               REFERENCES group_mls_transitions(tenant_id, namespace_present, namespace_id, event_id)
+               ON DELETE CASCADE,
+             CHECK((namespace_present = 0 AND namespace_id = '') OR
+                   (namespace_present = 1 AND namespace_id <> ''))
+         ) WITHOUT ROWID;
+
+         INSERT INTO group_mls_transition_admissions (
+             tenant_id, namespace_present, namespace_id, event_id, device_id
+         )
+         SELECT tenant_id, namespace_present, namespace_id, event_id, device_id
+         FROM group_mls_transition_admissions_v49_backup;
+
+         DROP TABLE group_mls_transition_admissions_v49_backup;
+
+         CREATE INDEX group_mls_transition_admissions_device
+         ON group_mls_transition_admissions(
+             tenant_id, namespace_present, namespace_id, device_id, event_id
+         );
+
+         CREATE TRIGGER event_id_owner_events BEFORE INSERT ON events
+         WHEN EXISTS(SELECT 1 FROM group_changes WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+           OR EXISTS(SELECT 1 FROM call_signals WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+         BEGIN SELECT RAISE(ABORT, 'ucr event id already reserved'); END;
+
+         CREATE TRIGGER event_id_owner_group_changes BEFORE INSERT ON group_changes
+         WHEN EXISTS(SELECT 1 FROM events WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+           OR EXISTS(SELECT 1 FROM call_signals WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+         BEGIN SELECT RAISE(ABORT, 'ucr event id already reserved'); END;
+
+         CREATE TRIGGER event_id_owner_call_signals BEFORE INSERT ON call_signals
+         WHEN EXISTS(SELECT 1 FROM events WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+           OR EXISTS(SELECT 1 FROM group_changes WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+         BEGIN SELECT RAISE(ABORT, 'ucr event id already reserved'); END;
+
+         PRAGMA foreign_keys=ON;",
+    )
+}
+
+#[cfg(test)]
 fn test_remove_v49_objects(connection: &Connection) -> Result<(), rusqlite::Error> {
+    test_restore_v49_mls_transition_shape(connection)?;
     connection.execute_batch(
         "DROP INDEX IF EXISTS group_mls_transition_admissions_device;
          DROP TABLE IF EXISTS group_mls_transition_admissions;",

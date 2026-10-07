@@ -151,6 +151,7 @@ def main() -> None:
     sqlite_group_mls = read("crates/ucr-storage-sqlite/src/group_mls_store.rs")
     realtime_registry = read("crates/ucr-realtime/src/lib.rs")
     realtime_service = read("crates/ucr-api-grpc/src/realtime_service.rs")
+    universal_conference_service = read("crates/ucr-api-grpc/src/universal_conference_service.rs")
     realtime_proto = read("proto/ucr/v1/realtime.proto")
     grpc_lib = read("crates/ucr-api-grpc/src/lib.rs")
     runtime_lib = read("crates/ucr-runtime/src/lib.rs")
@@ -302,7 +303,8 @@ def main() -> None:
         and "SQLITE_SCHEMA_V46: u32 = 46" in sqlite_store
         and "SQLITE_SCHEMA_V47: u32 = 47" in sqlite_store
         and "SQLITE_SCHEMA_V48: u32 = 48" in sqlite_store
-        and "SQLITE_SCHEMA_VERSION: u32 = 49" in sqlite_store
+        and "SQLITE_SCHEMA_V49: u32 = 49" in sqlite_store
+        and "SQLITE_SCHEMA_VERSION: u32 = 50" in sqlite_store
         and "migrate_v38_to_v39" in sqlite_store
         and "migrate_v39_to_v40" in sqlite_store
         and "migrate_v40_to_v41" in sqlite_store
@@ -314,6 +316,7 @@ def main() -> None:
         and "migrate_v46_to_v47" in sqlite_store
         and "migrate_v47_to_v48" in sqlite_store
         and "migrate_v48_to_v49" in sqlite_store
+        and "migrate_v49_to_v50" in sqlite_store
         and "create_v46_objects" in sqlite_universal_conferences
         and "verify_v46_objects" in sqlite_universal_conferences
         and "create_v47_objects" in sqlite_recording_provider
@@ -322,10 +325,13 @@ def main() -> None:
         and "verify_v48_objects" in sqlite_recording_provider
         and "create_v49_objects" in sqlite_group_mls
         and "verify_v49_objects" in sqlite_group_mls
+        and "create_v50_objects" in sqlite_group_mls
+        and "verify_v50_objects" in sqlite_group_mls
+        and "event_id_owner_group_mls_transitions" in sqlite_group_mls
         and "group_mls_transition_admissions" in sqlite_group_mls
         and "service_audit_authentication" in sqlite_service_control
         and "verify_v44_objects" in sqlite_service_control,
-        "resource quota v42, runtime worker lease v43, typed audit v44, attachment v45, conference metadata v46, recording provider outbox v47, ready marker v48, and device-bound MLS bootstrap v49 migration chain missing",
+        "resource quota v42, runtime worker lease v43, typed audit v44, attachment v45, conference metadata v46, recording provider outbox v47, ready marker v48, device-bound MLS bootstrap v49, and standalone MLS transition v50 migration chain missing",
     )
     for marker in (
         "ServiceResourceQuotaPolicy",
@@ -383,6 +389,47 @@ def main() -> None:
         "charge_aggregate_bandwidth",
     ):
         require(marker in realtime_service, f"bandwidth quota fanout anchor missing: {marker}")
+    for marker in (
+        "rpc GetMlsAdmissionContext(RealtimeGetMlsAdmissionContextRequest)",
+        "rpc RegisterMlsKeyPackage(RealtimeRegisterMlsKeyPackageRequest)",
+        "message RealtimeRegisterMlsKeyPackageRequest",
+        "RealtimeMlsEndpointStateMode",
+        "REALTIME_MLS_ENDPOINT_STATE_MODE_REGISTER",
+        "REALTIME_MLS_ENDPOINT_STATE_MODE_RESTORE",
+        "REALTIME_MLS_ENDPOINT_STATE_MODE_LEGACY_SERVER_OWNED",
+    ):
+        require(marker in realtime_proto, f"endpoint-owned MLS admission public contract missing: {marker}")
+    for marker in (
+        "RealtimeMlsAdmissionStore",
+        "with_mls_admission_store",
+        "mls_admission_context",
+        "register_endpoint_mls_key_package",
+        "MAX_MLS_KEY_PACKAGE_BYTES",
+    ):
+        require(marker in realtime_service, f"endpoint-owned MLS admission core missing: {marker}")
+    require(
+        ".with_mls_admission_store(Arc::clone(&store))" in runtime_lib,
+        "production runtime does not wire canonical endpoint MLS admission store",
+    )
+    require(
+        '"/v1/realtime/mls-context"' in realtime_web
+        and '"/v1/realtime/mls-key-package"' in realtime_web
+        and "client.get_mls_admission_context(request).await" in realtime_web
+        and "client.register_mls_key_package(request).await" in realtime_web
+        and "legacy_server_owned" in realtime_web,
+        "reference browser gateway does not expose endpoint-owned MLS admission handshake",
+    )
+    require(
+        "create_mls_device_key_package(&owner.scope, &participant.device_id)"
+        not in universal_conference_service,
+        "Universal Conference still creates participant MLS KeyPackages server-side",
+    )
+    require(
+        "REALTIME_MLS_KEY_PACKAGE_REQUEST_WIRE_MAX_BYTES" in grpc_lib
+        and "GRPC_MAX_DECODING_MESSAGE_SIZE >= REALTIME_MLS_KEY_PACKAGE_REQUEST_WIRE_MAX_BYTES" in grpc_lib,
+        "gRPC receive budget does not cover endpoint MLS KeyPackage registration",
+    )
+
     for marker in (
         "rpc GetMlsBootstrap(RealtimeGetMlsBootstrapRequest)",
         "message RealtimeMlsBootstrap",

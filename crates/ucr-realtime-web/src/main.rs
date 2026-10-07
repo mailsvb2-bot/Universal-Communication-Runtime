@@ -255,6 +255,22 @@ struct WebRtcIceCandidateRequest {
     sdp_mline_index: Option<u32>,
 }
 
+#[derive(Debug, Deserialize)]
+struct MlsKeyPackageRequest {
+    tenant_id: String,
+    namespace_id: Option<String>,
+    call_id: String,
+    session_id: String,
+    key_package_base64: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MlsAdmissionContextResponse {
+    ok: bool,
+    group_id: String,
+    endpoint_state_mode: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 struct MlsCryptoStateResponse {
     crypto_epoch: u64,
@@ -450,6 +466,14 @@ async fn handle_post_route(state: &AppState, token: &str, path: &str, body: &[u8
         },
         "/v1/realtime/leave" => match decode_json::<SessionRequest>(body) {
             Ok(input) => leave(state, token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/mls-context" => match decode_json::<SessionRequest>(body) {
+            Ok(input) => get_mls_admission_context(state, token, input).await,
+            Err(error) => error.into_response(),
+        },
+        "/v1/realtime/mls-key-package" => match decode_json::<MlsKeyPackageRequest>(body) {
+            Ok(input) => register_mls_key_package(state, token, input).await,
             Err(error) => error.into_response(),
         },
         "/v1/realtime/mls-bootstrap" => match decode_json::<SessionRequest>(body) {
@@ -690,6 +714,132 @@ async fn heartbeat(state: &AppState, token: &str, input: HeartbeatRequest) -> Ht
                 ),
             }
         }
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn get_mls_admission_context(
+    state: &AppState,
+    token: &str,
+    input: SessionRequest,
+) -> HttpResponse {
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeGetMlsAdmissionContextRequest {
+        scope: Some(pb_scope(&input)),
+        call_id: Some(pb_id(&input.call)),
+        session_id: Some(pb_id(&input.session)),
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+    match client.get_mls_admission_context(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_get_mls_admission_context_response::Result::Context(context)) => {
+                let Some(group_id) = context.group_id else {
+                    return GatewayFailure::new(
+                        StatusCode::BAD_GATEWAY,
+                        "invalid_mls_context",
+                        "realtime upstream returned an MLS context without Group ID",
+                    )
+                    .into_response();
+                };
+                let mode =
+                    match pb::RealtimeMlsEndpointStateMode::try_from(context.endpoint_state_mode) {
+                        Ok(pb::RealtimeMlsEndpointStateMode::Register) => "register",
+                        Ok(pb::RealtimeMlsEndpointStateMode::Restore) => "restore",
+                        Ok(pb::RealtimeMlsEndpointStateMode::LegacyServerOwned) => {
+                            "legacy_server_owned"
+                        }
+                        _ => {
+                            return GatewayFailure::new(
+                                StatusCode::BAD_GATEWAY,
+                                "invalid_mls_context",
+                                "realtime upstream returned an unspecified MLS endpoint state mode",
+                            )
+                            .into_response();
+                        }
+                    };
+                match String::from_utf8(group_id.value) {
+                    Ok(group_id) => json_response(
+                        StatusCode::OK,
+                        &MlsAdmissionContextResponse {
+                            ok: true,
+                            group_id,
+                            endpoint_state_mode: mode,
+                        },
+                    ),
+                    Err(_) => GatewayFailure::new(
+                        StatusCode::BAD_GATEWAY,
+                        "invalid_mls_context",
+                        "realtime upstream returned a non-text MLS Group ID",
+                    )
+                    .into_response(),
+                }
+            }
+            Some(pb::realtime_get_mls_admission_context_response::Result::Error(error)) => {
+                canonical_error_response(
+                    &error,
+                    "mls_context_rejected",
+                    "device-bound MLS admission context rejected",
+                )
+            }
+            None => empty_upstream(),
+        },
+        Err(status) => grpc_error(&status),
+    }
+}
+
+async fn register_mls_key_package(
+    state: &AppState,
+    token: &str,
+    input: MlsKeyPackageRequest,
+) -> HttpResponse {
+    let key_package = match STANDARD.decode(input.key_package_base64.as_bytes()) {
+        Ok(bytes)
+            if !bytes.is_empty()
+                && bytes.len() <= ucr_api_grpc::REALTIME_MLS_KEY_PACKAGE_MAX_BYTES =>
+        {
+            bytes
+        }
+        _ => {
+            return GatewayFailure::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_mls_key_package",
+                "MLS KeyPackage is invalid or exceeds the wire bound",
+            )
+            .into_response();
+        }
+    };
+    let session = SessionRequest {
+        tenant: input.tenant_id,
+        namespace: input.namespace_id,
+        call: input.call_id,
+        session: input.session_id,
+    };
+    let mut client = client(state);
+    let mut request = GrpcRequest::new(pb::RealtimeRegisterMlsKeyPackageRequest {
+        scope: Some(pb_scope(&session)),
+        call_id: Some(pb_id(&session.call)),
+        session_id: Some(pb_id(&session.session)),
+        key_package,
+    });
+    if let Err(error) = attach_bearer(&mut request, token) {
+        return error.into_response();
+    }
+    match client.register_mls_key_package(request).await {
+        Ok(response) => match response.into_inner().result {
+            Some(pb::realtime_register_mls_key_package_response::Result::Acknowledgement(_)) => {
+                json_response(StatusCode::OK, &serde_json::json!({"ok": true}))
+            }
+            Some(pb::realtime_register_mls_key_package_response::Result::Error(error)) => {
+                canonical_error_response(
+                    &error,
+                    "mls_key_package_rejected",
+                    "device-bound MLS KeyPackage rejected",
+                )
+            }
+            None => empty_upstream(),
+        },
         Err(status) => grpc_error(&status),
     }
 }

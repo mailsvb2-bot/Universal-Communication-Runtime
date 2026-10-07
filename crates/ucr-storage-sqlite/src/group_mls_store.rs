@@ -5,12 +5,13 @@ use ucr_group_mls::{
     GroupMlsStoreError, MAX_MLS_BOOTSTRAP_BYTES, MAX_MLS_BOOTSTRAP_COMMITS, MlsBootstrapCommit,
     MlsCommitArtifacts, MlsDeviceAdmission, MlsDeviceBootstrap, MlsGroupState, MlsTransitionInput,
     create_device_key_package, create_group, current_crypto_state, decode_key_package, load_group,
-    member_device_ids, mls_change_request_fingerprint, own_device_id, sqlite_provider,
-    stage_transition,
+    member_device_ids, mls_change_request_fingerprint, mls_device_admission_fingerprint,
+    own_device_id, sqlite_provider, stage_transition,
 };
 use ucr_model::{
-    ConversationRecord, DeviceId, GroupChange, GroupChangeKind, GroupCryptoState, GroupId,
-    GroupRecord, OpaqueId, PrincipalKind, PrincipalRef, ScopedPrincipal, TenantScope,
+    ConversationRecord, DeviceId, EventId, GroupChange, GroupChangeKind, GroupCryptoState, GroupId,
+    GroupMemberState, GroupRecord, OpaqueId, PrincipalKind, PrincipalRef, ScopedPrincipal,
+    TenantScope,
 };
 use ucr_protocol::{
     GROUP_MLS_CAPABILITY, device_allows_protected_access, group_change_fingerprint,
@@ -60,6 +61,224 @@ pub(super) fn verify_v49_objects(connection: &Connection) -> Result<(), DurableS
             ("device_id", "TEXT", 1, 5),
         ],
     )
+}
+
+const V50_OBJECTS_SQL: &str = r"
+DROP TRIGGER IF EXISTS event_id_owner_group_mls_transitions;
+DROP TRIGGER IF EXISTS event_id_owner_events;
+DROP TRIGGER IF EXISTS event_id_owner_group_changes;
+DROP TRIGGER IF EXISTS event_id_owner_call_signals;
+
+CREATE TABLE group_mls_transitions_v50 (
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+    namespace_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    actor_device_id TEXT NOT NULL,
+    request_fingerprint BLOB NOT NULL CHECK(length(request_fingerprint)=32),
+    commit_bytes BLOB NOT NULL CHECK(length(commit_bytes) BETWEEN 1 AND 2097152),
+    welcome_bytes BLOB CHECK(welcome_bytes IS NULL OR length(welcome_bytes) BETWEEN 1 AND 2097152),
+    crypto_epoch BLOB NOT NULL CHECK(length(crypto_epoch)=8),
+    crypto_state_ref TEXT NOT NULL,
+    PRIMARY KEY(tenant_id, namespace_present, namespace_id, event_id),
+    FOREIGN KEY(tenant_id, namespace_present, namespace_id, group_id)
+      REFERENCES groups(tenant_id, namespace_present, namespace_id, group_id) ON DELETE CASCADE,
+    CHECK((namespace_present = 0 AND namespace_id = '') OR
+          (namespace_present = 1 AND namespace_id <> ''))
+) WITHOUT ROWID;
+
+CREATE TABLE group_mls_transition_admissions_v50 (
+    tenant_id TEXT NOT NULL,
+    namespace_present INTEGER NOT NULL CHECK(namespace_present IN (0, 1)),
+    namespace_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    PRIMARY KEY(tenant_id, namespace_present, namespace_id, event_id, device_id),
+    FOREIGN KEY(tenant_id, namespace_present, namespace_id, event_id)
+      REFERENCES group_mls_transitions_v50(tenant_id, namespace_present, namespace_id, event_id)
+      ON DELETE CASCADE,
+    CHECK((namespace_present = 0 AND namespace_id = '') OR
+          (namespace_present = 1 AND namespace_id <> ''))
+) WITHOUT ROWID;
+
+INSERT INTO group_mls_transitions_v50 (
+    tenant_id, namespace_present, namespace_id, event_id, group_id,
+    actor_device_id, request_fingerprint, commit_bytes, welcome_bytes,
+    crypto_epoch, crypto_state_ref
+)
+SELECT tenant_id, namespace_present, namespace_id, event_id, group_id,
+       actor_device_id, request_fingerprint, commit_bytes, welcome_bytes,
+       crypto_epoch, crypto_state_ref
+FROM group_mls_transitions;
+
+INSERT INTO group_mls_transition_admissions_v50 (
+    tenant_id, namespace_present, namespace_id, event_id, device_id
+)
+SELECT tenant_id, namespace_present, namespace_id, event_id, device_id
+FROM group_mls_transition_admissions;
+
+DROP INDEX IF EXISTS group_mls_transition_admissions_device;
+DROP TABLE group_mls_transition_admissions;
+DROP TABLE group_mls_transitions;
+ALTER TABLE group_mls_transitions_v50 RENAME TO group_mls_transitions;
+ALTER TABLE group_mls_transition_admissions_v50 RENAME TO group_mls_transition_admissions;
+
+CREATE INDEX group_mls_transition_admissions_device
+ON group_mls_transition_admissions(
+    tenant_id, namespace_present, namespace_id, device_id, event_id
+);
+
+CREATE TRIGGER event_id_owner_events BEFORE INSERT ON events
+WHEN EXISTS(SELECT 1 FROM group_changes WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+  OR EXISTS(SELECT 1 FROM call_signals WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+  OR EXISTS(SELECT 1 FROM group_mls_transitions WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+BEGIN SELECT RAISE(ABORT, 'ucr event id already reserved'); END;
+
+CREATE TRIGGER event_id_owner_group_changes BEFORE INSERT ON group_changes
+WHEN EXISTS(SELECT 1 FROM events WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+  OR EXISTS(SELECT 1 FROM call_signals WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+  OR EXISTS(SELECT 1 FROM group_mls_transitions WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+BEGIN SELECT RAISE(ABORT, 'ucr event id already reserved'); END;
+
+CREATE TRIGGER event_id_owner_call_signals BEFORE INSERT ON call_signals
+WHEN EXISTS(SELECT 1 FROM events WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+  OR EXISTS(SELECT 1 FROM group_changes WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+  OR EXISTS(SELECT 1 FROM group_mls_transitions WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+BEGIN SELECT RAISE(ABORT, 'ucr event id already reserved'); END;
+
+CREATE TRIGGER event_id_owner_group_mls_transitions BEFORE INSERT ON group_mls_transitions
+WHEN EXISTS(SELECT 1 FROM events WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+  OR EXISTS(SELECT 1 FROM call_signals WHERE tenant_id=NEW.tenant_id AND namespace_present=NEW.namespace_present AND namespace_id=NEW.namespace_id AND event_id=NEW.event_id)
+  OR EXISTS(
+      SELECT 1 FROM group_changes
+      WHERE tenant_id=NEW.tenant_id
+        AND namespace_present=NEW.namespace_present
+        AND namespace_id=NEW.namespace_id
+        AND event_id=NEW.event_id
+        AND group_id<>NEW.group_id
+  )
+BEGIN SELECT RAISE(ABORT, 'ucr event id already reserved'); END;
+";
+
+pub(super) fn create_v50_objects(transaction: &Transaction<'_>) -> Result<(), DurableStoreError> {
+    transaction
+        .execute_batch(V50_OBJECTS_SQL)
+        .map_err(|error| map_schema_change_error(&error))
+}
+
+pub(super) fn verify_v50_objects(connection: &Connection) -> Result<(), DurableStoreError> {
+    verify_v49_objects(connection)?;
+    verify_foreign_key_columns(
+        connection,
+        "group_mls_transitions",
+        "groups",
+        &[
+            ("tenant_id", "tenant_id"),
+            ("namespace_present", "namespace_present"),
+            ("namespace_id", "namespace_id"),
+            ("group_id", "group_id"),
+        ],
+    )?;
+    verify_foreign_key_columns(
+        connection,
+        "group_mls_transition_admissions",
+        "group_mls_transitions",
+        &[
+            ("tenant_id", "tenant_id"),
+            ("namespace_present", "namespace_present"),
+            ("namespace_id", "namespace_id"),
+            ("event_id", "event_id"),
+        ],
+    )?;
+    let transition_trigger: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema
+                WHERE type='trigger' AND name='event_id_owner_group_mls_transitions'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if !transition_trigger {
+        return Err(DurableStoreError::Corrupt);
+    }
+    let invalid_collision: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM events e
+                JOIN group_mls_transitions m
+                  ON e.tenant_id=m.tenant_id
+                 AND e.namespace_present=m.namespace_present
+                 AND e.namespace_id=m.namespace_id
+                 AND e.event_id=m.event_id
+                UNION ALL
+                SELECT 1 FROM call_signals c
+                JOIN group_mls_transitions m
+                  ON c.tenant_id=m.tenant_id
+                 AND c.namespace_present=m.namespace_present
+                 AND c.namespace_id=m.namespace_id
+                 AND c.event_id=m.event_id
+                UNION ALL
+                SELECT 1 FROM group_changes g
+                JOIN group_mls_transitions m
+                  ON g.tenant_id=m.tenant_id
+                 AND g.namespace_present=m.namespace_present
+                 AND g.namespace_id=m.namespace_id
+                 AND g.event_id=m.event_id
+                 AND g.group_id<>m.group_id
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if invalid_collision {
+        return Err(DurableStoreError::Corrupt);
+    }
+    Ok(())
+}
+
+fn verify_foreign_key_columns(
+    connection: &Connection,
+    table: &str,
+    expected_target: &str,
+    expected_columns: &[(&str, &str)],
+) -> Result<(), DurableStoreError> {
+    let sql = format!("PRAGMA foreign_key_list('{table}')");
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| map_sqlite_error(&error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|error| map_sqlite_error(&error))?;
+    let mut actual = Vec::new();
+    for row in rows {
+        actual.push(row.map_err(|error| map_sqlite_error(&error))?);
+    }
+    actual.sort();
+    let mut expected = expected_columns
+        .iter()
+        .map(|(from, to)| {
+            (
+                expected_target.to_owned(),
+                (*from).to_owned(),
+                (*to).to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    expected.sort();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(DurableStoreError::Corrupt)
+    }
 }
 
 impl GroupMlsAtomicStore for SqliteLocalStore {
@@ -210,6 +429,197 @@ impl GroupMlsAtomicStore for SqliteLocalStore {
             .map_err(|error| map_sqlite_error(&error))?;
         Ok(outcome)
     }
+
+    fn admit_mls_device(
+        &self,
+        actor: &ScopedPrincipal,
+        actor_device_id: &DeviceId,
+        group_id: &GroupId,
+        member: &PrincipalRef,
+        event_id: &EventId,
+        admission: &MlsDeviceAdmission,
+    ) -> Result<DurableRecordStatus, GroupMlsStoreError> {
+        if admission.key_package.is_empty() {
+            return Err(GroupMlsStoreError::InvalidChangeMaterial);
+        }
+        let request = DeviceAdmissionRequest {
+            actor,
+            actor_device_id,
+            group_id,
+            member,
+            event_id,
+            admission,
+            request_fingerprint: mls_device_admission_fingerprint(
+                &actor.scope,
+                group_id,
+                actor_device_id,
+                member,
+                event_id,
+                admission,
+            )?,
+        };
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| map_sqlite_error(&error))?;
+        if let Some(status) = existing_device_admission_status(&transaction, &request)? {
+            transaction
+                .commit()
+                .map_err(|error| map_sqlite_error(&error))?;
+            return Ok(status);
+        }
+
+        let (mut canonical_group, artifacts, mut mls_group) =
+            stage_device_admission(&transaction, &request)?;
+        canonical_group.crypto_state = artifacts.next_crypto_state.clone();
+        group_store::update_group(&transaction, &canonical_group)?;
+        insert_transition(
+            &transaction,
+            &TransitionInsert {
+                scope: &actor.scope,
+                group_id,
+                event_id,
+                actor_device_id,
+                request_fingerprint: &request.request_fingerprint,
+                artifacts: &artifacts,
+                added_devices: std::slice::from_ref(admission),
+            },
+        )?;
+        {
+            let provider = sqlite_provider(&transaction);
+            ucr_group_mls::merge_pending(
+                &provider,
+                &mut mls_group,
+                &actor.scope,
+                group_id,
+                &artifacts.next_crypto_state,
+            )?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| map_sqlite_error(&error))?;
+        Ok(DurableRecordStatus::Persisted)
+    }
+}
+
+struct DeviceAdmissionRequest<'a> {
+    actor: &'a ScopedPrincipal,
+    actor_device_id: &'a DeviceId,
+    group_id: &'a GroupId,
+    member: &'a PrincipalRef,
+    event_id: &'a EventId,
+    admission: &'a MlsDeviceAdmission,
+    request_fingerprint: [u8; 32],
+}
+
+fn existing_device_admission_status(
+    transaction: &Transaction<'_>,
+    request: &DeviceAdmissionRequest<'_>,
+) -> Result<Option<DurableRecordStatus>, GroupMlsStoreError> {
+    if let Some(stored) = load_transition(
+        transaction,
+        &request.actor.scope,
+        request.event_id.as_opaque().as_str(),
+    )? {
+        let admitted = transition_admits_device(
+            transaction,
+            &request.actor.scope,
+            request.event_id,
+            &request.admission.device_id,
+        )?;
+        if stored.group_id != *request.group_id
+            || stored.actor_device_id != *request.actor_device_id
+            || stored.request_fingerprint != request.request_fingerprint
+            || !admitted
+        {
+            return Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict));
+        }
+        return Ok(Some(DurableRecordStatus::Duplicate));
+    }
+
+    if group_store::load_change_record(
+        transaction,
+        &request.actor.scope,
+        request.event_id.as_opaque().as_str(),
+    )?
+    .is_some()
+        || super::event_journal::load_event_by_id(
+            transaction,
+            &request.actor.scope,
+            request.event_id,
+        )?
+        .is_some()
+        || super::call_store::call_signal_reserves_event_id(
+            transaction,
+            &request.actor.scope,
+            request.event_id.as_opaque().as_str(),
+        )?
+    {
+        return Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict));
+    }
+    Ok(None)
+}
+
+fn stage_device_admission(
+    transaction: &Transaction<'_>,
+    request: &DeviceAdmissionRequest<'_>,
+) -> Result<(GroupRecord, MlsCommitArtifacts, MlsGroupState), GroupMlsStoreError> {
+    let canonical_group =
+        group_store::load_group_from(transaction, &request.actor.scope, request.group_id)?.ok_or(
+            GroupMlsStoreError::Durable(DurableStoreError::InvalidRecord),
+        )?;
+    if canonical_group.crypto_state.capability_id.as_deref() != Some(GROUP_MLS_CAPABILITY) {
+        return Err(GroupMlsStoreError::InvalidChangeMaterial);
+    }
+    let membership = group_store::load_membership_from(
+        transaction,
+        &request.actor.scope,
+        request.group_id,
+        request.member,
+    )?
+    .ok_or(GroupMlsStoreError::Durable(
+        DurableStoreError::PermissionDenied,
+    ))?;
+    if membership.state != GroupMemberState::Active {
+        return Err(GroupMlsStoreError::Durable(
+            DurableStoreError::PermissionDenied,
+        ));
+    }
+    require_device_for_principal(
+        transaction,
+        &request.actor.scope,
+        &request.actor.principal,
+        request.actor_device_id,
+        true,
+    )?;
+    require_device_for_principal(
+        transaction,
+        &request.actor.scope,
+        request.member,
+        &request.admission.device_id,
+        true,
+    )?;
+
+    let provider = sqlite_provider(transaction);
+    let mut mls_group = load_group(&provider, &request.actor.scope, request.group_id)?
+        .ok_or(GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?;
+    if current_crypto_state(&request.actor.scope, request.group_id, &mls_group)?
+        != canonical_group.crypto_state
+        || own_device_id(&mls_group, &request.actor.scope)? != *request.actor_device_id
+    {
+        return Err(GroupMlsStoreError::Durable(DurableStoreError::Corrupt));
+    }
+    if member_device_ids(&mls_group, &request.actor.scope)?.contains(&request.admission.device_id) {
+        return Err(GroupMlsStoreError::TargetDeviceMismatch);
+    }
+    let artifacts = stage_transition(
+        &provider,
+        &mut mls_group,
+        &request.actor.scope,
+        request.group_id,
+        &MlsTransitionInput::Add(vec![request.admission.clone()]),
+    )?;
+    Ok((canonical_group, artifacts, mls_group))
 }
 
 #[derive(Debug)]
@@ -302,11 +712,15 @@ fn apply_new_transition_in_transaction(
     }
     insert_transition(
         transaction,
-        actor_device_id,
-        request_fingerprint,
-        &applied_change,
-        &artifacts,
-        added_devices,
+        &TransitionInsert {
+            scope: &applied_change.scope,
+            group_id: &applied_change.group_id,
+            event_id: &applied_change.event_id,
+            actor_device_id,
+            request_fingerprint,
+            artifacts: &artifacts,
+            added_devices,
+        },
     )?;
     {
         let provider = sqlite_provider(transaction);
@@ -333,9 +747,6 @@ fn prepare_transition_input(
 ) -> Result<MlsTransitionInput, GroupMlsStoreError> {
     match &requested_change.kind {
         GroupChangeKind::AddMember { member, .. } => {
-            if added_devices.is_empty() {
-                return Err(GroupMlsStoreError::InvalidChangeMaterial);
-            }
             let current_devices = {
                 let provider = sqlite_provider(transaction);
                 let group = load_group(
@@ -354,6 +765,13 @@ fn prepare_transition_input(
                 }
                 member_device_ids(&group, &requested_change.scope)?
             };
+            if added_devices.is_empty() {
+                // Principal-level Conference/Group admission is authoritative even before a
+                // browser Device has supplied its endpoint-owned KeyPackage. Rekey existing MLS
+                // members so the authorization change still advances the crypto epoch; the Device
+                // leaf is admitted later by `admit_mls_device`.
+                return Ok(MlsTransitionInput::Rekey);
+            }
             for admission in added_devices {
                 if current_devices.contains(&admission.device_id) {
                     return Err(GroupMlsStoreError::TargetDeviceMismatch);
@@ -555,16 +973,83 @@ fn device_belongs_to_principal(
     }
 }
 
+pub(super) fn mls_transition_reserves_event_id(
+    connection: &Connection,
+    scope: &TenantScope,
+    event_id: &str,
+) -> Result<bool, DurableStoreError> {
+    let table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='group_mls_transitions')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))?;
+    if !table_exists {
+        return Ok(false);
+    }
+    let namespace = namespace_storage_key(scope);
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM group_mls_transitions
+                WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND event_id=?4
+             )",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                event_id,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))
+}
+
+fn transition_admits_device(
+    connection: &Connection,
+    scope: &TenantScope,
+    event_id: &EventId,
+    device_id: &DeviceId,
+) -> Result<bool, GroupMlsStoreError> {
+    let namespace = namespace_storage_key(scope);
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM group_mls_transition_admissions
+                WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3
+                  AND event_id=?4 AND device_id=?5
+             )",
+            params![
+                scope.tenant_id.as_opaque().as_str(),
+                namespace.present,
+                namespace.value,
+                event_id.as_opaque().as_str(),
+                device_id.as_opaque().as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| map_sqlite_error(&error))
+        .map_err(Into::into)
+}
+
+struct TransitionInsert<'a> {
+    scope: &'a TenantScope,
+    group_id: &'a GroupId,
+    event_id: &'a EventId,
+    actor_device_id: &'a DeviceId,
+    request_fingerprint: &'a [u8; 32],
+    artifacts: &'a MlsCommitArtifacts,
+    added_devices: &'a [MlsDeviceAdmission],
+}
+
 fn insert_transition(
     transaction: &Transaction<'_>,
-    actor_device_id: &DeviceId,
-    request_fingerprint: &[u8; 32],
-    change: &GroupChange,
-    artifacts: &MlsCommitArtifacts,
-    added_devices: &[MlsDeviceAdmission],
+    insert: &TransitionInsert<'_>,
 ) -> Result<(), GroupMlsStoreError> {
-    let namespace = namespace_storage_key(&change.scope);
-    let state_ref = artifacts
+    let namespace = namespace_storage_key(insert.scope);
+    let state_ref = insert
+        .artifacts
         .next_crypto_state
         .state_ref
         .as_ref()
@@ -577,34 +1062,39 @@ fn insert_transition(
                 crypto_epoch, crypto_state_ref
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
-                change.scope.tenant_id.as_opaque().as_str(),
+                insert.scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
                 namespace.value,
-                change.event_id.as_opaque().as_str(),
-                change.group_id.as_opaque().as_str(),
-                actor_device_id.as_opaque().as_str(),
-                request_fingerprint.as_slice(),
-                artifacts.commit.as_slice(),
-                artifacts.welcome.as_deref(),
-                artifacts.next_crypto_state.epoch.to_be_bytes().as_slice(),
+                insert.event_id.as_opaque().as_str(),
+                insert.group_id.as_opaque().as_str(),
+                insert.actor_device_id.as_opaque().as_str(),
+                insert.request_fingerprint.as_slice(),
+                insert.artifacts.commit.as_slice(),
+                insert.artifacts.welcome.as_deref(),
+                insert
+                    .artifacts
+                    .next_crypto_state
+                    .epoch
+                    .to_be_bytes()
+                    .as_slice(),
                 state_ref.as_str(),
             ],
         )
         .map_err(|error| map_sqlite_error(&error))?;
-    if artifacts.welcome.is_none() && !added_devices.is_empty() {
+    if insert.artifacts.welcome.is_none() && !insert.added_devices.is_empty() {
         return Err(GroupMlsStoreError::InvalidChangeMaterial);
     }
-    for admission in added_devices {
+    for admission in insert.added_devices {
         transaction
             .execute(
                 "INSERT INTO group_mls_transition_admissions (
                     tenant_id, namespace_present, namespace_id, event_id, device_id
                  ) VALUES (?1,?2,?3,?4,?5)",
                 params![
-                    change.scope.tenant_id.as_opaque().as_str(),
+                    insert.scope.tenant_id.as_opaque().as_str(),
                     namespace.present,
                     namespace.value,
-                    change.event_id.as_opaque().as_str(),
+                    insert.event_id.as_opaque().as_str(),
                     admission.device_id.as_opaque().as_str(),
                 ],
             )
@@ -701,11 +1191,11 @@ fn load_device_admission(
     scope: &TenantScope,
     group_id: &GroupId,
     device_id: &DeviceId,
-) -> Result<Option<(Vec<u8>, GroupCryptoState)>, GroupMlsStoreError> {
+) -> Result<Option<(EventId, Vec<u8>, GroupCryptoState)>, GroupMlsStoreError> {
     let namespace = namespace_storage_key(scope);
     let admission = connection
         .query_row(
-            "SELECT t.welcome_bytes, t.crypto_epoch, t.crypto_state_ref
+            "SELECT a.event_id, t.welcome_bytes, t.crypto_epoch, t.crypto_state_ref
              FROM group_mls_transition_admissions a
              JOIN group_mls_transitions t
                ON t.tenant_id=a.tenant_id
@@ -728,17 +1218,22 @@ fn load_device_admission(
             ],
             |row| {
                 Ok((
-                    row.get::<_, Option<Vec<u8>>>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| map_sqlite_error(&error))?;
     admission
-        .map(|(welcome, epoch, state_ref)| {
+        .map(|(event_id, welcome, epoch, state_ref)| {
             Ok((
+                EventId::from_opaque(
+                    OpaqueId::new(event_id)
+                        .map_err(|_| GroupMlsStoreError::Durable(DurableStoreError::Corrupt))?,
+                ),
                 welcome.ok_or(GroupMlsStoreError::InvalidChangeMaterial)?,
                 decode_crypto_state(epoch, state_ref)?,
             ))
@@ -810,7 +1305,7 @@ impl GroupMlsBootstrapStore for SqliteLocalStore {
     ) -> Result<Option<MlsDeviceBootstrap>, GroupMlsStoreError> {
         let connection = self.lock_connection()?;
         require_active_device(&connection, scope, device_id)?;
-        let Some((welcome, welcome_crypto_state)) =
+        let Some((admission_event_id, welcome, welcome_crypto_state)) =
             load_device_admission(&connection, scope, group_id, device_id)?
         else {
             return Ok(None);
@@ -839,6 +1334,7 @@ impl GroupMlsBootstrapStore for SqliteLocalStore {
 
         Ok(Some(MlsDeviceBootstrap {
             group_id: group_id.clone(),
+            admission_event_id,
             welcome,
             welcome_crypto_state,
             subsequent_commits,
@@ -1177,6 +1673,10 @@ mod phase29_atomic_mls_tests {
             .unwrap()
             .expect("device bootstrap");
         assert!(!initial.welcome.is_empty());
+        assert_eq!(
+            initial.admission_event_id.as_opaque().as_str(),
+            "phase29-bootstrap-add"
+        );
         assert_eq!(initial.welcome_crypto_state, admitted_state);
         assert!(initial.subsequent_commits.is_empty());
         assert_eq!(initial.current_crypto_state, admitted_state);
@@ -1198,6 +1698,10 @@ mod phase29_atomic_mls_tests {
             .mls_bootstrap_for_device(&scope(), &group.group_id, &admitted_device)
             .unwrap()
             .expect("advanced bootstrap");
+        assert_eq!(
+            advanced.admission_event_id.as_opaque().as_str(),
+            "phase29-bootstrap-add"
+        );
         assert_eq!(advanced.welcome_crypto_state, admitted_state);
         assert_eq!(advanced.subsequent_commits.len(), 1);
         assert!(!advanced.subsequent_commits[0].commit.is_empty());
@@ -1206,6 +1710,142 @@ mod phase29_atomic_mls_tests {
             current_state
         );
         assert_eq!(advanced.current_crypto_state, current_state);
+    }
+
+    fn assert_endpoint_admission_retry_and_collision_guards(
+        store: &SqliteLocalStore,
+        group: &GroupRecord,
+        owner: &ScopedPrincipal,
+        member: &ScopedPrincipal,
+        event_id: &EventId,
+        endpoint_admission: &MlsDeviceAdmission,
+        expected_crypto_state: &GroupCryptoState,
+    ) {
+        let duplicate = store
+            .admit_mls_device(
+                owner,
+                &device("phase29-owner-device"),
+                &group.group_id,
+                &member.principal,
+                event_id,
+                endpoint_admission,
+            )
+            .unwrap();
+        assert_eq!(duplicate, DurableRecordStatus::Duplicate);
+        assert_eq!(
+            store
+                .group(&scope(), &group.group_id)
+                .unwrap()
+                .expect("group after exact retry")
+                .crypto_state,
+            *expected_crypto_state
+        );
+
+        let changed = admission(store, "phase29-bob-device-2");
+        assert_eq!(
+            store.admit_mls_device(
+                owner,
+                &device("phase29-owner-device"),
+                &group.group_id,
+                &member.principal,
+                event_id,
+                &changed,
+            ),
+            Err(GroupMlsStoreError::Durable(DurableStoreError::Conflict))
+        );
+
+        let colliding_group_change = role_change(
+            group,
+            event_id.as_opaque().as_str(),
+            member,
+            1,
+            GroupRole::Admin,
+        );
+        assert_eq!(
+            store.apply_group_change(owner, &colliding_group_change),
+            Err(DurableStoreError::Conflict)
+        );
+    }
+
+    #[test]
+    fn principal_admission_precedes_endpoint_owned_device_leaf_and_retry_is_durable() {
+        let db = TestDb::new();
+        let store = SqliteLocalStore::open(db.path()).unwrap();
+        let (group, owner, bob) = bootstrap(&store);
+
+        let principal_add = add_change(&group, "phase29-principal-only-add", &bob, 0);
+        let added = store
+            .apply_mls_backed_group_change(
+                &owner,
+                &device("phase29-owner-device"),
+                &principal_add,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(added.status, DurableRecordStatus::Persisted);
+        let principal_state = added.applied_change.next_crypto_state.unwrap();
+        assert_eq!(principal_state.epoch, 1);
+        let membership = store
+            .group_membership(&scope(), &group.group_id, &bob.principal)
+            .unwrap()
+            .expect("principal membership");
+        assert_eq!(membership.state, GroupMemberState::Active);
+        assert!(
+            !mls_snapshot(&store, &group)
+                .1
+                .contains(&device("phase29-bob-device-1"))
+        );
+        assert!(
+            store
+                .mls_bootstrap_for_device(
+                    &scope(),
+                    &group.group_id,
+                    &device("phase29-bob-device-1")
+                )
+                .unwrap()
+                .is_none()
+        );
+
+        let endpoint_admission = admission(&store, "phase29-bob-device-1");
+        let event_id = EventId::from_opaque(oid("rkp-phase29-endpoint-admission"));
+        let persisted = store
+            .admit_mls_device(
+                &owner,
+                &device("phase29-owner-device"),
+                &group.group_id,
+                &bob.principal,
+                &event_id,
+                &endpoint_admission,
+            )
+            .unwrap();
+        assert_eq!(persisted, DurableRecordStatus::Persisted);
+        let after_admission = store
+            .group(&scope(), &group.group_id)
+            .unwrap()
+            .expect("group after endpoint admission");
+        assert_eq!(after_admission.revision, 1);
+        assert_eq!(after_admission.crypto_state.epoch, 2);
+        assert!(
+            mls_snapshot(&store, &group)
+                .1
+                .contains(&device("phase29-bob-device-1"))
+        );
+        let bootstrap = store
+            .mls_bootstrap_for_device(&scope(), &group.group_id, &device("phase29-bob-device-1"))
+            .unwrap()
+            .expect("endpoint bootstrap");
+        assert_eq!(bootstrap.admission_event_id, event_id);
+        assert_eq!(bootstrap.current_crypto_state, after_admission.crypto_state);
+
+        assert_endpoint_admission_retry_and_collision_guards(
+            &store,
+            &group,
+            &owner,
+            &bob,
+            &event_id,
+            &endpoint_admission,
+            &after_admission.crypto_state,
+        );
     }
 
     #[test]

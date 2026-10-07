@@ -82,6 +82,45 @@ message RealtimeLeaveResponse {
 // Device-bound MLS bootstrap is a read-only projection over canonical Group MLS transitions.
 // The target Device is never caller supplied: the server derives it from authenticated realtime
 // session claims and returns only the Welcome recorded for that exact Device.
+message RealtimeGetMlsAdmissionContextRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+}
+
+enum RealtimeMlsEndpointStateMode {
+  REALTIME_MLS_ENDPOINT_STATE_MODE_UNSPECIFIED = 0;
+  REALTIME_MLS_ENDPOINT_STATE_MODE_REGISTER = 1;
+  REALTIME_MLS_ENDPOINT_STATE_MODE_RESTORE = 2;
+  REALTIME_MLS_ENDPOINT_STATE_MODE_LEGACY_SERVER_OWNED = 3;
+}
+
+message RealtimeMlsAdmissionContext {
+  OpaqueId group_id = 1;
+  RealtimeMlsEndpointStateMode endpoint_state_mode = 2;
+}
+
+message RealtimeGetMlsAdmissionContextResponse {
+  oneof result {
+    RealtimeMlsAdmissionContext context = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
+message RealtimeRegisterMlsKeyPackageRequest {
+  TenantScope scope = 1;
+  OpaqueId call_id = 2;
+  OpaqueId session_id = 3;
+  bytes key_package = 4;
+}
+
+message RealtimeRegisterMlsKeyPackageResponse {
+  oneof result {
+    AcknowledgementEnvelope acknowledgement = 1;
+    ErrorEnvelope error = 2;
+  }
+}
+
 message RealtimeGetMlsBootstrapRequest {
   TenantScope scope = 1;
   OpaqueId call_id = 2;
@@ -426,6 +465,8 @@ service RealtimeService {
   rpc JoinRealtime(RealtimeJoinRequest) returns (RealtimeJoinResponse);
   rpc HeartbeatRealtime(RealtimeHeartbeatRequest) returns (RealtimeHeartbeatResponse);
   rpc LeaveRealtime(RealtimeLeaveRequest) returns (RealtimeLeaveResponse);
+  rpc GetMlsAdmissionContext(RealtimeGetMlsAdmissionContextRequest) returns (RealtimeGetMlsAdmissionContextResponse);
+  rpc RegisterMlsKeyPackage(RealtimeRegisterMlsKeyPackageRequest) returns (RealtimeRegisterMlsKeyPackageResponse);
   rpc GetMlsBootstrap(RealtimeGetMlsBootstrapRequest) returns (RealtimeGetMlsBootstrapResponse);
   rpc SetSubscriptions(RealtimeSetSubscriptionsRequest) returns (RealtimeSetSubscriptionsResponse);
   rpc SetRaisedHand(RealtimeSetRaisedHandRequest) returns (RealtimeSetRaisedHandResponse);

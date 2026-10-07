@@ -540,6 +540,13 @@ pub fn apply_group_change_in_transaction(
             Err(DurableStoreError::Conflict)
         };
     }
+    if super::group_mls_store::mls_transition_reserves_event_id(
+        transaction,
+        &change.scope,
+        change.event_id.as_opaque().as_str(),
+    )? {
+        return Err(DurableStoreError::Conflict);
+    }
     if let ucr_model::GroupChangeKind::AddBridgeMapping { mapping } = &change.kind {
         let registration = super::bridge_store::load_registration_from(
             transaction,
@@ -568,6 +575,11 @@ pub fn apply_group_change_in_transaction(
     if super::event_journal::load_event_by_id(transaction, &change.scope, &change.event_id)?
         .is_some()
         || super::call_store::call_signal_reserves_event_id(
+            transaction,
+            &change.scope,
+            change.event_id.as_opaque().as_str(),
+        )?
+        || super::group_mls_store::mls_transition_reserves_event_id(
             transaction,
             &change.scope,
             change.event_id.as_opaque().as_str(),
@@ -875,7 +887,7 @@ fn insert_group(
     Ok(())
 }
 
-fn update_group(
+pub(super) fn update_group(
     transaction: &Transaction<'_>,
     group: &GroupRecord,
 ) -> Result<(), DurableStoreError> {

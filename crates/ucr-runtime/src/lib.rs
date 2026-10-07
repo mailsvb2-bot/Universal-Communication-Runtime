@@ -2530,6 +2530,7 @@ impl ProductionRuntime {
             dependencies.webrtc,
         )
         .with_mls_bootstrap_store(Arc::clone(&store))
+        .with_mls_admission_store(Arc::clone(&store))
         .with_validated_media_observer(recording_media_observer);
         let (realtime_service, sfu_expiry_task) = configure_sfu_placement_lifecycle(
             realtime_service,
