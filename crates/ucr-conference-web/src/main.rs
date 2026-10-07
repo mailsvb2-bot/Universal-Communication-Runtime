@@ -256,6 +256,7 @@ async fn dispatch_recording_post(
     match path {
         "/v1/recordings" => forward_request_recording(&mut client, body, authorization).await,
         "/v1/recordings/get" => forward_get_recording(&mut client, body, authorization).await,
+        "/v1/recordings/export" => forward_export_recording(&mut client, body, authorization).await,
         "/v1/recordings/consent" => {
             forward_recording_consent(&mut client, body, authorization).await
         }
@@ -957,6 +958,46 @@ async fn forward_get_recording(
                 &json!({ "recording": recording_json(&recording) }),
             ),
             Some(pb::recording_get_response::Result::Error(error)) => error_response(&error),
+            None => empty_upstream(),
+        }
+    })
+    .await
+}
+
+async fn forward_export_recording(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingLookupJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let request = match (|| -> Result<_, TransportError> {
+        Ok(pb::RecordingExportRequest {
+            scope: Some(scope_of(&parsed.scope)?),
+            recording_id: Some(opaque(&parsed.recording_id)?),
+        })
+    })() {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(request, authorization) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(client.export_recording(request), |response| {
+        match response.result {
+            Some(pb::recording_export_response::Result::Artifact(artifact)) => json_response(
+                StatusCode::OK,
+                &json!({
+                    "artifact": {
+                        "media_type": artifact.media_type,
+                        "payload_b64": STANDARD.encode(&artifact.payload),
+                    }
+                }),
+            ),
+            Some(pb::recording_export_response::Result::Error(error)) => error_response(&error),
             None => empty_upstream(),
         }
     })
