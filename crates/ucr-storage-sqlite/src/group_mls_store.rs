@@ -519,7 +519,7 @@ fn existing_device_admission_status(
     if let Some(stored) = load_transition(
         transaction,
         &request.actor.scope,
-        request.insert.event_id.as_opaque().as_str(),
+        request.event_id.as_opaque().as_str(),
     )? {
         let admitted = transition_admits_device(
             transaction,
@@ -774,7 +774,7 @@ fn prepare_transition_input(
                 // leaf is admitted later by `admit_mls_device`.
                 return Ok(MlsTransitionInput::Rekey);
             }
-            for admission in insert.added_devices {
+            for admission in added_devices {
                 if current_devices.contains(&admission.device_id) {
                     return Err(GroupMlsStoreError::TargetDeviceMismatch);
                 }
@@ -998,7 +998,7 @@ pub(super) fn mls_transition_reserves_event_id(
                 WHERE tenant_id=?1 AND namespace_present=?2 AND namespace_id=?3 AND event_id=?4
              )",
             params![
-                insert.scope.tenant_id.as_opaque().as_str(),
+                scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
                 namespace.value,
                 event_id,
@@ -1064,10 +1064,10 @@ fn insert_transition(
                 crypto_epoch, crypto_state_ref
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
-                scope.tenant_id.as_opaque().as_str(),
+                insert.scope.tenant_id.as_opaque().as_str(),
                 namespace.present,
                 namespace.value,
-                event_id.as_opaque().as_str(),
+                insert.event_id.as_opaque().as_str(),
                 insert.group_id.as_opaque().as_str(),
                 insert.actor_device_id.as_opaque().as_str(),
                 insert.request_fingerprint.as_slice(),
@@ -1081,17 +1081,17 @@ fn insert_transition(
     if insert.artifacts.welcome.is_none() && !insert.added_devices.is_empty() {
         return Err(GroupMlsStoreError::InvalidChangeMaterial);
     }
-    for admission in added_devices {
+    for admission in insert.added_devices {
         transaction
             .execute(
                 "INSERT INTO group_mls_transition_admissions (
                     tenant_id, namespace_present, namespace_id, event_id, device_id
                  ) VALUES (?1,?2,?3,?4,?5)",
                 params![
-                    scope.tenant_id.as_opaque().as_str(),
+                    insert.scope.tenant_id.as_opaque().as_str(),
                     namespace.present,
                     namespace.value,
-                    event_id.as_opaque().as_str(),
+                    insert.event_id.as_opaque().as_str(),
                     admission.device_id.as_opaque().as_str(),
                 ],
             )
