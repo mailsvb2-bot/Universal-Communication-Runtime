@@ -22,6 +22,7 @@ fn public_sdk_contract_includes_canonical_recording_service() {
     for method in [
         "pub async fn request_recording",
         "pub async fn get_recording",
+        "pub async fn export_recording",
         "pub async fn start_recording",
         "pub async fn stop_recording",
         "pub async fn delete_recording",

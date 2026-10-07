@@ -8,7 +8,7 @@ use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use hyper::{
     Method, Request, Response, StatusCode,
     body::Incoming,
-    header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, PRAGMA},
+    header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue, PRAGMA},
     service::service_fn,
 };
 use hyper_util::{
@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tonic::{Request as GrpcRequest, metadata::MetadataValue, transport::Channel};
-use ucr_api_grpc::pb;
+use ucr_api_grpc::{GRPC_MAX_ENCODING_MESSAGE_SIZE, pb};
 
 const DEFAULT_BIND: &str = "127.0.0.1:8082";
 const DEFAULT_UPSTREAM: &str = "http://127.0.0.1:50051";
@@ -252,10 +252,12 @@ async fn dispatch_recording_post(
         .into_response();
     };
     let mut client =
-        pb::recording_service_client::RecordingServiceClient::new(recording_upstream.clone());
+        pb::recording_service_client::RecordingServiceClient::new(recording_upstream.clone())
+            .max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE);
     match path {
         "/v1/recordings" => forward_request_recording(&mut client, body, authorization).await,
         "/v1/recordings/get" => forward_get_recording(&mut client, body, authorization).await,
+        "/v1/recordings/export" => forward_export_recording(&mut client, body, authorization).await,
         "/v1/recordings/consent" => {
             forward_recording_consent(&mut client, body, authorization).await
         }
@@ -960,6 +962,41 @@ async fn forward_get_recording(
             None => empty_upstream(),
         }
     })
+    .await
+}
+
+async fn forward_export_recording(
+    client: &mut RecordingClient,
+    body: &[u8],
+    authorization: Option<&str>,
+) -> HttpResponse {
+    let parsed = match decode_json::<RecordingLookupJson>(body) {
+        Ok(parsed) => parsed,
+        Err(error) => return error.into_response(),
+    };
+    let request = match (|| -> Result<_, TransportError> {
+        Ok(pb::RecordingExportRequest {
+            scope: Some(scope_of(&parsed.scope)?),
+            recording_id: Some(opaque(&parsed.recording_id)?),
+        })
+    })() {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let request = match authorized(request, authorization) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    call(
+        client.export_recording(request),
+        |response| match response.result {
+            Some(pb::recording_export_response::Result::Artifact(artifact)) => {
+                binary_response(&artifact.media_type, artifact.payload)
+            }
+            Some(pb::recording_export_response::Result::Error(error)) => error_response(&error),
+            None => empty_upstream(),
+        },
+    )
     .await
 }
 
@@ -2263,6 +2300,23 @@ fn json_response(status: StatusCode, payload: &Value) -> HttpResponse {
         .unwrap_or_else(|_| Response::new(Full::new(Bytes::new()).boxed_unsync()))
 }
 
+fn binary_response(media_type: &str, payload: Vec<u8>) -> HttpResponse {
+    let Ok(content_type) = HeaderValue::from_str(media_type) else {
+        return TransportError::new(
+            StatusCode::BAD_GATEWAY,
+            "recording export media type is not HTTP-safe",
+        )
+        .into_response();
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, content_type)
+        .header(CACHE_CONTROL, "no-store")
+        .header(PRAGMA, "no-cache")
+        .body(Full::new(Bytes::from(payload)).boxed_unsync())
+        .unwrap_or_else(|_| Response::new(Full::new(Bytes::new()).boxed_unsync()))
+}
+
 fn text_response(status: StatusCode, text: &'static str) -> HttpResponse {
     Response::builder()
         .status(status)
@@ -2498,30 +2552,32 @@ mod tests {
         });
 
         let body = br#"{"scope":{"tenant_id":"tenant-a"},"recording_id":"recording-a"}"#;
-        let mut request = format!(
-            "POST /v1/recordings/get HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        )
-        .into_bytes();
-        request.extend_from_slice(body);
-        let mut stream = tokio::net::TcpStream::connect(http_address)
-            .await
-            .expect("connect http");
-        stream.write_all(&request).await.expect("write request");
-        let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .await
-            .expect("read response");
-        let response = String::from_utf8(response).expect("utf-8 response");
-        assert!(
-            response.starts_with("HTTP/1.1 503"),
-            "recording route must fail closed without its realtime upstream: {response}"
-        );
-        assert!(
-            response.contains("recording gRPC upstream is not configured"),
-            "misconfiguration must be explicit: {response}"
-        );
+        for path in ["/v1/recordings/get", "/v1/recordings/export"] {
+            let mut request = format!(
+                "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            request.extend_from_slice(body);
+            let mut stream = tokio::net::TcpStream::connect(http_address)
+                .await
+                .expect("connect http");
+            stream.write_all(&request).await.expect("write request");
+            let mut response = Vec::new();
+            stream
+                .read_to_end(&mut response)
+                .await
+                .expect("read response");
+            let response = String::from_utf8(response).expect("utf-8 response");
+            assert!(
+                response.starts_with("HTTP/1.1 503"),
+                "recording route must fail closed without its realtime upstream: {response}"
+            );
+            assert!(
+                response.contains("recording gRPC upstream is not configured"),
+                "misconfiguration must be explicit: {response}"
+            );
+        }
     }
 
     #[tokio::test]

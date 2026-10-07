@@ -902,6 +902,22 @@ impl UcrSdkClient {
             .into_inner())
     }
 
+    /// Replaces bounded integration-owned metadata for one universal Conference.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn set_conference_metadata(
+        &mut self,
+        message: pb::UniversalSetConferenceMetadataRequest,
+    ) -> Result<pb::UniversalSetConferenceMetadataResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .set_conference_metadata(request)
+            .await?
+            .into_inner())
+    }
+
     /// Ensures one integration-owned participant without exposing UCR internal identifiers.
     ///
     /// # Errors
@@ -978,6 +994,22 @@ impl UcrSdkClient {
         Ok(self
             .universal_conference
             .list_participants(request)
+            .await?
+            .into_inner())
+    }
+
+    /// Lists bounded raised-hand state without exposing internal participant identifiers.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn list_raised_hands(
+        &mut self,
+        message: pb::UniversalListRaisedHandsRequest,
+    ) -> Result<pb::UniversalListRaisedHandsResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self
+            .universal_conference
+            .list_raised_hands(request)
             .await?
             .into_inner())
     }
@@ -1107,6 +1139,18 @@ impl UcrSdkClient {
     ) -> Result<pb::RecordingGetResponse, tonic::Status> {
         let request = self.authenticated_request(message);
         Ok(self.recording.get_recording(request).await?.into_inner())
+    }
+
+    /// Exports one stopped canonical recording through the configured provider.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn export_recording(
+        &mut self,
+        message: pb::RecordingExportRequest,
+    ) -> Result<pb::RecordingExportResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recording.export_recording(request).await?.into_inner())
     }
 
     /// Starts one consent-ready canonical recording session.
