@@ -60,6 +60,7 @@ fn phase39_rust_sdk_is_a_client_only_public_contract_binding() {
         "update_participant",
         "remove_participant",
         "list_participants",
+        "list_raised_hands",
         "set_subscriptions",
         "prepare_conference_runtime",
         "issue_join_grant",
