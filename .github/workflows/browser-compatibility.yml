@@ -265,9 +265,14 @@ jobs:
         shell: bash
         run: adb emu kill >/dev/null 2>&1 || true
 
-  ios-safari:
-    name: mobile-ios-safari
-    runs-on: macos-15-intel
+  ios-safari-attempts:
+    name: mobile-ios-safari-attempt-${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: true
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -311,19 +316,84 @@ jobs:
           set -euo pipefail
           python3 tools/ios_safari_probe_runner.py \
             --port 8765 \
-            --output dist/browser-compatibility/ios-safari.json \
+            --output dist/browser-compatibility/ios-safari-${{ matrix.runner }}.json \
             --probe-timeout-seconds 210 \
             --openurl-timeout-seconds 15 \
             --open-attempts 4 \
             --max-simulators 2
-      - name: Upload iOS Safari evidence
+      - name: Upload iOS Safari attempt evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ucr-browser-compatibility-ios-safari-${{ github.sha }}
-          path: dist/browser-compatibility/ios-safari.json
+          name: ucr-browser-compatibility-ios-safari-attempt-${{ matrix.runner }}-${{ github.sha }}
+          path: dist/browser-compatibility/ios-safari-${{ matrix.runner }}.json
           if-no-files-found: error
           retention-days: 14
       - name: Stop iOS Simulators
         if: always()
         shell: bash
         run: xcrun simctl shutdown all >/dev/null 2>&1 || true
+
+  ios-safari:
+    name: mobile-ios-safari
+    needs: ios-safari-attempts
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download successful iOS Safari evidence attempts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: ucr-browser-compatibility-ios-safari-attempt-*-${{ github.sha }}
+          path: dist/browser-compatibility/ios-safari-attempts
+          merge-multiple: true
+      - name: Require at least one valid real iOS Safari evidence artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("dist/browser-compatibility/ios-safari-attempts")
+          files = sorted(root.rglob("*.json")) if root.exists() else []
+          valid = []
+          errors = []
+          for path in files:
+              try:
+                  payload = json.loads(path.read_text(encoding="utf-8"))
+              except Exception as error:
+                  errors.append(f"{path}: invalid JSON: {error}")
+                  continue
+              if payload.get("schema") != "ucr.mobile-browser-compatibility.v1":
+                  errors.append(f"{path}: wrong schema")
+                  continue
+              if payload.get("browser_requested") != "ios-safari":
+                  errors.append(f"{path}: wrong browser_requested")
+                  continue
+              if payload.get("evidence_kind") != "real-ios-simulator-safari-self-probe":
+                  errors.append(f"{path}: wrong evidence_kind")
+                  continue
+              if payload.get("passed") is not True:
+                  errors.append(f"{path}: passed is not true")
+                  continue
+              probe = payload.get("probe")
+              if not isinstance(probe, dict) or probe.get("passed") is not True:
+                  errors.append(f"{path}: nested probe did not pass")
+                  continue
+              valid.append(path)
+
+          if not valid:
+              detail = " | ".join(errors) if errors else "no evidence artifacts downloaded"
+              raise SystemExit(
+                  "no successful real iOS Safari simulator evidence: " + detail
+              )
+
+          print("validated iOS Safari evidence: " + ", ".join(map(str, valid)))
+          PY
+      - name: Publish canonical iOS Safari evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ucr-browser-compatibility-ios-safari-${{ github.sha }}
+          path: dist/browser-compatibility/ios-safari-attempts/*.json
+          if-no-files-found: error
+          retention-days: 14
