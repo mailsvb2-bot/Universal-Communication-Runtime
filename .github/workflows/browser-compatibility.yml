@@ -305,79 +305,17 @@ jobs:
             --out-name ucr_endpoint_wasm
           test -s crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm.js
           test -s crates/ucr-realtime-web/static/endpoint-wasm/ucr_endpoint_wasm_bg.wasm
-      - name: Boot iOS Simulator
-        id: ios
-        shell: bash
-        run: |
-          set -euo pipefail
-          IOS_UDID="$(python3 - <<'PY'
-          import json
-          import re
-          import subprocess
-
-          data = json.loads(
-              subprocess.check_output(
-                  ["xcrun", "simctl", "list", "devices", "available", "-j"],
-                  text=True,
-              )
-          )
-          candidates = []
-          for runtime, devices in data.get("devices", {}).items():
-              if ".iOS-" not in runtime:
-                  continue
-              match = re.search(r"iOS-(\d+)(?:-(\d+))?", runtime)
-              version = (int(match.group(1)), int(match.group(2) or 0)) if match else (0, 0)
-              for device in devices:
-                  if device.get("isAvailable") and str(device.get("name", "")).startswith("iPhone"):
-                      candidates.append((version, device["name"], device["udid"]))
-          if not candidates:
-              raise SystemExit("no available iPhone simulator")
-          candidates.sort()
-          print(candidates[-1][2])
-          PY
-          )"
-          echo "udid=$IOS_UDID" >> "$GITHUB_OUTPUT"
-          xcrun simctl boot "$IOS_UDID" 2>/dev/null || true
-          xcrun simctl bootstatus "$IOS_UDID" -b
       - name: Probe iOS Safari on Simulator
         shell: bash
-        env:
-          IOS_UDID: ${{ steps.ios.outputs.udid }}
         run: |
           set -euo pipefail
-          python3 tools/mobile_browser_compatibility_probe.py \
-            --browser ios-safari \
+          python3 tools/ios_safari_probe_runner.py \
             --port 8765 \
-            --output dist/browser-compatibility/ios-safari.json &
-          PROBE_PID=$!
-          sleep 1
-          if ! kill -0 "$PROBE_PID" 2>/dev/null; then
-            wait "$PROBE_PID"
-          fi
-          MOBILE_URL='http://127.0.0.1:8765/client.html?ucr_mobile_probe=ios-safari'
-          open -a Simulator --args -CurrentDeviceUDID "$IOS_UDID" >/dev/null 2>&1 || true
-          xcrun simctl launch "$IOS_UDID" com.apple.mobilesafari >/dev/null 2>&1 || true
-          evidence=false
-          for attempt in 1 2 3 4 5 6; do
-            xcrun simctl openurl "$IOS_UDID" "$MOBILE_URL" || true
-            for second in $(seq 1 20); do
-              if [ -s dist/browser-compatibility/ios-safari.json ]; then
-                evidence=true
-                break 2
-              fi
-              if ! kill -0 "$PROBE_PID" 2>/dev/null; then
-                wait "$PROBE_PID"
-              fi
-              sleep 1
-            done
-            xcrun simctl terminate "$IOS_UDID" com.apple.mobilesafari >/dev/null 2>&1 || true
-            xcrun simctl launch "$IOS_UDID" com.apple.mobilesafari >/dev/null 2>&1 || true
-            sleep 2
-          done
-          if [ "$evidence" != true ]; then
-            wait "$PROBE_PID"
-          fi
-          wait "$PROBE_PID"
+            --output dist/browser-compatibility/ios-safari.json \
+            --probe-timeout-seconds 210 \
+            --openurl-timeout-seconds 15 \
+            --open-attempts 4 \
+            --max-simulators 2
       - name: Upload iOS Safari evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -385,12 +323,7 @@ jobs:
           path: dist/browser-compatibility/ios-safari.json
           if-no-files-found: error
           retention-days: 14
-      - name: Stop iOS Simulator
+      - name: Stop iOS Simulators
         if: always()
         shell: bash
-        env:
-          IOS_UDID: ${{ steps.ios.outputs.udid }}
-        run: |
-          if [ -n "${IOS_UDID:-}" ]; then
-            xcrun simctl shutdown "$IOS_UDID" 2>/dev/null || true
-          fi
+        run: xcrun simctl shutdown all >/dev/null 2>&1 || true
