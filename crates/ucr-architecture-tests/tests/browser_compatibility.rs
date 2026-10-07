@@ -31,6 +31,11 @@ fn assert_browser_workflow(workflow: &str) {
         "pm path com.android.chrome",
         "adb reverse tcp:8765 tcp:8765",
         "name: mobile-ios-safari",
+        "ios-safari-attempts",
+        "macos-15-intel",
+        "download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "real-ios-simulator-safari-self-probe",
+        "no successful real iOS Safari simulator evidence",
         "ios_safari_probe_runner.py",
         "mobile_browser_compatibility_probe.py",
         "android_chrome_first_run.py",
@@ -222,9 +227,8 @@ fn ci_runner_bootstrap_prefers_preinstalled_tools_and_bounds_apt_network_calls()
     }
 
     assert!(
-        !combined.contains(
-            "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends"
-        ),
+        !combined
+            .contains("sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends"),
         "CI workflows must not depend on an unbounded apt update/install chain"
     );
 
