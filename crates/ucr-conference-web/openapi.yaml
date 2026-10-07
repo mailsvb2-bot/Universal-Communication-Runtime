@@ -63,6 +63,9 @@ paths:
   /v1/recordings/get:
     post:
       operationId: getRecording
+  /v1/recordings/export:
+    post:
+      operationId: exportRecording
   /v1/recordings/consent:
     post:
       operationId: setRecordingConsent
