@@ -121,6 +121,15 @@ jobs:
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
 
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/adbkey" ]; then
+            adb keygen "$HOME/.android/adbkey" >/dev/null
+          fi
+          export ADB_VENDOR_KEYS="$HOME/.android"
+          echo "ADB_VENDOR_KEYS=$HOME/.android" >> "$GITHUB_ENV"
+          adb kill-server >/dev/null 2>&1 || true
+          adb start-server
+
           AVD_DIR="$HOME/.android/avd/ucr-mobile.avd"
           mkdir -p "$AVD_DIR"
           cat >"$HOME/.android/avd/ucr-mobile.ini" <<EOF
@@ -201,7 +210,7 @@ jobs:
             --output dist/browser-compatibility/android-chrome.json &
           PROBE_PID=$!
           for attempt in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8765/client.html >/dev/null; then
+            if curl -fsS --connect-timeout 1 --max-time 2 http://127.0.0.1:8765/client.html >/dev/null; then
               break
             fi
             if [ "$attempt" -eq 60 ]; then
@@ -304,7 +313,7 @@ jobs:
             --output dist/browser-compatibility/ios-safari.json &
           PROBE_PID=$!
           for attempt in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8765/client.html >/dev/null; then
+            if curl -fsS --connect-timeout 1 --max-time 2 http://127.0.0.1:8765/client.html >/dev/null; then
               break
             fi
             if [ "$attempt" -eq 60 ]; then
