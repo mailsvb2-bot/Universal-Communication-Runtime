@@ -157,6 +157,9 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
         "shutdown",
         "erase",
         "com.apple.CoreSimulator.CoreSimulatorService",
+        "restart_coresimulator_control_plane",
+        "CoreSimulator discovery failed; recycling control plane",
+        "could not enumerate available iPhone simulators after recovery",
         "best_effort",
         "max-simulators",
     ] {
@@ -188,4 +191,47 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
     assert!(spec.contains("simulator/emulator-backed mobile browsers"));
     assert!(spec.contains("**not** accepted as production evidence"));
     assert!(spec.contains("does not by itself prove TURN reachability"));
+}
+
+
+#[test]
+fn ci_runner_bootstrap_prefers_preinstalled_tools_and_bounds_apt_network_calls() {
+    let workflow = read(".github/workflows/ci.yml");
+    let apt_installer = read("tools/ci_install_apt_packages.sh");
+
+    for invariant in [
+        "command -v cmake",
+        "command -v cc",
+        "command -v c++",
+        "command -v make",
+        "command -v protoc",
+        "bash tools/ci_install_apt_packages.sh cmake build-essential",
+        "bash tools/ci_install_apt_packages.sh protobuf-compiler",
+    ] {
+        assert!(
+            workflow.contains(invariant),
+            "missing CI bootstrap invariant {invariant}"
+        );
+    }
+
+    assert!(
+        !workflow.contains(
+            "sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends"
+        ),
+        "CI must not depend on an unbounded apt update/install chain"
+    );
+
+    for invariant in [
+        "Acquire::Retries=3",
+        "Acquire::http::Timeout=20",
+        "Acquire::https::Timeout=20",
+        "timeout 120s",
+        "timeout 180s",
+        "apt install attempt",
+    ] {
+        assert!(
+            apt_installer.contains(invariant),
+            "missing bounded apt installer invariant {invariant}"
+        );
+    }
 }
