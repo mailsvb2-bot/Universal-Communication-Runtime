@@ -18,6 +18,8 @@ fn recording_rest_routes_remain_thin_grpc_adapters() {
     assert!(web.contains("UCR_RECORDING_GRPC_UPSTREAM"));
     assert!(web.contains("recording gRPC upstream is not configured"));
     assert!(web.contains("state.recording_upstream.as_ref()"));
+    assert!(web.contains("GRPC_MAX_ENCODING_MESSAGE_SIZE"));
+    assert!(web.contains(".max_decoding_message_size(GRPC_MAX_ENCODING_MESSAGE_SIZE)"));
     for (route, rpc) in [
         ("/v1/recordings", "request_recording"),
         ("/v1/recordings/get", "get_recording"),
