@@ -17,6 +17,16 @@ export interface ConferenceSchedule {
   readonly timezone?: string;
 }
 
+export interface ConferenceMetadataInput {
+  readonly key: string;
+  readonly value: Uint8Array;
+}
+
+export interface ConferenceMetadataEntry {
+  readonly key: string;
+  readonly value_b64: string;
+}
+
 export interface ConferenceDescriptor {
   readonly scope: TenantScope;
   readonly conference_id: string;
@@ -25,6 +35,7 @@ export interface ConferenceDescriptor {
   readonly mode: ConferenceMode;
   readonly lifecycle: ConferenceLifecycle;
   readonly schedule: ConferenceSchedule;
+  readonly metadata: readonly ConferenceMetadataEntry[];
   readonly entry_open: boolean;
   readonly revision: number;
 }
@@ -99,6 +110,7 @@ export interface CreateConferenceInput {
   readonly idempotencyKey: string;
   readonly mode: ConferenceMode;
   readonly schedule: ConferenceSchedule;
+  readonly metadata?: readonly ConferenceMetadataInput[];
 }
 
 export interface EnsureParticipantInput extends ConferenceMutationContext {
@@ -157,8 +169,7 @@ const trimBaseUrl = (value: string): string => {
   return trimmed;
 };
 
-const base64Utf8 = (value: string): string => {
-  const bytes = new TextEncoder().encode(value);
+const base64Bytes = (bytes: Uint8Array): string => {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   let output = "";
   for (let index = 0; index < bytes.length; index += 3) {
@@ -173,6 +184,11 @@ const base64Utf8 = (value: string): string => {
   }
   return output;
 };
+
+const base64Utf8 = (value: string): string => base64Bytes(new TextEncoder().encode(value));
+
+const metadataJson = (metadata: readonly ConferenceMetadataInput[] = []): readonly Record<string, string>[] =>
+  metadata.map((entry) => ({ key: entry.key, value_b64: base64Bytes(entry.value) }));
 
 const requireToken = (value: string): string => {
   const token = value.trim();
@@ -222,6 +238,7 @@ export class UniversalConferenceClient {
       idempotency_key: input.idempotencyKey,
       mode: input.mode,
       schedule: input.schedule,
+      metadata: metadataJson(input.metadata),
     });
     return value.conference as ConferenceDescriptor;
   }
@@ -273,6 +290,21 @@ export class UniversalConferenceClient {
       conference_id: context.conferenceId,
       integration_id: context.integrationId,
       entry_open: entryOpen,
+      idempotency_key: idempotencyKey,
+    });
+    return value.conference as ConferenceDescriptor;
+  }
+
+  async setConferenceMetadata(
+    context: ConferenceMutationContext,
+    metadata: readonly ConferenceMetadataInput[],
+    idempotencyKey: string,
+  ): Promise<ConferenceDescriptor> {
+    const value = await this.#post("/v1/conferences/metadata", {
+      scope: context.scope,
+      conference_id: context.conferenceId,
+      integration_id: context.integrationId,
+      metadata: metadataJson(metadata),
       idempotency_key: idempotencyKey,
     });
     return value.conference as ConferenceDescriptor;
