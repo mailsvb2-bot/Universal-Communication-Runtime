@@ -110,7 +110,21 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show
       - name: Install native media build prerequisites
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake build-essential
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v cmake >/dev/null &&
+             command -v cc >/dev/null &&
+             command -v c++ >/dev/null &&
+             command -v make >/dev/null; then
+            echo "native media build prerequisites already present"
+          else
+            bash tools/ci_install_apt_packages.sh cmake build-essential
+          fi
+          cmake --version
+          cc --version
+          c++ --version
+          make --version
       - name: Release tests
         run: cargo test --workspace --all-targets --release --locked
       - name: Public SDK release tests
