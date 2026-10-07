@@ -317,33 +317,32 @@ jobs:
             --port 8765 \
             --output dist/browser-compatibility/ios-safari.json &
           PROBE_PID=$!
-          for attempt in $(seq 1 60); do
-            if curl -fsS --connect-timeout 1 --max-time 2 http://127.0.0.1:8765/client.html >/dev/null; then
-              break
-            fi
-            if [ "$attempt" -eq 60 ]; then
-              kill "$PROBE_PID" 2>/dev/null || true
-              exit 1
-            fi
-            sleep 1
-          done
+          sleep 1
+          if ! kill -0 "$PROBE_PID" 2>/dev/null; then
+            wait "$PROBE_PID"
+          fi
           MOBILE_URL='http://127.0.0.1:8765/client.html?ucr_mobile_probe=ios-safari'
           open -a Simulator --args -CurrentDeviceUDID "$IOS_UDID" >/dev/null 2>&1 || true
           xcrun simctl launch "$IOS_UDID" com.apple.mobilesafari >/dev/null 2>&1 || true
-          sleep 3
-          opened=false
-          for attempt in 1 2 3; do
-            if xcrun simctl openurl "$IOS_UDID" "$MOBILE_URL"; then
-              opened=true
-              break
-            fi
+          evidence=false
+          for attempt in 1 2 3 4 5 6; do
+            xcrun simctl openurl "$IOS_UDID" "$MOBILE_URL" || true
+            for second in $(seq 1 20); do
+              if [ -s dist/browser-compatibility/ios-safari.json ]; then
+                evidence=true
+                break 2
+              fi
+              if ! kill -0 "$PROBE_PID" 2>/dev/null; then
+                wait "$PROBE_PID"
+              fi
+              sleep 1
+            done
             xcrun simctl terminate "$IOS_UDID" com.apple.mobilesafari >/dev/null 2>&1 || true
             xcrun simctl launch "$IOS_UDID" com.apple.mobilesafari >/dev/null 2>&1 || true
-            sleep 3
+            sleep 2
           done
-          if [ "$opened" != true ]; then
-            kill "$PROBE_PID" 2>/dev/null || true
-            exit 1
+          if [ "$evidence" != true ]; then
+            wait "$PROBE_PID"
           fi
           wait "$PROBE_PID"
       - name: Upload iOS Safari evidence
