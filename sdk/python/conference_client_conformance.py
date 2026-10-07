@@ -16,6 +16,12 @@ def fake_transport(path, token, body):
     calls.append((path, token, body))
     if path == "/v1/conferences":
         return {"conference": {"conference_id": "conference-1"}}
+    if path == "/v1/conferences/metadata":
+        return {"conference": {
+            "conference_id": "conference-1",
+            "revision": 2,
+            "metadata": [{"key": "com.example.crm.customer_id", "value_b64": "ODQ="}],
+        }}
     if path == "/v1/conferences/resolve":
         return {"conference": {"conference_id": "conference-1"}}
     if path == "/v1/participants/list":
@@ -93,6 +99,7 @@ conference = client.create_conference(
     idempotency_key="conference-1",
     mode="webinar",
     schedule={"starts_at_unix_ms": 1_700_000_000_000},
+    metadata=[{"key": "com.example.crm.customer_id", "value": b"42"}],
 )
 require(conference["conference_id"] == "conference-1", "conference response drifted")
 
@@ -101,6 +108,12 @@ context = {
     "integration_id": "integration",
     "conference_id": "conference-1",
 }
+metadata_conference = client.set_conference_metadata(
+    context,
+    [{"key": "com.example.crm.customer_id", "value": b"84"}],
+    "metadata-1",
+)
+require(metadata_conference["revision"] == 2, "metadata response drifted")
 participant = client.ensure_participant(context, "user-1", "attendee", "participant-1")
 require(participant["role"] == "attendee", "participant response drifted")
 device = client.ensure_participant_device(context, "user-1", "device-1")
@@ -132,14 +145,23 @@ require(
 )
 client.remove_participant(context, "user-1", "remove-1")
 
-require(len(calls) == 9, "client performed hidden retries")
+require(len(calls) == 10, "client performed hidden retries")
 require(all(call[1] == "machine-token" for call in calls), "Bearer token transport drifted")
 require(
     calls[0][2]["external_conference_id_b64"] == "ZXZlbnQtMQ==",
     "external conference ID encoding drifted",
 )
 require(
-    calls[1][2]["external_user_id_b64"] == "dXNlci0x",
+    calls[0][2]["metadata"][0]["value_b64"] == "NDI=",
+    "create metadata byte encoding drifted",
+)
+require(
+    calls[1][2]["metadata"][0]["value_b64"] == "ODQ="
+    and calls[1][2]["idempotency_key"] == "metadata-1",
+    "metadata update encoding or idempotency drifted",
+)
+require(
+    calls[2][2]["external_user_id_b64"] == "dXNlci0x",
     "external user ID encoding drifted",
 )
 
@@ -153,11 +175,11 @@ except UniversalConferenceHttpError as error:
     require(error.retry_after_ms == 2500, "canonical retry delay was discarded")
     require("machine-token" not in str(error), "error diagnostics leaked machine token")
 
-require(len(calls) == 10, "error path performed hidden retries")
-require(calls[4][2]["external_conference_id_b64"] == "ZXZlbnQtMQ==", "resolve encoding drifted")
-require(calls[5][2]["max_items"] == 25, "participant list bound drifted")
-require(calls[6][2]["max_items"] == 25, "raised-hands bound drifted")
-require(calls[8][2]["external_user_id_b64"] == "dXNlci0x", "remove participant encoding drifted")
+require(len(calls) == 11, "error path performed hidden retries")
+require(calls[5][2]["external_conference_id_b64"] == "ZXZlbnQtMQ==", "resolve encoding drifted")
+require(calls[6][2]["max_items"] == 25, "participant list bound drifted")
+require(calls[7][2]["max_items"] == 25, "raised-hands bound drifted")
+require(calls[9][2]["external_user_id_b64"] == "dXNlci0x", "remove participant encoding drifted")
 
 try:
     UniversalConferenceClient._raise_for_error(302, {"redirect": "https://other.example"})
