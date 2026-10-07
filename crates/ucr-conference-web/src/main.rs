@@ -8,7 +8,7 @@ use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use hyper::{
     Method, Request, Response, StatusCode,
     body::Incoming,
-    header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, PRAGMA, HeaderValue},
+    header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue, PRAGMA},
     service::service_fn,
 };
 use hyper_util::{
@@ -986,15 +986,16 @@ async fn forward_export_recording(
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };
-    call(client.export_recording(request), |response| {
-        match response.result {
+    call(
+        client.export_recording(request),
+        |response| match response.result {
             Some(pb::recording_export_response::Result::Artifact(artifact)) => {
                 binary_response(&artifact.media_type, artifact.payload)
             }
             Some(pb::recording_export_response::Result::Error(error)) => error_response(&error),
             None => empty_upstream(),
-        }
-    })
+        },
+    )
     .await
 }
 
