@@ -1141,6 +1141,18 @@ impl UcrSdkClient {
         Ok(self.recording.get_recording(request).await?.into_inner())
     }
 
+    /// Exports one stopped canonical recording through the configured provider.
+    ///
+    /// # Errors
+    /// Returns the gRPC status produced by the canonical UCR service.
+    pub async fn export_recording(
+        &mut self,
+        message: pb::RecordingExportRequest,
+    ) -> Result<pb::RecordingExportResponse, tonic::Status> {
+        let request = self.authenticated_request(message);
+        Ok(self.recording.export_recording(request).await?.into_inner())
+    }
+
     /// Starts one consent-ready canonical recording session.
     ///
     /// # Errors
