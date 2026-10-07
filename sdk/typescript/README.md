@@ -22,9 +22,12 @@ Phase 39 does not publish an npm artifact or select a permanent generator plugin
 
 `src/conference.ts` provides a high-level TypeScript client over the same thin `/v1` REST adapter.
 It exposes `createConference()`, `getConference()`, `transitionConference()`,
-`setEntryOpen()`, `ensureParticipant()`, `ensureParticipantDevice()`,
-`updateParticipant()`, `prepareRuntime()`, `issueJoinGrant()`,
-`revokeJoinGrant()`, `setSubscriptions()` and `getAttendance()`.
+`setEntryOpen()`, `setConferenceMetadata()`, `ensureParticipant()`,
+`ensureParticipantDevice()`, `updateParticipant()`, `prepareRuntime()`,
+`issueJoinGrant()`, `revokeJoinGrant()`, `setSubscriptions()` and `getAttendance()`.
+Conference creation and metadata replacement accept bounded opaque metadata values as `Uint8Array`;
+the SDK only performs the required Base64 REST encoding and leaves namespacing, size and
+idempotency semantics to the canonical server contract.
 
 The client accepts integration-owned external references, Base64-encodes them exactly for the REST
 transport, preserves canonical server errors, performs no hidden application retries and requires
