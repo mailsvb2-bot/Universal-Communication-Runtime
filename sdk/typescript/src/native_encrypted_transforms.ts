@@ -43,8 +43,10 @@ export function installUcrNativeEncryptedTransforms(
   authenticated: UcrEncodedTransformWorker,
   binding: UcrNativeTransformBinding,
   create: UcrTransformCreator,
+  isAuthorized: (binding: UcrNativeTransformBinding) => boolean,
+  closePeerOnFailure: () => void,
 ): void {
-  if (!binding.callId || !binding.groupId || binding.cryptoEpoch < 0n ||
+  if (!isAuthorized(binding) || !binding.callId || !binding.groupId || binding.cryptoEpoch < 0n ||
       authenticated.verifiedCallId !== binding.callId ||
       authenticated.verifiedGroupId !== binding.groupId ||
       authenticated.verifiedEpoch !== binding.cryptoEpoch ||
@@ -65,7 +67,8 @@ export function installUcrNativeEncryptedTransforms(
     receiver.transform = decrypt;
   } catch (error) {
     // A partially installed transform MUST NOT be used for media transport.
-    // Caller is responsible for closing the RTCPeerConnection on error.
-    throw new Error("native E2EE transform installation failed; close peer", {cause: error});
+    // Immediately close the peer to prevent any unprotected sender from running.
+    closePeerOnFailure();
+    throw new Error("native E2EE transform installation failed; peer closed", {cause: error});
   }
 }
