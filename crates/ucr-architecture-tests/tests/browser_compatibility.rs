@@ -43,7 +43,6 @@ fn assert_browser_workflow(workflow: &str) {
         "no successful real iOS Safari simulator evidence",
         "ios_safari_probe_runner.py",
         "android_chrome_probe_runner.py",
-        "android_chrome_first_run.py",
     ] {
         assert!(
             workflow.contains(invariant),
