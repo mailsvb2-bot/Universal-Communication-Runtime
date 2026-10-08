@@ -209,7 +209,13 @@ assert.match(browser, /sealState/);
     },
   };
   const wire = encodeSfuForwardEnvelopeWire(canonical);
+  let authorized = true;
   const adapter = createUcrPortableEndpointMediaAdapter({
+    binding: {
+      tenantId: "tenant-1", namespaceId: null, callId: "call-1", groupId: "group-1",
+      cryptoEpoch: 2n, negotiationRef: "neg-1", negotiationGeneration: 1n,
+    },
+    authorizeFrame: () => authorized,
     bridge: {
       seal_wire(_stream, mediaKind, videoKind, sequence, _timestamp, _keyframe, plaintext) {
         assert.equal(mediaKind, 1);
@@ -250,6 +256,20 @@ assert.match(browser, /sealState/);
   await adapter.onEnvelope(wire);
   assert.deepEqual([...played[0]], [1, 2, 3]);
   await assert.rejects(adapter.onEnvelope(wire), /replayed endpoint media frame/);
+  const wrongCall = encodeSfuForwardEnvelopeWire({
+    ...canonical, frame: {
+      ...canonical.frame, header: {...canonical.frame.header, callId: "another-call", sequence: 2n},
+    },
+  });
+  await assert.rejects(adapter.onEnvelope(wrongCall), /outside authenticated conference binding/);
+  authorized = false;
+  const nextFrame = encodeSfuForwardEnvelopeWire({
+    ...canonical, frame: {
+      ...canonical.frame, header: {...canonical.frame.header, sequence: 2n},
+    },
+  });
+  await assert.rejects(adapter.onEnvelope(nextFrame), /authorization revoked/);
+
   await assert.rejects(adapter.start({stream, cameraStream: stream, sendEnvelope() {}}), /already started/);
   assert.equal(failures.length, 0);
   await adapter.stop();
