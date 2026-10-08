@@ -97,7 +97,7 @@ const ui={
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
-let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null;
+let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
 let reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_ENDPOINT_CONTRACT_VERSION="ucr.endpoint-e2ee.v1";
@@ -644,6 +644,7 @@ function requireCompatibleE2eeAdapter(adapter){
   return adapter;
 }
 function closeE2eeTransport(){
+  ++e2eeActivationGeneration;
   ui.screenToggle.disabled=true;
   if(screenStream){
     const current=screenStream;screenStream=null;setScreenUi(false);
@@ -810,6 +811,10 @@ async function startScreenShare(){
   }
 }
 async function activateE2eeAdapter(){
+  const generation=e2eeActivationGeneration;
+  const channel=e2eeChannel;
+  const isCurrent=()=>generation===e2eeActivationGeneration&&channel===e2eeChannel&&channel?.readyState==="open";
+  if(!isCurrent())throw new Error("Encrypted media transport no longer active");
   // Integration owner must supply authenticated MLS/media/signing state; the
   // browser must never invent a default device key or silently send plaintext.
   if(!e2eeAdapter()&&typeof window.ucrInstallAuthorizedMediaEndpoint==="function"){
@@ -829,6 +834,11 @@ async function activateE2eeAdapter(){
       groupId:endpointMlsGroupId,
       loadWasm:loadEndpointWasmModule
     }));
+    if(!isCurrent()){
+      if(installed&&typeof installed.stop==="function")await installed.stop();
+      if(window.ucrE2eeEndpoint===installed)delete window.ucrE2eeEndpoint;
+      throw new Error("Encrypted media session changed during adapter installation");
+    }
     if(installed&&typeof installed==="object"&&!e2eeAdapter()){
       window.ucrE2eeEndpoint=installed;
     }
@@ -839,8 +849,14 @@ async function activateE2eeAdapter(){
     throw new Error("Authorized endpoint E2EE media adapter unavailable; refusing plaintext media");
   }
   const restoreState=await restoreEndpointPersistedState(adapter);
+  if(!isCurrent())throw new Error("Encrypted media session changed during restore");
   await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
+  if(!isCurrent()){
+    await adapter.stop();
+    throw new Error("Encrypted media session changed during startup");
+  }
   const persisted=await persistEndpointState(adapter);
+  if(!isCurrent())return;
   refreshScreenShareControl();
   ui.status.textContent=restoreState==="restored"
     ?"Endpoint E2EE media transport restored from sealed local state. Media keys remain on this endpoint."
@@ -852,7 +868,8 @@ function attachE2eeDataChannel(channel){
   if(channel.label!==E2EE_CHANNEL_LABEL){channel.close();return;}
   closeE2eeTransport();e2eeChannel=channel;e2eeChannel.binaryType="arraybuffer";
   channel.onopen=()=>{activateE2eeAdapter().catch(e=>{
-    if(e2eeChannel===channel){closeE2eeTransport();ui.webrtcState.textContent="E2EE unavailable";}
+    if(e2eeChannel!==channel)return;
+    closeE2eeTransport();ui.webrtcState.textContent="E2EE unavailable";
     ui.status.textContent="Endpoint E2EE adapter failed; encrypted transport closed: "+e.message;
   });};
   channel.onmessage=event=>{
