@@ -392,8 +392,24 @@ assert.equal(ucrCodecCanEnqueue("video", Number.POSITIVE_INFINITY), false);
   let closed = 0;
   assert.throws(() => installUcrNativeEncryptedTransforms(
     brokenSender, brokenReceiver, admitted, binding, factory, authorize, () => {closed++;},
-  ), /peer closed/);
+  ), /install failed/);
   assert.equal(closed, 1);
+  const revokedSender = {transform: null as unknown};
+  const revokedReceiver = {transform: null as unknown};
+  let revokedPeerClosed = 0;
+  assert.throws(() => installUcrNativeEncryptedTransforms(
+    revokedSender, revokedReceiver, admitted, binding, factory,
+    () => false, () => {revokedPeerClosed++;},
+  ), /not ready/);
+  assert.equal(revokedPeerClosed, 1);
+  assert.equal(revokedSender.transform, null);
+  assert.equal(revokedReceiver.transform, null);
+  let creatorClosed = 0;
+  assert.throws(() => installUcrNativeEncryptedTransforms(
+    {transform: null}, {transform: null}, admitted, binding,
+    () => {throw new Error("worker crashed");}, authorize, () => {creatorClosed++;},
+  ), /worker crashed/);
+  assert.equal(creatorClosed, 1);
 
 }
 
