@@ -445,19 +445,49 @@ mod tests {
         );
     }
 
-    #[test]
-    fn live_datachannel_ingress_preserves_ciphertext_and_session_binding() {
-        use crate::{LiveWebRtcProvider, WebRtcProvider, WebRtcSessionConfig};
-        use std::{sync::Arc, time::Duration};
-        use ucr_model::{IceTransportPolicy, SessionId, WebRtcSdpType, WebRtcSessionDescription};
+    async fn independent_e2ee_peer() -> (
+        std::sync::Arc<webrtc::peer_connection::RTCPeerConnection>,
+        tokio::sync::mpsc::Receiver<std::sync::Arc<webrtc::data_channel::RTCDataChannel>>,
+    ) {
         use webrtc::{
             api::{
                 APIBuilder, interceptor_registry::register_default_interceptors,
                 media_engine::MediaEngine,
             },
             interceptor::registry::Registry,
+            peer_connection::configuration::RTCConfiguration,
+        };
+        let mut engine = MediaEngine::default();
+        engine.register_default_codecs().expect("codecs");
+        let interceptors =
+            register_default_interceptors(Registry::new(), &mut engine).expect("interceptors");
+        let api = APIBuilder::new()
+            .with_media_engine(engine)
+            .with_interceptor_registry(interceptors)
+            .build();
+        let remote = Arc::new(
+            api.new_peer_connection(RTCConfiguration::default())
+                .await
+                .expect("independent peer"),
+        );
+        let (channel_tx, mut channel_rx) = tokio::sync::mpsc::channel(1);
+        remote.on_data_channel(Box::new(move |channel| {
+            let channel_tx = channel_tx.clone();
+            Box::pin(async move {
+                let _ = channel_tx.try_send(channel);
+            })
+        }));
+        (remote, channel_rx)
+    }
+
+    #[test]
+    fn live_datachannel_ingress_preserves_ciphertext_and_session_binding() {
+        use crate::{LiveWebRtcProvider, WebRtcProvider, WebRtcSessionConfig};
+        use std::time::Duration;
+        use ucr_model::{IceTransportPolicy, SessionId, WebRtcSdpType, WebRtcSessionDescription};
+        use webrtc::{
             peer_connection::{
-                configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
+                peer_connection_state::RTCPeerConnectionState,
                 sdp::session_description::RTCSessionDescription,
             },
         };
@@ -481,26 +511,7 @@ mod tests {
                 ice_servers: Vec::new(),
                 ice_transport_policy: IceTransportPolicy::All,
             };
-            let mut engine = MediaEngine::default();
-            engine.register_default_codecs().expect("codecs");
-            let interceptors =
-                register_default_interceptors(Registry::new(), &mut engine).expect("interceptors");
-            let api = APIBuilder::new()
-                .with_media_engine(engine)
-                .with_interceptor_registry(interceptors)
-                .build();
-            let remote = Arc::new(
-                api.new_peer_connection(RTCConfiguration::default())
-                    .await
-                    .expect("independent peer"),
-            );
-            let (channel_tx, mut channel_rx) = tokio::sync::mpsc::channel(1);
-            remote.on_data_channel(Box::new(move |channel| {
-                let channel_tx = channel_tx.clone();
-                Box::pin(async move {
-                    let _ = channel_tx.try_send(channel);
-                })
-            }));
+            let (remote, mut channel_rx) = independent_e2ee_peer().await;
             let offer = provider.create_session(&config).expect("server offer");
             remote
                 .set_remote_description(
