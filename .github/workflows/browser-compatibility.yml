@@ -226,33 +226,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/mobile_browser_compatibility_probe.py \
-            --browser android-chrome \
+          python3 tools/android_chrome_probe_runner.py \
             --port 8765 \
-            --output dist/browser-compatibility/android-chrome.json &
-          PROBE_PID=$!
-          for attempt in $(seq 1 60); do
-            if curl -fsS --connect-timeout 1 --max-time 2 http://127.0.0.1:8765/client.html >/dev/null; then
-              break
-            fi
-            if [ "$attempt" -eq 60 ]; then
-              kill "$PROBE_PID" 2>/dev/null || true
-              exit 1
-            fi
-            sleep 1
-          done
-          adb shell am force-stop com.android.chrome
-          adb shell am start -W \
-            -n com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity \
-            -a android.intent.action.VIEW \
-            -d 'about:blank'
-          python3 tools/android_chrome_first_run.py --timeout-seconds 120
-          adb shell am force-stop com.android.chrome
-          adb shell am start -W \
-            -n com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity \
-            -a android.intent.action.VIEW \
-            -d 'http://127.0.0.1:8765/client.html?ucr_mobile_probe=android-chrome'
-          wait "$PROBE_PID"
+            --output dist/browser-compatibility/android-chrome.json \
+            --probe-timeout-seconds 300 \
+            --navigation-attempts 4 \
+            --evidence-wait-seconds 40
       - name: Upload Android Chrome evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
