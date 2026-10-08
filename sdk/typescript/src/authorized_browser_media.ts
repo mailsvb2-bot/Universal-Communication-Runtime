@@ -42,7 +42,8 @@ export function createUcrAuthorizedMediaInstaller(
     }
     const options = await factory(bootstrap);
     if (!options?.binding || !options.bridge || !options.trustedKeys ||
-        typeof options.authorizeFrame !== "function") {
+        typeof options.authorizeFrame !== "function" ||
+        typeof options.authorizePublish !== "function") {
       throw new Error("current canonical call authority and endpoint crypto required");
     }
     if (options.binding.callId !== bootstrap.claims.callId ||
