@@ -216,7 +216,7 @@ assert.match(browser, /sealState/);
     producer: {start() {}, stop() {}},
     consumer: {play() {}, stop() {}},
     trustedKeys: {resolve() {return new Uint8Array(32);}},
-  }), /canonical call binding and live media authorization are required/);
+  }), /canonical call binding and bidirectional live media authorization are required/);
   let authorized = true;
   let bridgeRevoked = false;
   const adapter = createUcrPortableEndpointMediaAdapter({
@@ -225,6 +225,7 @@ assert.match(browser, /sealState/);
       cryptoEpoch: 2n, negotiationRef: "neg-1", negotiationGeneration: 1n,
     },
     authorizeFrame: () => authorized,
+    authorizePublish: () => authorized,
     bridge: {
       revoke() {bridgeRevoked = true;},
       seal_wire(_stream, mediaKind, videoKind, sequence, _timestamp, _keyframe, plaintext) {
@@ -273,6 +274,11 @@ assert.match(browser, /sealState/);
   });
   await assert.rejects(adapter.onEnvelope(wrongCall), /outside authenticated conference binding/);
   authorized = false;
+  await emit!({mediaKind: "audio", streamId: "audio-1", timestamp: 96000n,
+    keyframe: false, bytes: new Uint8Array([1, 2, 3])});
+  assert.deepEqual(outbound, [wire], "revoked publication must not emit another frame");
+  assert.ok(failures.some(error => String(error).includes("media publish authorization revoked")));
+  failures.length = 0;
   const nextFrame = encodeSfuForwardEnvelopeWire({
     ...canonical, frame: {
       ...canonical.frame, header: {...canonical.frame.header, sequence: 2n},
