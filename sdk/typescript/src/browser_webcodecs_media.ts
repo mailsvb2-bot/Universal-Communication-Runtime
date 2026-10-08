@@ -98,8 +98,9 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
 
   async updateSources(sources: UcrEndpointMediaSources): Promise<void> {
     if (!this.#emit) throw new Error("WebCodecs producer not running");
+    ++this.#generation;
     await this.#reset();
-    await this.#attach(sources, ++this.#generation);
+    await this.#attach(sources, this.#generation);
   }
 
   async stop(): Promise<void> {
@@ -163,8 +164,11 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
       encoder.configure({codec: AUDIO_CODEC, sampleRate: AUDIO_RATE,
         numberOfChannels: AUDIO_CHANNELS, bitrate: 32_000});
     } else {
-      encoder.configure({codec: VIDEO_CODEC, width: VIDEO_WIDTH,
-        height: VIDEO_HEIGHT, framerate: VIDEO_FRAMERATE, bitrate: 600_000});
+      const settings = track.getSettings();
+      encoder.configure({codec: VIDEO_CODEC,
+        width: settings.width ?? VIDEO_WIDTH,
+        height: settings.height ?? VIDEO_HEIGHT,
+        framerate: VIDEO_FRAMERATE, bitrate: 600_000});
     }
     this.#encoders.push(encoder);
     const reader = processor.readable.getReader();
@@ -195,7 +199,6 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   readonly #audioContext?: AudioContext;
   readonly #decoders = new Map<string, DecoderLike>();
   #nextAudioTime = 0;
-  #closed = false;
 
   constructor(options: UcrBrowserCodecOptions = {}) {
     this.#videoCanvas = options.videoCanvas;
@@ -204,7 +207,6 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   }
 
   play(frame: UcrEncodedMediaFrame): void {
-    if (this.#closed) return;
     const b = browser();
     if (!ucrWebCodecsSupported()) throw new Error("WebCodecs playback unavailable");
     const key = [frame.mediaKind, frame.videoSourceKind ?? "", frame.streamId].join(":");
@@ -265,7 +267,6 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   }
 
   stop(): void {
-    this.#closed = true;
     for (const decoder of this.#decoders.values()) decoder.close();
     this.#decoders.clear();
     this.#nextAudioTime = 0;
