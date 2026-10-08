@@ -3,6 +3,7 @@ import {
   createUcrPortableEndpointMediaAdapter,
   type UcrGroupMediaCryptoBridge,
   type UcrTrustedSourceKeys,
+  type UcrEndpointPipelineOptions,
 } from "./portable_endpoint_media.ts";
 import {
   UcrBrowserWebCodecsConsumer,
@@ -21,6 +22,8 @@ import {
 export interface UcrBrowserEndpointMediaOptions {
   readonly bridge: UcrGroupMediaCryptoBridge;
   readonly trustedKeys: UcrTrustedSourceKeys;
+  readonly binding: NonNullable<UcrEndpointPipelineOptions["binding"]>;
+  readonly authorizeFrame: NonNullable<UcrEndpointPipelineOptions["authorizeFrame"]>;
   readonly remoteVideoCanvas: HTMLCanvasElement | OffscreenCanvas;
   readonly audioContext: AudioContext;
   readonly maxPendingFrames?: number;
@@ -38,7 +41,8 @@ export function createUcrBrowserEndpointMediaAdapter(
   if (!options.bridge || !options.trustedKeys ||
       typeof options.bridge.seal_wire !== "function" ||
       typeof options.bridge.open_wire !== "function" ||
-      typeof options.trustedKeys.resolve !== "function") {
+      typeof options.trustedKeys.resolve !== "function" ||
+      !options.binding || typeof options.authorizeFrame !== "function") {
     throw new Error("authenticated MLS endpoint bridge and trusted identity resolver required");
   }
   const onError = options.onError ?? (() => {});
@@ -51,6 +55,8 @@ export function createUcrBrowserEndpointMediaAdapter(
       onError,
     }),
     trustedKeys: options.trustedKeys,
+    binding: options.binding,
+    authorizeFrame: options.authorizeFrame,
     maxPendingFrames: options.maxPendingFrames,
     onError,
   });
