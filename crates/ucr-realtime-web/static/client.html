@@ -851,7 +851,10 @@ async function activateE2eeAdapter(){
 function attachE2eeDataChannel(channel){
   if(channel.label!==E2EE_CHANNEL_LABEL){channel.close();return;}
   closeE2eeTransport();e2eeChannel=channel;e2eeChannel.binaryType="arraybuffer";
-  channel.onopen=()=>{activateE2eeAdapter().catch(e=>{ui.status.textContent="Endpoint E2EE adapter failed: "+e.message;});};
+  channel.onopen=()=>{activateE2eeAdapter().catch(e=>{
+    if(e2eeChannel===channel){closeE2eeTransport();ui.webrtcState.textContent="E2EE unavailable";}
+    ui.status.textContent="Endpoint E2EE adapter failed; encrypted transport closed: "+e.message;
+  });};
   channel.onmessage=event=>{
     try{
       const wire=receiveE2eeChunk(event.data);if(!wire)return;
@@ -1036,7 +1039,7 @@ async function restartIce(){
     const offer=await response.json();
     const pc=peer;
     if(!pc||pc.connectionState==="closed")throw new Error("WebRTC peer is unavailable for ICE restart");
-    pc.setConfiguration({iceServers:offer.ice_servers||[]});
+    pc.setConfiguration(rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value));
     await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
     const answer=await pc.createAnswer();
     await pc.setLocalDescription(answer);
