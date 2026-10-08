@@ -490,9 +490,7 @@ mod tests {
             sdp::session_description::RTCSessionDescription,
         };
 
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("select rustls crypto provider for live DTLS");
+        let _ = rustls::crypto::ring::default_provider().install_default();
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -699,9 +697,7 @@ mod tests {
         use crate::{LiveWebRtcProvider, WebRtcProvider};
         use ucr_model::SessionId;
 
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("select DTLS crypto provider");
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
