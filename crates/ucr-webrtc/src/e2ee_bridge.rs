@@ -581,7 +581,6 @@ mod tests {
             assert_live_ciphertext_egress(&provider, &session_id, &channel, &expected).await;
             remote.close().await.expect("close peer");
             assert_eq!(provider.close_session(&session_id), Ok(()));
-
         });
     }
 
