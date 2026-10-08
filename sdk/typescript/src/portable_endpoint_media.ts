@@ -29,6 +29,8 @@ export interface UcrGroupMediaCryptoBridge {
     plaintext: Uint8Array,
   ): Uint8Array;
   open_wire(wire: Uint8Array, sourceVerifyingKey: Uint8Array): Uint8Array;
+  /** Optional on older deployed bridges; required for bridge-level fail-closed revocation. */
+  revoke?(): void;
 }
 
 export interface UcrEncodedMediaFrame {
@@ -216,6 +218,9 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#sequences.clear();
     this.#received.clear();
     this.#reserved.clear();
+    // Retire the endpoint's cryptographic bridge before asynchronous media cleanup.
+    // A revoked bridge must never be reused for a resumed call or a new MLS epoch.
+    this.#bridge.revoke?.();
     await Promise.all([this.#producer.stop(), this.#consumer.stop()]);
   }
 
