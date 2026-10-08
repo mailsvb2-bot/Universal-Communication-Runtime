@@ -95,6 +95,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   readonly #reserved = new Set<string>();
   #pending = 0;
   #active = false;
+  #retired = false;
   #generation = 0;
   #sender: ((wire: Uint8Array) => void) | null = null;
 
@@ -117,6 +118,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   }
 
   async start(input: UcrEndpointE2eeStartInput): Promise<void> {
+    if (this.#retired) throw new Error("endpoint media bridge retired; create a new authorized MLS bridge");
     if (this.#active) throw new Error("endpoint media already started");
     this.#active = true;
     const generation = ++this.#generation;
@@ -125,8 +127,10 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       await this.#producer.start(input, (frame) => this.#sendFrame(frame, generation));
     } catch (error) {
       this.#active = false;
+      this.#retired = true;
       this.#sender = null;
       this.#generation++;
+      this.#bridge.revoke?.();
       await this.#producer.stop();
       throw error;
     }
@@ -213,6 +217,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   async stop(): Promise<void> {
     if (!this.#active) return;
     this.#active = false;
+    this.#retired = true;
     this.#generation++;
     this.#sender = null;
     this.#sequences.clear();
