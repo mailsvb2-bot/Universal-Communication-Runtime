@@ -104,6 +104,9 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#producer = options.producer;
     this.#consumer = options.consumer;
     this.#trustedKeys = options.trustedKeys;
+    if (!options.binding || !options.authorizeFrame) {
+      throw new Error("canonical call binding and live media authorization are required");
+    }
     this.#binding = options.binding;
     this.#authorizeFrame = options.authorizeFrame;
     this.#onError = options.onError ?? (() => {});
@@ -131,7 +134,11 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       this.#sender = null;
       this.#generation++;
       this.#bridge.revoke?.();
-      await this.#producer.stop();
+      try {
+        await Promise.all([this.#producer.stop(), this.#consumer.stop()]);
+      } catch (cleanupError) {
+        this.#onError(cleanupError);
+      }
       throw error;
     }
   }
