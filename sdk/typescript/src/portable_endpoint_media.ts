@@ -73,6 +73,8 @@ export interface UcrEndpointPipelineOptions {
   readonly binding?: Readonly<{ tenantId: string; namespaceId: string | null; callId: string; groupId: string; cryptoEpoch: bigint; negotiationRef: string; negotiationGeneration: bigint }>;
   /** Call on leave/revocation/rekey before accepting or sending another frame. */
   readonly authorizeFrame?: (header: SfuForwardEnvelopeWire["frame"]["header"]) => boolean | Promise<boolean>;
+  /** Locally cached canonical publish grant; must be updated on revocation/epoch change. */
+  readonly authorizePublish?: (frame: UcrEncodedMediaFrame) => boolean | Promise<boolean>;
   readonly onError?: (error: unknown) => void;
 }
 
@@ -86,6 +88,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   readonly #trustedKeys: UcrTrustedSourceKeys;
   readonly #binding: UcrEndpointPipelineOptions["binding"];
   readonly #authorizeFrame: UcrEndpointPipelineOptions["authorizeFrame"];
+  readonly #authorizePublish: NonNullable<UcrEndpointPipelineOptions["authorizePublish"]>;
   readonly #onError: (error: unknown) => void;
   readonly #maxFrameBytes: number;
   readonly #maxPendingFrames: number;
@@ -104,11 +107,12 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#producer = options.producer;
     this.#consumer = options.consumer;
     this.#trustedKeys = options.trustedKeys;
-    if (!options.binding || !options.authorizeFrame) {
-      throw new Error("canonical call binding and live media authorization are required");
+    if (!options.binding || !options.authorizeFrame || !options.authorizePublish) {
+      throw new Error("canonical call binding and bidirectional live media authorization are required");
     }
     this.#binding = options.binding;
     this.#authorizeFrame = options.authorizeFrame;
+    this.#authorizePublish = options.authorizePublish;
     this.#onError = options.onError ?? (() => {});
     this.#maxFrameBytes = options.maxFrameBytes ?? 1_048_576;
     this.#maxPendingFrames = options.maxPendingFrames ?? 64;
@@ -261,6 +265,10 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       return;
     }
     try {
+      if (!(await this.#authorizePublish(frame))) {
+        throw new Error("media publish authorization revoked");
+      }
+      if (!this.#active || generation !== this.#generation) return;
       const wire = this.#bridge.seal_wire(
         frame.streamId, frame.mediaKind === "audio" ? 1 : 2,
         videoSourceCode, sequence, frame.timestamp, frame.keyframe, frame.bytes,
