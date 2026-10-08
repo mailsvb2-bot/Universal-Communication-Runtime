@@ -367,20 +367,34 @@ assert.equal(ucrCodecCanEnqueue("video", Number.POSITIVE_INFINITY), false);
   const sender: {transform: unknown} = {transform: null};
   const receiver: {transform: unknown} = {transform: null};
   const factory = (_worker: Worker, direction: "encrypt" | "decrypt") => ({direction});
+  const authorize = () => true;
+  const closePeer = () => {};
   assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
-    {...admitted, receiverReady: false}, binding, factory), /not ready/);
+    {...admitted, receiverReady: false}, binding, factory, authorize, closePeer), /not ready/);
   assert.equal(sender.transform, null);
   assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
-    {...admitted, verifiedEpoch: 1n}, binding, factory), /not ready/);
+    {...admitted, verifiedEpoch: 1n}, binding, factory, authorize, closePeer), /not ready/);
   assert.equal(receiver.transform, null);
   assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
-    admitted, binding, () => null), /distinct authenticated/);
+    admitted, binding, factory, () => false, closePeer), /not ready/);
+  assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
+    admitted, binding, () => null, authorize, closePeer), /distinct authenticated/);
   assert.equal(sender.transform, null);
   installUcrNativeEncryptedTransforms(sender, receiver, admitted, binding, factory);
   assert.deepEqual(sender.transform, {direction: "encrypt"});
   assert.deepEqual(receiver.transform, {direction: "decrypt"});
   assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
-    admitted, binding, factory), /already installed/);
+    admitted, binding, factory, authorize, closePeer), /already installed/);
+  const brokenSender = {transform: null as unknown};
+  const brokenReceiver = Object.defineProperty({transform: null}, "transform", {
+    configurable: true, get() {return null;}, set() {throw new Error("install failed");},
+  });
+  let closed = 0;
+  assert.throws(() => installUcrNativeEncryptedTransforms(
+    brokenSender, brokenReceiver, admitted, binding, factory, authorize, () => {closed++;},
+  ), /peer closed/);
+  assert.equal(closed, 1);
+
 }
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
