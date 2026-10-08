@@ -122,7 +122,7 @@ const E2EE_CHUNK_PAYLOAD_BYTES=E2EE_DATA_MESSAGE_BYTES-E2EE_CHUNK_HEADER_BYTES;
 const E2EE_MAX_WIRE_BYTES=2*1024*1024+8192;
 const ENTRY_RETRY_MS=2000;
 const STREAM_RETRY_MS=1500;
-const WEBRTC_RETRY_MS=2000;
+const WEBRTC_RETRY_DELAYS_MS=[200,500,1000,2000,4000,8000,15000];
 const WEBRTC_RETRY_MAX_MS=15000;
 let webrtcRecoveryAttempt=0;
 const BRANDING_FRAGMENT_KEY="ucr_brand";
@@ -938,16 +938,24 @@ async function closeServerPeer(keepalive=false){
   if(!sessionActive)return;
   try{await api("/v1/realtime/webrtc/close",body(),undefined,keepalive);}catch(_){}
 }
-function scheduleWebRtcRetry(){
-  if(!sessionActive||!mediaActive||Date.now()>=claims.expires||restarting||!navigator.onLine)return;
-  if(webrtcRetryTimer)return;
+function scheduleWebRtcRetry(immediate=false){
+  if(!sessionActive||!mediaActive||Date.now()>=claims.expires||!navigator.onLine)return;
+  if(restarting)return;
+  if(webrtcRetryTimer){
+    if(!immediate)return;
+    clearTimeout(webrtcRetryTimer);
+    webrtcRetryTimer=null;
+  }
   ui.webrtcState.textContent="Reconnecting";
-  const delay=Math.min(WEBRTC_RETRY_MAX_MS,WEBRTC_RETRY_MS*2**Math.min(webrtcRecoveryAttempt,3));
-  webrtcRecoveryAttempt=Math.min(webrtcRecoveryAttempt+1,4);
-  webrtcRetryTimer=setTimeout(()=>{webrtcRetryTimer=null;recoverWebRtc().catch(e=>{
-    ui.status.textContent="Secure media reconnection failed: "+e.message;
-    scheduleWebRtcRetry();
-  });},delay);
+  const delay=immediate?0:WEBRTC_RETRY_DELAYS_MS[Math.min(webrtcRecoveryAttempt,WEBRTC_RETRY_DELAYS_MS.length-1)];
+  if(!immediate)webrtcRecoveryAttempt=Math.min(webrtcRecoveryAttempt+1,WEBRTC_RETRY_DELAYS_MS.length-1);
+  webrtcRetryTimer=setTimeout(()=>{
+    webrtcRetryTimer=null;
+    recoverWebRtc().catch(e=>{
+      ui.status.textContent="Secure media reconnection failed: "+e.message;
+      scheduleWebRtcRetry();
+    });
+  },delay);
 }
 async function startWebRtc(forceMedia=false){
   if(!sessionActive||!mediaActive||!navigator.onLine)return;
@@ -1030,7 +1038,8 @@ async function restartWebRtc(forceMedia){
     await startWebRtc(forceMedia);
   }catch(e){
     ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC reconnect failed: "+e.message;
-    setTimeout(()=>{restarting=false;scheduleWebRtcRetry();},WEBRTC_RETRY_MS);
+    restarting=false;
+    scheduleWebRtcRetry();
     return;
   }
   restarting=false;
@@ -1314,7 +1323,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
   navigator.mediaDevices.addEventListener("devicechange",()=>{handleMediaDeviceChange();});
 }
 window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
-window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";webrtcRecoveryAttempt=0;scheduleStreamRetry();scheduleWebRtcRetry();}});
+window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";webrtcRecoveryAttempt=0;scheduleStreamRetry();scheduleWebRtcRetry(true);}});
 window.addEventListener("pagehide",()=>{if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 <script src="./mobile-browser-probe.js"></script>
