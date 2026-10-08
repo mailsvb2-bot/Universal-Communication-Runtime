@@ -485,11 +485,9 @@ mod tests {
         use crate::{LiveWebRtcProvider, WebRtcProvider, WebRtcSessionConfig};
         use std::time::Duration;
         use ucr_model::{IceTransportPolicy, SessionId, WebRtcSdpType, WebRtcSessionDescription};
-        use webrtc::{
-            peer_connection::{
-                peer_connection_state::RTCPeerConnectionState,
-                sdp::session_description::RTCSessionDescription,
-            },
+        use webrtc::peer_connection::{
+            peer_connection_state::RTCPeerConnectionState,
+            sdp::session_description::RTCSessionDescription,
         };
 
         rustls::crypto::ring::default_provider()
