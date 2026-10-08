@@ -1,3 +1,5 @@
+import { createUcrPortableEndpointMediaAdapter } from "./src/portable_endpoint_media.ts";
+import { encodeSfuForwardEnvelopeWire } from "./src/sfu_forward_wire.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
@@ -178,5 +180,81 @@ assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
 assert.match(browser, /Unsupported endpoint E2EE adapter contract version/);
 assert.match(browser, /restoreSealedState/);
 assert.match(browser, /sealState/);
+
+
+{
+  const outbound: Uint8Array[] = [];
+  const played: Uint8Array[] = [];
+  const failures: unknown[] = [];
+  let emit: ((frame: {mediaKind: "audio"; streamId: string; timestamp: bigint; keyframe: boolean; bytes: Uint8Array}) => void | Promise<void>) | null = null;
+  let stopped = 0;
+  let seq = 0n;
+  const canonical = {
+    frame: {
+      header: {
+        tenantId: "tenant-1", namespaceId: null, callId: "call-1", groupId: "group-1",
+        streamId: "audio-1", source: {principalId: "alice", kind: "person" as const},
+        sourceDeviceId: "alice-device", negotiationRef: "neg-1",
+        negotiationGeneration: 1n, cryptoEpoch: 2n, cryptoStateRef: "state-2",
+        cryptoSuite: "ucr.v1" as const, headerVersion: 2 as const,
+        mediaKind: "audio" as const, videoSourceKind: null,
+        sequence: 1n, mediaTimestamp: 48000n, keyframe: false,
+      },
+      nonce: new Uint8Array(24), ciphertext: new Uint8Array([7, 8, 9]),
+      sourceSignature: {
+        keyId: "alice-key", algorithmId: "ed25519" as const,
+        algorithmVersion: 1 as const, signature: new Uint8Array(64),
+      },
+    },
+  };
+  const wire = encodeSfuForwardEnvelopeWire(canonical);
+  const adapter = createUcrPortableEndpointMediaAdapter({
+    bridge: {
+      seal_wire(_stream, mediaKind, videoKind, sequence, _timestamp, _keyframe, plaintext) {
+        assert.equal(mediaKind, 1);
+        assert.equal(videoKind, 0);
+        assert.equal(sequence, ++seq);
+        assert.deepEqual([...plaintext], [1, 2, 3]);
+        return wire;
+      },
+      open_wire(inbound, key) {
+        assert.deepEqual(inbound, wire);
+        assert.equal(key.length, 32);
+        return new Uint8Array([1, 2, 3]);
+      },
+    },
+    producer: {
+      start(_sources, send) { emit = send; },
+      stop() { stopped++; },
+    },
+    consumer: {
+      play(frame) { played.push(frame.bytes); },
+      stop() { stopped++; },
+    },
+    trustedKeys: {
+      resolve(_header, keyId) {
+        assert.equal(keyId, "alice-key");
+        return new Uint8Array(32).fill(1);
+      },
+    },
+    onError(error) { failures.push(error); },
+  });
+  assert.equal(adapter.contractVersion, UCR_ENDPOINT_E2EE_CONTRACT_VERSION);
+  const stream = {getTracks: () => []} as unknown as MediaStream;
+  await adapter.start({stream, cameraStream: stream, sendEnvelope: (payload) => outbound.push(payload)});
+  assert.ok(emit);
+  await emit!({mediaKind: "audio", streamId: "audio-1", timestamp: 48000n,
+    keyframe: false, bytes: new Uint8Array([1, 2, 3])});
+  assert.deepEqual(outbound, [wire]);
+  await adapter.onEnvelope(wire);
+  assert.deepEqual([...played[0]], [1, 2, 3]);
+  await assert.rejects(adapter.onEnvelope(wire), /replayed endpoint media frame/);
+  await assert.rejects(adapter.start({stream, cameraStream: stream, sendEnvelope() {}}), /already started/);
+  assert.equal(failures.length, 0);
+  await adapter.stop();
+  assert.equal(stopped, 2);
+  await adapter.onEnvelope(wire);
+  assert.equal(played.length, 1);
+}
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
