@@ -20,6 +20,7 @@ interface EncodedChunkLike {
   copyTo(destination: Uint8Array): void;
 }
 interface EncoderLike {
+  readonly encodeQueueSize: number;
   configure(config: object): void;
   encode(frame: unknown, options?: object): void;
   flush(): Promise<void>;
@@ -57,6 +58,14 @@ const VIDEO_WIDTH = 640;
 const VIDEO_HEIGHT = 480;
 const VIDEO_FRAMERATE = 15;
 const MAX_CAPTURE_FRAME_BYTES = 1_048_576;
+const MAX_VIDEO_ENCODER_QUEUE = 2;
+const MAX_AUDIO_ENCODER_QUEUE = 8;
+
+/** Bounded low-latency admission: discard stale source frames, never buffer indefinitely. */
+export function ucrCodecCanEnqueue(kind: "audio" | "video", queued: number): boolean {
+  if (!Number.isSafeInteger(queued) || queued < 0) return false;
+  return queued < (kind === "video" ? MAX_VIDEO_ENCODER_QUEUE : MAX_AUDIO_ENCODER_QUEUE);
+}
 
 function wireTimestamp(timestamp: number): bigint {
   if (!Number.isSafeInteger(timestamp) || timestamp < 0) throw new Error("invalid WebCodecs timestamp");
@@ -180,7 +189,9 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         if (result.done) break;
         const frame = result.value;
         try {
-          encoder.encode(frame, kind === "video" ? {keyFrame: count++ % 60 === 0} : undefined);
+          if (ucrCodecCanEnqueue(kind, encoder.encodeQueueSize)) {
+            encoder.encode(frame, kind === "video" ? {keyFrame: count++ % 60 === 0} : undefined);
+          }
         } finally {
           frame.close();
         }
