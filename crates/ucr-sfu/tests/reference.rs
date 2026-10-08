@@ -686,6 +686,14 @@ async fn rt0_independent_webrtc_peer(
     (peer, channel)
 }
 
+fn assert_rt0_bob_endpoint_decrypts_and_rejects_replay(
+    fixture: &Fixture,
+    received: &SfuForwardEnvelope,
+) {
+    let capabilities = PreparedGroupMediaE2eeCapabilities;
+    assert_rt0_bob_endpoint_decrypts_and_rejects_replay(&fixture, &received);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rt0_real_webrtc_alice_to_authorized_sfu_to_bob_endpoint_decrypt() {
     use std::sync::Arc;
