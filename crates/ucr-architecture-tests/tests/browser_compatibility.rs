@@ -42,7 +42,7 @@ fn assert_browser_workflow(workflow: &str) {
         "real-ios-simulator-safari-self-probe",
         "no successful real iOS Safari simulator evidence",
         "ios_safari_probe_runner.py",
-        "mobile_browser_compatibility_probe.py",
+        "android_chrome_probe_runner.py",
         "android_chrome_first_run.py",
     ] {
         assert!(
