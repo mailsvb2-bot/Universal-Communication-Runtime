@@ -120,6 +120,7 @@ const E2EE_CHUNK_HEADER_BYTES=24;
 const E2EE_DATA_MESSAGE_BYTES=16000;
 const E2EE_CHUNK_PAYLOAD_BYTES=E2EE_DATA_MESSAGE_BYTES-E2EE_CHUNK_HEADER_BYTES;
 const E2EE_MAX_WIRE_BYTES=2*1024*1024+8192;
+const E2EE_MAX_BUFFERED_SEND_BYTES=2*1024*1024;
 const ENTRY_RETRY_MS=2000;
 const STREAM_RETRY_MS=1500;
 const WEBRTC_RETRY_MS=2000;
@@ -686,6 +687,11 @@ function sendE2eeEnvelope(wire){
   if(!e2eeChannel||e2eeChannel.readyState!=="open")throw new Error("Encrypted media channel is not open");
   const bytes=wire instanceof Uint8Array?wire:new Uint8Array(wire);
   if(bytes.length===0||bytes.length>E2EE_MAX_WIRE_BYTES)throw new Error("Encrypted media envelope exceeds transport bounds");
+  // Drop work before chunking when a slow transport is already backlogged.
+  // Do not block the UI or grow DataChannel memory unboundedly.
+  if(e2eeChannel.bufferedAmount+bytes.length+Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES)*E2EE_CHUNK_HEADER_BYTES>E2EE_MAX_BUFFERED_SEND_BYTES){
+    throw new Error("Encrypted media transport congested; frame not queued");
+  }
   const count=Math.ceil(bytes.length/E2EE_CHUNK_PAYLOAD_BYTES);
   if(count>65535)throw new Error("Encrypted media envelope requires too many chunks");
   const messageId=BigInt(e2eeMessageId++);
