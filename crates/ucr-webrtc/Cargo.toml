@@ -11,15 +11,15 @@ repository.workspace = true
 base64 = "=0.22.1"
 bytes = "=1.12.1"
 openssl = "=0.10.81"
-
-[dev-dependencies]
-rustls = { version = "=0.23.45", features = ["ring"] }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "sync", "time"] }
 webrtc = "=0.17.2"
 zeroize = { version = "=1.9.0", features = ["derive"] }
 ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
 ucr-secrets = { path = "../ucr-secrets" }
+
+[dev-dependencies]
+rustls = { version = "=0.23.45", features = ["ring"] }
 
 [lints]
 workspace = true
