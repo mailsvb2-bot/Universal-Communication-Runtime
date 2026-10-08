@@ -2227,7 +2227,6 @@ mod tests {
         ));
     }
 
-
     #[test]
     fn browser_client_exposes_live_webrtc_media_and_reconnect_flow() {
         for required in [
