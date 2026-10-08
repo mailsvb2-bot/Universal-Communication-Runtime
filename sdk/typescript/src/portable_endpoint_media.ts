@@ -67,6 +67,10 @@ export interface UcrEndpointPipelineOptions {
   readonly maxFrameBytes?: number;
   readonly maxPendingFrames?: number;
   readonly maxReplayStreams?: number;
+  /** Expected authenticated conference scope, obtained at canonical join. */
+  readonly binding?: Readonly<{ tenantId: string; namespaceId: string | null; callId: string; groupId: string; cryptoEpoch: bigint; negotiationRef: string; negotiationGeneration: bigint }>;
+  /** Call on leave/revocation/rekey before accepting or sending another frame. */
+  readonly authorizeFrame?: (header: SfuForwardEnvelopeWire["frame"]["header"]) => boolean | Promise<boolean>;
   readonly onError?: (error: unknown) => void;
 }
 
@@ -78,6 +82,8 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   readonly #producer: UcrMediaProducer;
   readonly #consumer: UcrMediaConsumer;
   readonly #trustedKeys: UcrTrustedSourceKeys;
+  readonly #binding: UcrEndpointPipelineOptions["binding"];
+  readonly #authorizeFrame: UcrEndpointPipelineOptions["authorizeFrame"];
   readonly #onError: (error: unknown) => void;
   readonly #maxFrameBytes: number;
   readonly #maxPendingFrames: number;
@@ -95,6 +101,8 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#producer = options.producer;
     this.#consumer = options.consumer;
     this.#trustedKeys = options.trustedKeys;
+    this.#binding = options.binding;
+    this.#authorizeFrame = options.authorizeFrame;
     this.#onError = options.onError ?? (() => {});
     this.#maxFrameBytes = options.maxFrameBytes ?? 1_048_576;
     this.#maxPendingFrames = options.maxPendingFrames ?? 64;
@@ -142,11 +150,21 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     try {
       const envelope = decodeSfuForwardEnvelopeWire(wire);
       const header = envelope.frame.header;
+      const binding = this.#binding;
+      if (binding && (header.tenantId !== binding.tenantId ||
+          header.namespaceId !== binding.namespaceId ||
+          header.callId !== binding.callId ||
+          header.groupId !== binding.groupId ||
+          header.cryptoEpoch !== binding.cryptoEpoch ||
+          header.negotiationRef !== binding.negotiationRef ||
+          header.negotiationGeneration !== binding.negotiationGeneration)) {
+        throw new Error("encrypted media outside authenticated conference binding");
+      }
       const replayKey = [header.tenantId, header.callId, header.groupId,
         header.source.principalId, header.sourceDeviceId, header.cryptoEpoch.toString(),
         header.streamId].join("\u0000");
       const last = this.#received.get(replayKey);
-      const reservation = replayKey + "\\u0000" + header.sequence.toString();
+      const reservation = replayKey + "\u0000" + header.sequence.toString();
       if ((last !== undefined && header.sequence <= last) || this.#reserved.has(reservation)) {
         throw new Error("replayed endpoint media frame");
       }
@@ -155,6 +173,9 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       }
       this.#reserved.add(reservation);
       try {
+      if (this.#authorizeFrame && !(await this.#authorizeFrame(header))) {
+        throw new Error("media recipient or source authorization revoked");
+      }
       const key = await this.#trustedKeys.resolve(header, envelope.frame.sourceSignature.keyId);
       if (!(key instanceof Uint8Array) || key.byteLength !== 32) throw new Error("untrusted endpoint signing key");
       if (!this.#active || this.#generation !== generation) return;
