@@ -97,7 +97,7 @@ const ui={
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
-let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
+let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null;
 let reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_ENDPOINT_CONTRACT_VERSION="ucr.endpoint-e2ee.v1";
@@ -651,6 +651,12 @@ function closeE2eeTransport(){
   }
   const adapter=e2eeAdapter();
   if(adapter&&typeof adapter.stop==="function"){try{adapter.stop();}catch(_){}}
+  // The canonical bridge revokes permanently on stop. Never reuse a retired
+  // adapter on reconnection: reconstruct it from fresh authoritative admission.
+  if(adapter&&adapter===e2eeManagedAdapter){
+    if(window.ucrE2eeEndpoint===adapter)delete window.ucrE2eeEndpoint;
+    e2eeManagedAdapter=null;
+  }
   if(e2eeChannel){
     e2eeChannel.onopen=null;e2eeChannel.onmessage=null;e2eeChannel.onclose=null;e2eeChannel.onerror=null;
     try{e2eeChannel.close();}catch(_){}
@@ -826,6 +832,7 @@ async function activateE2eeAdapter(){
     if(installed&&typeof installed==="object"&&!e2eeAdapter()){
       window.ucrE2eeEndpoint=installed;
     }
+    if(installed&&window.ucrE2eeEndpoint===installed)e2eeManagedAdapter=installed;
   }
   const adapter=requireCompatibleE2eeAdapter(e2eeAdapter());
   if(!adapter||typeof adapter.start!=="function"||typeof adapter.onEnvelope!=="function"){
