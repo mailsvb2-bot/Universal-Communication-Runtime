@@ -669,13 +669,10 @@ mod tests {
                 sdp: remote.local_description().await.expect("peer SDP").sdp,
             })
             .expect("apply remote answer");
-        let channel = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            channel_rx.recv(),
-        )
-        .await
-        .expect("remote channel establishment")
-        .expect("E2EE channel");
+        let channel = tokio::time::timeout(std::time::Duration::from_secs(15), channel_rx.recv())
+            .await
+            .expect("remote channel establishment")
+            .expect("E2EE channel");
         assert_eq!(channel.label(), WEBRTC_E2EE_DATA_CHANNEL_LABEL);
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
@@ -709,10 +706,8 @@ mod tests {
                 LiveWebRtcProvider::with_e2ee_ingress(ingress_tx).expect("live provider");
             let alice_id = SessionId::from_opaque(id("rt0-alice-peer"));
             let bob_id = SessionId::from_opaque(id("rt0-bob-peer"));
-            let (alice, alice_channel) =
-                attach_independent_e2ee_peer(&provider, &alice_id).await;
-            let (bob, bob_channel) =
-                attach_independent_e2ee_peer(&provider, &bob_id).await;
+            let (alice, alice_channel) = attach_independent_e2ee_peer(&provider, &alice_id).await;
+            let (bob, bob_channel) = attach_independent_e2ee_peer(&provider, &bob_id).await;
             let expected = envelope();
             for chunk in encode_webrtc_e2ee_chunks(&expected, 63).expect("wire chunks") {
                 alice_channel
@@ -720,22 +715,13 @@ mod tests {
                     .await
                     .expect("Alice sends E2EE ciphertext");
             }
-            let frame = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                ingress_rx.recv(),
-            )
-            .await
-            .expect("live ingress")
-            .expect("Alice ingress");
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ingress_rx.recv())
+                .await
+                .expect("live ingress")
+                .expect("Alice ingress");
             assert_eq!(frame.session_id, alice_id, "bind ciphertext to Alice");
             assert_eq!(frame.envelope, expected, "ingress preserves ciphertext");
-            assert_live_ciphertext_egress(
-                &provider,
-                &bob_id,
-                &bob_channel,
-                &frame.envelope,
-            )
-            .await;
+            assert_live_ciphertext_egress(&provider, &bob_id, &bob_channel, &frame.envelope).await;
             assert!(ingress_rx.try_recv().is_err(), "no duplicate ingress");
             alice.close().await.expect("close Alice");
             bob.close().await.expect("close Bob");
