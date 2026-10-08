@@ -201,7 +201,8 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
         "reverse",
         "navigation_attempts",
         "evidence_wait_seconds",
-        "Android Chrome produced no mobile browser evidence after bounded navigation recovery",
+        "Android Chrome produced no mobile browser evidence",
+        "navigation recovery.",
         "FirstRunActivity",
         "ChromeTabbedActivity",
     ] {
