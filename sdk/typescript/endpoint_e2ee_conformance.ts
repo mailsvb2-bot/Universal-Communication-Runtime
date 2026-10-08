@@ -1,3 +1,4 @@
+import {chooseUcrBrowserMediaTransport, probeUcrNativeRtpBrowserCapabilities} from "./src/native_rtp_media.ts";
 import { ucrCodecCanEnqueue } from "./src/browser_webcodecs_media.ts";
 import {planUcrPrivacyNetwork, assertUcrPrivacyNetworkReady} from "./src/privacy_network.ts";
 import { createUcrPortableEndpointMediaAdapter } from "./src/portable_endpoint_media.ts";
@@ -324,5 +325,30 @@ assert.equal(ucrCodecCanEnqueue("audio", 7), true);
 assert.equal(ucrCodecCanEnqueue("audio", 8), false);
 assert.equal(ucrCodecCanEnqueue("audio", -1), false);
 assert.equal(ucrCodecCanEnqueue("video", Number.POSITIVE_INFINITY), false);
+
+
+{
+  const browserCaps = probeUcrNativeRtpBrowserCapabilities({
+    RTCRtpSender: {prototype: {transform: null}},
+    RTCRtpReceiver: {prototype: {transform: null}},
+    Worker: function Worker() {},
+  });
+  assert.equal(browserCaps.senderEncodedTransform, true);
+  assert.equal(browserCaps.receiverEncodedTransform, true);
+  const ready = {
+    ...browserCaps,
+    sfuEncryptedRtpForwarding: true,
+    endpointMlsReady: true,
+    canonicalAuthorizationReady: true,
+    encryptedSenderInstalled: true,
+    encryptedReceiverInstalled: true,
+  };
+  assert.equal(chooseUcrBrowserMediaTransport(ready, true), "native-e2ee-rtp");
+  assert.equal(chooseUcrBrowserMediaTransport({...ready, sfuEncryptedRtpForwarding: false}, true), "portable-e2ee-datachannel");
+  assert.equal(chooseUcrBrowserMediaTransport({...ready, encryptedReceiverInstalled: false}, true), "portable-e2ee-datachannel");
+  assert.throws(() => chooseUcrBrowserMediaTransport({...ready, endpointMlsReady: false}, true), /no authorized encrypted/);
+  assert.throws(() => chooseUcrBrowserMediaTransport({...ready, canonicalAuthorizationReady: false}, true), /no authorized encrypted/);
+  assert.throws(() => chooseUcrBrowserMediaTransport({...ready, encryptedSenderInstalled: false}, false), /no authorized encrypted/);
+}
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
