@@ -210,6 +210,12 @@ assert.match(browser, /sealState/);
     },
   };
   const wire = encodeSfuForwardEnvelopeWire(canonical);
+  assert.throws(() => createUcrPortableEndpointMediaAdapter({
+    bridge: {seal_wire() {return new Uint8Array([1]);}, open_wire() {return new Uint8Array([1]);}},
+    producer: {start() {}, stop() {}},
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() {return new Uint8Array(32);}},
+  }), /canonical call binding and live media authorization are required/);
   let authorized = true;
   let bridgeRevoked = false;
   const adapter = createUcrPortableEndpointMediaAdapter({
