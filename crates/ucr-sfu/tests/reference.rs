@@ -515,6 +515,86 @@ fn encrypted_group_frame_fans_out_bit_exactly_to_current_call_recipients() {
 }
 
 #[test]
+fn rt0_alice_sfu_bob_decrypts_authorized_media_and_rejects_replay() {
+    let fixture = build_fixture();
+    let capabilities = PreparedGroupMediaE2eeCapabilities;
+    let sfu_capabilities = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(
+        &AllowAll,
+        &fixture.store,
+        &capabilities,
+        &sfu_capabilities,
+    );
+    let sink = CaptureSink::default();
+    let outsider = principal("rt0-unknown-device");
+
+    assert_eq!(
+        runtime.forward_selected(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+            std::slice::from_ref(&outsider),
+            &sink,
+        ),
+        Err(SfuError::InvalidRecipientSet),
+    );
+    assert!(sink.forwarded().is_empty());
+
+    let validated = runtime
+        .validate_source_frame(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+        )
+        .expect("Alice authenticates encrypted source");
+    let batch = runtime
+        .prepare_forward_selected_from_validated_source(
+            validated,
+            std::slice::from_ref(&fixture.bob.principal),
+        )
+        .expect("Bob authorized recipient");
+    assert_eq!(batch.target_count(), 1);
+    assert_eq!(
+        dispatch_validated_forward_batch(&batch, &sink),
+        Ok(SfuForwardOutcome {
+            accepted_recipients: 1,
+        }),
+    );
+
+    let forwarded = sink.forwarded();
+    assert_eq!(forwarded.len(), 1);
+    assert_eq!(forwarded[0].0.recipient, fixture.bob.principal);
+    assert_eq!(
+        forwarded[0].1.frame.ciphertext,
+        fixture.envelope.frame.ciphertext,
+        "SFU forwards encrypted bytes unchanged",
+    );
+
+    let media_runtime = GroupMediaE2eeRuntime::new(
+        &AllowAll,
+        &fixture.store,
+        &capabilities,
+    );
+    let mut bob = media_runtime
+        .open_session(
+            &fixture.bob,
+            &device("bob"),
+            &group_media_context(&fixture.group, &fixture.call),
+            GroupMediaEpochSecret::from_exporter_bytes([42; 32]),
+        )
+        .expect("Bob endpoint-only media crypto");
+    assert_eq!(
+        bob.open_payload(&forwarded[0].1.frame),
+        Ok(b"opaque-video-payload".to_vec()),
+        "only recipient decrypts sealed media after canonical SFU",
+    );
+    assert!(matches!(
+        bob.open_payload(&forwarded[0].1.frame),
+        Err(ucr_media_e2ee::GroupMediaE2eeError::Replay)
+    ));
+}
+
+#[test]
 fn validated_source_frame_is_independent_from_recipient_authorization() {
     let fixture = build_fixture();
     let e2ee = PreparedGroupMediaE2eeCapabilities;
