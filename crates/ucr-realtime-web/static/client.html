@@ -50,6 +50,7 @@ button:disabled,select:disabled,input:disabled{opacity:.45;cursor:not-allowed}
 <div class="video-card"><header id="remote-label">Remote</header><video id="remote-video" autoplay playsinline></video></div>
 </div>
 <div class="controls">
+<select id="privacy-mode" aria-label="Network privacy mode"><option value="secure">Protected call (normal network)</option><option value="private">Higher privacy (TURN relay only)</option><option value="maximum" disabled>Maximum privacy (independent relay not configured)</option></select>
 <select id="microphone" aria-label="Microphone"><option value="">Default microphone</option></select>
 <select id="camera" aria-label="Camera"><option value="">Default camera</option></select>
 <button id="mic-toggle" class="secondary" disabled>Mute microphone</button>
@@ -92,7 +93,7 @@ const ui={
   stateLabel:$("state-label"),webrtcLabel:$("webrtc-label"),packetsLabel:$("packets-label"),expiresLabel:$("expires-label"),
   localLabel:$("local-label"),screenLabel:$("screen-label"),remoteLabel:$("remote-label"),footerNote:$("footer-note"),chatCard:$("chat-card"),
   localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),
-  mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker"),chatMessages:$("chat-messages"),chatInput:$("chat-input"),chatSend:$("chat-send")
+  privacyMode:$("privacy-mode"),mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker"),chatMessages:$("chat-messages"),chatInput:$("chat-input"),chatSend:$("chat-send")
 };
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
@@ -970,12 +971,23 @@ function scheduleWebRtcRetry(){
   ui.webrtcState.textContent="Reconnecting";
   webrtcRetryTimer=setTimeout(()=>{webrtcRetryTimer=null;recoverWebRtc();},WEBRTC_RETRY_MS);
 }
+function rtcNetworkConfiguration(iceServers,mode){
+  if(mode!=="secure"&&mode!=="private")throw new Error("Requested privacy mode requires unavailable infrastructure");
+  if(!Array.isArray(iceServers))throw new Error("Invalid canonical ICE server configuration");
+  const hasTurn=iceServers.some(server=>{
+    const urls=typeof server.urls==="string"?[server.urls]:server.urls;
+    return Array.isArray(urls)&&urls.some(url=>typeof url==="string"&&/^turns?:/i.test(url));
+  });
+  if(mode==="private"&&!hasTurn)throw new Error("Higher privacy requires configured TURN relay; refusing direct network fallback");
+  return {iceServers,iceTransportPolicy:mode==="private"?"relay":"all",bundlePolicy:"max-bundle"};
+}
 async function startWebRtc(forceMedia=false){
   if(!sessionActive||!mediaActive||!navigator.onLine)return;
+  if(ui.privacyMode.value==="maximum")throw new Error("Independent privacy relay is not configured");
   const media=await ensureLocalMedia(forceMedia);
   const response=await api("/v1/realtime/webrtc/start",body());
   const offer=await response.json();
-  const pc=new RTCPeerConnection({iceServers:offer.ice_servers||[]});
+  const pc=new RTCPeerConnection(rtcNetworkConfiguration(offer.ice_servers||[],ui.privacyMode.value));
   peer=pc;remoteStream=new MediaStream();ui.remoteVideo.srcObject=remoteStream;
   let remoteDescriptionAccepted=false;
   const pendingCandidates=[];
@@ -1324,6 +1336,7 @@ ui.mic.addEventListener("change",()=>{if(sessionActive&&mediaActive)replaceLocal
 ui.camera.addEventListener("change",()=>{if(sessionActive&&mediaActive)replaceLocalTrack("camera").catch(e=>{ui.status.textContent="Camera switch failed: "+e.message;});});
 try{
   const params=new URLSearchParams(location.hash.slice(1));applyBrandingFromFragment(params);token=params.get("ucr_join")||"";
+  // Fragment grants are invitations, never direct media master keys. MLS owns media secrets.
   if(!token)throw new Error("Missing #ucr_join grant");
   claims=readGrant(token);if(Date.now()>=claims.expires)throw new Error("Join grant has expired");
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
