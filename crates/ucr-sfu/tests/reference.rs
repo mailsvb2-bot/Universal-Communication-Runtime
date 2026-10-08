@@ -731,7 +731,10 @@ fn rt0_authorized_ciphertext_reaches_bob_but_outsider_and_spoofed_source_fail_cl
         ),
         Err(SfuError::InvalidRecipientSet),
     );
-    assert!(sink.forwarded().is_empty(), "outsider must never receive ciphertext");
+    assert!(
+        sink.forwarded().is_empty(),
+        "outsider must never receive ciphertext"
+    );
 
     assert_eq!(
         runtime.forward_selected(
@@ -743,7 +746,10 @@ fn rt0_authorized_ciphertext_reaches_bob_but_outsider_and_spoofed_source_fail_cl
         ),
         Err(SfuError::SourceMismatch),
     );
-    assert!(sink.forwarded().is_empty(), "spoofed source must never fan out");
+    assert!(
+        sink.forwarded().is_empty(),
+        "spoofed source must never fan out"
+    );
 
     assert_eq!(
         runtime.forward_selected(
@@ -753,12 +759,17 @@ fn rt0_authorized_ciphertext_reaches_bob_but_outsider_and_spoofed_source_fail_cl
             std::slice::from_ref(&fixture.bob.principal),
             &sink,
         ),
-        Ok(SfuForwardOutcome { accepted_recipients: 1 }),
+        Ok(SfuForwardOutcome {
+            accepted_recipients: 1
+        }),
     );
     let forwarded = sink.forwarded();
     assert_eq!(forwarded.len(), 1, "only Bob receives ciphertext");
     assert_eq!(forwarded[0].0.recipient, fixture.bob.principal);
-    assert_eq!(forwarded[0].1, fixture.envelope, "SFU must not change ciphertext");
+    assert_eq!(
+        forwarded[0].1, fixture.envelope,
+        "SFU must not change ciphertext"
+    );
 }
 
 #[test]
