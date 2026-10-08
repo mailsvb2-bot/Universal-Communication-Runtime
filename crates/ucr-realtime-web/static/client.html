@@ -797,10 +797,32 @@ async function startScreenShare(){
   }
 }
 async function activateE2eeAdapter(){
+  // Integration owner must supply authenticated MLS/media/signing state; the
+  // browser must never invent a default device key or silently send plaintext.
+  if(!e2eeAdapter()&&typeof window.ucrInstallAuthorizedMediaEndpoint==="function"){
+    const mls=await ensureEndpointMlsReady();
+    if(!mls)throw new Error("Endpoint-owned MLS required for encrypted media");
+    const installed=await window.ucrInstallAuthorizedMediaEndpoint(Object.freeze({
+      state:mls,
+      claims:Object.freeze({
+        tenantId:claims.tenant_id,
+        namespaceId:claims.namespace_id??null,
+        callId:claims.call_id,
+        deviceId:claims.device_id,
+        participantId:claims.participant_id,
+        participantKind:claims.participant_kind,
+        sessionId:claims.session_id
+      }),
+      groupId:endpointMlsGroupId,
+      loadWasm:loadEndpointWasmModule
+    }));
+    if(installed&&typeof installed==="object"&&!e2eeAdapter()){
+      window.ucrE2eeEndpoint=installed;
+    }
+  }
   const adapter=requireCompatibleE2eeAdapter(e2eeAdapter());
   if(!adapter||typeof adapter.start!=="function"||typeof adapter.onEnvelope!=="function"){
-    ui.status.textContent="WebRTC transport connected. Encrypted endpoint media adapter is required before camera/microphone/screen media can be published.";
-    return;
+    throw new Error("Authorized endpoint E2EE media adapter unavailable; refusing plaintext media");
   }
   const restoreState=await restoreEndpointPersistedState(adapter);
   await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
