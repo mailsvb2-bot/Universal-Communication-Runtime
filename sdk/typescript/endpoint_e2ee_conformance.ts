@@ -1,3 +1,4 @@
+import { ucrCodecCanEnqueue } from "./src/browser_webcodecs_media.ts";
 import {planUcrPrivacyNetwork, assertUcrPrivacyNetworkReady} from "./src/privacy_network.ts";
 import { createUcrPortableEndpointMediaAdapter } from "./src/portable_endpoint_media.ts";
 import { encodeSfuForwardEnvelopeWire } from "./src/sfu_forward_wire.ts";
@@ -303,5 +304,15 @@ assert.match(browser, /sealState/);
     mode: "secure", iceServers: [], trustedRelayAvailable: false,
   }).rtcConfiguration.iceTransportPolicy, "all");
 }
+
+
+// Low-latency codec admission is deterministic and prevents unbounded browser queues.
+assert.equal(ucrCodecCanEnqueue("video", 0), true);
+assert.equal(ucrCodecCanEnqueue("video", 1), true);
+assert.equal(ucrCodecCanEnqueue("video", 2), false);
+assert.equal(ucrCodecCanEnqueue("audio", 7), true);
+assert.equal(ucrCodecCanEnqueue("audio", 8), false);
+assert.equal(ucrCodecCanEnqueue("audio", -1), false);
+assert.equal(ucrCodecCanEnqueue("video", Number.POSITIVE_INFINITY), false);
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
