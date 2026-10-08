@@ -465,12 +465,12 @@ mod tests {
             .with_media_engine(engine)
             .with_interceptor_registry(interceptors)
             .build();
-        let remote = Arc::new(
+        let remote = std::sync::Arc::new(
             api.new_peer_connection(RTCConfiguration::default())
                 .await
                 .expect("independent peer"),
         );
-        let (channel_tx, mut channel_rx) = tokio::sync::mpsc::channel(1);
+        let (channel_tx, channel_rx) = tokio::sync::mpsc::channel(1);
         remote.on_data_channel(Box::new(move |channel| {
             let channel_tx = channel_tx.clone();
             Box::pin(async move {
