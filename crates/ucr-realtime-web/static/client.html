@@ -123,6 +123,8 @@ const E2EE_MAX_WIRE_BYTES=2*1024*1024+8192;
 const ENTRY_RETRY_MS=2000;
 const STREAM_RETRY_MS=1500;
 const WEBRTC_RETRY_MS=2000;
+const WEBRTC_RETRY_MAX_MS=15000;
+let webrtcRecoveryAttempt=0;
 const BRANDING_FRAGMENT_KEY="ucr_brand";
 const BRANDING_MAX_JSON_BYTES=4096;
 const BRAND_NAME_MAX=80;
@@ -827,7 +829,7 @@ function attachE2eeDataChannel(channel){
     }catch(e){e2eePending=null;ui.status.textContent="Encrypted media transport rejected data: "+e.message;}
   };
   channel.onerror=()=>{ui.status.textContent="Encrypted media DataChannel failed.";};
-  channel.onclose=()=>{if(e2eeChannel===channel){closeE2eeTransport();}};
+  channel.onclose=()=>{if(e2eeChannel===channel){closeE2eeTransport();scheduleWebRtcRetry();}};
 }
 function scheduleStreamRetry(){
   if(!sessionActive||!mediaActive||Date.now()>=claims.expires)return;
@@ -937,10 +939,15 @@ async function closeServerPeer(keepalive=false){
   try{await api("/v1/realtime/webrtc/close",body(),undefined,keepalive);}catch(_){}
 }
 function scheduleWebRtcRetry(){
-  if(!sessionActive||!mediaActive||Date.now()>=claims.expires||restarting)return;
-  if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);
+  if(!sessionActive||!mediaActive||Date.now()>=claims.expires||restarting||!navigator.onLine)return;
+  if(webrtcRetryTimer)return;
   ui.webrtcState.textContent="Reconnecting";
-  webrtcRetryTimer=setTimeout(()=>{webrtcRetryTimer=null;recoverWebRtc();},WEBRTC_RETRY_MS);
+  const delay=Math.min(WEBRTC_RETRY_MAX_MS,WEBRTC_RETRY_MS*2**Math.min(webrtcRecoveryAttempt,3));
+  webrtcRecoveryAttempt=Math.min(webrtcRecoveryAttempt+1,4);
+  webrtcRetryTimer=setTimeout(()=>{webrtcRetryTimer=null;recoverWebRtc().catch(e=>{
+    ui.status.textContent="Secure media reconnection failed: "+e.message;
+    scheduleWebRtcRetry();
+  });},delay);
 }
 async function startWebRtc(forceMedia=false){
   if(!sessionActive||!mediaActive||!navigator.onLine)return;
@@ -967,9 +974,10 @@ async function startWebRtc(forceMedia=false){
     const state=pc.connectionState;ui.webrtcState.textContent=state||"Connecting";
     if(state==="connected"){
       if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
+      webrtcRecoveryAttempt=0;
       ui.state.textContent="Connected";ui.status.textContent=e2eeChannel&&e2eeChannel.readyState==="open"?"Encrypted media transport connected.":"WebRTC signalling connected; waiting for encrypted media DataChannel.";
     }
-    if(state==="failed"||state==="disconnected")scheduleWebRtcRetry();
+    if(state==="failed"||state==="disconnected"||state==="closed")scheduleWebRtcRetry();
   };
   await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
   const answer=await pc.createAnswer();
@@ -1306,7 +1314,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
   navigator.mediaDevices.addEventListener("devicechange",()=>{handleMediaDeviceChange();});
 }
 window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
-window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry();}});
+window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";webrtcRecoveryAttempt=0;scheduleStreamRetry();scheduleWebRtcRetry();}});
 window.addEventListener("pagehide",()=>{if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 <script src="./mobile-browser-probe.js"></script>
