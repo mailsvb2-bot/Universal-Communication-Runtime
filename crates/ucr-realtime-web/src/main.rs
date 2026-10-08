@@ -2228,6 +2228,17 @@ mod tests {
     }
 
     #[test]
+    fn browser_privacy_modes_restrict_network_and_preserve_fragment_grant() {
+        assert!(CLIENT_HTML.contains("id=\"privacy-mode\""));
+        assert!(CLIENT_HTML.contains("iceTransportPolicy:mode===\"private\"?\"relay\":\"all\""));
+        assert!(CLIENT_HTML.contains("Higher privacy requires configured TURN relay"));
+        assert!(CLIENT_HTML.contains("ui.privacyMode.disabled=true"));
+        assert!(CLIENT_HTML.contains("ui.privacyMode.disabled=false"));
+        assert!(CLIENT_HTML.contains("token=params.get(\"ucr_join\")"));
+        assert!(CLIENT_HTML.contains("Independent privacy relay is not configured"));
+    }
+
+    #[test]
     fn browser_client_exposes_live_webrtc_media_and_reconnect_flow() {
         for required in [
             "navigator.mediaDevices.getUserMedia",
