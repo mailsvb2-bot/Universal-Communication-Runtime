@@ -2249,6 +2249,14 @@ mod tests {
     }
 
     #[test]
+    fn browser_e2ee_activation_rejects_stale_channels() {
+        assert!(CLIENT_HTML.contains("e2eeActivationGeneration"));
+        assert!(CLIENT_HTML.contains("Encrypted media session changed during adapter installation"));
+        assert!(CLIENT_HTML.contains("Encrypted media session changed during startup"));
+        assert!(CLIENT_HTML.contains("if(e2eeChannel!==channel)return;"));
+    }
+
+    #[test]
     fn browser_client_exposes_live_webrtc_media_and_reconnect_flow() {
         for required in [
             "navigator.mediaDevices.getUserMedia",
