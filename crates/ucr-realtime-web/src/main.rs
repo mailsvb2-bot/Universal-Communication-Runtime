@@ -2239,6 +2239,9 @@ mod tests {
         assert!(CLIENT_HTML.contains("adapter===e2eeManagedAdapter"));
         assert!(CLIENT_HTML.contains("delete window.ucrE2eeEndpoint"));
         assert!(CLIENT_HTML.contains("e2eeManagedAdapter=installed"));
+        assert!(CLIENT_HTML.contains("pc.setConfiguration(rtcNetworkConfiguration("));
+        assert!(CLIENT_HTML.contains("Endpoint E2EE adapter failed; encrypted transport closed"));
+        assert!(CLIENT_HTML.contains("if(e2eeChannel===channel){closeE2eeTransport()"));
     }
 
     #[test]
