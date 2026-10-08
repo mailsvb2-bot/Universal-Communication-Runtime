@@ -211,6 +211,7 @@ assert.match(browser, /sealState/);
   };
   const wire = encodeSfuForwardEnvelopeWire(canonical);
   let authorized = true;
+  let bridgeRevoked = false;
   const adapter = createUcrPortableEndpointMediaAdapter({
     binding: {
       tenantId: "tenant-1", namespaceId: null, callId: "call-1", groupId: "group-1",
@@ -218,6 +219,7 @@ assert.match(browser, /sealState/);
     },
     authorizeFrame: () => authorized,
     bridge: {
+      revoke() {bridgeRevoked = true;},
       seal_wire(_stream, mediaKind, videoKind, sequence, _timestamp, _keyframe, plaintext) {
         assert.equal(mediaKind, 1);
         assert.equal(videoKind, 0);
@@ -274,6 +276,7 @@ assert.match(browser, /sealState/);
   await assert.rejects(adapter.start({stream, cameraStream: stream, sendEnvelope() {}}), /already started/);
   assert.equal(failures.length, 0);
   await adapter.stop();
+  assert.equal(bridgeRevoked, true, "Rust bridge retired before media cleanup");
   assert.equal(stopped, 2);
   await adapter.onEnvelope(wire);
   assert.equal(played.length, 1);
