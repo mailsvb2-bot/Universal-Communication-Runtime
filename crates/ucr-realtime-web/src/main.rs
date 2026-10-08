@@ -1698,7 +1698,11 @@ async fn set_webrtc_remote_description(
     input: WebRtcRemoteDescriptionRequest,
 ) -> HttpResponse {
     if !valid_sdp(&input.sdp) {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_sdp", "WebRTC SDP exceeds bounds or has invalid content");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_sdp",
+            "WebRTC SDP exceeds bounds or has invalid content",
+        );
     }
     let sdp_type = match input.sdp_type.as_str() {
         "offer" => pb::WebRtcSdpType::Offer as i32,
@@ -1758,7 +1762,11 @@ async fn add_webrtc_ice_candidate(
     input: WebRtcIceCandidateRequest,
 ) -> HttpResponse {
     if !valid_ice_candidate(&input.candidate, input.sdp_mid.as_deref()) {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_ice_candidate", "WebRTC ICE candidate exceeds bounds or has invalid content");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_ice_candidate",
+            "WebRTC ICE candidate exceeds bounds or has invalid content",
+        );
     }
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeAddWebRtcIceCandidateRequest {
@@ -1881,18 +1889,20 @@ async fn bounded_body(body: Incoming) -> Result<Bytes, GatewayFailure> {
 }
 
 fn valid_sdp(sdp: &str) -> bool {
-    !sdp.is_empty()
-        && sdp.len() <= MAX_SIGNALING_SDP_BYTES
-        && !sdp.bytes().any(|byte| byte == 0)
+    !sdp.is_empty() && sdp.len() <= MAX_SIGNALING_SDP_BYTES && !sdp.bytes().any(|byte| byte == 0)
 }
 
 fn valid_ice_candidate(candidate: &str, mid: Option<&str>) -> bool {
     !candidate.is_empty()
         && candidate.len() <= MAX_SIGNALING_ICE_CANDIDATE_BYTES
-        && !candidate.bytes().any(|byte| byte == 0 || byte == b'\n' || byte == b'\r')
+        && !candidate
+            .bytes()
+            .any(|byte| byte == 0 || byte == b'\n' || byte == b'\r')
         && mid.is_none_or(|value| {
             value.len() <= MAX_SIGNALING_ICE_MID_BYTES
-                && !value.bytes().any(|byte| byte == 0 || byte == b'\n' || byte == b'\r')
+                && !value
+                    .bytes()
+                    .any(|byte| byte == 0 || byte == b'\n' || byte == b'\r')
         })
 }
 
@@ -2200,12 +2210,21 @@ mod tests {
         assert!(!valid_sdp(""));
         assert!(!valid_sdp(&"a".repeat(MAX_SIGNALING_SDP_BYTES + 1)));
         assert!(!valid_sdp("v=0\0"));
-        assert!(valid_ice_candidate("candidate:1 1 udp 1 127.0.0.1 1234 typ host", Some("0")));
+        assert!(valid_ice_candidate(
+            "candidate:1 1 udp 1 127.0.0.1 1234 typ host",
+            Some("0")
+        ));
         assert!(!valid_ice_candidate("", None));
-        assert!(!valid_ice_candidate(&"x".repeat(MAX_SIGNALING_ICE_CANDIDATE_BYTES + 1), None));
+        assert!(!valid_ice_candidate(
+            &"x".repeat(MAX_SIGNALING_ICE_CANDIDATE_BYTES + 1),
+            None
+        ));
         assert!(!valid_ice_candidate("candidate:1\nspoof", None));
         assert!(!valid_ice_candidate("candidate:1", Some("x\rspoof")));
-        assert!(!valid_ice_candidate("candidate:1", Some(&"x".repeat(MAX_SIGNALING_ICE_MID_BYTES + 1))));
+        assert!(!valid_ice_candidate(
+            "candidate:1",
+            Some(&"x".repeat(MAX_SIGNALING_ICE_MID_BYTES + 1))
+        ));
     }
 
 
