@@ -1350,6 +1350,12 @@ try{
   // Fragment grants are invitations, never direct media master keys. MLS owns media secrets.
   if(!token)throw new Error("Missing #ucr_join grant");
   claims=readGrant(token);if(Date.now()>=claims.expires)throw new Error("Join grant has expired");
+  // The signed grant has been captured for this tab. Scrub it from the visible
+  // URL without sending it through a navigation, analytics endpoint or log.
+  // This reduces accidental sharing; it does NOT erase browser history or RAM.
+  if(window.history&&typeof window.history.replaceState==="function"){
+    window.history.replaceState(window.history.state,"",location.pathname+location.search);
+  }
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
   if(!scheduleWaitingRoom())ui.status.textContent="Signed grant loaded. Ready to join.";
 }catch(e){fail(e.message);}
