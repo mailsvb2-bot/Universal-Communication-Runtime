@@ -1,3 +1,4 @@
+import {createUcrAuthorizedMediaInstaller} from "./src/authorized_browser_media.ts";
 import {installUcrNativeEncryptedTransforms} from "./src/native_encrypted_transforms.ts";
 import {chooseUcrBrowserMediaTransport, probeUcrNativeRtpBrowserCapabilities} from "./src/native_rtp_media.ts";
 import { ucrCodecCanEnqueue } from "./src/browser_webcodecs_media.ts";
@@ -411,6 +412,38 @@ assert.equal(ucrCodecCanEnqueue("video", Number.POSITIVE_INFINITY), false);
   ), /worker crashed/);
   assert.equal(creatorClosed, 1);
 
+}
+
+
+{
+  const target: Record<string, unknown> = {};
+  let unlock!: () => void;
+  const locked = new Promise<void>((resolve) => { unlock = resolve; });
+  let factoryCalls = 0;
+  const installer = createUcrAuthorizedMediaInstaller(target, async () => {
+    factoryCalls++;
+    await locked;
+    throw new Error("canonical signing identity unavailable");
+  });
+  const bootstrap = {
+    state: {}, groupId: "group-1",
+    claims: {tenantId: "tenant-1", namespaceId: null, callId: "call-1",
+      deviceId: "device-1", participantId: "participant-1",
+      participantKind: "person", sessionId: "session-1"},
+    loadWasm: async () => ({}),
+  };
+  const first = installer(bootstrap);
+  await assert.rejects(installer(bootstrap), /installation already active/);
+  assert.equal(factoryCalls, 1, "concurrent installer must not start a second MLS bridge");
+  unlock();
+  await assert.rejects(first, /canonical signing identity unavailable/);
+  assert.equal(target.ucrE2eeEndpoint, undefined);
+  target.ucrE2eeEndpoint = {};
+  await assert.rejects(installer(bootstrap), /installation already active/);
+  assert.equal(factoryCalls, 1, "installed adapter must not be replaced");
+  delete target.ucrE2eeEndpoint;
+  await assert.rejects(installer(bootstrap), /canonical signing identity unavailable/);
+  assert.equal(factoryCalls, 2, "failed installation releases lock for a fresh admission");
 }
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
