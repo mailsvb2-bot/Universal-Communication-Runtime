@@ -46,29 +46,33 @@ export function installUcrNativeEncryptedTransforms(
   isAuthorized: (binding: UcrNativeTransformBinding) => boolean,
   closePeerOnFailure: () => void,
 ): void {
-  if (!isAuthorized(binding) || !binding.callId || !binding.groupId || binding.cryptoEpoch < 0n ||
-      authenticated.verifiedCallId !== binding.callId ||
-      authenticated.verifiedGroupId !== binding.groupId ||
-      authenticated.verifiedEpoch !== binding.cryptoEpoch ||
-      !authenticated.senderReady || !authenticated.receiverReady) {
-    throw new Error("canonical MLS/SFrame endpoint transform not ready");
-  }
-  if (!("transform" in sender) || !("transform" in receiver) ||
-      sender.transform != null || receiver.transform != null) {
-    throw new Error("native RTP transforms unavailable or already installed");
-  }
-  const encrypt = create(authenticated.worker, "encrypt", binding);
-  const decrypt = create(authenticated.worker, "decrypt", binding);
-  if (!encrypt || !decrypt || encrypt === decrypt) {
-    throw new Error("distinct authenticated sender/receiver transforms required");
-  }
   try {
+    if (!isAuthorized(binding) || !binding.callId || !binding.groupId || binding.cryptoEpoch < 0n ||
+        authenticated.verifiedCallId !== binding.callId ||
+        authenticated.verifiedGroupId !== binding.groupId ||
+        authenticated.verifiedEpoch !== binding.cryptoEpoch ||
+        !authenticated.senderReady || !authenticated.receiverReady) {
+      throw new Error("canonical MLS/SFrame endpoint transform not ready");
+    }
+    if (!("transform" in sender) || !("transform" in receiver) ||
+        sender.transform != null || receiver.transform != null) {
+      throw new Error("native RTP transforms unavailable or already installed");
+    }
+    const encrypt = create(authenticated.worker, "encrypt", binding);
+    const decrypt = create(authenticated.worker, "decrypt", binding);
+    if (!encrypt || !decrypt || encrypt === decrypt) {
+      throw new Error("distinct authenticated sender/receiver transforms required");
+    }
     sender.transform = encrypt;
     receiver.transform = decrypt;
   } catch (error) {
-    // A partially installed transform MUST NOT be used for media transport.
-    // Immediately close the peer to prevent any unprotected sender from running.
-    closePeerOnFailure();
-    throw new Error("native E2EE transform installation failed; peer closed", {cause: error});
+    // Even a constructor or canonical authorization failure must not leave
+    // an already prepared peer alive with missing or partial E2EE transforms.
+    try {
+      closePeerOnFailure();
+    } catch {
+      // Preserve the security setup error; transport closure remains caller-owned.
+    }
+    throw error;
   }
 }
