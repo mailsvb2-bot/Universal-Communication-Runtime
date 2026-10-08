@@ -30,6 +30,9 @@ fn assert_browser_workflow(workflow: &str) {
         "google_apis_playstore;x86_64",
         "pm path com.android.chrome",
         "adb reverse tcp:8765 tcp:8765",
+        "android_chrome_probe_runner.py",
+        "--navigation-attempts 4",
+        "--evidence-wait-seconds 40",
         "name: mobile-ios-safari",
         "ios-safari-attempts",
         "macos-15-intel",
@@ -145,6 +148,7 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
     let mobile_probe = read("tools/mobile_browser_compatibility_probe.py");
     let ios_safari_runner = read("tools/ios_safari_probe_runner.py");
     let android_first_run = read("tools/android_chrome_first_run.py");
+    let android_probe_runner = read("tools/android_chrome_probe_runner.py");
     let mobile_probe_js = read("crates/ucr-realtime-web/static/mobile-browser-probe.js");
     let client = read("crates/ucr-realtime-web/static/client.html");
     let realtime = read("crates/ucr-api-grpc/src/realtime_service.rs");
@@ -189,6 +193,22 @@ fn browser_compatibility_matrix_runs_real_desktop_and_simulator_backed_mobile_br
         assert!(
             android_first_run.contains(invariant),
             "missing Android Chrome first-run invariant {invariant}"
+        );
+    }
+    for invariant in [
+        "mobile_browser_compatibility_probe.py",
+        "android_chrome_first_run.py",
+        "adb",
+        "reverse",
+        "navigation_attempts",
+        "evidence_wait_seconds",
+        "Android Chrome produced no mobile browser evidence after bounded navigation recovery",
+        "FirstRunActivity",
+        "ChromeTabbedActivity",
+    ] {
+        assert!(
+            android_probe_runner.contains(invariant),
+            "missing Android Chrome recovery invariant {invariant}"
         );
     }
     assert!(
