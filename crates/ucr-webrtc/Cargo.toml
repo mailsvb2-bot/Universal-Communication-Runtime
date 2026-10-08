@@ -18,5 +18,8 @@ ucr-model = { path = "../ucr-model" }
 ucr-protocol = { path = "../ucr-protocol" }
 ucr-secrets = { path = "../ucr-secrets" }
 
+[dev-dependencies]
+rustls = { version = "=0.23.45", features = ["ring"] }
+
 [lints]
 workspace = true

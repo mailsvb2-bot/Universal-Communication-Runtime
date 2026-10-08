@@ -4289,6 +4289,7 @@ dependencies = [
  "base64",
  "bytes",
  "openssl",
+ "rustls",
  "tokio",
  "ucr-model",
  "ucr-protocol",
