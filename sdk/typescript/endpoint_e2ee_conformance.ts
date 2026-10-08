@@ -380,7 +380,7 @@ assert.equal(ucrCodecCanEnqueue("video", Number.POSITIVE_INFINITY), false);
   assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
     admitted, binding, () => null, authorize, closePeer), /distinct authenticated/);
   assert.equal(sender.transform, null);
-  installUcrNativeEncryptedTransforms(sender, receiver, admitted, binding, factory);
+  installUcrNativeEncryptedTransforms(sender, receiver, admitted, binding, factory, authorize, closePeer);
   assert.deepEqual(sender.transform, {direction: "encrypt"});
   assert.deepEqual(receiver.transform, {direction: "decrypt"});
   assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
