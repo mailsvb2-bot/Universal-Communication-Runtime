@@ -581,6 +581,11 @@ mod tests {
             assert_live_ciphertext_egress(&provider, &session_id, &channel, &expected).await;
             remote.close().await.expect("close peer");
             assert_eq!(provider.close_session(&session_id), Ok(()));
+            assert_eq!(
+                provider.send_e2ee_envelope(&session_id, &expected),
+                Err(crate::WebRtcProviderError::SessionUnavailable),
+                "a closed peer cannot accept E2EE egress or resurrect transport state"
+            );
         });
     }
 
