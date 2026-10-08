@@ -1,8 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
-use ucr_model::{
-    IceTransportPolicy, OpaqueId, SessionId, WebRtcSdpType, WebRtcSessionDescription,
-};
+use ucr_model::{IceTransportPolicy, OpaqueId, SessionId, WebRtcSdpType, WebRtcSessionDescription};
 use ucr_webrtc::{LiveWebRtcProvider, WebRtcProvider, WebRtcSessionConfig};
 use webrtc::{
     api::{
@@ -60,7 +58,10 @@ async fn answer_offer(
         .await
         .expect("apply UCR offer");
 
-    let answer = remote.create_answer(None).await.expect("create remote answer");
+    let answer = remote
+        .create_answer(None)
+        .await
+        .expect("create remote answer");
     let mut gathering_complete = remote.gathering_complete_promise().await;
     remote
         .set_local_description(answer)
