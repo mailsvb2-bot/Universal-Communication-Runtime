@@ -41,6 +41,10 @@ export function createUcrAuthorizedMediaInstaller(
       throw new Error("canonical device-bound MLS admission required");
     }
     const options = await factory(bootstrap);
+    if (!options?.binding || !options.bridge || !options.trustedKeys ||
+        typeof options.authorizeFrame !== "function") {
+      throw new Error("current canonical call authority and endpoint crypto required");
+    }
     if (options.binding.callId !== bootstrap.claims.callId ||
         options.binding.groupId !== bootstrap.groupId ||
         options.binding.tenantId !== bootstrap.claims.tenantId ||
