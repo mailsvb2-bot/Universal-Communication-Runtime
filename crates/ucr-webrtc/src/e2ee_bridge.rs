@@ -652,6 +652,107 @@ mod tests {
         );
     }
 
+    async fn attach_independent_e2ee_peer(
+        provider: &crate::LiveWebRtcProvider,
+        session_id: &ucr_model::SessionId,
+    ) -> (
+        std::sync::Arc<webrtc::peer_connection::RTCPeerConnection>,
+        std::sync::Arc<webrtc::data_channel::RTCDataChannel>,
+    ) {
+        use crate::{WebRtcProvider, WebRtcSessionConfig};
+        use ucr_model::{IceTransportPolicy, WebRtcSdpType, WebRtcSessionDescription};
+        use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+
+        let config = WebRtcSessionConfig {
+            session_id: session_id.clone(),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        let (remote, mut channel_rx) = independent_e2ee_peer().await;
+        let offer = provider.create_session(&config).expect("server offer");
+        remote
+            .set_remote_description(
+                RTCSessionDescription::offer(offer.sdp).expect("valid server offer"),
+            )
+            .await
+            .expect("apply offer");
+        let answer = remote.create_answer(None).await.expect("peer answer");
+        let mut gathered = remote.gathering_complete_promise().await;
+        remote
+            .set_local_description(answer)
+            .await
+            .expect("set peer answer");
+        tokio::time::timeout(std::time::Duration::from_secs(12), gathered.recv())
+            .await
+            .expect("ICE gathering");
+        provider
+            .set_remote_description(&WebRtcSessionDescription {
+                session_id: session_id.clone(),
+                sdp_type: WebRtcSdpType::Answer,
+                sdp: remote.local_description().await.expect("peer SDP").sdp,
+            })
+            .expect("apply remote answer");
+        let channel = tokio::time::timeout(std::time::Duration::from_secs(15), channel_rx.recv())
+            .await
+            .expect("remote channel establishment")
+            .expect("E2EE channel");
+        assert_eq!(channel.label(), WEBRTC_E2EE_DATA_CHANNEL_LABEL);
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                if channel.ready_state()
+                    == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("open live E2EE channel");
+        (remote, channel)
+    }
+
+    #[test]
+    fn two_independent_peers_transfer_canonical_ciphertext_without_server_decryption() {
+        use crate::{LiveWebRtcProvider, WebRtcProvider};
+        use ucr_model::SessionId;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
+            let provider =
+                LiveWebRtcProvider::with_e2ee_ingress(ingress_tx).expect("live provider");
+            let alice_id = SessionId::from_opaque(id("rt0-alice-peer"));
+            let bob_id = SessionId::from_opaque(id("rt0-bob-peer"));
+            let (alice, alice_channel) = attach_independent_e2ee_peer(&provider, &alice_id).await;
+            let (bob, bob_channel) = attach_independent_e2ee_peer(&provider, &bob_id).await;
+            let expected = envelope();
+            for chunk in encode_webrtc_e2ee_chunks(&expected, 63).expect("wire chunks") {
+                alice_channel
+                    .send(&bytes::Bytes::from(chunk))
+                    .await
+                    .expect("Alice sends E2EE ciphertext");
+            }
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ingress_rx.recv())
+                .await
+                .expect("live ingress")
+                .expect("Alice ingress");
+            assert_eq!(frame.session_id, alice_id, "bind ciphertext to Alice");
+            assert_eq!(frame.envelope, expected, "ingress preserves ciphertext");
+            assert_live_ciphertext_egress(&provider, &bob_id, &bob_channel, &frame.envelope).await;
+            assert!(ingress_rx.try_recv().is_err(), "no duplicate ingress");
+            alice.close().await.expect("close Alice");
+            bob.close().await.expect("close Bob");
+            assert_eq!(provider.close_session(&alice_id), Ok(()));
+            assert_eq!(provider.close_session(&bob_id), Ok(()));
+        });
+    }
+
     #[test]
     fn decoder_rejects_unbounded_messages_before_parsing() {
         let wire = vec![0_u8; MAX_WEBRTC_E2EE_WIRE_BYTES + 1];
