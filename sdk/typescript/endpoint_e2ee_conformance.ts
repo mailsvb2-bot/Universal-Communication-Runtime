@@ -1,3 +1,4 @@
+import {installUcrNativeEncryptedTransforms} from "./src/native_encrypted_transforms.ts";
 import {chooseUcrBrowserMediaTransport, probeUcrNativeRtpBrowserCapabilities} from "./src/native_rtp_media.ts";
 import { ucrCodecCanEnqueue } from "./src/browser_webcodecs_media.ts";
 import {planUcrPrivacyNetwork, assertUcrPrivacyNetworkReady} from "./src/privacy_network.ts";
@@ -355,6 +356,31 @@ assert.equal(ucrCodecCanEnqueue("video", Number.POSITIVE_INFINITY), false);
   assert.throws(() => chooseUcrBrowserMediaTransport({...ready, endpointMlsReady: false}, true), /no authorized encrypted/);
   assert.throws(() => chooseUcrBrowserMediaTransport({...ready, canonicalAuthorizationReady: false}, true), /no authorized encrypted/);
   assert.throws(() => chooseUcrBrowserMediaTransport({...ready, encryptedSenderInstalled: false}, false), /no authorized encrypted/);
+}
+
+
+{
+  const worker = {} as Worker;
+  const binding = {callId: "call-1", groupId: "group-1", cryptoEpoch: 2n};
+  const admitted = {worker, verifiedCallId: "call-1", verifiedGroupId: "group-1",
+    verifiedEpoch: 2n, senderReady: true, receiverReady: true};
+  const sender: {transform: unknown} = {transform: null};
+  const receiver: {transform: unknown} = {transform: null};
+  const factory = (_worker: Worker, direction: "encrypt" | "decrypt") => ({direction});
+  assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
+    {...admitted, receiverReady: false}, binding, factory), /not ready/);
+  assert.equal(sender.transform, null);
+  assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
+    {...admitted, verifiedEpoch: 1n}, binding, factory), /not ready/);
+  assert.equal(receiver.transform, null);
+  assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
+    admitted, binding, () => null), /distinct authenticated/);
+  assert.equal(sender.transform, null);
+  installUcrNativeEncryptedTransforms(sender, receiver, admitted, binding, factory);
+  assert.deepEqual(sender.transform, {direction: "encrypt"});
+  assert.deepEqual(receiver.transform, {direction: "decrypt"});
+  assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
+    admitted, binding, factory), /already installed/);
 }
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
