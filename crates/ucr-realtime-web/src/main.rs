@@ -2235,6 +2235,10 @@ mod tests {
         assert!(CLIENT_HTML.contains("ui.privacyMode.disabled=true"));
         assert!(CLIENT_HTML.contains("ui.privacyMode.disabled=false"));
         assert!(CLIENT_HTML.contains("token=params.get(\"ucr_join\")"));
+        assert!(CLIENT_HTML.contains("window.history.replaceState("));
+        assert!(CLIENT_HTML.contains("location.pathname+location.search"));
+        assert!(CLIENT_HTML.contains("claims=readGrant(token);if(Date.now()>=claims.expires)"));
+
         assert!(CLIENT_HTML.contains("Independent privacy relay is not configured"));
         assert!(CLIENT_HTML.contains("adapter===e2eeManagedAdapter"));
         assert!(CLIENT_HTML.contains("delete window.ucrE2eeEndpoint"));
