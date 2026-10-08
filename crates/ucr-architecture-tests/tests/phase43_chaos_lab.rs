@@ -96,6 +96,8 @@ fn phase43_locks_data_safety_and_explicit_failure_evidence() {
     let implementation = read("crates/ucr-chaos-lab/src/lib.rs");
     let adversity = read("crates/ucr-chaos-lab/tests/network_adversity.rs");
     let sfu_adversity = read("crates/ucr-sfu/tests/network_adversity.rs");
+    let live_webrtc_adversity = read("crates/ucr-webrtc/tests/live_loopback_adversity.rs");
+    let realtime_spec = read("spec/realtime.md");
     let workflow = read(".github/workflows/phase43-chaos-lab.yml");
 
     for test in [
@@ -144,10 +146,35 @@ fn phase43_locks_data_safety_and_explicit_failure_evidence() {
             "missing SFU restart adversity evidence {marker}"
         );
     }
+    for marker in [
+        "live_loopback_connects_and_renegotiates_fresh_ice_generation_on_same_session",
+        "LiveWebRtcProvider",
+        "create_session",
+        "restart_session",
+        "set_remote_description",
+        "RTCPeerConnectionState::Connected",
+        "a=ice-ufrag:",
+        "initial_ufrags",
+        "restarted_ufrags",
+    ] {
+        assert!(
+            live_webrtc_adversity.contains(marker),
+            "missing live WebRTC loopback evidence {marker}"
+        );
+    }
+    assert!(
+        realtime_spec.contains("controlled loopback ICE/DTLS connectivity"),
+        "realtime spec must describe bounded loopback evidence"
+    );
+    assert!(
+        realtime_spec.contains("does not prove live public TURN traversal"),
+        "loopback evidence must not be promoted to public TURN evidence"
+    );
     assert!(workflow.contains("cargo clippy"));
     assert!(workflow.contains("cargo test"));
     assert!(workflow.contains("-p ucr-sfu --test network_adversity"));
-    assert!(workflow.matches("--locked").count() >= 3);
+    assert!(workflow.contains("-p ucr-webrtc --test live_loopback_adversity"));
+    assert!(workflow.matches("--locked").count() >= 4);
     assert!(!workflow.contains("cargo generate-lockfile"));
     assert!(!workflow.contains("continue-on-error"));
     assert!(!workflow.contains("|| true"));
