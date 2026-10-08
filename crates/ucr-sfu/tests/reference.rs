@@ -519,12 +519,7 @@ fn rt0_alice_sfu_bob_decrypts_authorized_media_and_rejects_replay() {
     let fixture = build_fixture();
     let capabilities = PreparedGroupMediaE2eeCapabilities;
     let sfu_capabilities = PreparedSfuCapabilities;
-    let runtime = SfuRuntime::new(
-        &AllowAll,
-        &fixture.store,
-        &capabilities,
-        &sfu_capabilities,
-    );
+    let runtime = SfuRuntime::new(&AllowAll, &fixture.store, &capabilities, &sfu_capabilities);
     let sink = CaptureSink::default();
     let outsider = principal("rt0-unknown-device");
 
@@ -541,11 +536,7 @@ fn rt0_alice_sfu_bob_decrypts_authorized_media_and_rejects_replay() {
     assert!(sink.forwarded().is_empty());
 
     let validated = runtime
-        .validate_source_frame(
-            &fixture.alice,
-            &fixture.alice_device,
-            &fixture.envelope,
-        )
+        .validate_source_frame(&fixture.alice, &fixture.alice_device, &fixture.envelope)
         .expect("Alice authenticates encrypted source");
     let batch = runtime
         .prepare_forward_selected_from_validated_source(
@@ -565,16 +556,11 @@ fn rt0_alice_sfu_bob_decrypts_authorized_media_and_rejects_replay() {
     assert_eq!(forwarded.len(), 1);
     assert_eq!(forwarded[0].0.recipient, fixture.bob.principal);
     assert_eq!(
-        forwarded[0].1.frame.ciphertext,
-        fixture.envelope.frame.ciphertext,
+        forwarded[0].1.frame.ciphertext, fixture.envelope.frame.ciphertext,
         "SFU forwards encrypted bytes unchanged",
     );
 
-    let media_runtime = GroupMediaE2eeRuntime::new(
-        &AllowAll,
-        &fixture.store,
-        &capabilities,
-    );
+    let media_runtime = GroupMediaE2eeRuntime::new(&AllowAll, &fixture.store, &capabilities);
     let mut bob = media_runtime
         .open_session(
             &fixture.bob,
@@ -594,6 +580,7 @@ fn rt0_alice_sfu_bob_decrypts_authorized_media_and_rejects_replay() {
     ));
 }
 
+#[derive(Debug)]
 struct Rt0WebRtcSink<'a> {
     provider: &'a ucr_webrtc::LiveWebRtcProvider,
     bob_id: ucr_model::SessionId,
@@ -609,7 +596,6 @@ impl SfuForwardSink for Rt0WebRtcSink<'_> {
         if target.recipient != self.bob {
             return Err(SfuForwardSinkError::Rejected);
         }
-        use ucr_webrtc::WebRtcProvider;
         self.provider
             .send_e2ee_envelope(&self.bob_id, envelope)
             .map_err(|_| SfuForwardSinkError::Unavailable)
@@ -631,8 +617,7 @@ async fn rt0_independent_webrtc_peer(
         },
         interceptor::registry::Registry,
         peer_connection::{
-            configuration::RTCConfiguration,
-            sdp::session_description::RTCSessionDescription,
+            configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription,
         },
     };
     let mut engine = MediaEngine::default();
@@ -662,14 +647,14 @@ async fn rt0_independent_webrtc_peer(
             ice_transport_policy: IceTransportPolicy::All,
         })
         .expect("server offer");
-    peer.set_remote_description(
-        RTCSessionDescription::offer(offer.sdp).expect("parse offer"),
-    )
-    .await
-    .expect("set offer");
+    peer.set_remote_description(RTCSessionDescription::offer(offer.sdp).expect("parse offer"))
+        .await
+        .expect("set offer");
     let answer = peer.create_answer(None).await.expect("answer");
     let mut gathered = peer.gathering_complete_promise().await;
-    peer.set_local_description(answer).await.expect("set answer");
+    peer.set_local_description(answer)
+        .await
+        .expect("set answer");
     tokio::time::timeout(std::time::Duration::from_secs(12), gathered.recv())
         .await
         .expect("ICE gathering");
@@ -677,7 +662,11 @@ async fn rt0_independent_webrtc_peer(
         .set_remote_description(&WebRtcSessionDescription {
             session_id: session_id.clone(),
             sdp_type: WebRtcSdpType::Answer,
-            sdp: peer.local_description().await.expect("local description").sdp,
+            sdp: peer
+                .local_description()
+                .await
+                .expect("local description")
+                .sdp,
         })
         .expect("answer installed");
     let channel = tokio::time::timeout(std::time::Duration::from_secs(15), rx.recv())
@@ -701,8 +690,7 @@ async fn rt0_independent_webrtc_peer(
 async fn rt0_real_webrtc_alice_to_authorized_sfu_to_bob_endpoint_decrypt() {
     use std::sync::Arc;
     use ucr_webrtc::{
-        LiveWebRtcProvider, WebRtcE2eeReassembler, WebRtcProvider,
-        encode_webrtc_e2ee_chunks,
+        LiveWebRtcProvider, WebRtcE2eeReassembler, WebRtcProvider, encode_webrtc_e2ee_chunks,
     };
 
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -735,8 +723,8 @@ async fn rt0_real_webrtc_alice_to_authorized_sfu_to_bob_endpoint_decrypt() {
         })
     }));
 
-    for chunk in encode_webrtc_e2ee_chunks(&fixture.envelope, 100)
-        .expect("Alice ciphertext wire chunks")
+    for chunk in
+        encode_webrtc_e2ee_chunks(&fixture.envelope, 100).expect("Alice ciphertext wire chunks")
     {
         alice_channel
             .send(&bytes::Bytes::from(chunk))
@@ -749,12 +737,7 @@ async fn rt0_real_webrtc_alice_to_authorized_sfu_to_bob_endpoint_decrypt() {
         .expect("Alice E2EE frame");
     assert_eq!(ingress.session_id, alice_id, "Alice bound to her session");
     assert_eq!(ingress.envelope, fixture.envelope);
-    let runtime = SfuRuntime::new(
-        &AllowAll,
-        &fixture.store,
-        &capabilities,
-        &sfu_capabilities,
-    );
+    let runtime = SfuRuntime::new(&AllowAll, &fixture.store, &capabilities, &sfu_capabilities);
     let sink = Rt0WebRtcSink {
         provider: &provider,
         bob_id: bob_id.clone(),
@@ -783,18 +766,17 @@ async fn rt0_real_webrtc_alice_to_authorized_sfu_to_bob_endpoint_decrypt() {
             accepted_recipients: 1,
         }),
     );
-    let received = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        delivered_rx.recv(),
-    )
-    .await
-    .expect("Bob must receive via WebRTC")
-    .expect("Bob encrypted envelope");
-    assert_eq!(received, ingress.envelope, "no SFU plaintext transformation");
+    let received = tokio::time::timeout(std::time::Duration::from_secs(5), delivered_rx.recv())
+        .await
+        .expect("Bob must receive via WebRTC")
+        .expect("Bob encrypted envelope");
+    assert_eq!(
+        received, ingress.envelope,
+        "no SFU plaintext transformation"
+    );
     assert!(delivered_rx.try_recv().is_err(), "no duplicate delivery");
 
-    let media_runtime =
-        GroupMediaE2eeRuntime::new(&AllowAll, &fixture.store, &capabilities);
+    let media_runtime = GroupMediaE2eeRuntime::new(&AllowAll, &fixture.store, &capabilities);
     let mut bob_crypto = media_runtime
         .open_session(
             &fixture.bob,
