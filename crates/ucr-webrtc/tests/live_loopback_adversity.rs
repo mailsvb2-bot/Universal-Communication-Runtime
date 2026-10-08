@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use ucr_model::{IceTransportPolicy, OpaqueId, SessionId, WebRtcSdpType, WebRtcSessionDescription};
-use ucr_webrtc::{LiveWebRtcProvider, WebRtcProvider, WebRtcSessionConfig};
+use ucr_webrtc::{LiveWebRtcProvider, WebRtcProvider, WebRtcProviderError, WebRtcSessionConfig};
 use webrtc::{
     api::{
         APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
@@ -123,8 +123,22 @@ fn live_loopback_connects_and_renegotiates_fresh_ice_generation_on_same_session(
             ice_transport_policy: IceTransportPolicy::All,
         };
         let remote = independent_remote_peer().await;
+        let unknown_config = WebRtcSessionConfig {
+            session_id: SessionId::from_opaque(id("unknown-loopback-session")),
+            ..config.clone()
+        };
+        assert_eq!(
+            provider.restart_session(&unknown_config),
+            Err(WebRtcProviderError::SessionUnavailable),
+            "unknown session cannot acquire a peer through ICE restart"
+        );
 
         let initial_offer = provider.create_session(&config).expect("initial UCR offer");
+        assert_eq!(
+            provider.create_session(&config),
+            Err(WebRtcProviderError::Conflict),
+            "a duplicate create must not replace the active peer"
+        );
         let initial_ufrags = ice_ufrags(&initial_offer.sdp);
         assert!(
             !initial_ufrags.is_empty(),
@@ -163,5 +177,10 @@ fn live_loopback_connects_and_renegotiates_fresh_ice_generation_on_same_session(
 
         remote.close().await.expect("close remote loopback peer");
         assert_eq!(provider.close_session(&session_id), Ok(()));
+        assert_eq!(
+            provider.restart_session(&config),
+            Err(WebRtcProviderError::SessionUnavailable),
+            "closed session cannot be resurrected through ICE restart"
+        );
     });
 }
