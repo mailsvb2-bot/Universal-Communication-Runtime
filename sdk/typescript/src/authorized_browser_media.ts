@@ -36,7 +36,13 @@ export function createUcrAuthorizedMediaInstaller(
   target: Record<string, unknown>,
   factory: UcrAuthorizedMediaFactory,
 ): (bootstrap: UcrAuthorizedMediaBootstrap) => Promise<UcrEndpointE2eeAdapterV1> {
+  let installationInProgress = false;
   return async (bootstrap) => {
+    if (installationInProgress || target.ucrE2eeEndpoint != null) {
+      throw new Error("authorized media endpoint installation already active");
+    }
+    installationInProgress = true;
+    try {
     if (!bootstrap.state || !bootstrap.claims?.deviceId || !bootstrap.groupId) {
       throw new Error("canonical device-bound MLS admission required");
     }
@@ -52,8 +58,19 @@ export function createUcrAuthorizedMediaInstaller(
         options.binding.namespaceId !== bootstrap.claims.namespaceId) {
       throw new Error("media bridge binding differs from authorized browser session");
     }
+    if (target.ucrE2eeEndpoint != null) {
+      throw new Error("authorized media endpoint installed during asynchronous setup");
+    }
     const adapter = createUcrBrowserEndpointMediaAdapter(options);
-    installUcrEndpointE2eeAdapter(target, adapter);
+    try {
+      installUcrEndpointE2eeAdapter(target, adapter);
+    } catch (error) {
+      await adapter.stop();
+      throw error;
+    }
     return adapter;
+    } finally {
+      installationInProgress = false;
+    }
   };
 }
