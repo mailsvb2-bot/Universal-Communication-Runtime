@@ -592,9 +592,8 @@ mod tests {
     ) {
         use std::time::Duration;
         let (message_tx, mut message_rx) = tokio::sync::mpsc::channel(1);
-        let reassembler = std::sync::Arc::new(tokio::sync::Mutex::new(
-            WebRtcE2eeReassembler::new(),
-        ));
+        let reassembler =
+            std::sync::Arc::new(tokio::sync::Mutex::new(WebRtcE2eeReassembler::new()));
         channel.on_message(Box::new(move |message| {
             let reassembler = std::sync::Arc::clone(&reassembler);
             let message_tx = message_tx.clone();
@@ -608,7 +607,10 @@ mod tests {
                     .push_chunk(&message.data)
                     .expect("valid outbound canonical ciphertext chunks");
                 if let Some(envelope) = complete {
-                    message_tx.send(envelope).await.expect("capture live ciphertext");
+                    message_tx
+                        .send(envelope)
+                        .await
+                        .expect("capture live ciphertext");
                 }
             })
         }));
