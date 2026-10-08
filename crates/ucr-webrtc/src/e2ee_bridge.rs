@@ -578,9 +578,55 @@ mod tests {
                 ingress_rx.try_recv().is_err(),
                 "one envelope produces one ingress"
             );
+            assert_live_ciphertext_egress(&provider, &session_id, &channel, &expected).await;
             remote.close().await.expect("close peer");
             assert_eq!(provider.close_session(&session_id), Ok(()));
         });
+    }
+
+    async fn assert_live_ciphertext_egress(
+        provider: &crate::LiveWebRtcProvider,
+        session_id: &ucr_model::SessionId,
+        channel: &std::sync::Arc<webrtc::data_channel::RTCDataChannel>,
+        expected: &SfuForwardEnvelope,
+    ) {
+        use std::time::Duration;
+        let (message_tx, mut message_rx) = tokio::sync::mpsc::channel(1);
+        let reassembler = std::sync::Arc::new(tokio::sync::Mutex::new(
+            WebRtcE2eeReassembler::new(),
+        ));
+        channel.on_message(Box::new(move |message| {
+            let reassembler = std::sync::Arc::clone(&reassembler);
+            let message_tx = message_tx.clone();
+            Box::pin(async move {
+                if message.is_string {
+                    return;
+                }
+                let complete = reassembler
+                    .lock()
+                    .await
+                    .push_chunk(&message.data)
+                    .expect("valid outbound canonical ciphertext chunks");
+                if let Some(envelope) = complete {
+                    message_tx.send(envelope).await.expect("capture live ciphertext");
+                }
+            })
+        }));
+        provider
+            .send_e2ee_envelope(session_id, expected)
+            .expect("send SFU ciphertext over real DataChannel");
+        let delivered = tokio::time::timeout(Duration::from_secs(5), message_rx.recv())
+            .await
+            .expect("outbound E2EE must reach independent WebRTC peer")
+            .expect("captured ciphertext envelope");
+        assert_eq!(
+            delivered, *expected,
+            "outbound WebRTC must preserve the encrypted envelope verbatim"
+        );
+        assert!(
+            message_rx.try_recv().is_err(),
+            "one outbound envelope must not be delivered twice"
+        );
     }
 
     #[test]
