@@ -4186,12 +4186,17 @@ dependencies = [
 name = "ucr-sfu"
 version = "0.0.1"
 dependencies = [
+ "bytes",
+ "rustls",
+ "tokio",
  "ucr-core",
  "ucr-crypto",
  "ucr-media-e2ee",
  "ucr-model",
  "ucr-protocol",
  "ucr-storage-memory",
+ "ucr-webrtc",
+ "webrtc",
 ]
 
 [[package]]
