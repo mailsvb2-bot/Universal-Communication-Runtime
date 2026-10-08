@@ -24,6 +24,7 @@ export interface UcrBrowserEndpointMediaOptions {
   readonly trustedKeys: UcrTrustedSourceKeys;
   readonly binding: NonNullable<UcrEndpointPipelineOptions["binding"]>;
   readonly authorizeFrame: NonNullable<UcrEndpointPipelineOptions["authorizeFrame"]>;
+  readonly authorizePublish: NonNullable<UcrEndpointPipelineOptions["authorizePublish"]>;
   readonly remoteVideoCanvas: HTMLCanvasElement | OffscreenCanvas;
   readonly audioContext: AudioContext;
   readonly maxPendingFrames?: number;
@@ -42,7 +43,8 @@ export function createUcrBrowserEndpointMediaAdapter(
       typeof options.bridge.seal_wire !== "function" ||
       typeof options.bridge.open_wire !== "function" ||
       typeof options.trustedKeys.resolve !== "function" ||
-      !options.binding || typeof options.authorizeFrame !== "function") {
+      !options.binding || typeof options.authorizeFrame !== "function" ||
+      typeof options.authorizePublish !== "function") {
     throw new Error("authenticated MLS endpoint bridge and trusted identity resolver required");
   }
   const onError = options.onError ?? (() => {});
@@ -57,6 +59,7 @@ export function createUcrBrowserEndpointMediaAdapter(
     trustedKeys: options.trustedKeys,
     binding: options.binding,
     authorizeFrame: options.authorizeFrame,
+    authorizePublish: options.authorizePublish,
     maxPendingFrames: options.maxPendingFrames,
     onError,
   });
