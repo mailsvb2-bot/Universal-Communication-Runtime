@@ -691,7 +691,23 @@ fn assert_rt0_bob_endpoint_decrypts_and_rejects_replay(
     received: &SfuForwardEnvelope,
 ) {
     let capabilities = PreparedGroupMediaE2eeCapabilities;
-    assert_rt0_bob_endpoint_decrypts_and_rejects_replay(&fixture, &received);
+    let media_runtime = GroupMediaE2eeRuntime::new(&AllowAll, &fixture.store, &capabilities);
+    let mut bob_crypto = media_runtime
+        .open_session(
+            &fixture.bob,
+            &device("bob"),
+            &group_media_context(&fixture.group, &fixture.call),
+            GroupMediaEpochSecret::from_exporter_bytes([42; 32]),
+        )
+        .expect("Bob endpoint E2EE keys");
+    assert_eq!(
+        bob_crypto.open_payload(&received.frame),
+        Ok(b"opaque-video-payload".to_vec()),
+    );
+    assert!(matches!(
+        bob_crypto.open_payload(&received.frame),
+        Err(ucr_media_e2ee::GroupMediaE2eeError::Replay)
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -784,23 +800,7 @@ async fn rt0_real_webrtc_alice_to_authorized_sfu_to_bob_endpoint_decrypt() {
     );
     assert!(delivered_rx.try_recv().is_err(), "no duplicate delivery");
 
-    let media_runtime = GroupMediaE2eeRuntime::new(&AllowAll, &fixture.store, &capabilities);
-    let mut bob_crypto = media_runtime
-        .open_session(
-            &fixture.bob,
-            &device("bob"),
-            &group_media_context(&fixture.group, &fixture.call),
-            GroupMediaEpochSecret::from_exporter_bytes([42; 32]),
-        )
-        .expect("Bob endpoint E2EE keys");
-    assert_eq!(
-        bob_crypto.open_payload(&received.frame),
-        Ok(b"opaque-video-payload".to_vec()),
-    );
-    assert!(matches!(
-        bob_crypto.open_payload(&received.frame),
-        Err(ucr_media_e2ee::GroupMediaE2eeError::Replay)
-    ));
+    assert_rt0_bob_endpoint_decrypts_and_rejects_replay(&fixture, &received);
     alice.close().await.expect("close Alice");
     bob.close().await.expect("close Bob");
     assert_eq!(provider.close_session(&alice_id), Ok(()));
