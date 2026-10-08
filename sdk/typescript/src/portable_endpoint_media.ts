@@ -84,6 +84,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   readonly #maxReplayStreams: number;
   readonly #sequences = new Map<string, bigint>();
   readonly #received = new Map<string, bigint>();
+  readonly #reserved = new Set<string>();
   #pending = 0;
   #active = false;
   #generation = 0;
@@ -145,7 +146,15 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         header.source.principalId, header.sourceDeviceId, header.cryptoEpoch.toString(),
         header.streamId].join("\u0000");
       const last = this.#received.get(replayKey);
-      if (last !== undefined && header.sequence <= last) throw new Error("replayed endpoint media frame");
+      const reservation = replayKey + "\\u0000" + header.sequence.toString();
+      if ((last !== undefined && header.sequence <= last) || this.#reserved.has(reservation)) {
+        throw new Error("replayed endpoint media frame");
+      }
+      if (this.#reserved.size >= this.#maxPendingFrames) {
+        throw new Error("endpoint verification queue capacity exceeded");
+      }
+      this.#reserved.add(reservation);
+      try {
       const key = await this.#trustedKeys.resolve(header, envelope.frame.sourceSignature.keyId);
       if (!(key instanceof Uint8Array) || key.byteLength !== 32) throw new Error("untrusted endpoint signing key");
       if (!this.#active || this.#generation !== generation) return;
@@ -157,6 +166,10 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         throw new Error("endpoint replay-stream capacity exceeded");
       }
       if (!this.#active || this.#generation !== generation) return;
+      const latest = this.#received.get(replayKey);
+      if (latest !== undefined && header.sequence <= latest) {
+        throw new Error("replayed endpoint media frame");
+      }
       this.#received.set(replayKey, header.sequence);
       await this.#consumer.play({
         mediaKind: header.mediaKind,
@@ -166,6 +179,9 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         keyframe: header.keyframe,
         bytes: plaintext,
       }, header);
+      } finally {
+        this.#reserved.delete(reservation);
+      }
     } finally {
       this.#pending--;
     }
@@ -178,6 +194,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#sender = null;
     this.#sequences.clear();
     this.#received.clear();
+    this.#reserved.clear();
     await Promise.all([this.#producer.stop(), this.#consumer.stop()]);
   }
 
