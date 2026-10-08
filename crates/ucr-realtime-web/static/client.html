@@ -1110,7 +1110,7 @@ async function join(){
     ui.join.disabled=true;ui.state.textContent="Joining";ui.status.textContent="Authenticating signed session grant…";
     const r=await api("/v1/realtime/join",body());const data=await r.json();
     if(!data.ok)throw new Error(data.message||"Join rejected");
-    sessionActive=true;ui.leave.disabled=false;
+    sessionActive=true;ui.leave.disabled=false;ui.privacyMode.disabled=true;
     await applyMediaPolicy(data.media_policy);
     if(data.expires_at_unix_ms)ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
@@ -1136,6 +1136,7 @@ async function leave(){
   if(wasActive)await closeServerPeer();
   if(endpointMlsState&&typeof endpointMlsState.free==="function"){try{endpointMlsState.free();}catch(_){}}
   endpointMlsState=null;endpointMlsGroupId=null;delete window.ucrEndpointMlsSession;
+  ui.privacyMode.disabled=false;
   sessionActive=false;mediaActive=false;handRaised=false;reactionCursor=0;reactionPollInFlight=false;chatCursor=0;chatPollInFlight=false;pendingChatPayload=null;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();ui.handToggle.textContent="Raise hand";ui.leave.disabled=true;ui.micToggle.disabled=true;ui.cameraToggle.disabled=true;ui.screenToggle.disabled=true;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}
   if(heartbeatTimer)clearInterval(heartbeatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(streamAbort)streamAbort.abort();
   if(wasActive){try{await api("/v1/realtime/leave",body());}catch(_){}}
