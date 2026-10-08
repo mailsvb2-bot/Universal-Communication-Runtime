@@ -713,6 +713,55 @@ fn selected_encrypted_forwarding_reaches_only_explicit_current_recipient() {
 }
 
 #[test]
+fn rt0_authorized_ciphertext_reaches_bob_but_outsider_and_spoofed_source_fail_closed() {
+    let fixture = build_fixture();
+    let e2ee = PreparedGroupMediaE2eeCapabilities;
+    let sfu = PreparedSfuCapabilities;
+    let runtime = SfuRuntime::new(&AllowAll, &fixture.store, &e2ee, &sfu);
+    let sink = CaptureSink::default();
+    let outsider = principal("rt0-outsider");
+
+    assert_eq!(
+        runtime.forward_selected(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+            std::slice::from_ref(&outsider),
+            &sink,
+        ),
+        Err(SfuError::InvalidRecipientSet),
+    );
+    assert!(sink.forwarded().is_empty(), "outsider must never receive ciphertext");
+
+    assert_eq!(
+        runtime.forward_selected(
+            &fixture.bob,
+            &device("bob"),
+            &fixture.envelope,
+            std::slice::from_ref(&fixture.alice.principal),
+            &sink,
+        ),
+        Err(SfuError::SourceMismatch),
+    );
+    assert!(sink.forwarded().is_empty(), "spoofed source must never fan out");
+
+    assert_eq!(
+        runtime.forward_selected(
+            &fixture.alice,
+            &fixture.alice_device,
+            &fixture.envelope,
+            std::slice::from_ref(&fixture.bob.principal),
+            &sink,
+        ),
+        Ok(SfuForwardOutcome { accepted_recipients: 1 }),
+    );
+    let forwarded = sink.forwarded();
+    assert_eq!(forwarded.len(), 1, "only Bob receives ciphertext");
+    assert_eq!(forwarded[0].0.recipient, fixture.bob.principal);
+    assert_eq!(forwarded[0].1, fixture.envelope, "SFU must not change ciphertext");
+}
+
+#[test]
 fn prepared_selected_forwarding_has_no_side_effect_until_explicit_dispatch() {
     let fixture = build_fixture();
     let e2ee = PreparedGroupMediaE2eeCapabilities;
