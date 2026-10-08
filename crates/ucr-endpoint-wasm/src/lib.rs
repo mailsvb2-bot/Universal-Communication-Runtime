@@ -256,6 +256,7 @@ impl EndpointMlsState {
             signing_key_id: KeyId::from_opaque(opaque(signing_key_id, "signing_key_id")?),
             source,
             source_device_id: self.device_id.clone(),
+            revoked: Cell::new(false),
         })
     }
 }
