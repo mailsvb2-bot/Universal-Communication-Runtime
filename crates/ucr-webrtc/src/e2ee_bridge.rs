@@ -632,6 +632,27 @@ mod tests {
     }
 
     #[test]
+    fn closed_session_rejects_e2ee_egress() {
+        use crate::{LiveWebRtcProvider, WebRtcProvider, WebRtcSessionConfig};
+        use ucr_model::{IceTransportPolicy, SessionId};
+
+        let provider = LiveWebRtcProvider::new().expect("live peer provider");
+        let session_id = SessionId::from_opaque(id("closed-e2ee-peer"));
+        let config = WebRtcSessionConfig {
+            session_id: session_id.clone(),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        provider.create_session(&config).expect("create live peer");
+        assert_eq!(provider.close_session(&session_id), Ok(()));
+        assert_eq!(
+            provider.send_e2ee_envelope(&session_id, &envelope()),
+            Err(crate::WebRtcProviderError::SessionUnavailable),
+            "closed peer must never accept encrypted egress"
+        );
+    }
+
+    #[test]
     fn decoder_rejects_unbounded_messages_before_parsing() {
         let wire = vec![0_u8; MAX_WEBRTC_E2EE_WIRE_BYTES + 1];
         assert_eq!(
