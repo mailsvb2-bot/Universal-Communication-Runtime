@@ -445,6 +445,100 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn live_datachannel_ingress_preserves_ciphertext_and_session_binding() {
+        use std::{sync::Arc, time::Duration};
+        use ucr_model::{IceTransportPolicy, SessionId, WebRtcSdpType, WebRtcSessionDescription};
+        use webrtc::{
+            api::{APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine},
+            interceptor::registry::Registry,
+            peer_connection::{
+                configuration::RTCConfiguration,
+                peer_connection_state::RTCPeerConnectionState,
+                sdp::session_description::RTCSessionDescription,
+            },
+        };
+        use crate::{LiveWebRtcProvider, WebRtcProvider, WebRtcSessionConfig};
+
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("select rustls crypto provider for live DTLS");
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let (ingress_tx, mut ingress_rx) = tokio::sync::mpsc::channel(4);
+            let provider = LiveWebRtcProvider::with_e2ee_ingress(ingress_tx)
+                .expect("live ingress provider");
+            let session_id = SessionId::from_opaque(id("e2ee-live-ingress-session"));
+            let config = WebRtcSessionConfig {
+                session_id: session_id.clone(),
+                ice_servers: Vec::new(),
+                ice_transport_policy: IceTransportPolicy::All,
+            };
+            let mut engine = MediaEngine::default();
+            engine.register_default_codecs().expect("codecs");
+            let interceptors = register_default_interceptors(Registry::new(), &mut engine)
+                .expect("interceptors");
+            let api = APIBuilder::new()
+                .with_media_engine(engine)
+                .with_interceptor_registry(interceptors)
+                .build();
+            let remote = Arc::new(api.new_peer_connection(RTCConfiguration::default())
+                .await.expect("independent peer"));
+            let (channel_tx, mut channel_rx) = tokio::sync::mpsc::channel(1);
+            remote.on_data_channel(Box::new(move |channel| {
+                let channel_tx = channel_tx.clone();
+                Box::pin(async move {
+                    let _ = channel_tx.try_send(channel);
+                })
+            }));
+            let offer = provider.create_session(&config).expect("server offer");
+            remote.set_remote_description(RTCSessionDescription::offer(offer.sdp)
+                .expect("valid offer")).await.expect("apply offer");
+            let answer = remote.create_answer(None).await.expect("create answer");
+            let mut gathered = remote.gathering_complete_promise().await;
+            remote.set_local_description(answer).await.expect("set answer");
+            tokio::time::timeout(Duration::from_secs(12), gathered.recv())
+                .await.expect("gather ICE");
+            let answer_sdp = remote.local_description().await.expect("gathered answer").sdp;
+            provider.set_remote_description(&WebRtcSessionDescription {
+                session_id: session_id.clone(),
+                sdp_type: WebRtcSdpType::Answer,
+                sdp: answer_sdp,
+            }).expect("apply answer");
+
+            let channel = tokio::time::timeout(Duration::from_secs(15), channel_rx.recv())
+                .await.expect("server DataChannel arrives").expect("channel");
+            assert_eq!(channel.label(), WEBRTC_E2EE_DATA_CHANNEL_LABEL);
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if channel.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+                        && remote.connection_state() == RTCPeerConnectionState::Connected {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }).await.expect("DataChannel established");
+
+            let expected = envelope();
+            for chunk in encode_webrtc_e2ee_chunks(&expected, 42).expect("canonical chunks") {
+                channel.send(&bytes::Bytes::from(chunk)).await.expect("send ciphertext");
+            }
+            let frame = tokio::time::timeout(Duration::from_secs(5), ingress_rx.recv())
+                .await.expect("bounded live ingress").expect("ingress frame");
+            assert_eq!(frame.session_id, session_id);
+            assert_eq!(frame.envelope, expected, "SFU ingress must receive unchanged ciphertext");
+            assert!(ingress_rx.try_recv().is_err(), "one envelope produces one ingress");
+            remote.close().await.expect("close peer");
+            assert_eq!(provider.close_session(&session_id), Ok(()));
+        });
+    }
+
     #[test]
     fn decoder_rejects_unbounded_messages_before_parsing() {
         let wire = vec![0_u8; MAX_WEBRTC_E2EE_WIRE_BYTES + 1];
