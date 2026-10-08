@@ -109,6 +109,11 @@ fn live_loopback_connects_and_renegotiates_fresh_ice_generation_on_same_session(
         .build()
         .expect("loopback runtime");
 
+    // rustls sees both crypto backends in the workspace; choose explicitly before DTLS.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install deterministic rustls crypto provider for loopback DTLS");
+
     runtime.block_on(async {
         let provider = LiveWebRtcProvider::new().expect("live UCR WebRTC provider");
         let session_id = SessionId::from_opaque(id("live-loopback-ice-session"));
