@@ -1,3 +1,4 @@
+import {planUcrPrivacyNetwork, assertUcrPrivacyNetworkReady} from "./src/privacy_network.ts";
 import { createUcrPortableEndpointMediaAdapter } from "./src/portable_endpoint_media.ts";
 import { encodeSfuForwardEnvelopeWire } from "./src/sfu_forward_wire.ts";
 import assert from "node:assert/strict";
@@ -255,6 +256,32 @@ assert.match(browser, /sealState/);
   assert.equal(stopped, 2);
   await adapter.onEnvelope(wire);
   assert.equal(played.length, 1);
+}
+
+
+{
+  const turn = [{urls: "turns:relay.example.invalid:5349", username: "ephemeral", credential: "secret"}];
+  const privatePlan = planUcrPrivacyNetwork({
+    mode: "private", iceServers: turn, trustedRelayAvailable: true,
+  });
+  assert.equal(privatePlan.rtcConfiguration.iceTransportPolicy, "relay");
+  assert.equal(privatePlan.dataMinimization, "strict");
+  assert.deepEqual(privatePlan.rtcConfiguration.iceServers, turn);
+  assert.throws(() => planUcrPrivacyNetwork({
+    mode: "private", iceServers: [{urls: "stun:stun.example.invalid"}],
+    trustedRelayAvailable: true,
+  }), /needs TURN/);
+  assert.throws(() => planUcrPrivacyNetwork({
+    mode: "private", iceServers: turn, trustedRelayAvailable: false,
+  }), /requires a trusted TURN/);
+  const max = planUcrPrivacyNetwork({
+    mode: "maximum", iceServers: turn, trustedRelayAvailable: true,
+  });
+  assert.throws(() => assertUcrPrivacyNetworkReady(max, false), /independently deployed relay/);
+  assertUcrPrivacyNetworkReady(max, true);
+  assert.equal(planUcrPrivacyNetwork({
+    mode: "secure", iceServers: [], trustedRelayAvailable: false,
+  }).rtcConfiguration.iceTransportPolicy, "all");
 }
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
