@@ -277,6 +277,7 @@ assert.match(browser, /sealState/);
   assert.equal(failures.length, 0);
   await adapter.stop();
   assert.equal(bridgeRevoked, true, "Rust bridge retired before media cleanup");
+  await assert.rejects(adapter.start({stream, cameraStream: stream, sendEnvelope() {}}), /bridge retired/);
   assert.equal(stopped, 2);
   await adapter.onEnvelope(wire);
   assert.equal(played.length, 1);
