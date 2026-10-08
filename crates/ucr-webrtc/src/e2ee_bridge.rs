@@ -490,7 +490,9 @@ mod tests {
             sdp::session_description::RTCSessionDescription,
         };
 
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("select rustls crypto provider for live DTLS");
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -626,6 +628,27 @@ mod tests {
         assert!(
             message_rx.try_recv().is_err(),
             "one outbound envelope must not be delivered twice"
+        );
+    }
+
+    #[test]
+    fn closed_session_rejects_e2ee_egress() {
+        use crate::{LiveWebRtcProvider, WebRtcProvider, WebRtcSessionConfig};
+        use ucr_model::{IceTransportPolicy, SessionId};
+
+        let provider = LiveWebRtcProvider::new().expect("live peer provider");
+        let session_id = SessionId::from_opaque(id("closed-e2ee-peer"));
+        let config = WebRtcSessionConfig {
+            session_id: session_id.clone(),
+            ice_servers: Vec::new(),
+            ice_transport_policy: IceTransportPolicy::All,
+        };
+        provider.create_session(&config).expect("create live peer");
+        assert_eq!(provider.close_session(&session_id), Ok(()));
+        assert_eq!(
+            provider.send_e2ee_envelope(&session_id, &envelope()),
+            Err(crate::WebRtcProviderError::SessionUnavailable),
+            "closed peer must never accept encrypted egress"
         );
     }
 
