@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::cell::Cell;
+
 use wasm_bindgen::prelude::*;
 
 use ucr_crypto::{
@@ -254,6 +256,7 @@ impl EndpointMlsState {
             signing_key_id: KeyId::from_opaque(opaque(signing_key_id, "signing_key_id")?),
             source,
             source_device_id: self.device_id.clone(),
+            revoked: Cell::new(false),
         })
     }
 }
@@ -266,6 +269,7 @@ pub struct EndpointGroupMediaBridge {
     signing_key_id: KeyId,
     source: PrincipalRef,
     source_device_id: DeviceId,
+    revoked: Cell<bool>,
 }
 
 #[wasm_bindgen]
@@ -316,7 +320,14 @@ impl EndpointGroupMediaBridge {
             signing_key_id: KeyId::from_opaque(opaque(signing_key_id, "signing_key_id")?),
             source,
             source_device_id,
+            revoked: Cell::new(false),
         })
+    }
+
+    /// Fail closed on explicit leave, key epoch transition, or revoked device.
+    /// A new authorized MLS-derived bridge is required to resume media.
+    pub fn revoke(&self) {
+        self.revoked.set(true);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -330,6 +341,9 @@ impl EndpointGroupMediaBridge {
         keyframe: bool,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, JsValue> {
+        if self.revoked.get() {
+            return Err(js_error("endpoint media bridge revoked"));
+        }
         let media_kind = media_kind_from_code(media_kind)?;
         let video_source_kind = video_source_kind_from_code(media_kind, video_source_kind)?;
         let header = GroupMediaFrameHeader {
@@ -363,6 +377,9 @@ impl EndpointGroupMediaBridge {
     }
 
     pub fn open_wire(&self, wire: &[u8], source_verifying_key: &[u8]) -> Result<Vec<u8>, JsValue> {
+        if self.revoked.get() {
+            return Err(js_error("endpoint media bridge revoked"));
+        }
         let source_verifying_key = fixed_32(source_verifying_key, "source_verifying_key")?;
         open_endpoint_group_media_wire(
             &self.epoch_secret,
