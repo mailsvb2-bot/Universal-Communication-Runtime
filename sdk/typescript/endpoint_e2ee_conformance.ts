@@ -624,6 +624,21 @@ await lateHeartbeat;
 assert.equal(policyApplications, 0, "late heartbeat cannot change policy after Leave");
 assert.equal(admissionCtx.mediaActive, false);
 
+// A stale heartbeat rejection cannot call the interval's access-revoked
+// catch handler and accidentally leave a newly admitted session.
+let rejectLateHeartbeat: ((reason: Error) => void) | undefined;
+admissionCtx.sessionActive = true;
+admissionCtx.api = async () => new Promise((_resolve, reject) => {
+  rejectLateHeartbeat = reject;
+});
+const staleRejectedHeartbeat = admissionCtx.heartbeat();
+admissionCtx.sessionLifecycleGeneration++;
+rejectLateHeartbeat?.(new Error("heartbeat_rejected"));
+await staleRejectedHeartbeat;
+admissionCtx.api = async () => {throw new Error("heartbeat_rejected");};
+await assert.rejects(admissionCtx.heartbeat(), /heartbeat_rejected/,
+  "current heartbeat denial must still propagate to revocation handler");
+
 // Older heartbeat must not overwrite a newer admission decision even if both
 // were authorized when they started and the HTTP responses arrive reordered.
 const pendingHeartbeatResponses: Array<(value: any) => void> = [];
