@@ -2,7 +2,8 @@
 FROM rust:1.97.1-bookworm AS builder
 WORKDIR /src
 COPY . .
-RUN cargo build --locked --release -p ucr-dev --bin ucr
+RUN cargo build --locked --release -p ucr-dev --bin ucr \
+    && cargo build --locked --release -p ucr-realtime-web --bin ucr-realtime-web
 RUN rustup target add wasm32-unknown-unknown \
     && cargo install wasm-bindgen-cli --version 0.2.128 --locked \
     && cargo build --locked --release \
@@ -33,6 +34,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates coturn python3 socat \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/target/release/ucr /usr/local/bin/ucr
+COPY --from=builder /src/target/release/ucr-realtime-web /usr/local/bin/ucr-realtime-web
 COPY crates/ucr-realtime-web/static/client.html /opt/ucr/browser/client.html
 COPY --from=builder /src/crates/ucr-realtime-web/static/endpoint-wasm/ /opt/ucr/browser/endpoint-wasm/
 COPY --from=browser-sdk /out/endpoint-media/ /opt/ucr/browser/endpoint-media/
