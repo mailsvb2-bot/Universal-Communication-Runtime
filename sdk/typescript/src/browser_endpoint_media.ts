@@ -29,6 +29,10 @@ export interface UcrBrowserEndpointMediaOptions {
   readonly audioContext: AudioContext;
   readonly maxPendingFrames?: number;
   readonly onError?: (error: unknown) => void;
+  /** Optional real downlink/network/device probe. Must report every required field
+   * from measured or authoritative device state. No synthetic battery/CPU defaults.
+   */
+  readonly measureReceiveTelemetry?: UcrEndpointPipelineOptions["measureReceiveTelemetry"];
 }
 
 export function createUcrBrowserEndpointMediaAdapter(
@@ -61,6 +65,7 @@ export function createUcrBrowserEndpointMediaAdapter(
     authorizeFrame: options.authorizeFrame,
     authorizePublish: options.authorizePublish,
     maxPendingFrames: options.maxPendingFrames,
+    measureReceiveTelemetry: options.measureReceiveTelemetry,
     onError,
   });
 }
