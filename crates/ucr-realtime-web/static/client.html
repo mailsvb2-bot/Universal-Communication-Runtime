@@ -647,6 +647,7 @@ function requireCompatibleE2eeAdapter(adapter){
   return adapter;
 }
 function closeE2eeTransport(){
+  stopAdaptiveMediaMonitoring();
   appliedAdaptiveQuality=null;e2eeAdapterReady=false;
   if(ui.remoteCanvas){
     const context=ui.remoteCanvas.getContext("2d");
@@ -877,6 +878,9 @@ async function activateE2eeAdapter(){
   const persisted=await persistEndpointState(adapter);
   if(!isCurrent())return;
   e2eeAdapterReady=true;
+  // Admission happens before the protected DataChannel opens. Only now do we
+  // have a live, authorized decoder and measured downlink telemetry provider.
+  startAdaptiveMediaMonitoring();
   ui.remoteVideo.classList.add("hidden");
   ui.remoteCanvas.classList.remove("hidden");
   refreshScreenShareControl();
@@ -1131,7 +1135,7 @@ async function activateAdmittedMedia(){
   if(!chatTimer){chatTimer=setInterval(()=>{pollChat().catch(()=>{});},1000);}
   pollReactions().catch(()=>{});
   pollChat().catch(()=>{});
-  startAdaptiveMediaMonitoring();
+  // Quality sampling must start only after activateE2eeAdapter succeeds.
   ui.status.textContent=policyAllows("audio")||policyAllows("camera")?"The host has started the conference. Requesting permitted camera/microphone access…":"The host has started the conference. Viewing mode does not request camera or microphone access.";
   openStream().catch(e=>{if(e.name!=="AbortError"&&mediaActive)ui.status.textContent="Realtime stream closed: "+e.message;});
   try{await startWebRtc(false);}catch(e){ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC start failed: "+e.message;scheduleWebRtcRetry();}
