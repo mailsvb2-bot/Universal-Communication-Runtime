@@ -300,6 +300,7 @@ fn subscriptions_require_accepted_sources_and_are_recipient_owned() {
         subscriptions: vec![ConferenceMediaSubscription {
             source: alice.principal.clone(),
             media_kind: MediaKind::Audio,
+            stream_id: None,
         }],
     };
     assert_eq!(coordinator.set_subscriptions(&bob, &alice_audio), Ok(1));
@@ -309,6 +310,7 @@ fn subscriptions_require_accepted_sources_and_are_recipient_owned() {
         subscriptions: vec![ConferenceMediaSubscription {
             source: charlie.principal.clone(),
             media_kind: MediaKind::Video,
+            stream_id: None,
         }],
     };
     assert_eq!(

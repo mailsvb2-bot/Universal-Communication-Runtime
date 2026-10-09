@@ -2510,6 +2510,7 @@ where
         subscriptions.push(ConferenceMediaSubscription {
             source: source.participant,
             media_kind: requested.media_kind,
+            stream_id: None,
         });
     }
     let actor = ScopedPrincipal {

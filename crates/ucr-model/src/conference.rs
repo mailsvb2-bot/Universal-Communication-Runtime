@@ -28,6 +28,9 @@ pub struct ConferenceStart {
 pub struct ConferenceMediaSubscription {
     pub source: PrincipalRef,
     pub media_kind: MediaKind,
+    /// Optional authenticated encoded-stream selector. None preserves legacy receive-all
+    /// behavior; Some targets exactly one source stream without decrypting media at the SFU.
+    pub stream_id: Option<OpaqueId>,
 }
 
 /// Complete replacement of one participant's ephemeral Conference receive subscriptions.

@@ -2871,6 +2871,7 @@ fn decode_media_subscription(
     Ok(ConferenceMediaSubscription {
         source: decode_principal_ref(value.source.ok_or_else(invalid_argument)?)?,
         media_kind: decode_media_kind(value.media_kind)?,
+        stream_id: value.stream_id.map(decode_opaque).transpose()?,
     })
 }
 

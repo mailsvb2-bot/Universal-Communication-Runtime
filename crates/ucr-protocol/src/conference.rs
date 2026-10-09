@@ -29,6 +29,7 @@ pub enum ConferenceProtocolError {
     TooManySubscriptions,
     DuplicateSubscription,
     SelfSubscription,
+    InvalidStreamSelection,
 }
 
 #[must_use]
@@ -114,9 +115,17 @@ pub fn canonical_conference_subscription_set(
         if &subscription.source == actor {
             return Err(ConferenceProtocolError::SelfSubscription);
         }
+        if subscription.media_kind != ucr_model::MediaKind::Video
+            && subscription.stream_id.is_some()
+        {
+            return Err(ConferenceProtocolError::InvalidStreamSelection);
+        }
         if set.subscriptions[index + 1..].iter().any(|candidate| {
             candidate.source == subscription.source
                 && candidate.media_kind == subscription.media_kind
+                && (subscription.stream_id.is_none()
+                    || candidate.stream_id.is_none()
+                    || candidate.stream_id == subscription.stream_id)
         }) {
             return Err(ConferenceProtocolError::DuplicateSubscription);
         }
@@ -252,6 +261,7 @@ mod tests {
             subscriptions: vec![ucr_model::ConferenceMediaSubscription {
                 source: principal("bob"),
                 media_kind: ucr_model::MediaKind::Video,
+                stream_id: None,
             }],
         };
         assert_eq!(
@@ -278,6 +288,7 @@ mod tests {
             subscriptions: vec![ucr_model::ConferenceMediaSubscription {
                 source: alice.clone(),
                 media_kind: ucr_model::MediaKind::Audio,
+                stream_id: None,
             }],
             ..base.clone()
         };

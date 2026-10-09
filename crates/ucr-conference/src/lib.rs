@@ -1213,8 +1213,9 @@ where
         let call_id = validated.media.envelope().frame.header.call_id.clone();
         let source = validated.media.envelope().frame.header.source.clone();
         let media_kind = validated.media.envelope().frame.header.media_kind;
+        let stream_id = validated.media.envelope().frame.header.stream_id.clone();
         self.prune_subscriptions(&scope, &call_id)?;
-        let recipients = self.subscribers_for_source(&validated.call, &source, media_kind)?;
+        let recipients = self.subscribers_for_source(&validated.call, &source, media_kind, &stream_id)?;
         if recipients.is_empty() {
             return Ok(None);
         }
@@ -1234,6 +1235,7 @@ where
         call: &CallSession,
         source: &PrincipalRef,
         media_kind: MediaKind,
+        stream_id: &ucr_model::OpaqueId,
     ) -> Result<Vec<PrincipalRef>, ConferenceError> {
         let state = self
             .state
@@ -1245,7 +1247,9 @@ where
             entry.scope == call.scope
                 && entry.call_id == call.call_id
                 && entry.subscriptions.iter().any(|subscription| {
-                    subscription.source == *source && subscription.media_kind == media_kind
+                    subscription.source == *source
+                        && subscription.media_kind == media_kind
+                        && subscription.stream_id.as_ref().is_none_or(|chosen| chosen == stream_id)
                 })
         }) {
             if is_accepted_participant(call, &entry.recipient) {
@@ -1568,6 +1572,7 @@ mod subscription_state_tests {
             subscriptions: vec![ConferenceMediaSubscription {
                 source: principal("alice"),
                 media_kind: MediaKind::Video,
+                stream_id: None,
             }],
         }
     }
