@@ -325,6 +325,89 @@ assert.match(browser, /sealState/);
 }
 
 
+// The actual encrypted-send journey: concurrent codec frames must remain ordered,
+// bounded, independently owned and nonce-unique through async grant checks.
+{
+  type MediaFrame = import("./src/portable_endpoint_media.ts").UcrEncodedMediaFrame;
+  let emit!: (frame: MediaFrame) => void | Promise<void>;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const sealedSequences: bigint[] = [];
+  const sealedPayloads: number[][] = [];
+  const outbound: number[] = [];
+  const errors: string[] = [];
+  let authorizeCalls = 0;
+  let failSeal = false;
+  let bridgeRevoked = false;
+  const adapter = createUcrPortableEndpointMediaAdapter({
+    binding: {
+      tenantId: "tenant-1", namespaceId: null, callId: "call-1", groupId: "group-1",
+      cryptoEpoch: 2n, negotiationRef: "neg-1", negotiationGeneration: 1n,
+    },
+    maxPendingFrames: 2,
+    authorizeFrame: () => true,
+    authorizePublish: async () => {
+      authorizeCalls++;
+      await gate;
+      return true;
+    },
+    bridge: {
+      revoke() { bridgeRevoked = true; },
+      seal_wire(_id, _kind, _source, seq, _timestamp, _keyframe, bytes) {
+        sealedSequences.push(seq);
+        sealedPayloads.push([...bytes]);
+        if (failSeal) {
+          failSeal = false;
+          throw new Error("simulated seal failure");
+        }
+        return new Uint8Array([Number(seq)]);
+      },
+      open_wire() { throw new Error("inbound not expected"); },
+    },
+    producer: {
+      start(_sources, send) { emit = send; },
+      stop() {},
+    },
+    consumer: { play() {}, stop() {} },
+    trustedKeys: { resolve() { return new Uint8Array(32); } },
+    onError(error) { errors.push(String(error)); },
+  });
+  const stream = {getTracks: () => []} as unknown as MediaStream;
+  await adapter.start({stream, cameraStream: stream, sendEnvelope(wire) {outbound.push(wire[0]);}});
+  const firstBytes = new Uint8Array([10]);
+  const first = Promise.resolve(emit({mediaKind: "audio", streamId: "audio-1",
+    timestamp: 1n, keyframe: true, bytes: firstBytes}));
+  const second = Promise.resolve(emit({mediaKind: "audio", streamId: "audio-1",
+    timestamp: 2n, keyframe: true, bytes: new Uint8Array([20])}));
+  // The third concurrent frame is dropped under pressure; it must not grow a queue.
+  await emit({mediaKind: "audio", streamId: "audio-1",
+    timestamp: 3n, keyframe: true, bytes: new Uint8Array([30])});
+  firstBytes[0] = 99;
+  await Promise.resolve();
+  assert.equal(authorizeCalls, 1, "same-stream authorizations must be serialized");
+  assert.ok(errors.some((e) => e.includes("outbound endpoint media queue capacity exceeded")));
+  release();
+  await Promise.all([first, second]);
+  assert.deepEqual(sealedSequences, [1n, 2n], "concurrent frames must use unique ordered nonces");
+  assert.deepEqual(sealedPayloads, [[10], [20]], "queued producer buffers must be copied");
+  assert.deepEqual(outbound, [1, 2]);
+  failSeal = true;
+  await emit({mediaKind: "audio", streamId: "audio-1",
+    timestamp: 4n, keyframe: true, bytes: new Uint8Array([40])});
+  await emit({mediaKind: "audio", streamId: "audio-1",
+    timestamp: 5n, keyframe: true, bytes: new Uint8Array([50])});
+  assert.deepEqual(sealedSequences, [1n, 2n, 3n, 4n],
+    "a failed seal must permanently consume its sequence");
+  assert.deepEqual(outbound, [1, 2, 4], "failed encryption must not emit plaintext");
+  assert.ok(errors.some((e) => e.includes("simulated seal failure")));
+  await adapter.stop();
+  assert.equal(bridgeRevoked, true);
+  await emit({mediaKind: "audio", streamId: "audio-1",
+    timestamp: 6n, keyframe: true, bytes: new Uint8Array([60])});
+  assert.deepEqual(outbound, [1, 2, 4], "stopped session cannot send another frame");
+}
+
+
 // Low-latency codec admission is deterministic and prevents unbounded browser queues.
 assert.equal(ucrCodecCanEnqueue("video", 0), true);
 assert.equal(ucrCodecCanEnqueue("video", 1), true);
