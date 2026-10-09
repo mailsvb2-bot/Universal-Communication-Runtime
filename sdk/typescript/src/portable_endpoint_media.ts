@@ -96,7 +96,11 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   readonly #sequences = new Map<string, bigint>();
   readonly #received = new Map<string, bigint>();
   readonly #reserved = new Set<string>();
+  // Serialize emission for each stream: concurrent async authorization must never
+  // reuse a media sequence/nonce or reorder authenticated frames.
+  readonly #sendTails = new Map<string, Promise<void>>();
   #pending = 0;
+  #pendingOutbound = 0;
   #active = false;
   #retired = false;
   #generation = 0;
@@ -234,6 +238,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#sequences.clear();
     this.#received.clear();
     this.#reserved.clear();
+    this.#sendTails.clear();
     // Retire the endpoint's cryptographic bridge before asynchronous media cleanup.
     // A revoked bridge must never be reused for a resumed call or a new MLS epoch.
     this.#bridge.revoke?.();
@@ -252,36 +257,53 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       this.#onError(new Error("invalid encoded media metadata"));
       return;
     }
+    if (this.#pendingOutbound >= this.#maxPendingFrames) {
+      this.#onError(new Error("outbound endpoint media queue capacity exceeded"));
+      return;
+    }
     const videoSourceCode = frame.mediaKind === "audio" ? 0 :
       frame.videoSourceKind === "screen_share" ? 2 : 1;
     const streamKey = [frame.mediaKind, videoSourceCode, frame.streamId].join(":");
-    const sequence = (this.#sequences.get(streamKey) ?? 0n) + 1n;
-    if (sequence > 18_446_744_073_709_551_615n) {
-      this.#onError(new Error("media sequence exhausted; rotate session"));
-      return;
-    }
-    if (!this.#sequences.has(streamKey) && this.#sequences.size >= this.#maxReplayStreams) {
-      this.#onError(new Error("outbound stream capacity exceeded"));
-      return;
-    }
-    try {
-      if (!(await this.#authorizePublish(frame))) {
+    // A codec/producer may recycle its output buffer as soon as emit() returns.
+    // Keep an owned, bounded snapshot until the authorization queue drains.
+    const ownedFrame = {...frame, bytes: frame.bytes.slice()};
+    const previous = this.#sendTails.get(streamKey) ?? Promise.resolve();
+    this.#pendingOutbound++;
+    const current: Promise<void> = previous.then(async () => {
+      if (!this.#active || generation !== this.#generation) return;
+      if (!(await this.#authorizePublish(ownedFrame))) {
         throw new Error("media publish authorization revoked");
       }
       if (!this.#active || generation !== this.#generation) return;
+      const sequence = (this.#sequences.get(streamKey) ?? 0n) + 1n;
+      if (sequence > 18_446_744_073_709_551_615n) {
+        throw new Error("media sequence exhausted; rotate session");
+      }
+      if (!this.#sequences.has(streamKey) && this.#sequences.size >= this.#maxReplayStreams) {
+        throw new Error("outbound stream capacity exceeded");
+      }
+      // Reserve BEFORE encryption: even a crypto or transport error must never
+      // allow a previously used sequence/nonce to be retried with new plaintext.
+      this.#sequences.set(streamKey, sequence);
       const wire = this.#bridge.seal_wire(
-        frame.streamId, frame.mediaKind === "audio" ? 1 : 2,
-        videoSourceCode, sequence, frame.timestamp, frame.keyframe, frame.bytes,
+        ownedFrame.streamId, ownedFrame.mediaKind === "audio" ? 1 : 2,
+        videoSourceCode, sequence, ownedFrame.timestamp, ownedFrame.keyframe, ownedFrame.bytes,
       );
       if (!(wire instanceof Uint8Array) || wire.byteLength > this.#maxFrameBytes + 8_192) {
         throw new Error("encrypted media exceeds transport bounds");
       }
       if (!this.#active || generation !== this.#generation) return;
       this.#sender?.(wire);
-      this.#sequences.set(streamKey, sequence);
-    } catch (error) {
+    }).catch((error: unknown) => {
       this.#onError(error);
-    }
+    }).finally(() => {
+      this.#pendingOutbound--;
+      if (this.#sendTails.get(streamKey) === current) {
+        this.#sendTails.delete(streamKey);
+      }
+    });
+    this.#sendTails.set(streamKey, current);
+    await current;
   }
 }
 
