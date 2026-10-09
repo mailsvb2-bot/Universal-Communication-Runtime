@@ -701,8 +701,12 @@ function e2eeAdapter(){
 }
 function requireCompatibleE2eeAdapter(adapter){
   if(!adapter)return null;
-  if(adapter.contractVersion!==undefined&&adapter.contractVersion!==E2EE_ENDPOINT_CONTRACT_VERSION){
-    throw new Error("Unsupported endpoint E2EE adapter contract version");
+  // RT0 protected media requires the revocable v1 contract; accepting an
+  // unversioned legacy object here could mark an unverified media path as live.
+  if(adapter.contractVersion!==E2EE_ENDPOINT_CONTRACT_VERSION||
+     typeof adapter.start!=="function"||typeof adapter.onEnvelope!=="function"||
+     typeof adapter.stop!=="function"){
+    throw new Error("Protected endpoint E2EE adapter v1 with revocation is required");
   }
   endpointPersistence(adapter);
   return adapter;
