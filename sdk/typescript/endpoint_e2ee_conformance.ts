@@ -1064,6 +1064,81 @@ releaseNew?.();
 await nextInFlight;
 assert.equal(ctx.adaptiveMediaReportInFlight, false);
 
+// Execute the real reference-browser screen permission and publication
+// lifecycle. Authorization can disappear inside a native window picker or
+// while the asynchronous E2EE encoder source update is still pending.
+const screenCode = browser.slice(
+  browser.indexOf("function policyAllows(kind){"),
+  browser.indexOf("async function activateE2eeAdapter(){"),
+);
+assert.ok(screenCode.startsWith("function policyAllows(kind){"));
+let resolveScreenPicker: ((stream: any) => void) | undefined;
+const chosenScreen = new Promise<any>(resolve => {resolveScreenPicker = resolve;});
+const stoppedScreenTracks: string[] = [];
+const screenTrack = {readyState: "live", stop() {stoppedScreenTracks.push("stop");},
+  addEventListener() {}};
+const screenCapture = {
+  getVideoTracks: () => [screenTrack],
+  getTracks: () => [screenTrack],
+};
+const allowedScreenPolicy = {
+  publish_audio_allowed: false, publish_camera_allowed: false,
+  screen_share_allowed: true,
+};
+const screenCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, localStream: null,
+  screenStream: null, screenShareBusy: false,
+  e2eeChannel: {readyState: "open"}, mediaPolicy: allowedScreenPolicy,
+  navigator: {mediaDevices: {getDisplayMedia: async () => chosenScreen}},
+  ui: {
+    screenToggle: {disabled: false, textContent: ""},
+    screenCard: {classList: {toggle() {}}},
+    screenVideo: {srcObject: null}, status: {textContent: ""},
+  },
+  e2eeAdapter: () => ({updateSources: async () => {}}),
+  endpointMediaSources: () => ({screenStream: screenCtx.screenStream}),
+  refreshLocalMediaControls() {},
+};
+runInNewContext(screenCode +
+  "\nthis.startScreen = startScreenShare; this.applyPolicy = applyMediaPolicy;",
+  screenCtx);
+const revokedInPicker = screenCtx.startScreen();
+await screenCtx.applyPolicy({...allowedScreenPolicy, screen_share_allowed: false});
+resolveScreenPicker?.(screenCapture);
+await assert.rejects(revokedInPicker, /authorization changed/);
+assert.equal(screenCtx.screenStream, null);
+assert.equal(stoppedScreenTracks.length, 1, "revoked native picker must close its late screen track");
+
+// A later revocation must stop capture even when startScreenShare holds
+// screenShareBusy=true awaiting a slow WebCodecs updateSources().
+screenCtx.mediaPolicy = allowedScreenPolicy;
+screenCtx.navigator.mediaDevices.getDisplayMedia = async () => screenCapture;
+let firstScreenSourceUpdate: () => void = () => {};
+const firstScreenUpdateEntered = new Promise<void>(resolve => {
+  firstScreenSourceUpdate = resolve;
+});
+let releaseScreenUpdate: () => void = () => {};
+const delayedScreenUpdate = new Promise<void>(resolve => {
+  releaseScreenUpdate = resolve;
+});
+let screenUpdates = 0;
+screenCtx.e2eeAdapter = () => ({updateSources: async () => {
+  if(++screenUpdates === 1){
+    firstScreenSourceUpdate();
+    await delayedScreenUpdate;
+  }
+}});
+const publishingScreen = screenCtx.startScreen();
+await firstScreenUpdateEntered;
+await screenCtx.applyPolicy({...allowedScreenPolicy, screen_share_allowed: false});
+assert.equal(screenCtx.screenStream, null, "policy must stop pending screen capture immediately");
+assert.ok(stoppedScreenTracks.length >= 2,
+  "revocation must stop a screen track even while publication update is pending");
+releaseScreenUpdate();
+await assert.rejects(publishingScreen, /authorization changed/);
+assert.equal(screenCtx.screenStream, null, "stale screen source cannot be restored");
+assert.ok(screenUpdates >= 2, "revocation must signal empty E2EE source list");
+
 // Real RT0 portable pipeline integration: an authenticated, active adapter receives
 // per-subscriber quality commands, leaves the sender alone, and stops after revocation.
 assert.deepEqual(ucrVideoEncodingTarget(1920, 1080), {frameRate: 30, bitrate: 4_000_000});
@@ -1384,6 +1459,44 @@ try {
   assert.ok(outputFrames.filter(f => f.streamId === "camera123-low").length >= 3);
   assert.ok(outputFrames.filter(f => f.streamId === "camera123-low").length <= 6);
   assert.equal(lowDraws, outputFrames.filter(f => f.streamId === "camera123-low").length);
+
+  // A revoked screen source must never re-attach after an earlier async reader
+  // cancellation finishes. This exercises the real producer's updateSources.
+  captureCount = 12;
+  let sourceResetEntered: () => void = () => {};
+  const sourceResetStarted = new Promise<void>(resolve => {
+    sourceResetEntered = resolve;
+  });
+  let releaseSourceReset: () => void = () => {};
+  const sourceResetGate = new Promise<void>(resolve => {
+    releaseSourceReset = resolve;
+  });
+  fakeReader.cancel = async () => {
+    sourceResetEntered();
+    await sourceResetGate;
+  };
+  const serialized = new UcrBrowserWebCodecsProducer();
+  const bareSources = {
+    stream: {getAudioTracks: () => []},
+    cameraStream: {getVideoTracks: () => []},
+    screenStream: null,
+  };
+  await serialized.start({
+    ...bareSources, cameraStream: {getVideoTracks: () => [videoTrack]},
+  } as any, () => {});
+  const encodersBeforeRace = producerConfigured.length;
+  const staleAttach = serialized.updateSources({
+    ...bareSources, screenStream: {getVideoTracks: () => [
+      {id: "screen-1", getSettings: () => ({width: 1280, height: 720})},
+    ]},
+  } as any);
+  await sourceResetStarted;
+  const revokeSource = serialized.updateSources(bareSources as any);
+  releaseSourceReset();
+  await Promise.all([staleAttach, revokeSource]);
+  assert.equal(producerConfigured.length, encodersBeforeRace,
+    "pending screen publication cannot reattach after source revocation");
+  await serialized.stop();
 } finally {
   for (const {key, descriptor} of originalGlobals) {
     if (descriptor) Object.defineProperty(globalThis, key, descriptor);
