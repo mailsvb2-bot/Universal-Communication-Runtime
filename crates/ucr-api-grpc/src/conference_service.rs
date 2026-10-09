@@ -623,7 +623,8 @@ fn map_conference_protocol_error(error: ConferenceProtocolError) -> CanonicalErr
         | ConferenceProtocolError::GroupMismatch
         | ConferenceProtocolError::MissingMlsState
         | ConferenceProtocolError::DuplicateSubscription
-        | ConferenceProtocolError::SelfSubscription => {
+        | ConferenceProtocolError::SelfSubscription
+        | ConferenceProtocolError::InvalidStreamSelection => {
             CanonicalError::new(CanonicalErrorCode::InvalidArgument)
         }
     }
