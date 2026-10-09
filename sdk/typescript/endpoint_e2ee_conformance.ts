@@ -214,7 +214,7 @@ assert.match(browser, /sealState/);
   };
   const wire = encodeSfuForwardEnvelopeWire(canonical);
   assert.throws(() => createUcrPortableEndpointMediaAdapter({
-    bridge: {seal_wire() {return new Uint8Array([1]);}, open_wire() {return new Uint8Array([1]);}},
+    bridge: {seal_wire() {return new Uint8Array([1]);}, open_wire() {return new Uint8Array([1]);}, revoke() {}},
     producer: {start() {}, stop() {}},
     consumer: {play() {}, stop() {}},
     trustedKeys: {resolve() {return new Uint8Array(32);}},
@@ -405,6 +405,43 @@ assert.match(browser, /sealState/);
   await emit({mediaKind: "audio", streamId: "audio-1",
     timestamp: 6n, keyframe: true, bytes: new Uint8Array([60])});
   assert.deepEqual(outbound, [1, 2, 4], "stopped session cannot send another frame");
+}
+
+
+// Crypto revocation is not optional: an old/untrusted WASM bridge must fail
+// admission, and a stop-time bridge exception cannot leave local media running.
+{
+  const binding = {
+    tenantId: "tenant-1", namespaceId: null, callId: "call-1", groupId: "group-1",
+    cryptoEpoch: 2n, negotiationRef: "neg-1", negotiationGeneration: 1n,
+  };
+  const producer = { start() {}, stop() { stops++; } };
+  const consumer = { play() {}, stop() { stops++; } };
+  let stops = 0;
+  const trustedKeys = { resolve() { return new Uint8Array(32); } };
+  assert.throws(() => createUcrPortableEndpointMediaAdapter({
+    binding, authorizeFrame: () => true, authorizePublish: () => true,
+    producer, consumer, trustedKeys,
+    bridge: {
+      seal_wire() { return new Uint8Array([1]); },
+      open_wire() { return new Uint8Array([1]); },
+    } as unknown as import("./src/portable_endpoint_media.ts").UcrGroupMediaCryptoBridge,
+  }), /must support permanent revocation/);
+  const adapter = createUcrPortableEndpointMediaAdapter({
+    binding, authorizeFrame: () => true, authorizePublish: () => true,
+    producer, consumer, trustedKeys,
+    bridge: {
+      seal_wire() { return new Uint8Array([1]); },
+      open_wire() { return new Uint8Array([1]); },
+      revoke() { throw new Error("revocation failed"); },
+    },
+  });
+  const stream = {getTracks: () => []} as unknown as MediaStream;
+  await adapter.start({stream, cameraStream: stream, sendEnvelope() {}});
+  await assert.rejects(adapter.stop(), /revocation failed/);
+  assert.equal(stops, 2, "failed crypto revocation must still close producer and consumer");
+  await assert.rejects(adapter.start({stream, cameraStream: stream, sendEnvelope() {}}),
+    /bridge retired/);
 }
 
 
