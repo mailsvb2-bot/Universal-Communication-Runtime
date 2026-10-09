@@ -301,6 +301,7 @@ mod tests {
                 .map(|index| ucr_model::ConferenceMediaSubscription {
                     source: principal(format!("source-{index:02}")),
                     media_kind: ucr_model::MediaKind::Video,
+                    stream_id: None,
                 })
                 .collect(),
             ..base
