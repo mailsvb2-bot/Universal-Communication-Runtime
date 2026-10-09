@@ -294,7 +294,10 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   }
 
   async stop(): Promise<void> {
-    if (!this.#active) return;
+    // The installer can be cancelled before start() runs. Retire the Rust/WASM
+    // media bridge even in that state: a late async installer must not leave a
+    // live, never-started epoch signer behind after admission withdrawal.
+    if (this.#retired) return;
     this.#active = false;
     this.#retired = true;
     this.#generation++;
