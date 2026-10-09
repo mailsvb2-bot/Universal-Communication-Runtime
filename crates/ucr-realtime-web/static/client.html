@@ -102,6 +102,7 @@ let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=nu
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
 let appliedAdaptiveQuality=null,e2eeAdapterReady=false;
 let receiveRosterGeneration=0,receiveRosterInFlight=false,receiveSubscriptionFingerprint=null;
+let receiveSubscriptionInFlight=false,receiveSubscriptionDirty=false;
 let receiveRosterSources=[],receiveSpeakerId=null,receiveSpeakerCandidate=null,receiveSpeakerSamples=0;
 let reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
@@ -1149,11 +1150,15 @@ async function activateAdmittedMedia(){
 }
 async function applyAdmissionState(state){
   if(state==="waiting_room"){
+    // Revoke the protected receiver when the canonical conference withdraws
+    // admission; merely hiding the UI would leave encrypted media flowing.
+    teardownPeer();
     mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
     ui.status.textContent=waitCopy("waitingRoom");
     return;
   }
   if(state==="closed"){
+    teardownPeer();
     mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
@@ -1224,6 +1229,7 @@ function scheduleWaitingRoom(){
 // This reference UI has one remote video canvas: exactly one video source at a time.
 function resetReceiveRoster(){
   ++receiveRosterGeneration;receiveRosterInFlight=false;
+  receiveSubscriptionInFlight=false;receiveSubscriptionDirty=false;
   receiveSubscriptionFingerprint=null;receiveRosterSources=[];
   receiveSpeakerId=null;receiveSpeakerCandidate=null;receiveSpeakerSamples=0;
 }
@@ -1260,12 +1266,28 @@ async function applyReceiveSubscriptions(sources,preferredId,generation,session,
       claims!==session||e2eeChannel!==channel||channel?.readyState!=="open")return;
   const subscriptions=planReceiveSubscriptions(sources,preferredId);
   const fingerprint=JSON.stringify(subscriptions);
-  if(fingerprint===receiveSubscriptionFingerprint)return;
-  const response=await api("/v1/realtime/subscriptions",{...body(),subscriptions});
-  if(!response.ok)throw new Error("canonical receive subscriptions rejected");
-  if(sessionActive&&mediaActive&&e2eeAdapterReady&&generation===receiveRosterGeneration&&
-     claims===session&&e2eeChannel===channel&&channel?.readyState==="open"){
-    receiveSubscriptionFingerprint=fingerprint;
+  if(fingerprint===receiveSubscriptionFingerprint&&!receiveSubscriptionInFlight)return;
+  if(receiveSubscriptionInFlight){receiveSubscriptionDirty=true;return;}
+  receiveSubscriptionInFlight=true;
+  try{
+    const response=await api("/v1/realtime/subscriptions",{...body(),subscriptions});
+    if(!response.ok)throw new Error("canonical receive subscriptions rejected");
+    if(sessionActive&&mediaActive&&e2eeAdapterReady&&generation===receiveRosterGeneration&&
+       claims===session&&e2eeChannel===channel&&channel?.readyState==="open"){
+      receiveSubscriptionFingerprint=fingerprint;
+    }
+  }finally{
+    if(generation===receiveRosterGeneration){
+      receiveSubscriptionInFlight=false;
+      if(receiveSubscriptionDirty){
+        receiveSubscriptionDirty=false;
+        // Recompute latest speaker + roster; never submit an older preference
+        // concurrently and overwrite the new participant's subscriptions.
+        Promise.resolve().then(()=>applyReceiveSubscriptions(
+          receiveRosterSources,receiveSpeakerId,receiveRosterGeneration,claims,e2eeChannel
+        )).catch(e=>{if(sessionActive&&e2eeAdapterReady)ui.status.textContent="Protected subscription synchronization failed: "+e.message;});
+      }
+    }
   }
 }
 async function syncReceiveSubscriptions(){
