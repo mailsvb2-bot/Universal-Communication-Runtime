@@ -2382,11 +2382,10 @@ fn serve_reference_media_asset(path: &str) -> HttpResponse {
     // A deployment must provide the exact WASM and SDK bundles built for its
     // source revision. Never generate an adapter dynamically or load a remote
     // untrusted CDN script. Missing assets fail closed, not to plaintext media.
-    let directory = std::env::var_os("UCR_REALTIME_WEB_ASSET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static"))
-        });
+    let directory = std::env::var_os("UCR_REALTIME_WEB_ASSET_DIR").map_or_else(
+        || std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static")),
+        std::path::PathBuf::from,
+    );
     match std::fs::read(directory.join(file)) {
         Ok(bytes) if !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024 => Response::builder()
             .status(StatusCode::OK)
