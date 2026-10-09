@@ -53,7 +53,10 @@ layers or that a live 1,000-viewer video fan-out has been performance-tested.
 The browser reference client now validates the server target before optionally invoking the
 versioned endpoint adapter's `applyReceiveMediaDecision` callback. A quality change never
 triggers an unrelated ICE/WebRTC restart or an E2EE downgrade. Subscriber receive-layer/decoder control and real telemetry collection must be provided by the
-endpoint media adapter. One viewer's downlink report must NEVER reconfigure the publisher's shared
+endpoint media adapter. The endpoint-only `UcrChameleonReceiveHandover` guards an optional
+receive-only route change with exact call/session/epoch binding, a verified decryptable keyframe,
+last-moment canonical authorization, cancellation and rollback. It does not choose the route,
+manage MLS keys, act as an SFU, or implement Edge/WebTransport. One viewer's downlink report must NEVER reconfigure the publisher's shared
 encoder; the publisher needs a separate, uplink-grounded decision and authorized layer negotiation. There is no attempt to
 manufacture CPU, battery or thermal telemetry when it is not measured.
 
