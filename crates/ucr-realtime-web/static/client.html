@@ -101,6 +101,8 @@ let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
 let appliedAdaptiveQuality=null,e2eeAdapterReady=false;
+let receiveRosterGeneration=0,receiveRosterInFlight=false,receiveSubscriptionFingerprint=null;
+let receiveRosterSources=[],receiveSpeakerId=null,receiveSpeakerCandidate=null,receiveSpeakerSamples=0;
 let reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_ENDPOINT_CONTRACT_VERSION="ucr.endpoint-e2ee.v1";
@@ -648,6 +650,7 @@ function requireCompatibleE2eeAdapter(adapter){
 }
 function closeE2eeTransport(){
   stopAdaptiveMediaMonitoring();
+  resetReceiveRoster();
   appliedAdaptiveQuality=null;e2eeAdapterReady=false;
   if(ui.remoteCanvas){
     const context=ui.remoteCanvas.getContext("2d");
@@ -881,6 +884,7 @@ async function activateE2eeAdapter(){
   // Admission happens before the protected DataChannel opens. Only now do we
   // have a live, authorized decoder and measured downlink telemetry provider.
   startAdaptiveMediaMonitoring();
+  syncReceiveSubscriptions().catch(e=>{if(sessionActive)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
   ui.remoteVideo.classList.add("hidden");
   ui.remoteCanvas.classList.remove("hidden");
   refreshScreenShareControl();
@@ -1165,6 +1169,9 @@ async function heartbeat(){
   const data=await r.json();
   await applyMediaPolicy(data.media_policy);
   await applyAdmissionState(data.admission_state);
+  if(sessionActive&&mediaActive&&e2eeAdapterReady){
+    syncReceiveSubscriptions().catch(e=>{if(sessionActive&&e2eeAdapterReady)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
+  }
 }
 async function join(){
   try{
@@ -1211,6 +1218,89 @@ function scheduleWaitingRoom(){
   if(waitTimer)clearTimeout(waitTimer);
   waitTimer=setTimeout(()=>{waitTimer=null;ui.join.disabled=false;join();},delay);
   return true;
+}
+// The server projects accepted sources from the canonical Call; the browser can
+// only select within that bounded, authorized roster. No second roster/room owner.
+// This reference UI has one remote video canvas: exactly one video source at a time.
+function resetReceiveRoster(){
+  ++receiveRosterGeneration;receiveRosterInFlight=false;
+  receiveSubscriptionFingerprint=null;receiveRosterSources=[];
+  receiveSpeakerId=null;receiveSpeakerCandidate=null;receiveSpeakerSamples=0;
+}
+function validReceiveRoster(value){
+  if(!value||value.ok!==true||!Array.isArray(value.sources)||value.sources.length>1024)return null;
+  const sources=[],seen=new Set();
+  for(const source of value.sources){
+    if(!source||typeof source.source_id!=="string"||source.source_id.length<1||
+        new TextEncoder().encode(source.source_id).length>128||
+        /[\\u0000-\\u001f\\u007f]/.test(source.source_id)||
+        !Number.isInteger(source.source_kind)||source.source_kind<1||source.source_kind>8||
+        seen.has(source.source_kind+":"+source.source_id))return null;
+    seen.add(source.source_kind+":"+source.source_id);
+    if(source.source_id!==claims?.participant_id)sources.push({
+      source_id:source.source_id,source_kind:source.source_kind
+    });
+  }
+  return sources;
+}
+function planReceiveSubscriptions(sources,preferredId){
+  // One video canvas; the other 31 slots carry authorized encrypted audio.
+  // Never silently exceed the canonical 32-entry per-recipient limit.
+  const video=sources.find(s=>s.source_id===preferredId)||sources[0]||null;
+  const audio=sources.slice(0,31).map(s=>({
+    source_id:s.source_id,source_kind:s.source_kind,media_kind:1,stream_id:null
+  }));
+  if(video)audio.push({
+    source_id:video.source_id,source_kind:video.source_kind,media_kind:2,stream_id:null
+  });
+  return audio;
+}
+async function applyReceiveSubscriptions(sources,preferredId,generation,session,channel){
+  if(!sessionActive||!mediaActive||!e2eeAdapterReady||generation!==receiveRosterGeneration||
+      claims!==session||e2eeChannel!==channel||channel?.readyState!=="open")return;
+  const subscriptions=planReceiveSubscriptions(sources,preferredId);
+  const fingerprint=JSON.stringify(subscriptions);
+  if(fingerprint===receiveSubscriptionFingerprint)return;
+  const response=await api("/v1/realtime/subscriptions",{...body(),subscriptions});
+  if(!response.ok)throw new Error("canonical receive subscriptions rejected");
+  if(sessionActive&&mediaActive&&e2eeAdapterReady&&generation===receiveRosterGeneration&&
+     claims===session&&e2eeChannel===channel&&channel?.readyState==="open"){
+    receiveSubscriptionFingerprint=fingerprint;
+  }
+}
+async function syncReceiveSubscriptions(){
+  if(!sessionActive||!mediaActive||!e2eeAdapterReady||receiveRosterInFlight||
+      e2eeChannel?.readyState!=="open")return;
+  const generation=receiveRosterGeneration,session=claims,channel=e2eeChannel;
+  receiveRosterInFlight=true;
+  try{
+    const response=await api("/v1/realtime/receive-roster",body());
+    const data=await response.json();
+    const sources=validReceiveRoster(data);
+    if(!sources)throw new Error("invalid canonical receive roster");
+    if(!sessionActive||!mediaActive||!e2eeAdapterReady||
+        generation!==receiveRosterGeneration||claims!==session||
+        e2eeChannel!==channel||channel?.readyState!=="open")return;
+    receiveRosterSources=sources;
+    await applyReceiveSubscriptions(sources,receiveSpeakerId,generation,session,channel);
+  }finally{
+    if(generation===receiveRosterGeneration)receiveRosterInFlight=false;
+  }
+}
+function updateReceiveActiveSpeaker(principalId){
+  if(typeof principalId!=="string"||!receiveRosterSources.some(s=>s.source_id===principalId)){
+    receiveSpeakerCandidate=null;receiveSpeakerSamples=0;return;
+  }
+  if(receiveSpeakerCandidate===principalId)receiveSpeakerSamples++;
+  else{receiveSpeakerCandidate=principalId;receiveSpeakerSamples=1;}
+  if(receiveSpeakerSamples<2||receiveSpeakerId===principalId)return;
+  receiveSpeakerId=principalId;
+  if(e2eeChannel?.readyState==="open"&&e2eeAdapterReady){
+    applyReceiveSubscriptions(receiveRosterSources,receiveSpeakerId,
+      receiveRosterGeneration,claims,e2eeChannel).catch(e=>{
+        if(sessionActive&&e2eeAdapterReady)ui.status.textContent="Protected speaker selection unavailable: "+e.message;
+      });
+  }
 }
 function stopAdaptiveMediaMonitoring(){
   ++adaptiveMediaGeneration;
@@ -1329,6 +1419,11 @@ async function pollActiveSpeaker(){
     const data=await r.json();
     const value=data.participant_id_b64;
     ui.activeSpeaker.textContent=value?tr("activeSpeakerPrefix")+value.slice(0,12)+(value.length>12?"…":""):tr("activeSpeakerNone");
+    let speakerId=null;
+    if(typeof value==="string"&&value.length<=256){
+      try{speakerId=new TextDecoder("utf-8",{fatal:true}).decode(Uint8Array.from(atob(value),c=>c.charCodeAt(0)));}catch(_){}
+    }
+    updateReceiveActiveSpeaker(speakerId);
   }finally{
     activeSpeakerPollInFlight=false;
   }
