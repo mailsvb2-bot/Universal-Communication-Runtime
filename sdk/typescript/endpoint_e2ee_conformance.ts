@@ -465,6 +465,100 @@ assert.doesNotThrow(() => strictAdapterCtx.verifyAdapter({
   start() {}, onEnvelope() {}, stop() {},
 }));
 
+// Production device preflight: never trigger a camera prompt, signaling, or
+// MLS registration when the canonical trusted Device media host is absent.
+const preflightSnippet = browser.slice(
+  browser.indexOf("function requireCanonicalMediaHostReady(){"),
+  browser.indexOf("function closeE2eeTransport(){"),
+);
+assert.ok(preflightSnippet.startsWith("function requireCanonicalMediaHostReady(){"));
+const preflightCtx: Record<string, any> = {
+  window: {}, e2eeAdapter: () => null,
+  requireCompatibleE2eeAdapter: (x: any) => x,
+};
+runInNewContext(preflightSnippet +
+  "\nthis.preflight = requireCanonicalMediaHostReady;", preflightCtx);
+assert.throws(() => preflightCtx.preflight(), /Canonical Device signing\/trust integration is unavailable/);
+preflightCtx.window.ucrCanonicalAuthorizedMediaFactory = () => ({});
+assert.doesNotThrow(() => preflightCtx.preflight(),
+  "registered host authority allows capture to proceed to real E2EE validation");
+delete preflightCtx.window.ucrCanonicalAuthorizedMediaFactory;
+preflightCtx.window.ucrInstallAuthorizedMediaEndpoint = () => ({});
+assert.doesNotThrow(() => preflightCtx.preflight(),
+  "custom canonical host installer is permitted only under later strict E2EE checks");
+delete preflightCtx.window.ucrInstallAuthorizedMediaEndpoint;
+let unexpectedCapture = 0, unexpectedSignalling = 0;
+const earlyBlockedCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, navigator: {onLine: true},
+  claims: {expires: Date.now() + 5000},
+  ui: {privacyMode: {value: "secure"}},
+  mediaCaptureGeneration: 1,
+  requireCanonicalMediaHostReady: preflightCtx.preflight,
+  ensureLocalMedia: async () => {unexpectedCapture++;},
+  api: async () => {unexpectedSignalling++;},
+};
+const preflightStartCode = browser.slice(
+  browser.indexOf("async function startWebRtc("),
+  browser.indexOf("async function restartIce("),
+);
+assert.ok(preflightStartCode.startsWith("async function startWebRtc("));
+runInNewContext(preflightStartCode + "\nthis.start = startWebRtc;", earlyBlockedCtx);
+await assert.rejects(earlyBlockedCtx.start(),
+  /Canonical Device signing\/trust integration is unavailable/);
+assert.equal(unexpectedCapture, 0, "no microphone/camera prompt without trusted signer");
+assert.equal(unexpectedSignalling, 0, "no network offer without trusted signer");
+
+// The same preflight must happen even earlier: before a signed invite can
+// create a realtime session or start a heartbeat in the first place.
+const preflightJoinSnippet = browser.slice(
+  browser.indexOf("async function join(){"),
+  browser.indexOf("function scheduleEntryRetry(){"),
+);
+assert.ok(preflightJoinSnippet.startsWith("async function join(){"));
+let unauthorizedJoinRequests = 0;
+const preflightJoinCtx: Record<string, any> = {
+  claims: {not_before: 0}, sessionLifecycleGeneration: 0,
+  ui: {state: {textContent: ""}, status: {textContent: ""},
+    join: {disabled: false}},
+  requireCanonicalMediaHostReady: preflightCtx.preflight,
+  api: async () => {unauthorizedJoinRequests++;throw new Error("unexpected join");},
+  scheduleWaitingRoom() {},
+};
+runInNewContext(preflightJoinSnippet + "\nthis.joinCall = join;", preflightJoinCtx);
+await preflightJoinCtx.joinCall();
+assert.equal(unauthorizedJoinRequests, 0,
+  "missing trusted media authority cannot create a realtime session");
+assert.equal(preflightJoinCtx.sessionLifecycleGeneration, 0,
+  "preflight rejection must not activate a session lifecycle");
+assert.equal(preflightJoinCtx.ui.state.textContent, "Secure media unavailable");
+assert.equal(preflightJoinCtx.ui.join.disabled, false,
+  "user can retry after canonical media authority is installed");
+
+// A server-accepted join followed by MLS/policy activation failure must
+// synchronously retire its active session rather than leave a heartbeat alive.
+let acceptedJoinCleanup = 0;
+let acceptedJoinHeartbeats = 0;
+const acceptedJoinCtx: Record<string, any> = {
+  claims: {not_before: 0}, sessionLifecycleGeneration: 0,
+  sessionActive: false, mediaActive: false, heartbeatTimer: null,
+  ui: {state: {textContent: ""}, status: {textContent: ""},
+    join: {disabled: false}, leave: {disabled: true},
+    privacyMode: {disabled: false}, expires: {textContent: ""}},
+  requireCanonicalMediaHostReady() {},
+  api: async () => ({json: async () => ({ok: true, admission_state: "admitted"})}),
+  body: () => ({}),
+  applyMediaPolicy: async () => {throw new Error("MLS activation refused");},
+  setInterval: () => {acceptedJoinHeartbeats++;return 1;},
+  leave: async () => {acceptedJoinCleanup++;acceptedJoinCtx.sessionActive = false;},
+  scheduleWaitingRoom() {}, scheduleEntryRetry() {},
+};
+runInNewContext(preflightJoinSnippet + "\nthis.joinCall = join;", acceptedJoinCtx);
+await acceptedJoinCtx.joinCall();
+assert.equal(acceptedJoinCleanup, 1, "accepted session is retired on activation failure");
+assert.equal(acceptedJoinCtx.sessionActive, false, "no orphan active session");
+assert.equal(acceptedJoinHeartbeats, 0, "no heartbeat before failed policy activation");
+assert.equal(acceptedJoinCtx.ui.state.textContent, "Rejected");
+
 // Chameleon lifecycle: no telemetry may be reported before the endpoint is
 // authenticated and running; the first report must start after E2EE activation.
 const activateSnippet = browser.slice(
@@ -667,6 +761,7 @@ const startCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
   navigator: {onLine: true},
   ui: {privacyMode: {value: "secure"}},
+  requireCanonicalMediaHostReady() {},
   ensureLocalMedia: async () => startCaptureGate,
   api: async () => { staleServerStarts++; throw new Error("stale server peer opened"); },
 };
@@ -713,6 +808,7 @@ const admissionCtx: Record<string, any> = {
   ui: admissionUi, claims: {not_before: 0}, sessionActive: true,
   mediaActive: true, mediaCaptureGeneration: 0, sessionLifecycleGeneration: 0,
   heartbeatRequestGeneration: 0,
+  requireCanonicalMediaHostReady() {},
   endpointMlsInvalidationGeneration: 0, endpointMlsBootstrapAbort: null,
   endpointMlsState: null, endpointMlsGroupId: null, window: {},
   localStream: makePhysicalStream(), streamAbort: {abort() {}},
@@ -853,6 +949,7 @@ const negotiationCtx: Record<string, any> = {
   ui: {privacyMode: {value: "secure"}, remoteVideo: {srcObject: null},
     webrtcState: {textContent: ""}, state: {textContent: ""},
     status: {textContent: ""}},
+  requireCanonicalMediaHostReady() {},
   ensureLocalMedia: async () => ({}),
   api: async (path: string) => {
     if(path.endsWith("/webrtc/start"))return {json: async () => ({

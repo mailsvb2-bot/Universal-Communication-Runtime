@@ -711,6 +711,17 @@ function requireCompatibleE2eeAdapter(adapter){
   endpointPersistence(adapter);
   return adapter;
 }
+// Do not ask a user for microphone/camera permission, create an MLS key
+// package, or begin signalling when the product has supplied no trusted
+// Device media signer/authorization integration. Presence is not proof of
+// trust: actual per-frame authority is still checked at adapter activation.
+function requireCanonicalMediaHostReady(){
+  const adapter=e2eeAdapter();
+  if(adapter){requireCompatibleE2eeAdapter(adapter);return;}
+  if(typeof window.ucrInstallAuthorizedMediaEndpoint==="function"||
+     typeof window.ucrCanonicalAuthorizedMediaFactory==="function")return;
+  throw new Error("Canonical Device signing/trust integration is unavailable; secure audio/video cannot start");
+}
 function closeE2eeTransport(){
   stopAdaptiveMediaMonitoring();
   resetReceiveRoster();
@@ -1191,6 +1202,7 @@ async function startWebRtc(forceMedia=false){
       throw new Error("WebRTC start cancelled by conference media teardown");
     }
   };
+  requireCanonicalMediaHostReady();
   await ensureLocalMedia(forceMedia);
   ensureCurrent();
   const response=await api("/v1/realtime/webrtc/start",body());
@@ -1314,6 +1326,7 @@ function scheduleWebRtcRetryAfterRestart(){
 async function activateAdmittedMedia(){
   if(!sessionActive||mediaActive)return;
   const generation=sessionLifecycleGeneration;
+  requireCanonicalMediaHostReady();
   await ensureEndpointMlsReady();
   if(generation!==sessionLifecycleGeneration||!sessionActive||mediaActive)return;
   mediaActive=true;ui.state.textContent="Connecting";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;ui.chatInput.disabled=false;ui.chatSend.disabled=false;refreshLocalMediaControls();
@@ -1376,6 +1389,16 @@ async function heartbeat(){
 }
 async function join(){
   if(Date.now()<claims.not_before){scheduleWaitingRoom();return;}
+  // A signed join URL alone does not provision an authorized media signer.
+  // Reject before opening a realtime session/heartbeat when the host omitted
+  // the canonical Device media authority; the user may retry after setup.
+  try{requireCanonicalMediaHostReady();}
+  catch(error){
+    ui.state.textContent="Secure media unavailable";
+    ui.status.textContent=error.message;
+    ui.join.disabled=false;
+    return;
+  }
   const generation=++sessionLifecycleGeneration;
   try{
     ui.join.disabled=true;ui.state.textContent="Joining";ui.status.textContent="Authenticating signed session grant…";
@@ -1391,7 +1414,20 @@ async function join(){
     await applyAdmissionState(data.admission_state);
   }catch(e){
     if(generation!==sessionLifecycleGeneration)return;
-    if(e.code==="waiting_room"){scheduleEntryRetry();return;}
+    if(e.code==="waiting_room"&&!sessionActive){scheduleEntryRetry();return;}
+    // The server may already have accepted the join when MLS or admission
+    // activation fails. Never leave heartbeat, camera or an authorized
+    // session running behind a misleading "Rejected" Join button.
+    if(sessionActive){
+      try{await leave();}catch(cleanupError){
+        // Local revocation must precede any best-effort remote Leave.
+        ++sessionLifecycleGeneration;++mediaCaptureGeneration;
+        mediaActive=false;sessionActive=false;
+        retireEndpointMlsState();teardownPeer();stopLocalCapture();
+        if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
+        ui.leave.disabled=true;ui.privacyMode.disabled=false;
+      }
+    }
     ui.state.textContent="Rejected";ui.status.textContent=e.message;ui.join.disabled=false;
   }
 }
