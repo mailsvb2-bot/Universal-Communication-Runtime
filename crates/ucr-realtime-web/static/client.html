@@ -840,6 +840,27 @@ async function startScreenShare(){
     screenShareBusy=false;refreshScreenShareControl();
   }
 }
+let referenceMediaInstallerPromise=null;
+async function requireAuthorizedMediaInstaller(){
+  // A product integration may supply the exact canonical installer before
+  // startup. Otherwise load UCR's bundled reference adapter code on demand.
+  if(typeof window.ucrInstallAuthorizedMediaEndpoint==="function"){
+    return window.ucrInstallAuthorizedMediaEndpoint;
+  }
+  if(!referenceMediaInstallerPromise){
+    referenceMediaInstallerPromise=import("./endpoint-media/reference_browser_media_installer.js")
+      .then(module=>{
+        if(typeof module.installUcrReferenceBrowserMedia!=="function"){
+          throw new Error("Invalid UCR endpoint media installer bundle");
+        }
+        return module.installUcrReferenceBrowserMedia;
+      }).catch(error=>{
+        referenceMediaInstallerPromise=null;
+        throw error;
+      });
+  }
+  return referenceMediaInstallerPromise;
+}
 async function activateE2eeAdapter(){
   e2eeAdapterReady=false;
   const generation=e2eeActivationGeneration;
@@ -848,10 +869,12 @@ async function activateE2eeAdapter(){
   if(!isCurrent())throw new Error("Encrypted media transport no longer active");
   // Integration owner must supply authenticated MLS/media/signing state; the
   // browser must never invent a default device key or silently send plaintext.
-  if(!e2eeAdapter()&&typeof window.ucrInstallAuthorizedMediaEndpoint==="function"){
+  if(!e2eeAdapter()){
+    const install=await requireAuthorizedMediaInstaller();
+    if(!isCurrent())throw new Error("Encrypted media session retired before installer load");
     const mls=await ensureEndpointMlsReady();
     if(!mls)throw new Error("Endpoint-owned MLS required for encrypted media");
-    const installed=await window.ucrInstallAuthorizedMediaEndpoint(Object.freeze({
+    const installed=await install(Object.freeze({
       state:mls,
       claims:Object.freeze({
         tenantId:claims.tenant_id,
