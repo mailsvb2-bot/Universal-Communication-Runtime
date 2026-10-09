@@ -29,6 +29,9 @@ const DEFAULT_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_UPSTREAM: &str = "http://127.0.0.1:50051";
 const MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BEARER_BYTES: usize = 4096;
+const MAX_SIGNALING_SDP_BYTES: usize = 256 * 1024;
+const MAX_SIGNALING_ICE_CANDIDATE_BYTES: usize = 4096;
+const MAX_SIGNALING_ICE_MID_BYTES: usize = 256;
 const CLIENT_HTML: &str = include_str!("../static/client.html");
 
 type HttpBody = UnsyncBoxBody<Bytes, Infallible>;
@@ -1694,6 +1697,13 @@ async fn set_webrtc_remote_description(
     token: &str,
     input: WebRtcRemoteDescriptionRequest,
 ) -> HttpResponse {
+    if !valid_sdp(&input.sdp) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_sdp",
+            "WebRTC SDP exceeds bounds or has invalid content",
+        );
+    }
     let sdp_type = match input.sdp_type.as_str() {
         "offer" => pb::WebRtcSdpType::Offer as i32,
         "answer" => pb::WebRtcSdpType::Answer as i32,
@@ -1751,6 +1761,13 @@ async fn add_webrtc_ice_candidate(
     token: &str,
     input: WebRtcIceCandidateRequest,
 ) -> HttpResponse {
+    if !valid_ice_candidate(&input.candidate, input.sdp_mid.as_deref()) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_ice_candidate",
+            "WebRTC ICE candidate exceeds bounds or has invalid content",
+        );
+    }
     let mut client = client(state);
     let mut request = GrpcRequest::new(pb::RealtimeAddWebRtcIceCandidateRequest {
         scope: Some(pb_scope(&input.session)),
@@ -1869,6 +1886,24 @@ async fn bounded_body(body: Incoming) -> Result<Bytes, GatewayFailure> {
         ));
     }
     Ok(bytes)
+}
+
+fn valid_sdp(sdp: &str) -> bool {
+    !sdp.is_empty() && sdp.len() <= MAX_SIGNALING_SDP_BYTES && !sdp.bytes().any(|byte| byte == 0)
+}
+
+fn valid_ice_candidate(candidate: &str, mid: Option<&str>) -> bool {
+    !candidate.is_empty()
+        && candidate.len() <= MAX_SIGNALING_ICE_CANDIDATE_BYTES
+        && !candidate
+            .bytes()
+            .any(|byte| byte == 0 || byte == b'\n' || byte == b'\r')
+        && mid.is_none_or(|value| {
+            value.len() <= MAX_SIGNALING_ICE_MID_BYTES
+                && !value
+                    .bytes()
+                    .any(|byte| byte == 0 || byte == b'\n' || byte == b'\r')
+        })
 }
 
 fn decode_json<T>(body: &[u8]) -> Result<T, GatewayFailure>
@@ -2168,6 +2203,60 @@ fn empty_response(status: StatusCode) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_webrtc_signaling_rejects_malformed_or_oversized_inputs() {
+        assert!(valid_sdp("v=0\r\n"));
+        assert!(!valid_sdp(""));
+        assert!(!valid_sdp(&"a".repeat(MAX_SIGNALING_SDP_BYTES + 1)));
+        assert!(!valid_sdp("v=0\0"));
+        assert!(valid_ice_candidate(
+            "candidate:1 1 udp 1 127.0.0.1 1234 typ host",
+            Some("0")
+        ));
+        assert!(!valid_ice_candidate("", None));
+        assert!(!valid_ice_candidate(
+            &"x".repeat(MAX_SIGNALING_ICE_CANDIDATE_BYTES + 1),
+            None
+        ));
+        assert!(!valid_ice_candidate("candidate:1\nspoof", None));
+        assert!(!valid_ice_candidate("candidate:1", Some("x\rspoof")));
+        assert!(!valid_ice_candidate(
+            "candidate:1",
+            Some(&"x".repeat(MAX_SIGNALING_ICE_MID_BYTES + 1))
+        ));
+    }
+
+    #[test]
+    fn browser_privacy_modes_restrict_network_and_preserve_fragment_grant() {
+        assert!(CLIENT_HTML.contains("id=\"privacy-mode\""));
+        assert!(CLIENT_HTML.contains("iceTransportPolicy:mode===\"private\"?\"relay\":\"all\""));
+        assert!(CLIENT_HTML.contains("Higher privacy requires configured TURN relay"));
+        assert!(CLIENT_HTML.contains("ui.privacyMode.disabled=true"));
+        assert!(CLIENT_HTML.contains("ui.privacyMode.disabled=false"));
+        assert!(CLIENT_HTML.contains("token=params.get(\"ucr_join\")"));
+        assert!(CLIENT_HTML.contains("window.history.replaceState("));
+        assert!(CLIENT_HTML.contains("location.pathname+location.search"));
+        assert!(CLIENT_HTML.contains("claims=readGrant(token);if(Date.now()>=claims.expires)"));
+
+        assert!(CLIENT_HTML.contains("Independent privacy relay is not configured"));
+        assert!(CLIENT_HTML.contains("adapter===e2eeManagedAdapter"));
+        assert!(CLIENT_HTML.contains("delete window.ucrE2eeEndpoint"));
+        assert!(CLIENT_HTML.contains("e2eeManagedAdapter=installed"));
+        assert!(CLIENT_HTML.contains("pc.setConfiguration(rtcNetworkConfiguration("));
+        assert!(CLIENT_HTML.contains("Endpoint E2EE adapter failed; encrypted transport closed"));
+        assert!(CLIENT_HTML.contains("if(e2eeChannel===channel){closeE2eeTransport()"));
+    }
+
+    #[test]
+    fn browser_e2ee_activation_rejects_stale_channels() {
+        assert!(CLIENT_HTML.contains("e2eeActivationGeneration"));
+        assert!(
+            CLIENT_HTML.contains("Encrypted media session changed during adapter installation")
+        );
+        assert!(CLIENT_HTML.contains("Encrypted media session changed during startup"));
+        assert!(CLIENT_HTML.contains("if(e2eeChannel!==channel)return;"));
+    }
 
     #[test]
     fn browser_client_exposes_live_webrtc_media_and_reconnect_flow() {

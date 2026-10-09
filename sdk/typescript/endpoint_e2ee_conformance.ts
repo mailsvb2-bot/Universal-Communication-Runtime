@@ -1,3 +1,10 @@
+import {createUcrAuthorizedMediaInstaller} from "./src/authorized_browser_media.ts";
+import {installUcrNativeEncryptedTransforms} from "./src/native_encrypted_transforms.ts";
+import {chooseUcrBrowserMediaTransport, probeUcrNativeRtpBrowserCapabilities} from "./src/native_rtp_media.ts";
+import { ucrCodecCanEnqueue } from "./src/browser_webcodecs_media.ts";
+import {planUcrPrivacyNetwork, assertUcrPrivacyNetworkReady} from "./src/privacy_network.ts";
+import { createUcrPortableEndpointMediaAdapter } from "./src/portable_endpoint_media.ts";
+import { encodeSfuForwardEnvelopeWire } from "./src/sfu_forward_wire.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
@@ -178,5 +185,409 @@ assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
 assert.match(browser, /Unsupported endpoint E2EE adapter contract version/);
 assert.match(browser, /restoreSealedState/);
 assert.match(browser, /sealState/);
+
+
+{
+  const outbound: Uint8Array[] = [];
+  const played: Uint8Array[] = [];
+  const failures: unknown[] = [];
+  let emit: ((frame: {mediaKind: "audio"; streamId: string; timestamp: bigint; keyframe: boolean; bytes: Uint8Array}) => void | Promise<void>) | null = null;
+  let stopped = 0;
+  let seq = 0n;
+  const canonical = {
+    frame: {
+      header: {
+        tenantId: "tenant-1", namespaceId: null, callId: "call-1", groupId: "group-1",
+        streamId: "audio-1", source: {principalId: "alice", kind: "person" as const},
+        sourceDeviceId: "alice-device", negotiationRef: "neg-1",
+        negotiationGeneration: 1n, cryptoEpoch: 2n, cryptoStateRef: "state-2",
+        cryptoSuite: "ucr.v1" as const, headerVersion: 2 as const,
+        mediaKind: "audio" as const, videoSourceKind: null,
+        sequence: 1n, mediaTimestamp: 48000n, keyframe: false,
+      },
+      nonce: new Uint8Array(24), ciphertext: new Uint8Array([7, 8, 9]),
+      sourceSignature: {
+        keyId: "alice-key", algorithmId: "ed25519" as const,
+        algorithmVersion: 1 as const, signature: new Uint8Array(64),
+      },
+    },
+  };
+  const wire = encodeSfuForwardEnvelopeWire(canonical);
+  assert.throws(() => createUcrPortableEndpointMediaAdapter({
+    bridge: {seal_wire() {return new Uint8Array([1]);}, open_wire() {return new Uint8Array([1]);}, revoke() {}},
+    producer: {start() {}, stop() {}},
+    consumer: {play() {}, stop() {}},
+    trustedKeys: {resolve() {return new Uint8Array(32);}},
+  }), /canonical call binding and bidirectional live media authorization are required/);
+  let authorized = true;
+  let bridgeRevoked = false;
+  const adapter = createUcrPortableEndpointMediaAdapter({
+    binding: {
+      tenantId: "tenant-1", namespaceId: null, callId: "call-1", groupId: "group-1",
+      cryptoEpoch: 2n, negotiationRef: "neg-1", negotiationGeneration: 1n,
+    },
+    authorizeFrame: () => authorized,
+    authorizePublish: () => authorized,
+    bridge: {
+      revoke() {bridgeRevoked = true;},
+      seal_wire(_stream, mediaKind, videoKind, sequence, _timestamp, _keyframe, plaintext) {
+        assert.equal(mediaKind, 1);
+        assert.equal(videoKind, 0);
+        assert.equal(sequence, ++seq);
+        assert.deepEqual([...plaintext], [1, 2, 3]);
+        return wire;
+      },
+      open_wire(inbound, key) {
+        assert.deepEqual(inbound, wire);
+        assert.equal(key.length, 32);
+        return new Uint8Array([1, 2, 3]);
+      },
+    },
+    producer: {
+      start(_sources, send) { emit = send; },
+      stop() { stopped++; },
+    },
+    consumer: {
+      play(frame) { played.push(frame.bytes); },
+      stop() { stopped++; },
+    },
+    trustedKeys: {
+      resolve(_header, keyId) {
+        assert.equal(keyId, "alice-key");
+        return new Uint8Array(32).fill(1);
+      },
+    },
+    onError(error) { failures.push(error); },
+  });
+  assert.equal(adapter.contractVersion, UCR_ENDPOINT_E2EE_CONTRACT_VERSION);
+  const stream = {getTracks: () => []} as unknown as MediaStream;
+  await adapter.start({stream, cameraStream: stream, sendEnvelope: (payload) => outbound.push(payload)});
+  assert.ok(emit);
+  await emit!({mediaKind: "audio", streamId: "audio-1", timestamp: 48000n,
+    keyframe: false, bytes: new Uint8Array([1, 2, 3])});
+  assert.deepEqual(outbound, [wire]);
+  await adapter.onEnvelope(wire);
+  assert.deepEqual([...played[0]], [1, 2, 3]);
+  await assert.rejects(adapter.onEnvelope(wire), /replayed endpoint media frame/);
+  const wrongCall = encodeSfuForwardEnvelopeWire({
+    ...canonical, frame: {
+      ...canonical.frame, header: {...canonical.frame.header, callId: "another-call", sequence: 2n},
+    },
+  });
+  await assert.rejects(adapter.onEnvelope(wrongCall), /outside authenticated conference binding/);
+  authorized = false;
+  await emit!({mediaKind: "audio", streamId: "audio-1", timestamp: 96000n,
+    keyframe: false, bytes: new Uint8Array([1, 2, 3])});
+  assert.deepEqual(outbound, [wire], "revoked publication must not emit another frame");
+  assert.ok(failures.some(error => String(error).includes("media publish authorization revoked")));
+  failures.length = 0;
+  const nextFrame = encodeSfuForwardEnvelopeWire({
+    ...canonical, frame: {
+      ...canonical.frame, header: {...canonical.frame.header, sequence: 2n},
+    },
+  });
+  await assert.rejects(adapter.onEnvelope(nextFrame), /authorization revoked/);
+
+  await assert.rejects(adapter.start({stream, cameraStream: stream, sendEnvelope() {}}), /already started/);
+  assert.equal(failures.length, 0);
+  await adapter.stop();
+  assert.equal(bridgeRevoked, true, "Rust bridge retired before media cleanup");
+  await assert.rejects(adapter.start({stream, cameraStream: stream, sendEnvelope() {}}), /bridge retired/);
+  assert.equal(stopped, 2);
+  await adapter.onEnvelope(wire);
+  assert.equal(played.length, 1);
+}
+
+
+{
+  const turn = [{urls: "turns:relay.example.invalid:5349", username: "ephemeral", credential: "secret"}];
+  const privatePlan = planUcrPrivacyNetwork({
+    mode: "private", iceServers: turn, trustedRelayAvailable: true,
+  });
+  assert.equal(privatePlan.rtcConfiguration.iceTransportPolicy, "relay");
+  assert.equal(privatePlan.dataMinimization, "strict");
+  assert.deepEqual(privatePlan.rtcConfiguration.iceServers, turn);
+  assert.throws(() => planUcrPrivacyNetwork({
+    mode: "private", iceServers: [{urls: "stun:stun.example.invalid"}],
+    trustedRelayAvailable: true,
+  }), /needs TURN/);
+  assert.throws(() => planUcrPrivacyNetwork({
+    mode: "private", iceServers: turn, trustedRelayAvailable: false,
+  }), /requires a trusted TURN/);
+  const max = planUcrPrivacyNetwork({
+    mode: "maximum", iceServers: turn, trustedRelayAvailable: true,
+  });
+  assert.throws(() => assertUcrPrivacyNetworkReady(max, false), /independently deployed relay/);
+  assertUcrPrivacyNetworkReady(max, true);
+  assert.equal(planUcrPrivacyNetwork({
+    mode: "secure", iceServers: [], trustedRelayAvailable: false,
+  }).rtcConfiguration.iceTransportPolicy, "all");
+}
+
+
+// The actual encrypted-send journey: concurrent codec frames must remain ordered,
+// bounded, independently owned and nonce-unique through async grant checks.
+{
+  type MediaFrame = import("./src/portable_endpoint_media.ts").UcrEncodedMediaFrame;
+  let emit!: (frame: MediaFrame) => void | Promise<void>;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const sealedSequences: bigint[] = [];
+  const sealedPayloads: number[][] = [];
+  const outbound: number[] = [];
+  const errors: string[] = [];
+  let authorizeCalls = 0;
+  let failSeal = false;
+  let bridgeRevoked = false;
+  const adapter = createUcrPortableEndpointMediaAdapter({
+    binding: {
+      tenantId: "tenant-1", namespaceId: null, callId: "call-1", groupId: "group-1",
+      cryptoEpoch: 2n, negotiationRef: "neg-1", negotiationGeneration: 1n,
+    },
+    maxPendingFrames: 2,
+    authorizeFrame: () => true,
+    authorizePublish: async () => {
+      authorizeCalls++;
+      await gate;
+      return true;
+    },
+    bridge: {
+      revoke() { bridgeRevoked = true; },
+      seal_wire(_id, _kind, _source, seq, _timestamp, _keyframe, bytes) {
+        sealedSequences.push(seq);
+        sealedPayloads.push([...bytes]);
+        if (failSeal) {
+          failSeal = false;
+          throw new Error("simulated seal failure");
+        }
+        return new Uint8Array([Number(seq)]);
+      },
+      open_wire() { throw new Error("inbound not expected"); },
+    },
+    producer: {
+      start(_sources, send) { emit = send; },
+      stop() {},
+    },
+    consumer: { play() {}, stop() {} },
+    trustedKeys: { resolve() { return new Uint8Array(32); } },
+    onError(error) { errors.push(String(error)); },
+  });
+  const stream = {getTracks: () => []} as unknown as MediaStream;
+  await adapter.start({stream, cameraStream: stream, sendEnvelope(wire) {outbound.push(wire[0]);}});
+  const firstBytes = new Uint8Array([10]);
+  const first = Promise.resolve(emit({mediaKind: "audio", streamId: "audio-1",
+    timestamp: 1n, keyframe: true, bytes: firstBytes}));
+  const second = Promise.resolve(emit({mediaKind: "audio", streamId: "audio-1",
+    timestamp: 2n, keyframe: true, bytes: new Uint8Array([20])}));
+  // The third concurrent frame is dropped under pressure; it must not grow a queue.
+  await emit({mediaKind: "audio", streamId: "audio-1",
+    timestamp: 3n, keyframe: true, bytes: new Uint8Array([30])});
+  firstBytes[0] = 99;
+  await Promise.resolve();
+  assert.equal(authorizeCalls, 1, "same-stream authorizations must be serialized");
+  assert.ok(errors.some((e) => e.includes("outbound endpoint media queue capacity exceeded")));
+  release();
+  await Promise.all([first, second]);
+  assert.deepEqual(sealedSequences, [1n, 2n], "concurrent frames must use unique ordered nonces");
+  assert.deepEqual(sealedPayloads, [[10], [20]], "queued producer buffers must be copied");
+  assert.deepEqual(outbound, [1, 2]);
+  failSeal = true;
+  await emit({mediaKind: "audio", streamId: "audio-1",
+    timestamp: 4n, keyframe: true, bytes: new Uint8Array([40])});
+  await emit({mediaKind: "audio", streamId: "audio-1",
+    timestamp: 5n, keyframe: true, bytes: new Uint8Array([50])});
+  assert.deepEqual(sealedSequences, [1n, 2n, 3n, 4n],
+    "a failed seal must permanently consume its sequence");
+  assert.deepEqual(outbound, [1, 2, 4], "failed encryption must not emit plaintext");
+  assert.ok(errors.some((e) => e.includes("simulated seal failure")));
+  await adapter.stop();
+  assert.equal(bridgeRevoked, true);
+  await emit({mediaKind: "audio", streamId: "audio-1",
+    timestamp: 6n, keyframe: true, bytes: new Uint8Array([60])});
+  assert.deepEqual(outbound, [1, 2, 4], "stopped session cannot send another frame");
+}
+
+
+// Crypto revocation is not optional: an old/untrusted WASM bridge must fail
+// admission, and a stop-time bridge exception cannot leave local media running.
+{
+  const binding = {
+    tenantId: "tenant-1", namespaceId: null, callId: "call-1", groupId: "group-1",
+    cryptoEpoch: 2n, negotiationRef: "neg-1", negotiationGeneration: 1n,
+  };
+  const producer = { start() {}, stop() { stops++; } };
+  const consumer = { play() {}, stop() { stops++; } };
+  let stops = 0;
+  const trustedKeys = { resolve() { return new Uint8Array(32); } };
+  assert.throws(() => createUcrPortableEndpointMediaAdapter({
+    binding, authorizeFrame: () => true, authorizePublish: () => true,
+    producer, consumer, trustedKeys,
+    bridge: {
+      seal_wire() { return new Uint8Array([1]); },
+      open_wire() { return new Uint8Array([1]); },
+    } as unknown as import("./src/portable_endpoint_media.ts").UcrGroupMediaCryptoBridge,
+  }), /must support permanent revocation/);
+  const adapter = createUcrPortableEndpointMediaAdapter({
+    binding, authorizeFrame: () => true, authorizePublish: () => true,
+    producer, consumer, trustedKeys,
+    bridge: {
+      seal_wire() { return new Uint8Array([1]); },
+      open_wire() { return new Uint8Array([1]); },
+      revoke() { throw new Error("revocation failed"); },
+    },
+  });
+  const stream = {getTracks: () => []} as unknown as MediaStream;
+  await adapter.start({stream, cameraStream: stream, sendEnvelope() {}});
+  await assert.rejects(adapter.stop(), /revocation failed/);
+  assert.equal(stops, 2, "failed crypto revocation must still close producer and consumer");
+  await assert.rejects(adapter.start({stream, cameraStream: stream, sendEnvelope() {}}),
+    /bridge retired/);
+
+  // A synchronous failure in one shutdown hook must not prevent the other
+  // endpoint from releasing the camera, microphone or decoder.
+  let consumerStops = 0;
+  const brokenProducer = createUcrPortableEndpointMediaAdapter({
+    binding, authorizeFrame: () => true, authorizePublish: () => true,
+    trustedKeys,
+    bridge: {
+      seal_wire() { return new Uint8Array([1]); },
+      open_wire() { return new Uint8Array([1]); },
+      revoke() {},
+    },
+    producer: {
+      start() {},
+      stop() { throw new Error("producer shutdown failed"); },
+    },
+    consumer: {
+      play() {},
+      stop() { consumerStops++; },
+    },
+  });
+  await brokenProducer.start({stream, cameraStream: stream, sendEnvelope() {}});
+  await assert.rejects(brokenProducer.stop(), /producer shutdown failed/);
+  assert.equal(consumerStops, 1, "sync producer exception must not skip consumer stop");
+}
+
+
+// Low-latency codec admission is deterministic and prevents unbounded browser queues.
+assert.equal(ucrCodecCanEnqueue("video", 0), true);
+assert.equal(ucrCodecCanEnqueue("video", 1), true);
+assert.equal(ucrCodecCanEnqueue("video", 2), false);
+assert.equal(ucrCodecCanEnqueue("audio", 7), true);
+assert.equal(ucrCodecCanEnqueue("audio", 8), false);
+assert.equal(ucrCodecCanEnqueue("audio", -1), false);
+assert.equal(ucrCodecCanEnqueue("video", Number.POSITIVE_INFINITY), false);
+
+
+{
+  const browserCaps = probeUcrNativeRtpBrowserCapabilities({
+    RTCRtpSender: {prototype: {transform: null}},
+    RTCRtpReceiver: {prototype: {transform: null}},
+    Worker: function Worker() {},
+  });
+  assert.equal(browserCaps.senderEncodedTransform, true);
+  assert.equal(browserCaps.receiverEncodedTransform, true);
+  const ready = {
+    ...browserCaps,
+    sfuEncryptedRtpForwarding: true,
+    endpointMlsReady: true,
+    canonicalAuthorizationReady: true,
+    encryptedSenderInstalled: true,
+    encryptedReceiverInstalled: true,
+  };
+  assert.equal(chooseUcrBrowserMediaTransport(ready, true), "native-e2ee-rtp");
+  assert.equal(chooseUcrBrowserMediaTransport({...ready, sfuEncryptedRtpForwarding: false}, true), "portable-e2ee-datachannel");
+  assert.equal(chooseUcrBrowserMediaTransport({...ready, encryptedReceiverInstalled: false}, true), "portable-e2ee-datachannel");
+  assert.throws(() => chooseUcrBrowserMediaTransport({...ready, endpointMlsReady: false}, true), /no authorized encrypted/);
+  assert.throws(() => chooseUcrBrowserMediaTransport({...ready, canonicalAuthorizationReady: false}, true), /no authorized encrypted/);
+  assert.throws(() => chooseUcrBrowserMediaTransport({...ready, encryptedSenderInstalled: false}, false), /no authorized encrypted/);
+}
+
+
+{
+  const worker = {} as Worker;
+  const binding = {callId: "call-1", groupId: "group-1", cryptoEpoch: 2n};
+  const admitted = {worker, verifiedCallId: "call-1", verifiedGroupId: "group-1",
+    verifiedEpoch: 2n, senderReady: true, receiverReady: true};
+  const sender: {transform: unknown} = {transform: null};
+  const receiver: {transform: unknown} = {transform: null};
+  const factory = (_worker: Worker, direction: "encrypt" | "decrypt") => ({direction});
+  const authorize = () => true;
+  const closePeer = () => {};
+  assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
+    {...admitted, receiverReady: false}, binding, factory, authorize, closePeer), /not ready/);
+  assert.equal(sender.transform, null);
+  assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
+    {...admitted, verifiedEpoch: 1n}, binding, factory, authorize, closePeer), /not ready/);
+  assert.equal(receiver.transform, null);
+  assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
+    admitted, binding, factory, () => false, closePeer), /not ready/);
+  assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
+    admitted, binding, () => null, authorize, closePeer), /distinct authenticated/);
+  assert.equal(sender.transform, null);
+  installUcrNativeEncryptedTransforms(sender, receiver, admitted, binding, factory, authorize, closePeer);
+  assert.deepEqual(sender.transform, {direction: "encrypt"});
+  assert.deepEqual(receiver.transform, {direction: "decrypt"});
+  assert.throws(() => installUcrNativeEncryptedTransforms(sender, receiver,
+    admitted, binding, factory, authorize, closePeer), /already installed/);
+  const brokenSender = {transform: null as unknown};
+  const brokenReceiver = Object.defineProperty({transform: null}, "transform", {
+    configurable: true, get() {return null;}, set() {throw new Error("install failed");},
+  });
+  let closed = 0;
+  assert.throws(() => installUcrNativeEncryptedTransforms(
+    brokenSender, brokenReceiver, admitted, binding, factory, authorize, () => {closed++;},
+  ), /install failed/);
+  assert.equal(closed, 1);
+  const revokedSender = {transform: null as unknown};
+  const revokedReceiver = {transform: null as unknown};
+  let revokedPeerClosed = 0;
+  assert.throws(() => installUcrNativeEncryptedTransforms(
+    revokedSender, revokedReceiver, admitted, binding, factory,
+    () => false, () => {revokedPeerClosed++;},
+  ), /not ready/);
+  assert.equal(revokedPeerClosed, 1);
+  assert.equal(revokedSender.transform, null);
+  assert.equal(revokedReceiver.transform, null);
+  let creatorClosed = 0;
+  assert.throws(() => installUcrNativeEncryptedTransforms(
+    {transform: null}, {transform: null}, admitted, binding,
+    () => {throw new Error("worker crashed");}, authorize, () => {creatorClosed++;},
+  ), /worker crashed/);
+  assert.equal(creatorClosed, 1);
+
+}
+
+
+{
+  const target: Record<string, unknown> = {};
+  let unlock!: () => void;
+  const locked = new Promise<void>((resolve) => { unlock = resolve; });
+  let factoryCalls = 0;
+  const installer = createUcrAuthorizedMediaInstaller(target, async () => {
+    factoryCalls++;
+    await locked;
+    throw new Error("canonical signing identity unavailable");
+  });
+  const bootstrap = {
+    state: {}, groupId: "group-1",
+    claims: {tenantId: "tenant-1", namespaceId: null, callId: "call-1",
+      deviceId: "device-1", participantId: "participant-1",
+      participantKind: "person", sessionId: "session-1"},
+    loadWasm: async () => ({}),
+  };
+  const first = installer(bootstrap);
+  await assert.rejects(installer(bootstrap), /installation already active/);
+  assert.equal(factoryCalls, 1, "concurrent installer must not start a second MLS bridge");
+  unlock();
+  await assert.rejects(first, /canonical signing identity unavailable/);
+  assert.equal(target.ucrE2eeEndpoint, undefined);
+  target.ucrE2eeEndpoint = {};
+  await assert.rejects(installer(bootstrap), /installation already active/);
+  assert.equal(factoryCalls, 1, "installed adapter must not be replaced");
+  delete target.ucrE2eeEndpoint;
+  await assert.rejects(installer(bootstrap), /canonical signing identity unavailable/);
+  assert.equal(factoryCalls, 2, "failed installation releases lock for a fresh admission");
+}
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
