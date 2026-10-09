@@ -479,7 +479,7 @@ async fn handle_request(
     if method == Method::GET && path == "/healthz" {
         return Ok(text_response(StatusCode::OK, "ok"));
     }
-    if method == Method::GET && matches!(path.as_str(), "/" | "/join" | "/conference") {
+    if method == Method::GET && matches!(path.as_str(), "/" | "/join" | "/conference" | "/client.html") {
         return Ok(html_response(StatusCode::OK, CLIENT_HTML));
     }
     if method == Method::GET && reference_media_asset(&path).is_some() {
