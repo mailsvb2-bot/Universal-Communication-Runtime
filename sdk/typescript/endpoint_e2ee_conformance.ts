@@ -497,7 +497,12 @@ const earlyBlockedCtx: Record<string, any> = {
   ensureLocalMedia: async () => {unexpectedCapture++;},
   api: async () => {unexpectedSignalling++;},
 };
-runInNewContext(startCode + "\nthis.start = startWebRtc;", earlyBlockedCtx);
+const preflightStartCode = browser.slice(
+  browser.indexOf("async function startWebRtc("),
+  browser.indexOf("async function restartIce("),
+);
+assert.ok(preflightStartCode.startsWith("async function startWebRtc("));
+runInNewContext(preflightStartCode + "\nthis.start = startWebRtc;", earlyBlockedCtx);
 await assert.rejects(earlyBlockedCtx.start(),
   /Canonical Device signing\/trust integration is unavailable/);
 assert.equal(unexpectedCapture, 0, "no microphone/camera prompt without trusted signer");
