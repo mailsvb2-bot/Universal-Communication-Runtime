@@ -903,9 +903,11 @@ function attachE2eeDataChannel(channel){
       const wire=receiveE2eeChunk(event.data);if(!wire)return;
       packetCount++;ui.packets.textContent=String(packetCount);
       const adapter=requireCompatibleE2eeAdapter(e2eeAdapter());if(!adapter||typeof adapter.onEnvelope!=="function")return;
+      // Endpoint MLS and sealed restart state are persisted at session/epoch
+      // boundaries, never after every encoded video/audio frame. Per-frame
+      // IndexedDB writes inflate latency, flash wear and battery consumption.
       Promise.resolve(adapter.onEnvelope(wire))
-        .then(()=>persistEndpointState(adapter))
-        .catch(e=>{ui.status.textContent="Encrypted media open/persist failed: "+e.message;});
+        .catch(e=>{ui.status.textContent="Encrypted media frame rejected: "+e.message;});
     }catch(e){e2eePending=null;ui.status.textContent="Encrypted media transport rejected data: "+e.message;}
   };
   channel.onerror=()=>{ui.status.textContent="Encrypted media DataChannel failed.";};
