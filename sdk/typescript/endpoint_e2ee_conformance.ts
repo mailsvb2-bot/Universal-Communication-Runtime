@@ -429,6 +429,7 @@ const rosterCtx: Record<string, any> = {
   sessionActive: true, mediaActive: true, e2eeAdapterReady: true,
   e2eeChannel: rosterChannel, claims: rosterClaims,
   receiveRosterGeneration: 0, receiveRosterInFlight: false,
+  appliedAdaptiveQuality: null,
   receiveSubscriptionFingerprint: null, receiveSubscriptionInFlight: false,
   receiveSubscriptionDirty: false, receiveRosterSources: [],
   receiveSpeakerId: null, receiveSpeakerCandidate: null, receiveSpeakerSamples: 0,
