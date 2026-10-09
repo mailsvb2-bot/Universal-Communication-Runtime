@@ -131,7 +131,9 @@ const E2EE_MAX_WIRE_BYTES=2*1024*1024+8192;
 const E2EE_MAX_BUFFERED_SEND_BYTES=2*1024*1024;
 const ENTRY_RETRY_MS=2000;
 const STREAM_RETRY_MS=1500;
-const WEBRTC_RETRY_MS=2000;
+// Recovery is bounded; only a newly authenticated E2EE DataChannel resets it.
+const WEBRTC_RETRY_DELAYS_MS=[250,500,1000,2000,4000,8000,15000];
+let webrtcRecoveryAttempt=0,webrtcNeedsPeerRebuild=false;
 const BRANDING_FRAGMENT_KEY="ucr_brand";
 const BRANDING_MAX_JSON_BYTES=4096;
 const BRAND_NAME_MAX=80;
@@ -912,6 +914,8 @@ async function activateE2eeAdapter(){
   const persisted=await persistEndpointState(adapter);
   if(!isCurrent())return;
   e2eeAdapterReady=true;
+  // A connected ICE transport alone is never evidence of recovered E2EE.
+  webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;
   // Admission happens before the protected DataChannel opens. Only now do we
   // have a live, authorized decoder and measured downlink telemetry provider.
   startAdaptiveMediaMonitoring();
@@ -946,7 +950,13 @@ function attachE2eeDataChannel(channel){
     }catch(e){e2eePending=null;ui.status.textContent="Encrypted media transport rejected data: "+e.message;}
   };
   channel.onerror=()=>{ui.status.textContent="Encrypted media DataChannel failed.";};
-  channel.onclose=()=>{if(e2eeChannel===channel){closeE2eeTransport();}};
+  channel.onclose=()=>{if(e2eeChannel===channel){
+    // ICE restart cannot reopen a terminally closed encrypted DataChannel.
+    // Retire its MLS media bridge before scheduling a fresh WebRTC peer.
+    webrtcNeedsPeerRebuild=true;
+    closeE2eeTransport();
+    scheduleWebRtcRetry();
+  }};
 }
 function scheduleStreamRetry(){
   if(!sessionActive||!mediaActive||Date.now()>=claims.expires)return;
@@ -1082,11 +1092,23 @@ async function closeServerPeer(keepalive=false){
   if(!sessionActive)return;
   try{await api("/v1/realtime/webrtc/close",body(),undefined,keepalive);}catch(_){}
 }
-function scheduleWebRtcRetry(){
-  if(!sessionActive||!mediaActive||Date.now()>=claims.expires||restarting)return;
-  if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);
+function scheduleWebRtcRetry(immediate=false){
+  if(!sessionActive||!mediaActive||Date.now()>=claims.expires||!navigator.onLine||restarting)return;
+  if(webrtcRetryTimer){
+    if(!immediate)return; // repeated ICE notifications cannot postpone recovery.
+    clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;
+  }
   ui.webrtcState.textContent="Reconnecting";
-  webrtcRetryTimer=setTimeout(()=>{webrtcRetryTimer=null;recoverWebRtc();},WEBRTC_RETRY_MS);
+  const delay=immediate?0:WEBRTC_RETRY_DELAYS_MS[Math.min(webrtcRecoveryAttempt,WEBRTC_RETRY_DELAYS_MS.length-1)];
+  if(!immediate)webrtcRecoveryAttempt=Math.min(webrtcRecoveryAttempt+1,WEBRTC_RETRY_DELAYS_MS.length-1);
+  webrtcRetryTimer=setTimeout(()=>{
+    webrtcRetryTimer=null;
+    recoverWebRtc().catch(e=>{
+      if(!sessionActive||!mediaActive)return;
+      ui.status.textContent="Secure media reconnection failed: "+e.message;
+      scheduleWebRtcRetry();
+    });
+  },delay);
 }
 function rtcNetworkConfiguration(iceServers,mode){
   if(mode!=="secure"&&mode!=="private")throw new Error("Requested privacy mode requires unavailable infrastructure");
@@ -1138,7 +1160,7 @@ async function startWebRtc(forceMedia=false){
       if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
       ui.state.textContent="Connected";ui.status.textContent=e2eeChannel&&e2eeChannel.readyState==="open"?"Encrypted media transport connected.":"WebRTC signalling connected; waiting for encrypted media DataChannel.";
     }
-    if(state==="failed"||state==="disconnected")scheduleWebRtcRetry();
+    if(state==="failed"||state==="disconnected"||state==="closed")scheduleWebRtcRetry();
   };
   await pc.setRemoteDescription({type:offer.sdp_type,sdp:offer.sdp});
   ensureOwnedPeer();
@@ -1187,6 +1209,7 @@ async function restartIce(){
 }
 async function recoverWebRtc(){
   if(restarting||!sessionActive||!mediaActive||Date.now()>=claims.expires||!navigator.onLine)return;
+  if(webrtcNeedsPeerRebuild){await restartWebRtc(false);return;}
   if(peer){
     try{
       if(await restartIce())return;
@@ -1197,19 +1220,33 @@ async function recoverWebRtc(){
   await restartWebRtc(false);
 }
 async function restartWebRtc(forceMedia){
-  if(restarting||!sessionActive)return;
+  if(restarting||!sessionActive||!mediaActive||Date.now()>=claims.expires)return;
+  const generation=sessionLifecycleGeneration;
   restarting=true;
   try{
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     await closeServerPeer();
+    // Leave or admission withdrawal during the network request must not
+    // destroy a newer peer or resurrect a revoked call.
+    if(generation!==sessionLifecycleGeneration||!sessionActive||!mediaActive)return;
     teardownPeer();
     await startWebRtc(forceMedia);
   }catch(e){
-    ui.webrtcState.textContent="Retrying";ui.status.textContent="WebRTC reconnect failed: "+e.message;
-    setTimeout(()=>{restarting=false;scheduleWebRtcRetry();},WEBRTC_RETRY_MS);
-    return;
+    if(generation===sessionLifecycleGeneration&&sessionActive&&mediaActive){
+      ui.webrtcState.textContent="Retrying";
+      ui.status.textContent="WebRTC reconnect failed: "+e.message;
+      // scheduled in finally after restarting is reset.
+      return scheduleWebRtcRetryAfterRestart();
+    }
+  }finally{
+    restarting=false;
   }
-  restarting=false;
+}
+// Avoid retrying inside the restarting guard; schedule one bounded retry
+// after the current restart attempt has relinquished ownership.
+function scheduleWebRtcRetryAfterRestart(){
+  // A microtask runs after restartWebRtc's finally has reset restarting.
+  Promise.resolve().then(()=>scheduleWebRtcRetry());
 }
 async function activateAdmittedMedia(){
   if(!sessionActive||mediaActive)return;
@@ -1306,10 +1343,11 @@ async function leave(){
   // Invalidate late joins, heartbeats and permission prompts synchronously.
   ++sessionLifecycleGeneration;++mediaCaptureGeneration;mediaActive=false;
   if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
-  if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);
-  await stopScreenShare(false);
+  if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
+  // Device tracks must stop before the first await on explicit Leave.
   teardownPeer();
   stopLocalCapture();
+  await stopScreenShare(false);
   if(wasActive)await closeServerPeer();
   if(endpointMlsState&&typeof endpointMlsState.free==="function"){try{endpointMlsState.free();}catch(_){}}
   endpointMlsState=null;endpointMlsGroupId=null;delete window.ucrEndpointMlsSession;
@@ -1717,7 +1755,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
   navigator.mediaDevices.addEventListener("devicechange",()=>{handleMediaDeviceChange();});
 }
 window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
-window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry();}});
+window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry(true);}});
 window.addEventListener("pagehide",()=>{++sessionLifecycleGeneration;++mediaCaptureGeneration;if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 <script src="./mobile-browser-probe.js"></script>
