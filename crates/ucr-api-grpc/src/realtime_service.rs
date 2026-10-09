@@ -808,7 +808,12 @@ where
         request: Request<pb::RealtimeGetReceiveRosterRequest>,
     ) -> Result<Response<pb::RealtimeGetReceiveRosterResponse>, Status> {
         let token = decode_bearer_token(request.metadata());
-        let lookup = decode_realtime_lookup(request.into_inner());
+        let fields = request.into_inner();
+        let lookup = decode_realtime_lookup_fields(
+            fields.scope,
+            fields.call_id,
+            fields.session_id,
+        );
         let result = match (token, lookup) {
             (Ok(token), Ok((scope, call_id, session_id))) => self
                 .authenticated_claims(&token, &scope, &call_id, &session_id)
