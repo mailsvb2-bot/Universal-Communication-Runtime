@@ -490,9 +490,9 @@ mod tests {
             sdp::session_description::RTCSessionDescription,
         };
 
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .expect("select rustls crypto provider for live DTLS");
+        // Another concurrent WebRTC test may have installed the same provider.
+        // rustls installation is process-global and intentionally single-shot.
+        let _ = rustls::crypto::ring::default_provider().install_default();
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
