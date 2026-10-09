@@ -348,6 +348,7 @@ const mlsContextGate = new Promise<any>(resolve => {releaseMlsContext = resolve;
 let releaseMlsRegistration: (() => void) | undefined;
 const mlsRegistrationGate = new Promise<void>(resolve => {releaseMlsRegistration = resolve;});
 let registeredPackages = 0, freedMlsStates = 0, publishedSnapshots = 0;
+let capturedMlsSignal: AbortSignal | undefined;
 const mlsClaims = {tenant_id: "tenant", namespace_id: null,
   call_id: "call", device_id: "device"};
 const mlsFixture = {
@@ -364,8 +365,10 @@ const mlsContext: Record<string, any> = {
   claims: mlsClaims, sessionActive: true, sessionLifecycleGeneration: 1,
   endpointMlsState: null, endpointMlsGroupId: null,
   endpointMlsInvalidationGeneration: 0, endpointMlsBootstrapPromise: null,
-  window: {},
-  fetchEndpointMlsContext: async () => mlsContextGate,
+  endpointMlsBootstrapAbort: null, AbortController, window: {},
+  fetchEndpointMlsContext: async (signal: AbortSignal) => {
+    capturedMlsSignal=signal;return mlsContextGate;
+  },
   loadEndpointWasmModule: async () => ({
     EndpointMlsState: class {
       key_package() {return Uint8Array.of(1);}
@@ -382,7 +385,8 @@ const mlsContext: Record<string, any> = {
   endpointApplyBootstrapCommits() {},
   sealEndpointMlsSnapshot: async () => {publishedSnapshots++;},
   body: () => ({}),
-  api: async () => {
+  api: async (_path: string, _body: object, signal: AbortSignal) => {
+    capturedMlsSignal=signal;
     registeredPackages++;
     await mlsRegistrationGate;
   },
@@ -393,6 +397,8 @@ runInNewContext(mlsSnippet +
   mlsContext);
 const waitingForContext = mlsContext.ensureMls();
 mlsContext.retireMls();
+assert.equal(capturedMlsSignal?.aborted, true,
+  "retirement must abort an in-flight canonical MLS context request");
 mlsContext.sessionActive = false;
 releaseMlsContext?.(mlsFixture);
 await assert.rejects(waitingForContext, /cancelled by admission withdrawal/);
@@ -408,6 +414,8 @@ for(let i=0;i<16&&registeredPackages===0;i++)await Promise.resolve();
 assert.equal(registeredPackages, 1, "one canonical Device registration required");
 const sameRegistration = mlsContext.ensureMls();
 mlsContext.retireMls();
+assert.equal(capturedMlsSignal?.aborted, true,
+  "retirement must abort pending canonical Device registration");
 mlsContext.sessionActive = false;
 releaseMlsRegistration?.();
 await assert.rejects(waitingForRegistration, /cancelled by admission withdrawal/);
@@ -672,7 +680,7 @@ const admissionCtx: Record<string, any> = {
   ui: admissionUi, claims: {not_before: 0}, sessionActive: true,
   mediaActive: true, mediaCaptureGeneration: 0, sessionLifecycleGeneration: 0,
   heartbeatRequestGeneration: 0,
-  endpointMlsInvalidationGeneration: 0,
+  endpointMlsInvalidationGeneration: 0, endpointMlsBootstrapAbort: null,
   endpointMlsState: null, endpointMlsGroupId: null, window: {},
   localStream: makePhysicalStream(), streamAbort: {abort() {}},
   webrtcRetryTimer: 1, streamRetryTimer: 2, reactionTimer: null, chatTimer: null,
