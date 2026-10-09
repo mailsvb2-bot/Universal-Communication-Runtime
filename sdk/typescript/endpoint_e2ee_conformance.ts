@@ -442,6 +442,30 @@ assert.match(browser, /sealState/);
   assert.equal(stops, 2, "failed crypto revocation must still close producer and consumer");
   await assert.rejects(adapter.start({stream, cameraStream: stream, sendEnvelope() {}}),
     /bridge retired/);
+
+  // A synchronous failure in one shutdown hook must not prevent the other
+  // endpoint from releasing the camera, microphone or decoder.
+  let consumerStops = 0;
+  const brokenProducer = createUcrPortableEndpointMediaAdapter({
+    binding, authorizeFrame: () => true, authorizePublish: () => true,
+    trustedKeys,
+    bridge: {
+      seal_wire() { return new Uint8Array([1]); },
+      open_wire() { return new Uint8Array([1]); },
+      revoke() {},
+    },
+    producer: {
+      start() {},
+      stop() { throw new Error("producer shutdown failed"); },
+    },
+    consumer: {
+      play() {},
+      stop() { consumerStops++; },
+    },
+  });
+  await brokenProducer.start({stream, cameraStream: stream, sendEnvelope() {}});
+  await assert.rejects(brokenProducer.stop(), /producer shutdown failed/);
+  assert.equal(consumerStops, 1, "sync producer exception must not skip consumer stop");
 }
 
 
