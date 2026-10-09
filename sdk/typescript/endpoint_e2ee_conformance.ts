@@ -528,7 +528,9 @@ Object.defineProperty(globalThis, "MediaStreamTrackProcessor", {
 });
 Object.defineProperty(globalThis, "OffscreenCanvas", {
   configurable: true, value: class {
-    constructor(readonly width: number, readonly height: number) {}
+    readonly width: number;
+    readonly height: number;
+    constructor(width: number, height: number) { this.width = width; this.height = height; }
     getContext() {return {drawImage() {lowDraws++;}};}
   },
 });
