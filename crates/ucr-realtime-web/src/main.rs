@@ -34,6 +34,26 @@ const MAX_SIGNALING_ICE_CANDIDATE_BYTES: usize = 4096;
 const MAX_SIGNALING_ICE_MID_BYTES: usize = 256;
 const CLIENT_HTML: &str = include_str!("../static/client.html");
 
+// Generated endpoint-only public code: no secrets, grants or MLS state in these
+// artifacts. The gateway serves only an explicit allowlist, never a directory.
+const REFERENCE_MEDIA_ASSETS: [(&str, &str, &str); 3] = [
+    (
+        "/endpoint-media/reference_browser_media_installer.js",
+        "endpoint-media/reference_browser_media_installer.js",
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "/endpoint-wasm/ucr_endpoint_wasm.js",
+        "endpoint-wasm/ucr_endpoint_wasm.js",
+        "text/javascript; charset=utf-8",
+    ),
+    (
+        "/endpoint-wasm/ucr_endpoint_wasm_bg.wasm",
+        "endpoint-wasm/ucr_endpoint_wasm_bg.wasm",
+        "application/wasm",
+    ),
+];
+
 type HttpBody = UnsyncBoxBody<Bytes, Infallible>;
 type HttpResponse = Response<HttpBody>;
 
@@ -461,6 +481,9 @@ async fn handle_request(
     }
     if method == Method::GET && matches!(path.as_str(), "/" | "/join" | "/conference") {
         return Ok(html_response(StatusCode::OK, CLIENT_HTML));
+    }
+    if method == Method::GET && reference_media_asset(&path).is_some() {
+        return Ok(serve_reference_media_asset(&path));
     }
 
     if method != Method::POST {
@@ -2340,6 +2363,39 @@ fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> HttpResponse 
         .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
+fn reference_media_asset(path: &str) -> Option<(&'static str, &'static str)> {
+    REFERENCE_MEDIA_ASSETS
+        .iter()
+        .find(|(route, _, _)| *route == path)
+        .map(|(_, file, mime)| (*file, *mime))
+}
+
+fn serve_reference_media_asset(path: &str) -> HttpResponse {
+    let Some((file, mime)) = reference_media_asset(path) else {
+        return empty_response(StatusCode::NOT_FOUND);
+    };
+    // A deployment must provide the exact WASM and SDK bundles built for its
+    // source revision. Never generate an adapter dynamically or load a remote
+    // untrusted CDN script. Missing assets fail closed, not to plaintext media.
+    let directory = std::env::var_os("UCR_REALTIME_WEB_ASSET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/static")));
+    match std::fs::read(directory.join(file)) {
+        Ok(bytes) if !bytes.is_empty() && bytes.len() <= 16 * 1024 * 1024 => Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, mime)
+            .header(CACHE_CONTROL, "no-store")
+            .header("X-Content-Type-Options", "nosniff")
+            .body(full_body(Bytes::from(bytes)))
+            .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR)),
+        _ => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "endpoint_media_asset_missing",
+            "Authorized endpoint E2EE package not installed on the gateway",
+        ),
+    }
+}
+
 fn html_response(status: StatusCode, html: &'static str) -> HttpResponse {
     Response::builder()
         .status(status)
@@ -2534,6 +2590,24 @@ mod tests {
             response.headers().get(CACHE_CONTROL),
             Some(&hyper::header::HeaderValue::from_static("no-store"))
         );
+    }
+
+    #[test]
+    fn browser_media_assets_use_only_fixed_local_paths_and_correct_mime() {
+        assert_eq!(
+            reference_media_asset("/endpoint-wasm/ucr_endpoint_wasm_bg.wasm"),
+            Some(("endpoint-wasm/ucr_endpoint_wasm_bg.wasm", "application/wasm")),
+        );
+        assert_eq!(
+            reference_media_asset("/endpoint-media/reference_browser_media_installer.js"),
+            Some((
+                "endpoint-media/reference_browser_media_installer.js",
+                "text/javascript; charset=utf-8",
+            )),
+        );
+        assert!(reference_media_asset("/endpoint-wasm/../private.key").is_none());
+        assert!(reference_media_asset("/endpoint-media/signing-seed").is_none());
+        assert!(reference_media_asset("/client.html").is_none());
     }
 
     #[test]
