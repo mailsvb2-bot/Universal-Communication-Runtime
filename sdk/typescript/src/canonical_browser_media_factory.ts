@@ -141,9 +141,13 @@ export function createUcrCanonicalBrowserMediaFactory(
         bridge,
         binding,
         trustedKeys: {
-          resolve: (header, keyId) => {
+          resolve: async (header, keyId) => {
             if (!admission.isCurrent()) throw new Error("device media authorization revoked");
-            return admission.trustedKeys.resolve(header, keyId);
+            const key = await admission.trustedKeys.resolve(header, keyId);
+            // The canonical descriptor may be fetched asynchronously. Do not
+            // decrypt a frame if the device or MLS epoch was retired meanwhile.
+            if (!admission.isCurrent()) throw new Error("device media authorization revoked");
+            return key;
           },
         },
         authorizeFrame: async (header) =>
