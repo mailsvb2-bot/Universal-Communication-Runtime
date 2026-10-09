@@ -104,6 +104,10 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   readonly #sequences = new Map<string, bigint>();
   readonly #received = new Map<string, bigint>();
   readonly #reserved = new Set<string>();
+  // Auth/key lookups are asynchronous. Preserve ciphertext DataChannel arrival
+  // order PER verified stream while allowing distinct speakers to progress in
+  // parallel. Bounded by #pending/#maxPendingFrames, never a global queue.
+  readonly #receiveTails = new Map<string, Promise<void>>();
   /** Endpoint-only, bounded authenticated video layer observations. */
   readonly #verifiedVideoStreams = new Map<string, UcrVerifiedReceiveVideoStream>();
   // Serialize emission for each stream: concurrent async authorization must never
@@ -245,7 +249,9 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         throw new Error("endpoint verification queue capacity exceeded");
       }
       this.#reserved.add(reservation);
-      try {
+      const previous = this.#receiveTails.get(replayKey) ?? Promise.resolve();
+      const current: Promise<void> = previous.catch(() => {}).then(async () => {
+      if (!this.#active || this.#generation !== generation) return;
       if (this.#authorizeFrame && !(await this.#authorizeFrame(header))) {
         throw new Error("media recipient or source authorization revoked");
       }
@@ -285,8 +291,15 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
           this.#verifiedVideoStreams.set(id, metadata);
         }
       }
+      });
+      this.#receiveTails.set(replayKey, current);
+      try {
+        await current;
       } finally {
         this.#reserved.delete(reservation);
+        if (this.#receiveTails.get(replayKey) === current) {
+          this.#receiveTails.delete(replayKey);
+        }
       }
     } finally {
       this.#pending--;
@@ -305,6 +318,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#sequences.clear();
     this.#received.clear();
     this.#reserved.clear();
+    this.#receiveTails.clear();
     this.#verifiedVideoStreams.clear();
     this.#sendTails.clear();
     // Retire crypto BEFORE asynchronous media cleanup. A revocation failure
