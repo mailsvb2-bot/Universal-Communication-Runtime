@@ -1169,11 +1169,11 @@ function validAdaptiveQualityTarget(value){
 async function reportAdaptiveMedia(){
   if(!sessionActive||!mediaActive||adaptiveMediaReportInFlight||!e2eeAdapterReady||e2eeChannel?.readyState!=="open")return;
   const adapter=e2eeAdapter();
-  if(!adapter||typeof adapter.getAdaptiveMediaTelemetry!=="function")return;
+  if(!adapter||typeof adapter.getReceiveMediaTelemetry!=="function")return;
   adaptiveMediaReportInFlight=true;
   const session=claims,channel=e2eeChannel;
   try{
-    const telemetry=validAdaptiveMediaTelemetry(await adapter.getAdaptiveMediaTelemetry());
+    const telemetry=validAdaptiveMediaTelemetry(await adapter.getReceiveMediaTelemetry());
     if(!telemetry)return;
     const response=await api("/v1/realtime/adaptive-media",{...body(),...telemetry});
     if(!response.ok)throw new Error("Adaptive media policy rejected telemetry");
@@ -1182,11 +1182,11 @@ async function reportAdaptiveMedia(){
     if(!target)throw new Error("Invalid adaptive media quality target");
     if(!sessionActive||!mediaActive||!e2eeAdapterReady||claims!==session||e2eeChannel!==channel||channel?.readyState!=="open")return;
     // Never restart ICE/WebRTC just to change resolution: that breaks an otherwise good call.
-    // Only the authenticated endpoint media/codec owner can change its encrypted encoder.
-    if(typeof adapter.applyAdaptiveMediaDecision!=="function")return;
+    // Only the authenticated subscriber endpoint may adjust receive/decode subscriptions; never change the publisher encoder based on this viewer's downlink.
+    if(typeof adapter.applyReceiveMediaDecision!=="function")return;
     const fingerprint=JSON.stringify(target);
     if(appliedAdaptiveQuality===fingerprint)return;
-    await adapter.applyAdaptiveMediaDecision(target);
+    await adapter.applyReceiveMediaDecision(target);
     if(sessionActive&&mediaActive&&claims===session&&e2eeChannel===channel){
       appliedAdaptiveQuality=fingerprint;
     }
@@ -1202,7 +1202,7 @@ function startAdaptiveMediaMonitoring(){
   stopAdaptiveMediaMonitoring();
   if(!sessionActive||!mediaActive)return;
   const adapter=e2eeAdapter();
-  if(!adapter||typeof adapter.getAdaptiveMediaTelemetry!=="function")return;
+  if(!adapter||typeof adapter.getReceiveMediaTelemetry!=="function")return;
   adaptiveMediaTimer=setInterval(()=>{reportAdaptiveMedia().catch(()=>{});},2000);
   reportAdaptiveMedia().catch(()=>{});
 }
