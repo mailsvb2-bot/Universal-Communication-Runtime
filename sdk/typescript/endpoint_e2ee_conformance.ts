@@ -281,6 +281,7 @@ assert.ok(handoverEvents.includes("retire:B"));
 assert.ok(handoverEvents.includes("retire:late"));
 await assert.rejects(chameleon.handover(receivePath("after-close")), /receive session retired/);
 
+const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
 // Chameleon lifecycle: no telemetry may be reported before the endpoint is
 // authenticated and running; the first report must start after E2EE activation.
 const activateSnippet = browser.slice(
@@ -406,7 +407,7 @@ assert.equal(openedFrameCount, 80, "80 protected ciphertext frames must be accep
 assert.equal(persistedFrameCount, 0,
   "media hot path must not persist MLS state on every decrypted frame");
 
-const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
+
 assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
 assert.match(browser, /Unsupported endpoint E2EE adapter contract version/);
 assert.match(browser, /restoreSealedState/);
