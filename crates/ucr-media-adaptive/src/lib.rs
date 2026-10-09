@@ -213,6 +213,103 @@ pub fn select_viewer_video_layer(
         }))
 }
 
+/// Ephemeral per-subscriber hysteresis. Quality drop and authorization-driven removal are
+/// immediate; restoration to a better *actually available* layer requires two valid observations.
+/// Never owns subscription, Call, E2EE epoch, codec, transport or publisher state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewerLayerController {
+    selected: Option<ViewerVideoLayer>,
+    pending_improvement: Option<ViewerVideoLayer>,
+    improvement_samples: u8,
+}
+
+impl ViewerLayerController {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            selected: None,
+            pending_improvement: None,
+            improvement_samples: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn selected(&self) -> Option<ViewerVideoLayer> {
+        self.selected
+    }
+
+    /// Recompute one subscriber's layer from already-authorized advertised options.
+    ///
+    /// # Errors
+    /// Returns bounded metadata errors without changing the current selection.
+    pub fn observe(
+        &mut self,
+        stage: AdaptiveMediaStage,
+        viewport_width: u32,
+        viewport_height: u32,
+        layers: &[ViewerVideoLayer],
+    ) -> Result<Option<ViewerVideoLayer>, ViewerLayerSelectionError> {
+        let preferred =
+            select_viewer_video_layer(stage, viewport_width, viewport_height, layers)?;
+        let Some(candidate) = preferred else {
+            self.selected = None;
+            self.pending_improvement = None;
+            self.improvement_samples = 0;
+            return Ok(None);
+        };
+        let current = self.selected;
+        let current_still_suitable = current.is_some_and(|old| {
+            layers.contains(&old)
+                && old.width <= viewport_width
+                && old.height <= viewport_height
+                && reference_video_config(stage).is_ok_and(|cfg| cfg.is_some_and(|cap| {
+                    old.width <= cap.width
+                        && old.height <= cap.height
+                        && old.frame_rate <= cap.frame_rate
+                        && old.bitrate_bps <= cap.target_bitrate_bps
+                }))
+        });
+        if !current_still_suitable {
+            self.selected = Some(candidate);
+            self.pending_improvement = None;
+            self.improvement_samples = 0;
+            return Ok(self.selected);
+        }
+        if current == Some(candidate) {
+            self.pending_improvement = None;
+            self.improvement_samples = 0;
+            return Ok(self.selected);
+        }
+        let current = current.expect("checked that current layer is suitable");
+        let candidate_pixels = u64::from(candidate.width) * u64::from(candidate.height);
+        let current_pixels = u64::from(current.width) * u64::from(current.height);
+        if (candidate_pixels, candidate.frame_rate, candidate.bitrate_bps)
+            < (current_pixels, current.frame_rate, current.bitrate_bps)
+        {
+            self.selected = Some(candidate);
+            self.pending_improvement = None;
+            self.improvement_samples = 0;
+        } else if self.pending_improvement == Some(candidate) {
+            self.improvement_samples = self.improvement_samples.saturating_add(1);
+            if self.improvement_samples >= 2 {
+                self.selected = Some(candidate);
+                self.pending_improvement = None;
+                self.improvement_samples = 0;
+            }
+        } else {
+            self.pending_improvement = Some(candidate);
+            self.improvement_samples = 1;
+        }
+        Ok(self.selected)
+    }
+}
+
+impl Default for ViewerLayerController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ucr_model::{
