@@ -672,6 +672,8 @@ const admissionCtx: Record<string, any> = {
   ui: admissionUi, claims: {not_before: 0}, sessionActive: true,
   mediaActive: true, mediaCaptureGeneration: 0, sessionLifecycleGeneration: 0,
   heartbeatRequestGeneration: 0,
+  endpointMlsInvalidationGeneration: 0,
+  endpointMlsState: null, endpointMlsGroupId: null, window: {},
   localStream: makePhysicalStream(), streamAbort: {abort() {}},
   webrtcRetryTimer: 1, streamRetryTimer: 2, reactionTimer: null, chatTimer: null,
   clearTimeout() {}, clearInterval() {},
@@ -684,7 +686,7 @@ const admissionCtx: Record<string, any> = {
   api: async () => {throw new Error("unexpected network request");},
 };
 runInNewContext(
-  captureStopCode + "\n" + admissionCode +
+  mlsSnippet + "\n" + captureStopCode + "\n" + admissionCode +
   "\nthis.admission = applyAdmissionState;" +
   "\nthis.heartbeat = heartbeat; this.joinConference = join;" +
   "\nthis.activateAdmitted = activateAdmittedMedia;",
