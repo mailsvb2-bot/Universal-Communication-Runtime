@@ -100,7 +100,7 @@ const ui={
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false,adaptiveMediaGeneration=0;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
-let mediaCaptureGeneration=0;
+let mediaCaptureGeneration=0,sessionLifecycleGeneration=0;
 let appliedAdaptiveQuality=null,e2eeAdapterReady=false;
 let receiveRosterGeneration=0,receiveRosterInFlight=false,receiveSubscriptionFingerprint=null;
 let receiveSubscriptionInFlight=false,receiveSubscriptionDirty=false;
@@ -1038,6 +1038,11 @@ function applyToggleLabels(){
   ui.micToggle.textContent=!policyAllows("audio")?tr("microphoneUnavailable"):audio?(audio.enabled?tr("muteMicrophone"):tr("unmuteMicrophone")):tr("startMicrophone");
   ui.cameraToggle.textContent=!policyAllows("camera")?tr("cameraUnavailable"):video?(video.enabled?tr("turnCameraOff"):tr("turnCameraOn")):tr("startCamera");
 }
+function stopLocalCapture(){
+  ++mediaCaptureGeneration;
+  if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;}
+  ui.localVideo.srcObject=null;
+}
 function teardownPeer(){
   ++mediaCaptureGeneration;
   closeE2eeTransport();
@@ -1159,8 +1164,10 @@ async function restartWebRtc(forceMedia){
   restarting=false;
 }
 async function activateAdmittedMedia(){
-  await ensureEndpointMlsReady();
   if(!sessionActive||mediaActive)return;
+  const generation=sessionLifecycleGeneration;
+  await ensureEndpointMlsReady();
+  if(generation!==sessionLifecycleGeneration||!sessionActive||mediaActive)return;
   mediaActive=true;ui.state.textContent="Connected";ui.handToggle.disabled=false;ui.reactionSend.disabled=false;ui.chatInput.disabled=false;ui.chatSend.disabled=false;refreshLocalMediaControls();
   if(!reactionTimer){reactionTimer=setInterval(()=>{pollReactions().catch(()=>{});},1000);}
   if(!chatTimer){chatTimer=setInterval(()=>{pollChat().catch(()=>{});},1000);}
@@ -1174,47 +1181,57 @@ async function activateAdmittedMedia(){
 }
 async function applyAdmissionState(state){
   if(state==="waiting_room"){
-    // Revoke the protected receiver when the canonical conference withdraws
-    // admission; merely hiding the UI would leave encrypted media flowing.
-    teardownPeer();
-    mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
+    // Withdrawal must stop real camera/microphone capture, not just the E2EE
+    // transport. A later re-admission can request devices afresh.
+    mediaActive=false;teardownPeer();stopLocalCapture();
+    if(streamAbort){streamAbort.abort();streamAbort=null;}
+    if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();refreshLocalMediaControls();ui.state.textContent="Waiting";ui.webrtcState.textContent="Waiting";
     ui.status.textContent=waitCopy("waitingRoom");
     return;
   }
   if(state==="closed"){
-    teardownPeer();
-    mediaActive=false;ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();
+    mediaActive=false;teardownPeer();stopLocalCapture();ui.handToggle.disabled=true;ui.reactionSend.disabled=true;ui.chatInput.disabled=true;ui.chatSend.disabled=true;if(reactionTimer){clearInterval(reactionTimer);reactionTimer=null;}if(chatTimer){clearInterval(chatTimer);chatTimer=null;}stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();
     if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
     if(streamRetryTimer){clearTimeout(streamRetryTimer);streamRetryTimer=null;}
     if(streamAbort){streamAbort.abort();streamAbort=null;}
-    teardownPeer();refreshLocalMediaControls();
+    refreshLocalMediaControls();
     ui.state.textContent="Ended";ui.status.textContent="The conference is no longer accepting realtime media.";
     return;
   }
   if(state==="admitted"||!state)await activateAdmittedMedia();
 }
 async function heartbeat(){
+  if(!sessionActive)return;
+  const generation=sessionLifecycleGeneration;
+  const current=()=>sessionActive&&generation===sessionLifecycleGeneration;
   const r=await api("/v1/realtime/heartbeat",{...body(),expected_session_sequence:0});
+  if(!current())return;
   const data=await r.json();
+  if(!current())return;
   await applyMediaPolicy(data.media_policy);
+  if(!current())return;
   await applyAdmissionState(data.admission_state);
-  if(sessionActive&&mediaActive&&e2eeAdapterReady){
+  if(current()&&mediaActive&&e2eeAdapterReady){
     syncReceiveSubscriptions().catch(e=>{if(sessionActive&&e2eeAdapterReady)ui.status.textContent="Protected receive subscription unavailable: "+e.message;});
   }
 }
 async function join(){
+  if(Date.now()<claims.not_before){scheduleWaitingRoom();return;}
+  const generation=++sessionLifecycleGeneration;
   try{
-    if(Date.now()<claims.not_before){scheduleWaitingRoom();return;}
     ui.join.disabled=true;ui.state.textContent="Joining";ui.status.textContent="Authenticating signed session grant…";
     const r=await api("/v1/realtime/join",body());const data=await r.json();
+    if(generation!==sessionLifecycleGeneration)return;
     if(!data.ok)throw new Error(data.message||"Join rejected");
     sessionActive=true;ui.leave.disabled=false;ui.privacyMode.disabled=true;
     await applyMediaPolicy(data.media_policy);
+    if(generation!==sessionLifecycleGeneration)return;
     if(data.expires_at_unix_ms)ui.expires.textContent=new Date(data.expires_at_unix_ms).toLocaleTimeString();
     const interval=Math.max(5000,Number(data.heartbeat_interval_ms||15000));
     heartbeatTimer=setInterval(()=>{heartbeat().catch(async e=>{if(e.code==="heartbeat_rejected"){await leave();ui.state.textContent="Access ended";ui.status.textContent="Conference access ended by host or server policy.";return;}ui.status.textContent="Heartbeat failed: "+e.message;});},interval);
     await applyAdmissionState(data.admission_state);
   }catch(e){
+    if(generation!==sessionLifecycleGeneration)return;
     if(e.code==="waiting_room"){scheduleEntryRetry();return;}
     ui.state.textContent="Rejected";ui.status.textContent=e.message;ui.join.disabled=false;
   }
@@ -1227,12 +1244,13 @@ function scheduleEntryRetry(){
 }
 async function leave(){
   const wasActive=sessionActive;
-  // Invalidate outstanding browser permission dialogs BEFORE any awaited cleanup.
-  ++mediaCaptureGeneration;mediaActive=false;
+  // Invalidate late joins, heartbeats and permission prompts synchronously.
+  ++sessionLifecycleGeneration;++mediaCaptureGeneration;mediaActive=false;
+  if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
   if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);
   await stopScreenShare(false);
   teardownPeer();
-  if(localStream){localStream.getTracks().forEach(track=>track.stop());localStream=null;ui.localVideo.srcObject=null;}
+  stopLocalCapture();
   if(wasActive)await closeServerPeer();
   if(endpointMlsState&&typeof endpointMlsState.free==="function"){try{endpointMlsState.free();}catch(_){}}
   endpointMlsState=null;endpointMlsGroupId=null;delete window.ucrEndpointMlsSession;
@@ -1641,7 +1659,7 @@ if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="fun
 }
 window.addEventListener("offline",()=>{if(sessionActive){ui.state.textContent="Reconnecting";ui.webrtcState.textContent="Offline";ui.status.textContent="Network unavailable. Realtime media will reconnect automatically.";if(streamAbort)streamAbort.abort();}});
 window.addEventListener("online",()=>{if(sessionActive){ui.status.textContent="Network restored. Reconnecting media…";scheduleStreamRetry();scheduleWebRtcRetry();}});
-window.addEventListener("pagehide",()=>{++mediaCaptureGeneration;if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
+window.addEventListener("pagehide",()=>{++sessionLifecycleGeneration;++mediaCaptureGeneration;if(sessionActive){closeServerPeer(true);api("/v1/realtime/leave",body(),undefined,true).catch(()=>{});}sessionActive=false;mediaActive=false;stopAdaptiveMediaMonitoring();stopActiveSpeakerMonitoring();if(reactionTimer)clearInterval(reactionTimer);if(chatTimer)clearInterval(chatTimer);if(waitTimer)clearTimeout(waitTimer);if(entryRetryTimer)clearTimeout(entryRetryTimer);if(streamRetryTimer)clearTimeout(streamRetryTimer);if(webrtcRetryTimer)clearTimeout(webrtcRetryTimer);if(streamAbort)streamAbort.abort();teardownPeer();if(screenStream)screenStream.getTracks().forEach(track=>track.stop());screenStream=null;if(localStream)localStream.getTracks().forEach(track=>track.stop());});
 </script>
 <script src="./mobile-browser-probe.js"></script>
 </body>
