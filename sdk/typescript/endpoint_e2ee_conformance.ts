@@ -541,6 +541,136 @@ releaseStartCapture();
 await assert.rejects(staleStart, /cancelled by conference media teardown/);
 assert.equal(staleServerStarts, 0, "late camera permission cannot reopen WebRTC server peer");
 
+// Real browser conference admission withdrawal must turn OFF physical
+// camera/microphone capture, not only close the encrypted DataChannel.
+const captureStopCode = browser.slice(
+  browser.indexOf("function stopLocalCapture(){"),
+  browser.indexOf("function teardownPeer(){"),
+);
+const admissionCode = browser.slice(
+  browser.indexOf("async function activateAdmittedMedia(){"),
+  browser.indexOf("function scheduleWaitingRoom(){"),
+);
+assert.ok(captureStopCode.startsWith("function stopLocalCapture(){"));
+assert.ok(admissionCode.startsWith("async function activateAdmittedMedia(){"));
+const stoppedPhysical: string[] = [];
+const makePhysicalStream = () => ({
+  getTracks: () => [
+    {stop() {stoppedPhysical.push("microphone");}},
+    {stop() {stoppedPhysical.push("camera");}},
+  ],
+});
+let protectedTeardowns = 0;
+let policyApplications = 0;
+let resurrectionAttempts = 0;
+const admissionUi: Record<string, any> = {
+  localVideo: {srcObject: {}},
+  handToggle: {disabled: false}, reactionSend: {disabled: false},
+  chatInput: {disabled: false}, chatSend: {disabled: false},
+  state: {textContent: ""}, webrtcState: {textContent: ""},
+  status: {textContent: ""}, join: {disabled: false},
+  leave: {disabled: false}, privacyMode: {disabled: false},
+  expires: {textContent: ""},
+};
+const admissionCtx: Record<string, any> = {
+  ui: admissionUi, claims: {not_before: 0}, sessionActive: true,
+  mediaActive: true, mediaCaptureGeneration: 0, sessionLifecycleGeneration: 0,
+  heartbeatRequestGeneration: 0,
+  localStream: makePhysicalStream(), streamAbort: {abort() {}},
+  webrtcRetryTimer: 1, streamRetryTimer: 2, reactionTimer: null, chatTimer: null,
+  clearTimeout() {}, clearInterval() {},
+  stopAdaptiveMediaMonitoring() {}, stopActiveSpeakerMonitoring() {},
+  refreshLocalMediaControls() {}, waitCopy: () => "Waiting for host",
+  teardownPeer() { protectedTeardowns++; },
+  applyMediaPolicy: async () => {policyApplications++;},
+  syncReceiveSubscriptions: async () => {},
+  e2eeAdapterReady: false, body: () => ({}),
+  api: async () => {throw new Error("unexpected network request");},
+};
+runInNewContext(
+  captureStopCode + "\n" + admissionCode +
+  "\nthis.admission = applyAdmissionState;" +
+  "\nthis.heartbeat = heartbeat; this.joinConference = join;" +
+  "\nthis.activateAdmitted = activateAdmittedMedia;",
+  admissionCtx,
+);
+await admissionCtx.admission("waiting_room");
+assert.deepEqual(stoppedPhysical, ["microphone", "camera"],
+  "waiting room must stop the real microphone/camera tracks");
+assert.equal(admissionCtx.localStream, null);
+assert.equal(admissionUi.localVideo.srcObject, null);
+assert.equal(admissionCtx.mediaActive, false);
+assert.equal(admissionCtx.streamAbort, null, "waiting room must abort realtime stream");
+assert.equal(admissionCtx.streamRetryTimer, null);
+assert.equal(protectedTeardowns, 1);
+admissionCtx.mediaActive = true;
+admissionCtx.localStream = makePhysicalStream();
+await admissionCtx.admission("closed");
+assert.deepEqual(stoppedPhysical, ["microphone", "camera", "microphone", "camera"]);
+assert.equal(admissionCtx.localStream, null, "closed conference must stop devices");
+assert.equal(protectedTeardowns, 2, "closed conference must not double teardown");
+
+// A heartbeat already in the network must not restore admission after Leave.
+let releaseHeartbeat: ((response: any) => void) | undefined;
+const heartbeatGate = new Promise<any>(resolve => {releaseHeartbeat = resolve;});
+admissionCtx.sessionActive = true;
+admissionCtx.mediaActive = false;
+admissionCtx.api = async () => heartbeatGate;
+const lateHeartbeat = admissionCtx.heartbeat();
+admissionCtx.sessionLifecycleGeneration++;
+admissionCtx.sessionActive = false;
+releaseHeartbeat?.({json: async () => ({admission_state: "admitted"})});
+await lateHeartbeat;
+assert.equal(policyApplications, 0, "late heartbeat cannot change policy after Leave");
+assert.equal(admissionCtx.mediaActive, false);
+
+// Older heartbeat must not overwrite a newer admission decision even if both
+// were authorized when they started and the HTTP responses arrive reordered.
+const pendingHeartbeatResponses: Array<(value: any) => void> = [];
+admissionCtx.sessionActive = true;
+admissionCtx.api = async () => new Promise(resolve => {
+  pendingHeartbeatResponses.push(resolve);
+});
+const olderHeartbeat = admissionCtx.heartbeat();
+const newerHeartbeat = admissionCtx.heartbeat();
+assert.equal(pendingHeartbeatResponses.length, 2);
+pendingHeartbeatResponses[1]({json: async () =>
+  ({admission_state: "waiting_room", media_policy: null})});
+await newerHeartbeat;
+const afterNewest = policyApplications;
+pendingHeartbeatResponses[0]({json: async () =>
+  ({admission_state: "admitted", media_policy: null})});
+await olderHeartbeat;
+assert.equal(policyApplications, afterNewest, "older heartbeat cannot override newer policy");
+assert.equal(admissionCtx.mediaActive, false, "late admission must remain withdrawn");
+
+// An already authorized join response can arrive after navigation/Leave.
+// It must not create a new active session or start microphone capture.
+let releaseJoin: ((response: any) => void) | undefined;
+admissionCtx.api = async () => new Promise(resolve => {releaseJoin = resolve;});
+admissionCtx.sessionActive = false;
+const lateJoin = admissionCtx.joinConference();
+admissionCtx.sessionLifecycleGeneration++;
+releaseJoin?.({json: async () => ({ok: true, admission_state: "admitted"})});
+await lateJoin;
+assert.equal(admissionCtx.sessionActive, false, "stale join response cannot resurrect session");
+
+// MLS bootstrap may also resolve after Leave. An old bootstrap must not start
+// a new WebRTC sender when admission was already revoked.
+let releaseMls: (() => void) | undefined;
+const mlsGate = new Promise<void>(resolve => {releaseMls = resolve;});
+admissionCtx.sessionActive = true;
+admissionCtx.mediaActive = false;
+admissionCtx.ensureEndpointMlsReady = async () => mlsGate;
+admissionCtx.startWebRtc = async () => {resurrectionAttempts++;};
+const pendingAdmission = admissionCtx.activateAdmitted();
+admissionCtx.sessionLifecycleGeneration++;
+admissionCtx.sessionActive = false;
+releaseMls?.();
+await pendingAdmission;
+assert.equal(admissionCtx.mediaActive, false);
+assert.equal(resurrectionAttempts, 0, "revoked MLS bootstrap cannot start WebRTC");
+
 // Execute browser's canonical roster -> per-viewer SFU subscription journey.
 // The VM never supplies a parallel admission owner or a forged roster.
 const rosterCode = browser.slice(
