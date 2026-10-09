@@ -1575,6 +1575,59 @@ mod subscription_state_tests {
         }
     }
 
+    #[test]
+    fn chameleon_sfu_only_routes_authenticated_ciphertext_streams_subscribed_by_viewer() {
+        let video_hd = oid("publisher-hd");
+        let video_low = oid("publisher-low");
+        let speaker = principal("speaker");
+        let layer = ConferenceMediaSubscription {
+            source: speaker.clone(),
+            media_kind: MediaKind::Video,
+            stream_id: Some(video_hd.clone()),
+        };
+        assert!(conference_subscription_matches_stream(
+            &layer, &speaker, MediaKind::Video, &video_hd
+        ));
+        assert!(!conference_subscription_matches_stream(
+            &layer, &speaker, MediaKind::Video, &video_low
+        ));
+        assert!(!conference_subscription_matches_stream(
+            &layer, &principal("other"), MediaKind::Video, &video_hd
+        ));
+        assert!(!conference_subscription_matches_stream(
+            &layer, &speaker, MediaKind::Audio, &video_hd
+        ));
+        let wildcard = ConferenceMediaSubscription {
+            stream_id: None,
+            ..layer
+        };
+        assert!(conference_subscription_matches_stream(
+            &wildcard, &speaker, MediaKind::Video, &video_hd
+        ));
+        assert!(conference_subscription_matches_stream(
+            &wildcard, &speaker, MediaKind::Video, &video_low
+        ));
+        // The stream match depends on subscriber preference and authenticated
+        // envelope identity, NEVER conference name or attendee-count thresholds.
+        for index in 0..1_000 {
+            let choice = if index % 2 == 0 {
+                video_hd.clone()
+            } else {
+                video_low.clone()
+            };
+            let selected = ConferenceMediaSubscription {
+                stream_id: Some(choice),
+                ..wildcard.clone()
+            };
+            assert_eq!(
+                conference_subscription_matches_stream(
+                    &selected, &speaker, MediaKind::Video, &video_hd
+                ),
+                index % 2 == 0
+            );
+        }
+    }
+
     fn entry() -> RecipientSubscriptionState {
         RecipientSubscriptionState {
             scope: scope(),
