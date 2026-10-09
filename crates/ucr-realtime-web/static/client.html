@@ -125,6 +125,8 @@ const STREAM_RETRY_MS=1500;
 const WEBRTC_RETRY_DELAYS_MS=[200,500,1000,2000,4000,8000,15000];
 const WEBRTC_RETRY_MAX_MS=15000;
 let webrtcRecoveryAttempt=0;
+// Permanently closed encrypted DataChannels require a NEW WebRTC peer.
+let webrtcNeedsPeerRebuild=false;
 const BRANDING_FRAGMENT_KEY="ucr_brand";
 const BRANDING_MAX_JSON_BYTES=4096;
 const BRAND_NAME_MAX=80;
@@ -799,6 +801,7 @@ async function startScreenShare(){
   }
 }
 async function activateE2eeAdapter(){
+  const activatingChannel=e2eeChannel;
   const adapter=requireCompatibleE2eeAdapter(e2eeAdapter());
   if(!adapter||typeof adapter.start!=="function"||typeof adapter.onEnvelope!=="function"){
     ui.status.textContent="WebRTC transport connected. Encrypted endpoint media adapter is required before camera/microphone/screen media can be published.";
@@ -807,6 +810,9 @@ async function activateE2eeAdapter(){
   const restoreState=await restoreEndpointPersistedState(adapter);
   await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
   const persisted=await persistEndpointState(adapter);
+  if(e2eeChannel!==activatingChannel||activatingChannel?.readyState!=="open")return;
+  // A successful ICE handshake alone does not imply secure audio/video playback.
+  webrtcNeedsPeerRebuild=false;webrtcRecoveryAttempt=0;
   refreshScreenShareControl();
   ui.status.textContent=restoreState==="restored"
     ?"Endpoint E2EE media transport restored from sealed local state. Media keys remain on this endpoint."
@@ -829,7 +835,10 @@ function attachE2eeDataChannel(channel){
     }catch(e){e2eePending=null;ui.status.textContent="Encrypted media transport rejected data: "+e.message;}
   };
   channel.onerror=()=>{ui.status.textContent="Encrypted media DataChannel failed.";};
-  channel.onclose=()=>{if(e2eeChannel===channel){closeE2eeTransport();scheduleWebRtcRetry();}};
+  channel.onclose=()=>{if(e2eeChannel===channel){
+    webrtcNeedsPeerRebuild=true;
+    closeE2eeTransport();scheduleWebRtcRetry();
+  }};
 }
 function scheduleStreamRetry(){
   if(!sessionActive||!mediaActive||Date.now()>=claims.expires)return;
@@ -982,7 +991,6 @@ async function startWebRtc(forceMedia=false){
     const state=pc.connectionState;ui.webrtcState.textContent=state||"Connecting";
     if(state==="connected"){
       if(webrtcRetryTimer){clearTimeout(webrtcRetryTimer);webrtcRetryTimer=null;}
-      webrtcRecoveryAttempt=0;
       ui.state.textContent="Connected";ui.status.textContent=e2eeChannel&&e2eeChannel.readyState==="open"?"Encrypted media transport connected.":"WebRTC signalling connected; waiting for encrypted media DataChannel.";
     }
     if(state==="failed"||state==="disconnected"||state==="closed")scheduleWebRtcRetry();
@@ -1019,6 +1027,8 @@ async function restartIce(){
 }
 async function recoverWebRtc(){
   if(restarting||!sessionActive||!mediaActive||Date.now()>=claims.expires||!navigator.onLine)return;
+  // ICE restart cannot reopen a terminally closed E2EE DataChannel.
+  if(webrtcNeedsPeerRebuild){await restartWebRtc(false);return;}
   if(peer){
     try{
       if(await restartIce())return;
