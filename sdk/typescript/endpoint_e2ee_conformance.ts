@@ -10,6 +10,13 @@ import {
 } from "./src/endpoint_e2ee.ts";
 import { createUcrEndpointWasmPersistence } from "./src/endpoint_wasm_persistence.ts";
 import {
+  UcrPortableEndpointMediaAdapter,
+} from "./src/portable_endpoint_media.ts";
+import {
+  UcrBrowserWebCodecsConsumer,
+  ucrVideoEncodingTarget,
+} from "./src/browser_webcodecs_media.ts";
+import {
   UcrChameleonReceiveHandover,
   type UcrEncryptedReceivePath,
 } from "./src/chameleon_receive_handover.ts";
@@ -366,5 +373,64 @@ releaseServerResponse?.();
 await staleReport;
 assert.equal(appliedReceive.length, beforeInvalid, "stale encrypted channel must not adapt");
 assert.equal(retryAttempted, 0);
+
+// Real RT0 portable pipeline integration: an authenticated, active adapter receives
+// per-subscriber quality commands, leaves the sender alone, and stops after revocation.
+assert.deepEqual(ucrVideoEncodingTarget(1920, 1080), {frameRate: 30, bitrate: 4_000_000});
+assert.deepEqual(ucrVideoEncodingTarget(1280, 720), {frameRate: 30, bitrate: 2_000_000});
+assert.deepEqual(ucrVideoEncodingTarget(640, 360), {frameRate: 12, bitrate: 384_000});
+assert.throws(() => ucrVideoEncodingTarget(0, 1080), /invalid measured source video dimensions/);
+const endpointQualityCalls: string[] = [];
+const crypto = {
+  seal_wire() { return new Uint8Array([1, 2]); },
+  open_wire() { return new Uint8Array([1, 2]); },
+  revoke() { endpointQualityCalls.push("revoke"); },
+};
+const receive = {
+  play() {},
+  setReceiveQuality(target: {stage: string}) { endpointQualityCalls.push("recv:" + target.stage); },
+  stop() { endpointQualityCalls.push("recv:stop"); },
+};
+const publish = {
+  start() { endpointQualityCalls.push("sender:start"); },
+  stop() { endpointQualityCalls.push("sender:stop"); },
+};
+const endpoint = new UcrPortableEndpointMediaAdapter({
+  bridge: crypto,
+  consumer: receive,
+  producer: publish,
+  trustedKeys: {resolve() { return new Uint8Array(32).fill(7); }},
+  binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+    groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+    negotiationGeneration: 1n},
+  authorizeFrame: () => true,
+  authorizePublish: () => true,
+  measureReceiveTelemetry: () => adapter.getReceiveMediaTelemetry(),
+});
+const src = {stream: {}, cameraStream: {}, screenStream: null};
+assert.equal(await endpoint.getReceiveMediaTelemetry(), null);
+await endpoint.start({...src, sendEnvelope() {}});
+assert.equal((await endpoint.getReceiveMediaTelemetry() as any).estimated_bandwidth_bps, 8_000_000);
+await endpoint.applyReceiveMediaDecision({
+  stage: "video_720p",
+  video: {codec_capability_id: "ucr.video.h264",
+    width: 1280, height: 720, frame_rate: 30, target_bitrate_bps: 2_000_000},
+  opus_target_bitrate_bps: null,
+});
+assert.deepEqual(endpointQualityCalls, ["sender:start", "recv:video_720p"]);
+await endpoint.stop();
+assert.deepEqual(endpointQualityCalls, [
+  "sender:start", "recv:video_720p", "revoke", "sender:stop", "recv:stop",
+]);
+assert.equal(await endpoint.getReceiveMediaTelemetry(), null);
+await assert.rejects(endpoint.applyReceiveMediaDecision({
+  stage: "audio", video: null, opus_target_bitrate_bps: 48_000,
+}), /not active/);
+const decoder = new UcrBrowserWebCodecsConsumer();
+decoder.setReceiveQuality({stage: "audio", video: null, opus_target_bitrate_bps: 48_000});
+// Video is ignored before needing WebCodecs APIs: no forbidden plaintext fallbacks.
+decoder.play({mediaKind: "video", streamId: "source", timestamp: 1n,
+  keyframe: true, bytes: new Uint8Array([1])});
+decoder.stop();
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
