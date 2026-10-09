@@ -508,6 +508,44 @@ await assert.rejects(earlyBlockedCtx.start(),
 assert.equal(unexpectedCapture, 0, "no microphone/camera prompt without trusted signer");
 assert.equal(unexpectedSignalling, 0, "no network offer without trusted signer");
 
+// Code prewarming must never mint trust, join sessions or touch camera/audio.
+const warmSnippet = browser.slice(
+  browser.indexOf("function prewarmAuthorizedMediaRuntime(){"),
+  browser.indexOf("async function activateE2eeAdapter(){"),
+);
+assert.ok(warmSnippet.startsWith("function prewarmAuthorizedMediaRuntime(){"));
+let warmWasm = 0, warmInstaller = 0;
+const warmCtx: Record<string, any> = {
+  window: {}, Promise, e2eeAdapter: () => null,
+  requireCompatibleE2eeAdapter: (x: unknown) => x,
+  loadEndpointWasmModule: async () => {warmWasm++;},
+  requireAuthorizedMediaInstaller: async () => {warmInstaller++;},
+};
+runInNewContext(warmSnippet + "\nthis.warm = prewarmAuthorizedMediaRuntime;", warmCtx);
+warmCtx.warm();
+await Promise.resolve();
+assert.equal(warmWasm, 0, "no preload without canonical trust integration");
+assert.equal(warmInstaller, 0, "no installer without canonical host");
+warmCtx.window.ucrCanonicalAuthorizedMediaFactory = () => ({});
+warmCtx.warm();
+await Promise.resolve();
+assert.equal(warmWasm, 1, "public WASM can be loaded before Join");
+assert.equal(warmInstaller, 1, "public endpoint code can be loaded before Join");
+// A preinstalled, validated adapter needs no new installer, but MLS WASM
+// should still be warm before admission.
+warmCtx.window.ucrCanonicalAuthorizedMediaFactory = undefined;
+warmCtx.e2eeAdapter = () => ({contractVersion: "ucr.endpoint-e2ee.v1"});
+warmCtx.warm();
+await Promise.resolve();
+assert.equal(warmWasm, 2, "installed endpoint still prewarms WASM");
+assert.equal(warmInstaller, 1, "installed endpoint skips installer preload");
+// Invalid injected adapters fail at the actual Join gate, not during page load.
+warmCtx.requireCompatibleE2eeAdapter = () => {throw new Error("incompatible adapter");};
+assert.doesNotThrow(() => warmCtx.warm(), "optional warmup must not crash startup");
+await Promise.resolve();
+assert.equal(warmWasm, 2, "invalid adapter cannot trigger WASM preload");
+assert.equal(warmInstaller, 1, "invalid adapter cannot trigger installer preload");
+
 // The same preflight must happen even earlier: before a signed invite can
 // create a realtime session or start a heartbeat in the first place.
 const preflightJoinSnippet = browser.slice(
@@ -544,7 +582,7 @@ const acceptedJoinCtx: Record<string, any> = {
   ui: {state: {textContent: ""}, status: {textContent: ""},
     join: {disabled: false}, leave: {disabled: true},
     privacyMode: {disabled: false}, expires: {textContent: ""}},
-  requireCanonicalMediaHostReady() {},
+  requireCanonicalMediaHostReady() {}, prewarmAuthorizedMediaRuntime() {},
   api: async () => ({json: async () => ({ok: true, admission_state: "admitted"})}),
   body: () => ({}),
   applyMediaPolicy: async () => {throw new Error("MLS activation refused");},
