@@ -580,6 +580,7 @@ const savedGlobals = globals.map((key) => ({
   key, original: Object.getOwnPropertyDescriptor(globalThis, key),
 }));
 let savedVideoOutput: ((frame: any) => void) | null = null;
+let decoderCreations = 0;
 for (const key of globals) {
   Object.defineProperty(globalThis, key, {configurable: true, writable: true, value: class {}});
 }
@@ -588,6 +589,7 @@ Object.defineProperty(globalThis, "VideoDecoder", {
   value: class {
     constructor(options: {output: (frame: any) => void}) {
       savedVideoOutput = options.output;
+      decoderCreations++;
     }
     configure() {}
     decode() {
@@ -655,6 +657,21 @@ try {
   switching.play(videoFrame("camera123", true));
   assert.equal(visualCalls.length, 5, "HD resumes only after authenticated keyframe");
   switching.stop();
+
+  // Two authorized publishers can supply identical track IDs. They still need
+  // independent decoder state and replay/keyframe pipelines.
+  const collisionReceiver = new UcrBrowserWebCodecsConsumer({
+    videoCanvas: canvas as unknown as HTMLCanvasElement,
+  });
+  const createdBefore = decoderCreations;
+  const sourceHeader = (principalId: string) => ({
+    source: {principalId, kind: "person"}, sourceDeviceId: "device-1",
+  } as any);
+  collisionReceiver.play(videoFrame("shared-camera", true), sourceHeader("alice"));
+  collisionReceiver.play(videoFrame("shared-camera", true), sourceHeader("bob"));
+  assert.equal(decoderCreations - createdBefore, 2,
+    "same stream ID from distinct verified participants must use two decoders");
+  collisionReceiver.stop();
 } finally {
   for (const item of savedGlobals) {
     if (item.original) Object.defineProperty(globalThis, item.key, item.original);
