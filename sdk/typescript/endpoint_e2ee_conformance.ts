@@ -437,6 +437,34 @@ assert.equal(mlsContext.endpointMlsState, freshMls);
 mlsContext.retireMls();
 assert.equal(freedMlsStates, 2, "retirement frees the current local state synchronously");
 
+// The reference WebRTC browser must not report a protected connection when
+// a legacy/non-revocable host object is injected instead of the canonical v1
+// media bridge. The separate SDK may parse legacy contracts, not this path.
+const strictAdapterSnippet = browser.slice(
+  browser.indexOf("function requireCompatibleE2eeAdapter(adapter){"),
+  browser.indexOf("function closeE2eeTransport(){"),
+);
+assert.ok(strictAdapterSnippet.startsWith("function requireCompatibleE2eeAdapter(adapter){"));
+const strictAdapterCtx: Record<string, any> = {
+  E2EE_ENDPOINT_CONTRACT_VERSION: "ucr.endpoint-e2ee.v1",
+  endpointPersistence() {},
+};
+runInNewContext(strictAdapterSnippet +
+  "\nthis.verifyAdapter = requireCompatibleE2eeAdapter;", strictAdapterCtx);
+assert.equal(strictAdapterCtx.verifyAdapter(null), null);
+for(const candidate of [
+  {start() {}, onEnvelope() {}, stop() {}},
+  {contractVersion: "ucr.endpoint-e2ee.v1", start() {}, onEnvelope() {}},
+  {contractVersion: "ucr.endpoint-e2ee.v2", start() {}, onEnvelope() {}, stop() {}},
+]){
+  assert.throws(() => strictAdapterCtx.verifyAdapter(candidate), /E2EE adapter v1/,
+    "unversioned, non-revocable or unknown E2EE contracts must be rejected");
+}
+assert.doesNotThrow(() => strictAdapterCtx.verifyAdapter({
+  contractVersion: "ucr.endpoint-e2ee.v1",
+  start() {}, onEnvelope() {}, stop() {},
+}));
+
 // Chameleon lifecycle: no telemetry may be reported before the endpoint is
 // authenticated and running; the first report must start after E2EE activation.
 const activateSnippet = browser.slice(
