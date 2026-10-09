@@ -773,7 +773,9 @@ async function applyMediaPolicy(value){
       for(const track of localStream.getVideoTracks()){localStream.removeTrack(track);track.stop();sourcesChanged=true;}
     }
   }
-  if(!policyAllows("screen")&&screenStream)await stopScreenShare(true);
+  // Stop physical capture even while a source update is pending; the codec
+  // owner serializes generation-bound updates so stale sources cannot return.
+  if(!policyAllows("screen")&&screenStream)await stopScreenShare(true,screenShareBusy);
   if(sourcesChanged&&e2eeChannel&&e2eeChannel.readyState==="open"){
     const adapter=e2eeAdapter();
     if(adapter&&typeof adapter.updateSources==="function")await syncEndpointMediaSources();
@@ -812,15 +814,19 @@ async function startScreenShare(){
   let captured=null;
   try{
     captured=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
-    if(!sessionActive||!mediaActive)throw new Error("Conference session ended while screen capture was being selected");
+    if(!sessionActive||!mediaActive||!policyAllows("screen")){
+      throw new Error("Screen sharing authorization changed while choosing capture");
+    }
     if(!e2eeChannel||e2eeChannel.readyState!=="open")throw new Error("Encrypted media transport changed while screen capture was being selected");
     const track=captured.getVideoTracks()[0];
     if(!track)throw new Error("Screen capture returned no video track");
     screenStream=captured;setScreenUi(true);
     await syncEndpointMediaSources();
-    if(track.readyState==="ended"||screenStream!==captured){
+    if(track.readyState==="ended"||screenStream!==captured||
+       !sessionActive||!mediaActive||!policyAllows("screen")||
+       !e2eeChannel||e2eeChannel.readyState!=="open"){
       await stopScreenShare(true,true);
-      throw new Error("Screen sharing ended before publication became active");
+      throw new Error("Screen sharing ended or authorization changed before publication became active");
     }
     track.addEventListener("ended",()=>{if(screenStream===captured)stopScreenShare(true).catch(e=>{ui.status.textContent="Screen-share cleanup failed: "+e.message;});},{once:true});
   }catch(e){
