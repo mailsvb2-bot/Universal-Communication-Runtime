@@ -4,7 +4,7 @@ import type {
   UcrMediaProducer,
 } from "./portable_endpoint_media.ts";
 import type { SfuForwardEnvelopeWire } from "./sfu_forward_wire.ts";
-import type { UcrEndpointMediaSources, UcrEndpointAdaptiveQualityV1 } from "./endpoint_e2ee.ts";
+import type { UcrEndpointMediaSources, UcrEndpointAdaptiveQualityV1, UcrVerifiedReceiveVideoStream } from "./endpoint_e2ee.ts";
 
 /**
  * WebCodecs platform implementation. Opt-in: browsers without required APIs must
@@ -344,6 +344,14 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       }
     }
     this.#pendingVideoStreams.clear();
+  }
+
+  /** These stream IDs have reached the local video canvas, not just a decoder queue. */
+  getActiveReceiveVideoStreams(): readonly UcrVerifiedReceiveVideoStream[] {
+    return [...this.#activeVideoStreams.entries()].map(([key, streamId]) => {
+      const [sourceId, sourceDeviceId] = JSON.parse(key) as [string, string, string];
+      return {sourceId, sourceDeviceId, streamId};
+    });
   }
 
   /** Decoder identity includes canonical signed source identity, not only a media

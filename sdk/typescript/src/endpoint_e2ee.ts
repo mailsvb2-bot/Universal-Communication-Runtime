@@ -27,6 +27,15 @@ export interface UcrEndpointAdaptiveQualityV1 {
   readonly opus_target_bitrate_bps: number | null;
 }
 
+/** Stream IDs observed only after canonical frame authorization, signature verification
+ * and endpoint MLS decryption. This metadata never grants subscription permission.
+ */
+export interface UcrVerifiedReceiveVideoStream {
+  readonly sourceId: string;
+  readonly sourceDeviceId: string;
+  readonly streamId: string;
+}
+
 export interface UcrEndpointE2eePersistenceV1 {
   restoreSealedState(snapshot: Uint8Array): boolean | void | Promise<boolean | void>;
   sealState(): Uint8Array | null | Promise<Uint8Array | null>;
@@ -42,6 +51,8 @@ export interface UcrEndpointE2eeAdapterV1 {
   applyReceiveMediaDecision?(target: UcrEndpointAdaptiveQualityV1): void | Promise<void>;
   /** Subscriber downlink samples only; no guessed CPU/thermal/battery data. */
   getReceiveMediaTelemetry?(): unknown | Promise<unknown>;
+  getVerifiedReceiveVideoStreams?(): readonly UcrVerifiedReceiveVideoStream[];
+  getActiveReceiveVideoStreams?(): readonly UcrVerifiedReceiveVideoStream[];
   readonly persistence?: UcrEndpointE2eePersistenceV1;
 }
 
@@ -89,6 +100,11 @@ export function resolveUcrEndpointE2eeAdapter(
     if (value.getReceiveMediaTelemetry !== undefined &&
       typeof value.getReceiveMediaTelemetry !== "function") {
       throw new Error("ucr.endpoint-e2ee.v1 receive telemetry must be a function");
+    }
+    for (const method of ["getVerifiedReceiveVideoStreams", "getActiveReceiveVideoStreams"]) {
+      if (value[method] !== undefined && typeof value[method] !== "function") {
+        throw new Error("ucr.endpoint-e2ee.v1 authenticated stream inspection must be a function");
+      }
     }
     if (value.persistence !== undefined) {
       if (

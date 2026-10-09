@@ -1249,16 +1249,45 @@ function validReceiveRoster(value){
   }
   return sources;
 }
-function planReceiveSubscriptions(sources,preferredId){
-  // One video canvas; the other 31 slots carry authorized encrypted audio.
-  // Never silently exceed the canonical 32-entry per-recipient limit.
+function planReceiveSubscriptions(sources,preferredId,adapter=e2eeAdapter()){
+  // One video canvas; subscriber receives only what the canonical SFU approves.
   const video=sources.find(s=>s.source_id===preferredId)||sources[0]||null;
-  const audio=sources.slice(0,31).map(s=>({
+  let videoStreams=video?[null]:[];
+  if(video&&appliedAdaptiveQuality){
+    let target=null;
+    try{target=JSON.parse(appliedAdaptiveQuality);}catch(_){}
+    if(target&&typeof target.stage==="string"&&!target.stage.startsWith("video_")){
+      videoStreams=[];
+    }else if(target&&typeof adapter?.getVerifiedReceiveVideoStreams==="function"&&
+             typeof adapter?.getActiveReceiveVideoStreams==="function"){
+      const verified=adapter.getVerifiedReceiveVideoStreams();
+      const active=adapter.getActiveReceiveVideoStreams();
+      if(Array.isArray(verified)&&Array.isArray(active)){
+        const current=active.find(x=>x&&x.sourceId===video.source_id&&
+          typeof x.streamId==="string"&&typeof x.sourceDeviceId==="string");
+        if(current){
+          const full=current.streamId.endsWith("-low")?
+            current.streamId.slice(0,-4):current.streamId;
+          const low=full+"-low";
+          // No synthetic layers: both precise IDs must first arrive as
+          // authenticated ciphertext from this source/device, else wildcard.
+          const known=id=>verified.some(x=>x&&x.sourceId===video.source_id&&
+            x.sourceDeviceId===current.sourceDeviceId&&x.streamId===id);
+          if(known(full)&&known(low)){
+            const desired=target.stage==="video_1080p"?full:low;
+            videoStreams=current.streamId===desired?[desired]:[current.streamId,desired];
+          }
+        }
+      }
+    }
+  }
+  const audio=sources.slice(0,32-videoStreams.length).map(s=>({
     source_id:s.source_id,source_kind:s.source_kind,media_kind:1,stream_id:null
   }));
-  if(video)audio.push({
-    source_id:video.source_id,source_kind:video.source_kind,media_kind:2,stream_id:null
-  });
+  for(const stream of videoStreams){
+    audio.push({source_id:video.source_id,source_kind:video.source_kind,
+      media_kind:2,stream_id:stream});
+  }
   return audio;
 }
 async function applyReceiveSubscriptions(sources,preferredId,generation,session,channel){
@@ -1389,9 +1418,23 @@ async function reportAdaptiveMedia(){
     // Only the authenticated subscriber endpoint may adjust receive/decode subscriptions; never change the publisher encoder based on this viewer's downlink.
     if(typeof adapter.applyReceiveMediaDecision!=="function")return;
     const fingerprint=JSON.stringify(target);
-    if(appliedAdaptiveQuality===fingerprint)return;
+    if(appliedAdaptiveQuality===fingerprint){
+      // Decode readiness may arrive *after* the quality decision; only then
+      // replace two temporary SFU layers with the newly displayed one.
+      if(receiveRosterSources.length){
+        applyReceiveSubscriptions(receiveRosterSources,receiveSpeakerId,
+          receiveRosterGeneration,claims,e2eeChannel).catch(()=>{});
+      }
+      return;
+    }
     await adapter.applyReceiveMediaDecision(target);
-    if(current())appliedAdaptiveQuality=fingerprint;
+    if(current()){
+      appliedAdaptiveQuality=fingerprint;
+      if(receiveRosterSources.length){
+        applyReceiveSubscriptions(receiveRosterSources,receiveSpeakerId,
+          receiveRosterGeneration,claims,e2eeChannel).catch(()=>{});
+      }
+    }
   }catch(_){
     if(current())ui.status.textContent="Protected media quality adjustment unavailable; media encryption remains required.";
   }finally{

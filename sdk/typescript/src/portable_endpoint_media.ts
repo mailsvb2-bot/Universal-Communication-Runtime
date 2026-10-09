@@ -4,6 +4,7 @@ import {
   type UcrEndpointE2eeStartInput,
   type UcrEndpointMediaSources,
   type UcrEndpointAdaptiveQualityV1,
+  type UcrVerifiedReceiveVideoStream,
 } from "./endpoint_e2ee.ts";
 import {
   decodeSfuForwardEnvelopeWire,
@@ -56,6 +57,7 @@ export interface UcrMediaConsumer {
   play(frame: UcrEncodedMediaFrame, source: SfuForwardEnvelopeWire["frame"]["header"]): void | Promise<void>;
   /** Local authenticated-receiver quality control only; never changes the shared sender. */
   setReceiveQuality?(target: UcrEndpointAdaptiveQualityV1): void | Promise<void>;
+  getActiveReceiveVideoStreams?(): readonly UcrVerifiedReceiveVideoStream[];
   stop(): void | Promise<void>;
 }
 
@@ -102,6 +104,8 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   readonly #sequences = new Map<string, bigint>();
   readonly #received = new Map<string, bigint>();
   readonly #reserved = new Set<string>();
+  /** Endpoint-only, bounded authenticated video layer observations. */
+  readonly #verifiedVideoStreams = new Map<string, UcrVerifiedReceiveVideoStream>();
   // Serialize emission for each stream: concurrent async authorization must never
   // reuse a media sequence/nonce or reorder authenticated frames.
   readonly #sendTails = new Map<string, Promise<void>>();
@@ -179,6 +183,15 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     const generation = this.#generation;
     const value = await this.#measureReceiveTelemetry();
     return this.#active && !this.#retired && this.#generation === generation ? value : null;
+  }
+
+  getVerifiedReceiveVideoStreams(): readonly UcrVerifiedReceiveVideoStream[] {
+    return this.#active && !this.#retired ? [...this.#verifiedVideoStreams.values()] : [];
+  }
+
+  getActiveReceiveVideoStreams(): readonly UcrVerifiedReceiveVideoStream[] {
+    if (!this.#active || this.#retired) return [];
+    return this.#consumer.getActiveReceiveVideoStreams?.() ?? [];
   }
 
   /** Applies only local decoder/receive policy, after canonical authorization and MLS binding.
@@ -260,6 +273,18 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
         keyframe: header.keyframe,
         bytes: plaintext,
       }, header);
+      if (this.#active && this.#generation === generation &&
+          header.mediaKind === "video" && header.videoSourceKind === "camera") {
+        const metadata: UcrVerifiedReceiveVideoStream = {
+          sourceId: header.source.principalId,
+          sourceDeviceId: header.sourceDeviceId,
+          streamId: header.streamId,
+        };
+        const id = JSON.stringify([metadata.sourceId, metadata.sourceDeviceId, metadata.streamId]);
+        if (this.#verifiedVideoStreams.has(id) || this.#verifiedVideoStreams.size < 128) {
+          this.#verifiedVideoStreams.set(id, metadata);
+        }
+      }
       } finally {
         this.#reserved.delete(reservation);
       }
@@ -277,6 +302,7 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#sequences.clear();
     this.#received.clear();
     this.#reserved.clear();
+    this.#verifiedVideoStreams.clear();
     this.#sendTails.clear();
     // Retire crypto BEFORE asynchronous media cleanup. A revocation failure
     // cannot skip microphone/camera/decoder teardown or keep this adapter active.
