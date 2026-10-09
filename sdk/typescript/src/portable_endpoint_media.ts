@@ -29,8 +29,8 @@ export interface UcrGroupMediaCryptoBridge {
     plaintext: Uint8Array,
   ): Uint8Array;
   open_wire(wire: Uint8Array, sourceVerifyingKey: Uint8Array): Uint8Array;
-  /** Optional on older deployed bridges; required for bridge-level fail-closed revocation. */
-  revoke?(): void;
+  /** Required: retiring a call must permanently revoke this Rust/WASM epoch bridge. */
+  revoke(): void;
 }
 
 export interface UcrEncodedMediaFrame {
@@ -107,6 +107,9 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
   #sender: ((wire: Uint8Array) => void) | null = null;
 
   constructor(options: UcrEndpointPipelineOptions) {
+    if (!options.bridge || typeof options.bridge.revoke !== "function") {
+      throw new Error("endpoint media bridge must support permanent revocation");
+    }
     this.#bridge = options.bridge;
     this.#producer = options.producer;
     this.#consumer = options.consumer;
@@ -141,11 +144,14 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       this.#retired = true;
       this.#sender = null;
       this.#generation++;
-      this.#bridge.revoke?.();
       try {
-        await Promise.all([this.#producer.stop(), this.#consumer.stop()]);
-      } catch (cleanupError) {
-        this.#onError(cleanupError);
+        this.#bridge.revoke();
+      } catch (revokeError) {
+        this.#onError(revokeError);
+      }
+      const cleanup = await Promise.allSettled([this.#producer.stop(), this.#consumer.stop()]);
+      for (const result of cleanup) {
+        if (result.status === "rejected") this.#onError(result.reason);
       }
       throw error;
     }
@@ -239,10 +245,21 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     this.#received.clear();
     this.#reserved.clear();
     this.#sendTails.clear();
-    // Retire the endpoint's cryptographic bridge before asynchronous media cleanup.
-    // A revoked bridge must never be reused for a resumed call or a new MLS epoch.
-    this.#bridge.revoke?.();
-    await Promise.all([this.#producer.stop(), this.#consumer.stop()]);
+    // Retire crypto BEFORE asynchronous media cleanup. A revocation failure
+    // cannot skip microphone/camera/decoder teardown or keep this adapter active.
+    let stopError: unknown;
+    try {
+      this.#bridge.revoke();
+    } catch (error) {
+      stopError = error;
+    }
+    const cleanup = await Promise.allSettled([this.#producer.stop(), this.#consumer.stop()]);
+    for (const result of cleanup) {
+      if (result.status === "rejected" && stopError === undefined) {
+        stopError = result.reason;
+      }
+    }
+    if (stopError !== undefined) throw stopError;
   }
 
   async #sendFrame(frame: UcrEncodedMediaFrame, generation: number): Promise<void> {
