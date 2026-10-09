@@ -97,7 +97,7 @@ const ui={
   localVideo:$("local-video"),screenVideo:$("screen-video"),screenCard:$("screen-card"),remoteVideo:$("remote-video"),remoteCanvas:$("remote-e2ee-canvas"),
   privacyMode:$("privacy-mode"),mic:$("microphone"),camera:$("camera"),micToggle:$("mic-toggle"),cameraToggle:$("camera-toggle"),screenToggle:$("screen-toggle"),handToggle:$("hand-toggle"),reaction:$("reaction"),reactionSend:$("reaction-send"),reactions:$("reactions"),activeSpeaker:$("active-speaker"),chatMessages:$("chat-messages"),chatInput:$("chat-input"),chatSend:$("chat-send")
 };
-let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false;
+let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false,adaptiveMediaGeneration=0;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1,e2eeManagedAdapter=null,e2eeActivationGeneration=0;
 let appliedAdaptiveQuality=null,e2eeAdapterReady=false;
@@ -1213,6 +1213,7 @@ function scheduleWaitingRoom(){
   return true;
 }
 function stopAdaptiveMediaMonitoring(){
+  ++adaptiveMediaGeneration;
   if(adaptiveMediaTimer){clearInterval(adaptiveMediaTimer);adaptiveMediaTimer=null;}
   adaptiveMediaReportInFlight=false;
 }
@@ -1260,31 +1261,29 @@ async function reportAdaptiveMedia(){
   const adapter=e2eeAdapter();
   if(!adapter||typeof adapter.getReceiveMediaTelemetry!=="function"||typeof adapter.applyReceiveMediaDecision!=="function")return;
   adaptiveMediaReportInFlight=true;
-  const session=claims,channel=e2eeChannel;
+  const session=claims,channel=e2eeChannel,generation=adaptiveMediaGeneration;
+  const current=()=>sessionActive&&mediaActive&&e2eeAdapterReady&&claims===session&&
+    e2eeChannel===channel&&channel?.readyState==="open"&&adaptiveMediaGeneration===generation;
   try{
     const telemetry=validAdaptiveMediaTelemetry(await adapter.getReceiveMediaTelemetry());
-    if(!telemetry)return;
+    if(!telemetry||!current())return;
     const response=await api("/v1/realtime/adaptive-media",{...body(),...telemetry});
     if(!response.ok)throw new Error("Adaptive media policy rejected telemetry");
     const decision=await response.json();
     const target=validAdaptiveQualityTarget(decision);
     if(!target)throw new Error("Invalid adaptive media quality target");
-    if(!sessionActive||!mediaActive||!e2eeAdapterReady||claims!==session||e2eeChannel!==channel||channel?.readyState!=="open")return;
+    if(!current())return;
     // Never restart ICE/WebRTC just to change resolution: that breaks an otherwise good call.
     // Only the authenticated subscriber endpoint may adjust receive/decode subscriptions; never change the publisher encoder based on this viewer's downlink.
     if(typeof adapter.applyReceiveMediaDecision!=="function")return;
     const fingerprint=JSON.stringify(target);
     if(appliedAdaptiveQuality===fingerprint)return;
     await adapter.applyReceiveMediaDecision(target);
-    if(sessionActive&&mediaActive&&claims===session&&e2eeChannel===channel){
-      appliedAdaptiveQuality=fingerprint;
-    }
+    if(current())appliedAdaptiveQuality=fingerprint;
   }catch(_){
-    if(sessionActive&&mediaActive&&claims===session&&e2eeChannel===channel){
-      ui.status.textContent="Protected media quality adjustment unavailable; media encryption remains required.";
-    }
+    if(current())ui.status.textContent="Protected media quality adjustment unavailable; media encryption remains required.";
   }finally{
-    adaptiveMediaReportInFlight=false;
+    if(adaptiveMediaGeneration===generation)adaptiveMediaReportInFlight=false;
   }
 }
 function startAdaptiveMediaMonitoring(){
