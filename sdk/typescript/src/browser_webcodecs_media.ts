@@ -314,10 +314,13 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     if ((video && !target.video) || (!video && target.video !== null)) {
       throw new Error("invalid receive quality decision");
     }
+    // Only encoded layers are selectable. This is local decoder control, not SFU routing.
+    this.#lowVideoPreferred = video && target.stage !== "video_1080p";
     if (this.#videoEnabled === video) return;
     this.#videoEnabled = video;
     ++this.#renderGeneration;
     if (!video) {
+      this.#activeVideoStreams.clear();
       for (const [key, decoder] of this.#decoders) {
         if (key.startsWith("video:")) {
           decoder.close();
@@ -403,7 +406,9 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     ++this.#renderGeneration;
     for (const decoder of this.#decoders.values()) decoder.close();
     this.#decoders.clear();
+    this.#activeVideoStreams.clear();
     this.#videoEnabled = true;
+    this.#lowVideoPreferred = false;
     this.#nextAudioTime = 0;
   }
 }
