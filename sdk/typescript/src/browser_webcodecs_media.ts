@@ -330,6 +330,23 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     }
   }
 
+  /** Decoder identity includes canonical signed source identity, not only a media
+   * track ID that may collide across different speakers or devices.
+   */
+  #decoderKey(
+    mediaKind: "audio" | "video",
+    videoSourceKind: string | undefined,
+    streamId: string,
+    header?: SfuForwardEnvelopeWire["frame"]["header"],
+  ): string {
+    return mediaKind + ":" + JSON.stringify([
+      header?.source?.principalId ?? "",
+      header?.sourceDeviceId ?? "",
+      videoSourceKind ?? "",
+      streamId,
+    ]);
+  }
+
   play(
     frame: UcrEncodedMediaFrame,
     source?: SfuForwardEnvelopeWire["frame"]["header"],
@@ -340,17 +357,17 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       const isLow = frame.streamId.endsWith("-low");
       const baseTrack = isLow ? frame.streamId.slice(0, -4) : frame.streamId;
       // Already verified envelope source/device scope; no room-label authority.
-      videoSourceKey = [
+      videoSourceKey = JSON.stringify([
         source?.source?.principalId ?? "",
         source?.sourceDeviceId ?? "",
         baseTrack,
-      ].join("|");
+      ]);
       const current = this.#activeVideoStreams.get(videoSourceKey);
       const preferred = this.#lowVideoPreferred ? baseTrack + "-low" : baseTrack;
       if (current && current !== frame.streamId) {
         // Keep rendering the old stream until the replacement keyframe exists.
         if (frame.streamId !== preferred || !frame.keyframe) return;
-        const oldKey = ["video", frame.videoSourceKind, current].join(":");
+        const oldKey = this.#decoderKey("video", frame.videoSourceKind, current, source);
         const oldDecoder = this.#decoders.get(oldKey);
         if (oldDecoder) {
           oldDecoder.close();
@@ -364,7 +381,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     }
     const b = browser();
     if (!ucrWebCodecsSupported()) throw new Error("WebCodecs playback unavailable");
-    const key = [frame.mediaKind, frame.videoSourceKind ?? "", frame.streamId].join(":");
+    const key = this.#decoderKey(frame.mediaKind, frame.videoSourceKind, frame.streamId, source);
     let decoder = this.#decoders.get(key);
     // A newly selected encrypted video layer must start from its keyframe.
     if (frame.mediaKind === "video" && !decoder && !frame.keyframe) return;
