@@ -76,16 +76,17 @@ assert.throws(
 );
 
 // Chameleon is an optional codec control, not a replacement for endpoint E2EE.
+// Subscriber quality decisions are independent of the publisher encoder.
 const qualityTargets: unknown[] = [];
 const withQuality = {
   ...v1,
-  getAdaptiveMediaTelemetry() {
+  getReceiveMediaTelemetry() {
     return { estimated_bandwidth_bps: 8_000_000 };
   },
-  applyAdaptiveMediaDecision(target: unknown) { qualityTargets.push(target); },
+  applyReceiveMediaDecision(target: unknown) { qualityTargets.push(target); },
 } satisfies UcrEndpointE2eeAdapterV1;
 assert.equal(resolveUcrEndpointE2eeAdapter(withQuality, { allowLegacy: false }).adapter, withQuality);
-await withQuality.applyAdaptiveMediaDecision({
+await withQuality.applyReceiveMediaDecision({
   stage: "video_1080p",
   video: { codec_capability_id: "ucr.video.h264", width: 1920, height: 1080,
     frame_rate: 30, target_bitrate_bps: 4_000_000 },
@@ -93,11 +94,11 @@ await withQuality.applyAdaptiveMediaDecision({
 });
 assert.equal(qualityTargets.length, 1);
 assert.throws(() => resolveUcrEndpointE2eeAdapter({
-  ...v1, applyAdaptiveMediaDecision: "fullscreen",
-}), /quality control must be a function/);
+  ...v1, applyReceiveMediaDecision: "fullscreen",
+}), /receive quality control must be a function/);
 assert.throws(() => resolveUcrEndpointE2eeAdapter({
-  ...v1, getAdaptiveMediaTelemetry: 123,
-}), /adaptive telemetry must be a function/);
+  ...v1, getReceiveMediaTelemetry: 123,
+}), /receive telemetry must be a function/);
 
 const target: Record<string, unknown> = {};
 installUcrEndpointE2eeAdapter(target, v1);
@@ -207,7 +208,7 @@ assert.match(browser, /preferredCameraCapture\(ui\.camera\.value\)/);
 assert.match(browser, /width:\{ideal:1920\},height:\{ideal:1080\}/);
 assert.match(browser, /e2eeAdapterReady=true/);
 assert.match(browser, /!e2eeAdapterReady/);
-assert.match(browser, /adapter\.applyAdaptiveMediaDecision\(target\)/);
+assert.match(browser, /adapter\.applyReceiveMediaDecision\(target\)/);
 assert.doesNotMatch(browser.slice(browser.indexOf("async function reportAdaptiveMedia()"), browser.indexOf("function startAdaptiveMediaMonitoring()")), /scheduleWebRtcRetry/);
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
