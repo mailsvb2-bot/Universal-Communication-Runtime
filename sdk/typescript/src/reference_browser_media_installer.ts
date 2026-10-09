@@ -43,3 +43,7 @@ export async function installUcrReferenceBrowserMedia(
 ): Promise<UcrEndpointE2eeAdapterV1> {
   return createInstaller(bootstrap);
 }
+
+// The authenticated host can import this directly from the same ESM bundle.
+// It still MUST supply its canonical identity/key owner; the SDK mints none.
+export { createUcrCanonicalBrowserMediaFactory } from "./canonical_browser_media_factory.ts";
