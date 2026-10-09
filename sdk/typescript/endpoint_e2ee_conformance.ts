@@ -360,7 +360,7 @@ assert.ok(protectedLifecycleEvents.includes("stop"),
   "on transport retirement E2EE adapter must be revoked");
 assert.doesNotMatch(
   browser.slice(browser.indexOf("async function activateAdmittedMedia(){"),
-    browser.indexOf("async function start", browser.indexOf("async function activateAdmittedMedia(){") + 1)),
+    browser.indexOf("async function applyAdmissionState(", browser.indexOf("async function activateAdmittedMedia(){") + 1)),
   /startAdaptiveMediaMonitoring\\(\\)/,
   "admission must not begin sampling before the channel and endpoint are active",
 );
