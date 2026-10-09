@@ -939,7 +939,9 @@ async function requireAuthorizedMediaInstaller(){
 function prewarmAuthorizedMediaRuntime(){
   const installed=e2eeAdapter();
   if(installed){
-    requireCompatibleE2eeAdapter(installed);
+    // Warmup is optional: an incompatible injected adapter must be rejected
+    // by the Join preflight, not crash initialization of the whole page.
+    try{requireCompatibleE2eeAdapter(installed);}catch(_){return;}
     loadEndpointWasmModule().catch(()=>{});
     return;
   }
