@@ -114,6 +114,7 @@ const ENDPOINT_WASM_CONTRACT_VERSION="ucr.endpoint-wasm.v1";
 const ENDPOINT_WASM_MODULE_URL="./endpoint-wasm/ucr_endpoint_wasm.js";
 let endpointWasmModulePromise=null,endpointMlsState=null,endpointMlsGroupId=null;
 let endpointMlsInvalidationGeneration=0,endpointMlsBootstrapPromise=null;
+let endpointMlsBootstrapAbort=null;
 const ENDPOINT_STATE_DB_NAME="ucr-endpoint-state-v1";
 const ENDPOINT_STATE_DB_VERSION=2;
 const ENDPOINT_STATE_OBJECT_STORE="sealed-snapshots";
@@ -461,15 +462,15 @@ function endpointBase64ToBytes(value){
   for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
   return bytes;
 }
-async function fetchEndpointMlsContext(){
-  const response=await api("/v1/realtime/mls-context",body());
+async function fetchEndpointMlsContext(signal){
+  const response=await api("/v1/realtime/mls-context",body(),signal);
   const context=await response.json();
   if(!context||context.ok!==true||typeof context.group_id!=="string"||context.group_id.length===0)throw new Error("Invalid MLS admission context");
   if(!["register","restore","legacy_server_owned"].includes(context.endpoint_state_mode))throw new Error("Invalid MLS endpoint state mode");
   return context;
 }
-async function fetchEndpointMlsBootstrap(){
-  const response=await api("/v1/realtime/mls-bootstrap",body());
+async function fetchEndpointMlsBootstrap(signal){
+  const response=await api("/v1/realtime/mls-bootstrap",body(),signal);
   const bootstrap=await response.json();
   if(!bootstrap||bootstrap.ok!==true||typeof bootstrap.group_id!=="string"||!bootstrap.welcome_crypto_state||!bootstrap.current_crypto_state||!Array.isArray(bootstrap.subsequent_commits))throw new Error("Invalid MLS bootstrap");
   return bootstrap;
@@ -538,6 +539,8 @@ async function sealEndpointMlsSnapshot(state){
 // for the same Device; a replaced generation waits for old cleanup.
 function retireEndpointMlsState(){
   ++endpointMlsInvalidationGeneration;
+  // Abort obsolete requests, so a new admission cannot be held by a lost Welcome.
+  if(endpointMlsBootstrapAbort){endpointMlsBootstrapAbort.abort();endpointMlsBootstrapAbort=null;}
   if(endpointMlsState&&typeof endpointMlsState.free==="function"){
     try{endpointMlsState.free();}catch(_){}
   }
@@ -557,13 +560,18 @@ async function ensureEndpointMlsReady(){
     }
     return ensureEndpointMlsReady();
   }
-  const promise=bootstrapEndpointMlsForCurrentAdmission(generation);
+  const controller=new AbortController();
+  endpointMlsBootstrapAbort=controller;
+  const promise=bootstrapEndpointMlsForCurrentAdmission(generation,controller.signal);
   const entry={generation,promise};
   endpointMlsBootstrapPromise=entry;
   try{return await promise;}
-  finally{if(endpointMlsBootstrapPromise===entry)endpointMlsBootstrapPromise=null;}
+  finally{
+    if(endpointMlsBootstrapPromise===entry)endpointMlsBootstrapPromise=null;
+    if(endpointMlsBootstrapAbort===controller)endpointMlsBootstrapAbort=null;
+  }
 }
-async function bootstrapEndpointMlsForCurrentAdmission(generation){
+async function bootstrapEndpointMlsForCurrentAdmission(generation,signal){
   const sessionGeneration=sessionLifecycleGeneration;
   const identity=claims;
   const current=()=>sessionActive&&claims===identity&&
@@ -577,7 +585,7 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation){
   if(!identity||!identity.device_id)throw new Error("Endpoint-owned MLS requires a Device-bound join grant");
   let state=null;
   try{
-    const context=await fetchEndpointMlsContext();
+    const context=await fetchEndpointMlsContext(signal);
     requireCurrent();
     if(context.endpoint_state_mode==="legacy_server_owned"){
       endpointMlsGroupId=context.group_id;
@@ -598,7 +606,7 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation){
     let bootstrap;
     if(context.endpoint_state_mode==="restore"){
       if(sealed===null)throw new Error("Endpoint-owned MLS state is already admitted but its sealed local snapshot is missing");
-      bootstrap=await fetchEndpointMlsBootstrap();
+      bootstrap=await fetchEndpointMlsBootstrap(signal);
       requireCurrent();
       if(bootstrap.group_id!==context.group_id)throw new Error("MLS bootstrap Group does not match admission context");
       state=await restoreEndpointMlsSnapshot(module,context.group_id,sealed,bootstrap);
@@ -611,9 +619,9 @@ async function bootstrapEndpointMlsForCurrentAdmission(generation){
       const keyPackage=state.key_package();
       await api("/v1/realtime/mls-key-package",{
         ...body(),key_package_base64:endpointBytesToBase64(keyPackage)
-      });
+      },signal);
       requireCurrent();
-      bootstrap=await fetchEndpointMlsBootstrap();
+      bootstrap=await fetchEndpointMlsBootstrap(signal);
       requireCurrent();
       if(bootstrap.group_id!==context.group_id)throw new Error("MLS bootstrap Group does not match admission context");
       state.join_from_welcome(
