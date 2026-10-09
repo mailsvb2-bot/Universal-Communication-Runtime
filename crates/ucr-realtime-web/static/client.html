@@ -97,7 +97,7 @@ const ui={
 let token="",claims=null,heartbeatTimer=null,waitTimer=null,entryRetryTimer=null,streamAbort=null,streamRetryTimer=null,reactionTimer=null,reactionPollInFlight=false,chatTimer=null,chatPollInFlight=false,audioLevelTimer=null,activeSpeakerTimer=null,audioLevelReportInFlight=false,activeSpeakerPollInFlight=false,adaptiveMediaTimer=null,adaptiveMediaReportInFlight=false;
 let packetCount=0,sessionActive=false,mediaActive=false,peer=null,localStream=null,screenStream=null,remoteStream=null,webrtcRetryTimer=null,restarting=false,screenShareBusy=false,mediaPolicy=null;
 let e2eeChannel=null,e2eePending=null,e2eeMessageId=1;
-let appliedAdaptiveQuality=null;
+let appliedAdaptiveQuality=null,e2eeAdapterReady=false;
 let reactionCursor=0,chatCursor=0,pendingChatPayload=null,audioLevelContext=null,audioLevelAnalyser=null,audioLevelSource=null,audioLevelBuffer=null;
 const E2EE_CHANNEL_LABEL="ucr.e2ee.media.v1";
 const E2EE_ENDPOINT_CONTRACT_VERSION="ucr.endpoint-e2ee.v1";
@@ -643,7 +643,7 @@ function requireCompatibleE2eeAdapter(adapter){
   return adapter;
 }
 function closeE2eeTransport(){
-  appliedAdaptiveQuality=null;
+  appliedAdaptiveQuality=null;e2eeAdapterReady=false;
   ui.screenToggle.disabled=true;
   if(screenStream){
     const current=screenStream;screenStream=null;setScreenUi(false);
@@ -799,6 +799,8 @@ async function startScreenShare(){
   }
 }
 async function activateE2eeAdapter(){
+  const activeChannel=e2eeChannel;
+  e2eeAdapterReady=false;
   const adapter=requireCompatibleE2eeAdapter(e2eeAdapter());
   if(!adapter||typeof adapter.start!=="function"||typeof adapter.onEnvelope!=="function"){
     ui.status.textContent="WebRTC transport connected. Encrypted endpoint media adapter is required before camera/microphone/screen media can be published.";
@@ -806,7 +808,10 @@ async function activateE2eeAdapter(){
   }
   const restoreState=await restoreEndpointPersistedState(adapter);
   await adapter.start({...endpointMediaSources(),sendEnvelope:sendE2eeEnvelope});
+  if(!sessionActive||!mediaActive||e2eeChannel!==activeChannel||activeChannel?.readyState!=="open")return;
   const persisted=await persistEndpointState(adapter);
+  if(!sessionActive||!mediaActive||e2eeChannel!==activeChannel||activeChannel?.readyState!=="open")return;
+  e2eeAdapterReady=true;
   refreshScreenShareControl();
   ui.status.textContent=restoreState==="restored"
     ?"Endpoint E2EE media transport restored from sealed local state. Media keys remain on this endpoint."
@@ -1155,7 +1160,7 @@ function validAdaptiveQualityTarget(value){
   };
 }
 async function reportAdaptiveMedia(){
-  if(!sessionActive||!mediaActive||adaptiveMediaReportInFlight||e2eeChannel?.readyState!=="open")return;
+  if(!sessionActive||!mediaActive||adaptiveMediaReportInFlight||!e2eeAdapterReady||e2eeChannel?.readyState!=="open")return;
   const adapter=e2eeAdapter();
   if(!adapter||typeof adapter.getAdaptiveMediaTelemetry!=="function")return;
   adaptiveMediaReportInFlight=true;
@@ -1168,7 +1173,7 @@ async function reportAdaptiveMedia(){
     const decision=await response.json();
     const target=validAdaptiveQualityTarget(decision);
     if(!target)throw new Error("Invalid adaptive media quality target");
-    if(!sessionActive||!mediaActive||claims!==session||e2eeChannel!==channel||channel?.readyState!=="open")return;
+    if(!sessionActive||!mediaActive||!e2eeAdapterReady||claims!==session||e2eeChannel!==channel||channel?.readyState!=="open")return;
     // Never restart ICE/WebRTC just to change resolution: that breaks an otherwise good call.
     // Only the authenticated endpoint media/codec owner can change its encrypted encoder.
     if(typeof adapter.applyAdaptiveMediaDecision!=="function")return;
