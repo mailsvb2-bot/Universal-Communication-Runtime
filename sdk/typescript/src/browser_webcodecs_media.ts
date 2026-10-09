@@ -330,8 +330,38 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     }
   }
 
-  play(frame: UcrEncodedMediaFrame): void {
+  play(
+    frame: UcrEncodedMediaFrame,
+    source?: SfuForwardEnvelopeWire["frame"]["header"],
+  ): void {
     if (frame.mediaKind === "video" && !this.#videoEnabled) return;
+    let videoSourceKey: string | null = null;
+    if (frame.mediaKind === "video" && frame.videoSourceKind === "camera") {
+      const isLow = frame.streamId.endsWith("-low");
+      const baseTrack = isLow ? frame.streamId.slice(0, -4) : frame.streamId;
+      // Already verified envelope source/device scope; no room-label authority.
+      videoSourceKey = [
+        source?.source?.principalId ?? "",
+        source?.sourceDeviceId ?? "",
+        baseTrack,
+      ].join("|");
+      const current = this.#activeVideoStreams.get(videoSourceKey);
+      const preferred = this.#lowVideoPreferred ? baseTrack + "-low" : baseTrack;
+      if (current && current !== frame.streamId) {
+        // Keep rendering the old stream until the replacement keyframe exists.
+        if (frame.streamId !== preferred || !frame.keyframe) return;
+        const oldKey = ["video", frame.videoSourceKind, current].join(":");
+        const oldDecoder = this.#decoders.get(oldKey);
+        if (oldDecoder) {
+          oldDecoder.close();
+          this.#decoders.delete(oldKey);
+        }
+        this.#activeVideoStreams.set(videoSourceKey, frame.streamId);
+      } else if (!current) {
+        if (!frame.keyframe) return;
+        this.#activeVideoStreams.set(videoSourceKey, frame.streamId);
+      }
+    }
     const b = browser();
     if (!ucrWebCodecsSupported()) throw new Error("WebCodecs playback unavailable");
     const key = [frame.mediaKind, frame.videoSourceKind ?? "", frame.streamId].join(":");
@@ -349,10 +379,14 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       } else {
         if (!this.#videoCanvas) throw new Error("video rendering canvas not provided");
         const renderGeneration = this.#renderGeneration;
+        const selectedSourceKey = videoSourceKey;
+        const selectedStreamId = frame.streamId;
         decoder = new b.VideoDecoder!({
           output: (video) => {
             try {
-              if (!this.#videoEnabled || this.#renderGeneration !== renderGeneration) return;
+              if (!this.#videoEnabled || this.#renderGeneration !== renderGeneration ||
+                  (selectedSourceKey !== null &&
+                   this.#activeVideoStreams.get(selectedSourceKey) !== selectedStreamId)) return;
               const canvas = this.#videoCanvas!;
               const width = video.displayWidth, height = video.displayHeight;
               if (width < 1 || height < 1 || width > 7680 || height > 4320) {
