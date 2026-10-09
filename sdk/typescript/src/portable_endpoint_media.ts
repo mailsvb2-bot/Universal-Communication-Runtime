@@ -149,7 +149,10 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
       } catch (revokeError) {
         this.#onError(revokeError);
       }
-      const cleanup = await Promise.allSettled([this.#producer.stop(), this.#consumer.stop()]);
+      const cleanup = await Promise.allSettled([
+        Promise.resolve().then(() => this.#producer.stop()),
+        Promise.resolve().then(() => this.#consumer.stop()),
+      ]);
       for (const result of cleanup) {
         if (result.status === "rejected") this.#onError(result.reason);
       }
@@ -253,7 +256,10 @@ export class UcrPortableEndpointMediaAdapter implements UcrEndpointE2eeAdapterV1
     } catch (error) {
       stopError = error;
     }
-    const cleanup = await Promise.allSettled([this.#producer.stop(), this.#consumer.stop()]);
+    const cleanup = await Promise.allSettled([
+        Promise.resolve().then(() => this.#producer.stop()),
+        Promise.resolve().then(() => this.#consumer.stop()),
+      ]);
     for (const result of cleanup) {
       if (result.status === "rejected" && stopError === undefined) {
         stopError = result.reason;
