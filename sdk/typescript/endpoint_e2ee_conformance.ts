@@ -18,6 +18,7 @@ import {
   ucrCameraLayerStreamId,
   ucrVideoEncodingTarget,
 } from "./src/browser_webcodecs_media.ts";
+import { createUcrCanonicalBrowserMediaFactory } from "./src/canonical_browser_media_factory.ts";
 import {
   UcrChameleonReceiveHandover,
   type UcrEncryptedReceivePath,
@@ -1511,5 +1512,106 @@ try {
     else Reflect.deleteProperty(globalThis, key);
   }
 }
+
+// The only permitted default browser factory needs active canonical identity,
+// locally held device signing seed, exact epoch and matching published signer.
+// This is actual WASM media_bridge composition, not a second crypto function.
+const canonicalBootstrap = {
+  state: {
+    crypto_epoch() { return 12n; },
+    media_bridge(...args: unknown[]) {
+      observedMediaBridgeArguments = args;
+      return {
+        revoke() { revokedMediaBridges++; },
+        local_verifying_key: () => new Uint8Array(32).fill(7),
+        seal_wire: () => new Uint8Array(1),
+        open_wire: () => new Uint8Array(1),
+      };
+    },
+  },
+  claims: {tenantId: "tenant", namespaceId: null, callId: "call",
+    participantId: "alice", participantKind: "person", deviceId: "device-a",
+    sessionId: "session-a"},
+  groupId: "group",
+  loadWasm: async () => ({}),
+} as const;
+let observedMediaBridgeArguments: unknown[] = [];
+let revokedMediaBridges = 0;
+let canonicalMediaCurrent = true;
+const canonicalAdmission = {
+  sessionId: "session-a", deviceId: "device-a", participantId: "alice",
+  principalKindCode: 1,
+  binding: {tenantId: "tenant", namespaceId: null, callId: "call", groupId: "group",
+    cryptoEpoch: 12n, negotiationRef: "live-negotiation",
+    negotiationGeneration: 1n},
+  signingKeyId: "canonical-signer", signingSeed: new Uint8Array(32).fill(9),
+  trustedLocalVerifyingKey: new Uint8Array(32).fill(7),
+  trustedKeys: {resolve: () => new Uint8Array(32).fill(7)},
+  audioContext: {} as AudioContext,
+  isCurrent() { return canonicalMediaCurrent; },
+  authorizeFrame: () => true,
+  authorizePublish: () => true,
+};
+const canonicalFactory = createUcrCanonicalBrowserMediaFactory(
+  async () => canonicalAdmission,
+);
+const canonicalOptions = await canonicalFactory(canonicalBootstrap);
+assert.equal(canonicalOptions.binding.cryptoEpoch, 12n);
+assert.equal(observedMediaBridgeArguments[0], "call");
+assert.equal(observedMediaBridgeArguments[1], "live-negotiation");
+assert.equal(observedMediaBridgeArguments[2], 1n);
+assert.equal(observedMediaBridgeArguments[3], "alice");
+assert.equal(observedMediaBridgeArguments[4], 1);
+assert.equal(observedMediaBridgeArguments[5], "canonical-signer");
+assert.deepEqual(Array.from(observedMediaBridgeArguments[6] as Uint8Array),
+  Array.from(new Uint8Array(32)), "only temporary signing seed is erased");
+assert.ok(canonicalAdmission.signingSeed.every(b => b === 9),
+  "canonical device key store remains unmodified");
+assert.equal(await canonicalOptions.authorizePublish({} as any), true);
+canonicalMediaCurrent = false;
+assert.equal(await canonicalOptions.authorizePublish({} as any), false);
+assert.equal(await canonicalOptions.authorizeFrame({} as any), false);
+await assert.rejects(canonicalOptions.trustedKeys.resolve({} as any, "signer"),
+  /authorization revoked/);
+canonicalMediaCurrent = true;
+await assert.rejects(
+  createUcrCanonicalBrowserMediaFactory(async () => ({
+    ...canonicalAdmission, binding: {...canonicalAdmission.binding, cryptoEpoch: 13n},
+  }))(canonicalBootstrap),
+  /MLS epoch differs/,
+);
+const revokedBeforeMismatchedSigner = revokedMediaBridges;
+await assert.rejects(
+  createUcrCanonicalBrowserMediaFactory(async () => ({
+    ...canonicalAdmission, trustedLocalVerifyingKey: new Uint8Array(32).fill(3),
+  }))(canonicalBootstrap),
+  /endpoint signer differs/,
+);
+assert.equal(revokedMediaBridges, revokedBeforeMismatchedSigner + 1,
+  "misbound signer must retire the Rust bridge");
+await assert.rejects(
+  createUcrCanonicalBrowserMediaFactory(async () => ({
+    ...canonicalAdmission, sessionId: "different-session",
+  }))(canonicalBootstrap),
+  /canonical device signing, media binding or authorization incomplete/,
+);
+
+// Cancelling an installed but unstarted adapter must irreversibly retire the
+// signer. A cancelled installer must never leave a usable MLS media epoch.
+let prestartRevoked = 0;
+const unstarted = new UcrPortableEndpointMediaAdapter({
+  bridge: {...crypto, revoke() {prestartRevoked++;}},
+  producer: {start() {}, stop() {}},
+  consumer: {play() {}, stop() {}},
+  trustedKeys: {resolve() {return new Uint8Array(32).fill(7);}},
+  binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+    groupId: "group", cryptoEpoch: 12n, negotiationRef: "n",
+    negotiationGeneration: 1n},
+  authorizeFrame: () => true, authorizePublish: () => true,
+});
+await unstarted.stop();
+assert.equal(prestartRevoked, 1, "unstarted adapter signer must be revoked");
+await assert.rejects(unstarted.start({...src, sendEnvelope() {}}),
+  /endpoint media bridge retired/);
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
