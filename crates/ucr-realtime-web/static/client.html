@@ -1169,7 +1169,7 @@ function validAdaptiveQualityTarget(value){
 async function reportAdaptiveMedia(){
   if(!sessionActive||!mediaActive||adaptiveMediaReportInFlight||!e2eeAdapterReady||e2eeChannel?.readyState!=="open")return;
   const adapter=e2eeAdapter();
-  if(!adapter||typeof adapter.getReceiveMediaTelemetry!=="function")return;
+  if(!adapter||typeof adapter.getReceiveMediaTelemetry!=="function"||typeof adapter.applyReceiveMediaDecision!=="function")return;
   adaptiveMediaReportInFlight=true;
   const session=claims,channel=e2eeChannel;
   try{
@@ -1202,7 +1202,7 @@ function startAdaptiveMediaMonitoring(){
   stopAdaptiveMediaMonitoring();
   if(!sessionActive||!mediaActive)return;
   const adapter=e2eeAdapter();
-  if(!adapter||typeof adapter.getReceiveMediaTelemetry!=="function")return;
+  if(!adapter||typeof adapter.getReceiveMediaTelemetry!=="function"||typeof adapter.applyReceiveMediaDecision!=="function")return;
   adaptiveMediaTimer=setInterval(()=>{reportAdaptiveMedia().catch(()=>{});},2000);
   reportAdaptiveMedia().catch(()=>{});
 }
