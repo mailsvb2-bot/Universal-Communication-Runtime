@@ -476,6 +476,65 @@ mod tests {
         }
     }
 
+    #[test]
+    fn subscriber_switches_down_immediately_and_up_only_after_stable_samples() {
+        let lower = super::ViewerVideoLayer {
+            spatial_id: 0,
+            width: 640,
+            height: 360,
+            frame_rate: 12,
+            bitrate_bps: 300_000,
+        };
+        let higher = super::ViewerVideoLayer {
+            spatial_id: 1,
+            width: 1920,
+            height: 1080,
+            frame_rate: 30,
+            bitrate_bps: 3_500_000,
+        };
+        let layers = [lower, higher];
+        let mut receiver = super::ViewerLayerController::new();
+        let observe = |controller: &mut super::ViewerLayerController, stage| {
+            controller
+                .observe(stage, 1920, 1080, &layers)
+                .expect("bounded viewer quality")
+        };
+        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::Video1080p), Some(higher));
+        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::VideoLowFps), Some(lower));
+        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::Video1080p), Some(lower));
+        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::VideoLowFps), Some(lower));
+        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::Video1080p), Some(lower));
+        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::Video1080p), Some(higher));
+        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::Audio), None);
+        assert_eq!(receiver.selected(), None);
+    }
+
+    #[test]
+    fn subscriber_selection_rejects_invalid_updates_without_changing_running_layer() {
+        let valid = super::ViewerVideoLayer {
+            spatial_id: 0,
+            width: 640,
+            height: 360,
+            frame_rate: 12,
+            bitrate_bps: 300_000,
+        };
+        let mut receiver = super::ViewerLayerController::default();
+        assert_eq!(
+            receiver.observe(AdaptiveMediaStage::Video1080p, 640, 360, &[valid]),
+            Ok(Some(valid))
+        );
+        assert_eq!(
+            receiver.observe(AdaptiveMediaStage::Video1080p, 0, 360, &[valid]),
+            Err(super::ViewerLayerSelectionError::InvalidViewport)
+        );
+        assert_eq!(receiver.selected(), Some(valid));
+        assert_eq!(
+            receiver.observe(AdaptiveMediaStage::Video1080p, 640, 360, &[]),
+            Ok(None)
+        );
+        assert_eq!(receiver.selected(), None);
+    }
+
     fn ideal() -> AdaptiveMediaTelemetry {
         AdaptiveMediaTelemetry {
             estimated_bandwidth_bps: 8_000_000,
