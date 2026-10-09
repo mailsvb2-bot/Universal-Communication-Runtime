@@ -1,0 +1,45 @@
+import {
+  createUcrAuthorizedMediaInstaller,
+  type UcrAuthorizedMediaBootstrap,
+  type UcrAuthorizedMediaFactory,
+} from "./authorized_browser_media.ts";
+import type { UcrEndpointE2eeAdapterV1 } from "./endpoint_e2ee.ts";
+
+/**
+ * The only entrypoint loaded by the reference browser. Bundled once as ESM.
+ *
+ * The canonical application must inject its device-authenticated authority
+ * implementation before a call starts. This is NOT a second identity store:
+ * that authority must resolve live device trust, negotiated media binding,
+ * endpoint-owned signing material and per-frame publication/reception policy
+ * from the already-authorized Call/Group/Device/MLS session.
+ *
+ * Never invent a signing key, trust an unverified in-band public key, create an
+ * unauthenticated epoch, or send plaintext if the authority isn't available.
+ */
+interface UcrReferenceMediaWindow extends Record<string, unknown> {
+  ucrCanonicalAuthorizedMediaFactory?: UcrAuthorizedMediaFactory;
+}
+
+const target = globalThis as unknown as UcrReferenceMediaWindow;
+const createInstaller = createUcrAuthorizedMediaInstaller(
+  target,
+  async (bootstrap) => {
+    const factory = target.ucrCanonicalAuthorizedMediaFactory;
+    if (typeof factory !== "function") {
+      throw new Error(
+        "Canonical device media signing/trust authority is not wired; refusing endpoint media",
+      );
+    }
+    const options = await factory(bootstrap);
+    // Independent sanity checks happen inside createUcrAuthorizedMediaInstaller.
+    // The trusted factory never receives or asks for a server MLS exporter.
+    return options;
+  },
+);
+
+export async function installUcrReferenceBrowserMedia(
+  bootstrap: UcrAuthorizedMediaBootstrap,
+): Promise<UcrEndpointE2eeAdapterV1> {
+  return createInstaller(bootstrap);
+}
