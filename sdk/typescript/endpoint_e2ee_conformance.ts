@@ -615,6 +615,46 @@ try {
   oldOutput?.({displayWidth: 1920, displayHeight: 1080, close() {}});
   assert.equal(visualCalls.length, 1, "late callback after downgrade must not render");
   rendering.stop();
+
+  // Actual dual-layer receive journey: the wrong encrypted camera layer may
+  // arrive first or arrive late, but it must not flicker into the visible canvas.
+  const switching = new UcrBrowserWebCodecsConsumer({
+    videoCanvas: canvas as unknown as HTMLCanvasElement,
+  });
+  const videoFrame = (streamId: string, keyframe: boolean) => ({
+    mediaKind: "video" as const, videoSourceKind: "camera" as const,
+    streamId, timestamp: 24n, keyframe, bytes: new Uint8Array([1, 2]),
+  });
+  switching.play(videoFrame("camera123", true));
+  assert.equal(visualCalls.length, 2, "HD initial keyframe should be visible");
+  switching.play(videoFrame("camera123-low", true));
+  assert.equal(visualCalls.length, 2, "unselected low layer cannot replace HD");
+  const lowTarget = {
+    stage: "video_720p" as const,
+    video: {codec_capability_id: "ucr.video.h264",
+      width: 1280, height: 720, frame_rate: 30, target_bitrate_bps: 2_000_000},
+    opus_target_bitrate_bps: null,
+  };
+  switching.setReceiveQuality(lowTarget);
+  switching.play(videoFrame("camera123-low", false));
+  assert.equal(visualCalls.length, 2, "delta frame cannot start low-layer switch");
+  switching.play(videoFrame("camera123", false));
+  assert.equal(visualCalls.length, 3, "HD must stay visible until low keyframe");
+  const previousHdOutput = savedVideoOutput;
+  switching.play(videoFrame("camera123-low", true));
+  assert.equal(visualCalls.length, 4, "low keyframe commits local decoder switch");
+  previousHdOutput?.({displayWidth: 1920, displayHeight: 1080, close() {}});
+  assert.equal(visualCalls.length, 4, "late HD output after handover must be discarded");
+  switching.play(videoFrame("camera123", true));
+  assert.equal(visualCalls.length, 4, "HD is not selected during low target");
+  switching.setReceiveQuality({
+    stage: "video_1080p", video: {...lowTarget.video,
+      width: 1920, height: 1080, target_bitrate_bps: 4_000_000},
+    opus_target_bitrate_bps: null,
+  });
+  switching.play(videoFrame("camera123", true));
+  assert.equal(visualCalls.length, 5, "HD resumes only after authenticated keyframe");
+  switching.stop();
 } finally {
   for (const item of savedGlobals) {
     if (item.original) Object.defineProperty(globalThis, item.key, item.original);
@@ -626,6 +666,7 @@ try {
 // reader feeds exactly two independent encrypted stream IDs, never per-viewer encoders.
 assert.equal(ucrCameraLayerStreamId("track123", "full"), "track123");
 assert.equal(ucrCameraLayerStreamId("track123", "low"), "track123-low");
+assert.throws(() => ucrCameraLayerStreamId("track-low", "full"), /invalid authenticated/);
 assert.throws(() => ucrCameraLayerStreamId("x".repeat(113), "low"), /invalid authenticated/);
 const originalGlobals = [
   "MediaStreamTrackProcessor", "AudioEncoder", "VideoEncoder", "AudioDecoder",
