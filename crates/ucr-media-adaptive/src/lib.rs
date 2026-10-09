@@ -249,8 +249,7 @@ impl ViewerLayerController {
         viewport_height: u32,
         layers: &[ViewerVideoLayer],
     ) -> Result<Option<ViewerVideoLayer>, ViewerLayerSelectionError> {
-        let preferred =
-            select_viewer_video_layer(stage, viewport_width, viewport_height, layers)?;
+        let preferred = select_viewer_video_layer(stage, viewport_width, viewport_height, layers)?;
         let Some(candidate) = preferred else {
             self.selected = None;
             self.pending_improvement = None;
@@ -262,12 +261,14 @@ impl ViewerLayerController {
             layers.contains(&old)
                 && old.width <= viewport_width
                 && old.height <= viewport_height
-                && reference_video_config(stage).is_ok_and(|cfg| cfg.is_some_and(|cap| {
-                    old.width <= cap.width
-                        && old.height <= cap.height
-                        && old.frame_rate <= cap.frame_rate
-                        && old.bitrate_bps <= cap.target_bitrate_bps
-                }))
+                && reference_video_config(stage).is_ok_and(|cfg| {
+                    cfg.is_some_and(|cap| {
+                        old.width <= cap.width
+                            && old.height <= cap.height
+                            && old.frame_rate <= cap.frame_rate
+                            && old.bitrate_bps <= cap.target_bitrate_bps
+                    })
+                })
         });
         if !current_still_suitable {
             self.selected = Some(candidate);
@@ -283,8 +284,11 @@ impl ViewerLayerController {
         let current = current.expect("checked that current layer is suitable");
         let candidate_pixels = u64::from(candidate.width) * u64::from(candidate.height);
         let current_pixels = u64::from(current.width) * u64::from(current.height);
-        if (candidate_pixels, candidate.frame_rate, candidate.bitrate_bps)
-            < (current_pixels, current.frame_rate, current.bitrate_bps)
+        if (
+            candidate_pixels,
+            candidate.frame_rate,
+            candidate.bitrate_bps,
+        ) < (current_pixels, current.frame_rate, current.bitrate_bps)
         {
             self.selected = Some(candidate);
             self.pending_improvement = None;
@@ -499,12 +503,30 @@ mod tests {
                 .observe(stage, 1920, 1080, &layers)
                 .expect("bounded viewer quality")
         };
-        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::Video1080p), Some(higher));
-        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::VideoLowFps), Some(lower));
-        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::Video1080p), Some(lower));
-        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::VideoLowFps), Some(lower));
-        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::Video1080p), Some(lower));
-        assert_eq!(observe(&mut receiver, AdaptiveMediaStage::Video1080p), Some(higher));
+        assert_eq!(
+            observe(&mut receiver, AdaptiveMediaStage::Video1080p),
+            Some(higher)
+        );
+        assert_eq!(
+            observe(&mut receiver, AdaptiveMediaStage::VideoLowFps),
+            Some(lower)
+        );
+        assert_eq!(
+            observe(&mut receiver, AdaptiveMediaStage::Video1080p),
+            Some(lower)
+        );
+        assert_eq!(
+            observe(&mut receiver, AdaptiveMediaStage::VideoLowFps),
+            Some(lower)
+        );
+        assert_eq!(
+            observe(&mut receiver, AdaptiveMediaStage::Video1080p),
+            Some(lower)
+        );
+        assert_eq!(
+            observe(&mut receiver, AdaptiveMediaStage::Video1080p),
+            Some(higher)
+        );
         assert_eq!(observe(&mut receiver, AdaptiveMediaStage::Audio), None);
         assert_eq!(receiver.selected(), None);
     }
