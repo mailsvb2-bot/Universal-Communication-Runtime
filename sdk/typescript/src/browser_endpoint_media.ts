@@ -25,7 +25,8 @@ export interface UcrBrowserEndpointMediaOptions {
   readonly binding: NonNullable<UcrEndpointPipelineOptions["binding"]>;
   readonly authorizeFrame: NonNullable<UcrEndpointPipelineOptions["authorizeFrame"]>;
   readonly authorizePublish: NonNullable<UcrEndpointPipelineOptions["authorizePublish"]>;
-  readonly remoteVideoCanvas: HTMLCanvasElement | OffscreenCanvas;
+  /** Use this renderer for custom UIs. The reference UCR browser resolves its own E2EE canvas. */
+  readonly remoteVideoCanvas?: HTMLCanvasElement | OffscreenCanvas;
   readonly audioContext: AudioContext;
   readonly maxPendingFrames?: number;
   readonly onError?: (error: unknown) => void;
@@ -52,11 +53,18 @@ export function createUcrBrowserEndpointMediaAdapter(
     throw new Error("authenticated MLS endpoint bridge and trusted identity resolver required");
   }
   const onError = options.onError ?? (() => {});
+  const referenceCanvas = typeof document !== "undefined" ?
+    document.getElementById("remote-e2ee-canvas") : null;
+  const remoteVideoCanvas = options.remoteVideoCanvas ??
+    (referenceCanvas instanceof HTMLCanvasElement ? referenceCanvas : null);
+  if (!remoteVideoCanvas) {
+    throw new Error("authenticated endpoint-only video canvas required for decoder rendering");
+  }
   return createUcrPortableEndpointMediaAdapter({
     bridge: options.bridge,
     producer: new UcrBrowserWebCodecsProducer(onError),
     consumer: new UcrBrowserWebCodecsConsumer({
-      videoCanvas: options.remoteVideoCanvas,
+      videoCanvas: remoteVideoCanvas,
       audioContext: options.audioContext,
       onError,
     }),
