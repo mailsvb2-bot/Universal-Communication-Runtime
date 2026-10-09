@@ -21,7 +21,7 @@ export interface UcrAuthorizedMediaBootstrap {
     callId: string;
     deviceId: string;
     participantId: string;
-    participantKind: string;
+    participantKind: string | number;
     sessionId: string;
   }>;
   readonly groupId: string;
