@@ -451,6 +451,7 @@ const sessionClaims = {session: "1"};
 const channel = {readyState: "open"};
 const ctx: Record<string, any> = {
   sessionActive: true, mediaActive: true, adaptiveMediaReportInFlight: false,
+  adaptiveMediaGeneration: 0,
   e2eeAdapterReady: true, e2eeChannel: channel, appliedAdaptiveQuality: null,
   claims: sessionClaims, e2eeAdapter: () => adapter,
   validAdaptiveMediaTelemetry: (value: unknown) => value,
@@ -501,6 +502,67 @@ releaseServerResponse?.();
 await staleReport;
 assert.equal(appliedReceive.length, beforeInvalid, "stale encrypted channel must not adapt");
 assert.equal(retryAttempted, 0);
+
+// A stale measurement must NOT reach the server after a revoked/reconnected
+// encrypted media generation. Old finally must not unlock a newer in-flight report.
+let releaseTelemetry: (() => void) | undefined;
+const telemetryGate = new Promise<void>((resolve) => {releaseTelemetry = resolve;});
+let serverCallsAfterRevoke = 0;
+ctx.e2eeAdapter = () => ({
+  getReceiveMediaTelemetry: async () => {
+    await telemetryGate;
+    return adapter.getReceiveMediaTelemetry();
+  },
+  applyReceiveMediaDecision: adapter.applyReceiveMediaDecision,
+});
+ctx.api = async () => {
+  serverCallsAfterRevoke++;
+  return {ok: true, json: async () => qualityTarget};
+};
+const revokedDuringTelemetry = ctx.report();
+await Promise.resolve();
+ctx.adaptiveMediaGeneration++;
+ctx.e2eeChannel = {readyState: "open"};
+ctx.adaptiveMediaReportInFlight = false; // stopAdaptiveMediaMonitoring reset
+releaseTelemetry?.();
+await revokedDuringTelemetry;
+assert.equal(serverCallsAfterRevoke, 0,
+  "late telemetry from revoked E2EE channel must not be sent to server");
+assert.equal(appliedReceive.length, beforeInvalid,
+  "old telemetry must not change decoder after endpoint revocation");
+
+// A previous generation's finally may not clear the busy flag belonging to
+// a replacement generation's report (which would allow overlapping submissions).
+let releaseOld: (() => void) | undefined;
+const oldGate = new Promise<void>((resolve) => {releaseOld = resolve;});
+ctx.e2eeAdapter = () => ({
+  getReceiveMediaTelemetry: async () => {
+    await oldGate;
+    return adapter.getReceiveMediaTelemetry();
+  },
+  applyReceiveMediaDecision: adapter.applyReceiveMediaDecision,
+});
+const oldInFlight = ctx.report();
+await Promise.resolve();
+ctx.adaptiveMediaGeneration++;
+ctx.adaptiveMediaReportInFlight = false;
+ctx.e2eeAdapter = () => adapter;
+let releaseNew: (() => void) | undefined;
+const newGate = new Promise<void>((resolve) => {releaseNew = resolve;});
+ctx.api = async () => {
+  await newGate;
+  return {ok: true, json: async () => qualityTarget};
+};
+const nextInFlight = ctx.report();
+await Promise.resolve();
+assert.equal(ctx.adaptiveMediaReportInFlight, true);
+releaseOld?.();
+await oldInFlight;
+assert.equal(ctx.adaptiveMediaReportInFlight, true,
+  "stale request completion cannot clear new request's in-flight lock");
+releaseNew?.();
+await nextInFlight;
+assert.equal(ctx.adaptiveMediaReportInFlight, false);
 
 // Real RT0 portable pipeline integration: an authenticated, active adapter receives
 // per-subscriber quality commands, leaves the sender alone, and stops after revocation.
