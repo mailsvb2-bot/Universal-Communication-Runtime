@@ -1142,7 +1142,7 @@ function validAdaptiveQualityTarget(value){
     for(const [field,min,max] of [["width",1,7680],["height",1,4320],["frame_rate",1,120],["target_bitrate_bps",1,100000000]]){
       if(!Number.isInteger(video[field])||video[field]<min||video[field]>max)return null;
     }
-    if(typeof video.codec_capability_id!=="string"||video.codec_capability_id.length>128)return null;
+    if(typeof video.codec_capability_id!=="string"||video.codec_capability_id.length===0||video.codec_capability_id.length>128)return null;
   }else if(video!=null)return null;
   if(value.opus_target_bitrate_bps!=null&&(!Number.isInteger(value.opus_target_bitrate_bps)||value.opus_target_bitrate_bps<6000||value.opus_target_bitrate_bps>510000))return null;
   return {
@@ -1155,7 +1155,7 @@ function validAdaptiveQualityTarget(value){
   };
 }
 async function reportAdaptiveMedia(){
-  if(!sessionActive||!mediaActive||adaptiveMediaReportInFlight)return;
+  if(!sessionActive||!mediaActive||adaptiveMediaReportInFlight||e2eeChannel?.readyState!=="open")return;
   const adapter=e2eeAdapter();
   if(!adapter||typeof adapter.getAdaptiveMediaTelemetry!=="function")return;
   adaptiveMediaReportInFlight=true;
@@ -1177,6 +1177,10 @@ async function reportAdaptiveMedia(){
     await adapter.applyAdaptiveMediaDecision(target);
     if(sessionActive&&mediaActive&&claims===session&&e2eeChannel===channel){
       appliedAdaptiveQuality=fingerprint;
+    }
+  }catch(_){
+    if(sessionActive&&mediaActive&&claims===session&&e2eeChannel===channel){
+      ui.status.textContent="Protected media quality adjustment unavailable; media encryption remains required.";
     }
   }finally{
     adaptiveMediaReportInFlight=false;
