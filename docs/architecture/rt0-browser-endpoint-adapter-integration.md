@@ -28,7 +28,7 @@ Before joining the conference, the embedding product must provide:
 ```ts
 import {
   createUcrCanonicalBrowserMediaFactory,
-} from "./sdk/typescript/src/canonical_browser_media_factory.ts";
+} from "./endpoint-media/reference_browser_media_installer.js";
 
 // resolveAdmission MUST read authenticated, active Call/Group/Device/MLS
 // and trusted-signing-key state from the host's canonical identity owner.
