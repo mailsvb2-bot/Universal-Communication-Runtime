@@ -329,6 +329,46 @@ Promise.resolve()
             raise RuntimeError(
                 f"endpoint WASM browser execution failed: {endpoint_wasm_execution!r}"
             )
+        # Import the SAME ESM bundle that the actual DataChannel will load.
+        # With no canonical device signer/trusted keys provisioned, activation
+        # must refuse rather than creating keys in JS or falling back to RTP.
+        media_installer_probe = execute_async(
+            base,
+            """
+const done = arguments[arguments.length - 1];
+Promise.resolve().then(async () => {
+  const module = await import("./endpoint-media/reference_browser_media_installer.js");
+  let denied = "";
+  try {
+    await module.installUcrReferenceBrowserMedia({
+      state: {}, groupId: "probe-group",
+      claims: {
+        tenantId: "probe-tenant", namespaceId: null,
+        callId: "probe-call", participantId: "probe-person",
+        participantKind: "person", deviceId: "probe-device",
+        sessionId: "probe-session"
+      },
+      loadWasm: () => window.ucrEndpointWasm.load()
+    });
+  } catch (error) { denied = String(error); }
+  done({
+    ok: typeof module.installUcrReferenceBrowserMedia === "function" &&
+      denied.includes("Canonical device media signing/trust authority is not wired"),
+    entrypoint: typeof module.installUcrReferenceBrowserMedia,
+    noAuthorityRejected: denied.includes("Canonical device media signing/trust authority is not wired")
+  });
+}).catch(error => done({ok: false, error: String(error)}));
+""",
+        )
+        media_installer_verified = (
+            isinstance(media_installer_probe, dict)
+            and media_installer_probe.get("ok") is True
+        )
+        if not media_installer_verified:
+            raise RuntimeError(
+                f"bundled E2EE installer did not reject missing canonical authority: "
+                f"{media_installer_probe!r}"
+            )
         legacy_key = f"ucr-browser-legacy-{args.browser}"
         legacy_bytes = [11, 22, 33, 44, 55]
         legacy_upgrade = execute_async(
@@ -862,6 +902,11 @@ const done = arguments[arguments.length - 1];
             "probe": probe,
             "full_hd_local_codec_probe": full_hd_codec_probe,
             "full_hd_local_codec_probe_kind": "real-browser-synthetic-frame-no-network",
+            "endpoint_media_installer": {
+                "module_imported": media_installer_verified,
+                "no_authority_fails_closed": media_installer_probe.get("noAuthorityRejected") is True,
+                "probe": media_installer_probe,
+            },
             "endpoint_wasm_execution": {
                 "contract": probe.get("endpointWasmContract"),
                 "generated_package_loaded": endpoint_wasm_execution_verified,
