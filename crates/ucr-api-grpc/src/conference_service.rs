@@ -478,7 +478,10 @@ fn decode_subscription_set(
                         subscription.source.ok_or_else(invalid_argument)?,
                     )?,
                     media_kind: decode_media_kind(subscription.media_kind)?,
-                    stream_id: subscription.stream_id.map(|opaque| decode_opaque(Some(opaque))).transpose()?,
+                    stream_id: subscription
+                        .stream_id
+                        .map(|opaque| decode_opaque(Some(opaque)))
+                        .transpose()?,
                 })
             })
             .collect::<Result<Vec<_>, CanonicalError>>()?,
