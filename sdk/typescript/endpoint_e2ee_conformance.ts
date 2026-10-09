@@ -19,6 +19,7 @@ import {
   ucrVideoEncodingTarget,
 } from "./src/browser_webcodecs_media.ts";
 import { createUcrCanonicalBrowserMediaFactory } from "./src/canonical_browser_media_factory.ts";
+import { encodeSfuForwardEnvelopeWire } from "./src/sfu_forward_wire.ts";
 import {
   UcrChameleonReceiveHandover,
   type UcrEncryptedReceivePath,
@@ -833,6 +834,9 @@ assert.equal(bounded.filter((x: any) => x.media_kind === 2).length, 1,
   "one video canvas must never mix multiple speakers");
 assert.equal(bounded[31].source_id, "participant-990",
   "a chosen speaker outside the first audio page is still viewable");
+assert.equal(bounded.filter((x: any) => x.media_kind === 1 &&
+  x.source_id === "participant-990").length, 1,
+  "the selected video speaker must remain audible beyond the 32-item roster cap");
 // Exact SFU stream IDs are selected only from authenticated, actually
 // observed endpoint frames. HD stays subscribed until low is rendered.
 const verifiedLayers = [
@@ -1227,6 +1231,7 @@ const savedGlobals = globals.map((key) => ({
 }));
 let savedVideoOutput: ((frame: any) => void) | null = null;
 let decoderCreations = 0;
+let decoderCloses = 0;
 let rejectNextVideoDecode = false;
 let deferNextVideoOutput = false;
 let releaseDeferredVideoOutput: (() => void) | null = null;
@@ -1258,7 +1263,7 @@ Object.defineProperty(globalThis, "VideoDecoder", {
         render();
       }
     }
-    close() {}
+    close() {decoderCloses++;}
   },
 });
 Object.defineProperty(globalThis, "EncodedVideoChunk", {
@@ -1375,6 +1380,82 @@ try {
   assert.equal(decoderCreations - createdBefore, 2,
     "same stream ID from distinct verified participants must use two decoders");
   collisionReceiver.stop();
+
+  // Camera and screen-share frames from one authenticated participant arrive
+  // simultaneously under wildcard SFU subscription. Only the selected video
+  // source may draw on the single canvas, never alternating by decode timing.
+  const sharedCanvas = new UcrBrowserWebCodecsConsumer({
+    videoCanvas: canvas as unknown as HTMLCanvasElement,
+  });
+  const countBeforeScreens = visualCalls.length;
+  sharedCanvas.play(videoFrame("camera-main", true), sourceHeader("alice"));
+  sharedCanvas.play({...videoFrame("screen-1", true),
+    videoSourceKind: "screen_share"}, sourceHeader("alice"));
+  assert.equal(visualCalls.length, countBeforeScreens + 2,
+    "screen share must take the canvas on its first decoded keyframe");
+  sharedCanvas.play(videoFrame("camera-main", true), sourceHeader("alice"));
+  assert.equal(visualCalls.length, countBeforeScreens + 2,
+    "camera must not flicker over a still-active screen-share");
+  sharedCanvas.play({...videoFrame("screen-1", false),
+    videoSourceKind: "screen_share"}, sourceHeader("alice"));
+  assert.equal(visualCalls.length, countBeforeScreens + 3,
+    "screen-share frames must remain visible while source is active");
+  sharedCanvas.stop();
+
+  // Each new speaker must retire the previous decoder, not accumulate
+  // one VideoDecoder per roster change until browser hardware exhaustion.
+  const rotating = new UcrBrowserWebCodecsConsumer({
+    videoCanvas: canvas as unknown as HTMLCanvasElement,
+  });
+  const createdBeforeRotation = decoderCreations;
+  const closedBeforeRotation = decoderCloses;
+  for (let i = 0; i < 30; i++) {
+    rotating.play(videoFrame("shared-camera", true), sourceHeader("speaker-" + i));
+  }
+  assert.equal(decoderCreations - createdBeforeRotation, 30);
+  assert.ok(decoderCloses - closedBeforeRotation >= 29,
+    "all replaced authenticated speaker video decoders must be retired");
+  rotating.stop();
+
+  // Two speakers' audio is mixed in parallel on WebAudio. A shared playback
+  // watermark must not serialize independent speaker buffers back-to-back.
+  const audioStartTimes: number[] = [];
+  const audioSink = {
+    currentTime: 100,
+    destination: {},
+    createBuffer(_channels: number, _frames: number, _rate: number) {
+      return {duration: 0.01, copyToChannel() {}};
+    },
+    createBufferSource() {
+      return {buffer: null as unknown, connect() {},
+        start(time: number) {audioStartTimes.push(time);}};
+    },
+  };
+  Object.defineProperty(globalThis, "AudioDecoder", {
+    configurable: true, writable: true, value: class {
+      readonly output: (data: unknown) => void;
+      constructor({output}: {output: (data: unknown) => void}) {this.output = output;}
+      configure() {}
+      decode() {
+        this.output({numberOfChannels: 1, numberOfFrames: 480, sampleRate: 48000,
+          copyTo() {}, close() {}});
+      }
+      close() {}
+    },
+  });
+  const mixing = new UcrBrowserWebCodecsConsumer({
+    audioContext: audioSink as unknown as AudioContext,
+  });
+  const audioFrame = (id: string) => ({
+    mediaKind: "audio" as const, streamId: id, timestamp: 1n,
+    keyframe: false, bytes: Uint8Array.of(1, 2),
+  });
+  mixing.play(audioFrame("mic-a"), sourceHeader("alice"));
+  mixing.play(audioFrame("mic-a"), sourceHeader("alice"));
+  mixing.play(audioFrame("mic-b"), sourceHeader("bob"));
+  assert.deepEqual(audioStartTimes, [100, 100.01, 100],
+    "independent authenticated speakers must overlap while own frames stay ordered");
+  mixing.stop();
 } finally {
   for (const item of savedGlobals) {
     if (item.original) Object.defineProperty(globalThis, item.key, item.original);
@@ -1512,6 +1593,57 @@ try {
     else Reflect.deleteProperty(globalThis, key);
   }
 }
+
+// Different frames on one DataChannel may finish async trust lookups out of
+// order. The E2EE receiver must commit them in arrival order PER source/stream,
+// without stalling another participant and without weakening replay rejection.
+let releaseFirstKey: (() => void) | undefined;
+const firstKeyGate = new Promise<void>(resolve => {releaseFirstKey = resolve;});
+const receivedSequences: string[] = [];
+const inbound = new UcrPortableEndpointMediaAdapter({
+  bridge: {seal_wire() {return Uint8Array.of(1);},
+    open_wire() {return Uint8Array.of(9);}, revoke() {}},
+  producer: {start() {}, stop() {}},
+  consumer: {play(_frame, header) {
+    receivedSequences.push(header.source.principalId + ":" + header.sequence);
+  }, stop() {}},
+  trustedKeys: {async resolve(header) {
+    if(header.source.principalId === "alice" && header.sequence === 1n)
+      await firstKeyGate;
+    return new Uint8Array(32).fill(3);
+  }},
+  binding: {tenantId: "tenant", namespaceId: null, callId: "call",
+    groupId: "group", cryptoEpoch: 3n, negotiationRef: "current",
+    negotiationGeneration: 1n},
+  authorizeFrame: () => true, authorizePublish: () => true,
+});
+const inboundWire = (sequence: bigint, principalId: string) =>
+  encodeSfuForwardEnvelopeWire({frame: {
+    header: {
+      tenantId: "tenant", namespaceId: null, callId: "call", groupId: "group",
+      source: {principalId, kind: "person"}, sourceDeviceId: principalId + "-dev",
+      streamId: "camera", negotiationRef: "current", negotiationGeneration: 1n,
+      cryptoEpoch: 3n, cryptoStateRef: "state", cryptoSuite: "ucr.v1",
+      headerVersion: 2, mediaKind: "video", videoSourceKind: "camera",
+      sequence, mediaTimestamp: sequence, keyframe: true,
+    },
+    nonce: new Uint8Array(24), ciphertext: Uint8Array.of(1),
+    sourceSignature: {keyId: "trusted", algorithmId: "ed25519",
+      algorithmVersion: 1, signature: new Uint8Array(64)},
+  }});
+await inbound.start({...src, sendEnvelope() {}});
+const firstEncrypted = inbound.onEnvelope(inboundWire(1n, "alice"));
+const secondEncrypted = inbound.onEnvelope(inboundWire(2n, "alice"));
+await inbound.onEnvelope(inboundWire(1n, "bob"));
+assert.deepEqual(receivedSequences, ["bob:1"],
+  "a slow first key lookup must not reorder later frames or block other speakers");
+releaseFirstKey?.();
+await Promise.all([firstEncrypted, secondEncrypted]);
+assert.deepEqual(receivedSequences, ["bob:1", "alice:1", "alice:2"],
+  "protected inbound frames of each stream must render in signed sequence order");
+await assert.rejects(inbound.onEnvelope(inboundWire(1n, "alice")),
+  /replayed endpoint media frame/);
+await inbound.stop();
 
 // The only permitted default browser factory needs active canonical identity,
 // locally held device signing seed, exact epoch and matching published signer.
