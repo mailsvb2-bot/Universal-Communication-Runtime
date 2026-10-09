@@ -461,6 +461,86 @@ assert.equal(persistedFrameCount, 0,
   "media hot path must not persist MLS state on every decrypted frame");
 
 
+// A real browser permission dialog can resolve AFTER Leave/host withdrawal.
+// Execute the actual browser functions rather than asserting only code strings.
+const captureCode = browser.slice(
+  browser.indexOf("function preferredCameraCapture("),
+  browser.indexOf("async function replaceLocalTrack("),
+);
+assert.ok(captureCode.startsWith("function preferredCameraCapture("));
+const capturedResolvers: Array<(stream: any) => void> = [];
+let stoppedCaptureTracks = 0;
+const capturedTrack = () => ({
+  readyState: "live",
+  stop() { stoppedCaptureTracks++; },
+});
+const fakeCapture = (track: any) => ({
+  getTracks: () => [track],
+  getAudioTracks: () => [track],
+  getVideoTracks: () => [],
+});
+const mediaCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 0,
+  localStream: null,
+  navigator: {mediaDevices: {
+    getUserMedia: () => new Promise((resolve) => { capturedResolvers.push(resolve); }),
+  }},
+  ui: {mic: {value: ""}, camera: {value: ""}, localVideo: {srcObject: null}},
+  policyAllows: (kind: string) => kind === "audio",
+  refreshLocalMediaControls() {},
+  refreshDevices: async () => {},
+  MediaStream: class {},
+  e2eeChannel: null,
+};
+runInNewContext(captureCode +
+  "\nthis.getMedia = ensureLocalMedia; this.getTrack = ensureLocalTrack;", mediaCtx);
+const mediaPermissionPending = mediaCtx.getMedia();
+assert.equal(capturedResolvers.length, 1);
+mediaCtx.mediaCaptureGeneration++;
+mediaCtx.mediaActive = false;
+capturedResolvers.shift()?.(fakeCapture(capturedTrack()));
+await assert.rejects(mediaPermissionPending, /authorization changed/);
+assert.equal(stoppedCaptureTracks, 1, "late permission grant must stop the microphone");
+assert.equal(mediaCtx.localStream, null, "late capture cannot restore a left session");
+
+mediaCtx.mediaActive = true;
+mediaCtx.sessionActive = true;
+mediaCtx.localStream = {
+  getAudioTracks: () => [], getVideoTracks: () => [],
+  addTrack() { throw new Error("revoked track must not be added"); },
+};
+const trackPermissionPending = mediaCtx.getTrack("audio");
+assert.equal(capturedResolvers.length, 1);
+mediaCtx.sessionActive = false;
+mediaCtx.mediaCaptureGeneration++;
+mediaCtx.localStream = null;
+capturedResolvers.shift()?.(fakeCapture(capturedTrack()));
+await assert.rejects(trackPermissionPending, /authorization changed/);
+assert.equal(stoppedCaptureTracks, 2, "late individual device grant must stop its track");
+
+const startCode = browser.slice(
+  browser.indexOf("async function startWebRtc("),
+  browser.indexOf("async function restartIce("),
+);
+assert.ok(startCode.startsWith("async function startWebRtc("));
+let releaseStartCapture: () => void = () => {};
+const startCaptureGate = new Promise<void>((resolve) => { releaseStartCapture = resolve; });
+let staleServerStarts = 0;
+const startCtx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, mediaCaptureGeneration: 1,
+  navigator: {onLine: true},
+  ui: {privacyMode: {value: "secure"}},
+  ensureLocalMedia: async () => startCaptureGate,
+  api: async () => { staleServerStarts++; throw new Error("stale server peer opened"); },
+};
+runInNewContext(startCode + "\nthis.start = startWebRtc;", startCtx);
+const staleStart = startCtx.start();
+startCtx.mediaCaptureGeneration++;
+startCtx.mediaActive = false;
+releaseStartCapture();
+await assert.rejects(staleStart, /cancelled by conference media teardown/);
+assert.equal(staleServerStarts, 0, "late camera permission cannot reopen WebRTC server peer");
+
 // Execute browser's canonical roster -> per-viewer SFU subscription journey.
 // The VM never supplies a parallel admission owner or a forged roster.
 const rosterCode = browser.slice(
