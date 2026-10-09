@@ -431,7 +431,7 @@ const rosterCtx: Record<string, any> = {
   receiveSubscriptionDirty: false, receiveRosterSources: [],
   receiveSpeakerId: null, receiveSpeakerCandidate: null, receiveSpeakerSamples: 0,
   ui: {status: {textContent: ""}},
-  TextEncoder, body: () => ({}),
+  TextEncoder, body: () => ({}), e2eeAdapter: () => ({}),
   api: async (path: string, payload: any) => {
     rosterRequests.push({path, subscriptions: payload?.subscriptions});
     return path.endsWith("/receive-roster")
@@ -468,6 +468,47 @@ assert.equal(bounded.filter((x: any) => x.media_kind === 2).length, 1,
   "one video canvas must never mix multiple speakers");
 assert.equal(bounded[31].source_id, "participant-990",
   "a chosen speaker outside the first audio page is still viewable");
+// Exact SFU stream IDs are selected only from authenticated, actually
+// observed endpoint frames. HD stays subscribed until low is rendered.
+const verifiedLayers = [
+  {sourceId: "bob", sourceDeviceId: "device-b", streamId: "camera-b"},
+  {sourceId: "bob", sourceDeviceId: "device-b", streamId: "camera-b-low"},
+];
+let displayedLayer = "camera-b";
+const layerAdapter = {
+  getVerifiedReceiveVideoStreams: () => verifiedLayers,
+  getActiveReceiveVideoStreams: () => [{sourceId: "bob",
+    sourceDeviceId: "device-b", streamId: displayedLayer}],
+};
+rosterCtx.appliedAdaptiveQuality = JSON.stringify({
+  stage: "video_720p", video: {width: 1280, height: 720},
+});
+const preparing = rosterCtx.planRoster(sourceList.slice(1), "bob", layerAdapter);
+assert.equal(preparing.length, 4);
+assert.deepEqual(preparing.filter((x: any) => x.media_kind === 2)
+  .map((x: any) => x.stream_id), ["camera-b", "camera-b-low"],
+  "keep old ciphertext while waiting for the new authenticated decoded layer");
+displayedLayer = "camera-b-low";
+const committed = rosterCtx.planRoster(sourceList.slice(1), "bob", layerAdapter);
+assert.deepEqual(committed.filter((x: any) => x.media_kind === 2)
+  .map((x: any) => x.stream_id), ["camera-b-low"],
+  "unsubscribe old HD only after the low layer has actually rendered");
+rosterCtx.appliedAdaptiveQuality = JSON.stringify({stage: "video_1080p"});
+const upshift = rosterCtx.planRoster(sourceList.slice(1), "bob", layerAdapter);
+assert.deepEqual(upshift.filter((x: any) => x.media_kind === 2)
+  .map((x: any) => x.stream_id), ["camera-b-low", "camera-b"],
+  "Full HD upshift must preserve old video until decode completes");
+const missingLow = rosterCtx.planRoster(sourceList.slice(1), "bob", {
+  ...layerAdapter, getVerifiedReceiveVideoStreams: () => verifiedLayers.slice(0, 1),
+});
+assert.deepEqual(missingLow.filter((x: any) => x.media_kind === 2)
+  .map((x: any) => x.stream_id), [null],
+  "missing real layer cannot be invented or prematurely unsubscribe video");
+rosterCtx.appliedAdaptiveQuality = JSON.stringify({stage: "audio"});
+const audioFallback = rosterCtx.planRoster(sourceList.slice(1), "bob", layerAdapter);
+assert.equal(audioFallback.some((x: any) => x.media_kind === 2), false,
+  "audio-only policy must stop forwarding encrypted video");
+rosterCtx.appliedAdaptiveQuality = null;
 assert.equal(rosterCtx.validRoster({ok: true, sources: [
   {source_id: "alice", source_kind: 1},
   {source_id: "alice", source_kind: 1},
