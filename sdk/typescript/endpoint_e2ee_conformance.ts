@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 
 import {
   installUcrEndpointE2eeAdapter,
@@ -283,5 +284,81 @@ assert.match(browser, /e2eeAdapterReady=true/);
 assert.match(browser, /!e2eeAdapterReady/);
 assert.match(browser, /adapter\.applyReceiveMediaDecision\(target\)/);
 assert.doesNotMatch(browser.slice(browser.indexOf("async function reportAdaptiveMedia()"), browser.indexOf("function startAdaptiveMediaMonitoring()")), /scheduleWebRtcRetry/);
+
+// Execute the real reference-browser adaptation path, not merely a string check.
+// The VM supplies a stubbed authenticated endpoint; no camera, plaintext path, or
+// parallel protocol is introduced by these boundary/epoch/reconnect tests.
+const qualityCode = browser.slice(
+  browser.indexOf("function validAdaptiveQualityTarget("),
+  browser.indexOf("function startAdaptiveMediaMonitoring()"),
+);
+assert.ok(qualityCode.startsWith("function validAdaptiveQualityTarget("));
+assert.ok(qualityCode.includes("async function reportAdaptiveMedia()"));
+const appliedReceive: unknown[] = [];
+let retryAttempted = 0;
+const qualityTarget = {
+  ok: true, stage: "video_1080p",
+  video: {codec_capability_id: "ucr.video.h264", width: 1920, height: 1080,
+    frame_rate: 30, target_bitrate_bps: 4_000_000},
+  opus_target_bitrate_bps: null,
+};
+const adapter = {
+  getReceiveMediaTelemetry: () => ({
+    estimated_bandwidth_bps: 8_000_000,
+    packet_loss_basis_points: 0,
+    jitter_ms: 2, rtt_ms: 12,
+    cpu_utilization_percent: 30, gpu_utilization_percent: null,
+    battery_percent: 80, external_power: true, thermal_state: "nominal",
+  }),
+  applyReceiveMediaDecision: async (target: unknown) => { appliedReceive.push(target); },
+};
+const sessionClaims = {session: "1"};
+const channel = {readyState: "open"};
+const ctx: Record<string, any> = {
+  sessionActive: true, mediaActive: true, adaptiveMediaReportInFlight: false,
+  e2eeAdapterReady: true, e2eeChannel: channel, appliedAdaptiveQuality: null,
+  claims: sessionClaims, e2eeAdapter: () => adapter,
+  validAdaptiveMediaTelemetry: (value: unknown) => value,
+  api: async () => ({ok: true, json: async () => qualityTarget}),
+  body: () => ({}), ui: {status: {textContent: ""}},
+  scheduleWebRtcRetry: () => { retryAttempted++; },
+};
+runInNewContext(qualityCode + "\nthis.report = reportAdaptiveMedia; this.validate = validAdaptiveQualityTarget;", ctx);
+assert.equal(typeof ctx.report, "function");
+assert.equal(ctx.validate(qualityTarget)?.video.width, 1920);
+await ctx.report();
+await ctx.report();
+assert.equal(appliedReceive.length, 1, "repeated decision must not reconfigure active receiver");
+assert.equal(retryAttempted, 0, "quality adjustment must never restart WebRTC");
+const beforeInvalid = appliedReceive.length;
+ctx.api = async () => ({ok: true, json: async () => ({
+  ...qualityTarget, video: {...qualityTarget.video, width: -1},
+})});
+await ctx.report();
+assert.equal(appliedReceive.length, beforeInvalid, "invalid profile may not reach E2EE endpoint");
+assert.match(ctx.ui.status.textContent, /adjustment unavailable/);
+ctx.api = async () => ({ok: true, json: async () => ({
+  ...qualityTarget, stage: "video_720p",
+  video: {...qualityTarget.video, width: 1280, height: 720, target_bitrate_bps: 2_000_000},
+})});
+ctx.e2eeAdapterReady = false;
+await ctx.report();
+assert.equal(appliedReceive.length, beforeInvalid, "uninitialized endpoint must not adapt");
+ctx.e2eeAdapterReady = true;
+let releaseServerResponse: (() => void) | undefined;
+const serverGate = new Promise<void>((resolve) => { releaseServerResponse = resolve; });
+ctx.api = async () => { await serverGate; return {
+  ok: true, json: async () => ({
+    ...qualityTarget, stage: "video_720p",
+    video: {...qualityTarget.video, width: 1280, height: 720, target_bitrate_bps: 2_000_000},
+  }),
+}; };
+const staleReport = ctx.report();
+await Promise.resolve();
+ctx.e2eeChannel = {readyState: "open"};
+releaseServerResponse?.();
+await staleReport;
+assert.equal(appliedReceive.length, beforeInvalid, "stale encrypted channel must not adapt");
+assert.equal(retryAttempted, 0);
 
 console.log("UCR_ENDPOINT_E2EE_TYPESCRIPT_OK");
