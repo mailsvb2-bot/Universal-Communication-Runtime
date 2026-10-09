@@ -330,6 +330,12 @@ await ctx.report();
 await ctx.report();
 assert.equal(appliedReceive.length, 1, "repeated decision must not reconfigure active receiver");
 assert.equal(retryAttempted, 0, "quality adjustment must never restart WebRTC");
+let unsupportedReports = 0;
+ctx.e2eeAdapter = () => ({getReceiveMediaTelemetry: adapter.getReceiveMediaTelemetry});
+ctx.api = async () => { unsupportedReports++; return {ok: true, json: async () => qualityTarget}; };
+await ctx.report();
+assert.equal(unsupportedReports, 0, "must not ask server to degrade video when codec cannot apply it");
+ctx.e2eeAdapter = () => adapter;
 const beforeInvalid = appliedReceive.length;
 ctx.api = async () => ({ok: true, json: async () => ({
   ...qualityTarget, video: {...qualityTarget.video, width: -1},
