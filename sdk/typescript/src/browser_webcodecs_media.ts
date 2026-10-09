@@ -306,7 +306,10 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   readonly #videoCanvas?: HTMLCanvasElement | OffscreenCanvas;
   readonly #audioContext?: AudioContext;
   readonly #decoders = new Map<string, DecoderLike>();
-  #nextAudioTime = 0;
+  // WebAudio mixes independent AudioBufferSources automatically. Only frames
+  // from the SAME authenticated audio stream must be sequenced; a global clock
+  // serializes different speakers and makes conferences fall behind real time.
+  readonly #nextAudioTime = new Map<string, number>();
   #videoEnabled = true;
   #renderGeneration = 0;
   #lowVideoPreferred = false;
@@ -430,7 +433,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       if (frame.mediaKind === "audio") {
         if (!this.#audioContext) throw new Error("audio playback context not provided");
         decoder = new b.AudioDecoder!({
-          output: (data) => this.#playAudio(data),
+          output: (data) => this.#playAudio(data, key),
           error: this.#onError,
         });
         decoder.configure({codec: AUDIO_CODEC, sampleRate: AUDIO_RATE, numberOfChannels: AUDIO_CHANNELS});
@@ -517,7 +520,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     }
   }
 
-  #playAudio(data: AudioData): void {
+  #playAudio(data: AudioData, streamKey: string): void {
     try {
       const context = this.#audioContext!;
       const buffer = context.createBuffer(data.numberOfChannels, data.numberOfFrames, data.sampleRate);
@@ -529,9 +532,9 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
       const node = context.createBufferSource();
       node.buffer = buffer;
       node.connect(context.destination);
-      const start = Math.max(context.currentTime, this.#nextAudioTime);
+      const start = Math.max(context.currentTime, this.#nextAudioTime.get(streamKey) ?? context.currentTime);
       node.start(start);
-      this.#nextAudioTime = start + buffer.duration;
+      this.#nextAudioTime.set(streamKey, start + buffer.duration);
     } catch (error) { this.#onError(error); }
     finally { data.close(); }
   }
@@ -544,6 +547,6 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     this.#activeVideoStreams.clear();
     this.#videoEnabled = true;
     this.#lowVideoPreferred = false;
-    this.#nextAudioTime = 0;
+    this.#nextAudioTime.clear();
   }
 }
