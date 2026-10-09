@@ -7,8 +7,8 @@
 ## Implemented groundwork on this branch (not a production claim)
 
 - The existing Phase-23 `ucr-media-adaptive` module now selects bounded quality layers independently for each viewport/viewer. It never takes a room label or a participant threshold as input, never invents a missing Full HD layer, and does not bypass canonical subscription authorization.
-- The reference browser no longer calls WebRTC/ICE reconnect merely in response to a quality-profile change. It validates the server's adaptive target and offers it only to the endpoint-owned optional `applyAdaptiveMediaDecision` callback, without changing encrypted media or grants itself.
-- The TypeScript endpoint adapter contract exposes the optional quality and observed-telemetry hooks; conformance tests cover hook validation and the no-ICE-restart invariant.
+- The reference browser no longer calls WebRTC/ICE reconnect merely in response to a quality-profile change. It validates the server's adaptive target and offers it only to the endpoint-owned optional `applyReceiveMediaDecision` callback, without changing encrypted media or grants itself.
+- The TypeScript endpoint adapter contract exposes separate subscriber-only receive-quality and observed-downlink telemetry hooks; conformance tests cover hook validation and the no-ICE-restart invariant.
 - **Integration limitations:** a deployed codec adapter must implement those hooks; the SFU must connect authorized subscriptions to actual advertised simulcast/SVC layers; E2EE epoch-aware transport switching, native codec negotiation, and large-scale edge fan-out are NOT implemented by this groundwork.
 - This branch is not a second media/crypto owner. No 15-person cutoff, implicit publication revocation, or WebTransport/CDN claim is introduced.
 
