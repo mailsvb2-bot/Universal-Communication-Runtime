@@ -1050,7 +1050,7 @@ assert.equal(staleSubscriptionWrites, 0,
   "outdated roster must never write SFU subscriptions after E2EE retirement");
 
 assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
-assert.match(browser, /Unsupported endpoint E2EE adapter contract version/);
+assert.match(browser, /Protected endpoint E2EE adapter v1 with revocation is required/);
 assert.match(browser, /restoreSealedState/);
 assert.match(browser, /sealState/);
 assert.match(browser, /validAdaptiveQualityTarget/);
