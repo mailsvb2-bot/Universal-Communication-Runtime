@@ -281,7 +281,9 @@ impl ViewerLayerController {
             self.improvement_samples = 0;
             return Ok(self.selected);
         }
-        let current = current.expect("checked that current layer is suitable");
+        let Some(current) = current else {
+            return Ok(self.selected);
+        };
         let candidate_pixels = u64::from(candidate.width) * u64::from(candidate.height);
         let current_pixels = u64::from(current.width) * u64::from(current.height);
         if (
