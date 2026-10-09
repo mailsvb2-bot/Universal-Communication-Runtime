@@ -365,6 +365,47 @@ assert.doesNotMatch(
   "admission must not begin sampling before the channel and endpoint are active",
 );
 
+// Execute the real DataChannel encrypted-frame handler: per-frame media must
+// never trigger a sealed-state IndexedDB write, including large live audiences.
+const frameHandlerSnippet = browser.slice(
+  browser.indexOf("function attachE2eeDataChannel(channel){"),
+  browser.indexOf("function scheduleStreamRetry(){"),
+);
+assert.ok(frameHandlerSnippet.startsWith("function attachE2eeDataChannel("));
+let openedFrameCount = 0;
+let persistedFrameCount = 0;
+let lastChannel: Record<string, any> | null = null;
+const frameCtx: Record<string, any> = {
+  E2EE_CHANNEL_LABEL: "ucr.e2ee.media.v1",
+  closeE2eeTransport() {},
+  receiveE2eeChunk: (wire: unknown) => wire,
+  packetCount: 0,
+  ui: {packets: {textContent: ""}, status: {textContent: ""},
+    webrtcState: {textContent: ""}},
+  e2eePending: null,
+  e2eeAdapter() {
+    return {onEnvelope: async () => {openedFrameCount++;}};
+  },
+  requireCompatibleE2eeAdapter: (x: unknown) => x,
+  persistEndpointState: async () => {persistedFrameCount++;},
+  activateE2eeAdapter: async () => {},
+};
+runInNewContext(frameHandlerSnippet + "\nthis.attach = attachE2eeDataChannel;", frameCtx);
+lastChannel = {
+  label: "ucr.e2ee.media.v1",
+  readyState: "open",
+  close() {},
+};
+frameCtx.attach(lastChannel);
+for (let i = 0; i < 80; i++) {
+  lastChannel.onmessage({data: new Uint8Array([1, 2, i])});
+}
+await Promise.resolve();
+await Promise.resolve();
+assert.equal(openedFrameCount, 80, "80 protected ciphertext frames must be accepted");
+assert.equal(persistedFrameCount, 0,
+  "media hot path must not persist MLS state on every decrypted frame");
+
 const browser = readFileSync("crates/ucr-realtime-web/static/client.html", "utf8");
 assert.match(browser, /ucr\.endpoint-e2ee\.v1/);
 assert.match(browser, /Unsupported endpoint E2EE adapter contract version/);
