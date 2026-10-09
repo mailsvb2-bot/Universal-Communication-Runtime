@@ -937,6 +937,12 @@ async function requireAuthorizedMediaInstaller(){
 // permission prompts, signalling or MLS registration. An authenticated host
 // remains the sole source of canonical Device media authority.
 function prewarmAuthorizedMediaRuntime(){
+  const installed=e2eeAdapter();
+  if(installed){
+    requireCompatibleE2eeAdapter(installed);
+    loadEndpointWasmModule().catch(()=>{});
+    return;
+  }
   if(typeof window.ucrCanonicalAuthorizedMediaFactory!=="function"&&
      typeof window.ucrInstallAuthorizedMediaEndpoint!=="function")return;
   Promise.all([loadEndpointWasmModule(),requireAuthorizedMediaInstaller()]).catch(()=>{
