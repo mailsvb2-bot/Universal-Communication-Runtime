@@ -1389,6 +1389,16 @@ async function heartbeat(){
 }
 async function join(){
   if(Date.now()<claims.not_before){scheduleWaitingRoom();return;}
+  // A signed join URL alone does not provision an authorized media signer.
+  // Reject before opening a realtime session/heartbeat when the host omitted
+  // the canonical Device media authority; the user may retry after setup.
+  try{requireCanonicalMediaHostReady();}
+  catch(error){
+    ui.state.textContent="Secure media unavailable";
+    ui.status.textContent=error.message;
+    ui.join.disabled=false;
+    return;
+  }
   const generation=++sessionLifecycleGeneration;
   try{
     ui.join.disabled=true;ui.state.textContent="Joining";ui.status.textContent="Authenticating signed session grant…";
