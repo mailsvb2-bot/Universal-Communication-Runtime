@@ -1571,8 +1571,23 @@ assert.equal(await canonicalOptions.authorizePublish({} as any), true);
 canonicalMediaCurrent = false;
 assert.equal(await canonicalOptions.authorizePublish({} as any), false);
 assert.equal(await canonicalOptions.authorizeFrame({} as any), false);
-assert.throws(() => canonicalOptions.trustedKeys.resolve({} as any, "signer"),
+await assert.rejects(canonicalOptions.trustedKeys.resolve({} as any, "signer"),
   /authorization revoked/);
+canonicalMediaCurrent = true;
+// Revocation DURING an asynchronous trusted descriptor lookup must also abort
+// decryption, not just revoke admission at the start of the lookup.
+let finishKeyLookup: ((key: Uint8Array) => void) | undefined;
+const delayedKey = new Promise<Uint8Array>(resolve => {finishKeyLookup = resolve;});
+const midflightFactory = createUcrCanonicalBrowserMediaFactory(async () => ({
+  ...canonicalAdmission,
+  trustedKeys: {resolve: async () => delayedKey},
+}));
+const midflightOptions = await midflightFactory(canonicalBootstrap);
+const lateKey = midflightOptions.trustedKeys.resolve({} as any, "source");
+canonicalMediaCurrent = false;
+finishKeyLookup?.(new Uint8Array(32).fill(7));
+await assert.rejects(lateKey, /authorization revoked/,
+  "revocation after trusted-key await must prevent crypto/decode");
 canonicalMediaCurrent = true;
 await assert.rejects(
   createUcrCanonicalBrowserMediaFactory(async () => ({
