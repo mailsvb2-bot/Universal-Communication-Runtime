@@ -860,6 +860,13 @@ async function openStream(){
     if(streamAbort===controller){streamAbort=null;if(sessionActive)scheduleStreamRetry();}
   }
 }
+// Prefer real Full HD source capture where the camera and browser can provide it.
+// 'ideal' is deliberately non-mandatory: a 720p-only camera must still work.
+function preferredCameraCapture(deviceId){
+  const video={width:{ideal:1920},height:{ideal:1080},frameRate:{ideal:30,max:30}};
+  if(deviceId)video.deviceId={exact:deviceId};
+  return video;
+}
 async function ensureLocalMedia(force=false){
   if(!mediaActive)throw new Error("Conference media is not admitted yet");
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error("Camera/microphone access is unavailable in this browser");
@@ -870,7 +877,7 @@ async function ensureLocalMedia(force=false){
     localStream=new MediaStream();ui.localVideo.srcObject=localStream;refreshLocalMediaControls();return localStream;
   }
   const audio=audioAllowed?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):false;
-  const video=cameraAllowed?(ui.camera.value?{deviceId:{exact:ui.camera.value}}:true):false;
+  const video=cameraAllowed?preferredCameraCapture(ui.camera.value):false;
   localStream=await navigator.mediaDevices.getUserMedia({audio,video});
   ui.localVideo.srcObject=localStream;
   refreshLocalMediaControls();
@@ -884,7 +891,7 @@ async function ensureLocalTrack(kind){
   const existing=kind==="audio"?localStream.getAudioTracks()[0]:localStream.getVideoTracks()[0];
   if(existing&&existing.readyState==="live")return existing;
   if(existing){localStream.removeTrack(existing);existing.stop();}
-  const constraint=kind==="audio"?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):(ui.camera.value?{deviceId:{exact:ui.camera.value}}:true);
+  const constraint=kind==="audio"?(ui.mic.value?{deviceId:{exact:ui.mic.value}}:true):preferredCameraCapture(ui.camera.value);
   const captured=await navigator.mediaDevices.getUserMedia(kind==="audio"?{audio:constraint,video:false}:{audio:false,video:constraint});
   const track=kind==="audio"?captured.getAudioTracks()[0]:captured.getVideoTracks()[0];
   if(!track){captured.getTracks().forEach(value=>value.stop());throw new Error("Requested media device returned no track");}
