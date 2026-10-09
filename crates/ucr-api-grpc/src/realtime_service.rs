@@ -846,7 +846,9 @@ where
         Ok(Response::new(pb::RealtimeGetReceiveRosterResponse {
             result: Some(match result {
                 Ok(roster) => pb::realtime_get_receive_roster_response::Result::Roster(roster),
-                Err(error) => pb::realtime_get_receive_roster_response::Result::Error(pb_error(error)),
+                Err(error) => {
+                    pb::realtime_get_receive_roster_response::Result::Error(pb_error(error))
+                }
             }),
         }))
     }
