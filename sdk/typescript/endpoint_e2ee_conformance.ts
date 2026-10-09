@@ -503,6 +503,32 @@ await assert.rejects(earlyBlockedCtx.start(),
 assert.equal(unexpectedCapture, 0, "no microphone/camera prompt without trusted signer");
 assert.equal(unexpectedSignalling, 0, "no network offer without trusted signer");
 
+// The same preflight must happen even earlier: before a signed invite can
+// create a realtime session or start a heartbeat in the first place.
+const preflightJoinSnippet = browser.slice(
+  browser.indexOf("async function join(){"),
+  browser.indexOf("function scheduleEntryRetry(){"),
+);
+assert.ok(preflightJoinSnippet.startsWith("async function join(){"));
+let unauthorizedJoinRequests = 0;
+const preflightJoinCtx: Record<string, any> = {
+  claims: {not_before: 0}, sessionLifecycleGeneration: 0,
+  ui: {state: {textContent: ""}, status: {textContent: ""},
+    join: {disabled: false}},
+  requireCanonicalMediaHostReady: preflightCtx.preflight,
+  api: async () => {unauthorizedJoinRequests++;throw new Error("unexpected join");},
+  scheduleWaitingRoom() {},
+};
+runInNewContext(preflightJoinSnippet + "\nthis.joinCall = join;", preflightJoinCtx);
+await preflightJoinCtx.joinCall();
+assert.equal(unauthorizedJoinRequests, 0,
+  "missing trusted media authority cannot create a realtime session");
+assert.equal(preflightJoinCtx.sessionLifecycleGeneration, 0,
+  "preflight rejection must not activate a session lifecycle");
+assert.equal(preflightJoinCtx.ui.state.textContent, "Secure media unavailable");
+assert.equal(preflightJoinCtx.ui.join.disabled, false,
+  "user can retry after canonical media authority is installed");
+
 // Chameleon lifecycle: no telemetry may be reported before the endpoint is
 // authenticated and running; the first report must start after E2EE activation.
 const activateSnippet = browser.slice(
