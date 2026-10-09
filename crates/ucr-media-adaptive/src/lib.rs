@@ -335,6 +335,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn quality_selection_scales_across_thousand_independent_viewers_without_a_room_mode() {
+        let layers = [
+            super::ViewerVideoLayer {
+                spatial_id: 0,
+                width: 640,
+                height: 360,
+                frame_rate: 12,
+                bitrate_bps: 300_000,
+            },
+            super::ViewerVideoLayer {
+                spatial_id: 1,
+                width: 1280,
+                height: 720,
+                frame_rate: 30,
+                bitrate_bps: 1_800_000,
+            },
+            super::ViewerVideoLayer {
+                spatial_id: 2,
+                width: 1920,
+                height: 1080,
+                frame_rate: 30,
+                bitrate_bps: 3_500_000,
+            },
+        ];
+        for viewer in 0..1_000 {
+            let (stage, width, height, expected) = match viewer % 4 {
+                0 => (AdaptiveMediaStage::Video1080p, 1920, 1080, Some(layers[2])),
+                1 => (AdaptiveMediaStage::Video720p, 1920, 1080, Some(layers[1])),
+                2 => (AdaptiveMediaStage::Video1080p, 640, 360, Some(layers[0])),
+                _ => (AdaptiveMediaStage::Audio, 1920, 1080, None),
+            };
+            assert_eq!(
+                super::select_viewer_video_layer(stage, width, height, &layers),
+                Ok(expected),
+                "unexpected layer for viewer {viewer}"
+            );
+        }
+    }
+
     fn ideal() -> AdaptiveMediaTelemetry {
         AdaptiveMediaTelemetry {
             estimated_bandwidth_bps: 8_000_000,
