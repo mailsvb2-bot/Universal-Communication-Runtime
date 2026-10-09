@@ -34,6 +34,11 @@ export interface UcrBrowserEndpointMediaOptions {
    * from measured or authoritative device state. No synthetic battery/CPU defaults.
    */
   readonly measureReceiveTelemetry?: UcrEndpointPipelineOptions["measureReceiveTelemetry"];
+  /** Opt-in two encoded camera streams (actual Full HD source + 360p/12 low).
+   * Only enable when the canonical Conference can select exact encrypted layer IDs.
+   * Disabled by default to avoid a second encoder on phones.
+   */
+  readonly enableCameraLayerPair?: boolean;
 }
 
 export function createUcrBrowserEndpointMediaAdapter(
@@ -62,7 +67,9 @@ export function createUcrBrowserEndpointMediaAdapter(
   }
   return createUcrPortableEndpointMediaAdapter({
     bridge: options.bridge,
-    producer: new UcrBrowserWebCodecsProducer(onError),
+    producer: new UcrBrowserWebCodecsProducer(
+      onError, options.enableCameraLayerPair === true,
+    ),
     consumer: new UcrBrowserWebCodecsConsumer({
       videoCanvas: remoteVideoCanvas,
       audioContext: options.audioContext,
