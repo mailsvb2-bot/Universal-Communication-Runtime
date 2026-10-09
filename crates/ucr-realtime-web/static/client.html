@@ -933,6 +933,17 @@ async function requireAuthorizedMediaInstaller(){
   }
   return referenceMediaInstallerPromise;
 }
+// Warm only public, revision-pinned code, never secrets, signing seeds,
+// permission prompts, signalling or MLS registration. An authenticated host
+// remains the sole source of canonical Device media authority.
+function prewarmAuthorizedMediaRuntime(){
+  if(typeof window.ucrCanonicalAuthorizedMediaFactory!=="function"&&
+     typeof window.ucrInstallAuthorizedMediaEndpoint!=="function")return;
+  Promise.all([loadEndpointWasmModule(),requireAuthorizedMediaInstaller()]).catch(()=>{
+    // A failed warmup is not an admission decision. The guarded on-demand
+    // loader retries and reports any real failure when the user joins.
+  });
+}
 async function activateE2eeAdapter(){
   e2eeAdapterReady=false;
   const generation=e2eeActivationGeneration;
@@ -1392,7 +1403,7 @@ async function join(){
   // A signed join URL alone does not provision an authorized media signer.
   // Reject before opening a realtime session/heartbeat when the host omitted
   // the canonical Device media authority; the user may retry after setup.
-  try{requireCanonicalMediaHostReady();}
+  try{requireCanonicalMediaHostReady();prewarmAuthorizedMediaRuntime();}
   catch(error){
     ui.state.textContent="Secure media unavailable";
     ui.status.textContent=error.message;
@@ -1855,6 +1866,10 @@ try{
   ui.expires.textContent=new Date(claims.expires).toLocaleTimeString();
   if(!scheduleWaitingRoom())ui.status.textContent="Signed grant loaded. Ready to join.";
 }catch(e){fail(e.message);}
+// Hosts installing trust before client startup benefit from an idle preload.
+// Hosts installing trust later may call this hook once authorized.
+window.ucrPrewarmAuthorizedMediaRuntime=prewarmAuthorizedMediaRuntime;
+prewarmAuthorizedMediaRuntime();
 ui.join.addEventListener("click",join);ui.leave.addEventListener("click",leave);
 if(navigator.mediaDevices&&typeof navigator.mediaDevices.addEventListener==="function"){
   navigator.mediaDevices.addEventListener("devicechange",()=>{handleMediaDeviceChange();});
