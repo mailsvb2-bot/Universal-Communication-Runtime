@@ -643,19 +643,36 @@ const savedGlobals = globals.map((key) => ({
 }));
 let savedVideoOutput: ((frame: any) => void) | null = null;
 let decoderCreations = 0;
+let rejectNextVideoDecode = false;
+let deferNextVideoOutput = false;
+let releaseDeferredVideoOutput: (() => void) | null = null;
 for (const key of globals) {
   Object.defineProperty(globalThis, key, {configurable: true, writable: true, value: class {}});
 }
 Object.defineProperty(globalThis, "VideoDecoder", {
   configurable: true, writable: true,
   value: class {
+    readonly #output: (frame: any) => void;
     constructor(options: {output: (frame: any) => void}) {
+      this.#output = options.output;
       savedVideoOutput = options.output;
       decoderCreations++;
     }
     configure() {}
     decode() {
-      savedVideoOutput?.({displayWidth: 1920, displayHeight: 1080, close() {}});
+      if (rejectNextVideoDecode) {
+        rejectNextVideoDecode = false;
+        throw new Error("simulated corrupt candidate video keyframe");
+      }
+      const render = () => this.#output({
+        displayWidth: 1920, displayHeight: 1080, close() {},
+      });
+      if (deferNextVideoOutput) {
+        deferNextVideoOutput = false;
+        releaseDeferredVideoOutput = render;
+      } else {
+        render();
+      }
     }
     close() {}
   },
@@ -719,6 +736,46 @@ try {
   switching.play(videoFrame("camera123", true));
   assert.equal(visualCalls.length, 5, "HD resumes only after authenticated keyframe");
   switching.stop();
+
+  // Old HD remains visible if the replacement decoder rejects its first keyframe.
+  const brokenSwitch = new UcrBrowserWebCodecsConsumer({
+    videoCanvas: canvas as unknown as HTMLCanvasElement,
+  });
+  brokenSwitch.play(videoFrame("failure-camera", true));
+  brokenSwitch.setReceiveQuality(lowTarget);
+  rejectNextVideoDecode = true;
+  assert.throws(() => brokenSwitch.play(videoFrame("failure-camera-low", true)),
+    /corrupt candidate video keyframe/);
+  const afterFailedSwitch = visualCalls.length;
+  brokenSwitch.play(videoFrame("failure-camera", false));
+  assert.equal(visualCalls.length, afterFailedSwitch + 1,
+    "HD frames must continue after failed replacement keyframe decode");
+  brokenSwitch.play(videoFrame("failure-camera-low", true));
+  assert.equal(visualCalls.length, afterFailedSwitch + 2,
+    "subsequent valid keyframe should complete protected layer handover");
+  brokenSwitch.stop();
+
+  // Decoder output is asynchronous in real WebCodecs: receiving an encoded
+  // keyframe alone must NOT retire old video before the new output is ready.
+  const deferredSwitch = new UcrBrowserWebCodecsConsumer({
+    videoCanvas: canvas as unknown as HTMLCanvasElement,
+  });
+  deferredSwitch.play(videoFrame("async-camera", true));
+  deferredSwitch.setReceiveQuality(lowTarget);
+  deferNextVideoOutput = true;
+  const beforeDeferred = visualCalls.length;
+  deferredSwitch.play(videoFrame("async-camera-low", true));
+  assert.equal(visualCalls.length, beforeDeferred,
+    "new encoded keyframe alone must not replace visible HD");
+  deferredSwitch.play(videoFrame("async-camera", false));
+  assert.equal(visualCalls.length, beforeDeferred + 1,
+    "old HD continues while the replacement decoder is still preparing");
+  const activatePreparedLayer = releaseDeferredVideoOutput;
+  assert.ok(activatePreparedLayer);
+  activatePreparedLayer();
+  assert.equal(visualCalls.length, beforeDeferred + 2,
+    "new layer activates only on successfully decoded frame output");
+  deferredSwitch.stop();
 
   // Two authorized publishers can supply identical track IDs. They still need
   // independent decoder state and replay/keyframe pipelines.
