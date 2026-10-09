@@ -3,7 +3,7 @@ import type {
   UcrMediaConsumer,
   UcrMediaProducer,
 } from "./portable_endpoint_media.ts";
-import type { UcrEndpointMediaSources } from "./endpoint_e2ee.ts";
+import type { UcrEndpointMediaSources, UcrEndpointAdaptiveQualityV1 } from "./endpoint_e2ee.ts";
 
 /**
  * WebCodecs platform implementation. Opt-in: browsers without required APIs must
@@ -56,8 +56,23 @@ const AUDIO_RATE = 48_000;
 const AUDIO_CHANNELS = 1;
 const VIDEO_WIDTH = 640;
 const VIDEO_HEIGHT = 480;
-const VIDEO_FRAMERATE = 15;
+const VIDEO_FRAMERATE = 30;
 const MAX_CAPTURE_FRAME_BYTES = 1_048_576;
+
+/** Source bitrate from actual camera dimensions, never from a weak viewer's downlink. */
+export function ucrVideoEncodingTarget(width: number, height: number): {
+  frameRate: number; bitrate: number;
+} {
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
+      width < 1 || height < 1 || width > 7680 || height > 4320) {
+    throw new Error("invalid measured source video dimensions");
+  }
+  const pixels = width * height;
+  if (pixels >= 1920 * 1080) return {frameRate: 30, bitrate: 4_000_000};
+  if (pixels >= 1280 * 720) return {frameRate: 30, bitrate: 2_000_000};
+  if (pixels >= 854 * 480) return {frameRate: 30, bitrate: 1_000_000};
+  return {frameRate: 12, bitrate: 384_000};
+}
 const MAX_VIDEO_ENCODER_QUEUE = 2;
 const MAX_AUDIO_ENCODER_QUEUE = 8;
 
@@ -174,10 +189,15 @@ export class UcrBrowserWebCodecsProducer implements UcrMediaProducer {
         numberOfChannels: AUDIO_CHANNELS, bitrate: 32_000});
     } else {
       const settings = track.getSettings();
+      const width = settings.width ?? VIDEO_WIDTH;
+      const height = settings.height ?? VIDEO_HEIGHT;
+      const quality = ucrVideoEncodingTarget(width, height);
       encoder.configure({codec: VIDEO_CODEC,
-        width: settings.width ?? VIDEO_WIDTH,
-        height: settings.height ?? VIDEO_HEIGHT,
-        framerate: VIDEO_FRAMERATE, bitrate: 600_000});
+        width, height,
+        framerate: Math.min(
+          Math.max(1, settings.frameRate ?? VIDEO_FRAMERATE), quality.frameRate,
+        ),
+        bitrate: quality.bitrate, latencyMode: "realtime"});
     }
     this.#encoders.push(encoder);
     const reader = processor.readable.getReader();
@@ -210,6 +230,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   readonly #audioContext?: AudioContext;
   readonly #decoders = new Map<string, DecoderLike>();
   #nextAudioTime = 0;
+  #videoEnabled = true;
 
   constructor(options: UcrBrowserCodecOptions = {}) {
     this.#videoCanvas = options.videoCanvas;
@@ -217,11 +238,34 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
     this.#onError = options.onError ?? (() => {});
   }
 
+  /** Receiver-only downgrade: video decoding stops at the local endpoint.
+   * Higher stages remain advisory until actual E2EE SVC/simulcast layering exists.
+   */
+  setReceiveQuality(target: UcrEndpointAdaptiveQualityV1): void {
+    const video = target.stage.startsWith("video_");
+    if ((video && !target.video) || (!video && target.video !== null)) {
+      throw new Error("invalid receive quality decision");
+    }
+    if (this.#videoEnabled === video) return;
+    this.#videoEnabled = video;
+    if (!video) {
+      for (const [key, decoder] of this.#decoders) {
+        if (key.startsWith("video:")) {
+          decoder.close();
+          this.#decoders.delete(key);
+        }
+      }
+    }
+  }
+
   play(frame: UcrEncodedMediaFrame): void {
+    if (frame.mediaKind === "video" && !this.#videoEnabled) return;
     const b = browser();
     if (!ucrWebCodecsSupported()) throw new Error("WebCodecs playback unavailable");
     const key = [frame.mediaKind, frame.videoSourceKind ?? "", frame.streamId].join(":");
     let decoder = this.#decoders.get(key);
+    // A newly selected encrypted video layer must start from its keyframe.
+    if (frame.mediaKind === "video" && !decoder && !frame.keyframe) return;
     if (!decoder) {
       if (frame.mediaKind === "audio") {
         if (!this.#audioContext) throw new Error("audio playback context not provided");
@@ -280,6 +324,7 @@ export class UcrBrowserWebCodecsConsumer implements UcrMediaConsumer {
   stop(): void {
     for (const decoder of this.#decoders.values()) decoder.close();
     this.#decoders.clear();
+    this.#videoEnabled = true;
     this.#nextAudioTime = 0;
   }
 }
