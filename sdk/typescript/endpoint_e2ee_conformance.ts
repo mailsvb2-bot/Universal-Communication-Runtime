@@ -208,7 +208,8 @@ const handoverEvents: string[] = [];
 const binding = {callId: "call1", sessionId: "session1", cryptoEpoch: 4n};
 function receivePath(
   id: string,
-  readiness: {authenticatedKeyframe: boolean; decoderReady: boolean} =
+  readiness: {authenticatedKeyframe: boolean; decoderReady: boolean;
+    pathId?: string; cryptoEpoch?: bigint} =
     {authenticatedKeyframe: true, decoderReady: true},
   wait?: Promise<void>,
 ): UcrEncryptedReceivePath {
@@ -218,7 +219,7 @@ function receivePath(
     async prepare() {
       handoverEvents.push("prepare:" + id);
       if (wait) await wait;
-      return readiness;
+      return {pathId: id, cryptoEpoch: binding.cryptoEpoch, ...readiness};
     },
     async activate(guard) {
       guard();
@@ -229,7 +230,9 @@ function receivePath(
 }
 let receiveAllowed = true;
 const pathA = receivePath("A");
-const chameleon = new UcrChameleonReceiveHandover(pathA, () => receiveAllowed);
+const chameleon = new UcrChameleonReceiveHandover(
+  pathA, (candidate) => receiveAllowed && candidate.pathId !== "unauthorized",
+);
 assert.equal(chameleon.activePathId, "A");
 assert.equal(await chameleon.handover(receivePath("B")), true);
 assert.equal(chameleon.activePathId, "B");
@@ -244,6 +247,13 @@ await assert.rejects(chameleon.handover(receivePath("revoked")), /authorization 
 assert.equal(chameleon.activePathId, "B");
 assert.ok(!handoverEvents.includes("activate:revoked"));
 assert.ok(handoverEvents.includes("retire:revoked"));
+receiveAllowed = true;
+await assert.rejects(chameleon.handover(receivePath("unauthorized")), /authorization revoked/);
+assert.ok(!handoverEvents.includes("activate:unauthorized"));
+await assert.rejects(chameleon.handover(receivePath("spoof", {
+  pathId: "other-route", authenticatedKeyframe: true, decoderReady: true,
+})), /cannot decode an authenticated keyframe/);
+assert.ok(!handoverEvents.includes("activate:spoof"));
 receiveAllowed = true;
 await assert.rejects(chameleon.handover({
   ...receivePath("wrong-epoch"), binding: {...binding, cryptoEpoch: 5n},
