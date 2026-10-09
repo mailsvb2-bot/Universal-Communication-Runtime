@@ -35,6 +35,27 @@ Degradation normally requires two consecutive matching samples. Recovery require
 samples and climbs only one rung at a time. Critical thermal pressure and loss of every sustainable
 realtime rung degrade immediately. A contradictory sample resets pending hysteresis evidence.
 
+## Quality-first subscriber layer selection (Chameleon groundwork)
+
+The same Prepared Phase-23 module offers `select_viewer_video_layer`. It consumes the
+already-authorized, already-advertised quality layers for **one viewer** plus their viewport
+dimensions and the adaptive media stage. It chooses the best actually available layer satisfying
+the viewer's resolution/FPS/bitrate ceilings; a small tile need not receive a 1080p layer while an
+eligible main/fullscreen viewport receives the highest available layer. If no layer fits, it returns
+`None` rather than fabricating 1080p by upscaling.
+
+The chooser accepts at most eight layers, rejects duplicate spatial IDs and malformed metadata,
+and never consumes room labels, meeting type or participant-count thresholds. A deterministic
+1,000-viewer test asserts independent results across quality/viewport combinations. This is a
+policy/selection **primitive**, not a claim that SFU can yet switch SVC/simulcast ciphertext
+layers or that a live 1,000-viewer video fan-out has been performance-tested.
+
+The browser reference client now validates the server target before optionally invoking the
+versioned endpoint adapter's `applyAdaptiveMediaDecision` callback. A quality change never
+triggers an unrelated ICE/WebRTC restart or an E2EE downgrade. Codec application and real
+telemetry collection must be provided by the endpoint media adapter. There is no attempt to
+manufacture CPU, battery or thermal telemetry when it is not measured.
+
 ## Security invariants
 
 Adaptive Media has no API that converts protected media to plaintext and does not mutate the
